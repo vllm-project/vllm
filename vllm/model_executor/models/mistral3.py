@@ -440,6 +440,7 @@ class Mistral3ForConditionalGeneration(
                 vllm_config=vllm_config,
                 hf_config=config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
+                architectures=["MistralForCausalLM"],
             )
 
         self.make_empty_intermediate_tensors = (
