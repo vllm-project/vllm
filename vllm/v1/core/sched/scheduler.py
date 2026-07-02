@@ -1175,7 +1175,19 @@ class Scheduler(SchedulerInterface):
         #    computed tokens will be adjusted in update_from_output.
         num_scheduled_tokens = scheduler_output.num_scheduled_tokens
         for req_id, num_scheduled_token in num_scheduled_tokens.items():
-            request = self.requests[req_id]
+            # Guard against stale req_id removed by finish_requests() between
+            # schedule build and post-schedule update. Surfaces in multi-stage
+            # serving paths (e.g. vllm-omni) where an async abort/finish can
+            # race with schedule(). Same defensive `.get()` pattern is already
+            # used elsewhere in this file (e.g. lines around 1296, 1606, 1633).
+            request = self.requests.get(req_id)
+            if request is None:
+                logger.debug(
+                    "Skipping stale req_id %s in _update_after_schedule "
+                    "(likely finished/aborted concurrently)",
+                    req_id,
+                )
+                continue
             request.num_computed_tokens += num_scheduled_token
             if self.defer_block_free:
                 # Record the in-flight step, to fence deferred block freeing.
