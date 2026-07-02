@@ -17,7 +17,6 @@ from vllm.assets.video import (
 )
 from vllm.multimodal.media import ImageMediaIO, VideoMediaIO
 from vllm.multimodal.video import (
-    GPU_VIDEO_BACKENDS,
     PYNVVIDEOCODEC_VIDEO_BACKEND,
     VIDEO_LOADER_REGISTRY,
     VideoLoader,
@@ -373,8 +372,8 @@ class TestMergeKwargsGpuBackendPolicy:
     """Verify that merge_kwargs blocks request-level GPU backend selection
     when the static (engine-level) config did not configure that backend."""
 
-    def test_pynvvideocodec_in_gpu_set(self):
-        assert PYNVVIDEOCODEC_VIDEO_BACKEND in GPU_VIDEO_BACKENDS
+    def test_pynvvideocodec_requires_gpu(self):
+        assert VIDEO_LOADER_REGISTRY.backend_requires_gpu(PYNVVIDEOCODEC_VIDEO_BACKEND)
 
     def test_strips_video_backend_pynv_when_not_static(self):
         result = VideoMediaIO.merge_kwargs(

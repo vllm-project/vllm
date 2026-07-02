@@ -12,7 +12,7 @@ from PIL import Image
 from vllm import envs
 from vllm.logger import init_logger
 
-from ..video import GPU_VIDEO_BACKENDS, VIDEO_LOADER_REGISTRY
+from ..video import VIDEO_LOADER_REGISTRY
 from .base import MediaIO
 from .image import ImageMediaIO
 
@@ -36,7 +36,7 @@ class VideoMediaIO(MediaIO[tuple[npt.NDArray, dict[str, Any]]]):
             # were not configured (and VRAM-reserved) at startup.
             for key in ("video_backend", "backend"):
                 requested = runtime_kwargs.get(key)
-                if requested and requested in GPU_VIDEO_BACKENDS:
+                if requested and VIDEO_LOADER_REGISTRY.backend_requires_gpu(requested):
                     static_val = (default_kwargs or {}).get(key)
                     if static_val != requested:
                         logger.warning(

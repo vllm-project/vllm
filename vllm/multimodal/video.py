@@ -39,6 +39,7 @@ class VideoLoaderRegistry(ExtensionManager):
     def __init__(self) -> None:
         super().__init__()
         self.processor2backend: dict[str, str] = {}
+        self._requires_gpu: dict[str, bool] = {}
 
     @staticmethod
     def _normalize_registered_video_processors(
@@ -62,11 +63,13 @@ class VideoLoaderRegistry(ExtensionManager):
         name: str,
         *,
         video_processor: str | tuple[str, ...] | None = None,
+        requires_gpu: bool = False,
     ):
         processors = self._normalize_registered_video_processors(video_processor)
 
         def wrap(cls_to_register):
             self.name2class[name] = cls_to_register
+            self._requires_gpu[name] = requires_gpu
             for processor_name in processors:
                 self.processor2backend[processor_name] = name
             return cls_to_register
@@ -81,6 +84,9 @@ class VideoLoaderRegistry(ExtensionManager):
             return None
 
         return self.processor2backend.get(video_processor)
+
+    def backend_requires_gpu(self, name: str) -> bool:
+        return self._requires_gpu.get(name, False)
 
 
 def get_video_loader_backend_for_processor(
@@ -204,13 +210,6 @@ PYNVVIDEOCODEC_MAX_RETAINED_DECODERS = 1
 # Per-API-server CUDA context and driver allocation, measured with
 # PyNvVideoCodec 2.0.4 on H100.
 PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES = int(1.8 * 1024 * MiB_bytes)
-
-# Video backends that allocate GPU VRAM (decoder surfaces, CUDA context)
-# and therefore require startup-time memory reservation via
-# _reserve_mm_ipc_gpu_memory. Request-level media_io_kwargs must not be
-# allowed to select these backends unless the static config already
-# reserved the corresponding budget.
-GPU_VIDEO_BACKENDS: frozenset[str] = frozenset({PYNVVIDEOCODEC_VIDEO_BACKEND})
 
 
 class PyNvVideoCodecDecoderSlot:
@@ -916,7 +915,7 @@ class VideoBackend(
         )
 
 
-@VIDEO_LOADER_REGISTRY.register(PYNVVIDEOCODEC_VIDEO_BACKEND)
+@VIDEO_LOADER_REGISTRY.register(PYNVVIDEOCODEC_VIDEO_BACKEND, requires_gpu=True)
 class PyNvVideoCodecVideoBackend(VideoBackend):
     """Hardware-accelerated video backend using PyNvVideoCodec.
 
