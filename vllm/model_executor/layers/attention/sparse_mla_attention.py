@@ -183,13 +183,9 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             token_to_seq = torch.repeat_interleave(req_indices, chunk_seq_lens[i])
             token_to_seq_cpu[i, : token_to_seq.shape[0]] = token_to_seq
 
-        prefill_tokens_with_context = None
-        if num_prefills_with_context > 0:
-            qsl_cpu = common_attn_metadata.query_start_loc_cpu
-            prefill_qsl_cpu = qsl_cpu[num_decodes:] - qsl_cpu[num_decodes]
-            prefill_tokens_with_context = prefill_qsl_cpu[
-                num_prefills_with_context
-            ].item()
+        qsl_cpu = common_attn_metadata.query_start_loc_cpu
+        prefill_qsl_cpu = qsl_cpu[num_decodes:] - qsl_cpu[num_decodes]
+        prefill_tokens_with_context = prefill_qsl_cpu[num_prefills_with_context].item()
 
         return SparseMLAChunkedContextMetadata(
             cu_seq_lens=cu_seq_lens_cpu.to(self.device, non_blocking=True),
