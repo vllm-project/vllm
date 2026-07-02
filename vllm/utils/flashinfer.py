@@ -9,6 +9,7 @@ import contextlib
 import functools
 import importlib
 import importlib.util
+import inspect
 import os
 import shutil
 from collections.abc import Callable
@@ -307,6 +308,30 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
         return False
     mod = _get_submodule("flashinfer")
     return mod is not None and hasattr(mod, "cute_dsl_fused_moe_nvfp4")
+
+
+@functools.cache
+def has_flashinfer_cutedsl_moe_nvfp4_activation_type() -> bool:
+    """Return ``True`` if CuteDSL NvFP4 MoE accepts activation kwargs."""
+    if not has_flashinfer_cutedsl_moe_nvfp4():
+        return False
+    mod = _get_submodule("flashinfer")
+    if mod is None:
+        return False
+    fn = getattr(mod, "cute_dsl_fused_moe_nvfp4", None)
+    if fn is None:
+        return False
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    return all(
+        name in params
+        for name in ("activation_type", "swiglu_alpha", "swiglu_beta", "swiglu_limit")
+    )
+
+
+has_flashinfer_cutedsl_moe_nvfp4_oai = has_flashinfer_cutedsl_moe_nvfp4_activation_type
 
 
 @functools.cache
@@ -1021,6 +1046,7 @@ __all__ = [
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_cutedsl_moe_nvfp4",
+    "has_flashinfer_cutedsl_moe_nvfp4_activation_type",
     "has_flashinfer_b12x_moe",
     "has_flashinfer_b12x_gemm",
     "has_flashinfer_fp8_blockscale_gemm",

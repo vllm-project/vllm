@@ -37,6 +37,8 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
         MoEActivation.GELU: ActivationType.Geglu,
         MoEActivation.GELU_TANH: ActivationType.Geglu,
+        MoEActivation.SWIGLUOAI: ActivationType.Swiglu,
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
         MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
     }
