@@ -8,6 +8,7 @@ from vllm.v1.kv_offload.tiering.base import SecondaryTierManager
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
+    from vllm.v1.kv_offload.tiering.pinning import PrimaryPinningAPI
 
 
 class SecondaryTierFactory:
@@ -30,10 +31,18 @@ class SecondaryTierFactory:
         tier_config: dict,
         primary_kv_view: memoryview,
         offloading_spec: "OffloadingSpec",
+        primary_pinning: "PrimaryPinningAPI | None" = None,
     ) -> SecondaryTierManager:
         tier_cls = cls.get_tier_class(tier_config)
         config = tier_config.copy()
         tier_type = config.pop("type")
+        if getattr(tier_cls, "requires_primary_pinning", False):
+            if primary_pinning is None:
+                raise ValueError(
+                    f"Secondary tier {tier_type!r} requires "
+                    "enable_external_pinning=True"
+                )
+            config["primary_pinning"] = primary_pinning
         return tier_cls(
             offloading_spec=offloading_spec,
             primary_kv_view=primary_kv_view,

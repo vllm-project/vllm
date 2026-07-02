@@ -11,6 +11,8 @@ Configuration via kv_connector_extra_config:
   - block_size: (optional) Block size for offloaded blocks (default: GPU block size)
   - eviction_policy: (optional) Primary tier eviction policy: "lru" or
     "arc" (default: "lru")
+  - enable_external_pinning: (optional) Expose primary-tier DRAM through
+    an in-process transfer endpoint (default: False)
   - secondary_tiers: (optional) List of secondary tier configurations
     Each secondary tier config is a dict with:
       - type: (required) Type of secondary tier (e.g., "example", "storage", "network")
@@ -137,16 +139,25 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
                 num_blocks=self.num_blocks,
                 cache_policy=self.eviction_policy,  # type: ignore[arg-type]
                 enable_events=self.kv_events_config.enable_kv_cache_events,
+                enable_external_pinning=bool(
+                    self.extra_config.get("enable_external_pinning", False)
+                ),
                 mmap_region=scheduler_mmap,
             )
 
             # Create secondary tiers
             primary_kv_view = primary_tier.get_kv_memoryview()
+            primary_pinning = (
+                primary_tier if primary_tier.enable_external_pinning else None
+            )
             secondary_tiers = []
             for i, tier_config in enumerate(self.secondary_tier_configs):
                 try:
                     tier = SecondaryTierFactory.create_secondary_tier(
-                        tier_config, primary_kv_view, self
+                        tier_config,
+                        primary_kv_view,
+                        self,
+                        primary_pinning=primary_pinning,
                     )
                     secondary_tiers.append(tier)
                     logger.info(
