@@ -5,6 +5,7 @@ import json
 from argparse import ArgumentError
 from contextlib import AbstractContextManager, nullcontext
 from typing import Annotated, Literal
+from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import Field
@@ -466,6 +467,35 @@ def test_attention_config():
     assert args is not None
     engine_args = EngineArgs.from_cli_args(args)
     with pytest.raises(ValueError, match="mutually exclusive"):
+        engine_args.create_engine_config()
+
+
+def test_lora_speculative_batched_tokens_error():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    # max_num_seqs=4, num_speculative_tokens=3 → min_batched_tokens = 4*(3+1)=16
+    # --max-num-batched-tokens=8 < 16, so the ValueError should fire.
+    # create_speculative_config is mocked because it requires a draft model
+    # download; we only want to test the scheduler constraint check.
+    args = parser.parse_args(
+        [
+            "--model",
+            "facebook/opt-125m",
+            "--enable-lora",
+            "--max-num-seqs",
+            "4",
+            "--max-num-batched-tokens",
+            "8",
+        ]
+    )
+    engine_args = EngineArgs.from_cli_args(args)
+    mock_spec_config = MagicMock()
+    mock_spec_config.num_speculative_tokens = 3
+    with (
+        patch.object(
+            engine_args, "create_speculative_config", return_value=mock_spec_config
+        ),
+        pytest.raises(ValueError, match="LoRA and speculative decoding"),
+    ):
         engine_args.create_engine_config()
 
 
