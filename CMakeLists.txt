@@ -372,6 +372,24 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   target_compile_definitions(_C PRIVATE CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)
 endif() # _C HIP endif
 
+if(VLLM_GPU_LANG STREQUAL "CUDA")
+  set(VLLM_L20_EXT_SRC
+    "csrc/attention/l20_paged_decode_bindings.cpp"
+    "csrc/attention/l20_paged_decode.cu")
+  set_gencode_flags_for_srcs(
+    SRCS "${VLLM_L20_EXT_SRC}"
+    CUDA_ARCHS "8.9")
+  define_extension_target(
+    _l20_C
+    DESTINATION vllm
+    LANGUAGE CUDA
+    SOURCES ${VLLM_L20_EXT_SRC}
+    COMPILE_FLAGS ${VLLM_GPU_FLAGS}
+    ARCHITECTURES "89"
+    USE_SABI 3
+    WITH_SOABI)
+endif()
+
 if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)

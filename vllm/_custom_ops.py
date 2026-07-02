@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from contextlib import suppress
 from enum import IntEnum
 from typing import TYPE_CHECKING, Literal
 
@@ -18,6 +19,9 @@ from vllm.utils.math_utils import cdiv
 logger = init_logger(__name__)
 
 current_platform.import_kernels()
+
+with suppress(ImportError):
+    import vllm._l20_C  # noqa: F401
 
 if TYPE_CHECKING:
 
@@ -114,6 +118,53 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
         output_scale: torch.Tensor,
     ) -> None:
         return None
+
+
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "l20_paged_decode_split_out"):
+
+    @register_fake("_C::l20_paged_decode_split_out")
+    def _l20_paged_decode_split_out_fake(
+        query: torch.Tensor,
+        key_cache: torch.Tensor,
+        value_cache: torch.Tensor,
+        block_table: torch.Tensor,
+        seq_lens: torch.Tensor,
+        partial_output: torch.Tensor,
+        partial_max: torch.Tensor,
+        partial_sum: torch.Tensor,
+        output: torch.Tensor,
+        max_seq_len: int,
+        split_size: int,
+    ) -> None:
+        return None
+
+
+def l20_paged_decode_split_out(
+    query: torch.Tensor,
+    key_cache: torch.Tensor,
+    value_cache: torch.Tensor,
+    block_table: torch.Tensor,
+    seq_lens: torch.Tensor,
+    partial_output: torch.Tensor,
+    partial_max: torch.Tensor,
+    partial_sum: torch.Tensor,
+    output: torch.Tensor,
+    max_seq_len: int,
+    split_size: int,
+) -> None:
+    torch.ops._C.l20_paged_decode_split_out(
+        query,
+        key_cache,
+        value_cache,
+        block_table,
+        seq_lens,
+        partial_output,
+        partial_max,
+        partial_sum,
+        output,
+        max_seq_len,
+        split_size,
+    )
 
 
 # page attention ops
