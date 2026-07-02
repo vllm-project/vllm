@@ -20,12 +20,14 @@ Key Design Principles:
    protecting blocks from eviction until complete_read() is called
 """
 
+import uuid
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
 from typing_extensions import override
 
+from vllm.distributed import nixl_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
@@ -49,6 +51,11 @@ from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobMetadata,
     SecondaryTierManager,
+)
+from vllm.v1.kv_offload.tiering.pinning import (
+    MemDescriptor,
+    PinHandle,
+    TransportEndpoint,
 )
 
 logger = init_logger(__name__)
@@ -87,6 +94,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         mmap_region: SharedOffloadRegion,
         cache_policy: str = "lru",
         enable_events: bool = False,
+        enable_external_pinning: bool = False,
     ):
         super().__init__(
             num_blocks=num_blocks,
@@ -94,6 +102,7 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
             enable_events=enable_events,
         )
         self._mmap_region = mmap_region
+        self.enable_external_pinning = enable_external_pinning
         # read/write is for CPU<->secondary transfers,
         # load/store is for CPU<->GPU transfers.
         # These aliases avoid calling prepare_load inside a store path.
@@ -103,6 +112,133 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self.complete_write = self.complete_store
 
         self._kv_memoryview = mmap_region.create_kv_memoryview()
+
+        if self.enable_external_pinning:
+            self._init_external_pinning()
+
+    def _init_external_pinning(self) -> None:
+        self._kv_base_addr = self._mmap_region.base_addr
+        self._kv_row_stride = self._mmap_region.row_stride_bytes
+        self._pin_handles: dict[PinHandle, tuple[OffloadKey, ...]] = {}
+        self._transport_endpoint_info = "nixl"
+        self._transport_memory_registration: object | None = None
+
+        nixl_agent_cls = nixl_utils.NixlWrapper
+        if nixl_agent_cls is None:
+            raise RuntimeError("NIXL is required for external primary-tier pinning")
+
+        config_factory = nixl_utils.nixl_agent_config
+        agent_config = (
+            config_factory(num_threads=4, capture_telemetry=True)
+            if config_factory is not None
+            else None
+        )
+        endpoint_name = str(uuid.uuid4())
+        self._transport_endpoint_name = endpoint_name
+        self._transport_agent = nixl_agent_cls(endpoint_name, agent_config)
+        try:
+            self._transport_memory_registration = self._transport_agent.register_memory(
+                [(self._kv_base_addr, self._kv_memoryview.nbytes, 0, "")],
+                mem_type="DRAM",
+            )
+        except Exception as exc:
+            raise RuntimeError(
+                "Failed to register primary-tier memory with NIXL"
+            ) from exc
+
+    def get_transport_endpoint(self) -> TransportEndpoint:
+        if not self.enable_external_pinning:
+            raise RuntimeError("external pinning is not enabled for this primary tier")
+        return TransportEndpoint(
+            name=self._transport_endpoint_name,
+            end_point=self._transport_agent,
+            info=self._transport_endpoint_info,
+        )
+
+    def search_and_pin(
+        self,
+        keys: Collection[OffloadKey],
+    ) -> tuple[PinHandle, dict[OffloadKey, MemDescriptor]] | None:
+        # The primary tier exposes one contiguous canonical memory row per key,
+        # including layouts that differ across attention heads. If that
+        # canonical form ever becomes split, MemDescriptor can become a list.
+        if not self.enable_external_pinning:
+            raise RuntimeError("external pinning is not enabled for this primary tier")
+
+        pin_keys = tuple(keys)
+
+        blocks = []
+        for key in pin_keys:
+            block = self._policy.get(key)
+            if block is None or not block.is_ready:
+                return None
+            blocks.append(block)
+
+        descriptors: dict[OffloadKey, MemDescriptor] = {}
+        for key, block in zip(pin_keys, blocks):
+            if block.ref_cnt == 0:
+                self._policy.mark_non_evictable(key)
+                self._num_evictable_cache_blocks -= 1
+                if self._num_evictable_cache_blocks < 0:
+                    raise RuntimeError(
+                        "primary-tier evictable block count became negative"
+                    )
+            block.ref_cnt += 1
+            descriptors[key] = self._make_mem_descriptor(block.block_id)
+
+        pin_handle = uuid.uuid4().hex
+        self._pin_handles[pin_handle] = pin_keys
+        return pin_handle, descriptors
+
+    def _make_mem_descriptor(self, block_id: int) -> MemDescriptor:
+        return MemDescriptor(
+            end_point_name=self._transport_endpoint_name,
+            mem_type="DRAM",
+            addr=self._kv_base_addr + block_id * self._kv_row_stride,
+            size=self._kv_row_stride,
+            device_Id=0,
+            info="",
+        )
+
+    def unpin(self, pin_handle: PinHandle) -> bool:
+        if not self.enable_external_pinning:
+            return False
+
+        keys = self._pin_handles.get(pin_handle)
+        if keys is None:
+            return False
+
+        blocks = []
+        for key in keys:
+            block = self._policy.get(key)
+            if block is None:
+                raise RuntimeError(f"Block {key!r} not found")
+            if block.ref_cnt <= 0:
+                raise RuntimeError(f"Block {key!r} ref_cnt is already 0")
+            blocks.append((key, block))
+
+        self._pin_handles.pop(pin_handle)
+        for key, block in blocks:
+            block.ref_cnt -= 1
+            if block.ref_cnt == 0:
+                self._num_evictable_cache_blocks += 1
+                self._policy.mark_evictable(key)
+        return True
+
+    def _has_active_external_pins(self) -> bool:
+        if not self.enable_external_pinning:
+            return False
+        return bool(self._pin_handles)
+
+    def _shutdown_external_pinning(self) -> None:
+        registration = self._transport_memory_registration
+        if registration is None:
+            return
+        try:
+            self._transport_agent.deregister_memory(registration)
+        except Exception as exc:
+            logger.warning("failed to deregister primary-tier memory: %s", exc)
+        self._transport_memory_registration = None
 
     def get_kv_memoryview(self) -> memoryview:
         """Return the memoryview over the primary tier's KV cache buffer.
@@ -114,7 +250,15 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         return self._kv_memoryview
 
     @override
+    def reset_cache(self) -> None:
+        if self._has_active_external_pins():
+            raise RuntimeError("Cannot reset cache with active external pins")
+        super().reset_cache()
+
+    @override
     def shutdown(self) -> None:
+        if self.enable_external_pinning:
+            self._shutdown_external_pinning()
         super().shutdown()
         self._kv_memoryview.release()
         self._mmap_region.cleanup()
@@ -654,6 +798,9 @@ class TieringOffloadingManager(OffloadingManager):
         retained so those requests can continue after the reset; finished
         requests are finalized and removed.
         """
+        if self.primary_tier._has_active_external_pins():
+            raise RuntimeError("Cannot reset cache with active external pins")
+
         for tier in self.secondary_tiers:
             tier.drain_jobs()
         # All tier I/O has stopped; consume their completion notifications
