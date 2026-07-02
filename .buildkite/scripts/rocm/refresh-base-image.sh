@@ -429,7 +429,7 @@ build_base_image() {
     docker buildx build \
         "${no_cache_args[@]}" \
         --pull \
-        --progress plain \
+        --progress "${BUILDKIT_PROGRESS:-plain}" \
         --file "${DOCKERFILE}" \
         --build-arg "USE_SCCACHE=${use_sccache}" \
         "${sccache_args[@]}" \

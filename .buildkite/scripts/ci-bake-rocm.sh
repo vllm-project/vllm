@@ -1795,7 +1795,10 @@ seed_dependency_caches_if_needed() {
 
         echo "--- :docker: Seeding ${target}"
         echo "Expected cache ref: ${cache_ref}"
-        docker buildx bake "${BAKE_FILES[@]}" --progress plain "${target}"
+        docker buildx bake \
+            "${BAKE_FILES[@]}" \
+            --progress "${BUILDKIT_PROGRESS:-plain}" \
+            "${target}"
         verify_dependency_cache_ref "${cache_ref}"
     done
 }
@@ -1823,7 +1826,10 @@ run_bake() {
     local build_rc=0
 
     echo "--- :docker: Building ${TARGET}"
-    docker buildx bake "${BAKE_FILES[@]}" --progress plain "${BAKE_TARGETS[@]}" || build_rc=$?
+    docker buildx bake \
+        "${BAKE_FILES[@]}" \
+        --progress "${BUILDKIT_PROGRESS:-plain}" \
+        "${BAKE_TARGETS[@]}" || build_rc=$?
 
     if [[ ${build_rc} -eq 0 ]]; then
         echo "--- :white_check_mark: Build complete"

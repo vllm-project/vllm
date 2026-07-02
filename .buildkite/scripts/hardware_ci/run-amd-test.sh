@@ -33,10 +33,11 @@ set -o pipefail
 : "${FORCE_COLOR:=1}"
 : "${CLICOLOR_FORCE:=1}"
 : "${PY_COLORS:=1}"
+: "${ROCM_DOCKER_TTY:=1}"
 if [[ " ${PYTEST_ADDOPTS:-} " != *" --color"* ]]; then
   PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--color=yes"
 fi
-export BUILDKIT_PROGRESS TERM FORCE_COLOR CLICOLOR_FORCE PY_COLORS PYTEST_ADDOPTS
+export BUILDKIT_PROGRESS TERM FORCE_COLOR CLICOLOR_FORCE PY_COLORS PYTEST_ADDOPTS ROCM_DOCKER_TTY
 
 # Export Python path for commands that run directly on the host. Containerized
 # tests set this to /vllm-workspace below so spawned Python processes do not
@@ -159,7 +160,7 @@ EOF
   echo "--- Building local ROCm test image"
   docker build \
     --pull=false \
-    --progress plain \
+    --progress "${BUILDKIT_PROGRESS}" \
     --build-arg "BASE_IMAGE=${base_image}" \
     -t "${artifact_image}" \
     "${context_dir}" || return 1
@@ -544,8 +545,16 @@ if is_multi_node "$commands"; then
 else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+  docker_tty_args=()
+  if [[ "${ROCM_DOCKER_TTY}" == "1" ]]; then
+    docker_tty_args=(-t)
+    echo "Docker TTY allocation: enabled"
+  else
+    echo "Docker TTY allocation: disabled"
+  fi
 
   docker run \
+    "${docker_tty_args[@]}" \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
     --network=host \
