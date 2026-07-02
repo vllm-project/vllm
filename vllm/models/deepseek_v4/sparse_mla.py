@@ -92,7 +92,7 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability.major in [9, 10]
+        return capability.major in [9, 10, 12]
 
     @staticmethod
     def get_kv_cache_shape(
