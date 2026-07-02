@@ -2109,6 +2109,9 @@ def compile_factors() -> dict[str, object]:
         "VLLM_SKIP_MODEL_NAME_VALIDATION",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
+        "ZE_AFFINITY_MASK",
+        "ZE_ENABLE_PCI_ID_DEVICE_ORDER",
+        "VLLM_XPU_WORKER_DEVICE_INDEX",
         "NO_COLOR",
     }
 
