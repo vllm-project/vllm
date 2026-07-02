@@ -235,7 +235,8 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         image_prompt="<image>\nWhat is in this image?",
         marks=[pytest.mark.core_model],
         compilation_config_overrides={
-            "encoder_cudagraph_token_budgets": [272],
+            "encoder_cudagraph_global_token_budgets": [272],
+            "encoder_cudagraph_local_token_budgets": [0, 100, 200, 400, 800],
             "mode": 0,
             "cudagraph_mode": 2,
         },
@@ -245,8 +246,8 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
                 dummy_hf_overrides,
                 model_arch="DeepseekOCRForCausalLM",
             ),
+            "gpu_memory_utilization": 0.6,
         },
-        skip=True,  # TODO: Re-enable this once OOM issues are resolved on CI.
     ),
 }
 

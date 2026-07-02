@@ -537,6 +537,20 @@ class CompilationConfig:
     User-provided values override auto-inference.
     Example: [2048, 4096, 8192, 13824]"""
 
+    encoder_cudagraph_global_token_budgets: list[int] = field(default_factory=list)
+    """Token budget levels for the global path in dual-path encoder CUDA graph
+    capture. If non-empty, used directly instead of auto-generating from the
+    model's ``global_token_per_image``. Only relevant when the model uses
+    dual-path graphs (e.g. DeepSeek-OCR). All values must be positive.
+    Example: [272, 544, 1088, 2176]"""
+
+    encoder_cudagraph_local_token_budgets: list[int] = field(default_factory=list)
+    """Token budget levels for the local path in dual-path encoder CUDA graph
+    capture. If non-empty, used directly instead of auto-generating from the
+    model's ``local_token_per_patch``. Only relevant when the model uses
+    dual-path graphs (e.g. DeepSeek-OCR). All values must be positive.
+    Example: [100, 200, 400, 800]"""
+
     encoder_cudagraph_max_vision_items_per_batch: int = 0
     """Maximum number of images/videos per batch for encoder CUDA graph capture.
     Determines the fixed batch size used during graph capture.
@@ -1021,6 +1035,24 @@ class CompilationConfig:
             raise ValueError(
                 f"All encoder_cudagraph_token_budgets must be positive, "
                 f"got {self.encoder_cudagraph_token_budgets}"
+            )
+
+        if self.encoder_cudagraph_global_token_budgets and any(
+            b <= 0 for b in self.encoder_cudagraph_global_token_budgets
+        ):
+            raise ValueError(
+                f"All encoder_cudagraph_global_token_budgets must be "
+                f"positive, got "
+                f"{self.encoder_cudagraph_global_token_budgets}"
+            )
+
+        if self.encoder_cudagraph_local_token_budgets and any(
+            b <= 0 for b in self.encoder_cudagraph_local_token_budgets
+        ):
+            raise ValueError(
+                f"All encoder_cudagraph_local_token_budgets must be "
+                f"positive, got "
+                f"{self.encoder_cudagraph_local_token_budgets}"
             )
 
         if self.backend == "":
