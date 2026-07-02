@@ -308,6 +308,8 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
                     remote_xfer_side_handle=remote_xfer_side_handle,
                     local_block_descs_ids=local_block_descs_ids,
                     remote_block_descs_ids=remote_block_descs_ids,
+                    notif_agent=self._remote_agents[dst_engine_id][remote_rank],
+                    notif_id=notif_id,
                 )
                 return
 
@@ -345,8 +347,16 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_xfer_side_handle: int,
         local_block_descs_ids: np.ndarray,
         remote_block_descs_ids: np.ndarray,
+        notif_agent: str,
+        notif_id: bytes,
     ) -> None:
-        """Split a READ into DRAM and VRAM local descriptor lists."""
+        """Split a READ into DRAM and VRAM local descriptor lists.
+
+        NIXL delivers a notif_msg on completion of a single xfer, so the
+        P-side "done reading" notification cannot ride on either half of the
+        split. It is deferred instead: recorded here and sent by
+        _pop_done_transfers once every xfer of this request completes.
+        """
         desc_is_dram = self._desc_is_dram_by_block_size[local_block_size_key]
         desc_pos = self._desc_pos_by_block_size[local_block_size_key]
         dram_handle = self._dram_src_handles_by_block_size[local_block_size_key]
@@ -355,20 +365,44 @@ class NixlPullConnectorWorker(NixlBaseConnectorWorker):
         remote_ids = np.asarray(remote_block_descs_ids)
         is_dram = desc_is_dram[local_ids]
 
-        for type_mask, local_handle in (
-            (is_dram, dram_handle),
-            (~is_dram, local_vram_handle),
-        ):
-            if not type_mask.any():
-                continue
-            handle = self.nixl_wrapper.make_prepped_xfer(
-                "READ",
-                local_handle,
-                desc_pos[local_ids[type_mask]],
-                remote_xfer_side_handle,
-                remote_ids[type_mask],
-            )
-            self.nixl_wrapper.transfer(handle)
+        # Create every prepped xfer before starting any, so a setup failure
+        # leaves nothing in flight and can release all handles cleanly.
+        handles = []
+        try:
+            for type_mask, local_handle in (
+                (is_dram, dram_handle),
+                (~is_dram, local_vram_handle),
+            ):
+                if not type_mask.any():
+                    continue
+                handles.append(
+                    self.nixl_wrapper.make_prepped_xfer(
+                        "READ",
+                        local_handle,
+                        desc_pos[local_ids[type_mask]],
+                        remote_xfer_side_handle,
+                        remote_ids[type_mask],
+                    )
+                )
+        except Exception:
+            for handle in handles:
+                self.nixl_wrapper.release_xfer_handle(handle)
+            raise
+
+        self._pending_recv_notifs.setdefault(request_id, []).append(
+            (notif_agent, notif_id)
+        )
+        for i, handle in enumerate(handles):
+            try:
+                self.nixl_wrapper.transfer(handle)
+            except Exception:
+                # Handles not yet started can be released; already-started
+                # ones stay in _recving_transfers so _pop_done_transfers
+                # reaps them (the request is reported failed exactly once
+                # via _handle_failed_transfer in the caller).
+                for unstarted in handles[i:]:
+                    self.nixl_wrapper.release_xfer_handle(unstarted)
+                raise
             self._recving_transfers[request_id].append(handle)
 
     def _get_new_notifs(self) -> set[str]:

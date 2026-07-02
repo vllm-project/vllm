@@ -438,6 +438,14 @@ class NixlBaseConnectorWorker:
         # Uses Queue for thread-safe cross-thread coordination with the
         # background handshake thread, matching the _ready_requests pattern.
         self._failed_recv_reqs: queue.Queue[ReqId] = queue.Queue()
+        # Deferred "done reading" notifications for reads split across
+        # multiple xfers (mixed DRAM/VRAM): NIXL can attach a notif_msg to
+        # only one xfer, so the P-side notification is sent explicitly once
+        # every xfer of the request completes (see _pop_done_transfers).
+        self._pending_recv_notifs: dict[ReqId, list[tuple[str, bytes]]] = {}
+        # Requests already reported failed whose remaining in-flight xfers
+        # must be reaped without re-reporting the request as done.
+        self._failed_recv_reported: set[ReqId] = set()
 
         # Handshake metadata of this worker for NIXL transfers.
         self.xfer_handshake_metadata: NixlHandshakePayload | None = None
@@ -1973,6 +1981,11 @@ class NixlBaseConnectorWorker:
             except queue.Empty:
                 break
 
+        # A failed request with no in-flight xfers left needs no reap guard.
+        for req_id in failed_recv_reqs:
+            if req_id not in self._recving_transfers:
+                self._failed_recv_reported.discard(req_id)
+
         # Add failed requests to done_recving for scheduler tracking
         # (blocks are already marked invalid, scheduler will handle recompute)
         done_recving.update(failed_recv_reqs)
@@ -2121,12 +2134,38 @@ class NixlBaseConnectorWorker:
                     self._handle_failed_transfer(req_id, handle)
 
             if not in_progress:
+                del transfers[req_id]
+                if req_id in self._failed_recv_reported:
+                    # Already reported failed in a previous step; reap the
+                    # remaining handles without re-reporting the request.
+                    self._failed_recv_reported.discard(req_id)
+                    continue
                 # Only report request as completed when all transfers are done.
                 done_req_ids.add(req_id)
-                del transfers[req_id]
+                self._send_pending_recv_notifs(req_id)
             else:
                 transfers[req_id] = in_progress
         return done_req_ids
+
+    def _send_pending_recv_notifs(self, req_id: str) -> None:
+        """Send deferred "done reading" notifications for a completed read.
+
+        Used for reads split across multiple xfers (mixed DRAM/VRAM), where
+        the notification cannot ride on a single xfer's notif_msg.
+        """
+        for agent_name, notif_id in self._pending_recv_notifs.pop(req_id, []):
+            try:
+                self.nixl_wrapper.send_notif(agent_name, notif_msg=notif_id)
+            except Exception as e:
+                self._log_failure(
+                    failure_type="notification_failed",
+                    msg="P worker blocks will be freed after timeout. "
+                    "This may indicate network issues.",
+                    req_id=req_id,
+                    error=e,
+                    remote_agent_name=agent_name,
+                )
+                self.xfer_stats.record_failed_notification()
 
     def _handle_failed_transfer(self, req_id: str, handle: int | None):
         """
@@ -2142,6 +2181,10 @@ class NixlBaseConnectorWorker:
         if (meta := self._recving_metadata.get(req_id)) and not self._is_hma_required:
             self._invalid_block_ids.put(set(meta.local_block_ids[0]))
         self._failed_recv_reqs.put(req_id)
+        self._failed_recv_reported.add(req_id)
+        # Never notify P for a failed read; its blocks are freed on lease
+        # expiry (the request is recovered on the D side).
+        self._pending_recv_notifs.pop(req_id, None)
         if handle is not None:
             self.nixl_wrapper.release_xfer_handle(handle)
         self.xfer_stats.record_failed_transfer()
@@ -2470,6 +2513,9 @@ class NixlBaseConnectorWorker:
             for handle in handles:
                 self.nixl_wrapper.release_dlist_handle(handle)
         self.src_xfer_handles_by_tp_ratio.clear()
+        for handle in self._dram_src_handles_by_block_size.values():
+            self.nixl_wrapper.release_dlist_handle(handle)
+        self._dram_src_handles_by_block_size.clear()
         for engine_id in list(self._remote_agents):
             self._cleanup_remote_engine(engine_id, log_eviction=False)
         for desc in self._registered_descs:
