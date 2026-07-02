@@ -15,6 +15,7 @@ from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric
 from vllm.distributed.device_communicators.pynccl_allocator import (
     is_symmetric_memory_enabled,
 )
+from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
@@ -382,7 +383,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
             output = torch.empty(
                 output_shape, dtype=input_tensor.dtype, device=input_tensor.device
             )
-            if sizes is not None and sizes.count(sizes[0]) != len(sizes):
+            dp_world_size = get_dp_group().world_size
+            use_deterministic_rs = envs.VLLM_BATCH_INVARIANT and dp_world_size > 2
+            if sizes is not None and use_deterministic_rs:
+                # Reduce to a fixed root (0) for determinism
+                reduced = torch.empty_like(input_tensor)
+                pynccl_comm.reduce(reduced, input_tensor, root=0)
+                pynccl_comm.scatter(output, reduced, sizes, root=0)
+            elif sizes is not None and sizes.count(sizes[0]) != len(sizes):
                 pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
             else:
                 pynccl_comm.reduce_scatter(output, input_tensor)
