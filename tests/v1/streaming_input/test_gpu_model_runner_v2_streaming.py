@@ -20,6 +20,17 @@ pytestmark = pytest.mark.cpu_test
 
 
 @pytest.fixture
+def mock_model_runner_for_spec_token_sanitize():
+    runner = Mock(spec=GPUModelRunner)
+    runner.model_config = Mock()
+    runner.model_config.get_vocab_size.return_value = 32000
+    runner._sanitize_scheduled_spec_decode_tokens = (
+        GPUModelRunner._sanitize_scheduled_spec_decode_tokens.__get__(runner)
+    )
+    return runner
+
+
+@pytest.fixture
 def mock_model_runner_with_req_states():
     """Create a mock MRv2 GPUModelRunner with a real RequestState."""
 
@@ -62,6 +73,50 @@ def _make_scheduler_output(new_reqs):
         num_common_prefix_blocks=[],
         finished_req_ids=set(),
         free_encoder_mm_hashes=[],
+    )
+
+
+def test_sanitize_invalid_scheduled_spec_decode_tokens_drops_bad_drafts(
+    mock_model_runner_for_spec_token_sanitize,
+):
+    runner = mock_model_runner_for_spec_token_sanitize
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={"req-0": 2},
+        total_num_scheduled_tokens=2,
+        scheduled_spec_decode_tokens={"req-0": [-1]},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    sanitized = runner._sanitize_scheduled_spec_decode_tokens(scheduler_output)
+
+    assert sanitized.scheduled_spec_decode_tokens == {}
+    assert sanitized.num_scheduled_tokens == {"req-0": 1}
+    assert sanitized.total_num_scheduled_tokens == 1
+
+
+def test_sanitize_valid_scheduled_spec_decode_tokens_keeps_fast_path(
+    mock_model_runner_for_spec_token_sanitize,
+):
+    runner = mock_model_runner_for_spec_token_sanitize
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={"req-0": 2},
+        total_num_scheduled_tokens=2,
+        scheduled_spec_decode_tokens={"req-0": [1]},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    assert runner._sanitize_scheduled_spec_decode_tokens(scheduler_output) is (
+        scheduler_output
     )
 
 

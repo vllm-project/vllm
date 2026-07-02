@@ -21,6 +21,7 @@ import functools
 import gc
 import time
 from copy import deepcopy
+from dataclasses import replace
 from typing import Any, NamedTuple
 
 import numpy as np
@@ -836,6 +837,53 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.kv_block_zeroer is not None
             self.kv_block_zeroer.zero_block_ids(scheduler_output.new_block_ids_to_zero)
 
+    def _sanitize_scheduled_spec_decode_tokens(
+        self, scheduler_output: SchedulerOutput
+    ) -> SchedulerOutput:
+        draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+        if not draft_tokens:
+            return scheduler_output
+
+        vocab_size = self.model_config.get_vocab_size()
+        sanitized_spec_tokens: dict[str, list[int]] | None = None
+        sanitized_num_scheduled_tokens: dict[str, int] | None = None
+        invalid_req_ids: list[str] = []
+
+        for req_id, token_ids in draft_tokens.items():
+            if not any(
+                token_id < 0 or token_id >= vocab_size for token_id in token_ids
+            ):
+                continue
+
+            if sanitized_spec_tokens is None:
+                sanitized_spec_tokens = draft_tokens.copy()
+                sanitized_num_scheduled_tokens = (
+                    scheduler_output.num_scheduled_tokens.copy()
+                )
+
+            assert sanitized_num_scheduled_tokens is not None
+            sanitized_spec_tokens.pop(req_id, None)
+            sanitized_num_scheduled_tokens[req_id] = max(
+                1,
+                sanitized_num_scheduled_tokens[req_id] - len(token_ids),
+            )
+            invalid_req_ids.append(req_id)
+
+        if sanitized_spec_tokens is None or sanitized_num_scheduled_tokens is None:
+            return scheduler_output
+
+        logger.warning(
+            "Ignoring invalid speculative draft tokens for %d request(s): %s",
+            len(invalid_req_ids),
+            invalid_req_ids,
+        )
+        return replace(
+            scheduler_output,
+            num_scheduled_tokens=sanitized_num_scheduled_tokens,
+            total_num_scheduled_tokens=sum(sanitized_num_scheduled_tokens.values()),
+            scheduled_spec_decode_tokens=sanitized_spec_tokens,
+        )
+
     def prepare_inputs(
         self, scheduler_output: SchedulerOutput, batch_desc: BatchExecutionDescriptor
     ) -> InputBatch:
@@ -1126,6 +1174,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.add_requests(scheduler_output)
             self.update_requests(scheduler_output)
             self.block_tables.apply_staged_writes()
+            scheduler_output = self._sanitize_scheduled_spec_decode_tokens(
+                scheduler_output
+            )
             if scheduler_output.total_num_scheduled_tokens == 0:
                 # No need to run the model.
                 empty_output = self.kv_connector.no_forward(scheduler_output)
