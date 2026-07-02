@@ -72,28 +72,9 @@ else:
         raise RuntimeError("numba is required for fused Kimi image preprocessing")
 
 
-DEFAULT_MEDIA_PROC_CFG: dict[str, Any] = {
-    "patch_size": 14,
-    "merge_kernel_size": 2,
-    "in_patch_limit": 4096,
-    "patch_limit_on_one_side": 64,
-    "fixed_output_tokens": None,
-    "in_patch_limit_each_frame": None,
-    "in_patch_limit_video": None,
-    "max_num_frames_each_video": None,
-    "fixed_output_tokens_each_frame": None,
-    "sample_fps": 1.0,
-    "temporal_merge_kernel_size": 4,
-    "timestamp_mode": "hh:mm:ss.fff",
-    "image_mean": [0.5, 0.5, 0.5],
-    "image_std": [0.5, 0.5, 0.5],
-}
-
-
 def _load_media_proc_cfg(model: str, revision: str | None = None) -> dict[str, Any]:
     raw = get_hf_file_to_dict("preprocessor_config.json", model, revision) or {}
-    cfg = dict(DEFAULT_MEDIA_PROC_CFG)
-    cfg.update(raw.get("media_proc_cfg", {}))
+    cfg = dict(raw["media_proc_cfg"])
     merge_kernel_size = cfg["merge_kernel_size"]
     if isinstance(merge_kernel_size, (list, tuple)):
         cfg["merge_kernel_size"] = int(merge_kernel_size[0])
