@@ -127,6 +127,11 @@ class Request:
         # Cache per-block prompt-embed hashes to avoid rehashing the same
         # tensor slices when generating extra keys.
         self._prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes] = {}
+        # Cache a single whole-tensor prompt-embed digest. Used by external KV
+        # connectors (e.g. LMCacheMP) that need a request-level identity string
+        # rather than per-block hashes. Lazily populated to avoid the D2H copy
+        # for requests that never reach a KV connector path.
+        self._prompt_embeds_digest: str | None = None
         self.num_prompt_tokens = length_from_prompt_token_ids_or_embeds(
             prompt_token_ids, prompt_embeds
         )
