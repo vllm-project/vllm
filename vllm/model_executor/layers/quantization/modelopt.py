@@ -38,6 +38,7 @@ from vllm.model_executor.layers.fused_moe.oracle.mxfp8 import (
     select_mxfp8_moe_backend,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
@@ -1548,10 +1549,58 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
         )
         layer.register_parameter("w2_input_scale", w2_input_scale)
 
+    def _validate_loaded_expert_scales(self, layer: RoutedExperts) -> None:
+        """Reject checkpoints whose per-expert scales never loaded.
+
+        modelopt only writes ``input_scale`` for experts activated during
+        calibration, so rarely-routed experts can be missing from the
+        checkpoint. Those slots keep their zero initialization, and the
+        downstream ``1 / scale`` global-scale inversion turns them into
+        ``inf`` → NaN activations for any token routed to such an expert —
+        a silent, prompt-dependent failure (see issue #45212). Raise at load
+        time with the offending parameter and expert ids instead.
+
+        W4A16 mode never quantizes activations (native W4A16 checkpoints
+        carry no ``input_scale`` at all and the params stay uninitialized).
+        More generally, ``input_scale`` is only consumed by backends that
+        quantize activations: the Marlin backend -- which W4A16 always
+        selects, and which a W4A4 checkpoint also falls back to without
+        Blackwell / FlashInfer -- drops activation scales in
+        ``convert_to_nvfp4_moe_kernel_format``. So validate input scales
+        only when the selected backend is not Marlin; otherwise a valid
+        W4A4-on-Marlin checkpoint would be wrongly rejected (#45320).
+
+        Raises:
+            ValueError: if any per-expert scale slot is zero or non-finite.
+        """
+        names = ["w13_weight_scale_2", "w2_weight_scale_2"]
+        if self.nvfp4_backend != NvFp4MoeBackend.MARLIN:
+            names += ["w13_input_scale", "w2_input_scale"]
+        for name in names:
+            scale = getattr(layer, name, None)
+            if scale is None:
+                continue
+            per_expert = scale.detach().float().reshape(scale.shape[0], -1)
+            bad = ((per_expert == 0) | ~per_expert.isfinite()).any(dim=-1)
+            if bad.any():
+                bad_experts = bad.nonzero(as_tuple=True)[0].tolist()
+                raise ValueError(
+                    f"NVFP4 MoE checkpoint is missing usable per-expert "
+                    f"scales: '{name}' has zero or non-finite values for "
+                    f"expert ids {bad_experts}. This usually means the "
+                    f"checkpoint lacks the corresponding scale keys (e.g. "
+                    f"experts never activated during modelopt calibration), "
+                    f"which would otherwise produce inf global scales and "
+                    f"silent NaN output for tokens routed to these experts. "
+                    f"Re-export the checkpoint with calibration data that "
+                    f"activates all experts, or repair the missing scales."
+                )
+
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         """
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
+        self._validate_loaded_expert_scales(layer)
 
         # Use a single gscale for w13.
         if self.moe.is_act_and_mul and not torch.allclose(
