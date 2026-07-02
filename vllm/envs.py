@@ -27,6 +27,9 @@ if TYPE_CHECKING:
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
+    VLLM_LLM_SIGN_ENABLED: bool = False
+    VLLM_LLM_SIGN_CERTFILE: str | None = None
+    VLLM_LLM_SIGN_KEYFILE: str | None = None
     S3_ACCESS_KEY_ID: str | None = None
     S3_SECRET_ACCESS_KEY: str | None = None
     S3_ENDPOINT_URL: str | None = None
@@ -753,6 +756,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_DEBUG_LOG_API_SERVER_RESPONSE": lambda: (
         os.environ.get("VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False").lower() == "true"
     ),
+    # Whether to attach llm_sign signatures to OpenAI-compatible responses.
+    "VLLM_LLM_SIGN_ENABLED": lambda: bool(
+        int(os.environ.get("VLLM_LLM_SIGN_ENABLED", "0"))
+    ),
+    # TLS certificate and private key used by llm_sign when enabled.
+    # The issuer (host name) is derived from the certificate's SAN/CN,
+    # mirroring TLS server identity; no separate override is needed.
+    "VLLM_LLM_SIGN_CERTFILE": lambda: os.environ.get("VLLM_LLM_SIGN_CERTFILE", None),
+    "VLLM_LLM_SIGN_KEYFILE": lambda: os.environ.get("VLLM_LLM_SIGN_KEYFILE", None),
     # S3 access information, used for tensorizer to load model from S3
     "S3_ACCESS_KEY_ID": lambda: os.environ.get("S3_ACCESS_KEY_ID", None),
     "S3_SECRET_ACCESS_KEY": lambda: os.environ.get("S3_SECRET_ACCESS_KEY", None),
@@ -2072,6 +2084,9 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_COLOR",
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
+        "VLLM_LLM_SIGN_ENABLED",
+        "VLLM_LLM_SIGN_CERTFILE",
+        "VLLM_LLM_SIGN_KEYFILE",
         "VLLM_TUNED_CONFIG_FOLDER",
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR",
         "VLLM_ENGINE_ITERATION_TIMEOUT_S",
