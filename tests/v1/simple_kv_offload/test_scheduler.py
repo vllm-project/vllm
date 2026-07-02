@@ -1839,3 +1839,219 @@ def test_cp_lazy_target_blocks_scaling(cp_world_size: int) -> None:
             f"cp_world_size={cp_world_size}: target_cp={target_cp} should be "
             f"less than target_base={target_base}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Test 19: In-flight store blocks are not evicted by concurrent stores
+# ---------------------------------------------------------------------------
+def test_in_flight_store_protected() -> None:
+    """Prove that an in-flight store's CPU blocks are not evicted by
+    a concurrent store attempt.
+
+    When get_new_blocks() allocates CPU blocks for a store, the blocks
+    leave the free queue (ref_cnt becomes 1). During the async DMA window,
+    those blocks are invisible to the allocator.
+
+    Setup:
+    - CPU: 5 total = 4 usable (null_block takes 1).
+    - Store req_a (2 blocks) + req_b (2 blocks) → fills CPU, complete store.
+      All 4 blocks are cached with ref_cnt = 0 in the free queue.
+    - Start req_c's store for 4 blocks → get_new_blocks(4) empties free queue.
+      req_c's blocks are in-flight (ref_cnt = 1, not in free queue,
+      not yet in cached_block_hash_to_block).
+      Note: get_new_blocks evicts the old cached entries (req_a, req_b) via
+      _maybe_evict_cached_block — this is expected LRU behavior.
+    - Attempt to store req_d (2 blocks) while req_c is in-flight.
+
+    Expected:
+    - num_free = 0 → out_of_space = True → no blocks allocated for req_d.
+    - No store event is created for req_d.
+    - req_c's in-flight blocks retain ref_cnt = 1.
+    - After req_c completes, its blocks are properly cached.
+
+    This proves that the allocator does not evict in-flight blocks — when
+    num_free=0, it defers (out_of_space) rather than touching blocks with
+    ref_cnt > 0.
+    """
+    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    # Store req_a (2 blocks) + req_b (2 blocks) → fills CPU (4 usable).
+    req_a = make_request(num_blocks=2)
+    req_b = make_request(num_blocks=2)
+    kv_a = _alloc_and_register(fix, req_a, 2)
+    kv_b = _alloc_and_register(fix, req_b, 2)
+    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
+    sched.update_state_after_alloc(req_b, kv_b, num_external_tokens=0)
+
+    ids_a = kv_a.get_block_ids()
+    ids_b = kv_b.get_block_ids()
+    sched_out1 = make_scheduler_output(
+        {req_a.request_id: 2 * BLOCK_SIZE, req_b.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req_a.request_id: ids_a, req_b.request_id: ids_b},
+    )
+    meta1 = sched.build_connector_meta(sched_out1)
+    assert meta1.store_event >= 0
+    simulate_store_completion(sched, meta1.store_event)
+
+    # Start req_c's store for 4 blocks → takes all 4 from free queue.
+    # get_new_blocks evicts old cached entries; free queue becomes empty.
+    req_c = make_request(num_blocks=4)
+    kv_c = _alloc_and_register(fix, req_c, 4)
+    sched.update_state_after_alloc(req_c, kv_c, num_external_tokens=0)
+    ids_c = kv_c.get_block_ids()
+    sched_out2 = make_scheduler_output(
+        {req_c.request_id: 4 * BLOCK_SIZE},
+        new_reqs={req_c.request_id: ids_c},
+    )
+    meta2 = sched.build_connector_meta(sched_out2)
+    assert meta2.store_event >= 0
+
+    # Verify: free queue is empty (req_c's blocks are in-flight, ref_cnt=1).
+    cpu_pool = sched.cpu_block_pool
+    assert cpu_pool.get_num_free_blocks() == 0, (
+        "free queue should be empty while req_c is in-flight"
+    )
+
+    # Verify: old cached entries (req_a, req_b) were evicted by get_new_blocks.
+    for bhash in req_a.block_hashes[:2]:
+        bhash_with_group = make_block_hash_with_group_id(bhash, 0)
+        assert (
+            cpu_pool.cached_block_hash_to_block.get_one_block(bhash_with_group) is None
+        ), "req_a block should be evicted by req_c's get_new_blocks"
+
+    # Attempt to store req_d (2 blocks) while req_c is in-flight.
+    req_d = make_request(num_blocks=2)
+    kv_d = _alloc_and_register(fix, req_d, 2)
+    sched.update_state_after_alloc(req_d, kv_d, num_external_tokens=0)
+    ids_d = kv_d.get_block_ids()
+    sched_out3 = make_scheduler_output(
+        {req_d.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req_d.request_id: ids_d},
+    )
+    meta3 = sched.build_connector_meta(sched_out3)
+
+    # Verify: no store event for req_d (out_of_space).
+    assert meta3.store_event < 0, (
+        "req_d should NOT have a store event (out_of_space while req_c in-flight)"
+    )
+
+    # Verify: req_c's in-flight blocks still have ref_cnt = 1.
+    # The 4 usable CPU blocks are block_ids 1-4 (block 0 is null_block).
+    for blk_id in range(1, 5):
+        blk = cpu_pool.blocks[blk_id]
+        assert blk.ref_cnt == 1, f"CPU block {blk_id} should have ref_cnt=1 (in-flight)"
+
+    # Now complete req_c's store.
+    simulate_store_completion(sched, meta2.store_event)
+
+    # Verify: after completion, blocks are freed (ref_cnt=0) and cached.
+    assert cpu_pool.get_num_free_blocks() == 4, (
+        "free queue should have 4 blocks after req_c store completes"
+    )
+    # req_c's blocks are now in the cache map (with req_c's hashes).
+    for bhash in req_c.block_hashes[:4]:
+        bhash_with_group = make_block_hash_with_group_id(bhash, 0)
+        assert (
+            cpu_pool.cached_block_hash_to_block.get_one_block(bhash_with_group)
+            is not None
+        ), "req_c block should be cached after store completion"
+
+
+# ---------------------------------------------------------------------------
+# Test 20: Active request blocks CAN be evicted after store completion
+# ---------------------------------------------------------------------------
+def test_active_request_blocks_can_be_evicted() -> None:
+    """Prove that blocks belonging to an active (not finished) request CAN be
+    evicted after their store completes.
+
+    After _process_store_completion() frees blocks (ref_cnt→0), they join the
+    free queue tail (MRU). A subsequent store that needs CPU blocks will take
+    from the free queue head (LRU), evicting the oldest cached entries.
+
+    This is the scenario the original FIXME worried about: evicted blocks below
+    the cursor are never re-stored. The NOTE explains why this is safe: the
+    load path recomputes missing tokens from GPU — no data loss.
+
+    Setup:
+    - CPU: 5 total = 4 usable (null_block takes 1).
+    - Store req_a (2 blocks) + req_b (2 blocks) → fills CPU, complete.
+      req_a's blocks are at LRU head (freed first), req_b's at MRU tail.
+    - Store req_c (2 blocks) → takes 2 from free queue → evicts req_a's blocks.
+
+    Expected:
+    - req_a's blocks are evicted from cache (not finished, still active).
+    - req_b's blocks survive (at MRU tail, evicted last).
+    """
+    fix = make_scheduler(num_cpu_blocks=5, num_gpu_blocks=16, lazy=False)
+    sched = fix.scheduler
+
+    # Store req_a (2 blocks) + req_b (2 blocks) → fills CPU (4 usable).
+    req_a = make_request(num_blocks=2)
+    req_b = make_request(num_blocks=2)
+    kv_a = _alloc_and_register(fix, req_a, 2)
+    kv_b = _alloc_and_register(fix, req_b, 2)
+    sched.update_state_after_alloc(req_a, kv_a, num_external_tokens=0)
+    sched.update_state_after_alloc(req_b, kv_b, num_external_tokens=0)
+
+    ids_a = kv_a.get_block_ids()
+    ids_b = kv_b.get_block_ids()
+    sched_out1 = make_scheduler_output(
+        {req_a.request_id: 2 * BLOCK_SIZE, req_b.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req_a.request_id: ids_a, req_b.request_id: ids_b},
+    )
+    meta1 = sched.build_connector_meta(sched_out1)
+    assert meta1.store_event >= 0
+    simulate_store_completion(sched, meta1.store_event)
+
+    # Verify: all blocks cached after store completion.
+    cpu_pool = sched.cpu_block_pool
+    for bhash in req_a.block_hashes[:2]:
+        bhash_with_group = make_block_hash_with_group_id(bhash, 0)
+        assert (
+            cpu_pool.cached_block_hash_to_block.get_one_block(bhash_with_group)
+            is not None
+        ), "req_a block should be cached after store"
+    for bhash in req_b.block_hashes[:2]:
+        bhash_with_group = make_block_hash_with_group_id(bhash, 0)
+        assert (
+            cpu_pool.cached_block_hash_to_block.get_one_block(bhash_with_group)
+            is not None
+        ), "req_b block should be cached after store"
+
+    # Store req_c (2 blocks) → needs 2 CPU blocks → takes from LRU head.
+    # req_a's blocks are at LRU head (freed first), so they get evicted.
+    req_c = make_request(num_blocks=2)
+    kv_c = _alloc_and_register(fix, req_c, 2)
+    sched.update_state_after_alloc(req_c, kv_c, num_external_tokens=0)
+    ids_c = kv_c.get_block_ids()
+    sched_out2 = make_scheduler_output(
+        {req_c.request_id: 2 * BLOCK_SIZE},
+        new_reqs={req_c.request_id: ids_c},
+    )
+    meta2 = sched.build_connector_meta(sched_out2)
+    assert meta2.store_event >= 0
+    simulate_store_completion(sched, meta2.store_event)
+
+    # Verify: req_a's blocks were evicted (req_a is still active!).
+    for bhash in req_a.block_hashes[:2]:
+        bhash_with_group = make_block_hash_with_group_id(bhash, 0)
+        assert (
+            cpu_pool.cached_block_hash_to_block.get_one_block(bhash_with_group) is None
+        ), "req_a block (active, not finished) should be evicted by req_c's store"
+
+    # Verify: req_b's blocks survive (at MRU tail).
+    for bhash in req_b.block_hashes[:2]:
+        bhash_with_group = make_block_hash_with_group_id(bhash, 0)
+        assert (
+            cpu_pool.cached_block_hash_to_block.get_one_block(bhash_with_group)
+            is not None
+        ), "req_b block (at MRU tail) should survive"
+
+    # Verify: req_c's blocks are cached.
+    for bhash in req_c.block_hashes[:2]:
+        bhash_with_group = make_block_hash_with_group_id(bhash, 0)
+        assert (
+            cpu_pool.cached_block_hash_to_block.get_one_block(bhash_with_group)
+            is not None
+        ), "req_c block should be cached after store"
