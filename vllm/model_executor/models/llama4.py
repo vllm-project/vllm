@@ -525,6 +525,14 @@ class Llama4Model(LlamaModel):
                 # TODO: add EP support for non fused weights
                 pass
 
+            # The transpose, chunk, and expert indexing above leave
+            # new_loaded_weight as a non-contiguous CPU tensor. Copying a
+            # non-contiguous CPU tensor to the GPU is very slow (seconds per
+            # weight), so make it contiguous on the CPU first, which is a cheap
+            # CPU-side operation, before handing it to the weight loader.
+            if not new_loaded_weight.is_contiguous():
+                new_loaded_weight = new_loaded_weight.contiguous()
+
             # Load the weight into the module parameter with corresponding
             # shard id and expert id.
             weight_loader(
