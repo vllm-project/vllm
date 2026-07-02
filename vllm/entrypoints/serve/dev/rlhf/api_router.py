@@ -91,6 +91,42 @@ async def resume_generation(raw_request: Request) -> JSONResponse:
         )
 
 
+@router.post("/abort_requests")
+async def abort_requests(raw_request: Request) -> JSONResponse:
+    """Abort in-flight requests without pausing the scheduler.
+
+    Empty/missing ``request_ids`` aborts all in-flight requests.
+    """
+
+    engine = engine_client(raw_request)
+
+    try:
+        body = await raw_request.json()
+    except json.JSONDecodeError:
+        body = {}
+
+    request_ids = body.get("request_ids")
+    if not request_ids:
+        # The dev RL server runs AsyncLLM; abort everything it is tracking.
+        from vllm.v1.engine.async_llm import AsyncLLM
+
+        assert isinstance(engine, AsyncLLM)
+        request_ids = list(engine.output_processor.request_states.keys())
+
+    try:
+        await engine.abort(request_ids)
+        return JSONResponse(
+            content={"status": "aborted", "aborted": len(request_ids)},
+            status_code=HTTPStatus.OK.value,
+        )
+    except Exception as err:  # pragma: no cover - defensive
+        logger.exception("Failed to abort requests")
+        return JSONResponse(
+            content={"error": f"Failed to abort requests: {err}"},
+            status_code=HTTPStatus.INTERNAL_SERVER_ERROR.value,
+        )
+
+
 @router.get("/is_paused")
 async def is_paused(raw_request: Request) -> JSONResponse:
     """Return the current pause status."""
