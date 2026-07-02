@@ -602,6 +602,28 @@ class QuarkConfig(QuantizationConfig):
                 if _matches_pattern(layer_name, name_pattern):
                     return config
 
+            # FusedMoE fallback: a folded Quark recipe may list only per-expert
+            # per-projection patterns (e.g. ``...experts.0.down_proj``) without
+            # an entry for the FusedMoE parent path itself. Without this probe,
+            # the parent layer falls through to global_quant_config (typically
+            # fp8 per-tensor) and dispatches to the wrong MoE method, crashing
+            # when 2D per-block scales are loaded into 0D per-tensor slots.
+            try:
+                from vllm.model_executor.layers.fused_moe import FusedMoE
+
+                _is_fused_moe = isinstance(module, FusedMoE)
+            except Exception:
+                _is_fused_moe = False
+            if _is_fused_moe:
+                for proj in ("down_proj", "gate_proj", "up_proj", "gate_up_proj"):
+                    for probe in (
+                        f"{layer_name}.0.{proj}",
+                        f"{layer_name}.{proj}",
+                    ):
+                        for name_pattern, config in layer_quant_config.items():
+                            if _matches_pattern(probe, name_pattern):
+                                return config
+
             layer_type = cast(str, type(module))
             layer_type_quant_config = cast(
                 dict[str, Any], self.quant_config.get("layer_type_quant_config")
