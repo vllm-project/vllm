@@ -110,6 +110,20 @@ class XPUPlatform(Platform):
     ray_device_key: str = "GPU"
     dist_backend: str = "xccl"  # xccl only
     device_control_env_var: str = "ZE_AFFINITY_MASK"
+    supported_quantization: list[str] = [
+        "awq",
+        "gptq",
+        "inc",
+        "fp8",
+        "mxfp4",
+        "mxfp8",
+        "fp8_per_tensor",
+        "fp8_per_block",
+        "online",
+        "gpt_oss_mxfp4",
+        "modelopt",
+        "compressed-tensors",
+    ]
 
     @classmethod
     def import_kernels(cls) -> None:

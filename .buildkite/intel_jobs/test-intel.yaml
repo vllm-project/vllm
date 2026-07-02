@@ -119,4 +119,5 @@ steps:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'cd tests &&
-        pytest -v -s quantization/test_auto_round.py'
+        pytest -v -s quantization/test_auto_round.py && 
+        VLLM_XPU_FUSED_MOE_USE_REF=1 pytest -v -s quantization/test_online.py'
