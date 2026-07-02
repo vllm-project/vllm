@@ -28,6 +28,16 @@
 ###############################################################################
 set -o pipefail
 
+: "${BUILDKIT_PROGRESS:=plain}"
+: "${TERM:=xterm-256color}"
+: "${FORCE_COLOR:=1}"
+: "${CLICOLOR_FORCE:=1}"
+: "${PY_COLORS:=1}"
+if [[ " ${PYTEST_ADDOPTS:-} " != *" --color"* ]]; then
+  PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--color=yes"
+fi
+export BUILDKIT_PROGRESS TERM FORCE_COLOR CLICOLOR_FORCE PY_COLORS PYTEST_ADDOPTS
+
 # Export Python path for commands that run directly on the host. Containerized
 # tests set this to /vllm-workspace below so spawned Python processes do not
 # depend on their current working directory.
@@ -149,6 +159,7 @@ EOF
   echo "--- Building local ROCm test image"
   docker build \
     --pull=false \
+    --progress plain \
     --build-arg "BASE_IMAGE=${base_image}" \
     -t "${artifact_image}" \
     "${context_dir}" || return 1
@@ -548,6 +559,11 @@ else
     -e AWS_SECRET_ACCESS_KEY \
     -e BUILDKITE_PARALLEL_JOB \
     -e BUILDKITE_PARALLEL_JOB_COUNT \
+    -e TERM \
+    -e FORCE_COLOR \
+    -e CLICOLOR_FORCE \
+    -e PY_COLORS \
+    -e PYTEST_ADDOPTS \
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
