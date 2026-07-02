@@ -7,7 +7,7 @@ from typing_extensions import override
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import round_up
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import KVCacheConfig, UniformTypeKVCacheSpecs
 from vllm.v1.kv_offload.base import (
     CanonicalKVCaches,
     OffloadingCounterMetadata,
@@ -75,6 +75,10 @@ class CPUOffloadingSpec(OffloadingSpec):
                 if is_packed
                 else sum(t.size for t in kv_cache_config.kv_cache_tensors)
             )
+            total_gpu_kv_bytes = max(
+                total_gpu_kv_bytes,
+                self._get_per_layer_gpu_kv_bytes(kv_cache_config),
+            )
             kv_bytes_per_block = (
                 total_gpu_kv_bytes // kv_cache_config.num_blocks
             ) * world_size
@@ -104,6 +108,27 @@ class CPUOffloadingSpec(OffloadingSpec):
         self._worker: CPUOffloadingWorker | None = None
 
         self.eviction_policy: str = self.extra_config.get("eviction_policy", "lru")
+
+    @staticmethod
+    def _get_per_layer_gpu_kv_bytes(kv_cache_config: KVCacheConfig) -> int:
+        """Return a conservative per-layer KV byte upper bound.
+
+        KVCacheTensor entries can share storage across layers, but canonical
+        offloading tensors are split whenever their concrete tensor views differ
+        in stride or offset. This upper bound keeps CPU offload rows large
+        enough for those split views.
+        """
+        total_page_bytes = 0
+        for group in kv_cache_config.kv_cache_groups:
+            group_spec = group.kv_cache_spec
+            if isinstance(group_spec, UniformTypeKVCacheSpecs):
+                per_layer_specs = group_spec.kv_cache_specs
+            else:
+                per_layer_specs = {}
+            for layer_name in group.layer_names:
+                layer_spec = per_layer_specs.get(layer_name, group_spec)
+                total_page_bytes += layer_spec.page_size_bytes
+        return total_page_bytes * kv_cache_config.num_blocks
 
     @override
     def get_manager(self) -> OffloadingManager:

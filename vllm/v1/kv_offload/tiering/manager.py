@@ -20,7 +20,7 @@ Key Design Principles:
    protecting blocks from eviction until complete_read() is called
 """
 
-from collections.abc import Collection, Iterable, Sequence
+from collections.abc import Callable, Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -49,6 +49,7 @@ from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobMetadata,
     SecondaryTierManager,
+    WorkerTransferSpec,
 )
 
 logger = init_logger(__name__)
@@ -61,6 +62,17 @@ class PendingPromotion:
     req_context: ReqContext
     keys: list[OffloadKey] = field(default_factory=list)
     block_ids: list[int] = field(default_factory=list)
+
+
+@dataclass
+class PendingWorkerTransfer:
+    """A primary<->secondary transfer waiting for connector job IDs."""
+
+    tier: SecondaryTierManager
+    keys: Sequence[OffloadKey]
+    block_ids: np.ndarray
+    is_promotion: bool
+    req_context: ReqContext
 
 
 @dataclass(slots=True)
@@ -162,6 +174,8 @@ class TieringOffloadingManager(OffloadingManager):
         #   True:  secondary → primary (promotion)
         #   False: primary → secondary (cascade)
         self._transfer_jobs: dict[JobId, JobMetadata] = {}
+        self._worker_transfer_tiers: dict[JobId, SecondaryTierManager] = {}
+        self._pending_worker_transfers: list[PendingWorkerTransfer] = []
 
         # Pending promotion requests accumulated during lookup() calls; flushed
         # as one batched submit_load() per (tier, request) in on_schedule_end().
@@ -182,9 +196,22 @@ class TieringOffloadingManager(OffloadingManager):
 
     def _next_job_id(self) -> JobId:
         """Generate a unique job ID for async transfer tracking."""
+        while self._job_id_counter in self._transfer_jobs:
+            self._job_id_counter += 1
         job_id = self._job_id_counter
         self._job_id_counter += 1
         return job_id
+
+    def _reserve_worker_job_id(
+        self, allocate_job_id: Callable[[], JobId]
+    ) -> JobId:
+        """Reserve a connector-visible ID without colliding in manager state."""
+        while True:
+            job_id = allocate_job_id()
+            if job_id in self._transfer_jobs:
+                continue
+            self._job_id_counter = max(self._job_id_counter, job_id + 1)
+            return job_id
 
     def _maybe_process_finished_jobs(self):
         """
@@ -212,27 +239,134 @@ class TieringOffloadingManager(OffloadingManager):
         """
         for i, tier in enumerate(self.secondary_tiers):
             for completed_job in tier.get_finished_jobs():
-                job_id = completed_job.job_id
-                job_metadata = self._transfer_jobs.pop(job_id, None)
-                assert job_metadata is not None, (
-                    f"Finished job_id {job_id} from tier #{i}"
-                    f" ({tier.tier_type}) not in _transfer_jobs"
+                self._complete_secondary_transfer(
+                    completed_job.job_id,
+                    completed_job.success,
+                    tier,
+                    worker_transfer=False,
+                    tier_index=i,
                 )
 
-                if job_metadata.is_promotion:
-                    # secondary→primary transfer (promotion) completed.
-                    # Make blocks available in primary tier.
-                    self.primary_tier.complete_write(
-                        job_metadata.keys,
-                        job_metadata.req_context,
-                        completed_job.success,
-                    )
-                else:
-                    # primary→secondary transfer completed.
-                    # Decrement ref_cnt on primary blocks.
-                    self.primary_tier.complete_read(
-                        job_metadata.keys, job_metadata.req_context
-                    )
+    def _complete_secondary_transfer(
+        self,
+        job_id: JobId,
+        success: bool,
+        tier: SecondaryTierManager,
+        *,
+        worker_transfer: bool,
+        tier_index: int | None = None,
+    ) -> None:
+        job_metadata = self._transfer_jobs.pop(job_id, None)
+        tier_label = (
+            f"tier #{tier_index} ({tier.tier_type})"
+            if tier_index is not None
+            else f"tier ({tier.tier_type})"
+        )
+        assert job_metadata is not None, (
+            f"Finished job_id {job_id} from {tier_label} not in _transfer_jobs"
+        )
+
+        if job_metadata.is_promotion:
+            if worker_transfer:
+                tier.complete_worker_load(job_metadata, success)
+            # secondary→primary transfer (promotion) completed.
+            # Make blocks available in primary tier.
+            self.primary_tier.complete_write(
+                job_metadata.keys,
+                job_metadata.req_context,
+                success,
+            )
+        else:
+            if worker_transfer:
+                tier.complete_worker_store(job_metadata, success)
+            # primary→secondary transfer completed.
+            # Decrement ref_cnt on primary blocks.
+            self.primary_tier.complete_read(
+                job_metadata.keys, job_metadata.req_context
+            )
+
+    def _submit_secondary_transfer(
+        self,
+        tier: SecondaryTierManager,
+        keys: Sequence[OffloadKey],
+        block_ids: np.ndarray,
+        *,
+        is_promotion: bool,
+        req_context: ReqContext,
+    ) -> None:
+        if tier.uses_worker_transfers():
+            self._pending_worker_transfers.append(
+                PendingWorkerTransfer(
+                    tier=tier,
+                    keys=tuple(keys),
+                    block_ids=np.array(block_ids, dtype=np.int64),
+                    is_promotion=is_promotion,
+                    req_context=req_context,
+                )
+            )
+            return
+
+        job_id = self._next_job_id()
+        job_metadata = JobMetadata(
+            job_id=job_id,
+            keys=keys,
+            block_ids=np.array(block_ids, dtype=np.int64),
+            is_promotion=is_promotion,
+            req_context=req_context,
+        )
+        self._transfer_jobs[job_id] = job_metadata
+        if is_promotion:
+            tier.submit_load(job_metadata)
+        else:
+            tier.submit_store(job_metadata)
+
+    def pop_worker_transfer_jobs(
+        self, allocate_job_id: Callable[[], JobId]
+    ) -> dict[JobId, WorkerTransferSpec]:
+        """Return worker-executed secondary transfers queued by the manager."""
+        if not self._pending_worker_transfers:
+            return {}
+
+        jobs: dict[JobId, WorkerTransferSpec] = {}
+        for pending in self._pending_worker_transfers:
+            job_id = self._reserve_worker_job_id(allocate_job_id)
+            job_metadata = JobMetadata(
+                job_id=job_id,
+                keys=pending.keys,
+                block_ids=pending.block_ids,
+                is_promotion=pending.is_promotion,
+                req_context=pending.req_context,
+            )
+            if pending.is_promotion:
+                src_spec, dst_spec = pending.tier.build_worker_load_transfer(
+                    job_metadata
+                )
+            else:
+                src_spec, dst_spec = pending.tier.build_worker_store_transfer(
+                    job_metadata
+                )
+            self._transfer_jobs[job_id] = job_metadata
+            self._worker_transfer_tiers[job_id] = pending.tier
+            jobs[job_id] = WorkerTransferSpec(
+                req_id=pending.req_context.req_id,
+                src_spec=src_spec,
+                dst_spec=dst_spec,
+            )
+
+        self._pending_worker_transfers.clear()
+        return jobs
+
+    def complete_worker_transfer(self, job_id: JobId, success: bool) -> None:
+        tier = self._worker_transfer_tiers.pop(job_id)
+        logger.debug(
+            "Completing worker transfer job %d for tier %s: success=%s",
+            job_id,
+            tier.tier_type,
+            success,
+        )
+        self._complete_secondary_transfer(
+            job_id, success, tier, worker_transfer=True
+        )
 
     @override
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
@@ -339,16 +473,13 @@ class TieringOffloadingManager(OffloadingManager):
 
         for tier, pending_by_ctx in self._pending_load_submissions.items():
             for entry in pending_by_ctx.values():
-                job_id = self._next_job_id()
-                job_metadata = JobMetadata(
-                    job_id=job_id,
+                self._submit_secondary_transfer(
+                    tier,
                     keys=entry.keys,
                     block_ids=np.array(entry.block_ids, dtype=np.int64),
                     is_promotion=True,
                     req_context=entry.req_context,
                 )
-                self._transfer_jobs[job_id] = job_metadata
-                tier.submit_load(job_metadata)
 
         self._pending_load_submissions.clear()
 
@@ -482,17 +613,14 @@ class TieringOffloadingManager(OffloadingManager):
                 ready_keys, req_context
             )
 
-            job_id = self._next_job_id()
             assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
-            job_metadata = JobMetadata(
-                job_id=job_id,
+            self._submit_secondary_transfer(
+                tier,
                 keys=ready_keys,
                 block_ids=primary_blocks_spec.block_ids,
                 is_promotion=False,
                 req_context=req_context,
             )
-            self._transfer_jobs[job_id] = job_metadata
-            tier.submit_store(job_metadata)
 
     @override
     def complete_store(
@@ -530,22 +658,14 @@ class TieringOffloadingManager(OffloadingManager):
             # secondary tier.
             for tier in self.secondary_tiers:
                 primary_blocks_spec = self.primary_tier.prepare_read(keys, req_context)
-
-                # Submit async store job: primary→secondary
-                job_id = self._next_job_id()
-
-                # Track this store job
                 assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
-                job_metadata = JobMetadata(
-                    job_id=job_id,
+                self._submit_secondary_transfer(
+                    tier,
                     keys=keys,
                     block_ids=primary_blocks_spec.block_ids,
                     is_promotion=False,
                     req_context=req_context,
                 )
-                self._transfer_jobs[job_id] = job_metadata
-
-                tier.submit_store(job_metadata)
 
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
@@ -622,8 +742,10 @@ class TieringOffloadingManager(OffloadingManager):
         # In-flight primary<->secondary transfers (pending promotions are
         # translated to transfer jobs in on_schedule_end), plus any work the
         # secondary tiers themselves still have outstanding.
-        return bool(self._transfer_jobs) or any(
-            tier.has_pending_work() for tier in self.secondary_tiers
+        return (
+            bool(self._transfer_jobs)
+            or bool(self._pending_worker_transfers)
+            or any(tier.has_pending_work() for tier in self.secondary_tiers)
         )
 
     @override
@@ -664,6 +786,11 @@ class TieringOffloadingManager(OffloadingManager):
         # reset below invalidates; their submit_load() has not yet been
         # called so no tier I/O is touching that memory.
         self._pending_load_submissions.clear()
+        self._pending_worker_transfers.clear()
+        self._worker_transfer_tiers.clear()
+        self._transfer_jobs.clear()
+        for tier in self.secondary_tiers:
+            tier.abort_worker_transfers()
 
         finished_req_ids = []
         for req_id, state in self._req_state.items():

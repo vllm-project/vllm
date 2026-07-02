@@ -21,6 +21,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
 from vllm.v1.kv_offload.base import (
+    LoadStoreSpec,
     LookupResult,
     OffloadingCounterMetadata,
     OffloadKey,
@@ -30,6 +31,7 @@ from vllm.v1.kv_offload.base import (
     ScheduleEndContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -116,6 +118,71 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
         stats = self.stats
         self.stats = None
         return stats
+
+
+class DummyWorkerLoadStoreSpec(LoadStoreSpec):
+    @staticmethod
+    def medium() -> str:
+        return "dummy_worker"
+
+
+class WorkerTransferSecondaryTierManager(SecondaryTierManager):
+    """Test tier whose data copies must be executed by workers."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.lookup_hits: set[OffloadKey] = set()
+        self.worker_store_jobs: list[JobMetadata] = []
+        self.worker_load_jobs: list[JobMetadata] = []
+        self.completed_worker_stores: list[tuple[JobMetadata, bool]] = []
+        self.completed_worker_loads: list[tuple[JobMetadata, bool]] = []
+
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        return LookupResult.HIT if key in self.lookup_hits else LookupResult.MISS
+
+    def submit_store(self, job_metadata: JobMetadata) -> None:
+        raise AssertionError("worker-transfer tier should not use submit_store")
+
+    def submit_load(self, job_metadata: JobMetadata) -> None:
+        raise AssertionError("worker-transfer tier should not use submit_load")
+
+    def get_finished_jobs(self) -> Iterable[JobResult]:
+        return ()
+
+    def drain_jobs(self) -> None:
+        return
+
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
+
+    def uses_worker_transfers(self) -> bool:
+        return True
+
+    def build_worker_store_transfer(
+        self, job_metadata: JobMetadata
+    ) -> tuple[LoadStoreSpec, LoadStoreSpec]:
+        self.worker_store_jobs.append(job_metadata)
+        return (
+            CPULoadStoreSpec([int(b) for b in job_metadata.block_ids]),
+            DummyWorkerLoadStoreSpec(),
+        )
+
+    def build_worker_load_transfer(
+        self, job_metadata: JobMetadata
+    ) -> tuple[LoadStoreSpec, LoadStoreSpec]:
+        self.worker_load_jobs.append(job_metadata)
+        return (
+            DummyWorkerLoadStoreSpec(),
+            CPULoadStoreSpec([int(b) for b in job_metadata.block_ids]),
+        )
+
+    def complete_worker_store(
+        self, job_metadata: JobMetadata, success: bool
+    ) -> None:
+        self.completed_worker_stores.append((job_metadata, success))
+
+    def complete_worker_load(self, job_metadata: JobMetadata, success: bool) -> None:
+        self.completed_worker_loads.append((job_metadata, success))
 
 
 def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
@@ -338,6 +405,151 @@ class TestTieringOffloadingManager:
         # All completed jobs have been drained
         assert len(self.secondary_tier1.completed_jobs) == 0
         assert len(self.secondary_tier2.completed_jobs) == 0
+
+    def test_worker_transfer_cascade_is_scheduler_orchestrated(self):
+        mock_region = _mock_mmap_region(5)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=5, mmap_region=mock_region
+        )
+        worker_tier = WorkerTransferSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="worker_test",
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[worker_tier],
+        )
+        manager.on_new_request(_CTX)
+
+        blocks = to_keys(range(2))
+        assert manager.prepare_store(blocks, _CTX) is not None
+        manager.complete_store(blocks, _CTX, success=True)
+
+        # The secondary transfer is queued for the connector instead of being
+        # submitted on the scheduler thread.
+        assert worker_tier.worker_store_jobs == []
+        assert manager.has_pending_work()
+        for block_hash in blocks:
+            block = primary_tier._policy.get(block_hash)
+            assert block.ref_cnt == 1
+
+        job_ids = iter([123])
+        worker_jobs = manager.pop_worker_transfer_jobs(lambda: next(job_ids))
+
+        assert set(worker_jobs) == {123}
+        assert isinstance(worker_jobs[123].src_spec, CPULoadStoreSpec)
+        assert isinstance(worker_jobs[123].dst_spec, DummyWorkerLoadStoreSpec)
+        assert [job.job_id for job in worker_tier.worker_store_jobs] == [123]
+
+        manager.complete_worker_transfer(123, success=True)
+
+        assert worker_tier.completed_worker_stores == [
+            (worker_tier.worker_store_jobs[0], True)
+        ]
+        for block_hash in blocks:
+            block = primary_tier._policy.get(block_hash)
+            assert block.ref_cnt == 0
+
+    def test_worker_transfer_job_id_skips_scheduler_side_secondary_jobs(self):
+        mock_region = _mock_mmap_region(5)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=5, mmap_region=mock_region
+        )
+        mock_view = mock_region.create_kv_memoryview()
+        scheduler_tier = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_view,
+            tier_type="example",
+        )
+        worker_tier = WorkerTransferSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_view,
+            tier_type="worker_test",
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[scheduler_tier, worker_tier],
+        )
+        manager.on_new_request(_CTX)
+
+        blocks = to_keys(range(2))
+        assert manager.prepare_store(blocks, _CTX) is not None
+        manager.complete_store(blocks, _CTX, success=True)
+
+        assert [job.job_id for job in scheduler_tier.completed_jobs] == [0]
+        job_ids = iter([0, 1])
+        worker_jobs = manager.pop_worker_transfer_jobs(lambda: next(job_ids))
+
+        assert set(worker_jobs) == {1}
+        assert [job.job_id for job in worker_tier.worker_store_jobs] == [1]
+        assert manager._job_id_counter == 2
+
+    def test_worker_transfer_failure_is_reported_to_tier(self):
+        mock_region = _mock_mmap_region(5)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=5, mmap_region=mock_region
+        )
+        worker_tier = WorkerTransferSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="worker_test",
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[worker_tier],
+        )
+        manager.on_new_request(_CTX)
+
+        blocks = to_keys(range(2))
+        assert manager.prepare_store(blocks, _CTX) is not None
+        manager.complete_store(blocks, _CTX, success=True)
+        worker_jobs = manager.pop_worker_transfer_jobs(lambda: 124)
+
+        assert set(worker_jobs) == {124}
+        manager.complete_worker_transfer(124, success=False)
+
+        assert worker_tier.completed_worker_stores == [
+            (worker_tier.worker_store_jobs[0], False)
+        ]
+        for block_hash in blocks:
+            block = primary_tier._policy.get(block_hash)
+            assert block.ref_cnt == 0
+
+    def test_worker_transfer_promotion_is_scheduler_orchestrated(self):
+        mock_region = _mock_mmap_region(5)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=5, mmap_region=mock_region
+        )
+        worker_tier = WorkerTransferSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_region.create_kv_memoryview(),
+            tier_type="worker_test",
+        )
+        manager = TieringOffloadingManager(
+            primary_tier=primary_tier,
+            secondary_tiers=[worker_tier],
+        )
+        manager.on_new_request(_CTX)
+
+        block = to_keys([99])[0]
+        worker_tier.lookup_hits.add(block)
+
+        assert manager.lookup(block, _CTX) is LookupResult.RETRY
+        manager.on_schedule_end()
+        worker_jobs = manager.pop_worker_transfer_jobs(lambda: 125)
+
+        assert set(worker_jobs) == {125}
+        assert isinstance(worker_jobs[125].src_spec, DummyWorkerLoadStoreSpec)
+        assert isinstance(worker_jobs[125].dst_spec, CPULoadStoreSpec)
+        assert [job.job_id for job in worker_tier.worker_load_jobs] == [125]
+
+        manager.complete_worker_transfer(125, success=True)
+
+        assert worker_tier.completed_worker_loads == [
+            (worker_tier.worker_load_jobs[0], True)
+        ]
+        assert primary_tier.lookup(block, _CTX) is LookupResult.HIT
 
     def test_lookup_from_primary(self, manager_setup):
         """Test lookup when blocks are in primary tier."""
