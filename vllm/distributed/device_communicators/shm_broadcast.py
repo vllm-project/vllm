@@ -371,9 +371,11 @@ class MessageQueue:
         # Default of 24MiB chosen to be large enough to accommodate grammar
         # bitmask tensors for large batches (1024 requests).
         max_chunk_bytes: int = 1024 * 1024 * 24,
-        max_chunks: int = 10,
+        max_chunks: int | None = None,
         connect_ip: str | None = None,
     ):
+        if max_chunks is None:
+            max_chunks = envs.VLLM_MQ_MAX_CHUNKS
         if local_reader_ranks is None:
             local_reader_ranks = list(range(n_local_reader))
         else:

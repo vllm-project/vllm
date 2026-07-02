@@ -66,6 +66,37 @@ from vllm.v1.worker.worker_base import WorkerWrapperBase
 
 logger = init_logger(__name__)
 
+# CPU needs a longer RPC timeout than the GPU default (issue #44862).
+_CPU_EXECUTE_MODEL_TIMEOUT_SECONDS = 3600
+
+# Enqueue timeout — should be much shorter than the dequeue (RPC) timeout.
+# If we can't write to the ring buffer within this window, the worker is
+# likely deadlocked and waiting longer won't help.
+_ENQUEUE_TIMEOUT_SECONDS = 60
+
+
+def _get_execute_model_timeout() -> int:
+    timeout = envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS
+    if (
+        os.environ.get("VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS") is None
+        and current_platform.is_cpu()
+    ):
+        timeout = max(timeout, _CPU_EXECUTE_MODEL_TIMEOUT_SECONDS)
+    return timeout
+
+
+def _get_mq_max_chunks() -> int:
+    """Get the max number of chunks for the shared memory ring buffer.
+
+    CPU inference benefits from a larger ring buffer because workers may
+    hold chunks for a long time during slow forward passes (issue #44862).
+    Default: 256 on CPU, 10 on GPU.  Configurable via VLLM_MQ_MAX_CHUNKS.
+    """
+    max_chunks = envs.VLLM_MQ_MAX_CHUNKS
+    if os.environ.get("VLLM_MQ_MAX_CHUNKS") is None and current_platform.is_cpu():
+        max_chunks = 256
+    return max_chunks
+
 
 class FutureWrapper(Future):
     def __init__(
@@ -152,6 +183,7 @@ class MultiprocExecutor(Executor):
                 self.world_size,
                 self.local_world_size,
                 max_chunk_bytes=max_chunk_bytes,
+                max_chunks=_get_mq_max_chunks(),
                 connect_ip=mq_connect_ip,
             )
             scheduler_output_handle = self.rpc_broadcast_mq.export_handle()
@@ -312,7 +344,7 @@ class MultiprocExecutor(Executor):
             args=(scheduler_output,),
             unique_reply_rank=self.output_rank,
             non_block=non_block,
-            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+            timeout=_get_execute_model_timeout(),
             kv_output_aggregator=self.kv_output_aggregator,
         )
 
@@ -324,7 +356,7 @@ class MultiprocExecutor(Executor):
             args=(grammar_output,),
             unique_reply_rank=self.output_rank,
             non_block=non_block,
-            timeout=envs.VLLM_EXECUTE_MODEL_TIMEOUT_SECONDS,
+            timeout=_get_execute_model_timeout(),
             kv_output_aggregator=self.kv_output_aggregator,
         )
 
@@ -371,7 +403,10 @@ class MultiprocExecutor(Executor):
             send_method = method
         else:
             send_method = cloudpickle.dumps(method, protocol=pickle.HIGHEST_PROTOCOL)
-        self.rpc_broadcast_mq.enqueue((send_method, args, kwargs, output_rank))
+        self.rpc_broadcast_mq.enqueue(
+            (send_method, args, kwargs, output_rank),
+            timeout=_ENQUEUE_TIMEOUT_SECONDS,
+        )
 
         response_mqs: Sequence[MessageQueue] = self.response_mqs
         if output_rank is not None:
@@ -568,7 +603,7 @@ class WorkerProc:
             )
 
             # Initializes a message queue for sending the model output
-            self.worker_response_mq = MessageQueue(1, 1)
+            self.worker_response_mq = MessageQueue(1, 1, max_chunks=_get_mq_max_chunks())
             self.peer_response_handles = []
         else:
             # Initialize remote MessageQueue for receiving SchedulerOutput across nodes
@@ -950,7 +985,7 @@ class WorkerProc:
         else:
             result = (WorkerProc.ResponseStatus.SUCCESS, output)
         if (response_mq := self.worker_response_mq) is not None:
-            response_mq.enqueue(result)
+            response_mq.enqueue(result, timeout=_ENQUEUE_TIMEOUT_SECONDS)
 
     def handle_output(self, output: Any):
         """Handles output from the worker. If async scheduling is enabled,
