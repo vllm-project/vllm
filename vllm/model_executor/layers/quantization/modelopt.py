@@ -152,8 +152,16 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         if len(self.exclude_modules) == 0:
             return False
 
-        # First check exact matching with fused layer support
-        if is_layer_skipped(prefix, self.exclude_modules, self.packed_modules_mapping):
+        # First check matching with fused layer support; use substring match
+        # so HF-style short patterns (e.g. "linear_attn.in_proj_qkv") work
+        # against the fully-qualified runtime prefix. Aligns with AWQ family
+        # (#26909, #27416).
+        if is_layer_skipped(
+            prefix,
+            self.exclude_modules,
+            self.packed_modules_mapping,
+            skip_with_substr=True,
+        ):
             return True
 
         # TODO: This special hard coded logic is not needed for quantized checkpoints

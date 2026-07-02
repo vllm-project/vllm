@@ -551,12 +551,18 @@ def is_layer_skipped(
                     "are quantized. All shards of fused layers "
                     "to have the same precision."
                 )
-    elif "experts" in prefix and not skip_with_substr:
-        expert_ignore_layers = filter(
-            lambda layer_name: "experts" in layer_name, ignored_layers
-        )
+    elif "experts" in prefix:
+        expert_ignore_layers = [
+            layer_name for layer_name in ignored_layers if "experts" in layer_name
+        ]
+        # Preserve the legacy MoE convention where a child expert listed in
+        # ``ignored_layers`` (e.g. ``model.layers.0.mlp.experts.0.w1``) skips
+        # its parent ``RoutedExperts`` prefix (``model.layers.0.mlp.experts``)
+        # via parent-in-child containment. When ``skip_with_substr`` is
+        # enabled, also honour the substring direction so HF-style short
+        # patterns still match.
         return any(
-            prefix in layer_name if not skip_with_substr else layer_name in prefix
+            prefix in layer_name or (skip_with_substr and layer_name in prefix)
             for layer_name in expert_ignore_layers
         )
     else:
