@@ -46,7 +46,6 @@ from vllm.v1.spec_decode.utils import (
     PADDING_SLOT_ID,
     compute_new_slot_mapping,
     copy_and_expand_eagle_inputs_kernel,
-    eagle_prepare_inputs_padded_kernel,
     eagle_prepare_next_token_padded_kernel,
     eagle_step_update_slot_mapping_and_metadata,
     extend_all_queries_by_N,
@@ -1064,23 +1063,22 @@ class SpecDecodeBaseProposer:
         No blocking CPU operations should be introduced in this function.
         """
         num_reqs = common_attn_metadata.num_reqs
-        device = valid_sampled_tokens_count.device
-
-        token_indices_to_sample = torch.empty(
-            (num_reqs,), dtype=torch.int32, device=device
+        cu_num_draft_tokens = spec_decode_metadata.cu_num_draft_tokens[:num_reqs]
+        num_draft_tokens = cu_num_draft_tokens.clone()
+        if num_reqs > 1:
+            num_draft_tokens[1:] -= cu_num_draft_tokens[:-1]
+        num_rejected_tokens_gpu = (
+            num_draft_tokens + 1 - valid_sampled_tokens_count[:num_reqs]
         )
-        num_rejected_tokens_gpu = torch.empty(
-            (num_reqs,), dtype=torch.int32, device=device
-        )
-
-        grid = (num_reqs,)
-        eagle_prepare_inputs_padded_kernel[grid](
-            spec_decode_metadata.cu_num_draft_tokens,
-            valid_sampled_tokens_count,
-            common_attn_metadata.query_start_loc,
-            token_indices_to_sample,
+        num_rejected_tokens_gpu = torch.where(
+            num_draft_tokens > 0,
             num_rejected_tokens_gpu,
-            num_reqs,
+            torch.zeros_like(num_rejected_tokens_gpu),
+        )
+        token_indices_to_sample = (
+            common_attn_metadata.query_start_loc[1 : num_reqs + 1]
+            - 1
+            - num_rejected_tokens_gpu
         )
 
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu

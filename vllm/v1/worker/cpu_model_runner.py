@@ -80,9 +80,6 @@ class CPUModelRunner(GPUModelRunner):
         import vllm.v1.spec_decode.llm_base_proposer
         import vllm.v1.spec_decode.utils as spec_decode_utils
 
-        vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_inputs_padded_kernel = (
-            cpu_tl.eagle_prepare_inputs_padded_kernel
-        )
         vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_next_token_padded_kernel = (
             cpu_tl.eagle_prepare_next_token_padded_kernel
         )
