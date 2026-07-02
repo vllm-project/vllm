@@ -160,7 +160,7 @@ class FlashMLASparseMetadata(AttentionMetadata):
     block_size: int = 64
     topk_tokens: int = 2048
     cp_kv_cache_interleave_size: int = 1
-    sparse_indexer_mode: str = "union"
+    sparse_indexer_mode: str = "exact"
 
     @dataclass
     class FP8KernelMetadata:
@@ -869,7 +869,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         # -1 padding already trailing, so the front-pack is a no-op there; skip
         # it to cut the per-call argsort+gather (the de-localize kernel stays).
         if self.dcp_world_size > 1:
-            topk_indices, _ = triton_filter_and_convert_dcp_index(
+            topk_indices = triton_filter_and_convert_dcp_index(
                 attn_metadata.req_id_per_token,
                 attn_metadata.block_table,
                 topk_indices,
@@ -880,7 +880,6 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
                 ),
                 BLOCK_SIZE=attn_metadata.block_size,
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
-                return_valid_counts=True,
                 compact_valid_to_front=attn_metadata.sparse_indexer_mode != "union",
             )
         else:

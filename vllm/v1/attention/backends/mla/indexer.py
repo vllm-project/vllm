@@ -181,7 +181,7 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     token_end: int
     num_reqs: int
     skip_kv_gather: bool = False
-    sparse_indexer_mode: str = "union"
+    sparse_indexer_mode: str = "exact"
     local_cu_seq_lens: torch.Tensor | None = None
     local_total_seq_lens: int = 0
     max_local_total_seq_lens: int = 0
@@ -203,7 +203,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     decode_lens: torch.Tensor
     requires_padding: bool
     schedule_metadata: torch.Tensor
-    sparse_indexer_mode: str = "union"
+    sparse_indexer_mode: str = "exact"
     global_seq_lens: torch.Tensor | None = None
 
 
@@ -775,7 +775,7 @@ def build_prefill_chunk_metadata(
     dcp_rank: int = 0,
     dcp_world_size: int = 1,
     cp_kv_cache_interleave_size: int = 1,
-    sparse_indexer_mode: str = "union",
+    sparse_indexer_mode: str = "exact",
 ) -> DeepseekV32IndexerPrefillChunkMetadata | None:
     total_seq_lens = compressed_seq_lens_cpu[start_idx:end_idx].sum().item()
     if total_seq_lens == 0:
