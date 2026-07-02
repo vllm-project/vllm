@@ -215,7 +215,7 @@ def fused_indexer_q_rope_quant(
     head_scale: float,
     is_neox: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    assert current_platform.is_cuda()
+    assert current_platform.is_cuda() or current_platform.is_rocm()
     assert q.dtype == torch.bfloat16
     assert q.shape[-1] == 128
     assert cos_sin_cache.shape[-1] == 64
