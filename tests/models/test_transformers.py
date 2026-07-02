@@ -25,8 +25,19 @@ def check_implementation(
     model: str,
     kwargs_ref: dict[str, Any] | None = None,
     kwargs_test: dict[str, Any] | None = None,
+    num_fused: tuple[int, int] = (1, 1),
     **kwargs,
 ):
+    def get_num_fused(model) -> tuple[int, int]:
+        from vllm.model_executor.layers.linear import (
+            MergedColumnParallelLinear,
+            QKVParallelLinear,
+        )
+
+        glu = sum(isinstance(m, MergedColumnParallelLinear) for m in model.modules())
+        qkv = sum(isinstance(m, QKVParallelLinear) for m in model.modules())
+        return glu, qkv
+
     if kwargs_ref is None:
         kwargs_ref = {}
     if kwargs_test is None:
@@ -40,6 +51,12 @@ def check_implementation(
     with runner_test(model, **kwargs_test, **kwargs) as model_test:
         model_config = model_test.llm.llm_engine.model_config
         assert model_config.using_transformers_backend()
+
+        num_layers = model_config.hf_config.get_text_config().num_hidden_layers
+        expected_glu, expected_qkv = num_fused
+        for num_glu, num_qkv in model_test.apply_model(get_num_fused):
+            assert num_glu == expected_glu * num_layers
+            assert num_qkv == expected_qkv * num_layers
 
         outputs_test = model_test.generate_greedy_logprobs(*args)
 
@@ -58,11 +75,11 @@ def check_implementation(
 
 
 @pytest.mark.parametrize(
-    "model,model_impl",
+    "model,model_impl,num_fused",
     [
-        ("meta-llama/Llama-3.2-1B-Instruct", "transformers"),
-        ("hmellor/Ilama-3.2-1B", "auto"),  # CUSTOM CODE
-        ("allenai/OLMoE-1B-7B-0924", "transformers"),  # MoE
+        ("meta-llama/Llama-3.2-1B-Instruct", "transformers", (1, 1)),
+        ("hmellor/Ilama-3.2-1B", "auto", (1, 1)),  # CUSTOM CODE
+        ("allenai/OLMoE-1B-7B-0924", "transformers", (0, 1)),  # MoE
     ],
 )  # trust_remote_code=True by default
 def test_models(
@@ -71,6 +88,7 @@ def test_models(
     example_prompts: list[str],
     model: str,
     model_impl: str,
+    num_fused: tuple[int, int],
 ) -> None:
     import transformers
     from packaging.version import Version
@@ -84,7 +102,12 @@ def test_models(
         )
 
     check_implementation(
-        hf_runner, vllm_runner, example_prompts, model, model_impl=model_impl
+        hf_runner,
+        vllm_runner,
+        example_prompts,
+        model,
+        num_fused=num_fused,
+        model_impl=model_impl,
     )
 
 
