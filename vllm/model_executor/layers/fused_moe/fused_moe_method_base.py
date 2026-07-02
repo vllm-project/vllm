@@ -162,13 +162,8 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     ) -> None:
         """Refresh derived quant-method state after EPLB rearranges Parameters.
 
-        EPLB moves registered expert Parameters in-place via P2P, but
-        quant methods often hold *derived* per-expert tensors (e.g. the
-        reciprocal of a global scale, with activation scales fused in)
-        that are separate tensors with their own storage. Those won't
-        be touched by the rearrangement. Override this to re-derive
-        them in place so kernel references stay in sync. Default no-op
-        for methods with no such derived state.
+        Override when the method holds derived per-expert tensors (separate
+        storage) the in-place rearrangement won't update; default is a no-op.
         """
         return
 
