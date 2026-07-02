@@ -113,6 +113,60 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         self._lmcache_engine = cls(vllm_config, role, self)
 
         self._kv_cache_events: LMCacheKVEvents | None = None
+        self._logged_lmcache_degraded = False
+
+    def _warn_degraded_once(self, message: str) -> None:
+        if not self._logged_lmcache_degraded:
+            logger.warning(message)
+            self._logged_lmcache_degraded = True
+
+    def _lmcache_engine_unavailable(self) -> bool:
+        # Degraded init leaves the adapter in place with inner lmcache_engine
+        # set to None; older adapters that lack the attribute count as available.
+        inner_engine = getattr(
+            self._lmcache_engine, "lmcache_engine", self._lmcache_engine
+        )
+        return inner_engine is None
+
+    def _skip_when_lmcache_degraded(self, method_name: str) -> bool:
+        if not self._lmcache_engine_unavailable():
+            return False
+        self._warn_degraded_once(
+            "LMCache engine is unavailable. Skipping LMCache load/store worker "
+            "hooks and falling back to local recomputation."
+        )
+        logger.debug(
+            "Skipping LMCacheConnectorV1.%s because LMCache is degraded",
+            method_name,
+        )
+        return True
+
+    def _skip_when_lmcache_metadata_unavailable(self, method_name: str) -> bool:
+        # Degraded scheduler returns base KVConnectorMetadata (no "requests");
+        # forwarding it to the adapter would trip the adapter's type assertion.
+        if hasattr(self._get_connector_metadata(), "requests"):
+            return False
+        self._warn_degraded_once(
+            "LMCache connector metadata is unavailable. Skipping LMCache "
+            "load/store worker hooks and falling back to local recomputation."
+        )
+        logger.debug(
+            "Skipping LMCacheConnectorV1.%s because LMCache metadata is unavailable",
+            method_name,
+        )
+        return True
+
+    def _lmcache_lookup_unavailable(self) -> bool:
+        # Scheduler degraded signal: a failed init leaves lookup_client == None
+        # (worker role lacks the attr; the sentinel keeps it counted as available).
+        sentinel = object()
+        if getattr(self._lmcache_engine, "lookup_client", sentinel) is None:
+            self._warn_degraded_once(
+                "LMCache lookup client is unavailable. Skipping LMCache "
+                "scheduler hooks and falling back to local recomputation."
+            )
+            return True
+        return False
 
     # ==============================
     # Worker-side methods
@@ -125,6 +179,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         Args:
             kv_caches: dictionary of layer names, kv cache
         """
+        if self._skip_when_lmcache_degraded("register_kv_caches"):
+            return
         if hasattr(self._lmcache_engine, "register_kv_caches"):
             self._lmcache_engine.register_kv_caches(kv_caches)
         else:
@@ -148,6 +204,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             the same.
 
         """
+        if self._skip_when_lmcache_degraded("start_load_kv"):
+            return
+        if self._skip_when_lmcache_metadata_unavailable("start_load_kv"):
+            return
         self._lmcache_engine.start_load_kv(forward_context, **kwargs)
 
     def wait_for_layer_load(self, layer_name: str) -> None:
@@ -161,6 +221,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         Args:
             layer_name: the name of that layer
         """
+        if self._skip_when_lmcache_degraded("wait_for_layer_load"):
+            return
+        if self._skip_when_lmcache_metadata_unavailable("wait_for_layer_load"):
+            return
         self._lmcache_engine.wait_for_layer_load(layer_name)
 
     def save_kv_layer(
@@ -182,6 +246,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             attn_metadata (AttentionMetadata): the attention metadata.
             **kwargs: additional arguments for the save operation.
         """
+        if self._skip_when_lmcache_degraded("save_kv_layer"):
+            return
+        if self._skip_when_lmcache_metadata_unavailable("save_kv_layer"):
+            return
         self._lmcache_engine.save_kv_layer(
             layer_name, kv_layer, attn_metadata, **kwargs
         )
@@ -194,6 +262,10 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
 
         This prevents overwrites of paged KV buffer before saving done.
         """
+        if self._skip_when_lmcache_degraded("wait_for_save"):
+            return
+        if self._skip_when_lmcache_metadata_unavailable("wait_for_save"):
+            return
         self._lmcache_engine.wait_for_save()
 
     def get_finished(
@@ -210,6 +282,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             The finished saves/sends req ids must belong to a set provided in a
             call to this method (this call or a prior one).
         """
+        if self._skip_when_lmcache_degraded("get_finished"):
+            return None, None
         return self._lmcache_engine.get_finished(finished_req_ids)
 
     def get_block_ids_with_load_errors(self) -> set[int]:
@@ -220,6 +294,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             Set of block IDs that encountered load errors.
             Empty set if no load errors occurred.
         """
+        if self._skip_when_lmcache_degraded("get_block_ids_with_load_errors"):
+            return set()
         method = getattr(self._lmcache_engine, "get_block_ids_with_load_errors", None)
         if callable(method):
             return method()
@@ -231,6 +307,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         Get the KV connector kv cache events collected during the last interval.
         """
+        if self._skip_when_lmcache_degraded("get_kv_connector_kv_cache_events"):
+            return None
 
         events = self._lmcache_engine.get_kv_events()  # type: ignore [attr-defined]
         if not events:
@@ -274,6 +352,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             the number of tokens that can be loaded from the
             external KV cache beyond what is already computed.
         """
+        if self._lmcache_lookup_unavailable():
+            return 0, False
         return self._lmcache_engine.get_num_new_matched_tokens(
             request, num_computed_tokens
         ), False
@@ -284,6 +364,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         """
         Update KVConnector state after block allocation.
         """
+        if self._lmcache_lookup_unavailable():
+            return
         self._lmcache_engine.update_state_after_alloc(request, num_external_tokens)
 
     def build_connector_meta(
@@ -298,6 +380,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         Args:
             scheduler_output (SchedulerOutput): the scheduler output object.
         """
+        if self._lmcache_lookup_unavailable():
+            return KVConnectorMetadata()
         return self._lmcache_engine.build_connector_meta(scheduler_output)
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
@@ -337,6 +421,8 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
+        if self._lmcache_lookup_unavailable():
+            return False, None
         return self._lmcache_engine.request_finished(request, block_ids)
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
