@@ -13,6 +13,9 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
     RoutingMethodType,
 )
+from vllm.model_executor.layers.fused_moe.experts.gpt_oss_mi300_swiglu_stage1 import (
+    run_mi300_swiglu_stage1,
+)
 from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
     LoRAExpertsMixin,
 )
@@ -714,17 +717,29 @@ def triton_kernel_fused_experts(
     )
     gammas = routing_data.gate_scal if routing_data else None
 
-    matmul_ogs(
+    if not run_mi300_swiglu_stage1(
         hidden_states,
         w1,
-        quant_config.w1_bias,
         routing_data,
-        gather_indx=gather_indx,
-        precision_config=quant_config.w1_precision,
-        gammas=gammas if apply_router_weight_on_input else None,
-        fused_activation=act,
-        y=intermediate_cache,
-    )
+        gather_indx,
+        quant_config.w1_precision,
+        quant_config.w1_bias,
+        intermediate_cache.view(M * topk, N // 2),
+        apply_router_weight_on_input=apply_router_weight_on_input,
+        swiglu_alpha=swiglu_alpha,
+        swiglu_limit=swiglu_limit,
+    ):
+        matmul_ogs(
+            hidden_states,
+            w1,
+            quant_config.w1_bias,
+            routing_data,
+            gather_indx=gather_indx,
+            precision_config=quant_config.w1_precision,
+            gammas=gammas if apply_router_weight_on_input else None,
+            fused_activation=act,
+            y=intermediate_cache,
+        )
 
     matmul_ogs(
         intermediate_cache.view(M * topk, N // 2),
