@@ -161,6 +161,15 @@ class ResponsesRequest(OpenAIBaseModel):
     previous_response_id: str | None = None
     prompt: ResponsePrompt | None = None
     reasoning: Reasoning | None = None
+    include_reasoning: bool = Field(
+        default=True,
+        description=(
+            "Whether to include reasoning content in the response. "
+            "When false, reasoning tokens are still generated but "
+            "excluded from the output. This reduces network traffic "
+            "without affecting model inference."
+        ),
+    )
     service_tier: Literal["auto", "default", "flex", "scale", "priority"] = "auto"
     store: bool | None = True
     stream: bool | None = False

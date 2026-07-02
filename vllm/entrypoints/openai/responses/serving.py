@@ -1068,6 +1068,9 @@ class OpenAIServingResponses(OpenAIServing):
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=final_output.token_ids,
             )
+            if not request.include_reasoning:
+                reasoning = None
+                logprobs = None
             return build_response_output_items(
                 reasoning=reasoning,
                 content=content,
@@ -1341,10 +1344,14 @@ class OpenAIServingResponses(OpenAIServing):
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
         processor = SimpleStreamingEventProcessor()
 
+        hide_stream_metadata = not request.include_reasoning and self.parser is not None
+
         def _get_logprobs(
             output: CompletionOutput,
         ) -> list[response_text_delta_event.Logprob]:
             if not request.is_include_output_logprobs():
+                return []
+            if hide_stream_metadata:
                 return []
             return self._create_stream_response_logprobs(
                 token_ids=output.token_ids,

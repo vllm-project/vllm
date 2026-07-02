@@ -344,6 +344,8 @@ class ParsableContext(ConversationContext):
                 enable_auto_tools=self.enable_auto_tools,
                 model_output_token_ids=completion.token_ids,
             )
+            if not self.request.include_reasoning:
+                reasoning = None
             self.response_messages.extend(
                 build_response_output_items(
                     reasoning=reasoning,

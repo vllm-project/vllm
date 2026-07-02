@@ -43,6 +43,7 @@ def _make_request(**chat_template_kwargs):
     request = MagicMock(spec=ChatCompletionRequest)
     request.tools = []
     request.tool_choice = "auto"
+    request.include_reasoning = True
     request.chat_template_kwargs = chat_template_kwargs or None
     return request
 

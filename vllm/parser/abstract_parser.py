@@ -447,7 +447,7 @@ class DelegatingParser(Parser):
 
         tool_calls = list[FunctionCall]()
         if is_named_tool_choice and supports_required_and_named:
-            if content is None:
+            if content is None or (isinstance(content, str) and not content.strip()):
                 return [], None
             function_name = self._get_function_name(request)
             tool_calls.append(
@@ -496,6 +496,14 @@ class DelegatingParser(Parser):
                     content = None
             else:
                 # No tool calls.
+                # For required/named tool choice (when falling back to auto
+                # parsing), if content is empty or whitespace-only, return
+                # empty list with None content.
+                if (is_required_tool_choice or is_named_tool_choice) and (
+                    content is None
+                    or (isinstance(content, str) and not content.strip())
+                ):
+                    return [], None
                 return None, content
 
         return tool_calls, content
@@ -916,6 +924,15 @@ class DelegatingParser(Parser):
         if finished:
             delta_message = self.finalize_generation(delta_message, request, state)
             delta_message = self._flush_engine_parsers(delta_message)
+
+        # Suppress reasoning deltas if not requested
+        if delta_message and not request.include_reasoning:
+            delta_message.reasoning = None
+
+            # If only reasoning was in the message (no content, no tool_calls)
+            # skip emitting entirely
+            if not delta_message.content and not delta_message.tool_calls:
+                delta_message = None
 
         return delta_message
 
