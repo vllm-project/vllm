@@ -5,7 +5,7 @@
 import weakref
 from dataclasses import dataclass, field
 from functools import partial
-from typing import Any, ClassVar
+from typing import Any, ClassVar, NamedTuple
 
 import numpy as np
 import torch
@@ -100,6 +100,23 @@ def _buffer_nbytes(buffer: torch.Tensor | None) -> int:
     if buffer is None:
         return 0
     return buffer.numel() * buffer.element_size()
+
+
+class WorkspaceSizes(NamedTuple):
+    float_bytes: int
+    int_bytes: int = 0
+
+    @property
+    def total_bytes(self) -> int:
+        return self.float_bytes + self.int_bytes
+
+
+def _parse_workspace_sizes(workspace_size: Any) -> WorkspaceSizes:
+    if isinstance(workspace_size, (tuple, list)):
+        float_bytes = int(workspace_size[0])
+        int_bytes = int(workspace_size[1]) if len(workspace_size) > 1 else 0
+        return WorkspaceSizes(float_bytes, int_bytes)
+    return WorkspaceSizes(int(workspace_size), 0)
 
 
 def _is_float8_dtype(dtype: torch.dtype) -> bool:
@@ -920,16 +937,94 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     def _register_workspace_wrapper(self, wrapper: object) -> None:
         self._workspace_state.register_wrapper(wrapper)
 
+    def _normalize_workspace_sizes(
+        self, workspace_size: WorkspaceSizes | int | None
+    ) -> WorkspaceSizes:
+        if workspace_size is None:
+            return WorkspaceSizes(self._default_workspace_buffer_size(), 0)
+        if isinstance(workspace_size, WorkspaceSizes):
+            return workspace_size
+        return WorkspaceSizes(int(workspace_size), 0)
+
+    def _ensure_flashinfer_wrapper_int_workspace(
+        self,
+        wrapper: object,
+        required_bytes: int,
+    ) -> tuple[torch.Tensor | None, bool]:
+        int_workspace = getattr(wrapper, "_int_workspace_buffer", None)
+        if int_workspace is None:
+            return None, False
+
+        required_bytes = max(int(required_bytes), 0)
+        if _buffer_nbytes(int_workspace) >= required_bytes:
+            return int_workspace, False
+
+        if getattr(wrapper, "_vllm_flashinfer_int_workspace_finalized", False):
+            raise AssertionError(
+                "FlashInfer CUDA graph int workspace is finalized but a larger "
+                f"buffer is required: {_buffer_nbytes(int_workspace)} bytes "
+                f"allocated, {required_bytes} bytes required."
+            )
+
+        if getattr(wrapper, "_vllm_flashinfer_int_workspace_prepared", False):
+            logger.warning(
+                "Growing FlashInfer int workspace after initial preparation: "
+                "%.2f MiB -> %.2f MiB. This is allowed for non-captured "
+                "wrappers, but frequent growth means workspace reserve "
+                "candidates are too small.",
+                _buffer_nbytes(int_workspace) / (1 << 20),
+                required_bytes / (1 << 20),
+            )
+
+        int_workspace = torch.empty(
+            (max(required_bytes, 1),), dtype=torch.uint8, device=self.device
+        )
+        object.__setattr__(wrapper, "_int_workspace_buffer", int_workspace)
+        return int_workspace, True
+
+    def _flashinfer_wrapper_workspace_matches(
+        self,
+        wrapper: object,
+        float_workspace: torch.Tensor,
+        int_workspace: torch.Tensor | None,
+    ) -> bool:
+        current_float = getattr(wrapper, "_float_workspace_buffer", None)
+        if (
+            current_float is None
+            or current_float.data_ptr() != float_workspace.data_ptr()
+            or _buffer_nbytes(current_float) != _buffer_nbytes(float_workspace)
+        ):
+            return False
+
+        current_int = getattr(wrapper, "_int_workspace_buffer", None)
+        if current_int is None or int_workspace is None:
+            return current_int is int_workspace
+        return current_int.data_ptr() == int_workspace.data_ptr() and _buffer_nbytes(
+            current_int
+        ) == _buffer_nbytes(int_workspace)
+
     def _ensure_flashinfer_wrapper_workspace(
         self,
         wrapper: object,
-        workspace_size: int | None,
+        workspace_size: WorkspaceSizes | int | None,
     ) -> None:
-        self._get_workspace_buffer(
-            self._default_workspace_buffer_size()
-            if workspace_size is None
-            else workspace_size
+        sizes = self._normalize_workspace_sizes(workspace_size)
+        int_workspace, int_workspace_changed = (
+            self._ensure_flashinfer_wrapper_int_workspace(wrapper, sizes.int_bytes)
         )
+        float_workspace = self._get_workspace_buffer(sizes.float_bytes)
+        if (
+            hasattr(wrapper, "reset_workspace_buffer")
+            and (
+                int_workspace_changed
+                or not self._flashinfer_wrapper_workspace_matches(
+                    wrapper, float_workspace, int_workspace
+                )
+            )
+            and int_workspace is not None
+        ):
+            wrapper.reset_workspace_buffer(float_workspace, int_workspace)
+        object.__setattr__(wrapper, "_vllm_flashinfer_int_workspace_prepared", True)
         self._register_workspace_wrapper(wrapper)
 
     def _get_prefill_wrapper(
@@ -1111,7 +1206,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         window_left: int,
         fixed_split_size: int | None,
         disable_split_kv: bool,
-    ) -> int | None:
+    ) -> WorkspaceSizes | None:
         try:
             kv_lens_arr_cpu = get_seq_lens(
                 paged_kv_indptr_cpu,
@@ -1143,7 +1238,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         0,  # num_colocated_ctas
                     ]
                 )
-            return int(workspace_size(*args)[0])
+            return _parse_workspace_sizes(workspace_size(*args))
         except Exception:
             logger.debug(
                 "Failed to calculate FlashInfer prefill workspace size.",
@@ -1162,7 +1257,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         use_custom_mask: bool = False,
         fixed_split_size: int | None = None,
         disable_split_kv: bool = False,
-    ) -> int | None:
+    ) -> WorkspaceSizes | None:
         q_data_type = self.q_data_type
         kv_data_type = self.kv_cache_dtype
         helper = self._get_prefill_workspace_size_func(
@@ -1201,6 +1296,51 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             query_lens.append(max_query_len)
         return query_lens
 
+    def _make_decode_workspace_inputs(
+        self,
+        *,
+        batch_size: int,
+        num_pages: int,
+        last_page_len: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        batch_arange = torch.arange(batch_size + 1, dtype=torch.int32, device="cpu")
+        indptr_cpu = batch_arange * num_pages
+        last_page_len_cpu = torch.full(
+            (batch_size,),
+            last_page_len,
+            dtype=torch.int32,
+            device="cpu",
+        )
+        return indptr_cpu, last_page_len_cpu
+
+    def _reserve_decode_wrapper_workspace(
+        self,
+        *,
+        batch_size: int,
+        num_pages: int,
+        last_page_len: int,
+        use_cudagraph: bool,
+    ) -> WorkspaceSizes:
+        decode_wrapper = self._get_decode_wrapper(batch_size, use_cudagraph)
+        indptr_cpu, last_page_len_cpu = self._make_decode_workspace_inputs(
+            batch_size=batch_size,
+            num_pages=num_pages,
+            last_page_len=last_page_len,
+        )
+        workspace_sizes = self._get_decode_workspace_size(
+            decode_wrapper=decode_wrapper,
+            indptr_cpu=indptr_cpu,
+            last_page_len_cpu=last_page_len_cpu,
+            fixed_split_size=self.decode_fixed_split_size,
+            disable_split_kv=self.disable_split_kv,
+        )
+        if workspace_sizes is None:
+            return WorkspaceSizes(0, 0)
+        self._ensure_flashinfer_wrapper_workspace(decode_wrapper, workspace_sizes)
+        if use_cudagraph:
+            decode_wrapper._vllm_flashinfer_int_workspace_finalized = True
+        return workspace_sizes
+
     def reserve_workspace_for_cudagraph_capture(self) -> int:
         if self.use_dcp or not self.use_vllm_workspace_manager_for_workspace_buffer():
             return 0
@@ -1228,7 +1368,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         backend, workspace_size = helper
         num_pages = cdiv(max_model_len, self.page_size)
         last_page_len = max_model_len % self.page_size or self.page_size
-        max_workspace_size = 0
+        max_prefill_workspace_size = WorkspaceSizes(0, 0)
 
         for batch_size in range(1, max_num_seqs + 1):
             max_query_len = max_num_batched_tokens // batch_size
@@ -1245,7 +1385,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             query_lens = self._get_workspace_query_len_candidates(max_query_len)
             for query_len in query_lens:
                 qo_indptr_cpu = batch_arange * query_len
-                workspace_size_bytes = self._call_prefill_workspace_size(
+                workspace_sizes = self._call_prefill_workspace_size(
                     backend=backend,
                     workspace_size=workspace_size,
                     qo_indptr_cpu=qo_indptr_cpu,
@@ -1256,20 +1396,69 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     fixed_split_size=self.prefill_fixed_split_size,
                     disable_split_kv=self.disable_split_kv,
                 )
-                if workspace_size_bytes is None:
+                if workspace_sizes is None:
                     continue
-                max_workspace_size = max(max_workspace_size, workspace_size_bytes)
+                max_prefill_workspace_size = WorkspaceSizes(
+                    max(
+                        max_prefill_workspace_size.float_bytes,
+                        workspace_sizes.float_bytes,
+                    ),
+                    max(
+                        max_prefill_workspace_size.int_bytes,
+                        workspace_sizes.int_bytes,
+                    ),
+                )
 
-        if max_workspace_size <= 0:
+        reserved_sizes = max_prefill_workspace_size
+        if max_prefill_workspace_size.total_bytes > 0:
+            prefill_wrapper = self._get_prefill_wrapper(causal=True)
+            self._ensure_flashinfer_wrapper_workspace(
+                prefill_wrapper, max_prefill_workspace_size
+            )
+
+        max_decode_tokens = max_num_seqs
+        speculative_config = self.vllm_config.speculative_config
+        if speculative_config is not None:
+            max_decode_tokens *= 1 + speculative_config.num_speculative_tokens
+        max_decode_tokens = min(max_decode_tokens, max_num_batched_tokens)
+
+        if max_decode_tokens > 0:
+            decode_sizes = self._reserve_decode_wrapper_workspace(
+                batch_size=max_decode_tokens,
+                num_pages=num_pages,
+                last_page_len=last_page_len,
+                use_cudagraph=False,
+            )
+            reserved_sizes = WorkspaceSizes(
+                max(reserved_sizes.float_bytes, decode_sizes.float_bytes),
+                reserved_sizes.int_bytes + decode_sizes.int_bytes,
+            )
+
+        if self.enable_cuda_graph:
+            for batch_size in self.compilation_config.cudagraph_capture_sizes or []:
+                if batch_size <= 0 or batch_size > self._decode_cudagraph_max_bs:
+                    continue
+                decode_sizes = self._reserve_decode_wrapper_workspace(
+                    batch_size=batch_size,
+                    num_pages=num_pages,
+                    last_page_len=last_page_len,
+                    use_cudagraph=True,
+                )
+                reserved_sizes = WorkspaceSizes(
+                    max(reserved_sizes.float_bytes, decode_sizes.float_bytes),
+                    reserved_sizes.int_bytes + decode_sizes.int_bytes,
+                )
+
+        if reserved_sizes.total_bytes <= 0:
             return 0
 
-        prefill_wrapper = self._get_prefill_wrapper(causal=True)
-        self._ensure_flashinfer_wrapper_workspace(prefill_wrapper, max_workspace_size)
         logger.debug(
-            "Reserved FlashInfer prefill workspace before CUDA graph lock: %.2f MiB",
-            max_workspace_size / (1 << 20),
+            "Reserved FlashInfer workspace before CUDA graph lock: "
+            "%.2f MiB float workspace, %.2f MiB dedicated int workspace",
+            reserved_sizes.float_bytes / (1 << 20),
+            reserved_sizes.int_bytes / (1 << 20),
         )
-        return max_workspace_size
+        return reserved_sizes.total_bytes
 
     def _get_decode_workspace_size(
         self,
@@ -1279,7 +1468,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         last_page_len_cpu: torch.Tensor,
         fixed_split_size: int,
         disable_split_kv: bool,
-    ) -> int | None:
+    ) -> WorkspaceSizes | None:
         q_data_type = self.q_data_type
         kv_data_type = self.kv_cache_dtype
         backend = self._get_tensor_core_decode_backend(q_data_type, kv_data_type)
@@ -1336,7 +1525,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         0,  # num_colocated_ctas
                     ]
                 )
-            return int(workspace_size(*args)[0])
+            return _parse_workspace_sizes(workspace_size(*args))
         except Exception:
             logger.debug(
                 "Failed to calculate FlashInfer decode workspace size.",
