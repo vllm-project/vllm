@@ -766,10 +766,19 @@ def _get_tile_size(
     element_size: int,
     is_prefill: bool,
 ) -> int:
-    """Select tile size with Gemma3-specific optimization."""
+    """Select tile size with head-size-specific optimization."""
     if _is_gemma3_attention(head_size, sliding_window):
         # Gemma3: use 32 for decode (default is 16)
         return 32
+
+    # Very large head sizes (e.g. Gemma 4's full-attention layers at
+    # head_dim=512) benefit from a larger inner K tile, which improves L2
+    # reuse on the long-context prefill path. Restricted to
+    # ``element_size == 1`` (FP8): with 2-byte dtypes the per-CTA K+V
+    # smem footprint at TILE_SIZE=64 + num_stages=2 exceeds H100/A100
+    # limits and would fail at launch.
+    if head_size >= 512 and is_prefill and element_size == 1:
+        return 64
 
     # Default behavior
     if is_prefill:
@@ -921,6 +930,20 @@ def unified_attention(
     if tuned_large_head:
         BLOCK_M = 32
         BLOCK_Q = BLOCK_M // num_queries_per_kv
+        launch_num_warps = 8
+        launch_num_stages = 2
+
+    # Gemma 4 full-attention layers use head_dim=512 (vs 256 on the sliding
+    # layers). With the decode-oriented defaults the kernel hits a register
+    # cliff: regs/thread up to 255 (SM90 max) and theoretical occupancy capped
+    # at 12.5% (1 block/SM). Per ncu the kernel is latency-bound (SM%/Mem%
+    # both well below 60%) because too few warps are resident to hide
+    # instruction latency. 8 warps spreads the (BLOCK_M, HEAD_SIZE_PADDED=512)
+    # accumulator across more warps and ``num_stages=2`` (paired with the
+    # ``TILE_SIZE=64`` set in ``_get_tile_size`` for FP8 KV) trades a bit of
+    # latency hiding for occupancy headroom. Applies on Hopper and Blackwell
+    # alike — the regression mode is universal.
+    if head_size >= 512:
         launch_num_warps = 8
         launch_num_stages = 2
 
