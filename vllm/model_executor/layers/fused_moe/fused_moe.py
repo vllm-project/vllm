@@ -37,6 +37,54 @@ logger = init_logger(__name__)
 
 
 @triton.jit
+def _moe_sum_kernel(
+    input_ptr,
+    output_ptr,
+    M,
+    TOPK: tl.constexpr,
+    K,
+    stride_im,
+    stride_ik,
+    stride_ia,
+    stride_om,
+    stride_ok,
+    BLOCK_K: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_k = tl.program_id(1)
+    m_offset = pid_m
+    if m_offset >= M:
+        return
+    k_offset = pid_k * BLOCK_K
+    offs_k = k_offset + tl.arange(0, BLOCK_K)
+    accum = tl.zeros((BLOCK_K,), dtype=tl.float32)
+    for k in range(TOPK):
+        ptrs = input_ptr + m_offset * stride_im + k * stride_ik + offs_k * stride_ia
+        row = tl.load(ptrs, mask=offs_k < K, other=0.0)
+        accum += row.to(tl.float32)
+    out_ptrs = output_ptr + m_offset * stride_om + offs_k * stride_ok
+    tl.store(out_ptrs, accum, mask=offs_k < K)
+
+
+def _triton_moe_sum(input: torch.Tensor, output: torch.Tensor) -> None:
+    """Triton-based moe_sum with compile-time unrolled topk."""
+    M, topk, K = input.shape
+    BLOCK_K = triton.next_power_of_2(min(K, 2048))
+    num_k_blocks = triton.cdiv(K, BLOCK_K)
+
+    if topk <= 8:
+        _moe_sum_kernel[(M, num_k_blocks)](
+            input, output, M, topk, K,
+            input.stride(0), input.stride(1), input.stride(2),
+            output.stride(0), output.stride(1),
+            BLOCK_K=BLOCK_K,
+            num_warps=max(4, BLOCK_K // 256),
+        )
+    else:
+        ops.moe_sum(input, output)
+
+
+@triton.jit
 def write_zeros_to_output(
     c_ptr,
     stride_cm,
@@ -1747,17 +1795,37 @@ def fused_experts_impl(
         B_bias=w1_bias,
     )
 
-    apply_moe_activation(
-        activation_enum, intermediate_cache2, intermediate_cache1.view(-1, N)
+    # Fused SiLU+Mul + FP8 quantization for per-token-group quant
+    use_fused_act_quant = (
+        use_fp8_w8a8
+        and block_shape is not None
+        and activation_enum == MoEActivation.SILU
+        and a2_scale is None
+        and not per_channel_quant
     )
+    if use_fused_act_quant:
+        from vllm.model_executor.layers.quantization.utils.fp8_utils_moe_fused import (
+            silu_mul_per_token_group_quant_fp8_rowmajor,
+        )
+        group_k = block_shape[1]
+        qintermediate_cache2, a2q_scale = (
+            silu_mul_per_token_group_quant_fp8_rowmajor(
+                intermediate_cache1.view(-1, N),
+                group_size=group_k,
+            )
+        )
+    else:
+        apply_moe_activation(
+            activation_enum, intermediate_cache2, intermediate_cache1.view(-1, N)
+        )
 
-    qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
-        A=intermediate_cache2,
-        A_scale=a2_scale,
-        quant_dtype=quant_dtype,
-        per_act_token_quant=per_channel_quant,
-        block_shape=block_shape,
-    )
+        qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
+            A=intermediate_cache2,
+            A_scale=a2_scale,
+            quant_dtype=quant_dtype,
+            per_act_token_quant=per_channel_quant,
+            block_shape=block_shape,
+        )
 
     if expert_map is not None:
         intermediate_cache3.zero_()
@@ -1786,7 +1854,7 @@ def fused_experts_impl(
         B_bias=w2_bias,
     )
 
-    ops.moe_sum(
+    _triton_moe_sum(
         intermediate_cache3.view(*intermediate_cache3.size()),
         out_hidden_states,
     )
