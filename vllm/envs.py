@@ -126,6 +126,8 @@ if TYPE_CHECKING:
     VLLM_ROCM_AITER_MOE_DISPATCH_POLICY: int = 0
     VLLM_ROCM_USE_AITER_RMSNORM: bool = True
     VLLM_ROCM_USE_AITER_MLA: bool = True
+    VLLM_ROCM_USE_AITER_MLA_SPARSE_TP_SHARD: bool = True
+    VLLM_ROCM_USE_AITER_MLA_SPARSE_TP_SHARD_FOLD: bool = False
     VLLM_ROCM_USE_AITER_MHA: bool = True
     VLLM_ROCM_USE_AITER_FP4_ASM_GEMM: bool = False
     VLLM_ROCM_USE_AITER_TRITON_ROPE: bool = False
@@ -1185,6 +1187,20 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is enabled.
     "VLLM_ROCM_USE_AITER_MLA": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_MLA", "True").lower() in ("true", "1")
+    ),
+    # Shard the replicated ROCm AITER sparse-MLA (lightning indexer) prefill
+    # logits + top-k across the TP group on the query dimension. By default is
+    # enabled (gated at runtime to gfx950 with tp_size > 1).
+    "VLLM_ROCM_USE_AITER_MLA_SPARSE_TP_SHARD": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MLA_SPARSE_TP_SHARD", "True").lower()
+        in ("true", "1")
+    ),
+    # Use the work-balanced fold partition for the sharded sparse-MLA indexer
+    # prefill (each rank pairs a cheap low-index row group with an expensive
+    # high-index one). By default is disabled.
+    "VLLM_ROCM_USE_AITER_MLA_SPARSE_TP_SHARD_FOLD": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_MLA_SPARSE_TP_SHARD_FOLD", "False").lower()
+        in ("true", "1")
     ),
     # Whether to use aiter mha ops.
     # By default is enabled.
