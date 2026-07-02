@@ -56,6 +56,38 @@ class OpenAIBaseModel(BaseModel):
             )
         return result
 
+    def get_extra_fields(self) -> dict[str, Any]:
+        """Return any unknown fields received in the request.
+
+        OpenAI-compatible servers accept extra fields by spec, and vLLM
+        preserves them via Pydantic's ``extra="allow"`` configuration on
+        :class:`OpenAIBaseModel`. This method exposes those fields as a
+        public, documented :class:`dict` so downstream consumers (custom
+        middleware, external safety classifiers, audit pipelines, A/B
+        routing layers, etc.) can read them without relying on Pydantic's
+        private ``__pydantic_extra__`` attribute, which is not part of
+        Pydantic's stable public API.
+
+        Returns:
+            A copy of the dict mapping each unknown field name to its
+            received value. Empty dict if the request only contained
+            known fields.
+
+        Example::
+
+            req = ChatCompletionRequest.model_validate(
+                {
+                    "model": "my-model",
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "audit_session_id": "abc-123",
+                    "experimental_safety": True,
+                }
+            )
+            req.get_extra_fields()
+            # {'audit_session_id': 'abc-123', 'experimental_safety': True}
+        """
+        return dict(self.model_extra or {})
+
 
 class ErrorInfo(OpenAIBaseModel):
     message: str
