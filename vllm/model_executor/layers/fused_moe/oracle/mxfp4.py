@@ -711,12 +711,10 @@ def convert_gpt_oss_weight_to_mxfp4_moe_kernel_format(
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
-            convert_to_humming_moe_kernel_format,
+            prepare_humming_moe_layer,
         )
 
-        convert_to_humming_moe_kernel_format(
-            layer, quant_config={"quant_method": "gpt_oss_mxfp4"}
-        )
+        prepare_humming_moe_layer(layer, {"quant_method": "gpt_oss_mxfp4"})
         return (
             layer.w13_weight,
             layer.w2_weight,
@@ -1279,12 +1277,10 @@ def convert_weight_to_mxfp4_moe_kernel_format(
 
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
         from vllm.model_executor.layers.quantization.utils.humming_utils import (
-            convert_to_humming_moe_kernel_format,
+            prepare_humming_moe_layer,
         )
 
-        convert_to_humming_moe_kernel_format(
-            layer, quant_config={"quant_method": "mxfp4"}
-        )
+        prepare_humming_moe_layer(layer, {"quant_method": "mxfp4"})
         return (
             layer.w13_weight,
             layer.w2_weight,
@@ -1573,7 +1569,7 @@ def make_mxfp4_moe_quant_config(
     w2_bias: torch.Tensor | None = None,
     a1_scale: torch.Tensor | None = None,
     a2_scale: torch.Tensor | None = None,
-    layer: "RoutedExperts | None" = None,
+    layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig | None:
     """Create a FusedMoEQuantConfig for the given MXFP4 backend."""
     if mxfp4_backend == Mxfp4MoeBackend.DEEPGEMM_MXFP4:
@@ -1666,7 +1662,7 @@ def make_mxfp4_moe_quant_config(
             get_humming_moe_quant_config,
         )
 
-        assert layer is not None
+        assert isinstance(layer, RoutedExperts)
         return get_humming_moe_quant_config(
             layer,
             gemm1_alpha=gemm1_alpha,
@@ -1707,7 +1703,6 @@ def make_mxfp4_moe_kernel(
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
-    logger.info_once("Using %s", experts_cls.__name__)
 
     extra_kwargs = {}
     if mxfp4_backend == Mxfp4MoeBackend.HUMMING:
