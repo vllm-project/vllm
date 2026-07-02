@@ -134,13 +134,18 @@ class PyNcclCommunicator:
         self.device = device
         # nccl communicator and stream will use this device
         with torch.accelerator.device_index(device.index):
+            # Allocate warmup data early to force CUDA context creation
+            # before NCCL communicator init. Otherwise, the hooks of HAMI 
+            # will fail to map the devices in time, resulting in a segment 
+            # fault and process crash.
+            data = torch.zeros(1, device=device)
+            
             self.comm: ncclComm_t = self.nccl.ncclCommInitRank(
                 self.world_size, self.unique_id, self.rank
             )
 
             stream = current_stream()
             # A small all_reduce for warmup.
-            data = torch.zeros(1, device=device)
             self.all_reduce(data)
             stream.synchronize()
             del data
