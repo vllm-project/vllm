@@ -11,7 +11,7 @@ def get_sparse_mla_reorder_batch_threshold(vllm_config) -> int:
     num_q_heads = vllm_config.model_config.get_num_attention_heads(
         vllm_config.parallel_config
     )
-    return {16: 64, 128: 1024}.get(num_q_heads, 1024)
+    return {16: 64, 32: 128, 64: 256, 128: 1024}.get(num_q_heads, 1024)
 
 
 # Kernel with prefill workspace support and valid count tracking
