@@ -50,7 +50,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     EagleModelMixin,
-    MixtureOfExperts,
     SupportsEagle3,
     SupportsPP,
 )
@@ -65,6 +64,7 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.model_executor.utils import set_weight_attrs
 from vllm.models.deepseek_v4.attention import DeepseekV4Attention
+from vllm.models.deepseek_v4.common.moe import DeepseekV4MixtureOfExperts
 from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
     DeepseekV4FlashInferMLAAttention,
     DeepseekV4FlashInferSM120Attention,
@@ -1316,47 +1316,12 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
     )
 
 
-class DeepseekV4MixtureOfExperts(MixtureOfExperts):
-    moe_mlp_layers: list["DeepseekV4MoE"]
-
-    def extract_moe_parameters(self, example_moe: "DeepseekV4MoE | None") -> None:
-        if example_moe is None:
-            self.num_moe_layers = 0
-            self.num_expert_groups = 0
-            self.num_logical_experts = 0
-            self.num_physical_experts = 0
-            self.num_local_physical_experts = 0
-            self.num_routed_experts = 0
-            self.num_shared_experts = 0
-            self.num_redundant_experts = 0
-            return
-        self.num_logical_experts = example_moe.n_logical_experts
-        self.num_physical_experts = example_moe.n_physical_experts
-        self.num_local_physical_experts = example_moe.n_local_physical_experts
-        self.num_routed_experts = example_moe.n_routed_experts
-        self.num_shared_experts = example_moe.n_shared_experts
-        self.num_redundant_experts = example_moe.n_redundant_experts
-
-    def update_physical_experts_metadata(
-        self,
-        num_physical_experts: int,
-        num_local_physical_experts: int,
-    ) -> None:
-        assert self.num_local_physical_experts == num_local_physical_experts
-        self.num_physical_experts = num_physical_experts
-        self.num_local_physical_experts = num_local_physical_experts
-        self.num_redundant_experts = num_physical_experts - self.num_logical_experts
-        for moe in self.moe_mlp_layers:
-            moe.n_local_physical_experts = num_local_physical_experts
-            moe.n_physical_experts = num_physical_experts
-            moe.n_redundant_experts = self.num_redundant_experts
-            moe.experts.update_expert_map()
-
-
 class DeepseekV4ForCausalLM(
     nn.Module, SupportsPP, SupportsEagle3, DeepseekV4MixtureOfExperts
 ):
     model_cls = DeepseekV4Model
+    decoder_layer_cls = DeepseekV4DecoderLayer
+    moe_layer_cls = DeepseekV4MoE
 
     # Default mapper assumes the original FP4-expert checkpoint layout.
     # Overridden per-instance in __init__ when expert_dtype != "fp4".
@@ -1388,25 +1353,6 @@ class DeepseekV4ForCausalLM(
         )
 
         self.set_moe_parameters()
-
-    def set_moe_parameters(self) -> None:
-        self.num_expert_groups = getattr(self.config, "n_group", 1)
-        self.num_moe_layers = self.config.num_hidden_layers
-        self.moe_layers: list[nn.Module] = []
-        self.moe_mlp_layers: list[DeepseekV4MoE] = []
-        example_moe: DeepseekV4MoE | None = None
-        for layer in self.model.layers:
-            if isinstance(layer, PPMissingLayer):
-                continue
-            if not isinstance(layer, DeepseekV4DecoderLayer):
-                continue
-            if isinstance(layer.ffn, DeepseekV4MoE):
-                example_moe = layer.ffn
-                self.moe_mlp_layers.append(layer.ffn)
-                self.moe_layers.append(layer.ffn.experts)
-
-        self.num_moe_layers = len(self.moe_layers)
-        self.extract_moe_parameters(example_moe)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
