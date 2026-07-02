@@ -504,7 +504,11 @@ class InputBatch:
         # _prepare_input_ids.
         start_index = self.num_tokens_no_spec[req_index]
         end_token_index = start_index + num_spec_tokens
-        self.token_ids_cpu[req_index, start_index:end_token_index] = spec_token_ids
+        # Sanitize: replace -1 (grammar-rejected padding sentinel) with 0
+        # so that invalid token IDs never reach GPU embeddings even if the
+        # async overwrite in _prepare_input_ids is skipped for any reason.
+        safe_ids = [t if t >= 0 else 0 for t in spec_token_ids]
+        self.token_ids_cpu[req_index, start_index:end_token_index] = safe_ids
         self.is_token_ids[req_index, start_index:end_token_index] = True
         cur_spec_token_ids.extend(spec_token_ids)
 

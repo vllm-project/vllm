@@ -1591,6 +1591,26 @@ class Scheduler(SchedulerInterface):
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_sampled = self.num_sampled_tokens_per_step
                 num_accepted = max(len(generated_token_ids) - num_sampled, 0)
+
+                # When structured output grammar invalidates draft tokens,
+                # those positions are padded with -1 and the grammar bitmask
+                # leaves them unconstrained. The rejection sampler may still
+                # accept tokens at those unconstrained positions, but they
+                # are not guaranteed to satisfy the grammar. Cap the accepted
+                # count to the valid (grammar-checked) prefix so that only
+                # grammar-safe tokens are kept. (CVE: GHSA-55m4-88pw-2875)
+                num_invalid = 0
+                if scheduler_output.num_invalid_spec_tokens:
+                    num_invalid = scheduler_output.num_invalid_spec_tokens.get(
+                        req_id, 0
+                    )
+                num_valid_drafts = num_draft_tokens - num_invalid
+                if num_accepted > num_valid_drafts:
+                    generated_token_ids = generated_token_ids[
+                        : num_valid_drafts + num_sampled
+                    ]
+                    num_accepted = num_valid_drafts
+
                 num_rejected = num_draft_tokens - num_accepted
                 # num_computed_tokens represents the number of tokens
                 # processed in the current step, considering scheduled
