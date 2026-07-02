@@ -133,6 +133,49 @@ def test_modelopt_mixed_precision_quantizes_parallel_lm_head():
     assert isinstance(method, ModelOptNvFp4LinearMethod)
 
 
+def test_modelopt_mixed_precision_infers_fused_gate_up_projection():
+    from vllm.model_executor.layers.linear import LinearBase
+
+    config = _mixed_precision_config(
+        {
+            "model.layers.0.mlp.gate_proj": {"quant_algo": "NVFP4"},
+            "model.layers.0.mlp.up_proj": {"quant_algo": "NVFP4"},
+        }
+    )
+
+    fake_layer = MagicMock(spec=LinearBase)
+    with patch(
+        "vllm.model_executor.layers.quantization.modelopt.init_nvfp4_linear_kernel"
+    ):
+        method = config.get_quant_method(fake_layer, "model.layers.0.mlp.gate_up_proj")
+
+    assert isinstance(method, ModelOptNvFp4LinearMethod)
+
+
+@pytest.mark.parametrize(
+    ("quantized_prefix", "missing_prefix"),
+    [
+        ("model.layers.0.mlp.gate_proj", "model.layers.0.mlp.down_proj"),
+        ("model.layers.0.self_attn.o_proj", "model.layers.0.self_attn.qkv_proj"),
+    ],
+)
+def test_modelopt_mixed_precision_does_not_infer_missing_sibling_linear(
+    quantized_prefix, missing_prefix
+):
+    from vllm.model_executor.layers.linear import LinearBase
+
+    config = _mixed_precision_config(
+        {
+            quantized_prefix: {"quant_algo": "NVFP4"},
+        }
+    )
+
+    fake_layer = MagicMock(spec=LinearBase)
+    method = config.get_quant_method(fake_layer, missing_prefix)
+
+    assert isinstance(method, UnquantizedLinearMethod)
+
+
 def test_vocab_parallel_embedding_weight_loader_accepts_scalar_scale():
     holder = Mock()
     scale = torch.nn.Parameter(torch.empty(1))
