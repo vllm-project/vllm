@@ -228,6 +228,16 @@ class SchedulerConfig:
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
 
+    @field_validator("long_prefill_token_threshold", mode="after")
+    @classmethod
+    def _check_long_prefill_token_threshold(cls, v: int) -> int:
+        if v < 0:
+            raise ValueError(
+                f"long_prefill_token_threshold must be >= 0 "
+                f"(0 = off, > 0 = token clamp), got {v}."
+            )
+        return v
+
     @field_validator("scheduler_cls", "async_scheduling", mode="wrap")
     @classmethod
     def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
