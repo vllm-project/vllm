@@ -36,7 +36,7 @@ def test_memory_profiling():
     weights_memory = 128 * 1024 * 1024 * 4  # 512 MiB
 
     def measure_current_non_torch():
-        free, total = torch.accelerator.get_memory_info()
+        free, total = torch.cuda.mem_get_info()
         current_used = total - free
         current_torch = torch.accelerator.memory_reserved()
         current_non_torch = current_used - current_torch
@@ -81,9 +81,8 @@ def test_memory_snapshot_uses_psutil_on_integrated_gpu():
     with (
         patch("vllm.utils.mem_utils.current_platform") as mock_platform,
         patch("vllm.utils.mem_utils.psutil") as mock_psutil,
-        patch("torch.accelerator") as mock_accelerator,
     ):
-        mock_accelerator.get_memory_info.return_value = (
+        mock_platform.mem_get_info.return_value = (
             mock_cuda_free,
             mock_cuda_total,
         )
@@ -91,8 +90,8 @@ def test_memory_snapshot_uses_psutil_on_integrated_gpu():
         mock_platform.memory_stats.return_value = {
             "allocated_bytes.all.peak": 0,
         }
-        mock_accelerator.memory_reserved.return_value = 0
-        mock_accelerator.current_device = lambda: "cuda:0"
+        mock_platform.memory_reserved.return_value = 0
+        mock_platform.current_device = lambda: "cuda:0"
 
         mock_vmem = MagicMock()
         mock_vmem.available = mock_psutil_available
@@ -106,25 +105,24 @@ def test_memory_snapshot_uses_psutil_on_integrated_gpu():
 
 
 def test_memory_snapshot_uses_cuda_on_discrete_gpu():
-    """On discrete GPUs, free_memory should come from accelerator  get_memory_info."""
+    """On discrete GPUs, free_memory should come from CUDA mem_get_info."""
     mock_cuda_free = 70 * 1024**3
     mock_cuda_total = 80 * 1024**3
 
     with (
         patch("vllm.utils.mem_utils.current_platform") as mock_platform,
         patch("vllm.utils.mem_utils.psutil") as mock_psutil,
-        patch("torch.accelerator") as mock_accelerator,
     ):
-        mock_accelerator.get_memory_info.return_value = (
+        mock_platform.mem_get_info.return_value = (
             mock_cuda_free,
             mock_cuda_total,
         )
         mock_platform.is_integrated_gpu.return_value = False
-        mock_accelerator.memory_stats.return_value = {
+        mock_platform.memory_stats.return_value = {
             "allocated_bytes.all.peak": 0,
         }
-        mock_accelerator.memory_reserved.return_value = 0
-        mock_accelerator.current_device = lambda: "cuda:0"
+        mock_platform.memory_reserved.return_value = 0
+        mock_platform.current_device = lambda: "cuda:0"
 
         snapshot = MemorySnapshot(device="cuda:0")
 

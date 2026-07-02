@@ -143,7 +143,7 @@ class MemorySnapshot:
             "allocated_bytes.all.peak", 0
         )
 
-        self.free_memory, self.total_memory = torch.accelerator.get_memory_info(device)
+        self.free_memory, self.total_memory = current_platform.mem_get_info(device)
         if current_platform.is_integrated_gpu(device.index):
             # On UMA (Unified Memory Architecture) platforms where CPU and
             # GPU share physical memory (e.g. GH200, DGX Spark, Jetson Orin),

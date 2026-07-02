@@ -20,7 +20,7 @@ def _should_share(eagle: nn.Module, flag: str, draft, target) -> bool:
     # Use the faster GPU path when there is plenty of headroom;
     # otherwise compare on CPU.
     w = draft.weight
-    if w.is_cuda and torch.accelerator.get_memory_info(w.device)[0] < w.numel() * 2:
+    if w.is_cuda and torch.cuda.mem_get_info(w.device)[0] < w.numel() * 2:
         return torch.equal(w.cpu(), target.weight.cpu())
     return torch.equal(w, target.weight)
 
