@@ -158,7 +158,9 @@ def select_int8_moe_backend(
                 logger.debug_once(_make_log_unsupported(backend, reason))
 
     raise NotImplementedError(
-        "No Int8 MoE backend supports the deployment configuration."
+        "No Int8 MoE backend supports the deployment configuration "
+        f"(weight_key={weight_key}, activation_key={activation_key}). "
+        "Set `VLLM_LOGGING_LEVEL=DEBUG` to see per-backend unsupported reasons."
     )
 
 
