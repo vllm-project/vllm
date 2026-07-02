@@ -203,7 +203,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         else:
             kv_cache_dtype_str = "bf16"
         kv_dtype = dtypes.d_dtypes.get(kv_cache_dtype_str, dtypes.bf16)
-
         # Persist for get_mla_metadata_v1 (decode build): omitting these causes
         # wrong split/reduce metadata for the gfx950 fp8 nhead=32 fold path.
         self._mla_q_dtype = q_dtype
