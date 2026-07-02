@@ -115,6 +115,27 @@ def select_wna16_moe_backend(
         else mk.FusedMoEActivationFormat.Standard
     )
 
+    def _kernel_candidates(
+        backend: WNA16MoEBackend,
+    ) -> list[type[mk.FusedMoEExperts]]:
+        # Opt-in: only when the user explicitly requests the FlashInfer TRT-LLM
+        # backend do we offer the LoRA-aware MxInt4 experts (gemm1_lora_delta
+        # path, PR #3153). Under "auto", LoRA + MxInt4 keeps its historical
+        # fallback (the non-LoRA trtllm candidate is rejected by the LoRA gate,
+        # so selection moves on to e.g. Marlin).
+        cands = list(backend_to_kernel_cls(backend))
+        if (
+            config.is_lora_enabled
+            and backend == WNA16MoEBackend.FLASHINFER_TRTLLM
+            and config.moe_backend == "flashinfer_trtllm"
+        ):
+            from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+                TrtLlmMxint4LoRAExperts,
+            )
+
+            cands = [TrtLlmMxint4LoRAExperts, *cands]
+        return cands
+
     def _make_log_backend(backend: WNA16MoEBackend):
         return f"Using '{backend.value}' WNA16 MoE backend."
 
@@ -137,7 +158,7 @@ def select_wna16_moe_backend(
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
         reason: str | None = None
-        for k_cls in backend_to_kernel_cls(backend):
+        for k_cls in _kernel_candidates(backend):
             supported, reason = k_cls.is_supported_config(
                 k_cls, config, weight_key, activation_key, activation_format
             )
@@ -151,7 +172,7 @@ def select_wna16_moe_backend(
 
     for backend in AVAILABLE_BACKENDS:
         activation_key = None  # always BF16 activation for WNA16 MoE
-        for k_cls in backend_to_kernel_cls(backend):
+        for k_cls in _kernel_candidates(backend):
             supported, reason = k_cls.is_supported_config(
                 k_cls, config, weight_key, activation_key, activation_format
             )
