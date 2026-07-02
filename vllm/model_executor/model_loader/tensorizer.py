@@ -495,6 +495,30 @@ def _check_tensors_on_meta_device(model: nn.Module) -> None:
             )
 
 
+def _restore_kv_scale_dtypes(model: nn.Module) -> None:
+    """Restore KV cache scale buffers to float32 after deserialization.
+
+    TensorDeserializer applies a global dtype cast (e.g. to bfloat16) which
+    incorrectly converts scale buffers that must remain float32 for attention
+    kernels that enforce strict dtype checks (e.g. XPU flash attention).
+    """
+    if not current_platform.is_xpu():
+        return
+
+    scale_names = ("_k_scale", "_v_scale", "_q_scale", "_prob_scale")
+    for module in model.modules():
+        for name in scale_names:
+            buf = getattr(module, name, None)
+            if (
+                buf is not None
+                and isinstance(buf, torch.Tensor)
+                and buf.dtype != torch.float32
+            ):
+                module.register_buffer(
+                    name, buf.to(dtype=torch.float32), persistent=True
+                )
+
+
 def _resize_lora_embeddings(model: nn.Module):
     """Modify LoRA embedding layers to use bigger tensors
     to allow for adapter added tokens."""
@@ -568,6 +592,7 @@ def deserialize_tensorizer_model(
 
     _check_tensors_on_meta_device(model)
     _resize_lora_embeddings(model)
+    _restore_kv_scale_dtypes(model)
     del model.vllm_tensorized_marker
 
 
