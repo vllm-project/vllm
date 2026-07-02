@@ -435,9 +435,16 @@ class Scheduler(SchedulerInterface):
         ) and any(not r.is_prefill_chunk for r in self.running)
 
         # First, schedule the RUNNING requests.
+        running_has_spec_decode = (
+            self.num_spec_tokens > 0
+            and self.dynamic_sd_lookup is None
+            and any(r.spec_token_ids for r in self.running)
+        )
+        running_has_prefill_chunk = any(r.is_prefill_chunk for r in self.running)
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            pad_spec_decode = False
 
             if (
                 request.num_output_placeholders > 0
@@ -484,6 +491,25 @@ class Scheduler(SchedulerInterface):
                 - request.num_computed_tokens
                 - self.num_sampled_tokens_per_step,
             )
+            if (
+                running_has_spec_decode
+                and not running_has_prefill_chunk
+                and not request.spec_token_ids
+                and num_new_tokens == 1
+            ):
+                padded_num_new_tokens = 1 + self.num_spec_tokens
+                if (
+                    padded_num_new_tokens <= token_budget
+                    and request.num_computed_tokens
+                    + padded_num_new_tokens
+                    + self.num_sampled_tokens_per_step
+                    <= self.max_model_len
+                ):
+                    num_new_tokens = padded_num_new_tokens
+                    pad_spec_decode = True
+                else:
+                    req_index += 1
+                    continue
 
             # Schedule encoder inputs.
             encoder_inputs_to_schedule = None
@@ -604,6 +630,10 @@ class Scheduler(SchedulerInterface):
                 # New spec tokens will be set in `update_draft_token_ids` before the
                 # next step when applicable.
                 request.spec_token_ids = []
+            elif pad_spec_decode:
+                scheduled_spec_decode_tokens[request.request_id] = [
+                    -1
+                ] * self.num_spec_tokens
 
             # Encoder-related.
             if encoder_inputs_to_schedule:
