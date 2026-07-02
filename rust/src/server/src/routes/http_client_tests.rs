@@ -18,9 +18,10 @@ use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
     DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderedPrompt,
 };
-use vllm_engine_core_client::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs,
 };
+use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::Llm;

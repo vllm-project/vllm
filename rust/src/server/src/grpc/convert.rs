@@ -3,7 +3,8 @@
 
 use tonic::Status;
 use uuid::Uuid;
-use vllm_engine_core_client::protocol::{StopReason, StructuredOutputsParams};
+use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, SamplingParams,
     TextDecodeOptions, TextRequest,
@@ -67,6 +68,11 @@ pub fn to_text_request(
             let kv_json = proto_struct_to_json(kv_struct);
             let map = sampling_params.vllm_xargs.get_or_insert_with(Default::default);
             map.insert("kv_transfer_params".to_string(), kv_json);
+        }
+        if let Some(ec_struct) = kv.ec_transfer_params.as_ref() {
+            let ec_json = proto_struct_to_json(ec_struct);
+            let map = sampling_params.vllm_xargs.get_or_insert_with(Default::default);
+            map.insert("ec_transfer_params".to_string(), ec_json);
         }
         if kv.bypass_prefix_cache {
             sampling_params.skip_reading_prefix_cache = Some(true);
@@ -355,6 +361,7 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
         finish_reason,
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
+        ec_transfer_params: finished.ec_transfer_params.as_ref().and_then(json_to_proto_struct),
     }
 }
 
@@ -502,7 +509,7 @@ impl ResponseOpts {
 
 #[cfg(test)]
 mod tests {
-    use vllm_engine_core_client::protocol::StopReason;
+    use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{FinishReason, Finished, Prompt};
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};

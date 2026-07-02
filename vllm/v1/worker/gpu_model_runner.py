@@ -3440,6 +3440,10 @@ class GPUModelRunner(
         is_first_rank = get_pp_group().is_first_rank
         is_encoder_decoder = self.model_config.is_encoder_decoder
 
+        # Clamp speculative scheduler placeholders (-1) before embedding lookup.
+        if self.speculative_config is not None:
+            self.input_ids.gpu[:num_input_tokens].clamp_(min=0)
+
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
         ec_connector_output = None
