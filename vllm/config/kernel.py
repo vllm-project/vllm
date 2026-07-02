@@ -134,6 +134,7 @@ MoEBackend = Literal[
     "triton_unfused",
     "aiter",
     "flydsl",
+    "tokenspeed",
     "hpc",
     "emulation",
 ]
@@ -193,6 +194,7 @@ class KernelConfig:
     - "triton_unfused": Use Triton unfused MoE kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
     - "flydsl": Use AMD FlyDSL kernels (ROCm only)
+    - "tokenspeed": Use TokenSpeed AMD GFX950 monolithic MoE kernels
     - "hpc": Use HPC kernels (FP8 and Hopper only)
     - "emulation": use BF16/FP16 GEMM, dequantizing weights and
                    running QDQ on activations.

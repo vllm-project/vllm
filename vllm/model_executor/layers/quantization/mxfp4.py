@@ -274,6 +274,21 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
             layer.register_parameter("w2_bias", w2_bias)
             set_weight_attrs(w2_bias, extra_weight_attrs)
 
+        if self.mxfp4_backend == Mxfp4MoeBackend.TOKENSPEED:
+            w13_input_scale = torch.nn.Parameter(
+                torch.full((num_experts,), torch.nan, dtype=torch.float32),
+                requires_grad=False,
+            )
+            layer.register_parameter("w13_input_scale", w13_input_scale)
+            set_weight_attrs(w13_input_scale, extra_weight_attrs)
+
+            w2_input_scale = torch.nn.Parameter(
+                torch.full((num_experts,), torch.nan, dtype=torch.float32),
+                requires_grad=False,
+            )
+            layer.register_parameter("w2_input_scale", w2_input_scale)
+            set_weight_attrs(w2_input_scale, extra_weight_attrs)
+
     def _setup_kernel(
         self,
         layer: RoutedExperts,
@@ -343,7 +358,9 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
-        if self.mxfp4_backend not in TRITON_BACKENDS:
+        if self.mxfp4_backend not in TRITON_BACKENDS and (
+            self.mxfp4_backend != Mxfp4MoeBackend.TOKENSPEED
+        ):
             replace_parameter(layer, "w13_weight", w13)
             replace_parameter(layer, "w2_weight", w2)
             replace_parameter(layer, "w13_weight_scale", w13_scale)
@@ -393,10 +410,16 @@ class GptOssMxfp4MoEMethod(FusedMoEMethodBase):
     def get_fused_moe_quant_config(
         self, layer: RoutedExperts
     ) -> FusedMoEQuantConfig | None:
-        w1_bias = getattr(layer, "w13_bias", None)
-        w2_bias = getattr(layer, "w2_bias", None)
+        if self.mxfp4_backend == Mxfp4MoeBackend.TOKENSPEED:
+            w1_bias = layer.w13_weight_bias
+            w2_bias = layer.w2_weight_bias
+        else:
+            w1_bias = getattr(layer, "w13_bias", None)
+            w2_bias = getattr(layer, "w2_bias", None)
 
-        if self.mxfp4_backend in TRITON_BACKENDS:
+        if self.mxfp4_backend in TRITON_BACKENDS or (
+            self.mxfp4_backend == Mxfp4MoeBackend.TOKENSPEED
+        ):
             # TRITON backends free w13/w2_weight_scale after swizzling; the
             # swizzled scales live inside the precision configs instead.
             assert self.w13_precision_config is not None
@@ -690,7 +713,12 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
 
         # For TRITON backends, weights are wrapped tensors from triton_kernels
         # that don't support .detach(). Manually assign parameters.
-        if self.mxfp4_backend not in TRITON_BACKENDS:
+        if (
+            self.mxfp4_backend not in TRITON_BACKENDS
+            and self.mxfp4_backend != Mxfp4MoeBackend.TOKENSPEED
+            and isinstance(w13_scale, torch.Tensor)
+            and isinstance(w2_scale, torch.Tensor)
+        ):
             replace_parameter(layer, "w13_weight", w13)
             replace_parameter(layer, "w2_weight", w2)
             replace_parameter(layer, "w13_weight_scale", w13_scale)
@@ -745,7 +773,9 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         w2_bias = getattr(layer, "w2_bias", None)
         swiglu_limit = getattr(layer, "swiglu_limit", None)
 
-        if self.mxfp4_backend in TRITON_BACKENDS:
+        if self.mxfp4_backend in TRITON_BACKENDS or (
+            self.mxfp4_backend == Mxfp4MoeBackend.TOKENSPEED
+        ):
             # TRITON backends free w13/w2_weight_scale after swizzling; the
             # swizzled scales live inside the precision configs instead.
             assert self.w13_precision_config is not None

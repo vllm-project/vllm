@@ -1217,8 +1217,15 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
         )
 
         # Handle weight/scale assignment based on backend type
-        if self.mxfp4_backend in TRITON_BACKENDS or self.mxfp4_backend in (
-            Mxfp4MoeBackend.AITER_MXFP4_FP8,
+        if (
+            self.mxfp4_backend in TRITON_BACKENDS
+            or self.mxfp4_backend
+            in (
+                Mxfp4MoeBackend.AITER_MXFP4_FP8,
+                Mxfp4MoeBackend.TOKENSPEED,
+            )
+            or not isinstance(w13_scale, torch.Tensor)
+            or not isinstance(w2_scale, torch.Tensor)
         ):
             # Triton-based backends: w13/w2 are triton_kernels.tensor.Tensor
             # Store on layer for apply(), scales are PrecisionConfig
@@ -1262,6 +1269,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             # Determine scale source based on backend type
             if self.mxfp4_backend in TRITON_BACKENDS or self.mxfp4_backend in (
                 Mxfp4MoeBackend.AITER_MXFP4_FP8,
+                Mxfp4MoeBackend.TOKENSPEED,
             ):
                 w1_scale = self.w13_precision_config
                 w2_scale = self.w2_precision_config
