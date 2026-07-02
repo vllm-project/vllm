@@ -53,9 +53,9 @@ void dynamic_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
 
 torch::Tensor dynamic_4bit_int_moe_cpu(
     torch::Tensor x, torch::Tensor topk_ids, torch::Tensor topk_weights,
-    torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t H, int64_t I,
-    int64_t I2, int64_t group_size, bool apply_router_weight_on_input,
-    int64_t activation_kind);
+    torch::Tensor w13_packed, torch::Tensor w2_packed, int64_t hidden_size,
+    int64_t intermediate_size, int64_t group_size,
+    bool apply_router_weight_on_input, int64_t activation_kind);
 
 using fptr_t = int64_t;
 #ifdef USE_ROCM
