@@ -1,7 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
 import contextlib
 
+import numpy as np
 import pytest
 import pytest_asyncio
 from mistral_common.protocol.transcription.request import (
@@ -98,6 +100,86 @@ def audio_assets() -> list[AudioAsset]:
 @pytest.fixture
 def tokenizer() -> MistralTokenizer:
     return MistralTokenizer.from_hf_hub(MODEL_NAME)
+
+
+@pytest.mark.asyncio
+async def test_voxtral_realtime_recovers_after_feed_token_timeout(monkeypatch):
+    """Regression test for https://github.com/vllm-project/vllm/issues/36015.
+
+    An idle gap on the token-feedback queue must not kill the background feeder.
+    With the old timeout the feeder exits and later tokens never unblock the
+    next realtime audio frame, which looks like a silent transcription hang."""
+    from vllm.model_executor.models import voxtral_realtime
+    from vllm.model_executor.models.voxtral_realtime import VoxtralRealtimeGeneration
+
+    class FakeAudioConfig:
+        streaming_look_ahead_ms = 0.0
+        streaming_look_back_ms = 0.0
+        raw_audio_length_per_tok = 1
+        sampling_rate = 1000
+        frame_rate = 1000
+
+    class FakeAudio:
+        def __init__(self, audio_array):
+            self.audio_array = audio_array
+
+    class FakeAudioEncoder:
+        audio_config = FakeAudioConfig()
+
+        def encode_streaming_tokens(self):
+            return []
+
+        def get_padding_audio(self):
+            empty = np.array([], dtype=np.float32)
+            return FakeAudio(empty), FakeAudio(empty)
+
+    class FakeInstruct:
+        audio_encoder = FakeAudioEncoder()
+
+        def start(self):
+            return [11]
+
+    class FakeTokenizer:
+        instruct = FakeInstruct()
+
+    monkeypatch.setattr(
+        voxtral_realtime, "cached_tokenizer_from_config", lambda _: FakeTokenizer()
+    )
+    # The fix removes the timeout, so this name no longer exists on the module
+    # (raising=False). It is kept so that if a timeout is ever reintroduced into
+    # feed_tokens it fires almost immediately and this test still catches the
+    # regression instead of silently passing within the short wait below.
+    monkeypatch.setattr(
+        voxtral_realtime, "VLLM_ENGINE_ITERATION_TIMEOUT_S", 0.01, raising=False
+    )
+
+    async def audio_stream():
+        yield np.array([0.1, 0.2, 0.3], dtype=np.float32)
+
+    input_stream: asyncio.Queue[list[int]] = asyncio.Queue()
+    generator = VoxtralRealtimeGeneration.buffer_realtime_audio(
+        audio_stream(), input_stream, model_config=None
+    )
+    second_task = None
+
+    try:
+        first_prompt = await asyncio.wait_for(anext(generator), timeout=1.0)
+        assert first_prompt["prompt_token_ids"] == [11]
+
+        await asyncio.sleep(0.05)
+        second_task = asyncio.create_task(anext(generator))
+        input_stream.put_nowait([42])
+        done, _ = await asyncio.wait({second_task}, timeout=1.0)
+        assert second_task in done, "feed_tokens did not recover after timeout"
+        second_prompt = second_task.result()
+        assert second_prompt["prompt_token_ids"] == [42]
+    finally:
+        if second_task is not None and not second_task.done():
+            second_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await second_task
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(generator.aclose(), timeout=1.0)
 
 
 @pytest.fixture
