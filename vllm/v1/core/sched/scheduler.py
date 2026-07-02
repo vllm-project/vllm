@@ -441,6 +441,14 @@ class Scheduler(SchedulerInterface):
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+            if self.requests.get(request.request_id) is not request:
+                logger.debug(
+                    "Dropping stale running request %s before scheduling: "
+                    "request is no longer the tracked request",
+                    request.request_id,
+                )
+                self.running.pop(req_index)
+                continue
 
             if (
                 request.num_output_placeholders > 0
@@ -649,6 +657,14 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+                if self.requests.get(request_id) is not request:
+                    logger.debug(
+                        "Dropping stale waiting request %s before scheduling: "
+                        "request is no longer the tracked request",
+                        request_id,
+                    )
+                    request_queue.pop_request()
+                    continue
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
