@@ -691,6 +691,34 @@ class OpenAIServingChat(OpenAIServing):
                             finish_reason_ = (
                                 output.finish_reason if output.finish_reason else "stop"
                             )
+
+                        # MTP truncation detection: with speculative
+                        # decoding the model may produce EOS during the
+                        # reasoning-to-tool-call transition, causing
+                        # finish_reason="stop" with only reasoning
+                        # produced. Detect this and raise a retryable
+                        # error so the client retries.
+                        if (
+                            finish_reason_ == "stop"
+                            and request.tools
+                            and not tools_streamed[i]
+                            and not auto_tools_called
+                            and reasoning_parser is not None
+                            and delta_message is not None
+                            and not delta_message.content
+                            and not delta_message.tool_calls
+                        ):
+                            logger.warning(
+                                "MTP truncation detected for request %s: "
+                                "finished with 'stop' but tools configured "
+                                "and only reasoning produced.",
+                                request_id,
+                            )
+                            raise GenerationError(
+                                "MTP speculative decoding truncated tool "
+                                "call generation. Please retry."
+                            )
+
                         choice_data = ChatCompletionResponseStreamChoice(
                             index=i,
                             delta=delta_message,
