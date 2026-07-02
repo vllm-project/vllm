@@ -440,6 +440,100 @@ class CPUFusedMOE:
 
         return output
 
+    def forward_batched_gemm(
+        self,
+        layer: torch.nn.Module,
+        input: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        activation: MoEActivation,
+        global_num_experts: int = -1,
+        skip_weighted: bool = False,
+    ) -> torch.Tensor:
+        """Universal batched GEMM fallback for CPUs without AVX512 fused MoE.
+
+        The per-expert F.linear loop in forward_torch issues N_experts separate
+        BLAS calls, each triggering a full weight-matrix packing pass
+        (sbgemm_incopy / similar). For decode (small T), packing dominates.
+
+        This path instead:
+          1. One torch.mm  for gate+up — packs ALL expert weights in one pass.
+          2. One torch.bmm for down   — batched over experts.
+        → 2 BLAS weight-packing passes regardless of N_experts.
+
+        Works on any CPU (x86 non-AVX512, ARM non-AMX, PowerPC, RISC-V, ...).
+        The trade-off (computing all experts densely) is beneficial whenever
+        decode batch size is small relative to expert weight size.
+        """
+        if skip_weighted:
+            # Weight is pre-applied to input; must NOT re-apply in accumulation.
+            assert topk_ids.size(1) == 1, (
+                "apply_router_weight_on_input is only supported for topk=1"
+            )
+            input = input * topk_weights.to(input.dtype)
+
+        num_tokens: int = input.shape[0]
+        hidden_dim: int = input.shape[1]
+        num_experts: int = layer.w13_weight.shape[0]
+        gate_up_dim: int = layer.w13_weight.shape[1]   # gate + up concatenated
+        top_k: int = topk_ids.shape[1]
+        act_fn = _CPU_MOE_ACT_FN[activation]
+
+        # ------------------------------------------------------------------
+        # 1. Gate+Up — single large GEMM covering ALL experts at once.
+        #    w13_weight: (E, gate+up, hidden) → (E*gate+up, hidden)
+        #    mm: (T, hidden) @ (hidden, E*gate+up) → (T, E*gate+up)
+        #    → view (T, E, gate+up)
+        # ------------------------------------------------------------------
+        w13_2d = layer.w13_weight.view(num_experts * gate_up_dim, hidden_dim)
+        gate_up_all = torch.mm(input, w13_2d.T)  # (T, E*gate+up)
+        if hasattr(layer, "w13_bias") and layer.w13_bias is not None:
+            gate_up_all = gate_up_all + layer.w13_bias.view(-1)
+        gate_up_all = gate_up_all.view(num_tokens, num_experts, gate_up_dim)
+
+        # Apply gating activation: (T, E, gate+up) → (T, E, down_dim)
+        gate_up_act = act_fn(gate_up_all)
+        down_dim: int = gate_up_act.shape[-1]
+
+        # ------------------------------------------------------------------
+        # 2. Down — batched GEMM over experts.
+        #    Permute to (E, T, down_dim) for bmm.
+        #    w2_weight: (E, out, down_dim) → transpose → (E, down_dim, out)
+        #    bmm: (E, T, down_dim) @ (E, down_dim, out) → (E, T, out)
+        # ------------------------------------------------------------------
+        gate_up_t = gate_up_act.permute(1, 0, 2).contiguous()   # (E, T, down)
+        down_all = torch.bmm(
+            gate_up_t,
+            layer.w2_weight.transpose(1, 2),
+        )  # (E, T, out_dim)
+        if hasattr(layer, "w2_bias") and layer.w2_bias is not None:
+            down_all = down_all + layer.w2_bias.unsqueeze(1)
+        down_all = down_all.permute(1, 0, 2)  # (T, E, out_dim)
+
+        # ------------------------------------------------------------------
+        # 3. Weighted accumulation over top-k routed experts.
+        #    output[t] += topk_weights[t,k] * down_all[t, topk_ids[t,k], :]
+        # ------------------------------------------------------------------
+        out_dim: int = down_all.shape[-1]
+        output = torch.zeros(
+            num_tokens, out_dim, dtype=input.dtype, device=input.device
+        )
+        t_idx = torch.arange(num_tokens, device=input.device)
+        if skip_weighted:
+            # Weight already baked into input — gather directly, no re-weighting.
+            expert_ids = topk_ids[:, 0].long()
+            output.add_(down_all[t_idx, expert_ids, :])
+        else:
+            for k in range(top_k):
+                expert_ids = topk_ids[:, k].long()        # (T,)
+                w_k = topk_weights[:, k].to(input.dtype)  # (T,)
+                expert_out = down_all[t_idx, expert_ids, :]       # (T, out)
+                output.addcmul_(
+                    expert_out, w_k.unsqueeze(-1).expand_as(expert_out)
+                )
+
+        return output
+
 
 def cpu_fused_moe_torch(
     layer_id: int,
@@ -502,3 +596,4 @@ direct_register_custom_op(
     op_func=cpu_fused_moe_torch,
     mutates_args=["output"],
 )
+

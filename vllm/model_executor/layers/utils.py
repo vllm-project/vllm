@@ -234,17 +234,25 @@ def dispatch_cpu_unquantized_gemm(
         layer.cpu_linear = torch.nn.functional.linear
         return
 
+    # Skip CPU GEMM dispatch for non-2D weights (e.g. MoE 3D expert weights).
+    # These layers are handled by their own specialized methods.
     if layer.weight.ndim != 2:
         # this is not a linear layer
-        # For now it should be a causal_conv1d op
-        if torch.cpu._is_amx_tile_supported():
-            # prepack conv weight
-            layer.weight.data = ops.causal_conv1d_weight_pack(
-                layer.weight.view(
-                    layer.weight.size(0),
-                    layer.weight.size(2),
+        # For now it should be a causal_conv1d op or MoE 3D expert weights
+        if torch.cpu._is_amx_tile_supported() and hasattr(ops, "causal_conv1d_weight_pack"):
+            try:
+                # prepack conv weight
+                layer.weight.data = ops.causal_conv1d_weight_pack(
+                    layer.weight.view(
+                        layer.weight.size(0),
+                        layer.weight.size(2),
+                    )
                 )
-            )
+            except Exception:
+                pass
+        layer.cpu_linear = lambda x, weight, bias: torch.nn.functional.linear(
+            x, weight, bias
+        )
         return
 
     N, K = layer.weight.size()

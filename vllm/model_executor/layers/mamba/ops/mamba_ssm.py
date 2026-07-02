@@ -225,8 +225,9 @@ cvt.rs.f16x2.f32 $0, $2, $1, $3;
 @triton.heuristics({"HAS_Z": lambda args: args["z_ptr"] is not None})
 @triton.heuristics(
     {
-        "HAS_STATE_BATCH_INDICES": lambda args: args["state_batch_indices_ptr"]
-        is not None
+        "HAS_STATE_BATCH_INDICES": lambda args: (
+            args["state_batch_indices_ptr"] is not None
+        )
     }
 )
 @triton.heuristics(
@@ -493,7 +494,7 @@ def _selective_scan_update_kernel(
         tl.store(dst_state_ptrs, state, mask=mask)
 
 
-def selective_state_update(
+def _selective_state_update_cuda(
     state,
     x,
     dt,
@@ -603,6 +604,29 @@ def selective_state_update(
     assert out.shape == x.shape
     if num_accepted_tokens is not None:
         assert num_accepted_tokens.shape == (N,)
+
+    if not HAS_TRITON:
+        return _selective_state_update_cpu(
+            state,
+            x,
+            dt,
+            A,
+            B,
+            C,
+            D,
+            z,
+            dt_bias,
+            dt_softplus,
+            state_batch_indices,
+            dst_state_batch_indices,
+            null_block_id,
+            out,
+            num_accepted_tokens,
+            cu_seqlens,
+            is_blackwell,
+            enable_stochastic_rounding,
+            cache_philox_rounds,
+        )
 
     grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE_M"]), N, nheads)
     z_strides = (z.stride(0), z.stride(1), z.stride(2)) if z is not None else (0, 0, 0)
@@ -844,3 +868,76 @@ def selective_scan_fn(
         return delta  # output written inplace to delta
     else:
         return z  # output written inplace to z
+
+
+
+def selective_state_update(
+    state,
+    x,
+    dt,
+    A,
+    B,
+    C,
+    D=None,
+    z=None,
+    dt_bias=None,
+    dt_softplus=False,
+    state_batch_indices=None,
+    dst_state_batch_indices=None,
+    null_block_id=NULL_BLOCK_ID,
+    out=None,
+    num_accepted_tokens=None,
+    cu_seqlens=None,
+    is_blackwell=False,
+    enable_stochastic_rounding=False,
+    cache_philox_rounds=0,
+):
+    """Dispatch selective_state_update to CPU C++ kernel or CUDA Triton kernel."""
+    # Ensure out tensor exists
+    if out is None:
+        out = torch.empty_like(x if x.dim() == 2 else x)
+
+    if x.device.type == "cpu":
+        # Reshape tensors from (batch, dim) -> (batch, 1, dim) if needed
+        # The C++ kernel expects (N, nheads, dim) layout
+        _state = state.unsqueeze(1) if state.dim() == 3 else state
+        _x = x.unsqueeze(1) if x.dim() == 2 else x
+        _dt = dt.unsqueeze(1) if dt.dim() == 2 else dt
+        _A = A.unsqueeze(0) if A.dim() == 2 else A
+        _B = B.unsqueeze(1) if B.dim() == 2 else B
+        _C = C.unsqueeze(1) if C.dim() == 2 else C
+        _D = D.unsqueeze(0) if (D is not None and D.dim() == 1) else D
+        _z = z.unsqueeze(1) if (z is not None and z.dim() == 2) else z
+        _dt_bias = (
+            dt_bias.unsqueeze(0)
+            if (dt_bias is not None and dt_bias.dim() == 1)
+            else dt_bias
+        )
+        _out = out.unsqueeze(1) if out.dim() == 2 else out
+        # state_batch_indices and dst_state_batch_indices are 1D index arrays;
+        # do NOT reshape them.
+        _sbi = state_batch_indices
+        _dsbi = dst_state_batch_indices
+        ops.selective_state_update_cpu(
+            _state, _x, _dt, _A, _B, _C,
+            _D, _z, _dt_bias, dt_softplus,
+            _sbi, _dsbi,
+            null_block_id, _out,
+            num_accepted_tokens, cu_seqlens,
+        )
+        return _out.squeeze(1) if out.dim() == 2 else _out
+
+    return _selective_state_update_cuda(
+        state, x, dt, A, B, C,
+        D=D, z=z, dt_bias=dt_bias,
+        dt_softplus=dt_softplus,
+        state_batch_indices=state_batch_indices,
+        dst_state_batch_indices=dst_state_batch_indices,
+        null_block_id=null_block_id,
+        out=out,
+        num_accepted_tokens=num_accepted_tokens,
+        cu_seqlens=cu_seqlens,
+        is_blackwell=is_blackwell,
+        enable_stochastic_rounding=enable_stochastic_rounding,
+        cache_philox_rounds=cache_philox_rounds,
+    )

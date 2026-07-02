@@ -2129,6 +2129,66 @@ def selective_scan_fwd(
     )
 
 
+def causal_conv1d_update_cpu(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor | None = None,
+    activation: str | None = None,
+    conv_state_indices: torch.Tensor | None = None,
+    query_start_loc: torch.Tensor | None = None,
+    pad_slot_id: int = 0,
+) -> torch.Tensor:
+    return torch.ops._C.causal_conv1d_update_cpu(
+        x,
+        conv_state,
+        weight,
+        bias,
+        activation,
+        conv_state_indices,
+        query_start_loc,
+        pad_slot_id,
+    )
+
+
+def selective_state_update_cpu(
+    state: torch.Tensor,
+    x: torch.Tensor,
+    dt: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    D: torch.Tensor | None,
+    z: torch.Tensor | None,
+    dt_bias: torch.Tensor | None,
+    dt_softplus: bool,
+    state_batch_indices: torch.Tensor | None,
+    dst_state_batch_indices: torch.Tensor | None,
+    null_block_id: int,
+    out: torch.Tensor,
+    num_accepted_tokens: torch.Tensor | None,
+    cu_seqlens: torch.Tensor | None,
+):
+    torch.ops._C.selective_state_update_cpu(
+        state,
+        x,
+        dt,
+        A,
+        B,
+        C,
+        D,
+        z,
+        dt_bias,
+        dt_softplus,
+        state_batch_indices,
+        dst_state_batch_indices,
+        null_block_id,
+        out,
+        num_accepted_tokens,
+        cu_seqlens,
+    )
+
+
 # ROCm skinny gemms
 def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor:
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)
