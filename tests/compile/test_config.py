@@ -34,6 +34,30 @@ from . import silly_attention  # noqa: F401
 DEVICE_TYPE = current_platform.device_type
 
 
+def test_cudagraph_sizes_capped_for_tp_marlin_on_ampere():
+    vllm_config = VllmConfig(
+        model_config=MagicMock(
+            enforce_eager=False,
+            quantization="awq_marlin",
+        ),
+        parallel_config=ParallelConfig(tensor_parallel_size=2),
+        scheduler_config=SchedulerConfig(max_num_seqs=32, max_num_batched_tokens=8192),
+    )
+
+    vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
+    vllm_config.compilation_config.cudagraph_capture_sizes = None
+    vllm_config.compilation_config.max_cudagraph_capture_size = None
+
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_device_capability_family", return_value=True),
+    ):
+        vllm_config._set_cudagraph_sizes()
+
+    assert vllm_config.compilation_config.max_cudagraph_capture_size == 8
+    assert vllm_config.compilation_config.cudagraph_capture_sizes == [1, 2, 4, 8]
+
+
 def test_version():
     # Test the version comparison logic using the private function
     assert _is_torch_equal_or_newer("2.8.0.dev20250624+cu128", "2.8.0.dev")
