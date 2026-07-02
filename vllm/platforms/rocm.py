@@ -992,6 +992,45 @@ class RocmPlatform(Platform):
         return torch.cuda.get_device_properties(device_id).multi_processor_count
 
     @classmethod
+    def mem_get_info(
+        cls,
+        device: "torch.types.Device | None" = None,
+    ) -> tuple[int, int]:
+        """Return (free_bytes, total_bytes) for the given device.
+
+        hipMemGetInfo (exposed via torch.cuda.mem_get_info) may report the
+        entire XGMI/HIVE-accessible VRAM pool as ``total`` on multi-GPU ROCm
+        systems (e.g. 6 × 32 GiB GPUs → total = 192 GiB even for GPU 0).
+        That makes vLLM try to allocate far more memory than the local GPU
+        actually has, causing OOM during KV-cache initialisation.
+
+        We therefore cap ``total`` to the physical local-device VRAM reported
+        by amdsmi (or torch.cuda.get_device_properties as fallback).  ``free``
+        is kept as-is because the HIP allocator already limits it to local
+        VRAM.
+
+        See https://github.com/vllm-project/vllm/issues/36890
+        """
+        free, total = torch.cuda.mem_get_info(device)
+        # Derive device_id for the physical-VRAM query.
+        if device is None:
+            device_id = torch.cuda.current_device()
+        else:
+            device_id = torch.device(device).index or 0
+        try:
+            vram_total = cls.get_device_total_memory(device_id)
+        except Exception:
+            # amdsmi unavailable — fall back to torch device properties which
+            # reflects local VRAM on all known ROCm driver versions.
+            vram_total = torch.cuda.get_device_properties(device_id).total_memory
+        # Only apply the cap when hipMemGetInfo over-reports total.
+        if total > vram_total:
+            # Scale free proportionally so free <= total invariant holds.
+            free = min(free, vram_total)
+            total = vram_total
+        return free, total
+
+    @classmethod
     def use_custom_op_collectives(cls) -> bool:
         return True
 
