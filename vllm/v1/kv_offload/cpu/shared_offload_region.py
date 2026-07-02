@@ -170,6 +170,17 @@ class SharedOffloadRegion:
         )
         return memoryview(np_arr)
 
+    @property
+    def base_addr(self) -> int:
+        """Base address of the mmap-backed KV buffer."""
+        assert self._base is not None
+        return int(self._base.data_ptr())
+
+    @property
+    def row_stride_bytes(self) -> int:
+        """Distance in bytes between adjacent primary-tier block rows."""
+        return self._row_stride
+
     def cleanup(self) -> None:
         if self.is_pinned and self._base is not None:
             if current_platform.is_cuda_alike():
