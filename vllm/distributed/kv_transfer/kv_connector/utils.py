@@ -32,6 +32,8 @@ BlockIds = tuple[list[int], ...] | list[list[int]]
 
 
 def get_kv_connector_cache_layout():
+    if current_platform.is_cpu():
+        return "HND"
     # NOTE (NickLucche) When running disaggregated PD with NIXL, HND layout is
     # used for faster transfer.
     vllm_config = get_current_vllm_config()
