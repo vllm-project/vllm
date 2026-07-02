@@ -74,6 +74,37 @@ logger = init_logger("vllm.entrypoints.openai.api_server")
 _FALLBACK_SUPPORTED_TASKS: tuple[SupportedTask, ...] = ("generate",)
 
 
+def _attach_endpoint_plugins(
+    app: FastAPI, supported_tasks: tuple["SupportedTask", ...]
+) -> None:
+    """Phase A of endpoint plugin wiring: discover, gate and attach routes.
+
+    Attached last after all core routers. This is so endpoint plugin routes can
+    shadow core routes with the same path (see `EndpointPlugin.attach_router`
+    docstring). No-ops when no plugins are discovered/allowlisted.
+    """
+    from vllm.plugins import load_endpoint_plugins
+
+    endpoint_plugins = load_endpoint_plugins(supported_tasks)
+    for plugin in endpoint_plugins:
+        plugin.attach_router(app)
+    app.state.endpoint_plugins = endpoint_plugins
+
+
+async def _init_endpoint_plugins_state(
+    engine_client: EngineClient, state: State, args: Namespace
+) -> None:
+    """Phase B of endpoint plugin wiring: initialize per app plugin state.
+
+    `state.endpoint_plugins` is set by `_attach_endpoint_plugins` (Phase A)
+    in `build_app`. Some `init_app_state` callers (e.g. `run_batch.py`)
+    build their own bare `State` without going through `build_app`. As a result
+    `endpoint_plugins` may be absent and are treated that the same as "none attached".
+    """
+    for plugin in getattr(state, "endpoint_plugins", []):
+        await plugin.init_state(engine_client, state, args)
+
+
 @asynccontextmanager
 async def build_async_engine_client(
     args: Namespace,
@@ -158,6 +189,8 @@ def build_app(
     args: Namespace,
     supported_tasks: tuple["SupportedTask", ...] | None = None,
     model_config: ModelConfig | None = None,
+    *,
+    attach_endpoint_plugins: bool = True,
 ) -> FastAPI:
     if supported_tasks is None:
         warnings.warn(
@@ -229,6 +262,14 @@ def build_app(
         from vllm.entrypoints.pooling.factories import register_pooling_api_routers
 
         register_pooling_api_routers(app, supported_tasks, model_config)
+
+    # Endpoint plugins are attached last so their routes are registered after all core
+    # routers. Skipped for the CPU only render server (`attach_endpoint_plugins=False`)
+    # as it has no `EngineClient`and therefore `init_render_app_state` can never run
+    # Phase B (`_init_endpoint_plugins_state`). It is skipped because the route that
+    # can never be initialized is worse than an absent one.
+    if attach_endpoint_plugins:
+        _attach_endpoint_plugins(app, supported_tasks)
 
     app.root_path = args.root_path
     app.add_middleware(
@@ -416,6 +457,8 @@ async def init_app_state(
         from vllm.entrypoints.pooling.factories import init_pooling_state
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
+
+    await _init_endpoint_plugins_state(engine_client, state, args)
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
@@ -655,7 +698,9 @@ async def build_and_serve_renderer(
     if log_config is not None:
         uvicorn_kwargs["log_config"] = log_config
 
-    app = build_app(args, ("render",))
+    # Endpoint plugins are not supported on the render server because it has no
+    # `EngineClient` for Phase B initialization (see `build_app`).
+    app = build_app(args, ("render",), attach_endpoint_plugins=False)
     await init_render_app_state(vllm_config, app.state, args)
 
     logger.info("Starting vLLM server on %s", listen_address)
