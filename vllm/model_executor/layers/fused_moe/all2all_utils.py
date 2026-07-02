@@ -140,6 +140,14 @@ def maybe_make_prepare_finalize(
         if not allow_new_interface:
             return None
 
+        parallel_config = get_current_vllm_config().parallel_config
+        if parallel_config.data_parallel_external_lb:
+            logger.info_once(
+                "External LB mode detected. "
+                "Disabling DP-EP cross-rank token routing to prevent collective "
+                "communication hangs. Falling back to no_dp_ep."
+            )
+            return make_moe_prepare_and_finalize_no_dp_ep(use_monolithic)
         # For DP/TP case, fall back to naive P/F.
         if moe.moe_parallel_config.dp_size > 1:
             logger.info_once(
