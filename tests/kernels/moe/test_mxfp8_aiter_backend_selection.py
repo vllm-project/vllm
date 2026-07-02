@@ -68,12 +68,17 @@ def _flydsl_installed(present: bool):
 
 
 def test_aiter_mxfp8_registered():
-    """The FlyDSL backend is auto-selectable and reachable via --moe-backend aiter."""
+    """The FlyDSL backend is auto-selectable and reachable via --moe-backend aiter.
+
+    AITER_MXFP8 is shared with the gfx942 BF16-emulation FlyDSL path, so the
+    kernel-class dispatch is platform-gated: mock gfx950 (native MX) to assert
+    the native AiterMxfp8Experts is chosen."""
     assert Fp8MoeBackend.AITER_MXFP8 in _SUPPORTED_BACKENDS
     assert _BACKEND_NAME_MAP["aiter"] is Fp8MoeBackend.AITER_MXFP8
-    assert _mxfp8_backend_to_kernel_cls(Fp8MoeBackend.AITER_MXFP8) == [
-        AiterMxfp8Experts
-    ]
+    with _gfx950():
+        assert _mxfp8_backend_to_kernel_cls(Fp8MoeBackend.AITER_MXFP8) == [
+            AiterMxfp8Experts
+        ]
 
 
 def test_triton_selectable():

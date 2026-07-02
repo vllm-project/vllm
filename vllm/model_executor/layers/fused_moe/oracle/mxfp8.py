@@ -53,11 +53,17 @@ def _mxfp8_backend_to_kernel_cls(
 
         return [DeepGemmExperts]
     if backend == Fp8MoeBackend.AITER_MXFP8:
-        from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
-            AiterMxfp8Experts,
+        if current_platform.supports_mx():
+            from vllm.model_executor.layers.fused_moe.experts.aiter_mxfp8_moe import (
+                AiterMxfp8Experts,
+            )
+
+            return [AiterMxfp8Experts]
+        from vllm.model_executor.layers.fused_moe.experts.flydsl_emulation_moe import (
+            FlydslEmulationExperts,
         )
 
-        return [AiterMxfp8Experts]
+        return [FlydslEmulationExperts]
     if backend == Fp8MoeBackend.TRITON_MXFP8:
         # Explicit ``--moe-backend triton``: the Triton mxfp8 path, i.e.
         # dot_scaled on MX-capable HW (gfx950) and BF16 emulation otherwise.
