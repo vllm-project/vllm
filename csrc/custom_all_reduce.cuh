@@ -17,6 +17,8 @@ typedef __hip_bfloat16 nv_bfloat16;
 #include <vector>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
+#include <string>
 
 namespace vllm {
 #define CUDACHECK(cmd)                                              \
@@ -492,6 +494,28 @@ class CustomAllreduce {
       const std::vector<std::string>& handles,
       const std::vector<std::vector<int64_t>>& offsets) {
     auto num_buffers = graph_unreg_buffers_.size();
+    if (handles.size() != static_cast<size_t>(world_size_) ||
+        offsets.size() != static_cast<size_t>(world_size_)) {
+      throw std::runtime_error(
+          "CustomAllreduce::register_graph_buffers: expected handles and "
+          "offsets length to match world size.");
+    }
+    const size_t handle_sz = sizeof(cudaIpcMemHandle_t);
+    for (int j = 0; j < world_size_; j++) {
+      size_t peer_num_buffers = handles[j].size() / handle_sz;
+      if (peer_num_buffers != static_cast<size_t>(num_buffers) ||
+          offsets[j].size() != static_cast<size_t>(num_buffers)) {
+        throw std::runtime_error(
+            "CustomAllreduce: mismatched CUDA graph buffer counts during "
+            "registration (this rank has " +
+            std::to_string(num_buffers) + " buffers, but rank " +
+            std::to_string(j) + " provided " +
+            std::to_string(peer_num_buffers) +
+            "). Tensor-parallel ranks must issue the same number of custom "
+            "all-reduces while capturing the graph. Try disabling custom "
+            "all-reduce (e.g. --disable-custom-all-reduce).");
+      }
+    }
     check_rank_data_capacity(num_buffers);
     std::vector<RankData> rank_data(num_buffers);
     for (int i = 0; i < num_buffers; i++) {
