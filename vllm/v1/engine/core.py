@@ -929,84 +929,109 @@ class EngineCoreProc(EngineCore):
             self.tensor_ipc_receiver = TensorIpcReceiver(tensor_queue)
             logger.info("Using tensor IPC queue for multimodal tensor sharing")
 
-        with self._perform_handshakes(
-            handshake_address,
-            identity,
-            local_client,
-            vllm_config,
-            client_handshake_address,
-        ) as addresses:
-            # Set up data parallel environment.
-            self.has_coordinator = addresses.coordinator_output is not None
-            self.frontend_stats_publish_address = (
-                addresses.frontend_stats_publish_address
-            )
-            logger.debug(
-                "Has DP Coordinator: %s, stats publish address: %s",
-                self.has_coordinator,
-                self.frontend_stats_publish_address,
-            )
-            internal_dp_balancing = (
-                self.has_coordinator
-                and not vllm_config.parallel_config.data_parallel_external_lb
-            )
-            # Only publish request queue stats to coordinator for "internal"
-            # and "hybrid" LB modes.
-            self.publish_dp_lb_stats = internal_dp_balancing
-
-            self.addresses = addresses
-            self.process_input_queue_block = True
-            if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
-                self._eep_send_engine_core_notification(
-                    EEPNotificationType.NEW_CORE_ENGINES_INIT_READY,
-                    vllm_config=vllm_config,
-                )
-            self._init_data_parallel(vllm_config)
-
-            super().__init__(
+        try:
+            with self._perform_handshakes(
+                handshake_address,
+                identity,
+                local_client,
                 vllm_config,
-                executor_class,
-                log_stats,
-                executor_fail_callback,
-                internal_dp_balancing,
-            )
+                client_handshake_address,
+            ) as addresses:
+                # Set up data parallel environment.
+                self.has_coordinator = addresses.coordinator_output is not None
+                self.frontend_stats_publish_address = (
+                    addresses.frontend_stats_publish_address
+                )
+                logger.debug(
+                    "Has DP Coordinator: %s, stats publish address: %s",
+                    self.has_coordinator,
+                    self.frontend_stats_publish_address,
+                )
+                internal_dp_balancing = (
+                    self.has_coordinator
+                    and not vllm_config.parallel_config.data_parallel_external_lb
+                )
+                # Only publish request queue stats to coordinator for "internal"
+                # and "hybrid" LB modes.
+                self.publish_dp_lb_stats = internal_dp_balancing
 
-            # Background Threads and Queues for IO. These enable us to
-            # overlap ZMQ socket IO with GPU since they release the GIL,
-            # and to overlap some serialization/deserialization with the
-            # model forward pass.
-            # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
-            ready_event = threading.Event()
-            input_thread = threading.Thread(
-                target=self.process_input_sockets,
-                args=(
-                    addresses.inputs,
-                    addresses.coordinator_input,
-                    identity,
-                    ready_event,
-                ),
-                daemon=True,
-            )
-            input_thread.start()
+                self.addresses = addresses
+                self.process_input_queue_block = True
+                if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+                    self._eep_send_engine_core_notification(
+                        EEPNotificationType.NEW_CORE_ENGINES_INIT_READY,
+                        vllm_config=vllm_config,
+                    )
+                self._init_data_parallel(vllm_config)
 
-            self.output_thread = threading.Thread(
-                target=self.process_output_sockets,
-                args=(
-                    addresses.outputs,
-                    addresses.coordinator_output,
-                    self.engine_index,
-                ),
-                daemon=True,
-            )
-            self.output_thread.start()
+                super().__init__(
+                    vllm_config,
+                    executor_class,
+                    log_stats,
+                    executor_fail_callback,
+                    internal_dp_balancing,
+                )
 
-            # Don't complete handshake until DP coordinator ready message is
-            # received.
-            while not ready_event.wait(timeout=10):
-                if not input_thread.is_alive():
-                    raise RuntimeError("Input socket thread died during startup")
-                assert addresses.coordinator_input is not None
-                logger.info("Waiting for READY message from DP Coordinator...")
+                # Background Threads and Queues for IO. These enable us to
+                # overlap ZMQ socket IO with GPU since they release the GIL,
+                # and to overlap some serialization/deserialization with the
+                # model forward pass.
+                # Threads handle Socket <-> Queues and core_busy_loop uses Queue.
+                ready_event = threading.Event()
+                input_thread = threading.Thread(
+                    target=self.process_input_sockets,
+                    args=(
+                        addresses.inputs,
+                        addresses.coordinator_input,
+                        identity,
+                        ready_event,
+                    ),
+                    daemon=True,
+                )
+                input_thread.start()
+
+                self.output_thread = threading.Thread(
+                    target=self.process_output_sockets,
+                    args=(
+                        addresses.outputs,
+                        addresses.coordinator_output,
+                        self.engine_index,
+                    ),
+                    daemon=True,
+                )
+                self.output_thread.start()
+
+                # Don't complete handshake until DP coordinator ready message is
+                # received.
+                while not ready_event.wait(timeout=10):
+                    if not input_thread.is_alive():
+                        raise RuntimeError("Input socket thread died during startup")
+                    assert addresses.coordinator_input is not None
+                    logger.info("Waiting for READY message from DP Coordinator...")
+        except BaseException:
+            # If construction is interrupted after the executor was created --
+            # e.g. a SIGTERM during model load / warmup, which run_engine_core's
+            # signal handler turns into SystemExit -- shut the executor down so
+            # its worker subprocesses are terminated instead of surviving as
+            # orphans that keep holding GPU memory. Cleanup during the executor's
+            # own construction is handled by MultiprocExecutor.__init__.
+            #
+            # We deliberately call ``model_executor.shutdown()`` directly rather
+            # than ``self.shutdown()``: the latter touches
+            # ``self.structured_output_manager`` / ``self.scheduler`` (created
+            # only AFTER the long warmup) and would raise AttributeError on a
+            # half-built engine. The executor is bound before warmup, so this is
+            # always safe and is the part that owns the GPU worker subprocesses.
+            executor = getattr(self, "model_executor", None)
+            if executor is not None:
+                try:
+                    executor.shutdown()
+                except Exception:
+                    # Never let a teardown error mask the original interruption.
+                    logger.exception(
+                        "Error shutting down executor during startup abort"
+                    )
+            raise
 
     @contextmanager
     def _perform_handshakes(
@@ -1186,6 +1211,48 @@ class EngineCoreProc(EngineCore):
                 )
 
             parallel_config.data_parallel_index = dp_rank
+
+            # Install signal handlers BEFORE constructing the engine. If a
+            # SIGTERM/SIGINT arrives during model loading or warmup -- before
+            # the engine object and its graceful-wakeup machinery exist -- the
+            # handler raises SystemExit so that construction unwinds and the
+            # executor's worker processes are torn down (see EngineCoreProc
+            # __init__). Otherwise the process would be killed by the default
+            # signal disposition with its worker subprocesses left running and
+            # holding GPU memory as orphans.
+            #
+            # ``startup_shutdown_requested`` guards against repeated signals
+            # (e.g. Kubernetes resending SIGTERM, or impatient Ctrl-C) during
+            # the startup-abort window: a second SystemExit would otherwise
+            # interrupt the in-flight executor.shutdown() teardown and orphan
+            # workers anyway.
+            startup_shutdown_requested = False
+
+            def signal_handler(signum, frame):
+                nonlocal startup_shutdown_requested
+                signal_name = signal.Signals(signum).name
+                if engine_core is None or signal_callback is None:
+                    if startup_shutdown_requested:
+                        # Already aborting; ignore so executor.shutdown() can
+                        # complete without being reinterrupted.
+                        return
+                    startup_shutdown_requested = True
+                    logger.info(
+                        "[shutdown] EngineCore: received signal=%s during "
+                        "startup; aborting initialization.",
+                        signal_name,
+                    )
+                    raise SystemExit()
+                logger.info(
+                    "[shutdown] EngineCore: trigger received signal=%s",
+                    signal_name,
+                )
+                engine_core.shutdown_state = EngineShutdownState.REQUESTED
+                signal_callback.trigger()
+
+            signal.signal(signal.SIGTERM, signal_handler)
+            signal.signal(signal.SIGINT, signal_handler)
+
             if data_parallel and vllm_config.model_config.is_moe:
                 # Set data parallel rank for this engine process.
                 parallel_config.data_parallel_rank = dp_rank
@@ -1208,18 +1275,6 @@ class EngineCoreProc(EngineCore):
                 engine_core.input_queue.put_nowait((EngineCoreRequestType.WAKEUP, None))
 
             signal_callback = SignalCallback(wakeup_engine)
-
-            def signal_handler(signum, frame):
-                signal_name = signal.Signals(signum).name
-                logger.info(
-                    "[shutdown] EngineCore: trigger received signal=%s",
-                    signal_name,
-                )
-                engine_core.shutdown_state = EngineShutdownState.REQUESTED
-                signal_callback.trigger()
-
-            signal.signal(signal.SIGTERM, signal_handler)
-            signal.signal(signal.SIGINT, signal_handler)
 
             engine_core.run_busy_loop()
 
