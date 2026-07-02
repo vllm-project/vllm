@@ -32,12 +32,11 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 
-# Backends whose weight layout is per-expert leading-dim contiguous,
-# so EPLB can safely rearrange them.
 _EPLB_SUPPORTED_NVFP4_BACKENDS = frozenset(
     {
         NvFp4MoeBackend.FLASHINFER_CUTEDSL,
         NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
+        NvFp4MoeBackend.FLASHINFER_TRTLLM,
     }
 )
 
@@ -326,8 +325,6 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
 
     def after_eplb_rearrangement(self, layer: RoutedExperts) -> None:
-        # w13/w2_weight_scale_2 are fused products derived from the
-        # globals EPLB just rearranged; re-derive them here to stay in sync.
         layer.w13_weight_scale_2.copy_(
             (1.0 / layer.w13_weight_global_scale[:, 0]) * layer.w13_input_scale
         )
