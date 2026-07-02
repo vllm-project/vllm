@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import torch
 from transformers import PretrainedConfig
 
 from vllm.multimodal.processing import InputProcessingContext
@@ -216,6 +218,62 @@ def test_qwen3_omni_get_updates_use_audio_in_video(
     assert len(updates) == expected_total, (
         f"Expected {expected_total} total tokens, got {len(updates)}"
     )
+
+
+def test_qwen3_omni_empty_deepstack_buffers_match_inputs_embeds():
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeThinkerForConditionalGeneration,
+    )
+
+    model = Qwen3OmniMoeThinkerForConditionalGeneration.__new__(
+        Qwen3OmniMoeThinkerForConditionalGeneration
+    )
+    model.config = SimpleNamespace(text_config=SimpleNamespace(hidden_size=8))
+    model.deepstack_num_level = 2
+    model.deepstack_input_embeds = [
+        torch.zeros(4, 8),
+        torch.zeros(4, 8),
+    ]
+    model.deepstack_input_embeds_num_tokens = 0
+    inputs_embeds = torch.empty(2, 8, device="meta", dtype=torch.float16)
+
+    deepstack_input_embeds = model._get_deepstack_input_embeds(
+        num_tokens=2, inputs_embeds=inputs_embeds
+    )
+
+    assert deepstack_input_embeds is not None
+    for tensor in deepstack_input_embeds.tensors.values():
+        assert tensor.shape == (2, 8)
+        assert tensor.device == inputs_embeds.device
+        assert tensor.dtype == inputs_embeds.dtype
+
+
+def test_qwen3_omni_deepstack_payload_matches_payload_dtype():
+    from vllm.model_executor.models.qwen3_omni_moe_thinker import (
+        Qwen3OmniMoeThinkerForConditionalGeneration,
+    )
+
+    model = Qwen3OmniMoeThinkerForConditionalGeneration.__new__(
+        Qwen3OmniMoeThinkerForConditionalGeneration
+    )
+    model.config = SimpleNamespace(text_config=SimpleNamespace(hidden_size=8))
+    model.deepstack_num_level = 2
+    model.deepstack_input_embeds = [
+        torch.zeros(4, 8),
+        torch.zeros(4, 8),
+    ]
+    model.deepstack_input_embeds_num_tokens = 0
+    payload = torch.arange(2 * 3 * 8, dtype=torch.float16).reshape(2, 3, 8)
+
+    model._set_deepstack_input_embeds(payload)
+    deepstack_input_embeds = model._get_deepstack_input_embeds(
+        num_tokens=3, inputs_embeds=torch.empty(3, 8, dtype=torch.float16)
+    )
+
+    assert deepstack_input_embeds is not None
+    for idx, tensor in enumerate(deepstack_input_embeds.tensors.values()):
+        assert tensor.dtype == payload.dtype
+        assert torch.equal(tensor, payload[idx])
 
 
 if __name__ == "__main__":
