@@ -351,10 +351,34 @@ def _layerwise_process(layer: torch.nn.Module, info: LayerReloadingInfo):
         param.weight_loader = _get_original_loader(param)
 
     # Load all buffered weights into materialized layer (using original loaders)
+    loaded_names = set()
     for name, args in info.loaded_weights:
         param = getattr(layer, name)
         args.arguments["param"] = param
         param.weight_loader(*args.args, **args.kwargs)
+        loaded_names.add(name)
+
+    # During reload, scale parameters may not be provided by external weight
+    # sync (e.g. when an RL framework sends FP8 weights without scale_inv).
+    # These unloaded scales are still torch.empty (NaN) after materialization.
+    # Restore them from the previously saved kernel tensors so that
+    # process_weights_after_loading sees valid values.
+    if info.kernel_tensors is not None:
+        parameters, buffers = info.kernel_tensors
+        for name in list(parameters) + list(buffers):
+            if name in loaded_names:
+                continue
+            materialized = getattr(layer, name, None)
+            if materialized is None:
+                continue
+            if not materialized.is_floating_point():
+                continue
+            if torch.isnan(materialized).any():
+                saved = parameters.get(name) or buffers.get(name)
+                if saved is not None:
+                    materialized.data.copy_(saved.data)
+                    logger.debug("%s.%s: restored from kernel tensors",
+                                 layer.__class__.__name__, name)
 
     # Process weights (quantization, repacking, etc.)
     quant_method = getattr(layer, "quant_method", None)
