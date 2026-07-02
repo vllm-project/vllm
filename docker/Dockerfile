@@ -696,12 +696,14 @@ RUN apt-get update -y \
         python${PYTHON_VERSION}-dev \
         python${PYTHON_VERSION}-venv \
         libibverbs-dev \
+    && apt-get purge -y --auto-remove software-properties-common \
     && rm -rf /var/lib/apt/lists/* \
     && update-alternatives --install /usr/bin/python3 python3 /usr/bin/python${PYTHON_VERSION} 1 \
     && update-alternatives --set python3 /usr/bin/python${PYTHON_VERSION} \
     && ln -sf /usr/bin/python${PYTHON_VERSION}-config /usr/bin/python3-config \
     && rm -f /usr/lib/python${PYTHON_VERSION}/EXTERNALLY-MANAGED \
-    && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} \
+    && curl -sS ${GET_PIP_URL} | python${PYTHON_VERSION} - "pip==26.1.2" \
+    && rm -rf /usr/lib/python${PYTHON_VERSION}/ensurepip/_bundled /root/.cache/pip \
     && python3 --version && python3 -m pip --version
 
 # Install CUDA development tools for runtime JIT compilation
@@ -790,13 +792,15 @@ ENV VLLM_ENABLE_CUDA_COMPATIBILITY=0
 # Install PyTorch and core CUDA dependencies
 # This is ~2GB and rarely changes
 ARG PYTORCH_CUDA_INDEX_BASE_URL
-COPY requirements/common.txt /tmp/common.txt
-COPY requirements/cuda.txt /tmp/requirements-cuda.txt
 # nvidia-cutlass-dsl[cu13] installs -libs-base and -libs-cu13 wheels that
 # share paths with different content. uv can extract them in either order,
 # leaving base files that break CUDA 13 CuTe DSL JIT.
 # TODO(mmangkad): Remove this after NVIDIA/cutlass#3259 is fixed.
-RUN --mount=type=cache,target=/opt/uv/cache \
+RUN --mount=type=bind,source=requirements/common.txt,target=/tmp/common.txt.in,ro \
+    --mount=type=bind,source=requirements/cuda.txt,target=/tmp/requirements-cuda.txt.in,ro \
+    --mount=type=cache,target=/opt/uv/cache \
+    cp /tmp/common.txt.in /tmp/common.txt && \
+    cp /tmp/requirements-cuda.txt.in /tmp/requirements-cuda.txt && \
     if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "12" ]; then \
         sed -i 's/^nvidia-cutlass-dsl\[cu13\]/nvidia-cutlass-dsl/' /tmp/requirements-cuda.txt; \
         sed -i 's/^humming-kernels\[cu13\]/humming-kernels[cu12]/' /tmp/requirements-cuda.txt; \
@@ -1055,10 +1059,10 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         uv pip install --system --force-reinstall --no-deps nixl-cu${CUDA_MAJOR}; \
     fi
 
-# Optional override: install mooncake-transfer-engine from a URL instead of the
-# PyPI release pulled in above. Use this for wheels built with non-default CMake
-# flags (e.g. `STORE_USE_ETCD=ON` for master HA). The URL's manylinux glibc
-# floor must be <= the FINAL_BASE_IMAGE's glibc.
+# Optional override: install mooncake-transfer-engine from a vetted URL. Use
+# this for patched wheels or wheels built with non-default CMake flags (e.g.
+# `STORE_USE_ETCD=ON` for master HA). The URL's manylinux glibc floor must be
+# <= the FINAL_BASE_IMAGE's glibc.
 ARG MOONCAKE_WHEEL_AARCH64
 ARG MOONCAKE_WHEEL_X86_64
 RUN if [ "$INSTALL_KV_CONNECTORS" = "true" ]; then \
