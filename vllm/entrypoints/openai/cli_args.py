@@ -134,6 +134,11 @@ class BaseFrontendArgs:
     log. The default of None means unlimited."""
     enable_prompt_tokens_details: bool = False
     """If set to True, enable prompt_tokens_details in usage."""
+    enable_per_request_metrics: bool = False
+    """If set to True, enable per-request timing metrics in API responses.
+    When enabled, requests that include `include_metrics=True` will receive
+    timing metrics (TTFT, generation time, queue time, ITL, tokens/s) in
+    the response body."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
@@ -397,6 +402,19 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+
+    # Per-request timing metrics are derived from the engine's RequestStateStats,
+    # which are only tracked when statistics logging is enabled. Warn (rather than
+    # fail) so the server still starts, but the operator knows the metrics will be
+    # null until stat logging is re-enabled.
+    if getattr(args, "enable_per_request_metrics", False) and getattr(
+        args, "disable_log_stats", False
+    ):
+        logger.warning(
+            "--enable-per-request-metrics is set but engine statistics logging "
+            "is disabled (--disable-log-stats). Per-request timing metrics depend "
+            "on engine statistics and will be null until stat logging is enabled."
+        )
 
     if args.data_parallel_multi_port_external_lb:
         from vllm.entrypoints.openai.dp_supervisor import (

@@ -115,6 +115,14 @@ class UsageInfo(OpenAIBaseModel):
     prompt_tokens_details: PromptTokenUsageInfo | None = None
 
 
+class PerRequestTimingMetrics(OpenAIBaseModel):
+    time_to_first_token_ms: float | None = None
+    generation_time_ms: float | None = None
+    queue_time_ms: float | None = None
+    mean_itl_ms: float | None = None
+    tokens_per_second: float | None = None
+
+
 class RequestResponseMetadata(BaseModel):
     request_id: str
     final_usage_info: UsageInfo | None = None
