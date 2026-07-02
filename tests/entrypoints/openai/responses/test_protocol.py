@@ -5,9 +5,35 @@ from openai_harmony import (
 )
 
 from vllm.entrypoints.openai.responses.protocol import (
+    ResponsesRequest,
     serialize_message,
     serialize_messages,
 )
+
+
+def test_input_image_accepts_chat_completions_format() -> None:
+    # Regression test for #46631: nested image_url + missing detail must be accepted.
+    req = ResponsesRequest.model_validate(
+        {
+            "model": "test",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "what is this?"},
+                        {
+                            "type": "input_image",
+                            "image_url": {"url": "data:image/png;base64,AAAA"},
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+    image_part = req.input[0]["content"][1]
+    # nested {"url": X} flattened to X; required `detail` defaulted to "auto".
+    assert image_part["image_url"] == "data:image/png;base64,AAAA"
+    assert image_part["detail"] == "auto"
 
 
 def test_serialize_message() -> None:
