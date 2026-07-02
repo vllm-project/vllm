@@ -902,6 +902,53 @@ class VllmConfig:
                     "connectors (PD disaggregation, KV cache offload)."
                 )
 
+            # routed_experts capture relies on the Python router hook
+            # (FusedMoE.router.set_capture_fn -> BaseRouter.select_experts()
+            # calls capture_fn(topk_ids); fused_moe/router/base_router.py).
+            # The fused FlashInfer MoE kernels are *internal routers*
+            # (top-k is computed inside the kernel), so select_experts() — and
+            # thus the capture hook — is never invoked and the capturer returns
+            # an all-zero buffer (correctly shaped but meaningless routing).
+            # The FlashInfer kernels do not yet emit routing_replay_out into the
+            # capturer (see RFC #39701). Until they do, route through the Triton
+            # MoE backend, whose router runs in Python and triggers the hook.
+            _fi_internal_router_backends = (
+                "flashinfer_trtllm",
+                "flashinfer_cutlass",
+                "flashinfer_cutedsl",
+                "flashinfer_b12x",
+            )
+            _moe_backend = self.kernel_config.moe_backend
+            if _moe_backend in _fi_internal_router_backends:
+                raise ValueError(
+                    f"--moe-backend {_moe_backend} is incompatible with "
+                    "--enable-return-routed-experts: this fused FlashInfer MoE "
+                    "kernel routes internally and bypasses the routed-experts "
+                    "capture hook, returning all-zero routing. Use "
+                    "--moe-backend triton."
+                )
+            if _moe_backend == "auto" and self.model_config.quantization is None:
+                # auto on CUDA prefers FlashInfer TRTLLM/CUTLASS (internal
+                # router). Force Triton so capture works for unquantized MoE.
+                logger.warning_once(
+                    "enable_return_routed_experts: overriding moe_backend "
+                    "'auto' -> 'triton'. The auto-selected FlashInfer MoE "
+                    "kernels route internally and bypass routed-experts "
+                    "capture (all-zero output). Pass --moe-backend triton "
+                    "explicitly to silence this, or another non-FlashInfer "
+                    "backend that uses the Python router."
+                )
+                self.kernel_config.moe_backend = "triton"
+            elif _moe_backend == "auto":
+                # Quantized auto path: cannot safely force Triton (the quantized
+                # oracle selects among quant-specific kernels); warn instead.
+                logger.warning_once(
+                    "enable_return_routed_experts with a quantized MoE and "
+                    "moe_backend='auto' may return all-zero routing if a fused "
+                    "FlashInfer kernel is selected (internal router bypasses "
+                    "the capture hook). See RFC #39701."
+                )
+
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
 
