@@ -1431,6 +1431,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         is_available_online=False,
         use_original_num_layers=True,  # DSpark backbone requires all layers
     ),
+    "Qwen3_5DSparkModel": _HfExamplesInfo(
+        "Qwen/Qwen3.5-9B",
+        speculative_model="z-lab/Qwen3.5-9B-DSpark",
+        is_available_online=False,
+        use_original_num_layers=True,  # DSpark backbone requires all layers
+    ),
     # [Eagle]
     "EagleCohereForCausalLM": _HfExamplesInfo(
         "/host/engines/cohere-moe",
