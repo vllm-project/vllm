@@ -1084,6 +1084,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         sampled_tokens: torch.Tensor,
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
+        num_reqs: int | None = None,
         query_start_loc: torch.Tensor | None = None,
     ) -> None:
         # Update the number of computed tokens.
@@ -1106,7 +1107,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
         self.model_state.postprocess_state(
-            idx_mapping, num_sampled, self.req_states.num_computed_tokens.gpu
+            idx_mapping,
+            num_sampled,
+            self.req_states.num_computed_tokens.gpu,
+            num_reqs if num_reqs is not None else idx_mapping.shape[0],
+            query_start_loc,
         )
 
     @torch.inference_mode()
@@ -1172,10 +1177,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Prepare all the inputs and copy to the input buffers.
             input_batch = self.prepare_inputs(scheduler_output, batch_desc)
             block_tables, slot_mappings = self.prepare_attn(input_batch)
-            # Mamba "align" pre-copy: migrate recurrent state across block
-            # boundaries before the forward. Runs only on real batches, and
-            # before model_state.prepare_attn gathers num_accepted_tokens so the
-            # boundary reset is visible to the attention metadata.
+            # Mamba "align" prefix caching hook: emit per-request src columns
+            # before the forward (real batches only).
             self.model_state.preprocess_state(
                 input_batch,
                 block_tables,
@@ -1449,6 +1452,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampler_output.sampled_token_ids,
             num_sampled,
             num_rejected,
+            input_batch.num_reqs,
             input_batch.query_start_loc,
         )
 

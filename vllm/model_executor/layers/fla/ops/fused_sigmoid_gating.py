@@ -11,13 +11,17 @@ import torch
 
 from vllm.triton_utils import tl, triton
 
+from .utils import select_ssm_src_indices
+
 
 @triton.heuristics(
     {
         "USE_INITIAL_STATE": lambda args: args["h0"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
-        "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
+        "IS_CONTINUOUS_BATCHING": lambda args: args["dst_ssm_state_indices"]
+        is not None,
         "IS_SPEC_DECODING": lambda args: args["num_accepted_tokens"] is not None,
+        # SRC_PRERESOLVED is passed explicitly from the wrapper (src_preresolved).
     }
 )
 @triton.jit(do_not_specialize=["N", "T"])
@@ -35,7 +39,8 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     h0,
     ht,
     cu_seqlens,
-    ssm_state_indices,
+    src_ssm_state_indices,
+    dst_ssm_state_indices,
     num_accepted_tokens,
     scale,
     N: tl.int64,  # num of sequences
@@ -57,6 +62,7 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     IS_VARLEN: tl.constexpr,
     IS_CONTINUOUS_BATCHING: tl.constexpr,
     IS_SPEC_DECODING: tl.constexpr,
+    SRC_PRERESOLVED: tl.constexpr,
     IS_KDA: tl.constexpr,
 ):
     i_k, i_v, i_nh = tl.program_id(0), tl.program_id(1), tl.program_id(2)
@@ -102,14 +108,19 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
     b_h = tl.zeros([BV, BK], dtype=tl.float32)
     if USE_INITIAL_STATE:
         if IS_CONTINUOUS_BATCHING:
-            if IS_SPEC_DECODING:
-                i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+            if SRC_PRERESOLVED:
+                # copy-free align: read from the pre-resolved 1D physical src
+                # (NULL_BLOCK_ID=0 == fresh / start from zero state).
+                state_idx = tl.load(src_ssm_state_indices + i_n).to(tl.int64)
             else:
-                i_t = 0
-            # Load state index and check for invalid entries
-            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq + i_t).to(
-                tl.int64
-            )
+                # no redirect: src aliases the 2D dst window; resolve column.
+                if IS_SPEC_DECODING:
+                    i_t = tl.load(num_accepted_tokens + i_n).to(tl.int64) - 1
+                else:
+                    i_t = 0
+                state_idx = tl.load(
+                    src_ssm_state_indices + i_n * stride_indices_seq + i_t
+                ).to(tl.int64)
             # Skip if state index is invalid (NULL_BLOCK_ID=0)
             if state_idx <= 0:
                 return
@@ -155,9 +166,9 @@ def fused_sigmoid_gating_delta_rule_update_kernel(
 
         # keep the states for multi-query tokens
         if INPLACE_FINAL_STATE:
-            # Load state index and check for invalid entries
+            # Write to the dst window at the per-token loop column i_t.
             final_state_idx = tl.load(
-                ssm_state_indices + i_n * stride_indices_seq + i_t
+                dst_ssm_state_indices + i_n * stride_indices_seq + i_t
             ).to(tl.int64)
             # Only store if state index is valid (not NULL_BLOCK_ID=0)
             if final_state_idx > 0:
@@ -194,6 +205,7 @@ def fused_sigmoid_gating_delta_rule_update(
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
+    src_ssm_state_indices: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
     is_kda: bool = False,
 ):
@@ -238,6 +250,13 @@ def fused_sigmoid_gating_delta_rule_update(
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
+    src_ssm_state_indices, src_preresolved = select_ssm_src_indices(
+        src_ssm_state_indices, ssm_state_indices, N
+    )
+    if num_accepted_tokens is not None and ssm_state_indices is not None:
+        # the multi-token write loop indexes dst at column i_t -> needs a 2D dst
+        assert ssm_state_indices.ndim == 2
+
     grid = (NK, NV, N * HV)
     fused_sigmoid_gating_delta_rule_update_kernel[grid](
         A_log=A_log,
@@ -253,7 +272,8 @@ def fused_sigmoid_gating_delta_rule_update(
         h0=initial_state,
         ht=final_state,
         cu_seqlens=cu_seqlens,
-        ssm_state_indices=ssm_state_indices,
+        src_ssm_state_indices=src_ssm_state_indices,
+        dst_ssm_state_indices=ssm_state_indices,
         num_accepted_tokens=num_accepted_tokens,
         scale=scale,
         N=N,
@@ -272,6 +292,7 @@ def fused_sigmoid_gating_delta_rule_update(
         INPLACE_FINAL_STATE=inplace_final_state,
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         IS_KDA=is_kda,
+        SRC_PRERESOLVED=src_preresolved,
         num_warps=num_warps,
         num_stages=num_stages,
     )

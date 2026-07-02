@@ -742,7 +742,7 @@ def fill_following_kv_cache_block_ids(test_config: TestConfig) -> None:
 
 
 @create_new_process_for_each_test()
-def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
+def test_mamba_prefix_cache(monkeypatch: pytest.MonkeyPatch):
     run_ref_mamba_state_in_subprocess()
     apply_patch(monkeypatch)
     prompt_dataset = datasets.load_dataset("heheda/a_long_article")
@@ -843,32 +843,23 @@ def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
     ) -> None:
         captured["block_tables"] = block_tables
         captured["kv_cache_config"] = kv_cache_config
-        expected = (
-            None if cur_step_action is None else cur_step_action.preprocess_copy_idx
-        )
-        snapshots = []
-        if expected is not None and expected != (-1, -1):
-            for temporal, bt in temporal_states(self, block_tables, kv_cache_config):
-                snapshots.append(
-                    (temporal, bt, temporal_block(temporal, bt, expected[0]).clone())
-                )
         ret = original_preprocess_state(
             self, input_batch, block_tables, kv_cache_config, num_computed_tokens
         )
-        if cur_step_action is not None:
+        # Copy-free does not migrate state here; it stages the src columns the
+        # forward reads from. Validate those against the step action.
+        action = cur_step_action
+        if action is not None:
+            info = self.mamba_cache_align_info
             req_idx = int(input_batch.idx_mapping[0].item())
-            src_col = int(self._mamba_src_col_gpu[req_idx].item())
-            off = int(self._mamba_src_off_gpu[req_idx].item())
-            dst = int(self._mamba_state_idx_gpu[req_idx].item())
+            src_col = int(info.conv_src_col_gpu[req_idx].item())
+            off = int(info.conv_src_off_gpu[req_idx].item())
+            dst = int(info.state_idx_gpu[req_idx].item())
             actual = (-1, -1) if src_col < 0 or src_col == dst else (src_col + off, dst)
-            assert actual == expected, (
-                f"V2 align preprocess copy: expected={expected}, "
-                f"actual={actual}, {cur_step_action=}"
+            assert actual == action.preprocess_copy_idx, (
+                f"copy-free align preprocess src: "
+                f"expected={action.preprocess_copy_idx}, actual={actual}, {action=}"
             )
-            for temporal, bt, src_state in snapshots:
-                torch.testing.assert_close(
-                    temporal_block(temporal, bt, expected[1]), src_state
-                )
         return ret
 
     def wrapped_postprocess_state(
@@ -876,12 +867,15 @@ def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
         idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
+        num_reqs: int | None = None,
+        query_start_loc: torch.Tensor | None = None,
     ) -> None:
         action = cur_step_action
         block_tables = captured.get("block_tables")
         kv_cache_config = captured.get("kv_cache_config")
-        # The postprocess kernel does not expose its indices, so only the copy
-        # case is checked, by effect: snapshot the src block, expect dst == src.
+        # The postprocess save kernel does not expose its indices, so only the
+        # copy case is checked, by effect: snapshot the src block, expect
+        # dst == src.
         if (
             action is None
             or num_computed_tokens is None
@@ -889,7 +883,12 @@ def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
             or action.postprocess_copy_idx == (-1, -1)
         ):
             return original_postprocess_state(
-                self, idx_mapping, num_sampled, num_computed_tokens
+                self,
+                idx_mapping,
+                num_sampled,
+                num_computed_tokens,
+                num_reqs,
+                query_start_loc,
             )
         expected = action.postprocess_copy_idx
         snapshots = [
@@ -897,7 +896,12 @@ def test_mamba_prefix_cache_mrv2(monkeypatch: pytest.MonkeyPatch):
             for temporal, bt in temporal_states(self, block_tables, kv_cache_config)
         ]
         ret = original_postprocess_state(
-            self, idx_mapping, num_sampled, num_computed_tokens
+            self,
+            idx_mapping,
+            num_sampled,
+            num_computed_tokens,
+            num_reqs,
+            query_start_loc,
         )
         for temporal, bt, src_state in snapshots:
             torch.testing.assert_close(
