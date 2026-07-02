@@ -3,6 +3,9 @@
 # ruff: noqa: E402
 import importlib.util
 import os
+import tempfile
+
+import regex as re
 
 
 def _get_torch_cuda_version():
@@ -85,6 +88,88 @@ def _maybe_set_cuda_compatibility_path():
 _maybe_set_cuda_compatibility_path()
 
 import torch
+
+
+def _torch_needs_torchinductor_cache_dir_patch():
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    # PyTorch < 2.13 crashes in getpass.getuser() when the current UID has no
+    # /etc/passwd entry; 2.13 ships the upstream fix (pytorch/pytorch#184208),
+    # so leave its native behavior untouched.
+    return not is_torch_equal_or_newer("2.13.0.dev")
+
+
+def _torchinductor_fallback_cache_dir():
+    """A copy of torch's fixed ``default_cache_dir()`` (pytorch/pytorch#184208).
+
+    Installed only for torch < 2.13, whose ``default_cache_dir()`` crashes in
+    ``getpass.getuser()`` when the current UID has no ``/etc/passwd`` entry
+    (e.g. an OpenShift/k8s arbitrary UID). This mirrors the upstream-fixed
+    version so the patched behavior matches torch >= 2.13.
+    """
+    import getpass
+
+    from torch._environment import is_fbcode
+
+    try:
+        username = getpass.getuser()
+    except (KeyError, ModuleNotFoundError, OSError):
+        getuid = getattr(os, "getuid", None)
+        username = f"uid_{getuid()}" if callable(getuid) else "unknown_user"
+    sanitized_username = re.sub(r'[\\/:*?"<>|]', "_", username)
+    return os.path.join(
+        tempfile.gettempdir() if not is_fbcode() else "/var/tmp",
+        "torchinductor_" + sanitized_username,
+    )
+
+
+def _patch_torchinductor_default_cache_dir():
+    """Handle TorchInductor cache lookup for UIDs missing from /etc/passwd."""
+    if not _torch_needs_torchinductor_cache_dir_patch():
+        return
+
+    import getpass
+
+    try:
+        getpass.getuser()
+        # The UID resolves to a name; leave torch's native behavior untouched.
+        return
+    except (KeyError, ModuleNotFoundError, OSError):
+        pass
+
+    fallback_cache_dir = _torchinductor_fallback_cache_dir()
+
+    # Seed TORCHINDUCTOR_CACHE_DIR *before* importing any torch._inductor /
+    # torch._dynamo module. ``cache_dir()`` returns this env var when set and
+    # only falls back to ``default_cache_dir()`` when it is unset, so seeding it
+    # keeps the module-level callers that run at *import* time alive. The
+    # important one is torch._dynamo.package, whose top-level
+    #   DynamoCache = DiskDynamoCache(os.path.join(cache_dir(), "dynamo"))
+    # otherwise crashes in getpass.getuser() before we can install the patch
+    # below -- and we cannot install it earlier, because importing
+    # torch._inductor.runtime to do so triggers that very crashing import.
+    os.environ.setdefault("TORCHINDUCTOR_CACHE_DIR", fallback_cache_dir)
+
+    # Also patch default_cache_dir() itself for the call sites that use it
+    # directly and bypass the env-var shortcut in cache_dir() -- e.g. codecache's
+    # module-level ``_HEADER_DIR = os.path.join(default_cache_dir(), ...)``.
+    try:
+        from torch._inductor.runtime import cache_dir_utils, runtime_utils
+    except ImportError:
+        return
+
+    if getattr(cache_dir_utils.default_cache_dir, "_vllm_patched", False):
+        return
+
+    def default_cache_dir():
+        return fallback_cache_dir
+
+    default_cache_dir._vllm_patched = True  # type: ignore[attr-defined]
+    cache_dir_utils.default_cache_dir = default_cache_dir
+    runtime_utils.default_cache_dir = default_cache_dir
+
+
+_patch_torchinductor_default_cache_dir()
 
 from vllm.logger import init_logger
 from vllm.utils.torch_utils import is_torch_equal, is_torch_equal_or_newer
