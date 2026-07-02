@@ -857,9 +857,20 @@ class MergedColumnParallelLinear(ColumnParallelLinear):
         if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
             if isinstance(param, PerTensorScaleParameter):
                 if isinstance(loaded_shard_id, tuple):
-                    for idx in loaded_shard_id:
+                    # A fused disk weight (e.g. the Gated-Delta-Net
+                    # ``in_proj_qkv`` in Qwen3.5 / Qwen3-Next) maps to several
+                    # shards of a fused module. Its per-tensor scale may be
+                    # either a single shared scalar (broadcast to every shard)
+                    # or one scale per fused shard (shape ``[len(shard_id)]``).
+                    # Slice per shard in the latter case; broadcast otherwise.
+                    num_shards = len(loaded_shard_id)
+                    per_shard = num_shards > 1 and loaded_weight.numel() == num_shards
+                    for i, idx in enumerate(loaded_shard_id):
+                        shard_weight = (
+                            loaded_weight[i : i + 1] if per_shard else loaded_weight
+                        )
                         param.load_merged_column_weight(
-                            loaded_weight=loaded_weight, shard_id=idx
+                            loaded_weight=shard_weight, shard_id=idx
                         )
                 else:
                     # When weights are already fused on disk (e.g. Phi-3's
