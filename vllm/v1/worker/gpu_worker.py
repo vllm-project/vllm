@@ -356,6 +356,33 @@ class Worker(WorkerBase):
                 current_platform.dist_backend,
             )
 
+            # Pre-warm NCCL/RCCL to eliminate cold-start latency in
+            # the first request.  Controlled by --pre-warm-nccl flag.
+            if (
+                self.parallel_config.pre_warm_nccl
+                and (
+                    self.parallel_config.tensor_parallel_size > 1
+                    or self.parallel_config.pipeline_parallel_size > 1
+                )
+            ):
+                import torch.distributed as dist
+
+                warmup_start = time.perf_counter()
+                tp_group = get_tp_group().device_group
+                warmup_tensor = torch.zeros(
+                    1, device=self.device
+                )
+                dist.all_reduce(warmup_tensor, group=tp_group)
+                torch.cuda.synchronize()
+                warmup_elapsed = time.perf_counter() - warmup_start
+                logger.info(
+                    "NCCL/RCCL warmup completed in %.3fs "
+                    "(tp_size=%d, pp_size=%d)",
+                    warmup_elapsed,
+                    self.parallel_config.tensor_parallel_size,
+                    self.parallel_config.pipeline_parallel_size,
+                )
+
             if self.use_v2_model_runner:
                 logger.info_once("Using V2 Model Runner")
 
