@@ -4,6 +4,7 @@ import torch
 from torch.nn.parameter import Parameter
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.platforms import current_platform
@@ -85,6 +86,7 @@ class GateLinear(ReplicatedLinear):
         # fp32 specialized kernel eligibility (SM90+, exact dims, fp32 weight)
         self.allow_fp32_router_gemm = (
             not bias
+            and envs.VLLM_FLOAT32_MATMUL_PRECISION == "highest"
             and self.weight.dtype == torch.float32
             and current_platform.is_cuda()
             and (is_hopper or is_blackwell)
