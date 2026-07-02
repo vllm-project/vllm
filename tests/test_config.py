@@ -1557,29 +1557,30 @@ def test_ir_op_priority_ctx():
     from vllm import ir
     from vllm.config.kernel import IrOpPriorityConfig
 
-    priority = IrOpPriorityConfig.with_default(["native"], rms_norm=["vllm_c"])
+    ir_kernel = "xpu_kernels" if current_platform.is_xpu() else "vllm_c"
+    priority = IrOpPriorityConfig.with_default(["native"], rms_norm=[ir_kernel])
     priority2 = IrOpPriorityConfig.with_default(
-        ["native"], fused_add_rms_norm=["vllm_c"]
+        ["native"], fused_add_rms_norm=[ir_kernel]
     )
     with priority.set_priority():
-        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.rms_norm.get_priority() == [ir_kernel, "native"]
         assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
         with priority2.set_priority():
             assert ir.ops.rms_norm.get_priority() == ["native"]
-            assert ir.ops.fused_add_rms_norm.get_priority() == ["vllm_c", "native"]
+            assert ir.ops.fused_add_rms_norm.get_priority() == [ir_kernel, "native"]
 
         # context restored
-        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.rms_norm.get_priority() == [ir_kernel, "native"]
         assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
 
         with pytest.raises(ValueError), priority2.set_priority():
             assert ir.ops.rms_norm.get_priority() == ["native"]
-            assert ir.ops.fused_add_rms_norm.get_priority() == ["vllm_c", "native"]
+            assert ir.ops.fused_add_rms_norm.get_priority() == [ir_kernel, "native"]
 
             raise ValueError
 
         # context restored even after exception
-        assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
+        assert ir.ops.rms_norm.get_priority() == [ir_kernel, "native"]
         assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
 
 
