@@ -180,6 +180,7 @@ async def test_metrics_counts(
 
 
 EXPECTED_METRICS_V1 = [
+    "vllm:engine_startup_time_seconds",
     "vllm:num_requests_running",
     "vllm:num_requests_waiting",
     "vllm:num_requests_waiting_by_reason",
