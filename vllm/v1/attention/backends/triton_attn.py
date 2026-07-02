@@ -40,7 +40,10 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash,
     triton_reshape_and_cache_flash_per_token_head_quant,
 )
-from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+from vllm.v1.attention.ops.triton_unified_attention import (
+    _ATTN_3D_MIN_KV_FOR_MULTI_Q,
+    unified_attention,
+)
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVQuantMode,
@@ -151,6 +154,12 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
 
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         headdim_padded = next_power_of_2(self.headdim)
+        # 3D segmented-softmax scratch. The 1-query decode path needs one row per
+        # sequence (<= seq_threshold_3D); allocate that here, unchanged from the
+        # original 1-query design. Multi-query decode (max_seqlen_q > 1: diffusion-LM
+        # canvas, MTP/spec) needs more rows but is rarer, so its larger buffers are
+        # allocated lazily on first use (see _ensure_multi_query_segm_buffers),
+        # leaving 1-query-only models byte-for-byte unchanged.
         self.softmax_segm_output = torch.empty(
             (
                 self.seq_threshold_3D,
@@ -170,6 +179,43 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
+        )
+        # Larger buffers for multi-query decode, sized to the 2D-grid-under-fill
+        # bound under which the 3D path still wins. Allocated lazily (build()) so
+        # models that only ever do 1-query decode never pay for them.
+        sm_count = torch.cuda.get_device_properties(device).multi_processor_count
+        self._mq_segm_rows = max(
+            self.seq_threshold_3D,
+            (sm_count // self.num_heads_kv + 1) * 32,
+        )
+        self._mq_headdim_padded = headdim_padded
+        self._mq_device = device
+        self._mq_segm_output = None
+        self._mq_segm_max = None
+        self._mq_segm_expsum = None
+
+    def _ensure_multi_query_segm_buffers(self):
+        # Allocate the larger multi-query segment buffers on first use. They are
+        # separate tensors from the 1-query buffers that the captured decode graph
+        # references, and are never reallocated, so CUDA-graph replay is unaffected.
+        if self._mq_segm_output is not None:
+            return
+        nq = self.num_heads_q
+        ns = self.num_par_softmax_segments
+        self._mq_segm_output = torch.empty(
+            (self._mq_segm_rows, nq, ns, self._mq_headdim_padded),
+            dtype=torch.float32,
+            device=self._mq_device,
+        )
+        self._mq_segm_max = torch.empty(
+            (self._mq_segm_rows, nq, ns),
+            dtype=torch.float32,
+            device=self._mq_device,
+        )
+        self._mq_segm_expsum = torch.empty(
+            (self._mq_segm_rows, nq, ns),
+            dtype=torch.float32,
+            device=self._mq_device,
         )
 
     def build_for_cudagraph_capture(
@@ -215,6 +261,18 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             suffix_kv_lens = None
             prefix_scheduler_metadata = None
 
+        # Multi-query decode over a long KV (diffusion-LM canvas / spec verify)
+        # can take the 3D path and needs the larger segment buffers; allocate
+        # them lazily so 1-query-only models keep the small ones.
+        segm_output = self.softmax_segm_output
+        segm_max = self.softmax_segm_max
+        segm_expsum = self.softmax_segm_expsum
+        if max_query_len > 1 and max_seq_len >= _ATTN_3D_MIN_KV_FOR_MULTI_Q:
+            self._ensure_multi_query_segm_buffers()
+            segm_output = self._mq_segm_output
+            segm_max = self._mq_segm_max
+            segm_expsum = self._mq_segm_expsum
+
         attn_metadata = TritonAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -232,9 +290,9 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             seq_threshold_3D=self.seq_threshold_3D,
             num_par_softmax_segments=self.num_par_softmax_segments,
-            softmax_segm_output=self.softmax_segm_output,
-            softmax_segm_max=self.softmax_segm_max,
-            softmax_segm_expsum=self.softmax_segm_expsum,
+            softmax_segm_output=segm_output,
+            softmax_segm_max=segm_max,
+            softmax_segm_expsum=segm_expsum,
         )
 
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
