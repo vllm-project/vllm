@@ -118,12 +118,27 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         payloads.append(topk_ids)
         payloads.append(topk_weights)
 
+        invalid_token_expert_id = num_experts
+        if expert_map is not None and self.all2all_manager.world_size > 1:
+            assert num_experts % self.all2all_manager.world_size == 0, (
+                "FlashInfer one-sided all2all expects experts to be evenly "
+                "partitioned across EP ranks"
+            )
+            experts_per_rank = num_experts // self.all2all_manager.world_size
+            invalid_token_expert_id = (
+                (self.all2all_manager.rank + 1) % self.all2all_manager.world_size
+            ) * experts_per_rank
+
         assert self.all2all_manager.moe_alltoall is not None  # type: ignore[attr-defined]
         recv_payloads = self.all2all_manager.moe_alltoall.dispatch(  # type: ignore[attr-defined]
             token_selected_experts=topk_ids,
             input_payloads=payloads,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
-            invalid_token_expert_id=-1,  # Follow TRTLLM Pattern
+            # The one-sided kernel pads each source rank to
+            # runtime_max_tokens_per_rank. Use an expert that is invalid for
+            # the local rank when expert_map is present; this avoids negative
+            # IDs entering kernels that index expert_map before filtering.
+            invalid_token_expert_id=invalid_token_expert_id,
             expert_id_payload_index=topk_ids_payload_index,
         )
         if a1q_scale is not None:
