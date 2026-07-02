@@ -12,10 +12,12 @@ import importlib.util
 import os
 import sys
 from functools import cache
+from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import regex as re
+import tomllib
 from typing_extensions import Never
 
 from vllm.logger import init_logger
@@ -111,8 +113,46 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
 
 
 @cache
+def _load_vllm_optional_dependencies_from_pyproject() -> dict[str, list[str]]:
+    pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
+
+    try:
+        with pyproject_path.open("rb") as file:
+            payload = tomllib.load(file)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+
+    project = payload.get("project")
+    if not isinstance(project, dict):
+        return {}
+
+    optional_dependencies = project.get("optional-dependencies")
+    if not isinstance(optional_dependencies, dict):
+        return {}
+
+    extras: dict[str, list[str]] = {}
+    for extra, requirements in optional_dependencies.items():
+        if not isinstance(extra, str) or not isinstance(requirements, list):
+            continue
+
+        extras[extra] = [
+            match.group(1)
+            for requirement in requirements
+            if isinstance(requirement, str)
+            for match in [re.match(r"\s*([A-Za-z0-9_.-]+)", requirement)]
+            if match is not None
+        ]
+
+    return extras
+
+
+@cache
 def get_vllm_optional_dependencies():
-    metadata = importlib.metadata.metadata("vllm")
+    try:
+        metadata = importlib.metadata.metadata("vllm")
+    except importlib.metadata.PackageNotFoundError:
+        return _load_vllm_optional_dependencies_from_pyproject()
+
     requirements = metadata.get_all("Requires-Dist", [])
     extras = metadata.get_all("Provides-Extra", [])
 
