@@ -2,7 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-from vllm.triton_utils import tl, triton
+from vllm.triton_utils import HAS_TRITON, tl, tldevice, triton
+
+# Smallest positive value produced by Triton's fp32 `tl.rand`. Used to clamp
+# zero draws before the flipped Gumbel transform below.
+#
+# Triton requires globals accessed from `@triton.jit` functions to be wrapped
+# in `tl.constexpr(...)`. We can only do that when Triton is actually
+# available — on the CPU worker path `tl` is a placeholder whose `constexpr`
+# attribute is `None`, and `tl.constexpr(...)` would crash at import time.
+_TL_RAND_MIN = tl.constexpr(4.6566127342e-10) if HAS_TRITON else 4.6566127342e-10
 
 
 @triton.jit
@@ -14,7 +23,7 @@ def _temperature_kernel(
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
     temperature = tl.load(temperature_ptr + req_state_idx).to(tl.float32)
     if temperature == 0.0 or temperature == 1.0:
@@ -65,6 +74,14 @@ def tl_rand64(seed, offset, includes_zero: tl.constexpr):
 
 
 @triton.jit
+def tl_rand32(seed, offset, includes_zero: tl.constexpr):
+    u = tl.rand(seed, offset)
+    if not includes_zero:
+        u = tl.maximum(u, _TL_RAND_MIN)
+    return u
+
+
+@triton.jit
 def gumbel_block_argmax(
     logits,
     block,
@@ -79,9 +96,14 @@ def gumbel_block_argmax(
     processed_logits_col_ptr,
     vocab_size,
     APPLY_TEMPERATURE: tl.constexpr,
+    USE_FP64: tl.constexpr,
+    PER_TOKEN_COL: tl.constexpr = False,
 ):
-    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
-    temp = tl.load(temp_ptr + req_state_idx).to(tl.float32)
+    req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx).to(tl.int64)
+    is_valid_req = req_state_idx >= 0
+    temp = tl.load(temp_ptr + req_state_idx, mask=is_valid_req, other=0.0).to(
+        tl.float32
+    )
     if temp != 0.0 and APPLY_TEMPERATURE:
         # Apply temperature.
         # NOTE(woosuk): Match the behavior of _temperature_kernel.
@@ -91,7 +113,10 @@ def gumbel_block_argmax(
     if processed_logits_ptr is not None:
         # Store the temperature-applied logits.
         if processed_logits_col_ptr is not None:
-            col = tl.load(processed_logits_col_ptr)
+            if PER_TOKEN_COL:
+                col = tl.load(processed_logits_col_ptr + token_idx)
+            else:
+                col = tl.load(processed_logits_col_ptr)
         else:
             col = 0
         tl.store(
@@ -100,20 +125,31 @@ def gumbel_block_argmax(
             + col * vocab_size
             + block,
             logits,
-            mask=mask,
+            mask=mask & is_valid_req,
         )
 
-    logits = logits.to(tl.float64)
+    # fp32 is the default reduction dtype; fp64 is ~1/32–1/64x the throughput
+    # on H100/Ada/Blackwell and empirically indistinguishable for Gumbel-max.
+    if USE_FP64:
+        logits = logits.to(tl.float64)
     if temp != 0.0:
         # Calculate the seed for gumbel noise.
-        seed = tl.load(seeds_ptr + req_state_idx)
+        seed = tl.load(seeds_ptr + req_state_idx, mask=is_valid_req, other=0)
         pos = tl.load(pos_ptr + token_idx)
         gumbel_seed = tl.randint(seed, pos)
 
-        # tl.rand returns fp32, so build a true fp64 uniform from 64 random
-        # bits before applying the double-log transform.
-        u = tl_rand64(gumbel_seed, block, includes_zero=False)
-        gumbel_noise = -tl.log(-tl.log(u))
+        if USE_FP64:
+            u = tl_rand64(gumbel_seed, block, includes_zero=False)
+            gumbel_noise = -tl.log(-tl.log(u))
+        else:
+            u = tl_rand32(gumbel_seed, block, includes_zero=False)
+            # Draw the large-noise tail (which decides the argmax winner) from u -> 0,
+            # where fp32 has fine resolution, instead of u -> 1, where fp32 spacing is
+            # ~2**-24. The naive `-log(-log(u))` puts the winning tail at u -> 1,
+            # hard-capping the noise at ~16.6 and coarsely quantizing it; using
+            # `log1p(-u)` == `log(1 - u)` keeps the tail in the well-resolved region.
+            # Note `1 - u` would lose precision for small u, so `log1p` is required.
+            gumbel_noise = -tl.log(-tldevice.log1p(-u))
 
         # Apply gumbel noise.
         logits = tl.where(mask, logits + gumbel_noise, float("-inf"))
@@ -140,8 +176,10 @@ def _gumbel_sample_kernel(
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     APPLY_TEMPERATURE: tl.constexpr,
+    USE_FP64: tl.constexpr,
+    PER_TOKEN_COL: tl.constexpr,
 ):
-    token_idx = tl.program_id(0)
+    token_idx = tl.program_id(0).to(tl.int64)
     block_idx = tl.program_id(1)
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block < vocab_size
@@ -166,6 +204,8 @@ def _gumbel_sample_kernel(
         processed_logits_col_ptr,
         vocab_size,
         APPLY_TEMPERATURE=APPLY_TEMPERATURE,
+        USE_FP64=USE_FP64,
+        PER_TOKEN_COL=PER_TOKEN_COL,
     )
     token_id = block_idx * BLOCK_SIZE + idx
     tl.store(local_argmax_ptr + token_idx * local_argmax_stride + block_idx, token_id)
@@ -181,12 +221,23 @@ def gumbel_sample(
     apply_temperature: bool,
     output_processed_logits: torch.Tensor | None = None,
     output_processed_logits_col: torch.Tensor | None = None,
+    use_fp64: bool = False,
 ) -> torch.Tensor:
+    # Enforce contiguity on non-strided input tensors
+    expanded_idx_mapping = expanded_idx_mapping.contiguous()
+    pos = pos.contiguous()
+    if output_processed_logits_col is not None:
+        output_processed_logits_col = output_processed_logits_col.contiguous()
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = 1024
     num_blocks = triton.cdiv(vocab_size, BLOCK_SIZE)
     local_argmax = logits.new_empty(num_tokens, num_blocks, dtype=torch.int64)
-    local_max = logits.new_empty(num_tokens, num_blocks, dtype=torch.float64)
+    local_max_dtype = torch.float64 if use_fp64 else torch.float32
+    local_max = logits.new_empty(num_tokens, num_blocks, dtype=local_max_dtype)
+    per_token_col = (
+        output_processed_logits_col is not None
+        and output_processed_logits_col.dim() > 0
+    )
     _gumbel_sample_kernel[(num_tokens, num_blocks)](
         local_argmax,
         local_argmax.stride(0),
@@ -204,6 +255,8 @@ def gumbel_sample(
         vocab_size,
         BLOCK_SIZE=BLOCK_SIZE,
         APPLY_TEMPERATURE=apply_temperature,
+        USE_FP64=use_fp64,
+        PER_TOKEN_COL=per_token_col,
     )
     # NOTE(woosuk): Use int64 for later indexing.
     max_block_idx = local_max.argmax(dim=-1, keepdim=True)

@@ -126,7 +126,6 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
             moe_config=moe_config,
             quant_config=quant_config,
         ),
-        inplace=False,
     )
 
     # triton reference
@@ -136,7 +135,6 @@ def run_single_case(m, n, k, topk, num_experts, block_size):
         w2=w2,
         topk_weights=topk_weights,
         topk_ids=topk_ids,
-        inplace=False,
         quant_config=quant_config,
     )
 
@@ -323,7 +321,6 @@ def run_single_fp4_case(m, n, k, topk, num_experts):
             moe_config=moe_config,
             quant_config=quant_config,
         ),
-        inplace=False,
     )
 
     # DeepGEMM FP4 path

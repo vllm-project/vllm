@@ -134,8 +134,6 @@ class PassConfig:
     """Enable async TP."""
     fuse_allreduce_rms: bool = None  # type: ignore[assignment]
     """Enable flashinfer allreduce fusion."""
-    fuse_minimax_qk_norm: bool = None  # type: ignore[assignment]
-    """Enable fused allreduce+RMSNorm for MiniMax QK norm."""
     enable_qk_norm_rope_fusion: bool = None  # type: ignore[assignment]
     """Enable fused Q/K RMSNorm + RoPE pass."""
     fuse_rope_kvcache_cat_mla: bool = None  # type: ignore[assignment]
@@ -188,7 +186,7 @@ class PassConfig:
         """
 
         MiB = 1024 * 1024
-        FI_SUPPORTED_WORLD_SIZES = [2, 4, 8]
+        FI_SUPPORTED_WORLD_SIZES = [2, 4, 8, 16]
         if world_size not in FI_SUPPORTED_WORLD_SIZES:
             return None
         max_size_mb = self.fi_allreduce_fusion_max_size_mb
@@ -264,10 +262,12 @@ class PassConfig:
                     "Fusion enabled but reshape elimination disabled. "
                     "RMSNorm + padding fusion might not work"
                 )
-        if self.enable_qk_norm_rope_fusion and not current_platform.is_cuda_alike():
+        if self.enable_qk_norm_rope_fusion and not (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
             logger.warning_once(
                 "QK Norm + RoPE fusion enabled but the current platform is not "
-                "CUDA or ROCm. The fusion will be disabled."
+                "CUDA, ROCm or XPU. The fusion will be disabled."
             )
             self.enable_qk_norm_rope_fusion = False
         if self.fuse_act_padding and not current_platform.is_rocm():
@@ -752,13 +752,14 @@ class CompilationConfig:
         "vllm::short_conv",
         "vllm::linear_attention",
         "vllm::plamo2_mamba_mixer",
-        "vllm::gdn_attention_core",
+        "vllm::qwen_gdn_attention_core",
         "vllm::gdn_attention_core_xpu",
         "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::kda_attention",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
         "vllm::deepseek_v4_attention",
+        "vllm::hpc_rope_norm_forward",
     ]
 
     def compute_hash(self) -> str:
@@ -1014,6 +1015,14 @@ class CompilationConfig:
                 "non-negative (None = auto-infer)"
             )
 
+        if self.encoder_cudagraph_token_budgets and any(
+            b <= 0 for b in self.encoder_cudagraph_token_budgets
+        ):
+            raise ValueError(
+                f"All encoder_cudagraph_token_budgets must be positive, "
+                f"got {self.encoder_cudagraph_token_budgets}"
+            )
+
         if self.backend == "":
             self.backend = current_platform.get_compile_backend()
 
@@ -1191,7 +1200,7 @@ class CompilationConfig:
                 "are optimized for prefill and are incompatible with CUDA Graphs. "
                 "In order to use CUDA Graphs for decode-optimized workloads, "
                 "use --all2all-backend with another option, such as "
-                "deepep_low_latency or allgather_reducescatter."
+                "deepep_low_latency, nixl_ep, or allgather_reducescatter."
             )
             self.cudagraph_mode = CUDAGraphMode.NONE
 

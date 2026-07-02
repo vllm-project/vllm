@@ -5,7 +5,9 @@
 from collections.abc import Iterable, Mapping
 from typing import Any
 
+import numpy as np
 import torch
+from PIL import Image as PILImage
 from torch import nn
 from transformers import MiniCPMV4_6Config
 
@@ -29,7 +31,7 @@ from vllm.multimodal.inputs import (
     MultiModalFieldConfig,
     NestedTensors,
 )
-from vllm.multimodal.parse import ImageProcessorItems, VideoProcessorItems
+from vllm.multimodal.parse import ImageProcessorItems, ImageSize, VideoProcessorItems
 from vllm.multimodal.processing.processor import (
     PromptReplacement,
     PromptUpdateDetails,
@@ -41,6 +43,7 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -137,7 +140,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         per_frame = image_start + video_token * source_tokens + image_end
         if grids[0] > 0 and grids[1] > 0 and patch_tokens > 0:
             slice_ph = slice_start + video_token * patch_tokens + slice_end
-            rows = [slice_ph * grids[0] for _ in range(grids[1])]
+            rows = [slice_ph * grids[1] for _ in range(grids[0])]
             per_frame += "\n".join(rows)
 
         body = per_frame * num_frames
@@ -238,12 +241,34 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
 
         per_video_pixel_values: list[torch.Tensor] = []
         per_video_tgt_sizes: list[torch.Tensor] = []
+        per_video_image_sizes: list[torch.Tensor] = []
 
         for video in parsed_videos:
             # video is iterable of frames (PIL Image or numpy array).
             all_slices: list[torch.Tensor] = []
             ts_list: list[torch.Tensor] = []
+            frame_sizes: list[torch.Tensor] = []
             for frame in video:
+                # Record per-frame (W, H) for video_image_sizes so that
+                # get_video_prompt_texts can consume a consistent frame size.
+                if isinstance(frame, PILImage.Image):
+                    w, h = frame.size
+                elif isinstance(frame, np.ndarray):
+                    if frame.ndim == 3 and frame.shape[-1] in (1, 3, 4):
+                        # HWC (e.g. from np.array(PIL.Image))
+                        h, w = frame.shape[0], frame.shape[1]
+                    else:
+                        # CHW
+                        _, h, w = frame.shape
+                elif isinstance(frame, torch.Tensor):
+                    if frame.ndim == 3 and frame.shape[-1] in (1, 3, 4):
+                        h, w = frame.shape[0], frame.shape[1]
+                    else:
+                        _, h, w = frame.shape
+                else:
+                    raise TypeError(f"Unsupported frame type: {type(frame)}")
+                frame_sizes.append(torch.tensor([w, h], dtype=torch.long, device="cpu"))
+
                 ip_out = image_processor([frame], **video_mm_kwargs)
                 pv = ip_out["pixel_values"]  # (1, C, P, sum_W)
                 ts = ip_out["target_sizes"]  # (n_slices, 2)
@@ -274,6 +299,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
 
             per_video_pixel_values.append(out)
             per_video_tgt_sizes.append(torch.cat(ts_list, dim=0))
+            per_video_image_sizes.append(torch.stack(frame_sizes))
 
         if not per_video_pixel_values:
             return {}
@@ -281,6 +307,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         return {
             "video_pixel_values": per_video_pixel_values,
             "video_tgt_sizes": per_video_tgt_sizes,
+            "video_image_sizes": per_video_image_sizes,
         }
 
     def _get_prompt_updates(
@@ -326,6 +353,31 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
             )
 
         def get_video_replacement(item_idx: int):
+            # Prefer video_image_sizes from processed data so that the
+            # placeholder count is driven by the same frame sizes that the
+            # vision tower will actually consume.
+            video_mm_kwargs = out_mm_kwargs.get("video")
+            if video_mm_kwargs is not None and item_idx < len(video_mm_kwargs):
+                video_item = video_mm_kwargs[item_idx]
+                image_sizes_elem = video_item.get("video_image_sizes")
+                if image_sizes_elem is not None and image_sizes_elem.data is not None:
+                    # image_sizes_elem.data: (num_frames, 2) – each row is [W, H]
+                    image_sizes = image_sizes_elem.data
+                    num_frames = image_sizes.shape[0]
+                    frame_size = ImageSize(
+                        width=int(image_sizes[0, 0].item()),
+                        height=int(image_sizes[0, 1].item()),
+                    )
+                    return PromptUpdateDetails.select_text(
+                        self.get_video_prompt_texts(
+                            frame_size,
+                            num_frames,
+                            downsample_mode=ds_mode,
+                            video_idx=item_idx,
+                        ),
+                        video_embed_text,
+                    )
+
             videos = mm_items.get_items(
                 "video",
                 (MiniCPMVVideoEmbeddingItems, VideoProcessorItems),
@@ -371,6 +423,26 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 
     def get_hf_config(self):
         return self.ctx.get_hf_config()
+
+    def get_hf_processor(self, **kwargs: object):
+        # MiniCPM-V 4.6 keeps the native transformers MiniCPMV4_6Processor:
+        # this model has its own image/video handling and prompt-update logic
+        # below, so it does not need (and is incompatible with) the vendored
+        # MiniCPMVProcessor used by 2.x/4.0/4.5, whose __init__ assumes a
+        # legacy `image_processor.version` attribute that 4.6 no longer has.
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
+
+        # NumPy arrays are considered as Iterable but not Sequence in
+        # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
+        image_processor = getattr(hf_processor, "image_processor", None)
+        if image_processor is not None:
+            # transformers v5+ renamed `mean`/`std` -> `image_mean`/`image_std`
+            for attr in ("mean", "std", "image_mean", "image_std"):
+                val = getattr(image_processor, attr, None)
+                if isinstance(val, np.ndarray):
+                    setattr(image_processor, attr, val.tolist())
+
+        return hf_processor
 
     def _get_expected_hidden_size(self) -> int:
         config = self.get_hf_config()
@@ -437,22 +509,25 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         downsample_mode = self._get_downsample_mode(downsample_mode)
         token_divisor = 4 if downsample_mode == "4x" else 16
 
+        # vLLM ImageSize is (width, height); transformers expects (height, width)
+        hf_image_size = (image_size.height, image_size.width)
+
         # transformers v5.7+ requires `scale_resolution` arg
         try:
             grids = image_processor.get_sliced_grid(
-                image_size,
+                hf_image_size,
                 max_slice_nums,
                 scale_res,
             )
         except TypeError:
             grids = image_processor.get_sliced_grid(
-                image_size,
+                hf_image_size,
                 max_slice_nums,
             )
 
         if grids is None:
             best_size = image_processor.find_best_resize(
-                image_size,
+                hf_image_size,
                 scale_res,
                 patch_size,
                 allow_upscale=True,
@@ -463,7 +538,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             return [0, 0], source_tokens, 0
 
         best_resize = image_processor.find_best_resize(
-            image_size,
+            hf_image_size,
             scale_res,
             patch_size,
         )
@@ -471,7 +546,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             best_resize[0] * best_resize[1] // (patch_size * patch_size * token_divisor)
         )
         refine_size = image_processor.get_refine_size(
-            image_size,
+            hf_image_size,
             grids,
             scale_res,
             patch_size,
@@ -521,7 +596,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         if use_image_id:
             placeholder = f"{id_start}{image_idx}{id_end}" + placeholder
 
-        num_cols, num_rows = grids[0], grids[1]
+        num_rows, num_cols = grids[0], grids[1]
         if num_cols > 0 and num_rows > 0 and patch_tokens > 0:
             slice_ph = slice_start + image_token * patch_tokens + slice_end
             slices = [slice_ph * num_cols for _ in range(num_rows)]
@@ -543,6 +618,14 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 
 
 class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            "q_proj": ("qkv_proj", "q"),
+            "k_proj": ("qkv_proj", "k"),
+            "v_proj": ("qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config,
@@ -589,6 +672,10 @@ class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
         attn_out = self.attn(q, k, v)
         out, _ = self.out_proj(attn_out)
         return out
+
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
@@ -819,6 +906,7 @@ class MiniCPMV4_6Merger(nn.Module):
 class MiniCPMV4_6ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsLoRA,
     SupportsPP,
     HasInnerState,
     IsHybrid,

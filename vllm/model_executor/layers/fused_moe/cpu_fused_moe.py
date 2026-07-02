@@ -16,6 +16,7 @@ from vllm._custom_ops import (
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 _CPU_MOE_LAYER_CACHE = {}
@@ -46,20 +47,17 @@ def _gelu_and_mul(
     return F.gelu(x[..., :d], approximate="none") * x[..., d:]
 
 
-def _silu_and_mul(x: torch.Tensor) -> torch.Tensor:
-    """Standalone SiluAndMul forward to avoid instantiating CustomOp
-    (which calls get_current_vllm_config()) at model-forward time."""
-    d = x.shape[-1] // 2
-    return F.silu(x[..., :d]) * x[..., d:]
-
-
 # Map activation names to their native forward functions.
 # Uses static methods or standalone functions to avoid instantiating CustomOp
 # classes, which would call get_current_vllm_config() before config is set.
 _CPU_MOE_ACT_FN: dict[MoEActivation, Callable[[torch.Tensor], torch.Tensor]] = {
-    MoEActivation.SILU: _silu_and_mul,
+    MoEActivation.SILU: SiluAndMul.forward_native,
     MoEActivation.SWIGLUOAI: _swigluoai_forward_native,
     MoEActivation.GELU: _gelu_and_mul,
+    MoEActivation.GELU_TANH: (
+        lambda x: F.gelu(x[..., : x.shape[-1] // 2], approximate="tanh")
+        * x[..., x.shape[-1] // 2 :]
+    ),
 }
 
 
@@ -220,6 +218,10 @@ class SGLFusedMOE:
             None,  # w1_zero
             None,  # w2_zero
             None,  # block_size
+            None,  # w1_bias
+            None,  # w2_bias
+            None,  # alpha
+            None,  # limit
             True,  # is_vnni
         )
 
@@ -310,6 +312,17 @@ class CPUFusedMOE:
 
         if supports_amx:
             return False, "none"
+
+        supports_neon = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+        if supports_neon:
+            if (
+                dtype == torch.bfloat16
+                and w13_input_size % 4 == 0
+                and w2_input_size % 4 == 0
+            ):
+                return True, "neon"
+            else:
+                return False, "none"
 
         return True, "vec"
 

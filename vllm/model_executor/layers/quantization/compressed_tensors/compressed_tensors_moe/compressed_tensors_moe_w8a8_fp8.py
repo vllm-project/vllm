@@ -360,6 +360,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             per_act_token_quant=is_per_token,
             per_out_ch_quant=is_per_token,
             block_shape=self.weight_block_size,
+            swiglu_limit=getattr(layer, "swiglu_limit", None),
         )
 
     def apply_monolithic(
@@ -404,8 +405,6 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             topk_ids,
             activation=layer.activation,
             global_num_experts=layer.global_num_experts,
-            # TODO(rob): investigate the disable_expert_map introduced by:
-            # https://github.com/vllm-project/vllm/commit/84166fee9770e6fba71a96978b3e7d149392fb28 # noqa: E501
             expert_map=layer.expert_map,
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             shared_experts=shared_experts,

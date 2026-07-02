@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: V1 Spec Decode
+  device: h200_35gb
   key: v1-spec-decode
   timeout_in_minutes: 30
   source_file_dependencies:
@@ -20,6 +21,12 @@ steps:
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     # TODO: create another `optional` test group for slow tests
     - pytest -v -s -m 'not slow_test' v1/spec_decode
+  mirror:
+    amd:
+      device: mi300_1
+      timeout_in_minutes: 65
+      depends_on:
+      - image-build-amd
 
 - label: V1 Sample + Logits
   key: v1-sample-logits
@@ -51,7 +58,7 @@ steps:
     - pytest -v -s v1/test_outputs.py
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       depends_on:
       - image-build-amd
 
@@ -79,23 +86,31 @@ steps:
     - tests/v1/core
     - tests/v1/executor
     - tests/v1/kv_offload
+    - tests/v1/simple_kv_offload
     - tests/v1/worker
     - tests/v1/kv_connector/unit
     - tests/v1/metrics
     - tests/entrypoints/openai/correctness/test_lmeval.py
   commands:
-    - uv pip install --system -r /vllm-workspace/requirements/kv_connectors.txt
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - export VLLM_WORKER_MULTIPROC_METHOD=spawn
     # split the test to avoid interference
     - pytest -v -s -m 'not cpu_test' v1/core
     - pytest -v -s v1/executor
     - pytest -v -s v1/kv_offload
+    - pytest -v -s v1/simple_kv_offload
     - pytest -v -s v1/worker
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/metrics
     # Integration test for streaming correctness (requires special branch).
     - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api
     - pytest -v -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
 
 - label: V1 Others (CPU)
   key: v1-others-cpu
@@ -127,6 +142,34 @@ steps:
     - pytest -v -s -m 'cpu_test' v1/kv_connector/unit
     - pytest -v -s -m 'cpu_test' v1/metrics
 
+- label: Extract Hidden States Integration
+  key: extract-hidden-states-integration
+  timeout_in_minutes: 20
+  device: h200_18gb
+  source_file_dependencies:
+    - vllm/v1/spec_decode/extract_hidden_states.py
+    - vllm/model_executor/models/extract_hidden_states.py
+    - vllm/transformers_utils/configs/extract_hidden_states.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
+    - tests/v1/kv_connector/extract_hidden_states_integration
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s v1/kv_connector/extract_hidden_states_integration
+
+- label: Extract Hidden States Integration (2 GPUs)
+  key: extract-hidden-states-integration-2-gpus
+  timeout_in_minutes: 20
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/v1/spec_decode/extract_hidden_states.py
+    - vllm/model_executor/models/extract_hidden_states.py
+    - vllm/transformers_utils/configs/extract_hidden_states.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/example_hidden_states_connector.py
+    - tests/v1/kv_connector/extract_hidden_states_integration
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pytest -v -s -m 'distributed' v1/kv_connector/extract_hidden_states_integration
+
 - label: Regression
   key: regression
   timeout_in_minutes: 20
@@ -150,6 +193,7 @@ steps:
   working_dir: "/vllm-workspace/tests" # optional
 
 - label: Examples
+  device: h200_35gb
   key: examples
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/examples"
@@ -180,6 +224,16 @@ steps:
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
     # https://github.com/vllm-project/vllm/pull/26682 uses slightly more memory in PyTorch 2.9+ causing this test to OOM in 1xL4 GPU
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
+  mirror:
+    amd:
+      device: mi325_1
+      source_file_dependencies:
+      - vllm/entrypoints
+      - vllm/multimodal
+      - examples/
+      - vllm/platforms/rocm.py
+      depends_on:
+      - image-build-amd
 
 - label: Metrics, Tracing (2 GPUs)
   key: metrics-tracing-2-gpus
@@ -206,6 +260,12 @@ steps:
       'opentelemetry-exporter-otlp>=1.26.0' \
       'opentelemetry-semantic-conventions-ai>=0.4.1'"
   - pytest -v -s v1/tracing
+  mirror:
+    amd:
+      device: mi325_2
+      depends_on:
+      - image-build-amd
+      optional: true
 
 - label: Python-only Installation
   key: python-only-installation
@@ -218,8 +278,19 @@ steps:
   - setup.py
   commands:
   - bash standalone_tests/python_only_compile.sh
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/standalone_tests/python_only_compile.sh
+      - setup.py
+      - vllm/platforms/rocm.py
 
 - label: Async Engine, Inputs, Utils, Worker
+  device: h200_35gb
   key: async-engine-inputs-utils-worker
   timeout_in_minutes: 50
   source_file_dependencies:
@@ -263,6 +334,7 @@ steps:
   - vllm/model_executor/layers/quantization/quark/
   - vllm/multimodal/
   - vllm/outputs.py
+  - vllm/parser/
   - vllm/platforms/
   - vllm/pooling_params.py
   - vllm/ray/
@@ -274,6 +346,7 @@ steps:
   - vllm/transformers_utils/
   - vllm/utils/
   - vllm/v1/
+  - tests/test_envs.py
   - tests/test_inputs.py
   - tests/test_outputs.py
   - tests/test_pooling_params.py
@@ -281,27 +354,42 @@ steps:
   - tests/multimodal
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
-  - tests/tokenizers_
   - tests/reasoning
   - tests/tool_parsers
+  - tests/tokenizers_
   - tests/parser
   - tests/transformers_utils
   - tests/config
   device: cpu-small
   commands:
   - python3 standalone_tests/lazy_imports.py
+  - pytest -v -s test_envs.py
   - pytest -v -s test_inputs.py
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
-  - pytest -v -s tokenizers_
-  - pytest -v -s reasoning --ignore=reasoning/test_seedoss_reasoning_parser.py --ignore=reasoning/test_glm4_moe_reasoning_parser.py
+  - pytest -v -s reasoning
   - pytest -v -s tool_parsers
+  - pytest -v -s tokenizers_
   - pytest -v -s parser
   - pytest -v -s transformers_utils
   - pytest -v -s config
+
+- label: Batch Invariance (A100)
+  key: batch-invariance-a100
+  timeout_in_minutes: 30
+  device: a100
+  source_file_dependencies:
+    - vllm/v1/attention
+    - vllm/model_executor/layers
+    - tests/v1/determinism/
+  commands:
+    - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+    - pip install pytest-timeout pytest-forked
+    - pytest -v -s v1/determinism/test_batch_invariance.py
+    - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA]
 
 - label: Batch Invariance (H100)
   key: batch-invariance-h100
@@ -335,8 +423,10 @@ steps:
     - VLLM_TEST_MODEL=deepseek-ai/DeepSeek-V2-Lite-Chat pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[TRITON_MLA]
     - VLLM_TEST_MODEL=Qwen/Qwen3-30B-A3B-Thinking-2507-FP8 pytest -v -s v1/determinism/test_batch_invariance.py::test_v1_generation_is_deterministic_across_batch_sizes_with_needle[FLASH_ATTN]
     - pytest -v -s v1/determinism/test_nvfp4_batch_invariant.py
+    - pytest -v -s v1/determinism/test_nvfp4_batch_invariant_scaled_mm.py
   
 - label: Acceptance Length Test (Large Models) # optional
+  device: h200_35gb
   key: acceptance-length-test-large-models
   timeout_in_minutes: 25
   gpu: h100

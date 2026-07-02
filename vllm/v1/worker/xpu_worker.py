@@ -104,6 +104,9 @@ class XPUWorker(Worker):
         if torch.distributed.is_xccl_available():
             torch.distributed.all_reduce(torch.zeros(1).xpu())
 
+        if self.use_v2_model_runner:
+            logger.info_once("Using V2 Model Runner")
+
         # Set random seed.
         set_random_seed(self.model_config.seed)
 
@@ -159,3 +162,20 @@ class XPUWorker(Worker):
             logger.debug("Starting torch profiler with trace name: %s", trace_name)
 
         super().profile(is_start=is_start, profile_prefix=profile_prefix)
+
+    def shutdown(self) -> None:
+        logger.info(
+            "XPUWorker shutdown: cleaning up (rank=%d, local_rank=%d)",
+            self.rank,
+            self.local_rank,
+        )
+        super().shutdown()
+        from vllm.device_allocator.xpumem import XpuMemAllocator
+
+        if XpuMemAllocator.instance is not None:
+            XpuMemAllocator.instance.release_pools()
+        logger.info(
+            "XPUWorker shutdown: done (rank=%d, local_rank=%d)",
+            self.rank,
+            self.local_rank,
+        )

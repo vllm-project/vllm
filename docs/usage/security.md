@@ -85,6 +85,21 @@ significantly reduce the attack surface for these types of abuse.
 Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP
 redirects from being followed to bypass domain restrictions.
 
+### 5. **Restrict Media Decode Sizes:**
+
+Compressed media files can expand into gigabytes of memory during decoding. vLLM
+enforces decode-size limits to prevent out-of-memory denial of service:
+
+| Environment Variable | Default | Description |
+| --- | --- | --- |
+| `VLLM_MAX_IMAGE_PIXELS` | `178956970` (~179M pixels) | Maximum decoded image size in pixels. Images exceeding this are rejected before raster memory is allocated. Default matches PIL's built-in 2x decompression-bomb threshold (~680 MB for RGB). |
+| `VLLM_MAX_AUDIO_CLIP_FILESIZE_MB` | `25` | Maximum filesize in MB for a single audio file. |
+| `VLLM_MAX_AUDIO_DECODE_DURATION_S` | `600` | Maximum decoded audio duration in seconds. Prevents compressed audio from expanding into gigabytes of float32 PCM. |
+
+Setting any of these to `0` disables the corresponding limit. This is **not
+recommended** for deployments exposed to untrusted users, as it removes the
+protection against resource-exhaustion attacks.
+
 ## Security and Firewalls: Protecting Exposed vLLM Systems
 
 While vLLM is designed to allow unsafe network services to be isolated to
@@ -128,7 +143,7 @@ firewall configuration instructions.
 
 ### Overview
 
-The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for OpenAI-compatible API endpoints under the `/v1` path prefix**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
+The `--api-key` flag (or `VLLM_API_KEY` environment variable) provides authentication for vLLM's HTTP server, but **only for OpenAI-compatible API endpoints under the `/v1` path prefix**, and other similar `/v2`, `/inference` path prefix**. Many other sensitive endpoints are exposed on the same HTTP server without any authentication enforcement.
 
 **Important:** Do not rely exclusively on `--api-key` for securing access to vLLM. Additional security measures are required for production deployments.
 
@@ -154,6 +169,9 @@ When `--api-key` is configured, the following `/v1` endpoints require Bearer tok
 - `/v1/rerank` - Reranking API
 - `/v1/load_lora_adapter` - Load a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
 - `/v1/unload_lora_adapter` - Unload a LoRA adapter (can alter model behavior; only available when `--enable-lora` is set and `VLLM_ALLOW_RUNTIME_LORA_UPDATING=True`)
+- `/inference/v1/generate` - Generate completions
+- `/v2/embed` - Cohere Embed API
+- `/v2/rerank` - Cohere Rerank API
 
 ### Unprotected Endpoints (No API Key Required)
 
@@ -162,7 +180,6 @@ The following endpoints **do not require authentication** even when `--api-key` 
 **Inference endpoints:**
 
 - `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
-- `/inference/v1/generate` - Generate completions
 - `/generative_scoring` - Generative scoring API
 - `/pooling` - Pooling API
 - `/classify` - Classification API
@@ -309,6 +326,27 @@ vLLM supports dynamically loading and unloading LoRA adapters at runtime via the
 
 **Warning:** Dynamic LoRA loading is not a secure operation and should not be enabled in deployments exposed to untrusted clients. If you must enable dynamic LoRA loading, restrict access to the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` endpoints to trusted administrators only, using a reverse proxy or network-level access controls. Do not expose these endpoints to end users. For details on configuring LoRA adapters, see the [LoRA Adapters documentation](../features/lora.md).
 
+## gRPC Interface
+
+vLLM provides an optional gRPC Generate service on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
+
+**Warning:** The gRPC interface is **insecure by default** — it does not implement authentication, authorization, or encryption. It should be considered a private, internal interface intended for use only between co-located services within a trusted network. Do not expose the gRPC port to the public internet or untrusted clients. If you enable the gRPC interface, protect it via network-level access controls such as firewall rules, network segmentation, or deployment on an isolated private network.
+
+### Security Implications
+
+An attacker who can reach the gRPC port can:
+
+1. **Run arbitrary inference** via the `Generate` and `GenerateStream` RPCs without any credentials
+2. **Consume GPU and compute resources** by submitting unbounded generation requests
+3. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
+
+### Recommendations
+
+- Only enable `--grpc-port` when you have a specific need for gRPC-based inference
+- Ensure the gRPC port is only accessible from trusted hosts or services
+- Use firewall rules to block external access to the gRPC port
+- Consider deploying the gRPC interface on a dedicated internal network interface
+
 ## Cache Directory Security
 
 vLLM assumes that its cache directories are **private and trusted**. Cache contents are loaded without cryptographic integrity verification, including formats that support arbitrary code execution. If an untrusted user or process can write to vLLM's cache directories, they may be able to crash vLLM or cause it to execute arbitrary code.
@@ -323,6 +361,7 @@ Most cache paths default to subdirectories under a single root. Changing `VLLM_C
 | --- | --- | --- |
 | `VLLM_CACHE_ROOT` | `~/.cache/vllm` | Base cache directory. Respects `XDG_CACHE_HOME` if set. All paths below inherit from this unless explicitly overridden. |
 | *(torch.compile)* | `$VLLM_CACHE_ROOT/torch_compile_cache/` | Compilation cache for AOT-compiled models, Inductor graphs, and Triton kernels. Controlled by `VLLM_DISABLE_COMPILE_CACHE` (set to `1` to disable). |
+| `VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR` | `$VLLM_CACHE_ROOT/flashinfer_autotune_cache/<flashinfer-version>/<arch>/<cache-hash>/` | FlashInfer autotune config cache. |
 | `VLLM_ASSETS_CACHE` | `$VLLM_CACHE_ROOT/assets/` | Downloaded assets (e.g., tokenizer files). |
 | `VLLM_XLA_CACHE_PATH` | `$VLLM_CACHE_ROOT/xla_cache/` | XLA/TPU compilation cache. |
 | `VLLM_MEDIA_CACHE` | *(disabled)* | Optional cache for downloaded media (images, video, audio). Not enabled unless explicitly set. |

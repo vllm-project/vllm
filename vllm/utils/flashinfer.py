@@ -72,6 +72,13 @@ def _missing(*_: Any, **__: Any) -> NoReturn:
     )
 
 
+def _missing_sparse_mla(*_: Any, **__: Any) -> NoReturn:
+    raise RuntimeError(
+        "FlashInfer sparse MLA decode APIs are not available. "
+        "Install a FlashInfer build that includes sparse MLA decode support."
+    )
+
+
 def _get_submodule(module_name: str) -> Any | None:
     """Safely import a submodule and return it, or None if not available."""
     try:
@@ -135,16 +142,30 @@ flashinfer_cute_dsl_fused_moe_nvfp4 = _lazy_import_wrapper(
 flashinfer_convert_sf_to_mma_layout = _lazy_import_wrapper(
     "flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"
 )
+flashinfer_b12x_fused_moe = _lazy_import_wrapper(
+    "flashinfer.fused_moe", "b12x_fused_moe"
+)
 trtllm_fp4_block_scale_moe = _lazy_import_wrapper(
     "flashinfer", "trtllm_fp4_block_scale_moe"
 )
+flashinfer_trtllm_batch_decode_with_kv_cache_mla = _lazy_import_wrapper(
+    "flashinfer.decode",
+    "trtllm_batch_decode_with_kv_cache_mla",
+    fallback_fn=_missing_sparse_mla,
+)
+flashinfer_trtllm_batch_decode_sparse_mla_dsv4 = _lazy_import_wrapper(
+    "flashinfer.decode",
+    "trtllm_batch_decode_sparse_mla_dsv4",
+    fallback_fn=_missing_sparse_mla,
+)
+
+
 # Special case for autotune since it returns a context manager
 autotune = _lazy_import_wrapper(
     "flashinfer.autotuner",
     "autotune",
     fallback_fn=lambda *args, **kwargs: contextlib.nullcontext(),
 )
-_is_fi_autotuning: bool = False
 
 
 @functools.cache
@@ -188,6 +209,26 @@ def has_flashinfer_moe() -> bool:
     return (
         has_flashinfer()
         and importlib.util.find_spec("flashinfer.fused_moe") is not None
+    )
+
+
+@functools.cache
+def has_flashinfer_sparse_mla_sm120() -> bool:
+    """Return ``True`` if FlashInfer sparse MLA decode support is available."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.autotuner import autotune
+        from flashinfer.decode import (
+            trtllm_batch_decode_sparse_mla_dsv4,
+            trtllm_batch_decode_with_kv_cache_mla,
+        )
+    except ImportError:
+        return False
+    return (
+        callable(trtllm_batch_decode_sparse_mla_dsv4)
+        and callable(trtllm_batch_decode_with_kv_cache_mla)
+        and callable(autotune)
     )
 
 
@@ -266,6 +307,39 @@ def has_flashinfer_cutedsl_moe_nvfp4() -> bool:
         return False
     mod = _get_submodule("flashinfer")
     return mod is not None and hasattr(mod, "cute_dsl_fused_moe_nvfp4")
+
+
+@functools.cache
+def has_flashinfer_b12x_gemm() -> bool:
+    """Return True if FlashInfer b12x FP4 GEMM backend is available (SM120+)."""
+    if not has_flashinfer_cutedsl():
+        return False
+    mod = _get_submodule("flashinfer.gemm")
+    if mod is None:
+        return False
+    # FlashInfer 0.6.11 renamed Sm120BlockScaledDenseGemmKernel ->
+    # Sm120B12xBlockScaledDenseGemmKernel (commit 223f2a49). Accept either.
+    return hasattr(mod, "Sm120B12xBlockScaledDenseGemmKernel") or hasattr(
+        mod, "Sm120BlockScaledDenseGemmKernel"
+    )
+
+
+@functools.cache
+def has_flashinfer_b12x_moe() -> bool:
+    """Return ``True`` if FlashInfer CuteDSL SM12x fused MoE is available."""
+    if not has_flashinfer_moe():
+        return False
+
+    required_functions = [
+        ("flashinfer.fused_moe", "b12x_fused_moe"),
+        ("flashinfer.cute_dsl.utils", "convert_sf_to_mma_layout"),
+    ]
+
+    for module_name, attr_name in required_functions:
+        mod = _get_submodule(module_name)
+        if not mod or not hasattr(mod, attr_name):
+            return False
+    return True
 
 
 @functools.cache
@@ -883,20 +957,27 @@ def should_use_flashinfer_for_blockscale_fp8_gemm(
     return should_use_flashinfer
 
 
-_MIN_CUDNN_FP8 = 91701  # cuDNN >= 9.17.1 required for FP8 attention
+_MIN_CUDNN_FP8 = 91701  # cuDNN >= 9.17.1 required for FP8 ViT attention
 
 
 @functools.cache
 def is_flashinfer_cudnn_fp8_prefill_attn_supported() -> bool:
     """Check if FP8 ViT attention is supported on this platform.
 
-    Requires native FP8 hardware support, the FlashInfer cuDNN backend,
+    Requires Blackwell (SM 100) or newer, the FlashInfer cuDNN backend,
     and cuDNN >= 9.17.1.
+
+    cuDNN's FP8 SDPA forward path with bf16/fp16 output (used by
+    ``MMEncoderAttention._forward_flashinfer``) gates internally on
+    ``prop.major >= 10``; on Hopper it raises a misleading
+    ``cudnnGraphNotSupportedError: ... cuDNN version 9.13.0 and newer``
+    even when the installed cuDNN is new enough. See PR #38065 for the
+    original Blackwell-only design intent.
     """
     from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
-    # cuDNN SDPA FP8 requires Hopper (SM 90) or newer.
-    if not current_platform.has_device_capability(90):
+    # cuDNN SDPA FP8 with bf16/fp16 output requires Blackwell (SM 100) or newer.
+    if not current_platform.has_device_capability(100):
         return False
 
     try:
@@ -927,8 +1008,11 @@ __all__ = [
     "scaled_fp4_grouped_quantize",
     "nvfp4_block_scale_interleave",
     "flashinfer_cute_dsl_fused_moe_nvfp4",
+    "flashinfer_b12x_fused_moe",
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
+    "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
+    "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "autotune",
     "has_flashinfer_moe",
     "has_flashinfer_comm",
@@ -937,6 +1021,8 @@ __all__ = [
     "has_flashinfer_cutlass_fused_moe",
     "has_flashinfer_cutedsl_grouped_gemm_nt_masked",
     "has_flashinfer_cutedsl_moe_nvfp4",
+    "has_flashinfer_b12x_moe",
+    "has_flashinfer_b12x_gemm",
     "has_flashinfer_fp8_blockscale_gemm",
     "has_nvidia_artifactory",
     "supports_trtllm_attention",
