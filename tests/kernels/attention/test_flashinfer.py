@@ -17,6 +17,8 @@ except ImportError:
 
 import torch
 
+from vllm.platforms.interface import DeviceCapability
+
 NUM_HEADS = [(32, 8), (6, 1)]
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16, 32]
@@ -24,6 +26,122 @@ DTYPES = [torch.bfloat16]
 NUM_BLOCKS = 32768  # Large enough to test overflow in index calculation.
 SOFT_CAPS = [None, 30.0]
 SLIDING_WINDOWS = [None, 64]
+
+
+@pytest.mark.parametrize("kv_cache_dtype", ["auto", "nvfp4"])
+def test_flashinfer_backend_accepts_mm_prefix(kv_cache_dtype: str) -> None:
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    invalid_reasons = FlashInferBackend.validate_configuration(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=kv_cache_dtype,
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=True,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(8, 6),
+        attn_type="decoder",
+    )
+
+    assert invalid_reasons == []
+
+
+@pytest.mark.parametrize(
+    ("kv_cache_dtype", "block_size", "expected_reason"),
+    [
+        ("auto", 128, "TRTLLM-only FlashInfer block sizes"),
+    ],
+)
+def test_flashinfer_backend_rejects_unsupported_mm_prefix_combinations(
+    kv_cache_dtype: str,
+    block_size: int,
+    expected_reason: str,
+) -> None:
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    invalid_reasons = FlashInferBackend.validate_configuration(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype=kv_cache_dtype,
+        block_size=block_size,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=True,
+        use_per_head_quant_scales=False,
+        device_capability=DeviceCapability(8, 6),
+        attn_type="decoder",
+    )
+
+    assert any(expected_reason in reason for reason in invalid_reasons)
+
+
+def test_flashinfer_mm_prefix_custom_mask_matches_triton_semantics() -> None:
+    from vllm.v1.attention.backends.flashinfer import (
+        _build_mm_prefix_custom_mask,
+        _normalize_mm_prefix_range,
+    )
+
+    mm_prefix_range = _normalize_mm_prefix_range(
+        {
+            0: [(1, 4), (6, 6)],
+            1: [(0, 0)],
+        }
+    )
+
+    assert mm_prefix_range == {0: [(1, 4)]}
+
+    custom_mask = _build_mm_prefix_custom_mask(
+        mm_prefix_range=mm_prefix_range,
+        request_offset=0,
+        qo_indptr=torch.tensor([0, 3, 5], dtype=torch.int32),
+        paged_kv_indptr=torch.tensor([3, 5, 7], dtype=torch.int32),
+        paged_kv_last_page_len=torch.tensor([2, 1], dtype=torch.int32),
+        page_size=4,
+        window_left=1,
+        device=torch.device("cpu"),
+    )
+
+    expected = torch.tensor(
+        [
+            # Request 0: q_abs=[3,4,5], kv_len=6, range [1,4].
+            False,
+            True,
+            True,
+            True,
+            True,
+            False,
+            False,
+            True,
+            True,
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            True,
+            True,
+            # Request 1: no valid mm range, sliding causal only.
+            False,
+            False,
+            True,
+            True,
+            False,
+            False,
+            False,
+            False,
+            True,
+            True,
+        ],
+        dtype=torch.bool,
+    )
+
+    torch.testing.assert_close(custom_mask, expected)
 
 
 def ref_paged_attn(
@@ -36,6 +154,7 @@ def ref_paged_attn(
     scale: float,
     sliding_window: int | None = None,
     soft_cap: float | None = None,
+    custom_mask: torch.Tensor | None = None,
 ) -> torch.Tensor:
     num_seqs = len(query_lens)
     block_tables = block_tables.cpu().numpy()
@@ -43,6 +162,7 @@ def ref_paged_attn(
 
     outputs: list[torch.Tensor] = []
     start_idx = 0
+    custom_mask_offset = 0
     for i in range(num_seqs):
         query_len = query_lens[i]
         kv_len = kv_lens[i]
@@ -62,16 +182,23 @@ def ref_paged_attn(
             v = torch.repeat_interleave(v, q.shape[1] // v.shape[1], dim=1)
         attn = torch.einsum("qhd,khd->hqk", q, k).float()
         empty_mask = torch.ones(query_len, kv_len)
-        mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
-        if sliding_window is not None:
-            sliding_window_mask = (
-                torch.triu(
-                    empty_mask, diagonal=kv_len - (query_len + sliding_window) + 1
+        if custom_mask is None:
+            mask = torch.triu(empty_mask, diagonal=kv_len - query_len + 1).bool()
+            if sliding_window is not None:
+                sliding_window_mask = (
+                    torch.triu(
+                        empty_mask, diagonal=kv_len - (query_len + sliding_window) + 1
+                    )
+                    .bool()
+                    .logical_not()
                 )
-                .bool()
-                .logical_not()
-            )
-            mask |= sliding_window_mask
+                mask |= sliding_window_mask
+        else:
+            mask_len = query_len * kv_len
+            keep = custom_mask[custom_mask_offset : custom_mask_offset + mask_len]
+            keep = keep.view(query_len, kv_len).to(device=attn.device)
+            mask = keep.logical_not()
+            custom_mask_offset += mask_len
         if soft_cap is not None:
             attn = soft_cap * torch.tanh(attn / soft_cap)
         attn.masked_fill_(mask, float("-inf"))
@@ -80,6 +207,9 @@ def ref_paged_attn(
 
         outputs.append(out)
         start_idx += query_len
+
+    if custom_mask is not None:
+        assert custom_mask_offset == custom_mask.numel()
 
     return torch.cat(outputs, dim=0)
 
@@ -485,6 +615,88 @@ def test_flashinfer_prefill_with_paged_kv(
         torch.testing.assert_close(output, ref_output, atol=5e-2, rtol=1e-2),
         f"{torch.max(torch.abs(output - ref_output))}",
     )
+
+
+@torch.inference_mode
+def test_flashinfer_prefill_with_mm_prefix_custom_mask() -> None:
+    from vllm.v1.attention.backends.flashinfer import (
+        _build_mm_prefix_custom_mask,
+    )
+
+    torch.set_default_device("cuda")
+    set_random_seed(0)
+
+    query_lens = [6]
+    kv_lens = [12]
+    num_query_heads = 4
+    num_kv_heads = 1
+    head_size = 128
+    block_size = 16
+    dtype = torch.bfloat16
+    sliding_window = 2
+    scale = head_size**-0.5
+
+    query = torch.randn(sum(query_lens), num_query_heads, head_size, dtype=dtype)
+    key_value_cache = torch.randn(
+        NUM_BLOCKS, 2, block_size, num_kv_heads, head_size, dtype=dtype
+    )
+    key_cache = key_value_cache[:, 0, :, :, :].squeeze(1)
+    value_cache = key_value_cache[:, 1, :, :, :].squeeze(1)
+    key_cache /= head_size**0.5
+    value_cache /= head_size**0.5
+
+    block_tables = torch.randint(
+        0, NUM_BLOCKS, (1, 1), dtype=torch.int32, device="cuda"
+    )
+    qo_indptr = torch.tensor([0, query_lens[0]], dtype=torch.int32, device="cpu")
+    kv_indptr = torch.tensor([0, 1], dtype=torch.int32, device="cpu")
+    kv_indices = block_tables.reshape(-1).to(torch.int32)
+    kv_last_page_lens = torch.tensor([kv_lens[0]], dtype=torch.int32, device="cpu")
+    qo_indptr_gpu = qo_indptr.to("cuda")
+    kv_indptr_gpu = kv_indptr.to("cuda")
+    kv_last_page_lens_gpu = kv_last_page_lens.to("cuda")
+    custom_mask = _build_mm_prefix_custom_mask(
+        mm_prefix_range={0: [(2, 8)]},
+        request_offset=0,
+        qo_indptr=qo_indptr,
+        paged_kv_indptr=kv_indptr,
+        paged_kv_last_page_len=kv_last_page_lens,
+        page_size=block_size,
+        window_left=sliding_window - 1,
+        device=torch.device("cuda"),
+    )
+
+    workspace_buffer = torch.empty(128 * 1024 * 1024, dtype=torch.int8)
+    wrapper = flashinfer.BatchPrefillWithPagedKVCacheWrapper(workspace_buffer, "NHD")
+    wrapper.plan(
+        qo_indptr_gpu,
+        kv_indptr_gpu,
+        kv_indices,
+        kv_last_page_lens_gpu,
+        num_query_heads,
+        num_kv_heads,
+        head_size,
+        block_size,
+        custom_mask=custom_mask,
+        causal=True,
+        window_left=-1,
+        q_data_type=dtype,
+        kv_data_type=dtype,
+    )
+
+    output = wrapper.run(query, key_value_cache)
+    ref_output = ref_paged_attn(
+        query=query,
+        key_cache=key_cache,
+        value_cache=value_cache,
+        query_lens=query_lens,
+        kv_lens=kv_lens,
+        block_tables=block_tables,
+        scale=scale,
+        custom_mask=custom_mask,
+    )
+
+    torch.testing.assert_close(output, ref_output, atol=5e-2, rtol=1e-2)
 
 
 @pytest.mark.parametrize("seq_lens", [[(1, 132), (5, 18)]])

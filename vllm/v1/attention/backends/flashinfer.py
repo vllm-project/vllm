@@ -96,6 +96,76 @@ def _get_trtllm_gen_workspace_buffer():
     return trtllm_gen_workspace_buffer
 
 
+def _normalize_mm_prefix_range(
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None,
+) -> dict[int, list[tuple[int, int]]] | None:
+    if not mm_prefix_range:
+        return None
+
+    normalized: dict[int, list[tuple[int, int]]] = {}
+    for req_idx, ranges in mm_prefix_range.items():
+        valid_ranges = [
+            (int(start), int(end)) for start, end in ranges if int(start) < int(end)
+        ]
+        if valid_ranges:
+            normalized[req_idx] = valid_ranges
+    return normalized or None
+
+
+def _build_mm_prefix_custom_mask(
+    mm_prefix_range: dict[int, list[tuple[int, int]]],
+    request_offset: int,
+    qo_indptr: torch.Tensor,
+    paged_kv_indptr: torch.Tensor,
+    paged_kv_last_page_len: torch.Tensor,
+    page_size: int,
+    window_left: int,
+    device: torch.device,
+) -> torch.Tensor:
+    mask_parts: list[torch.Tensor] = []
+    num_reqs = qo_indptr.shape[0] - 1
+    for local_req_idx in range(num_reqs):
+        q_len = int((qo_indptr[local_req_idx + 1] - qo_indptr[local_req_idx]).item())
+        num_pages = int(
+            (paged_kv_indptr[local_req_idx + 1] - paged_kv_indptr[local_req_idx]).item()
+        )
+        last_page_len = int(paged_kv_last_page_len[local_req_idx].item())
+        kv_len = 0 if num_pages == 0 else (num_pages - 1) * page_size + last_page_len
+        if q_len == 0 or kv_len == 0:
+            mask_parts.append(
+                torch.empty(q_len * kv_len, dtype=torch.bool, device=device)
+            )
+            continue
+        if q_len > kv_len:
+            raise ValueError(
+                "FlashInfer mm_prefix custom mask expects each prefill request "
+                f"to have q_len <= kv_len, got {q_len=} and {kv_len=}."
+            )
+
+        context_len = kv_len - q_len
+        q_positions = context_len + torch.arange(q_len, device=device)
+        kv_positions = torch.arange(kv_len, device=device)
+        keep = kv_positions.unsqueeze(0) <= q_positions.unsqueeze(1)
+        if window_left >= 0:
+            keep &= (
+                q_positions.unsqueeze(1) - kv_positions.unsqueeze(0)
+            ) <= window_left
+
+        req_idx = request_offset + local_req_idx
+        for start, end in mm_prefix_range.get(req_idx, ()):
+            q_in_range = (q_positions >= start) & (q_positions <= end)
+            kv_in_range = (kv_positions >= start) & (kv_positions <= end)
+            keep |= q_in_range.unsqueeze(1) & kv_in_range.unsqueeze(0)
+
+        mask_parts.append(keep.reshape(-1))
+
+    return (
+        torch.cat(mask_parts)
+        if mask_parts
+        else torch.empty(0, dtype=torch.bool, device=device)
+    )
+
+
 @triton.jit
 def _trtllm_prefill_attn_kvfp8_dequant(
     kv_cache_ptr,
@@ -364,6 +434,31 @@ class FlashInferBackend(AttentionBackend):
     def supports_non_causal(cls) -> bool:
         return True
 
+    @classmethod
+    def supports_mm_prefix(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_combination(
+        cls,
+        head_size: int,
+        dtype: torch.dtype,
+        kv_cache_dtype: CacheDType | None,
+        block_size: int | None,
+        use_mla: bool,
+        has_sink: bool,
+        use_sparse: bool,
+        use_mm_prefix: bool,
+        device_capability: DeviceCapability,
+    ) -> str | None:
+        if not use_mm_prefix:
+            return None
+        if block_size is not None and block_size >= 128:
+            return "mm_prefix is not supported with TRTLLM-only FlashInfer block sizes"
+        if has_sink:
+            return "mm_prefix is not supported with attention sinks"
+        return None
+
     @staticmethod
     def get_impl_cls() -> type["FlashInferImpl"]:
         return FlashInferImpl
@@ -465,6 +560,7 @@ class FIPrefill:
     """Metadata for the native FlashInfer prefill pathway (non-TRTLLM)."""
 
     wrapper: BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper
+    mm_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = None
 
 
 @dataclass
@@ -559,6 +655,7 @@ class FlashInferMetadata:
     """
 
     cascade_wrapper: MultiLevelCascadeAttentionWrapper | None
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
 
 
 class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
@@ -579,6 +676,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
         ) = None  # Wrapper for prefill/append
+        self._mm_prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = None
         self._noncausal_prefill_wrapper: BatchPrefillWithPagedKVCacheWrapper | None = (
             None  # Wrapper for non-causal prefill (DFlash)
         )
@@ -837,6 +935,19 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         assert self._prefill_wrapper is not None
         return self._prefill_wrapper
 
+    def _get_mm_prefill_wrapper(self) -> BatchPrefillWithPagedKVCacheWrapper:
+        if self.use_dcp:
+            raise NotImplementedError(
+                "FlashInfer mm_prefix prefill is not supported with DCP yet."
+            )
+        if self._mm_prefill_wrapper is None:
+            self._mm_prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
+                self._get_workspace_buffer(),
+                get_kv_cache_layout(),
+                backend="auto",
+            )
+        return self._mm_prefill_wrapper
+
     def _get_decode_wrapper(self, batch_size: int, use_cudagraph: bool = False):
         if use_cudagraph:
             decode_wrapper = self._decode_wrappers_cudagraph.get(batch_size, None)
@@ -950,12 +1061,26 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         num_reqs = common_attn_metadata.num_reqs
         num_actual_tokens = common_attn_metadata.num_actual_tokens
         causal = common_attn_metadata.causal
+        mm_prefix_range = _normalize_mm_prefix_range(
+            common_attn_metadata.mm_req_doc_ranges
+        )
+        has_mm_prefix = mm_prefix_range is not None
+        if has_mm_prefix:
+            if not causal:
+                raise NotImplementedError(
+                    "FlashInfer mm_prefix custom mask supports causal attention only."
+                )
+            if common_attn_metadata.is_prefilling is None:
+                raise ValueError(
+                    "FlashInfer mm_prefix attention requires is_prefilling metadata."
+                )
         if causal:
             num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
                 split_decodes_and_prefills(
                     common_attn_metadata,
                     decode_threshold=self.reorder_batch_threshold,
-                    require_uniform=True,
+                    require_uniform=not has_mm_prefix,
+                    treat_short_extends_as_decodes=not has_mm_prefix,
                 )
             )
         else:
@@ -965,6 +1090,17 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             num_prefills = num_reqs
             num_decode_tokens = 0
             num_prefill_tokens = num_actual_tokens
+
+        if has_mm_prefix and num_decodes > 0:
+            query_lens = (
+                common_attn_metadata.query_start_loc_cpu[1 : num_decodes + 1]
+                - common_attn_metadata.query_start_loc_cpu[:num_decodes]
+            )
+            if not torch.all(query_lens == query_lens[0]):
+                num_decodes = 0
+                num_prefills = num_reqs
+                num_decode_tokens = 0
+                num_prefill_tokens = num_actual_tokens
 
         page_size = self.page_size
         max_seq_len = common_attn_metadata.max_seq_len
@@ -979,9 +1115,32 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # - Decode (FI native or TRTLLM)
         use_cascade = common_prefix_len > 0
         uses_spec_reorder = self.reorder_batch_threshold > 1
+        if has_mm_prefix and use_cascade:
+            raise NotImplementedError(
+                "FlashInfer mm_prefix attention does not support cascade attention."
+            )
+        if has_mm_prefix:
+            if self.use_dcp:
+                raise NotImplementedError(
+                    "FlashInfer mm_prefix prefill is not supported with DCP yet."
+                )
+            if page_size >= 128:
+                raise NotImplementedError(
+                    "FlashInfer mm_prefix prefill is not supported with "
+                    "TRTLLM-only block sizes."
+                )
+            if self.has_sinks:
+                raise NotImplementedError(
+                    "FlashInfer mm_prefix prefill is not supported with "
+                    "attention sinks."
+                )
         # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
         prefill_force_trtllm = (
-            True if page_size >= 128 else self.attention_config.use_trtllm_attention
+            False
+            if has_mm_prefix
+            else True
+            if page_size >= 128
+            else self.attention_config.use_trtllm_attention
         )
         prefill_use_trtllm = causal and use_trtllm_attention(
             self.num_qo_heads,
@@ -1055,6 +1214,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             prefill=None,
             decode=None,
             cascade_wrapper=None,
+            mm_prefix_range=mm_prefix_range,
         )
 
         # Guard access to seq_lens_cpu, which may not always be needed
@@ -1209,6 +1369,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 )
             else:
                 prefill_wrapper = self._get_prefill_wrapper(causal=attn_metadata.causal)
+                mm_prefill_wrapper = None
                 # Slicing CPU buffers that are only needed for FI native prefills
                 paged_kv_last_page_len_prefill_cpu = self.paged_kv_last_page_len.cpu[
                     prefill_start:num_reqs
@@ -1268,7 +1429,52 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
                     )
-                attn_metadata.prefill = FIPrefill(wrapper=prefill_wrapper)
+                    if has_mm_prefix:
+                        assert mm_prefix_range is not None
+                        mm_prefill_wrapper = self._get_mm_prefill_wrapper()
+                        qo_indptr_prefill_gpu = (
+                            qo_indptr[prefill_start:] - qo_indptr[prefill_start]
+                        )
+                        paged_kv_indptr_prefill_gpu = self.paged_kv_indptr.gpu[
+                            prefill_start : num_reqs + 1
+                        ]
+                        paged_kv_last_page_len_prefill_gpu = (
+                            self.paged_kv_last_page_len.gpu[prefill_start:num_reqs]
+                        )
+                        custom_mask = _build_mm_prefix_custom_mask(
+                            mm_prefix_range,
+                            prefill_start,
+                            qo_indptr_prefill_cpu,
+                            paged_kv_indptr_prefill_cpu,
+                            paged_kv_last_page_len_prefill_cpu,
+                            page_size,
+                            self.window_left,
+                            self.device,
+                        )
+                        mm_prefill_wrapper.plan(
+                            qo_indptr=qo_indptr_prefill_gpu,
+                            paged_kv_indptr=paged_kv_indptr_prefill_gpu,
+                            paged_kv_indices=paged_kv_indices,
+                            paged_kv_last_page_len=paged_kv_last_page_len_prefill_gpu,
+                            num_qo_heads=self.num_qo_heads,
+                            num_kv_heads=self.num_kv_heads,
+                            head_dim_qk=self.head_dim,
+                            page_size=self.page_size,
+                            custom_mask=custom_mask,
+                            causal=True,
+                            sm_scale=self.sm_scale,
+                            window_left=-1,
+                            logits_soft_cap=self.logits_soft_cap,
+                            q_data_type=self.q_data_type,
+                            kv_data_type=self.kv_cache_dtype,
+                            o_data_type=o_dtype,
+                            fixed_split_size=self.prefill_fixed_split_size,
+                            disable_split_kv=self.disable_split_kv,
+                        )
+                attn_metadata.prefill = FIPrefill(
+                    wrapper=prefill_wrapper,
+                    mm_wrapper=mm_prefill_wrapper,
+                )
 
         ## DECODE PATHWAY
         if num_decodes > 0:
@@ -1599,10 +1805,19 @@ class FlashInferImpl(AttentionImpl):
 
             if not prefill_use_trtllm:
                 assert isinstance(attn_metadata.prefill, FIPrefill)
-                prefill_wrapper = attn_metadata.prefill.wrapper
+                use_mm_prefill_wrapper = (
+                    attn_metadata.mm_prefix_range is not None
+                    and attn_metadata.prefill.mm_wrapper is not None
+                )
+                prefill_wrapper = (
+                    attn_metadata.prefill.mm_wrapper
+                    if use_mm_prefill_wrapper
+                    else attn_metadata.prefill.wrapper
+                )
                 assert prefill_wrapper is not None
                 if use_dcp:
                     assert isinstance(prefill_wrapper, BatchDCPPrefillWrapper)
+                    assert not use_mm_prefill_wrapper
                     assert prefill_wrapper._context._window_left == self.window_left
                     assert prefill_wrapper._context._logits_soft_cap == (
                         self.logits_soft_cap or 0.0
@@ -1628,12 +1843,17 @@ class FlashInferImpl(AttentionImpl):
                     assert isinstance(
                         prefill_wrapper, BatchPrefillWithPagedKVCacheWrapper
                     )
-                    assert prefill_wrapper._window_left == self.window_left
+                    expected_window_left = (
+                        -1 if use_mm_prefill_wrapper else self.window_left
+                    )
+                    assert prefill_wrapper._window_left == expected_window_left
                     assert prefill_wrapper._logits_soft_cap == (
                         self.logits_soft_cap or 0.0
                     )
                     assert prefill_wrapper._sm_scale == self.scale
-                    assert prefill_wrapper._causal == attn_metadata.causal
+                    assert prefill_wrapper._causal == (
+                        True if use_mm_prefill_wrapper else attn_metadata.causal
+                    )
 
                     if self.is_kvcache_nvfp4:
                         kv_cache_permute = nvfp4_kv_data
