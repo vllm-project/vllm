@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
+import torch
 from torch import fx, nn
 
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
@@ -64,7 +65,8 @@ class RMSNormFuser(BaseFuser):
     the graph, so detection does not depend on the class name.
     """
 
-    eps: float
+    eps: float | None
+    """`None` only for a fused `rms_norm` op with default eps; resolved in `fuse`."""
     has_weight: bool
     zero_centered: bool
     """Gemma-style `(1 + weight)` scaling (weight initialised at zero)."""
@@ -80,6 +82,19 @@ class RMSNormFuser(BaseFuser):
         x = find_node(graph, lambda n: n.op == "placeholder")
         if x is None:
             return None
+        # Handle native torch `rms_norm` op.
+        fused = find_node(graph, lambda n: is_op(n, "rms_norm"))
+        if fused is not None and fused.args and peel(fused.args[0]) is x:
+            args, kwargs = fused.args, fused.kwargs
+            weight = args[2] if len(args) > 2 else kwargs.get("weight")
+            eps = args[3] if len(args) > 3 else kwargs.get("eps")
+            return cls(
+                eps=eps if isinstance(eps, (int, float)) else None,
+                has_weight=isinstance(weight, fx.Node),
+                zero_centered=False,
+                source_cls=type(module).__name__,
+            )
+        # Handle explicit `x * rsqrt(mean(x**2, -1) + eps)` pattern.
         # The rsqrt over the mean-square variance is the spine of the norm.
         eps = rsqrt = None
         for node in graph.nodes:
@@ -130,12 +145,17 @@ class RMSNormFuser(BaseFuser):
         hidden_size = (
             weight.size(0) if weight is not None else model_config.get_hidden_size()
         )
+        eps = self.eps
+        if eps is None:
+            # Could be `None` for native torch `rms_norm`. Match torch behaviour.
+            dtype = weight.dtype if weight is not None else model_config.dtype
+            eps = torch.finfo(dtype).eps
         if self.zero_centered:
-            return GemmaRMSNorm(hidden_size=hidden_size, eps=self.eps)
+            return GemmaRMSNorm(hidden_size=hidden_size, eps=eps)
         has_weight = self.has_weight and weight is not None
         return RMSNorm(
             hidden_size=hidden_size,
-            eps=self.eps,
+            eps=eps,
             has_weight=has_weight,
             dtype=weight.dtype if has_weight else None,
         )
