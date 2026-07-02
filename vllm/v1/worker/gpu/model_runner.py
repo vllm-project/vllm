@@ -854,7 +854,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Decode first, then prefill.
         # batch_idx -> req_id
-        req_ids = sorted(num_tokens_per_req, key=num_tokens_per_req.get)  # type: ignore[arg-type]
+        req_ids = sort_batch_req_ids(num_tokens_per_req, self.decode_query_len)
         numtoks_iter = map(num_tokens_per_req.get, req_ids)
         num_scheduled_tokens = np.fromiter(numtoks_iter, dtype=np.int32, count=num_reqs)
 
@@ -1601,3 +1601,23 @@ class ExecuteModelState(NamedTuple):
     hidden_states: torch.Tensor | None
     aux_hidden_states: list[torch.Tensor] | None
     finished_req_ids: set[str]
+
+
+def sort_batch_req_ids(
+    num_tokens_per_req: dict[str, int], decode_query_len: int
+) -> list[str]:
+    """Order requests as decode -> short_extend -> prefill.
+
+    Uniform-length decodes (query_len == decode_query_len) must lead the batch:
+    split_decodes_and_prefills assumes this ordering, so with spec decode
+    (decode_query_len > 1) a shorter chunked-prefill tail sorted in front would
+    misclassify every decode as a prefill (e.g., forcing the DSA indexer onto
+    its full-KV-gather prefill path).
+    """
+    return sorted(
+        num_tokens_per_req,
+        key=lambda r: (
+            num_tokens_per_req[r] != decode_query_len,
+            num_tokens_per_req[r],
+        ),
+    )

@@ -1157,7 +1157,12 @@ class DeepseekV2MLAAttention(nn.Module):
             cache_config,
             quant_config,
             prefix,
-            skip_topk=_skip_topk,
+            # MTP layers must never start with skip_topk=True: their indexer
+            # computes indices at draft step 0, and the runtime toggle
+            # (set_skip_topk, index_share_for_mtp_iteration) only exists in
+            # the V1 proposer. A frozen True would leave the draft reading a
+            # never-written topk buffer.
+            skip_topk=_skip_topk and not is_mtp_layer,
         )
 
     def forward(
