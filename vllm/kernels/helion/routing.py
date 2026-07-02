@@ -99,3 +99,57 @@ def build_routed_op_map(
             sorted(str(v) for v in routed_map.values()),
         )
     return routed_map
+
+
+# --- Call-site routing for eager ops (MoE / MLA / linear) --------------------
+# The FX swap only reaches ops that appear in the torch.compile graph. Ops
+# dispatched from Python inside eager regions (fused-MoE experts, MLA attention,
+# linear methods) are invisible to it. `route_quant` is called at those _C call
+# sites to get the same "Helion under cudagraph, native in eager" behaviour.
+
+_ROUTABLE_EAGER_OPS = frozenset(
+    {
+        "per_token_group_fp8_quant",
+        "dynamic_per_token_scaled_fp8_quant",
+        "rms_norm_dynamic_per_token_quant",
+        "rms_norm_per_block_quant",
+    }
+)
+_helion_ready: dict[str, bool] = {}
+
+
+def _helion_available(op_name: str) -> bool:
+    ready = _helion_ready.get(op_name)
+    if ready is None:
+        try:
+            import vllm.kernels.helion  # noqa: F401  register ops
+            from vllm.kernels.helion.register import _HOP_AVAILABLE
+
+            ready = (not _HOP_AVAILABLE) and hasattr(
+                torch.ops.vllm_helion, op_name
+            )
+        except Exception:
+            ready = False
+        _helion_ready[op_name] = ready
+    return ready
+
+
+def route_quant(op_name: str, *args):
+    """Dispatch a quant op to Helion iff currently capturing a CUDA graph.
+
+    Use at the ``torch.ops._C.<op>`` call sites in eager code (MoE/MLA/linear).
+    The ``is_compiling()`` guard short-circuits during torch.compile tracing so
+    the capture check never graph-breaks (traced call sites just use native; the
+    FX swap covers them). Falls back to native for any unsupported/unknown op.
+    """
+    import vllm.envs as envs
+
+    if (
+        op_name in _ROUTABLE_EAGER_OPS
+        and envs.VLLM_USE_HELION_KERNELS
+        and not torch.compiler.is_compiling()
+        and torch.cuda.is_current_stream_capturing()
+        and _helion_available(op_name)
+    ):
+        return getattr(torch.ops.vllm_helion, op_name).default(*args)
+    return getattr(torch.ops._C, op_name).default(*args)

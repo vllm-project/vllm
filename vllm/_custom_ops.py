@@ -428,7 +428,10 @@ def rms_norm_dynamic_per_token_quant(
         (input.numel() // input.shape[-1], 1), device=input.device, dtype=torch.float32
     )
 
-    torch.ops._C.rms_norm_dynamic_per_token_quant(
+    from vllm.kernels.helion.routing import route_quant
+
+    route_quant(
+        "rms_norm_dynamic_per_token_quant",
         output, input, weight, scales, epsilon, scale_ub, residual
     )
     return output, scales
@@ -479,7 +482,10 @@ def rms_norm_per_block_quant(
         tma_alignment
     )
 
-    torch.ops._C.rms_norm_per_block_quant(
+    from vllm.kernels.helion.routing import route_quant
+
+    route_quant(
+        "rms_norm_per_block_quant",
         output,
         input,
         weight,
@@ -1939,8 +1945,10 @@ def scaled_fp8_quant(
     if scale is None:
         if use_per_token_if_dynamic:
             scale = torch.empty((shape[0], 1), device=input.device, dtype=torch.float32)
-            torch.ops._C.dynamic_per_token_scaled_fp8_quant(
-                output, input, scale, scale_ub
+            from vllm.kernels.helion.routing import route_quant
+
+            route_quant(
+                "dynamic_per_token_scaled_fp8_quant", output, input, scale, scale_ub
             )
         else:
             scale = torch.empty(1, device=input.device, dtype=torch.float32)
