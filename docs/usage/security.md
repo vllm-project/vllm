@@ -267,6 +267,46 @@ The most effective approach is to deploy vLLM behind a reverse proxy (such as ng
 - Blocks all other endpoints, including the unauthenticated inference and operational control endpoints
 - Implements additional authentication, rate limiting, and logging at the proxy layer
 
+### Production Hardening Checklist
+
+Before exposing the OpenAI-compatible HTTP server to application clients, review
+the deployment as a whole. The built-in server should be treated as an inference
+engine behind a trusted network or gateway, not as the complete production
+security boundary.
+
+- **Put vLLM behind a reverse proxy or gateway.** Expose only the endpoints your
+  clients require, such as specific `/v1/*` routes, and block all other paths by
+  default. Do not rely on `--api-key` alone to protect every endpoint on the
+  HTTP server.
+- **Keep operational and development endpoints internal.** Do not set
+  `VLLM_SERVER_DEV_MODE=1` in production. Keep profiler, sleep/wake, cache reset,
+  weight update, scaling, tokenizer info, and similar administrative endpoints
+  on an isolated admin-only network when they are required.
+- **Restrict browser and API access at the edge.** Configure CORS origins,
+  methods, and headers for the clients you operate. Enforce authentication,
+  rate limits, request size limits, and audit logging at the proxy or gateway
+  layer.
+- **Treat runtime model changes as administrative actions.** If dynamic LoRA
+  loading or resolver plugins are enabled, route those endpoints only to trusted
+  administrators and trusted artifact sources.
+- **Limit outbound fetches and tool execution.** For multimodal URL inputs,
+  set `--allowed-media-domains` and consider disabling redirects with
+  `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0`. Do not enable tool servers for untrusted
+  traffic unless the tool environment has explicit sandboxing, network
+  isolation, audit, and approval controls.
+- **Protect artifacts and caches.** Treat model files, tokenizer files, LoRA
+  adapters, chat templates, and cache directories as trusted deployment inputs.
+  Do not mount writable cache or model directories from untrusted users or
+  storage.
+- **Define a logging policy before enabling verbose logs.** Prompts, outputs,
+  credentials, and request metadata may be sensitive. Keep operational metadata
+  endpoints such as version, load, and health information internal unless your
+  deployment explicitly needs to expose them.
+- **Isolate distributed communication.** PyTorch distributed communication,
+  KV-cache transfer, and data/tensor/pipeline parallel channels are internal
+  channels. Protect them with network segmentation, firewall rules, or a
+  deployment-specific secure transport.
+
 ## Request Parameter Resource Limits
 
 Certain API request parameters can have a large impact on resource consumption and may be abused to exhaust server resources. The `n` parameter in the `/v1/completions` and `/v1/chat/completions` endpoints controls how many independent output sequences are generated per request. A very large value causes the engine to allocate memory, CPU, and GPU time proportional to `n`, which can lead to out-of-memory conditions on the host and block the server from processing other requests.
