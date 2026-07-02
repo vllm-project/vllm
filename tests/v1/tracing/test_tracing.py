@@ -89,6 +89,10 @@ def test_traces(
             assert attributes.get(SpanAttributes.GEN_AI_USAGE_PROMPT_TOKENS) == len(
                 outputs[0].prompt_token_ids
             )
+            assert (
+                attributes.get(SpanAttributes.GEN_AI_USAGE_CACHE_READ_INPUT_TOKENS)
+                == outputs[0].num_cached_tokens
+            )
             completion_tokens = sum(len(o.token_ids) for o in outputs[0].outputs)
             assert (
                 attributes.get(SpanAttributes.GEN_AI_USAGE_COMPLETION_TOKENS)
