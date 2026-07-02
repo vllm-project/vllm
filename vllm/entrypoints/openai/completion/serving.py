@@ -486,6 +486,7 @@ class OpenAIServingCompletion(OpenAIServing):
         num_prompt_tokens = 0
         num_generated_tokens = 0
         kv_transfer_params = None
+        ec_transfer_params = None
         last_final_res = None
         for final_res in final_res_batch:
             last_final_res = final_res
@@ -591,6 +592,8 @@ class OpenAIServingCompletion(OpenAIServing):
         request_metadata.final_usage_info = usage
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
+            ec_transfer_params = final_res_batch[0].ec_transfer_params
+
         return CompletionResponse(
             id=request_id,
             created=created_time,
@@ -599,6 +602,7 @@ class OpenAIServingCompletion(OpenAIServing):
             usage=usage,
             system_fingerprint=self.system_fingerprint,
             kv_transfer_params=kv_transfer_params,
+            ec_transfer_params=ec_transfer_params,
         )
 
     def _create_completion_logprobs(

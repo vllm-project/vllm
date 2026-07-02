@@ -97,6 +97,8 @@ pub struct EngineCoreOutput {
     #[serde(default)]
     pub kv_transfer_params: Option<serde_json::Value>,
     #[serde(default)]
+    pub ec_transfer_params: Option<serde_json::Value>,
+    #[serde(default)]
     pub trace_headers: Option<OpaqueValue>,
     /// Breakdown of the scheduled prefill computation, set on the first output
     /// of a newly scheduled prefill and elided for subsequent decode outputs.
@@ -374,6 +376,7 @@ mod tests {
                 stop_reason: Some(StopReason::Text("stop".to_string())),
                 events: None,
                 kv_transfer_params: None,
+                ec_transfer_params: None,
                 trace_headers: None,
                 prefill_stats: None,
                 routed_experts: None,
@@ -426,6 +429,7 @@ mod tests {
                             stop_reason: None,
                             events: None,
                             kv_transfer_params: None,
+                            ec_transfer_params: None,
                             trace_headers: None,
                             prefill_stats: None,
                             routed_experts: None,
