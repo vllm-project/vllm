@@ -154,14 +154,6 @@ is_nvidia_hopper = is_nvidia and (
 )
 use_cuda_graph = is_nvidia and os.environ.get("FLA_USE_CUDA_GRAPH", "0") == "1"
 is_gather_supported = hasattr(triton.language, "gather")
-is_tma_supported = (
-    is_nvidia_hopper
-    and os.getenv("FLA_USE_TMA", "0") == "1"
-    and (
-        hasattr(triton.language, "_experimental_make_tensor_descriptor")
-        or hasattr(triton.language, "make_tensor_descriptor")
-    )
-)
 
 
 def get_all_max_shared_mem():
@@ -174,6 +166,23 @@ def get_all_max_shared_mem():
         ]
     except BaseException:
         return [-1]
+
+
+# TMA code paths require significant shared memory for the Triton autotuner
+# to compile. SM12x desktop GPUs (RTX 5090/5080, DGX Spark GB10) have ~101KB
+# SMEM per SM, which is insufficient and causes OOM in fla/solve_tril. Gate
+# TMA on a 128KB SMEM threshold rather than the architecture, so future SM12x
+# variants with datacenter-class SMEM (e.g. RTX Pro 6000 Blackwell server)
+# automatically get TMA support.
+is_tma_supported = (
+    is_nvidia_hopper
+    and os.getenv("FLA_USE_TMA", "0") == "1"
+    and get_all_max_shared_mem()[0] >= 131072
+    and (
+        hasattr(triton.language, "_experimental_make_tensor_descriptor")
+        or hasattr(triton.language, "make_tensor_descriptor")
+    )
+)
 
 
 class Backend(Enum):
