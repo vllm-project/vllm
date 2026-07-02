@@ -884,7 +884,15 @@ class ChatCompletionRequest(OpenAIBaseModel):
                         parameter="tool_choice.function.name",
                     )
                 for tool in data["tools"]:
-                    if tool["function"]["name"] == function_name:
+                    # Defensive: not every tool entry carries a top-level
+                    # ``function`` key (e.g. MCP-style ``{"type": "mcp",
+                    # "name": ...}``, OpenAI Responses-API flat shapes, or an
+                    # empty ``{}``). Skip any entry that doesn't match the
+                    # expected ``{"function": {"name": ...}}`` structure rather
+                    # than indexing blindly, which would raise ``KeyError`` and
+                    # surface as an HTTP 500 instead of a 400.
+                    fn = tool.get("function") if isinstance(tool, dict) else None
+                    if isinstance(fn, dict) and fn.get("name") == function_name:
                         valid_tool = True
                         break
                 if not valid_tool:
