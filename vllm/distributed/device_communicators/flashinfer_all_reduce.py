@@ -51,6 +51,14 @@ def _create_workspace(
     """Create a flashinfer allreduce workspace, returning None on failure."""
     comm_backend = TorchDistBackend(group=group)
     rng_state = random.getstate()
+    from flashinfer.jit import env as fi_jit_env
+
+    logger.info_once(
+        "Creating FlashInfer allreduce workspace (backend=%s); cold "
+        "cache JIT-compile may take several minutes (cached under %s).",
+        backend,
+        fi_jit_env.FLASHINFER_JIT_DIR,
+    )
     try:
         random.seed(int.from_bytes(os.urandom(16), byteorder="big"))
         workspace = flashinfer_comm.create_allreduce_fusion_workspace(
