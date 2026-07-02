@@ -153,9 +153,11 @@ class INCConfig(QuantizationConfig):
                 if (
                     layer_name == prefix or layer_name == f"model.{prefix}"
                 ) and self.extra_config[layer_name].get("bits", 16) >= 16:
+                    if isinstance(layer, (LinearBase, ParallelLMHead)):
+                        return UnquantizedLinearMethod()
                     if isinstance(layer, RoutedExperts):
                         return UnquantizedFusedMoEMethod(layer.moe_config)
-                    return UnquantizedLinearMethod()
+                    return None
 
         layer_config = self.config_parser.resolve(layer, prefix)
         if not layer_config.quantized:
