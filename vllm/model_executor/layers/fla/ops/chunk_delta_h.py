@@ -27,6 +27,8 @@ NUM_WARPS = [2, 4, 8, 16]
         "STORE_FINAL_STATE": lambda args: args["ht"] is not None,
         "SAVE_NEW_VALUE": lambda args: args["v_new"] is not None,
         "IS_VARLEN": lambda args: args["cu_seqlens"] is not None,
+        "IS_CONTINUOUS_BATCHING": lambda args: args["ssm_state_indices"] is not None,
+        "HAS_INITIAL_STATE_MASK": lambda args: args["has_initial_state"] is not None,
     }
 )
 @triton.autotune(
@@ -52,6 +54,8 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     ht,
     cu_seqlens,
     chunk_offsets,
+    ssm_state_indices,
+    has_initial_state,
     T,
     H: tl.constexpr,
     Hg: tl.constexpr,
@@ -59,12 +63,18 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     V: tl.constexpr,
     BT: tl.constexpr,
     BV: tl.constexpr,
+    stride_init_state_token: tl.constexpr,
+    stride_final_state_token: tl.constexpr,
+    stride_indices_seq: tl.constexpr,
+    stride_has_initial_state: tl.constexpr,
     USE_G: tl.constexpr,
     USE_GK: tl.constexpr,
     USE_INITIAL_STATE: tl.constexpr,
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    IS_CONTINUOUS_BATCHING: tl.constexpr,
+    HAS_INITIAL_STATE_MASK: tl.constexpr,
     USE_EXP2: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
@@ -103,29 +113,41 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     stride_k = Hg * K
     stride_w = H * K
     if USE_INITIAL_STATE:
-        h0 = h0 + i_nh * V * K
-    if STORE_FINAL_STATE:
-        ht = ht + i_nh * V * K
-
-    # load initial state
-    if USE_INITIAL_STATE:
-        p_h0_1 = tl.make_block_ptr(h0, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
-        b_h1 += tl.load(p_h0_1, boundary_check=(0, 1)).to(tl.float32)
-        if K > 64:
-            p_h0_2 = tl.make_block_ptr(
-                h0, (V, K), (K, 1), (i_v * BV, 64), (BV, 64), (1, 0)
+        should_load = True
+        if IS_CONTINUOUS_BATCHING:
+            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(
+                tl.int64
             )
-            b_h2 += tl.load(p_h0_2, boundary_check=(0, 1)).to(tl.float32)
-        if K > 128:
-            p_h0_3 = tl.make_block_ptr(
-                h0, (V, K), (K, 1), (i_v * BV, 128), (BV, 64), (1, 0)
+            if HAS_INITIAL_STATE_MASK:
+                has_init = tl.load(has_initial_state + i_n * stride_has_initial_state)
+                if has_init:
+                    h0 = h0 + state_idx * stride_init_state_token + i_h * V * K
+                else:
+                    should_load = False
+            else:
+                h0 = h0 + state_idx * stride_init_state_token + i_h * V * K
+        else:
+            h0 = h0 + i_nh * V * K
+        if should_load:
+            p_h0_1 = tl.make_block_ptr(
+                h0, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0)
             )
-            b_h3 += tl.load(p_h0_3, boundary_check=(0, 1)).to(tl.float32)
-        if K > 192:
-            p_h0_4 = tl.make_block_ptr(
-                h0, (V, K), (K, 1), (i_v * BV, 192), (BV, 64), (1, 0)
-            )
-            b_h4 += tl.load(p_h0_4, boundary_check=(0, 1)).to(tl.float32)
+            b_h1 += tl.load(p_h0_1, boundary_check=(0, 1)).to(tl.float32)
+            if K > 64:
+                p_h0_2 = tl.make_block_ptr(
+                    h0, (V, K), (K, 1), (i_v * BV, 64), (BV, 64), (1, 0)
+                )
+                b_h2 += tl.load(p_h0_2, boundary_check=(0, 1)).to(tl.float32)
+            if K > 128:
+                p_h0_3 = tl.make_block_ptr(
+                    h0, (V, K), (K, 1), (i_v * BV, 128), (BV, 64), (1, 0)
+                )
+                b_h3 += tl.load(p_h0_3, boundary_check=(0, 1)).to(tl.float32)
+            if K > 192:
+                p_h0_4 = tl.make_block_ptr(
+                    h0, (V, K), (K, 1), (i_v * BV, 192), (BV, 64), (1, 0)
+                )
+                b_h4 += tl.load(p_h0_4, boundary_check=(0, 1)).to(tl.float32)
 
     # main recurrence
     for i_t in range(NT):
@@ -296,6 +318,13 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
             b_h4 += tl.trans(tl.dot(b_k, b_v))
     # epilogue
     if STORE_FINAL_STATE:
+        if IS_CONTINUOUS_BATCHING:
+            state_idx = tl.load(ssm_state_indices + i_n * stride_indices_seq).to(
+                tl.int64
+            )
+            ht = ht + state_idx * stride_final_state_token + i_h * V * K
+        else:
+            ht = ht + i_nh * V * K
         p_ht = tl.make_block_ptr(ht, (V, K), (K, 1), (i_v * BV, 0), (BV, 64), (1, 0))
         tl.store(p_ht, b_h1.to(p_ht.dtype.element_ty), boundary_check=(0, 1))
         if K > 64:
@@ -328,6 +357,8 @@ def chunk_gated_delta_rule_fwd_h(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
+    ssm_state_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
     use_exp2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
@@ -347,10 +378,24 @@ def chunk_gated_delta_rule_fwd_h(
             chunk_offsets = prepare_chunk_offsets(cu_seqlens, BT)
     assert K <= 256, "current kernel does not support head dimension larger than 256."
 
+    if ssm_state_indices is not None:
+        stride_indices_seq = ssm_state_indices.stride(0)
+        stride_init_state_token = initial_state.stride(0)
+        stride_final_state_token = initial_state.stride(0)
+        final_state = initial_state if output_final_state else None
+        stride_has_initial_state = (
+            has_initial_state.stride(0) if has_initial_state is not None else 1
+        )
+    else:
+        stride_indices_seq = 1
+        stride_init_state_token = 1
+        stride_final_state_token = 1
+        stride_has_initial_state = 1
+        final_state = (
+            k.new_empty(N, H, V, K, dtype=torch.float32) if output_final_state else None
+        )
+
     h = k.new_empty(B, NT, H, V, K)
-    final_state = (
-        k.new_empty(N, H, V, K, dtype=torch.float32) if output_final_state else None
-    )
 
     v_new = torch.empty_like(u) if save_new_value else None
 
@@ -369,12 +414,18 @@ def chunk_gated_delta_rule_fwd_h(
         ht=final_state,
         cu_seqlens=cu_seqlens,
         chunk_offsets=chunk_offsets,
+        ssm_state_indices=ssm_state_indices,
+        has_initial_state=has_initial_state,
         T=T,
         H=H,
         Hg=Hg,
         K=K,
         V=V,
         BT=BT,
+        stride_init_state_token=stride_init_state_token,
+        stride_final_state_token=stride_final_state_token,
+        stride_indices_seq=stride_indices_seq,
+        stride_has_initial_state=stride_has_initial_state,
         USE_EXP2=use_exp2,
     )
     return h, v_new, final_state

@@ -16,7 +16,7 @@ from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
 from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril
-from .utils import FLA_CHUNK_SIZE, SUPPRESS_LEVEL, input_guard
+from .utils import FLA_CHUNK_SIZE, SUPPRESS_LEVEL
 from .wy_fast import recompute_w_u_fwd
 
 
@@ -32,6 +32,8 @@ def chunk_gated_delta_rule_fwd(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
+    ssm_state_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
     core_attn_out: torch.Tensor | None = None,
 ):
     g = chunk_local_cumsum(
@@ -68,6 +70,8 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
         chunk_offsets=chunk_offsets,
+        ssm_state_indices=ssm_state_indices,
+        has_initial_state=has_initial_state,
     )
     o = chunk_fwd_o(
         q=q,
@@ -88,7 +92,6 @@ def chunk_gated_delta_rule_fwd(
 
 class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
     @staticmethod
-    @input_guard
     @torch.amp.custom_fwd(device_type="cuda")
     def forward(
         ctx,
@@ -104,34 +107,65 @@ class ChunkGatedDeltaRuleFunction(torch.autograd.Function):
         chunk_indices: torch.Tensor | None = None,
         chunk_offsets: torch.Tensor | None = None,
         use_qk_l2norm_in_kernel: bool = False,
+        ssm_state_indices: torch.Tensor | None = None,
+        has_initial_state: torch.Tensor | None = None,
         core_attn_out: torch.Tensor | None = None,
     ):
-        if use_qk_l2norm_in_kernel:
-            q = l2norm_fwd(q)
-            k = l2norm_fwd(k)
-
-        g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            scale=scale,
-            initial_state=initial_state,
-            output_final_state=output_final_state,
-            cu_seqlens=cu_seqlens,
-            chunk_indices=chunk_indices,
-            chunk_offsets=chunk_offsets,
-            core_attn_out=core_attn_out,
+        # Manually ensure contiguity instead of using @input_guard.
+        # We skip .contiguous() on initial_state when ssm_state_indices
+        # is provided: the kernel handles non-contiguous tensors via
+        # strides, and forcing contiguity on a large SSM cache view
+        # is expensive.
+        q = q.contiguous()
+        k = k.contiguous()
+        v = v.contiguous()
+        g = g.contiguous()
+        beta = beta.contiguous()
+        cu_seqlens = cu_seqlens.contiguous() if cu_seqlens is not None else None
+        chunk_indices = (
+            chunk_indices.contiguous() if chunk_indices is not None else None
         )
-        ctx.scale = scale
-        ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
-        if core_attn_out is not None:
-            assert not torch.is_grad_enabled(), (
-                "core_attn_out buffer reuse is only supported for inference"
+        chunk_offsets = (
+            chunk_offsets.contiguous() if chunk_offsets is not None else None
+        )
+        ssm_state_indices = (
+            ssm_state_indices.contiguous() if ssm_state_indices is not None else None
+        )
+        has_initial_state = (
+            has_initial_state.contiguous() if has_initial_state is not None else None
+        )
+        if ssm_state_indices is None and initial_state is not None:
+            initial_state = initial_state.contiguous()
+
+        with torch.accelerator.device_index(q.device.index):
+            if use_qk_l2norm_in_kernel:
+                q = l2norm_fwd(q)
+                k = l2norm_fwd(k)
+
+            g, o, A, final_state, w, h, v_new = chunk_gated_delta_rule_fwd(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                scale=scale,
+                initial_state=initial_state,
+                output_final_state=output_final_state,
+                cu_seqlens=cu_seqlens,
+                chunk_indices=chunk_indices,
+                chunk_offsets=chunk_offsets,
+                ssm_state_indices=ssm_state_indices,
+                has_initial_state=has_initial_state,
+                core_attn_out=core_attn_out,
             )
-            assert q.dtype == o.dtype, "Incompatible dtype for inplace computation"
-        return o.to(q.dtype), final_state
+            ctx.scale = scale
+            ctx.use_qk_l2norm_in_kernel = use_qk_l2norm_in_kernel
+            if core_attn_out is not None:
+                assert not torch.is_grad_enabled(), (
+                    "core_attn_out buffer reuse is only supported for inference"
+                )
+                assert q.dtype == o.dtype, "Incompatible dtype for inplace computation"
+            return o.to(q.dtype), final_state
 
 
 @torch.compiler.disable
@@ -148,6 +182,8 @@ def chunk_gated_delta_rule(
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
+    ssm_state_indices: torch.Tensor | None = None,
+    has_initial_state: torch.Tensor | None = None,
     core_attn_out: torch.Tensor | None = None,
 ):
     r"""
@@ -220,7 +256,11 @@ def chunk_gated_delta_rule(
                 f"The batch size is expected to be 1 rather than {q.shape[0]} when using `cu_seqlens`."
                 f"Please flatten variable-length inputs before processing."
             )
-        if initial_state is not None and initial_state.shape[0] != len(cu_seqlens) - 1:
+        if (
+            initial_state is not None
+            and ssm_state_indices is None
+            and initial_state.shape[0] != len(cu_seqlens) - 1
+        ):
             raise ValueError(
                 f"The number of initial states is expected to be equal to the number of input sequences, "
                 f"i.e., {len(cu_seqlens) - 1} rather than {initial_state.shape[0]}."
@@ -240,6 +280,8 @@ def chunk_gated_delta_rule(
         chunk_indices,
         chunk_offsets,
         use_qk_l2norm_in_kernel,
+        ssm_state_indices,
+        has_initial_state,
         core_attn_out,
     )
     return o, final_state
