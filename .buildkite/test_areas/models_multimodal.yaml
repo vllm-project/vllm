@@ -46,7 +46,8 @@ steps:
     - pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model
   mirror:
     amd:
-      device: mi325_1
+      device: mi250_1
+      timeout_in_minutes: 65
       depends_on:
       - image-build-amd
 
@@ -91,6 +92,11 @@ steps:
   - tests/models/registry.py
   commands:
     - pytest -v -s models/multimodal/processing/test_tensor_schema.py
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Multi-Modal Accuracy Eval (Small Models) # 50min
   device: h200_35gb
@@ -140,6 +146,11 @@ steps:
   - tests/models/multimodal/generation
   commands:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=0) and not core_model'
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Multi-Modal Models (Extended Generation 3)
   device: h200_35gb
@@ -150,6 +161,11 @@ steps:
   - tests/models/multimodal/generation
   commands:
     - pytest -v -s models/multimodal/generation/test_common.py -m 'split(group=1) and not core_model'
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Multi-Modal Models (Extended Pooling)
   key: multi-modal-models-extended-pooling

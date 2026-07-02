@@ -29,3 +29,15 @@ steps:
     - pytest -v -s v1/cudagraph/test_cudagraph_dispatch.py
     - pytest -v -s v1/cudagraph/test_cudagraph_mode.py
     - pytest -v -s v1/cudagraph/test_breakable_cudagraph.py
+  mirror:
+    amd:
+      device: mi250_1
+      timeout_in_minutes: 60
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/v1/cudagraph
+      - vllm/v1/cudagraph_dispatcher.py
+      - vllm/config/compilation.py
+      - vllm/compilation
+      - vllm/platforms/rocm.py
