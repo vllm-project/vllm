@@ -965,9 +965,11 @@ class GPUModelRunner(
             return
 
         kv_caches = getattr(self, "kv_caches", [])
-        for cache_tensor in kv_caches:
-            if cache_tensor is not None:
-                cache_tensor.zero_()
+        # Guard against unallocated tensors during partial wake-up (tags=kv_cache)
+        for layer_kv in kv_caches:
+            for cache_tensor in layer_kv:
+                if cache_tensor is not None and cache_tensor.numel() > 0:
+                    cache_tensor.zero_()
 
         k_attr_names = ("_k_scale", "k_scale")
         v_attr_names = ("_v_scale", "v_scale")
