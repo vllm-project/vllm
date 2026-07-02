@@ -12,6 +12,7 @@ from vllm.compilation.passes.utility.post_cleanup import PostCleanupPass
 from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
+from vllm.utils.import_utils import has_helion
 from vllm.utils.system_utils import set_env_var
 
 from .ir.clone_elimination import UnsafeCloneEliminationPass
@@ -193,6 +194,14 @@ class PostGradPassManager(CustomGraphPass):  # type: ignore[misc]
             if self.pass_config.enable_qk_norm_rope_fusion:
                 self.passes += [SplitCoalescingPass(config)]
                 self.passes += [QKNormRoPEFusionPass(config)]
+
+            # Swap native fused-quant ops for Helion kernels. Runs last so it
+            # rewrites the ops emitted by all the fusion passes above (and any
+            # standalone quant ops). On by default when helion is installed.
+            if envs.VLLM_USE_HELION_KERNELS and has_helion():
+                from .fusion.helion_swap import HelionKernelSwapPass
+
+                self.passes += [HelionKernelSwapPass(config)]
 
             self.ir_lowering = VllmIRLoweringPass(config)
             self.clone_elimination = UnsafeCloneEliminationPass(config)
