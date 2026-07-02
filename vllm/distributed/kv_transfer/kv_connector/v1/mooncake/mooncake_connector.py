@@ -623,12 +623,8 @@ class MooncakeConnectorScheduler:
         self.block_size = vllm_config.cache_config.block_size
 
         assert vllm_config.kv_transfer_config
-        self.is_kv_producer: bool = (
-            vllm_config.kv_transfer_config.kv_role == "kv_producer"
-        )
-        self.is_kv_consumer: bool = (
-            vllm_config.kv_transfer_config.kv_role == "kv_consumer"
-        )
+        self.is_kv_producer: bool = vllm_config.kv_transfer_config.is_kv_producer
+        self.is_kv_consumer: bool = vllm_config.kv_transfer_config.is_kv_consumer
         logger.info("Initializing Mooncake Transfer Engine Scheduler %s", engine_id)
 
         self._is_hma_required = (
