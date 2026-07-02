@@ -949,3 +949,36 @@ def test_sparse_decode_dcp_short_context_matches_non_dcp():
     dcp_out, dcp_lse = _dcp_lse_merge(local_outs, local_lses)
     torch.testing.assert_close(dcp_out, ref_out, atol=1e-5, rtol=1e-5)
     torch.testing.assert_close(dcp_lse, ref_lse, atol=1e-5, rtol=1e-5)
+
+
+@pytest.mark.parametrize("world", [2, 4])
+@pytest.mark.parametrize("interleave", [1, 2, 4])
+def test_merge_dcp_topk_global_union_maps_local_ids_in_place(
+    world: int, interleave: int
+):
+    """union mode rewrites each rank's local top-k to global token ids in
+    place and preserves trailing -1 padding, with no cross-rank exchange: no
+    DCP group is initialized here, so taking the exact path's all_gather
+    would raise. The expected ids come from the same interleave map the
+    exact path's candidate packer applies on-device."""
+    torch.manual_seed(0)
+    rows, topk, local_len = 5, 16, 40
+    logits = torch.randn(rows, local_len)
+    for rank in range(world):
+        indices = torch.randint(0, local_len, (rows, topk), dtype=torch.int32)
+        indices[:, -3:] = -1
+        expected = _local_to_global_indices(indices, rank, world, interleave)
+        rank_indices = indices.clone()
+        result = sparse_indexer._merge_dcp_topk_global(
+            logits,
+            rank_indices,
+            topk,
+            rank,
+            world,
+            interleave,
+            mode="union",
+        )
+        assert result is None
+        torch.testing.assert_close(
+            rank_indices, expected.to(torch.int32), rtol=0, atol=0
+        )

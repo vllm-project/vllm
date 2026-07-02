@@ -70,6 +70,22 @@ def _assert_cutedsl_dcp_merge_supported(
         )
 
 
+def _local_dcp_indices_to_global(
+    local_indices: torch.Tensor,
+    dcp_rank: int,
+    dcp_world_size: int,
+    cp_interleave: int,
+) -> torch.Tensor:
+    valid = local_indices >= 0
+    local = local_indices.to(torch.int64).clamp_min(0)
+    global_indices = (
+        (local // cp_interleave) * (dcp_world_size * cp_interleave)
+        + dcp_rank * cp_interleave
+        + local % cp_interleave
+    )
+    return torch.where(valid, global_indices, -1).to(torch.int32)
+
+
 def _merge_dcp_topk_global(
     logits: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -78,6 +94,7 @@ def _merge_dcp_topk_global(
     dcp_world_size: int,
     cp_interleave: int,
     row_starts: torch.Tensor | None = None,
+    mode: str = "exact",
 ) -> None:
     """Merge each DCP rank's local top-K into the global top-K.
 
@@ -92,6 +109,17 @@ def _merge_dcp_topk_global(
     rank.
     """
     if dcp_world_size <= 1:
+        return
+
+    if mode == "union":
+        # Union: keep each rank's own local top-k as global ids; skip the
+        # candidate all_gather + global top-k recompute. The attention
+        # backend localizes per rank and the LSE merge reconciles.
+        topk_indices.copy_(
+            _local_dcp_indices_to_global(
+                topk_indices, dcp_rank, dcp_world_size, cp_interleave
+            )
+        )
         return
 
     # CuteDSL-only path (no PyTorch fallback): Triton-pack each rank's
@@ -491,6 +519,7 @@ def sparse_attn_indexer(
                 dcp_world_size,
                 cp_kv_cache_interleave_size,
                 row_starts=chunk.cu_seqlen_ks,
+                mode=chunk.sparse_indexer_mode,
             )
 
     if has_decode:
@@ -631,6 +660,7 @@ def sparse_attn_indexer(
                 dcp_rank,
                 dcp_world_size,
                 cp_kv_cache_interleave_size,
+                mode=decode_metadata.sparse_indexer_mode,
             )
 
         if decode_metadata.requires_padding:

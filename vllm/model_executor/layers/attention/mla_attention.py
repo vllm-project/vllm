@@ -800,6 +800,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             else:
                 mqa_q = (mqa_ql_nope, mqa_q_pe)
             if self.impl.dcp_world_size > 1:
+                assert self.impl.need_to_return_lse_for_decode, (
+                    "DCP requires the MLA backend to return softmax LSE for decode."
+                )
                 if isinstance(mqa_q, tuple):
                     # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
                     mqa_q = torch.cat(mqa_q, dim=-1)
