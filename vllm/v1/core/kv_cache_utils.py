@@ -1312,9 +1312,6 @@ def _get_kv_cache_config_packed(
     return num_blocks, kv_cache_tensors
 
 
-_get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_packed
-
-
 def get_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -1365,6 +1362,7 @@ def get_kv_cache_config_from_groups(
         num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
             vllm_config, kv_cache_groups, available_memory
         )
+
     else:
         # General case:
         # We will have group_size memory pools, each is shared by one layer from

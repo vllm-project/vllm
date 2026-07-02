@@ -47,6 +47,7 @@ MTPModelTypes = Literal[
     "longcat_flash_mtp",
     "minimax_m3_mtp",
     "mtp",
+    "openpangu_mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
     "hy_v3_mtp",
@@ -337,9 +338,9 @@ class SpeculativeConfig:
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["DeepSeekV4MTPModel"]}
             )
-        if hf_config.model_type in ("pangu_ultra_moe"):
-            hf_config.model_type = "pangu_ultra_moe_mtp"
-        if hf_config.model_type == "pangu_ultra_moe_mtp":
+        if hf_config.model_type in ("pangu_ultra_moe", "openpangu_v2"):
+            hf_config.model_type = "openpangu_mtp"
+        if hf_config.model_type == "openpangu_mtp":
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["OpenPanguMTPModel"]}
@@ -801,10 +802,11 @@ class SpeculativeConfig:
                     MTPModelTypes
                 ):
                     self.method = "mtp"
-                    if (
-                        self.num_speculative_tokens > 1
-                        and self.draft_model_config.hf_config.model_type
-                        != "step3p5_mtp"
+                    n_predict = getattr(
+                        self.draft_model_config.hf_config, "n_predict", None
+                    )
+                    if self.num_speculative_tokens > 1 and (
+                        n_predict is None or n_predict <= 1
                     ):
                         logger.warning(
                             "Enabling num_speculative_tokens > 1 will run "
@@ -1176,6 +1178,14 @@ class SpeculativeConfig:
             and self.draft_model_config is not None
             and getattr(self.draft_model_config.hf_config, "model_type", None)
             == "step3p5_mtp"
+        )
+
+    def use_openpangu_v2_mtp(self) -> bool:
+        return (
+            self.method == "mtp"
+            and self.draft_model_config is not None
+            and getattr(self.draft_model_config.hf_config, "model_type", None)
+            == "openpangu_mtp"
         )
 
     def use_eagle(self) -> bool:

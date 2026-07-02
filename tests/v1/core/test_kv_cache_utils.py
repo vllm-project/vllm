@@ -48,8 +48,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheTensor,
     MambaSpec,
     MLAAttentionSpec,
-    SinkFullAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowMomeSpec,
     SlidingWindowSpec,
     UniformTypeKVCacheSpecs,
     get_kv_cache_spec_kind,
@@ -1948,6 +1948,48 @@ def new_mla_spec(cache_dtype_str=None):
     )
 
 
+def new_sliding_window_mome_spec(
+    block_size=16,
+    component_dims=(16, 32, 64),
+    dtype=torch.float32,
+    sliding_window=128,
+):
+    return SlidingWindowMomeSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=sum(component_dims),
+        dtype=dtype,
+        sliding_window=sliding_window,
+        component_dims=component_dims,
+    )
+
+
+def test_sliding_window_mome_spec_cache_state_properties():
+    spec = new_sliding_window_mome_spec(
+        block_size=8,
+        component_dims=(16, 32, 64),
+        dtype=torch.bfloat16,
+    )
+
+    assert spec.shapes == ((8, 16), (8, 32), (8, 64))
+    assert spec.dtypes == (torch.bfloat16, torch.bfloat16, torch.bfloat16)
+    assert spec.num_speculative_blocks == 0
+
+
+@pytest.mark.parametrize(
+    ("component_dims", "match"),
+    [
+        ((16, 32), "expects three component dims"),
+        ((16, 32, 64, 128), "expects three component dims"),
+        ((16, 0, 64), "component dims must be positive"),
+        ((16, -1, 64), "component dims must be positive"),
+    ],
+)
+def test_sliding_window_mome_spec_validates_component_dims(component_dims, match):
+    with pytest.raises(ValueError, match=match):
+        new_sliding_window_mome_spec(component_dims=component_dims)
+
+
 def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
     assert get_kv_cache_spec_kind(new_mla_spec()) == KVCacheSpecKind.MLA_ATTENTION
 
@@ -1963,16 +2005,11 @@ def test_get_kv_cache_spec_kind_prefers_specific_attention_subclasses():
         == KVCacheSpecKind.SLIDING_WINDOW_MLA
     )
 
-    sink_full_attention_spec = SinkFullAttentionSpec(
-        block_size=16,
-        num_kv_heads=1,
-        head_size=64,
-        dtype=torch.float32,
-        sink_len=4,
-    )
+    # MoME short-conv states use a SlidingWindowMLASpec subclass so they should
+    # stay in the sliding-window MLA family for scheduler-level classification.
     assert (
-        get_kv_cache_spec_kind(sink_full_attention_spec)
-        == KVCacheSpecKind.SINK_FULL_ATTENTION
+        get_kv_cache_spec_kind(new_sliding_window_mome_spec())
+        == KVCacheSpecKind.SLIDING_WINDOW_MLA
     )
 
 

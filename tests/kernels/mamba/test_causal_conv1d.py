@@ -273,6 +273,94 @@ def test_causal_conv1d_update_with_batch_gather(
 
 
 @pytest.mark.parametrize("itype", [torch.bfloat16])
+@pytest.mark.parametrize("silu_activation", [False, True])
+def test_causal_conv1d_varlen_zero_initial_state_output(itype, silu_activation):
+    device = DEVICE
+    rtol, atol = 1e-2, 5e-2
+    set_random_seed(0)
+
+    dim = 64
+    width = 4
+    state_len = width - 1
+    seqlens = [5, 5]
+    total_seqlen = sum(seqlens)
+    total_entries = 4
+    activation = None if not silu_activation else "silu"
+
+    x = torch.randn(dim, total_seqlen, device=device, dtype=itype)
+    weight = torch.randn(dim, width, device=device, dtype=itype)
+    bias = torch.randn(dim, device=device, dtype=itype)
+    conv_states = torch.randn(
+        total_entries, state_len, dim, device=device, dtype=itype
+    ).transpose(1, 2)
+
+    query_start_loc = torch.tensor([0, 5, 10], dtype=torch.int32, device=device)
+    cache_indices = torch.tensor([1, 2], dtype=torch.int32, device=device)
+    has_initial_states = torch.tensor([False, True], dtype=torch.bool, device=device)
+
+    out = causal_conv1d_fn(
+        x,
+        weight,
+        bias=bias,
+        conv_states=conv_states.clone(),
+        query_start_loc=query_start_loc,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_states,
+        activation=activation,
+        zero_initial_state_output=True,
+    )
+    out_without_zeroing = causal_conv1d_fn(
+        x,
+        weight,
+        bias=bias,
+        conv_states=conv_states.clone(),
+        query_start_loc=query_start_loc,
+        cache_indices=cache_indices,
+        has_initial_state=has_initial_states,
+        activation=activation,
+        zero_initial_state_output=False,
+    )
+
+    ref_chunks = []
+    ref_without_zeroing_chunks = []
+    x_chunks = torch.split(x.unsqueeze(0), seqlens, dim=-1)
+    for i, x_chunk in enumerate(x_chunks):
+        initial_states = (
+            conv_states[cache_indices[i]].unsqueeze(0)
+            if has_initial_states[i]
+            else None
+        )
+        chunk_ref, _ = causal_conv1d_ref(
+            x_chunk,
+            weight,
+            bias,
+            initial_states=initial_states,
+            activation=activation,
+        )
+        ref_without_zeroing_chunks.append(chunk_ref)
+        if not has_initial_states[i]:
+            chunk_ref = chunk_ref.clone()
+            chunk_ref[..., :state_len] = 0
+        ref_chunks.append(chunk_ref)
+
+    ref = torch.cat(ref_chunks, dim=-1).squeeze(0)
+    ref_without_zeroing = torch.cat(ref_without_zeroing_chunks, dim=-1).squeeze(0)
+
+    assert torch.allclose(out, ref, rtol=rtol, atol=atol)
+    assert torch.allclose(
+        out_without_zeroing, ref_without_zeroing, rtol=rtol, atol=atol
+    )
+    assert torch.count_nonzero(out[:, :state_len]) == 0
+    assert torch.count_nonzero(out_without_zeroing[:, :state_len]) > 0
+    assert torch.allclose(
+        out[:, seqlens[0] : seqlens[0] + state_len],
+        out_without_zeroing[:, seqlens[0] : seqlens[0] + state_len],
+        rtol=rtol,
+        atol=atol,
+    )
+
+
+@pytest.mark.parametrize("itype", [torch.bfloat16])
 @pytest.mark.parametrize("silu_activation", [True])
 @pytest.mark.parametrize("has_bias", [True])
 @pytest.mark.parametrize("width", [4])
