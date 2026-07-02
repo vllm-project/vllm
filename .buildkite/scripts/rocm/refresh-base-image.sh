@@ -346,6 +346,8 @@ build_base_image() {
     local fa_arg=""
     local aiter_arg=""
     local mori_arg=""
+    local python_version_arg=""
+    local pytorch_rocm_arch_arg=""
     local pytorch_branch=""
     local aiter_branch=""
     local dependency_summary=""
@@ -385,9 +387,11 @@ build_base_image() {
     fa_arg="$(extract_arg_default FA_BRANCH)"
     aiter_arg="$(extract_arg_default AITER_BRANCH)"
     mori_arg="$(extract_arg_default MORI_BRANCH)"
+    python_version_arg="$(extract_arg_default PYTHON_VERSION)"
+    pytorch_rocm_arch_arg="$(extract_arg_default PYTORCH_ROCM_ARCH)"
     pytorch_branch="$(tag_component "${pytorch_arg}" 16)"
     aiter_branch="$(tag_component "${aiter_arg}" 24)"
-    dependency_summary="base=${base_image_arg},rocm=${rocm_version},pytorch=${pytorch_arg},torchvision=${pytorch_vision_arg},torchaudio=${pytorch_audio_arg},triton=${triton_arg},flash-attn=${fa_arg},aiter=${aiter_arg},mori=${mori_arg}"
+    dependency_summary="base=${base_image_arg},rocm=${rocm_version},python=${python_version_arg},pytorch=${pytorch_arg},torchvision=${pytorch_vision_arg},torchaudio=${pytorch_audio_arg},triton=${triton_arg},flash-attn=${fa_arg},aiter=${aiter_arg},mori=${mori_arg},pytorch-rocm-arch=${pytorch_rocm_arch_arg}"
     descriptor="$(clean_docker_tag "base_custom_aiter_${aiter_branch}_torch_${pytorch_branch}_${build_date}${build_suffix}")"
     ci_descriptor="$(clean_docker_tag "ci_custom_aiter_${aiter_branch}_torch_${pytorch_branch}_${build_date}${build_suffix}")"
 
@@ -439,28 +443,25 @@ build_base_image() {
         --label "vllm.rocm_base.metadata_version=${metadata_version}" \
         --label "vllm.rocm_base.content_hash=${base_hash}" \
         --label "vllm.rocm_base.content_files_hash=${content_files_hash}" \
-        --label "vllm.rocm_base.content_files=${content_files}" \
-        --label "vllm.rocm_base.content_args=${content_args}" \
         --label "vllm.rocm_base.dockerfile=${DOCKERFILE}" \
         --label "vllm.rocm_base.image.descriptive=${descriptive_tag}" \
         --label "vllm.rocm_base.image.stable=${stable_tag}" \
-        --label "vllm.rocm_base.image.ci_descriptive=${ci_descriptive_tag}" \
         --label "vllm.rocm_base.git_commit=${BUILDKITE_COMMIT:-}" \
-        --label "vllm.rocm_base.git_branch=${git_branch}" \
         --label "vllm.rocm_base.stable_branch=${ROCM_BASE_STABLE_BRANCH:-main}" \
         --label "vllm.rocm_base.descriptor=${descriptor}" \
-        --label "vllm.rocm_base.ci_descriptor=${ci_descriptor}" \
         --label "vllm.rocm_base.dependency_summary=${dependency_summary}" \
         --label "vllm.rocm_base.base_image=${base_image_arg}" \
         --label "vllm.rocm_base.base_image_digest=${base_image_digest}" \
-        --label "vllm.rocm_base.rocm_version=${rocm_version}" \
-        --label "vllm.rocm_base.triton_branch=${triton_arg}" \
-        --label "vllm.rocm_base.pytorch_branch=${pytorch_arg}" \
-        --label "vllm.rocm_base.pytorch_vision_branch=${pytorch_vision_arg}" \
-        --label "vllm.rocm_base.pytorch_audio_branch=${pytorch_audio_arg}" \
-        --label "vllm.rocm_base.flash_attention_branch=${fa_arg}" \
-        --label "vllm.rocm_base.aiter_branch=${aiter_arg}" \
-        --label "vllm.rocm_base.mori_branch=${mori_arg}" \
+        --label "vllm.rocm_base.dependency.rocm=${rocm_version}" \
+        --label "vllm.rocm_base.dependency.python=${python_version_arg}" \
+        --label "vllm.rocm_base.dependency.pytorch=${pytorch_arg}" \
+        --label "vllm.rocm_base.dependency.torchvision=${pytorch_vision_arg}" \
+        --label "vllm.rocm_base.dependency.torchaudio=${pytorch_audio_arg}" \
+        --label "vllm.rocm_base.dependency.triton=${triton_arg}" \
+        --label "vllm.rocm_base.dependency.flash_attention=${fa_arg}" \
+        --label "vllm.rocm_base.dependency.aiter=${aiter_arg}" \
+        --label "vllm.rocm_base.dependency.mori=${mori_arg}" \
+        --label "vllm.rocm_base.pytorch_rocm_arch=${pytorch_rocm_arch_arg}" \
         "${tags[@]}" \
         --push \
         .
@@ -481,6 +482,16 @@ build_base_image() {
     metadata_set "rocm-base-dockerfile" "${DOCKERFILE}"
     metadata_set "rocm-base-descriptor" "${descriptor}"
     metadata_set "rocm-base-dependency-summary" "${dependency_summary}"
+    metadata_set "rocm-base-dependency-rocm" "${rocm_version}"
+    metadata_set "rocm-base-dependency-python" "${python_version_arg}"
+    metadata_set "rocm-base-dependency-pytorch" "${pytorch_arg}"
+    metadata_set "rocm-base-dependency-torchvision" "${pytorch_vision_arg}"
+    metadata_set "rocm-base-dependency-torchaudio" "${pytorch_audio_arg}"
+    metadata_set "rocm-base-dependency-triton" "${triton_arg}"
+    metadata_set "rocm-base-dependency-flash-attention" "${fa_arg}"
+    metadata_set "rocm-base-dependency-aiter" "${aiter_arg}"
+    metadata_set "rocm-base-dependency-mori" "${mori_arg}"
+    metadata_set "rocm-base-pytorch-rocm-arch" "${pytorch_rocm_arch_arg}"
     metadata_set "rocm-ci-image-descriptive" "${ci_descriptive_tag}"
 
     echo "--- :white_check_mark: ROCm base image published"
