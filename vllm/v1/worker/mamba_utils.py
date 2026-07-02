@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 import dataclasses
 import itertools
 from collections.abc import Callable
@@ -914,8 +915,10 @@ def collect_mamba_copy_meta(
                     state, block_ids, src_block_idx, accept_token_bias + 1
                 )
 
-                src_ptrs_np[offset] = copy_spec.start_addr
-                dst_ptrs_np[offset] = state[dest_block_id].data_ptr()
+                src_ptrs_np[offset] = ctypes.c_int64(copy_spec.start_addr).value
+                dst_ptrs_np[offset] = ctypes.c_int64(
+                    state[dest_block_id].data_ptr()
+                ).value
                 sizes_np[offset] = copy_spec.num_elements * state.element_size()
                 offset += 1
 
