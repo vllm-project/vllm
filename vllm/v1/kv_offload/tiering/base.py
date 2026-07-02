@@ -80,6 +80,13 @@ class SecondaryTierManager(ABC):
         self._primary_kv_view: memoryview = primary_kv_view
         self.tier_type = tier_type
 
+    def medium(self) -> str | None:
+        """Wire medium for this tier's Stored KV events, or None if this tier
+        should not auto-emit Stored events (the default). Mirrors
+        OffloadingManager.medium(). Secondary-tier Stored events are a
+        follow-up (opt-in per tier); today all tiers return None."""
+        return None
+
     @abstractmethod
     def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """

@@ -200,6 +200,19 @@ class TestExampleSecondaryTierManager:
         # Third block not present
         assert tier.lookup(blocks[2], _CTX) is LookupResult.MISS
 
+    def test_medium_defaults_to_none(self):
+        """SecondaryTierManager.medium() defaults to None, so no secondary
+        Stored events are auto-emitted. Opt-in secondary events are a
+        follow-up."""
+        mock_view = memoryview(torch.zeros((10, 16), dtype=torch.int8).numpy())
+        tier = ExampleSecondaryTierManager(
+            offloading_spec=_MOCK_OFFLOADING_SPEC,
+            primary_kv_view=mock_view,
+            tier_type="example",
+            custom_param=67,
+        )
+        assert tier.medium() is None
+
 
 class TestTieringOffloadingManager:
     """Tests for TieringOffloadingManager."""

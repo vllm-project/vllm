@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, NamedTuple, NewType
 
 import numpy as np
 import torch
-from typing_extensions import override
 
 from vllm.logger import init_logger
 from vllm.v1.core.kv_cache_utils import resolve_kv_cache_block_sizes
@@ -76,6 +75,7 @@ class RequestOffloadingContext:
     policy: OffloadPolicy = OffloadPolicy.BLOCK_LEVEL
 
 
+
 class ScheduleEndContext(NamedTuple):
     """Per-step scheduling info passed to on_schedule_end()."""
 
@@ -85,20 +85,11 @@ class ScheduleEndContext(NamedTuple):
     preempted_req_ids: Collection[str]
 
 
-class LoadStoreSpec(ABC):
+class LoadStoreSpec:
     """
-    Abstract metadata that encapsulates information allowing a worker
+    Metadata that encapsulates information allowing a worker
     to load, and optionally also to store, blocks of KV data.
     """
-
-    @staticmethod
-    @abstractmethod
-    def medium() -> str:
-        """
-        Returns a string representation of the medium type
-        this store/load targets.
-        """
-        pass
 
 
 @dataclass
@@ -262,7 +253,7 @@ class OffloadingManager(ABC):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
         success: bool = True,
-    ):
+    ) -> list[OffloadKey]:
         """
         Marks blocks which were previously prepared to be stored, as stored.
         Following this call, the blocks become loadable.
@@ -273,8 +264,13 @@ class OffloadingManager(ABC):
             keys: the keys identifying the blocks.
             req_context: per-request context (e.g. kv_transfer_params).
             success: whether the blocks were stored successfully.
+
+        Returns:
+            The keys that transitioned to stored by this call. The connector
+            uses these to emit a Stored KV event (see medium()). The default
+            implementation stores nothing and returns an empty list.
         """
-        return
+        return []
 
     @abstractmethod
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -317,6 +313,17 @@ class OffloadingManager(ABC):
             New OffloadingEvents collected since the last call.
         """
         return ()
+
+    def medium(self) -> str | None:
+        """Wire medium for this manager's KV events, or None to not emit
+        Stored events.
+
+        When set, the connector emits a Stored event with this medium on
+        complete_store, and the manager tags its eviction Removed events with
+        it. Whether events are collected at all is controlled by the connector's
+        enable_kv_cache_events.
+        """
+        return None
 
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """Called once at the end of each scheduler step.
@@ -391,11 +398,6 @@ class GPULoadStoreSpec(BlockIDsLoadStoreSpec):
         assert len(block_indices) == len(group_sizes)
         self.group_sizes: Sequence[int] = group_sizes
         self.block_indices: Sequence[int] = block_indices
-
-    @staticmethod
-    @override
-    def medium() -> str:
-        return "GPU"
 
 
 @dataclass

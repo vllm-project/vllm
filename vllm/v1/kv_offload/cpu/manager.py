@@ -6,6 +6,7 @@ from typing import Literal
 
 from typing_extensions import override
 
+from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
@@ -51,7 +52,6 @@ class CPUOffloadingManager(OffloadingManager):
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
     ):
-        self.medium: str = CPULoadStoreSpec.medium()
         self._num_blocks: int = num_blocks
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
@@ -214,7 +214,7 @@ class CPUOffloadingManager(OffloadingManager):
             self.events.append(
                 OffloadingEvent(
                     keys=to_evict,
-                    medium=self.medium,
+                    medium=self.medium(),
                     removed=True,
                 )
             )
@@ -242,7 +242,7 @@ class CPUOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
         success: bool = True,
-    ) -> None:
+    ) -> list[OffloadKey]:
         stored_keys: list[OffloadKey] = []
 
         if success:
@@ -260,14 +260,10 @@ class CPUOffloadingManager(OffloadingManager):
                     self._policy.remove(key)
                     self._free_block(block)
 
-        if stored_keys and self.events is not None:
-            self.events.append(
-                OffloadingEvent(
-                    keys=stored_keys,
-                    medium=self.medium,
-                    removed=False,
-                )
-            )
+        # The Stored KV event is emitted by the connector from these returned
+        # keys (gated on medium()); this manager only reports eviction Removed
+        # events (see prepare_store).
+        return stored_keys
 
     @override
     def reset_cache(self) -> None:
@@ -287,6 +283,13 @@ class CPUOffloadingManager(OffloadingManager):
         if self.events is not None:
             yield from self.events
             self.events.clear()
+
+    @override
+    def medium(self) -> str | None:
+        # Primary CPU tier always reports a wire medium: the connector emits
+        # the GPU->CPU Stored event with it, and this manager tags its eviction
+        # Removed events with it.
+        return MEDIUM_CPU
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = OffloadingConnectorStats()
