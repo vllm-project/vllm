@@ -864,6 +864,35 @@ class VllmConfig:
             "expandable_segments is automatically disabled)."
         )
 
+    def _validate_spec_decode_pp_config(self) -> None:
+        """Validate speculative decoding + pipeline parallelism combinations.
+
+        MTP-style speculative decoding with PP > 1 is only supported on the
+        prefill (producer) side of PD-disaggregated deployments. The decode
+        (consumer) side must use PP=1 because the draft verification loop
+        cannot coordinate draft token propagation across pipeline stages.
+        """
+        if (
+            self.speculative_config is None
+            or self.speculative_config.method != "mtp"
+            or self.parallel_config.pipeline_parallel_size <= 1
+        ):
+            return
+
+        if (
+            self.kv_transfer_config is not None
+            and self.kv_transfer_config.is_kv_producer
+        ):
+            return
+
+        raise ValueError(
+            "MTP speculative decoding with pipeline_parallel_size > 1 is only "
+            "supported on the prefill (producer) side of PD-disaggregated "
+            "deployments (kv_role='kv_producer'). The decode (consumer) side "
+            "must use pipeline_parallel_size=1; combine data parallelism with "
+            "MTP instead."
+        )
+
     def __post_init__(self):
         """Verify configs are valid & consistent with each other."""
 
@@ -1587,6 +1616,7 @@ class VllmConfig:
             if "-quant_fp8" not in custom_ops:
                 custom_ops.append("+quant_fp8")
 
+        self._validate_spec_decode_pp_config()
         self._verify_kv_transfer_compat()
         # Log the custom passes that are enabled
         self.compilation_config.pass_config.log_enabled_passes()

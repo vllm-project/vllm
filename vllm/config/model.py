@@ -1180,8 +1180,15 @@ class ModelConfig:
             self._verify_with_expert_parallelism()
 
         pipeline_parallel_size = parallel_config.pipeline_parallel_size
-        if pipeline_parallel_size > 1 and not self.registry.is_pp_supported_model(
-            self.architectures, self
+        # Speculative drafters (Eagle, MTP, etc.) are loaded locally on the
+        # last pipeline stage rather than partitioned across all PP ranks.
+        # Skip the PP support check for these models since they run with an
+        # effective PP size of 1.
+        is_local_drafter = self.runner_type == "draft"
+        if (
+            pipeline_parallel_size > 1
+            and not is_local_drafter
+            and not self.registry.is_pp_supported_model(self.architectures, self)
         ):
             raise NotImplementedError(
                 "Pipeline parallelism is not supported for this model. "
