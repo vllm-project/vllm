@@ -3654,6 +3654,18 @@ def cpu_fused_moe(
     return output
 
 
+_QUTLASS_EXTENSION_ERROR = (
+    "The `_qutlass_C` extension is not loaded or does not provide the required "
+    "QUTLASS op. QUTLASS FP4 ops require a vLLM build with QUTLASS support "
+    "(CUDA 12.8+ and a supported target architecture such as SM100 or SM120)."
+)
+
+
+def _check_qutlass_op(op_name: str) -> None:
+    if not hasattr(torch.ops._qutlass_C, op_name):
+        raise RuntimeError(f"{_QUTLASS_EXTENSION_ERROR} Missing op: {op_name}.")
+
+
 if hasattr(torch.ops._qutlass_C, "matmul_mxf4_bf16_tn"):
 
     @register_fake("_qutlass_C::matmul_mxf4_bf16_tn")
@@ -3674,6 +3686,7 @@ def matmul_mxf4_bf16_tn(
     b_sf: torch.Tensor,
     alpha: torch.Tensor,
 ) -> torch.Tensor:
+    _check_qutlass_op("matmul_mxf4_bf16_tn")
     return torch.ops._qutlass_C.matmul_mxf4_bf16_tn(a, b, a_sf, b_sf, alpha)
 
 
@@ -3705,6 +3718,15 @@ def fusedQuantizeMx(
     if b.device != a.device:
         raise ValueError("`a` and `b` must be on the same device.")
 
+    if method == "quest":
+        op_name = "fusedQuantizeMxQuest"
+    elif method == "abs_max":
+        op_name = "fusedQuantizeMxAbsMax"
+    else:
+        raise ValueError(f"invalid method {method!r}, must be 'quest' or 'abs_max'")
+
+    _check_qutlass_op(op_name)
+
     xh_e2m1 = torch.empty(
         *a.shape[:-1], a.size(-1) // 2, dtype=torch.uint8, device=a.device
     )
@@ -3719,18 +3741,9 @@ def fusedQuantizeMx(
         padded_rows, padded_cols, dtype=torch.float8_e8m0fnu, device=a.device
     )
 
-    if not hasattr(torch.ops, "_qutlass_C"):
-        raise RuntimeError(
-            "The `_qutlass_C` extension is not loaded. "
-            "Make sure your custom op library is imported before calling fusedQuantizeMx."
-        )
-
     if method == "quest":
         return torch.ops._qutlass_C.fusedQuantizeMxQuest(a, b, xh_e2m1, xh_e8m0)
-    elif method == "abs_max":
-        return torch.ops._qutlass_C.fusedQuantizeMxAbsMax(a, b, xh_e2m1, xh_e8m0)
-    else:
-        raise ValueError(f"invalid method {method!r}, must be 'quest' or 'abs_max'")
+    return torch.ops._qutlass_C.fusedQuantizeMxAbsMax(a, b, xh_e2m1, xh_e8m0)
 
 
 if hasattr(torch.ops._qutlass_C, "fusedQuantizeNv"):
@@ -3749,6 +3762,8 @@ if hasattr(torch.ops._qutlass_C, "fusedQuantizeNv"):
 def fusedQuantizeNv(
     a: torch.Tensor, b: torch.Tensor, global_scale: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor]:
+    _check_qutlass_op("fusedQuantizeNv")
+
     xh_e2m1 = torch.empty(
         *a.shape[:-1], a.size(-1) // 2, dtype=torch.uint8, device=a.device
     )
