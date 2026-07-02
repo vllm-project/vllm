@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -88,7 +89,7 @@ from vllm.version import __version__ as VLLM_VERSION
 
 logger = init_logger(__name__)
 
-HANDSHAKE_TIMEOUT_MINS = 5
+HANDSHAKE_TIMEOUT_MINS = envs.VLLM_ENGINE_HANDSHAKE_TIMEOUT_MINUTES
 
 _R = TypeVar("_R")  # Return type for collective_rpc
 
@@ -1835,7 +1836,24 @@ class DPEngineCoreProc(EngineCoreProc):
 
     def add_request(self, request: Request, request_wave: int = 0):
         super().add_request(request, request_wave)
-        if self.has_coordinator and request_wave != self.current_wave:
+        if not self.has_coordinator:
+            return
+        if current_platform.is_rocm():
+            # ROCm multi-pod: also wake on wave 0's first request (when
+            # request_wave == current_wave == 0) to prevent the all-to-all
+            # collective hang on cold start. This path is ROCm-only; the
+            # non-ROCm branch below stays bit-identical to upstream.
+            if request_wave > self.current_wave:
+                self.current_wave = request_wave
+            if (
+                not self.engines_running
+                and self.scheduler.pause_state == PauseState.UNPAUSED
+            ):
+                self.engines_running = True
+                self.output_queue.put_nowait(
+                    (-1, EngineCoreOutputs(start_wave=self.current_wave))
+                )
+        elif request_wave != self.current_wave:
             if request_wave > self.current_wave:
                 self.current_wave = request_wave
             elif (

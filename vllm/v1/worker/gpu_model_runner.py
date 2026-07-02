@@ -6042,6 +6042,36 @@ class GPUModelRunner(
         )
         return hidden_states, hidden_states[logit_indices_device]
 
+    def _should_skip_rocm_sampler_warmup(self) -> bool:
+        # TODO(shikamd123): Remove this workaround once the AITER fix for the
+        # top_k_top_p / top_p sampling kernels lands and vLLM's minimum
+        # supported AITER is bumped to include it.
+        #   AITER root-cause + fix: https://github.com/ROCm/aiter/pull/<N>
+        #   vLLM-side context:      https://github.com/vllm-project/vllm/pull/45043
+        #
+        # Observed: on ROCm/MI300X (gfx942), the dummy sampler warm-up
+        # deadlocks the engine during distributed (DP) start-up for
+        # disaggregated P/D serving. The warm-up runs in LOCKSTEP across all DP
+        # ranks, so if a single rank stalls it never reaches the all-reduce
+        # checkpoint and the whole DP group hangs on a never-completing HSA
+        # signal. Seen at DP=8 (1P1D) and DP=16 (2P2D) Wide-EP; NOT reproduced
+        # in single-rank ROCm runs. Suspected root cause is the AITER
+        # rejection-sampling kernels' pivot-bisection loop
+        # (`do { ... } while(low < high)`) failing to terminate for certain
+        # distributions; the AITER-side fix is tracked in the PR above.
+        #
+        # Scope is intentionally minimal -- ROCm + multi-rank DP + a KV-transfer
+        # (disaggregated P/D) config -- so single-process ROCm inference is
+        # unaffected and sampler.logprobs_mode is preserved for everyone else.
+        # NOTE: skipping the warm-up only defers the sampler kernel's first
+        # compile to the first real sampling step, which is far preferable to a
+        # hard hang at start-up.
+        return (
+            current_platform.is_rocm()
+            and self.parallel_config.data_parallel_size > 1
+            and self.vllm_config.kv_transfer_config is not None
+        )
+
     @torch.inference_mode()
     def _dummy_sampler_run(
         self,
@@ -6087,16 +6117,11 @@ class GPUModelRunner(
             sampler_output = self.sampler(
                 logits=logits, sampling_metadata=dummy_metadata
             )
-            # Also warm forward_native (taken when generators dict is non-empty),
-            # but skip the extra call in 'processed_logits' / 'processed_logprobs'
-            # modes — there TopKTopPSampler binds forward = forward_native at
-            # init time, so the warmup call is redundant and only inflates peak
-            # memory during profile_run.
-            # No .clone() of logits: warmup output is discarded, so any in-place
-            # mutation by forward_native does not affect correctness.
-            if self.sampler.logprobs_mode not in (
-                "processed_logits",
-                "processed_logprobs",
+            # See _should_skip_rocm_sampler_warmup(): avoid the AITER sampling
+            # kernel during the lockstep DP warm-up for disaggregated ROCm runs.
+            if not self._should_skip_rocm_sampler_warmup() and (
+                self.sampler.logprobs_mode
+                not in ("processed_logits", "processed_logprobs")
             ):
                 self.sampler(
                     logits=logits,
@@ -6300,7 +6325,11 @@ class GPUModelRunner(
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True
         )
-        if get_pp_group().is_last_rank:
+        # See _should_skip_rocm_sampler_warmup(): avoid the AITER sampling
+        # kernel during the lockstep DP warm-up for disaggregated ROCm runs.
+        if self._should_skip_rocm_sampler_warmup():
+            output = None
+        elif get_pp_group().is_last_rank:
             if self.is_pooling_model:
                 output = self._dummy_pooler_run(hidden_states)
             else:
