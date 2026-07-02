@@ -5,9 +5,11 @@ use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info};
 use vllm_metrics::{
     EngineLabels, F64Gauge, METRICS, PromptTokenSourceLabels, U64Counter, U64Gauge,
+    WaitingReasonLabels,
 };
 
 const LOG_STATS_INTERVAL: Duration = Duration::from_secs(10);
+const WAITING_REASON_DEFERRED: &str = "deferred";
 
 /// Cached, cloned metric handles for one engine. Each clone shares the same
 /// underlying `Arc<Atomic*>` as the prometheus `Family` entry, so reads go
@@ -18,20 +20,28 @@ struct EngineMetrics {
     generation_tokens: U64Counter,
     prefix_cache_queries: U64Counter,
     prefix_cache_hits: U64Counter,
+    external_prefix_cache_queries: U64Counter,
+    external_prefix_cache_hits: U64Counter,
+    num_preemptions: U64Counter,
 
     // Gauges for instantaneous scheduler state.
     scheduler_running: U64Gauge,
     scheduler_waiting: U64Gauge,
+    scheduler_deferred: U64Gauge,
     kv_cache_usage: F64Gauge,
 }
 
 /// Accumulated snapshot values from the last logging interval, used to compute
 /// deltas.
+#[derive(Default)]
 struct CounterSnapshot {
     prompt_tokens: u64,
     generation_tokens: u64,
     prefix_cache_queries: u64,
     prefix_cache_hits: u64,
+    external_prefix_cache_queries: u64,
+    external_prefix_cache_hits: u64,
+    num_preemptions: u64,
 }
 
 /// Periodic stats logger that mirrors Python vLLM's `LoggingStatLogger`.
@@ -68,6 +78,11 @@ fn resolve_engine_metrics(model_name: &str, engine_count: usize) -> Vec<EngineMe
                 engine,
                 source: "local_compute",
             };
+            let deferred = WaitingReasonLabels {
+                model_name: model_name.to_string(),
+                engine,
+                reason: WAITING_REASON_DEFERRED,
+            };
             EngineMetrics {
                 // Use "local_compute" source for prompt throughput (excludes
                 // cached/transferred tokens), matching Python's
@@ -76,8 +91,21 @@ fn resolve_engine_metrics(model_name: &str, engine_count: usize) -> Vec<EngineMe
                 generation_tokens: m.request.generation_tokens.get_or_create_owned(&el),
                 prefix_cache_queries: m.scheduler.prefix_cache_queries.get_or_create_owned(&el),
                 prefix_cache_hits: m.scheduler.prefix_cache_hits.get_or_create_owned(&el),
+                external_prefix_cache_queries: m
+                    .scheduler
+                    .external_prefix_cache_queries
+                    .get_or_create_owned(&el),
+                external_prefix_cache_hits: m
+                    .scheduler
+                    .external_prefix_cache_hits
+                    .get_or_create_owned(&el),
+                num_preemptions: m.request.num_preemptions.get_or_create_owned(&el),
                 scheduler_running: m.scheduler.scheduler_running.get_or_create_owned(&el),
                 scheduler_waiting: m.scheduler.scheduler_waiting.get_or_create_owned(&el),
+                scheduler_deferred: m
+                    .scheduler
+                    .scheduler_waiting_by_reason
+                    .get_or_create_owned(&deferred),
                 kv_cache_usage: m.scheduler.kv_cache_usage.get_or_create_owned(&el),
             }
         })
@@ -123,15 +151,21 @@ async fn run_stats_logger(model_name: String, engine_count: usize) {
 
         // Read scheduler gauges (aggregate across engines).
         let (num_running, num_waiting, kv_cache_usage) = read_scheduler_gauges(&engines);
+        let num_deferred = read_deferred_waiting(&engines);
+        let delta_preemptions = curr.num_preemptions.wrapping_sub(prev.num_preemptions);
 
         // Compute prefix cache hit rate over this interval.
         let delta_queries = curr.prefix_cache_queries.wrapping_sub(prev.prefix_cache_queries);
-        let prefix_cache_hit_rate = if delta_queries > 0 {
-            let delta_hits = curr.prefix_cache_hits.wrapping_sub(prev.prefix_cache_hits);
-            delta_hits as f64 / delta_queries as f64 * 100.0
-        } else {
-            0.0
-        };
+        let delta_hits = curr.prefix_cache_hits.wrapping_sub(prev.prefix_cache_hits);
+        let prefix_cache_hit_rate = cache_hit_rate(delta_hits, delta_queries);
+
+        let delta_external_queries = curr
+            .external_prefix_cache_queries
+            .wrapping_sub(prev.external_prefix_cache_queries);
+        let delta_external_hits =
+            curr.external_prefix_cache_hits.wrapping_sub(prev.external_prefix_cache_hits);
+        let external_prefix_cache_hit_rate =
+            cache_hit_rate(delta_external_hits, delta_external_queries);
 
         // Build the log line.
         msg.clear();
@@ -140,12 +174,29 @@ async fn run_stats_logger(model_name: String, engine_count: usize) {
             "Avg prompt tput: {prompt_throughput:.1} toks/s, \
              Avg generation tput: {generation_throughput:.1} toks/s, \
              Reqs Running: {num_running}, \
-             Waiting: {num_waiting}, \
-             GPU KV cache used: {:.1}%, \
+             Waiting: {num_waiting}"
+        )
+        .unwrap();
+        if num_deferred > 0 {
+            write!(msg, ", Deferred: {num_deferred} reqs").unwrap();
+        }
+        if delta_preemptions > 0 {
+            write!(msg, ", Preemptions: {delta_preemptions}").unwrap();
+        }
+        write!(
+            msg,
+            ", GPU KV cache used: {:.1}%, \
              Prefix cache hit rate: {prefix_cache_hit_rate:.1}%",
             kv_cache_usage * 100.0,
         )
         .unwrap();
+        if delta_external_queries > 0 {
+            write!(
+                msg,
+                ", External prefix cache hit rate: {external_prefix_cache_hit_rate:.1}%"
+            )
+            .unwrap();
+        }
 
         if is_idle {
             debug!("{msg}");
@@ -162,17 +213,15 @@ async fn run_stats_logger(model_name: String, engine_count: usize) {
 
 /// Read the current cumulative counter values for throughput computation.
 fn read_counters(engines: &[EngineMetrics]) -> CounterSnapshot {
-    let mut snap = CounterSnapshot {
-        prompt_tokens: 0,
-        generation_tokens: 0,
-        prefix_cache_queries: 0,
-        prefix_cache_hits: 0,
-    };
+    let mut snap = CounterSnapshot::default();
     for e in engines {
         snap.prompt_tokens += e.prompt_tokens_computed.get();
         snap.generation_tokens += e.generation_tokens.get();
         snap.prefix_cache_queries += e.prefix_cache_queries.get();
         snap.prefix_cache_hits += e.prefix_cache_hits.get();
+        snap.external_prefix_cache_queries += e.external_prefix_cache_queries.get();
+        snap.external_prefix_cache_hits += e.external_prefix_cache_hits.get();
+        snap.num_preemptions += e.num_preemptions.get();
     }
     snap
 }
@@ -196,4 +245,29 @@ fn read_scheduler_gauges(engines: &[EngineMetrics]) -> (u64, u64, f64) {
     };
 
     (num_running, num_waiting, kv_cache_usage)
+}
+
+/// Read deferred waiting requests across all engines.
+fn read_deferred_waiting(engines: &[EngineMetrics]) -> u64 {
+    engines.iter().map(|e| e.scheduler_deferred.get()).sum()
+}
+
+/// Return the cache hit rate as a percentage for a counter delta.
+fn cache_hit_rate(hits: u64, queries: u64) -> f64 {
+    if queries > 0 {
+        hits as f64 / queries as f64 * 100.0
+    } else {
+        0.0
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_hit_rate_returns_percent_for_non_empty_queries() {
+        assert_eq!(cache_hit_rate(25, 100), 25.0);
+        assert_eq!(cache_hit_rate(0, 0), 0.0);
+    }
 }
