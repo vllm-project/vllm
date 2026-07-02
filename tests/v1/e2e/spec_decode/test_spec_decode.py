@@ -908,12 +908,78 @@ class ArgsTest:
     # Defaults
     enforce_eager: bool = True
     parallel_drafting: bool = False
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None
     target_tensor_parallel_size: int = 1
     draft_tensor_parallel_size: int = 1
     max_model_len: int = 2048
     gpu_memory_utilization: float = 0.5
     dataset: str = "test_prompts"
     num_prompts: int = 100
+
+
+DYNAMIC_SD_PARALLEL_DRAFTING_SCHEDULE = [
+    (1, 32, 3),
+    (33, 100, 1),
+]
+
+
+def assert_parallel_drafting_dynamic_sd_correctness(
+    *,
+    target_model: str,
+    draft_model: str,
+    method: str,
+    num_speculative_tokens: int = 3,
+    expected_acceptance_len: float,
+    expected_acceptance_rate: float,
+    dataset: str = "likaixin/InstructCoder",
+    num_prompts: int = 100,
+    enforce_eager: bool = False,
+    gpu_memory_utilization: float = 0.5,
+    max_model_len: int = 2048,
+) -> None:
+    """E2E test for parallel drafting (PARD or P-Eagle) with Dynamic SD."""
+    test_prompts: list[Messages] = get_messages(dataset=dataset, n=num_prompts)
+
+    spec_llm = LLM(
+        model=target_model,
+        trust_remote_code=True,
+        speculative_config={
+            "model": draft_model,
+            "method": method,
+            "num_speculative_tokens": num_speculative_tokens,
+            "max_model_len": max_model_len,
+            "enforce_eager": enforce_eager,
+            "parallel_drafting": True,
+            "num_speculative_tokens_per_batch_size": (
+                DYNAMIC_SD_PARALLEL_DRAFTING_SCHEDULE
+            ),
+        },
+        max_num_seqs=100,  # align with schedule upper bound
+        max_model_len=max_model_len,
+        gpu_memory_utilization=gpu_memory_utilization,
+        enforce_eager=enforce_eager,
+        disable_log_stats=False,
+    )
+
+    spec_llm.chat(test_prompts, greedy_sampling())
+    metrics = spec_llm.get_metrics()
+    acceptance_rate = compute_acceptance_rate(metrics)
+    acceptance_len = compute_acceptance_len(metrics)
+
+    print(
+        f"spec-decode ({method} + parallel drafting + dynamic SD): "
+        f"target={target_model}, draft={draft_model}, "
+        f"acceptance_rate={acceptance_rate:.2f}, "
+        f"acceptance_len={acceptance_len:.2f}"
+    )
+
+    assert acceptance_rate >= expected_acceptance_rate
+    assert acceptance_len >= expected_acceptance_len
+    assert spec_llm.llm_engine.vllm_config.scheduler_config.async_scheduling
+
+    del spec_llm
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
 
 
 cases = [
@@ -992,6 +1058,43 @@ def test_draft_model_parallel_drafting():
         expected_acceptance_rate=0.4,  # ref: 0.51
     )
     assert_draft_model_correctness(args)
+
+
+@single_gpu_only
+# TODO: Fix async_scheduling and engine initialization issues - see https://github.com/vllm-project/vllm/issues/38929
+@pytest.mark.xfail(
+    raises=AsyncSchedulingNotEnabledError,
+    reason="draft_model does not yet enable async_scheduling: issue #38929",
+)
+def test_draft_model_parallel_drafting_dynamic_sd():
+    """PARD (draft_model) + parallel drafting + Dynamic SD."""
+    args = ArgsTest(
+        target_model="Qwen/Qwen3-1.7B",
+        draft_model="amd/PARD-Qwen3-0.6B",
+        dataset="likaixin/InstructCoder",
+        num_speculative_tokens=3,
+        num_speculative_tokens_per_batch_size=DYNAMIC_SD_PARALLEL_DRAFTING_SCHEDULE,
+        sampling_config=greedy_sampling(),
+        parallel_drafting=True,
+        enforce_eager=False,
+        # Dynamic SD lowers K at higher batch sizes, so thresholds are relaxed.
+        expected_acceptance_len=1.5,
+        expected_acceptance_rate=0.25,
+    )
+    assert_draft_model_correctness(args)
+
+
+@single_gpu_only
+@large_gpu_mark(min_gb=24)
+def test_eagle_parallel_drafting_dynamic_sd():
+    """P-Eagle (eagle) + parallel drafting + Dynamic SD."""
+    assert_parallel_drafting_dynamic_sd_correctness(
+        target_model="meta-llama/Llama-3.1-8B-Instruct",
+        draft_model="yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+        method="eagle",
+        expected_acceptance_len=1.2,
+        expected_acceptance_rate=0.2,
+    )
 
 
 @pytest.mark.parametrize(
@@ -1183,17 +1286,23 @@ def assert_draft_model_correctness(args: ArgsTest):
         dataset=args.dataset, n=args.num_prompts
     )
 
+    speculative_config: dict[str, Any] = {
+        "model": args.draft_model,
+        "method": "draft_model",
+        "num_speculative_tokens": args.num_speculative_tokens,
+        "max_model_len": args.max_model_len,
+        "enforce_eager": args.enforce_eager,
+        "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
+        "parallel_drafting": args.parallel_drafting,
+    }
+    if args.num_speculative_tokens_per_batch_size is not None:
+        speculative_config["num_speculative_tokens_per_batch_size"] = (
+            args.num_speculative_tokens_per_batch_size
+        )
+
     spec_llm = LLM(
         model=args.target_model,
-        speculative_config={
-            "model": args.draft_model,
-            "method": "draft_model",
-            "num_speculative_tokens": args.num_speculative_tokens,
-            "max_model_len": args.max_model_len,
-            "enforce_eager": args.enforce_eager,
-            "draft_tensor_parallel_size": args.draft_tensor_parallel_size,
-            "parallel_drafting": args.parallel_drafting,
-        },
+        speculative_config=speculative_config,
         max_num_seqs=100,  # limit cudagraph capture runtime
         max_model_len=args.max_model_len,
         gpu_memory_utilization=args.gpu_memory_utilization,

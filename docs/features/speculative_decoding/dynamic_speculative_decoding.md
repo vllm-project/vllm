@@ -69,9 +69,53 @@ VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
 
 ```
 
+### Dynamic SD PARD Drafter
+
+Dynamic SD works with [PARD](../parallel_draft_model.md) using
+`method: "draft_model"` and `parallel_drafting: true`. Set
+`num_speculative_tokens` to the maximum K and use
+`num_speculative_tokens_per_batch_size` to pick a lower runtime K at higher
+concurrency.
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=0 vllm serve Qwen/Qwen3-1.7B \
+  --speculative-config '{
+    "method": "draft_model",
+    "model": "amd/PARD-Qwen3-0.6B",
+    "num_speculative_tokens": 3,
+    "parallel_drafting": true,
+    "num_speculative_tokens_per_batch_size": [
+      [1, 32, 3],
+      [33, 100, 1]
+    ]
+  }'
+```
+
+### Dynamic SD P-Eagle Drafter
+
+Dynamic SD also works with P-Eagle (parallel EAGLE drafting) using
+`method: "eagle"` or `"eagle3"` and `parallel_drafting: true`. The draft
+model must expose `ptd_token_id` in its Hugging Face config.
+
+```bash
+VLLM_USE_V2_MODEL_RUNNER=0 vllm serve meta-llama/Llama-3.1-8B-Instruct \
+  --speculative-config '{
+    "method": "eagle",
+    "model": "yuhuili/EAGLE-LLaMA3.1-Instruct-8B",
+    "num_speculative_tokens": 3,
+    "parallel_drafting": true,
+    "num_speculative_tokens_per_batch_size": [
+      [1, 32, 3],
+      [33, 100, 1]
+    ]
+  }'
+```
+
 ## Limitations
 
-* only tested with Eagle and Eagle-3. Other SD methods may or may not work out of the box
+* tested with Eagle, Eagle-3, PARD (`draft_model` with `parallel_drafting:
+  true`), and P-Eagle (`eagle` / `eagle3` with `parallel_drafting: true`).
+  Other SD methods may or may not work out of the box
 * only usable with Model Runner V1
 * not compatible with full cuda graph so we force piece-wise cuda graph with this feature
 
