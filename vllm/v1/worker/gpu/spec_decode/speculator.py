@@ -27,6 +27,26 @@ from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 
 logger = init_logger(__name__)
 
+# Salt added to the Philox offsets used for draft-token Gumbel noise.
+# Positions are bounded by max_model_len, so this puts the draft stream in a
+# range disjoint from the target-side offsets.
+DRAFT_GUMBEL_POS_OFFSET = 1 << 30
+
+
+def draft_gumbel_pos(positions: torch.Tensor) -> torch.Tensor:
+    """Philox offsets for the draft Gumbel noise, given draft-row positions.
+
+    The rejection sampler keys both the acceptance uniform and the
+    recovery/bonus Gumbel noise for the token at position P by Philox offset
+    P (see _rejection_kernel and gumbel_block_argmax). If the draft's
+    proposal for position P used the same offset, the recovery draw would
+    reuse the exact noise vector that selected the rejected draft token,
+    biasing rejection sampling. Key the proposal for position P by
+    P + DRAFT_GUMBEL_POS_OFFSET instead, keeping the streams disjoint.
+    """
+    # Parenthesized so the constant folds and this is a single tensor add.
+    return positions + (1 + DRAFT_GUMBEL_POS_OFFSET)
+
 
 class BaseSpeculator(ABC):
     @abstractmethod
@@ -270,14 +290,12 @@ class DraftModelSpeculator(BaseSpeculator):
     ) -> torch.Tensor:
         if draft_logits is not None:
             logits = self.model.compute_logits(hidden_states)
-            # NOTE(woosuk): We must add 1 to the positions to match the Gumbel noise
-            # used for draft and target sampling.
             return gumbel_sample(
                 logits,
                 idx_mapping,
                 temperature,
                 seeds,
-                positions + 1,
+                draft_gumbel_pos(positions),
                 apply_temperature=True,
                 output_processed_logits=draft_logits,
                 output_processed_logits_col=draft_step,
