@@ -4,6 +4,17 @@
 from typing import TYPE_CHECKING
 
 import torch
+from compressed_tensors.quantization.lifecycle.forward_helpers import (
+    _quantize as ct_quantize,
+)
+from compressed_tensors.quantization.quant_args import (
+    QuantizationArgs,
+    QuantizationType,
+)
+from compressed_tensors.quantization.utils.helpers import (
+    calculate_qparams,
+    calculate_range,
+)
 from torch.nn import Module
 
 if TYPE_CHECKING:
@@ -51,8 +62,84 @@ from vllm.model_executor.model_loader.reload.layerwise import (
 from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
-from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
+
+# Symmetric FP8 (E4M3) quant args. The scale/range/quantize math is delegated to
+# compressed-tensors so online quant stays numerically identical to the offline
+# export; only ``type``/``num_bits``/``symmetric`` are consulted.
+_FP8_QUANT_ARGS = QuantizationArgs(
+    num_bits=8, type=QuantizationType.FLOAT, symmetric=True
+)
+
+
+def _quantize_fp8_symmetric(
+    x: torch.Tensor,
+    reduce_dims: int | tuple[int, ...],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Symmetric FP8 weight quant shared by the block/channel helpers,
+    bit-identical to compressed-tensors' offline export.
+
+    Reduces ``x`` over ``reduce_dims`` (keepdim so the scale broadcasts back) and
+    reuses compressed-tensors for every numeric step: ``calculate_qparams`` for
+    the bf16 per-group scale, ``calculate_range`` for the e4m3 clamp, and
+    ``ct_quantize`` to scale/clamp/cast. Returns ``(qweight, scale)`` with the
+    scale in ``x``'s dtype.
+    """
+    fp8_dtype = current_platform.fp8_dtype()
+    min_vals = x.amin(dim=reduce_dims, keepdim=True)
+    max_vals = x.amax(dim=reduce_dims, keepdim=True)
+    scale, _ = calculate_qparams(min_vals, max_vals, _FP8_QUANT_ARGS)
+    q_min, q_max = calculate_range(_FP8_QUANT_ARGS, x.device)
+    q = ct_quantize(
+        x=x,
+        scale=scale,
+        zero_point=None,
+        q_min=q_min,
+        q_max=q_max,
+        args=_FP8_QUANT_ARGS,
+        dtype=fp8_dtype,
+    )
+    return q, scale
+
+
+def _quantize_fp8_blockwise(
+    weight: torch.Tensor,
+    block_size: list[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Blockwise FP8 weight quant matching compressed-tensors' ``FP8_BLOCK``
+    export.
+    """
+    assert weight.dim() == 2
+    block_n, block_k = block_size
+    m, n = weight.shape
+
+    # Zero-pad to a block-size multiple (zeros leave each block's amax unchanged).
+    pad_m = (block_n - m % block_n) % block_n
+    pad_n = (block_k - n % block_k) % block_k
+    padded = torch.nn.functional.pad(weight, (0, pad_n, 0, pad_m), value=0)
+
+    # [num_row_blocks, block_n, num_col_blocks, block_k]
+    blocks = padded.view(
+        padded.size(0) // block_n, block_n, padded.size(1) // block_k, block_k
+    )
+    q, scale = _quantize_fp8_symmetric(blocks, reduce_dims=(1, 3))
+    qweight = q.view_as(padded)[:m, :n].contiguous()
+    scale = scale.view(blocks.size(0), blocks.size(2))
+    return qweight, scale
+
+
+def _quantize_fp8_channelwise(
+    weight: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Per-output-channel FP8 weight quant matching compressed-tensors'
+    ``FP8_DYNAMIC`` (``CHANNEL``) export. Returns ``(qweight[out, in],
+    scale[out, 1])`` with the scale in the weight dtype (bf16); the caller
+    upcasts it into the fp32 buffer losslessly.
+    """
+    assert weight.dim() == 2
+    q, scale = _quantize_fp8_symmetric(weight, reduce_dims=1)
+    return q.contiguous(), scale
+
 
 # ---------------------------------------------------------------------------
 # Online FP8 Linear Methods
@@ -253,8 +340,9 @@ class Fp8PerBlockOnlineLinearMethod(_Fp8OnlineLinearBase):
         layer.input_scale = None
         block_size = self.weight_block_size
 
-        qweight, weight_scale_inv = per_block_cast_to_fp8(
-            layer.weight, block_size=block_size, use_ue8m0=False
+        # See _quantize_fp8_blockwise for offline parity.
+        qweight, weight_scale_inv = _quantize_fp8_blockwise(
+            layer.weight, block_size=block_size
         )
 
         replace_parameter(layer, "weight", qweight.data)
@@ -335,9 +423,11 @@ class Fp8PtpcOnlineLinearMethod(_Fp8OnlineLinearBase):
             return
 
         layer.input_scale = None
-        qweight, weight_scale = ops.scaled_fp8_quant(
-            layer.weight, scale=None, use_per_token_if_dynamic=True
-        )
+        # See _quantize_fp8_channelwise for offline parity.
+        qweight, weight_scale = _quantize_fp8_channelwise(layer.weight)
+        # Upcast the bf16 scale into the fp32 buffer the kernel expects (value
+        # unchanged).
+        weight_scale = weight_scale.to(torch.float32)
 
         replace_parameter(layer, "weight", qweight.t())
         replace_parameter(layer, "weight_scale", weight_scale)
@@ -643,16 +733,16 @@ class Fp8PerBlockOnlineMoEMethod(_Fp8OnlineMoEBase):
             device=w2.device,
         )
 
+        # See _quantize_fp8_blockwise for offline parity; the fp32 scale buffers
+        # hold the bf16-rounded values losslessly.
         for expert in range(num_experts):
-            w13[expert], w13_scale[expert] = per_block_cast_to_fp8(
+            w13[expert], w13_scale[expert] = _quantize_fp8_blockwise(
                 layer.w13_weight[expert],
                 block_size=block_size,
-                use_ue8m0=False,
             )
-            w2[expert], w2_scale[expert] = per_block_cast_to_fp8(
+            w2[expert], w2_scale[expert] = _quantize_fp8_blockwise(
                 layer.w2_weight[expert],
                 block_size=block_size,
-                use_ue8m0=False,
             )
 
         layer.weight_block_size = block_size
@@ -733,16 +823,14 @@ class Fp8PtpcOnlineMoEMethod(_Fp8OnlineMoEBase):
         layer.w13_input_scale = None
         layer.w2_input_scale = None
 
+        # See _quantize_fp8_channelwise for offline parity; the fp32 scale
+        # buffers hold the bf16-rounded values losslessly.
         for expert in range(layer.local_num_experts):
-            w13[expert], w13_scale[expert] = ops.scaled_fp8_quant(
-                layer.w13_weight[expert],
-                scale=None,
-                use_per_token_if_dynamic=True,
+            w13[expert], w13_scale[expert] = _quantize_fp8_channelwise(
+                layer.w13_weight[expert]
             )
-            w2[expert], w2_scale[expert] = ops.scaled_fp8_quant(
-                layer.w2_weight[expert],
-                scale=None,
-                use_per_token_if_dynamic=True,
+            w2[expert], w2_scale[expert] = _quantize_fp8_channelwise(
+                layer.w2_weight[expert]
             )
 
         self._setup_kernel(
