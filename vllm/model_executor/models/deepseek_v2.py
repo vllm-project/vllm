@@ -541,7 +541,7 @@ class DeepseekV2Attention(nn.Module):
             qk_rope_head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
-            is_neox_style=False,
+            is_neox_style=not getattr(config, "rope_interleave", True),
         )
 
         if (
@@ -1060,7 +1060,7 @@ class DeepseekV2MLAAttention(nn.Module):
             qk_rope_head_dim,
             max_position=max_position_embeddings,
             rope_parameters=config.rope_parameters,
-            is_neox_style=False,
+            is_neox_style=not getattr(config, "rope_interleave", True),
         )
 
         if (
