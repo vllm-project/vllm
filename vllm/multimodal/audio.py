@@ -219,10 +219,20 @@ def resample_audio_pyav(
 
     resampler = av.AudioResampler(format="fltp", layout="mono", rate=target_sr_int)
 
-    frame = av.AudioFrame.from_ndarray(audio_f32, format="fltp", layout="mono")
-    frame.sample_rate = orig_sr_int
+    # To avoid int32 overflows inside the PyAV/FFmpeg frame buffers,
+    # chunk the processing loop into manageable boundaries.
+    CHUNK_SIZE = 1_024_000
+    out_frames = []
 
-    out_frames = resampler.resample(frame)
+    # audio_f32 is shape (1, samples)
+    total_samples = audio_f32.shape[1]
+
+    for i in range(0, total_samples, CHUNK_SIZE):
+        chunk = audio_f32[:, i : i + CHUNK_SIZE]
+        frame = av.AudioFrame.from_ndarray(chunk, format="fltp", layout="mono")
+        frame.sample_rate = orig_sr_int
+        out_frames.extend(resampler.resample(frame))
+
     out_frames.extend(resampler.resample(None))  # flush buffered samples
 
     result = np.concatenate([f.to_ndarray() for f in out_frames], axis=1).squeeze(0)
@@ -341,7 +351,7 @@ def split_audio(
         sample_rate: Sample rate of the audio in Hz.
         max_clip_duration_s: Maximum duration of each chunk in seconds.
         overlap_duration_s: Overlap duration in seconds between consecutive chunks.
-                           Used to search for optimal split points.
+                             Used to search for optimal split points.
         min_energy_window_size: Window size in samples for finding low-energy regions.
 
     Returns:

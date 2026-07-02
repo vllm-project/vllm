@@ -824,3 +824,22 @@ class TestAudioChunking:
         )
 
         assert len(chunks_48k) >= 2
+
+
+# ============================================================
+# Tests for Chunked Processing Large Inputs
+# ============================================================
+
+
+def test_resample_audio_pyav_large_input_chunking():
+    """Verify PyAV resampling chunk loop handles sizes above CHUNK_SIZE."""
+    # Exceeding the internal limit threshold boundary (1_024_000)
+    large_len = 1_500_000
+    large_audio = np.sin(np.linspace(0, 100, large_len))
+
+    # Downsampling from 4000Hz to 2000Hz via loop pipeline
+    out_down = resample_audio_pyav(large_audio, orig_sr=4, target_sr=2)
+
+    expected_len = int(math.ceil(large_len * 2 / 4))
+    assert abs(len(out_down) - expected_len) <= 5
+    assert isinstance(out_down, np.ndarray)
