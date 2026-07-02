@@ -1373,16 +1373,9 @@ class Gemma4Model(nn.Module, EagleModelMixin):
         #   moe.experts.{id}.gate_proj → FusedMoE w1 (shard of w13)
         #   moe.experts.{id}.up_proj   → FusedMoE w3 (shard of w13)
         #   moe.experts.{id}.down_proj → FusedMoE w2
-        num_experts = getattr(self.config, "num_experts", None) or 0
         # Strategy A: dot-separated suffix
         # (standard AWQ/GPTQ e.g. .qweight, .scales, .weight)
-        dot_suffix_expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=num_experts,
-        )
+        dot_suffix_expert_params_mapping = self.get_expert_mapping()
         # Strategy B: underscore-separated suffix
         # (CompressedTensors-format AWQ/W4A16 _packed, _scale)
         underscore_suffix_expert_params_mapping = [
@@ -1496,6 +1489,17 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             loaded_params.add(name)
 
         return loaded_params
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        num_experts = getattr(self.config, "num_experts", None) or 0
+        return fused_moe_make_expert_params_mapping(
+            self,
+            ckpt_gate_proj_name="gate_proj",
+            ckpt_down_proj_name="down_proj",
+            ckpt_up_proj_name="up_proj",
+            num_experts=num_experts,
+            num_redundant_experts=getattr(self, "num_redundant_experts", 0),
+        )
 
 
 class Gemma4ForCausalLM(
@@ -1713,3 +1717,6 @@ class Gemma4ForCausalLM(
 
         loader = AutoWeightsLoader(self, skip_substrs=skip)
         return loader.load_weights(_weight_iterator())
+
+    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
+        return self.model.get_expert_mapping()
