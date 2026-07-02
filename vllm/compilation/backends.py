@@ -45,6 +45,7 @@ from .compiler_interface import (
     is_compile_cache_enabled,
 )
 from .counter import compilation_counter
+from .diagnostics import format_compile_diagnostics, get_compile_diagnostics
 from .partition_rules import (
     inductor_partition_rule_context,
     should_split,
@@ -1096,6 +1097,27 @@ class VllmBackend:
         )
 
         # Reuses existing cache key
+
+        cache_factors = {
+            "env_hash": env_hash,
+            "config_hash": config_hash,
+            "compiler_hash": compiler_hash,
+            "code_hash": code_hash,
+        }
+
+        logger.debug(
+            "torch.compile diagnostics:\n%s",
+            lazy(
+                lambda: format_compile_diagnostics(
+                    get_compile_diagnostics(
+                        vllm_config,
+                        cache_dir=cache_dir,
+                        local_cache_dir=local_cache_dir,
+                        cache_factors=cache_factors,
+                    )
+                )
+            ),
+        )
 
         logger.debug(
             "torch.compile cache factors: env=%s cfg=%s comp=%s code=%s dir=%s",
