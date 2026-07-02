@@ -1802,6 +1802,7 @@ class MoRIIOConnectorWorker:
             remote_host=meta.remote_host,
             remote_notify_port=meta.remote_notify_port,
             remote_tp_size=meta.tp_size,
+            remote_dp_rank=meta.remote_dp_rank,
         )
 
     def _write_blocks_for_req(self, req_id: ReqId, meta: ReqMeta, layer_name, kv_layer):
@@ -1937,12 +1938,20 @@ class MoRIIOConnectorWorker:
         remote_host: str,
         remote_notify_port: int,
         remote_tp_size: int,
+        remote_dp_rank: int = 0,
     ) -> None:
         if self.mode == MoRIIOMode.WRITE:
             return
 
-        dp0_engine_id = self.get_engine_name_with_dp(dst_engine_id, 0)
-        sessions, remote_moriio_meta = self._get_built_session(dp0_engine_id)
+        # Read from the prefill DP rank that actually computed this request's KV
+        # (forwarded by the proxy). Hardcoding DP0 reads from a different rank's
+        # memory registration; per-DP num_blocks differ, so high block ids can
+        # overrun the wrong rank's region. remote_dp_rank == 0 keeps the
+        # symmetric single-DP behaviour byte-for-byte.
+        remote_dp_engine_id = self.get_engine_name_with_dp(
+            dst_engine_id, int(remote_dp_rank)
+        )
+        sessions, remote_moriio_meta = self._get_built_session(remote_dp_engine_id)
 
         for layer_name in self.layer_name_to_local_kv_cache_metadata:
             sess_idx = list(self.layer_name_to_local_kv_cache_metadata.keys()).index(
@@ -1963,6 +1972,13 @@ class MoRIIOConnectorWorker:
                 self._recving_transfers[request_id].append(transfer_status)
                 self._recving_transfers_callback_addr[request_id] = (
                     remote_host,
-                    str(remote_notify_port + self._remote_tp_rank(remote_tp_size)),
+                    str(
+                        remote_notify_port
+                        + get_port_offset(
+                            int(remote_dp_rank),
+                            self._remote_tp_rank(remote_tp_size),
+                            remote_tp_size,
+                        )
+                    ),
                     transfer_id,
                 )
