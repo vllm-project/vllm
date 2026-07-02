@@ -1121,7 +1121,7 @@ def test_hisparse_swap_in_semantics():
     )
 
 
-def test_hisparse_write_newest_rows_invalidates_recycled_slots():
+def test_hisparse_invalidate_slots_drops_recycled_hot_copies():
     device = torch.device(DEVICE_TYPE)
     block_size = 4
     row_width = 8
@@ -1130,7 +1130,11 @@ def test_hisparse_write_newest_rows_invalidates_recycled_slots():
     coordinator.bind_source_cache(kv_cache)
 
     # Pretend slot 5 is cached in row 0's hot buffer from an old request.
+    # The model runner invalidates every block (re)assigned to a request
+    # before the step that first writes it; model that here.
     coordinator.device_global_indices[0, 2] = 5
+    coordinator.invalidate_slots(torch.tensor([5], device=device))
+    assert 5 not in coordinator.device_global_indices.cpu().tolist()[0]
 
     kv_c = torch.randn(1, row_width - 2, device=device)
     k_pe = torch.randn(1, 1, 2, device=device)
@@ -1139,7 +1143,6 @@ def test_hisparse_write_newest_rows_invalidates_recycled_slots():
         kv_c, k_pe, kv_cache, slot_mapping, "auto", torch.tensor(1.0, device=device)
     )
 
-    assert 5 not in coordinator.device_global_indices.cpu().tolist()[0]
     # Newest row landed in the reserved hot slot and the host mirror.
     newest_slot = coordinator.config.device_buffer_size
     expected = torch.cat([kv_c[0], k_pe[0, 0]])
@@ -1480,9 +1483,12 @@ def test_hisparse_host_resident_pool():
     torch.testing.assert_close(flat_hot[hot_cpu[0]].cpu(), flat_pool[8])
     torch.testing.assert_close(flat_hot[hot_cpu[1]].cpu(), flat_pool[1])
 
-    # Recycled-slot invalidation: rewriting global slot 8 through
-    # write_newest_rows must drop the stale hot copy and re-miss from the
+    # Recycled-slot invalidation: when slot 8's block is reassigned, the
+    # model runner invalidates it (assignment-time hook) before the new
+    # owner's first write; the stale hot copy must re-miss from the
     # updated pool.
+    coordinator.invalidate_slots(torch.tensor([8], device=device))
+    assert 8 not in coordinator.device_global_indices.cpu().tolist()[0]
     kv_c2 = torch.randn(1, row_width - 2, device=device)
     k_pe2 = torch.randn(1, 1, 2, device=device)
     coordinator.write_newest_rows(
@@ -1491,7 +1497,6 @@ def test_hisparse_host_resident_pool():
         "auto", torch.tensor(1.0, device=device),
     )
     torch.cuda.synchronize()
-    assert 8 not in coordinator.device_global_indices.cpu().tolist()[0]
     hot_cache, hot_indices = coordinator.swap_in(
         kv_cache=kv_pool,
         req_id_per_token=req_ids,

@@ -1142,7 +1142,14 @@ class GPUModelRunner(
     def _hisparse_invalidate_new_request_blocks(
         self, scheduler_output: "SchedulerOutput"
     ) -> None:
-        """Drop HiSparse state for blocks assigned to incoming requests."""
+        """Drop HiSparse state for every block (re)assigned this step.
+
+        This is the single invalidation point for recycled blocks: hot-buffer
+        hits are keyed by global slot id, and a row's top-k can only name
+        slots in its own block table, so purging stale hot copies whenever a
+        block is assigned — to a new request, a resumed request, or a running
+        request that grew — keeps every later hit byte-correct.
+        """
         attention_config = self.vllm_config.attention_config
         if attention_config is None or not attention_config.enable_hisparse:
             return
@@ -1151,11 +1158,9 @@ class GPUModelRunner(
         for new_req in scheduler_output.scheduled_new_reqs:
             block_ids.extend(new_req.block_ids[0])
         cached_reqs = scheduler_output.scheduled_cached_reqs
-        for i, req_id in enumerate(cached_reqs.req_ids):
-            if req_id in cached_reqs.resumed_req_ids:
-                new_block_ids = cached_reqs.new_block_ids[i]
-                if new_block_ids is not None:
-                    block_ids.extend(new_block_ids[0])
+        for new_block_ids in cached_reqs.new_block_ids:
+            if new_block_ids is not None:
+                block_ids.extend(new_block_ids[0])
         if not block_ids:
             return
 
