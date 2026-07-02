@@ -299,12 +299,18 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         del self._logprobs_tensors
         del self._sampled_token_ids
         if max_gen_len == 1:
-            valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
-            for i in self._invalid_req_indices:
-                valid_sampled_token_ids[i].clear()
             logprobs_lists = None
             if self._logprobs_tensors_cpu is not None:
-                logprobs_lists = self._logprobs_tensors_cpu.tolists()
+                valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
+                    self.sampled_token_ids_cpu,
+                    self.vocab_size,
+                    self._invalid_req_indices,
+                    logprobs_tensors=self._logprobs_tensors_cpu,
+                )
+            else:
+                valid_sampled_token_ids = self.sampled_token_ids_cpu.tolist()
+                for i in self._invalid_req_indices:
+                    valid_sampled_token_ids[i].clear()
         else:
             valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(
                 self.sampled_token_ids_cpu,
@@ -3660,13 +3666,20 @@ class GPUModelRunner(
             max_gen_len = sampled_token_ids.shape[-1]
             if max_gen_len == 1:
                 # No spec decode tokens.
-                valid_sampled_token_ids = self._to_list(sampled_token_ids)
-                # Mask out the sampled tokens that should not be sampled.
-                for i in discard_sampled_tokens_req_indices:
-                    valid_sampled_token_ids[int(i)].clear()
-
                 if logprobs_tensors is not None:
-                    logprobs_lists = logprobs_tensors.tolists()
+                    valid_sampled_token_ids, logprobs_lists = (
+                        RejectionSampler.parse_output(
+                            sampled_token_ids,
+                            self.input_batch.vocab_size,
+                            discard_sampled_tokens_req_indices,
+                            logprobs_tensors=logprobs_tensors,
+                        )
+                    )
+                else:
+                    valid_sampled_token_ids = self._to_list(sampled_token_ids)
+                    # Mask out the sampled tokens that should not be sampled.
+                    for i in discard_sampled_tokens_req_indices:
+                        valid_sampled_token_ids[int(i)].clear()
             else:
                 # Includes spec decode tokens.
                 valid_sampled_token_ids, logprobs_lists = RejectionSampler.parse_output(

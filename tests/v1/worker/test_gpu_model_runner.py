@@ -42,14 +42,18 @@ from vllm.v1.kv_cache_interface import (
     KVCacheGroupSpec,
     KVCacheTensor,
 )
-from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT
+from vllm.v1.outputs import (
+    EMPTY_MODEL_RUNNER_OUTPUT,
+    LogprobsTensors,
+    ModelRunnerOutput,
+)
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 from vllm.v1.worker.gpu.lora_utils import LoraState
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu_input_batch import InputBatch
-from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+from vllm.v1.worker.gpu_model_runner import AsyncGPUModelRunnerOutput, GPUModelRunner
 from vllm.v1.worker.utils import select_common_block_size
 
 BLOCK_SIZE = 16
@@ -307,6 +311,98 @@ def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
 
     output = GPUModelRunner.sample_tokens(runner, None)
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
+
+
+@pytest.mark.skip_global_cleanup
+def test_async_output_filters_discarded_single_token_logprobs():
+    class _ReadyEvent:
+        def synchronize(self):
+            pass
+
+    async_output = AsyncGPUModelRunnerOutput.__new__(AsyncGPUModelRunnerOutput)
+    async_output._model_runner_output = ModelRunnerOutput(
+        req_ids=["req_0", "req_1"],
+        req_id_to_index={"req_0": 0, "req_1": 1},
+    )
+    async_output._invalid_req_indices = [0]
+    async_output.async_copy_ready_event = _ReadyEvent()
+    async_output.sampled_token_ids_cpu = torch.tensor([[11], [21]], dtype=torch.int32)
+    async_output.vocab_size = 100
+    async_output._sampled_token_ids = async_output.sampled_token_ids_cpu
+    async_output._logprobs_tensors = None
+    async_output._logprobs_tensors_cpu = LogprobsTensors(
+        logprob_token_ids=torch.tensor([[11], [21]], dtype=torch.int32),
+        logprobs=torch.tensor([[0.11], [0.21]]),
+        selected_token_ranks=torch.tensor([1, 1], dtype=torch.int32),
+    )
+    async_output._routed_experts = None
+    async_output._routed_experts_cpu = None
+
+    output = AsyncGPUModelRunnerOutput.get_output(async_output)
+
+    assert output.sampled_token_ids == [[], [21]]
+    assert output.logprobs is not None
+    assert output.logprobs.cu_num_generated_tokens == [0, 0, 1]
+    assert output.logprobs.logprob_token_ids.tolist() == [[21]]
+    assert output.logprobs.logprobs.tolist() == [[pytest.approx(0.21)]]
+
+
+@pytest.mark.skip_global_cleanup
+def test_bookkeeping_sync_filters_discarded_single_token_logprobs():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.use_async_scheduling = False
+    runner.routed_experts_initialized = False
+    runner.discard_request_mask = SimpleNamespace(np=np.array([True, False]))
+    runner.max_model_len = 2
+    runner.requests = {
+        "req_0": SimpleNamespace(output_token_ids=[]),
+        "req_1": SimpleNamespace(output_token_ids=[]),
+    }
+    runner.input_batch = SimpleNamespace(
+        num_reqs=2,
+        generators={},
+        req_ids=["req_0", "req_1"],
+        req_id_to_index={"req_0": 0, "req_1": 1},
+        vocab_size=100,
+        num_tokens_no_spec=np.array([0, 0], dtype=np.int32),
+        token_ids_cpu=np.zeros((2, 2), dtype=np.int32),
+        is_token_ids=np.zeros((2, 2), dtype=bool),
+    )
+
+    def get_nans_in_logits(logits):
+        return {}
+
+    def get_prompt_logprobs_dict(hidden_states, num_scheduled_tokens):
+        return {}
+
+    runner._get_nans_in_logits = get_nans_in_logits
+    runner._get_prompt_logprobs_dict = get_prompt_logprobs_dict
+
+    sampler_output = SimpleNamespace(
+        sampled_token_ids=torch.tensor([[11], [21]], dtype=torch.int32),
+        logprobs_tensors=LogprobsTensors(
+            logprob_token_ids=torch.tensor([[11], [21]], dtype=torch.int32),
+            logprobs=torch.tensor([[0.11], [0.21]]),
+            selected_token_ranks=torch.tensor([1, 1], dtype=torch.int32),
+        ),
+    )
+
+    _, logprobs, tokens, _, _, _, _ = GPUModelRunner._bookkeeping_sync(
+        runner,
+        scheduler_output=SimpleNamespace(num_scheduled_tokens={}),
+        sampler_output=sampler_output,
+        logits=None,
+        hidden_states=torch.empty((0, 1)),
+        num_scheduled_tokens=0,
+    )
+
+    assert tokens == [[], [21]]
+    assert logprobs is not None
+    assert logprobs.cu_num_generated_tokens == [0, 0, 1]
+    assert logprobs.logprob_token_ids.tolist() == [[21]]
+    assert logprobs.logprobs.tolist() == [[pytest.approx(0.21)]]
+    assert runner.requests["req_0"].output_token_ids == []
+    assert runner.requests["req_1"].output_token_ids == [21]
 
 
 def test_select_common_block_size_no_valid_option():
