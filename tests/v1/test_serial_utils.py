@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import asyncio
+import contextlib
+import time
 from collections import UserDict
 from dataclasses import dataclass
 
@@ -7,6 +10,8 @@ import msgspec
 import numpy as np
 import pytest
 import torch
+import zmq
+import zmq.asyncio
 
 from vllm.multimodal.inputs import (
     MultiModalBatchedField,
@@ -423,3 +428,187 @@ def test_multiple_senders_single_receiver_ipc():
         assert torch.allclose(decoded.prompt_embeds, original_tensor), (
             f"Value mismatch for sender {sender_idx} msg {msg_idx}"
         )
+
+
+def test_output_socket_drops_undecodable_frame():
+    """A malformed frame on the engine output socket must not crash the engine.
+
+    Regression test for issue #44486: an external port scanner injected junk
+    bytes onto the engine->client output socket, msgspec raised a
+    ``ValidationError`` ("Expected array, got int"), and that exception was
+    forwarded to ``outputs_queue`` and re-raised, killing the engine.
+
+    This drives the real ``AsyncMPClient._ensure_output_queue_task`` loop with a
+    lightweight fake ``self`` and an in-process ZMQ socket pair. A garbage frame
+    (an ``int`` where ``EngineCoreOutputs`` is expected, reproducing the exact
+    error from the issue) is sent first, followed by a valid
+    ``EngineCoreOutputs``. The loop must drop the bad frame and still deliver the
+    valid one.
+    """
+    from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.engine.core_client import AsyncMPClient
+    from vllm.v1.metrics.stats import SchedulerStats
+
+    class _FakeResources:
+        def __init__(self, output_socket):
+            self.output_queue_task = None
+            self.output_socket = output_socket
+
+        def validate_alive(self, frames):
+            # The real implementation only raises on the single-frame
+            # ENGINE_CORE_DEAD sentinel; an arbitrary junk frame cannot
+            # masquerade as it, so a no-op faithfully models that here.
+            pass
+
+    class _FakeClient:
+        # Deliberately has no ``process_engine_outputs`` /
+        # ``eep_process_engine_core_notification`` attributes, so the loop
+        # takes the plain "enqueue outputs" path.
+        def __init__(self, output_socket):
+            self.resources = _FakeResources(output_socket)
+            self.decoder = MsgpackDecoder(EngineCoreOutputs)
+            self.utility_results: dict = {}
+            self.outputs_queue: asyncio.Queue = asyncio.Queue()
+
+    async def _run():
+        ctx = zmq.asyncio.Context()
+        addr = "inproc://test-44486-output"
+        recv_socket = ctx.socket(zmq.PULL)
+        recv_socket.bind(addr)
+        send_socket = ctx.socket(zmq.PUSH)
+        send_socket.connect(addr)
+
+        fake = _FakeClient(recv_socket)
+
+        encoder = MsgpackEncoder()
+
+        try:
+            # Start the real output-handling loop under test.
+            AsyncMPClient._ensure_output_queue_task(fake)
+
+            # 1) garbage frame (int where an array is expected), then
+            # 2) a valid EngineCoreOutputs.
+            await send_socket.send_multipart(list(encoder.encode(123)))
+            valid = EngineCoreOutputs(engine_index=7, scheduler_stats=SchedulerStats())
+            await send_socket.send_multipart(list(encoder.encode(valid)))
+
+            return await asyncio.wait_for(fake.outputs_queue.get(), timeout=5.0)
+        finally:
+            task = fake.resources.output_queue_task
+            if task is not None:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+            recv_socket.close(linger=0)
+            send_socket.close(linger=0)
+            ctx.term()
+
+    received = asyncio.run(_run())
+
+    # Without the fix, the queue's first item would be the forwarded
+    # ValidationError instead of our valid output.
+    assert not isinstance(received, Exception), received
+    assert isinstance(received, EngineCoreOutputs)
+    assert received.engine_index == 7
+
+
+def test_dp_coordinator_drops_undecodable_frame():
+    """A malformed frame on the DP coordinator's sockets must not crash it.
+
+    Regression test for issue #44486: the DP coordinator decodes engine
+    messages with ``decoder.decode(buffer)`` (and a raw ``msgspec.msgpack``
+    decode on the front-end socket). ``run_coordinator`` only catches
+    ``KeyboardInterrupt``, so a ``ValidationError`` from a garbage frame
+    propagated uncaught and killed the coordinator process.
+
+    This drives the real ``DPCoordinatorProc.process_input_socket`` loop. A fake
+    engine subscribes so the coordinator reaches its steady-state poll loop;
+    then a garbage frame (an ``int`` where ``EngineCoreOutputs`` is expected,
+    reproducing "Expected array, got int") is pushed to the engine output
+    socket, followed by a valid stats update. The coordinator must drop the bad
+    frame and still publish the valid stats to the front-end.
+    """
+    import threading
+
+    from vllm.utils.network_utils import get_open_zmq_ipc_path
+    from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.engine.coordinator import DPCoordinatorProc
+    from vllm.v1.metrics.stats import SchedulerStats
+
+    front_addr = get_open_zmq_ipc_path()
+    back_output_addr = get_open_zmq_ipc_path()
+    back_publish_addr = get_open_zmq_ipc_path()
+
+    coord = DPCoordinatorProc(engine_count=1, enable_wave_coordination=True)
+    captured: dict = {}
+
+    def run():
+        try:
+            # Mirrors run_coordinator(), which only catches KeyboardInterrupt;
+            # any other exception would crash the coordinator process.
+            coord.process_input_socket(
+                front_addr, back_output_addr, back_publish_addr, None
+            )
+        except KeyboardInterrupt:
+            captured["exc"] = "KeyboardInterrupt"
+        except BaseException as e:  # noqa: BLE001
+            captured["exc"] = f"{type(e).__name__}: {e}"
+
+    thread = threading.Thread(target=run, daemon=True)
+    thread.start()
+
+    ctx = coord.ctx
+    encoder = MsgpackEncoder()
+    try:
+        # Act as the single engine subscribing, so the coordinator finishes
+        # startup and enters its steady-state poll loop.
+        sub_back = ctx.socket(zmq.SUB)
+        sub_back.setsockopt(zmq.SUBSCRIBE, b"")
+        sub_back.connect(back_publish_addr)
+        sub_back.RCVTIMEO = 5000
+        assert sub_back.recv() == b"READY"
+
+        # Subscribe to the front-end stats stream to observe liveness.
+        sub_front = ctx.socket(zmq.SUB)
+        sub_front.setsockopt(zmq.SUBSCRIBE, b"")
+        sub_front.connect(front_addr)
+        sub_front.RCVTIMEO = 8000
+        time.sleep(0.2)  # let the SUB subscription propagate to the XPUB
+
+        push = ctx.socket(zmq.PUSH)
+        push.connect(back_output_addr)
+
+        # 1) garbage frame (int where an EngineCoreOutputs array is expected).
+        push.send(bytes(encoder.encode(123)[0]))
+        # 2) a valid stats update from the engine.
+        valid = EngineCoreOutputs(
+            engine_index=0,
+            scheduler_stats=SchedulerStats(num_waiting_reqs=5, num_running_reqs=3),
+        )
+        push.send(bytes(encoder.encode(valid)[0]))
+
+        # The coordinator must survive the garbage frame and publish the stats
+        # from the valid one ([waiting, running] == [5, 3]) to the front-end.
+        seen = None
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            try:
+                decoded = msgspec.msgpack.decode(sub_front.recv())
+            except zmq.Again:
+                break
+            if decoded[0] == [[5, 3]]:
+                seen = decoded[0]
+                break
+
+        assert "exc" not in captured, f"coordinator crashed: {captured.get('exc')}"
+        assert thread.is_alive(), "coordinator loop exited unexpectedly"
+        assert seen == [[5, 3]], (
+            "coordinator did not publish stats from the valid frame "
+            f"(captured={captured})"
+        )
+    finally:
+        # The loop only exits on KeyboardInterrupt; destroying the context
+        # force-closes its sockets so the thread unwinds cleanly.
+        with contextlib.suppress(Exception):
+            ctx.destroy(linger=0)
+        thread.join(timeout=5)

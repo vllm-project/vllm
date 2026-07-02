@@ -303,7 +303,19 @@ class DPCoordinatorProc:
                         # Ignore subscription messages.
                         continue
 
-                    decoded = msgspec.msgpack.decode(buffer)
+                    try:
+                        decoded = msgspec.msgpack.decode(buffer)
+                    except (msgspec.ValidationError, msgspec.DecodeError) as e:
+                        # A malformed/garbage frame (e.g. injected by a port
+                        # scanner probing a bound endpoint) must not take down
+                        # the DP coordinator. Drop it and keep serving. See
+                        # issue #44486.
+                        logger.warning(
+                            "DP Coordinator discarding undecodable message on "
+                            "front-end socket: %s",
+                            e,
+                        )
+                        continue
                     if (
                         isinstance(decoded, (list, tuple))
                         and len(decoded) == 2
@@ -363,7 +375,19 @@ class DPCoordinatorProc:
                     # We received a message from one of the engines.
 
                     buffer = output_back.recv()
-                    outputs: EngineCoreOutputs = decoder.decode(buffer)
+                    try:
+                        outputs: EngineCoreOutputs = decoder.decode(buffer)
+                    except (msgspec.ValidationError, msgspec.DecodeError) as e:
+                        # A malformed/garbage frame (e.g. injected by a port
+                        # scanner probing a bound TCP endpoint) must not take
+                        # down the DP coordinator. Drop it and keep serving.
+                        # See issue #44486.
+                        logger.warning(
+                            "DP Coordinator discarding undecodable message on "
+                            "engine output socket: %s",
+                            e,
+                        )
+                        continue
 
                     assert not outputs.outputs
                     assert outputs.utility_output is None
