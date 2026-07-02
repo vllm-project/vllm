@@ -48,7 +48,8 @@ static constexpr int NumTopGroupScores = 2;
 static constexpr int DefaultMaxNumTopExperts = 8;
 static constexpr int MaxSupportedTopExperts = 22;
 static constexpr int MaxNumTopGroups = 4;
-
+// The empirical value for small batch
+static constexpr int PDLEnableTokens = 16;
 namespace warp_topk {
 
 template <int size, typename T>
@@ -564,8 +565,8 @@ __global__ void grouped_topk_fused_kernel(
   T* s_group_scores = reinterpret_cast<T*>(ptr_u);
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.wait;");  // I think all prolog can be put before
-                                         // acqbulk because it's ptr arithmetic
+  cudaGridDependencySynchronize();  // I think all prolog can be put before
+                                    // acqbulk because it's ptr arithmetic
 #endif
 
   // phase 1: per-group scan
@@ -609,7 +610,7 @@ __global__ void grouped_topk_fused_kernel(
       topk_values[i] = 1.0f / static_cast<float>(topk_i32);
     }
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-    asm volatile("griddepcontrol.launch_dependents;");
+    cudaTriggerProgrammaticLaunchCompletion();
 #endif
     return;
   }
@@ -670,7 +671,7 @@ __global__ void grouped_topk_fused_kernel(
   }
 
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.launch_dependents;");
+  cudaTriggerProgrammaticLaunchCompletion();
 #endif
 }
 
@@ -895,7 +896,8 @@ void invokeNoAuxTc(T* scores, float* topk_values, IdxT* topk_indices,
                    int64_t const num_experts, int64_t const n_group,
                    int64_t const topk_group, int64_t const topk,
                    bool const renormalize, double const routed_scaling_factor,
-                   bool enable_pdl = false, cudaStream_t const stream = 0) {
+                   const bool enable_pdl = false,
+                   cudaStream_t const stream = 0) {
   cudaLaunchConfig_t config;
   config.stream = stream;
   cudaLaunchAttribute attrs[1];
@@ -983,7 +985,7 @@ void invokeNoAuxTc(T* scores, float* topk_values, IdxT* topk_indices,
       int64_t const num_tokens, int64_t const num_experts,                   \
       int64_t const n_group, int64_t const topk_group, int64_t const topk,   \
       bool const renormalize, double const routed_scaling_factor,            \
-      bool enable_pdl, cudaStream_t const stream);
+      const bool enable_pdl, cudaStream_t const stream);
 
 INSTANTIATE_NOAUX_TC(float, float, int32_t, SCORING_SIGMOID);
 INSTANTIATE_NOAUX_TC(float, half, int32_t, SCORING_SIGMOID);
@@ -1037,7 +1039,7 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
       scores, {num_tokens, topk}, torch::headeronly::ScalarType::Float);
   auto topk_indices = torch::stable::new_empty(
       scores, {num_tokens, topk}, torch::headeronly::ScalarType::Int);
-
+  const bool pdl_flag = num_tokens <= vllm::moe::PDLEnableTokens;
   const cudaStream_t stream =
       get_current_cuda_stream(scores.get_device_index());
   auto const sf = static_cast<vllm::moe::ScoringFunc>(scoring_func);
@@ -1052,7 +1054,7 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
             reinterpret_cast<IdxT*>(topk_indices.mutable_data_ptr()),         \
             reinterpret_cast<BiasT const*>(bias.data_ptr()), num_tokens,      \
             num_experts, n_group, topk_group, topk, renormalize,              \
-            routed_scaling_factor, false, stream);                            \
+            routed_scaling_factor, pdl_flag, stream);                         \
         break;                                                                \
       case vllm::moe::SCORING_SIGMOID:                                        \
         vllm::moe::invokeNoAuxTc<T, BiasT, IdxT, vllm::moe::SCORING_SIGMOID>( \
@@ -1061,7 +1063,7 @@ std::tuple<torch::stable::Tensor, torch::stable::Tensor> grouped_topk(
             reinterpret_cast<IdxT*>(topk_indices.mutable_data_ptr()),         \
             reinterpret_cast<BiasT const*>(bias.data_ptr()), num_tokens,      \
             num_experts, n_group, topk_group, topk, renormalize,              \
-            routed_scaling_factor, false, stream);                            \
+            routed_scaling_factor, pdl_flag, stream);                         \
         break;                                                                \
       default:                                                                \
         STD_TORCH_CHECK(false, "Unsupported scoring_func");                   \
