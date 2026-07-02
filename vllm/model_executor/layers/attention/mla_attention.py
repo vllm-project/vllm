@@ -583,6 +583,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             assert isinstance(slot_mapping, dict), (
                 f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
             )
+            prepare_hisparse_for_batch = getattr(
+                self.impl,
+                "prepare_hisparse_for_batch",
+                None,
+            )
+            if prepare_hisparse_for_batch is not None:
+                prepare_hisparse_for_batch(attn_metadata)
             self.impl.do_kv_cache_update(  # type: ignore[attr-defined]
                 kv_c_normed,
                 k_pe,
@@ -1046,8 +1053,17 @@ def unified_mla_kv_cache_update(
     the data dependency between them to ensure torch.compile preserves ordering.
     """
     layer_name = _resolve_layer_name(layer_name)
-    _, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(layer_name)
+    attn_metadata, attn_layer, kv_cache, layer_slot_mapping = get_attention_context(
+        layer_name
+    )
     if layer_slot_mapping is not None:
+        prepare_hisparse_for_batch = getattr(
+            attn_layer.impl,
+            "prepare_hisparse_for_batch",
+            None,
+        )
+        if prepare_hisparse_for_batch is not None:
+            prepare_hisparse_for_batch(attn_metadata)
         attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             kv_c_normed,
             k_pe,

@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     ChunkedTokenDatabase,
     KeyMetadata,
     LoadSpec,
+    MooncakeStoreConnectorMetadata,
     PoolKey,
     ReqMeta,
 )
@@ -181,6 +182,7 @@ def _make_vllm_config(
     extra_config: dict[str, object] | None = None,
     rank: int = 0,
     decode_context_parallel_size: int = 1,
+    enable_hisparse: bool = False,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         model_config=_FakeModelConfig(),
@@ -194,6 +196,7 @@ def _make_vllm_config(
         cache_config=SimpleNamespace(block_size=16, num_gpu_blocks=10),
         kv_events_config=SimpleNamespace(enable_kv_cache_events=False),
         speculative_config=None,
+        attention_config=SimpleNamespace(enable_hisparse=enable_hisparse),
     )
 
 
@@ -866,6 +869,46 @@ def test_requester_worker_init_skips_disk_budget_when_offload_disabled(
     assert w.disk_offload_buffer_budget_bytes is None
 
 
+def _write_minimal_mooncake_config(tmp_path) -> str:
+    return _write_mooncake_config(
+        tmp_path,
+        {
+            "metadata_server": "http://metadata/endpoint",
+            "protocol": "tcp",
+            "device_name": "",
+            "master_server_address": "10.0.0.7:50051",
+        },
+    )
+
+
+def test_worker_init_derives_hisparse_enabled_from_attention_config(
+    tmp_path, monkeypatch
+):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", _write_minimal_mooncake_config(tmp_path))
+
+    w = worker.MooncakeStoreWorker(
+        _make_vllm_config(enable_hisparse=True), _make_kv_cache_config()
+    )
+
+    assert w._hisparse_enabled is True
+
+
+def test_worker_init_hisparse_disabled_by_default(tmp_path, monkeypatch):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setenv("MOONCAKE_CONFIG_PATH", _write_minimal_mooncake_config(tmp_path))
+
+    w = worker.MooncakeStoreWorker(_make_vllm_config(), _make_kv_cache_config())
+
+    assert w._hisparse_enabled is False
+
+
 def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
     tmp_path,
     monkeypatch,
@@ -1233,6 +1276,7 @@ def _make_bare_worker(
     worker.store = MagicMock()
     worker.store.register_buffer.return_value = 0
     worker.use_mla = False
+    worker._hisparse_enabled = False
     worker.kv_role = kv_role
     worker.block_size = block_size
     worker.tp_rank = 0
@@ -1480,6 +1524,206 @@ def test_register_kv_caches_cross_layer_single_segment():
     db2 = worker2.token_dbs[0]
     assert db2.kv_caches_base_addr == db.kv_caches_base_addr
     assert db2.block_len == db.block_len
+
+
+# ---------------------------------------------------------------------------
+# HiSparse mixed host/device segment tests
+# ---------------------------------------------------------------------------
+
+
+def test_chunked_token_db_tracks_segment_mem_kinds():
+    """HiSparse marks each segment host (MLA) or device (indexer); a uniform
+    GPU registration is not "mixed", and the legacy flat path leaves the
+    metadata empty."""
+    db = ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), block_size=16)
+    db.set_kv_caches_base_addr([0x1000, 0x2000, 0x3000])
+    db.set_block_len([256, 256, 64])
+    db.set_segment_mem_kinds(["host", "host", "device"])
+    assert db.has_mixed_memory is True
+    assert db.segment_mem_kinds == ["host", "host", "device"]
+
+    db_dev = ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), block_size=16)
+    db_dev.set_kv_caches_base_addr([0x1000, 0x2000])
+    db_dev.set_block_len([256, 256])
+    db_dev.set_segment_mem_kinds(["device", "device"])
+    assert db_dev.has_mixed_memory is False
+
+    db_legacy = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0), block_size=16
+    )
+    db_legacy.set_kv_caches_base_addr([0x1000])
+    db_legacy.set_block_len([256])
+    assert db_legacy.segment_mem_kinds == []
+    assert db_legacy.has_mixed_memory is False
+
+
+def test_chunked_token_db_segment_mem_kinds_length_validated():
+    db = ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), block_size=16)
+    db.set_kv_caches_base_addr([0x1000, 0x2000])
+    db.set_block_len([256, 256])
+    with pytest.raises(ValueError, match="segment_mem_kinds"):
+        db.set_segment_mem_kinds(["host"])
+
+
+def test_chunked_token_db_prepare_value_spans_all_mixed_segments():
+    """A block's value carries every segment (host MLA + device indexer) in
+    registration order, so the save/load address lists stay aligned with the
+    per-segment memory kinds."""
+    db = ChunkedTokenDatabase(KeyMetadata("test-model", 0, 0, 0, 0), block_size=16)
+    host0, host1, dev0 = 0x10000, 0x20000, 0x30000
+    db.set_kv_caches_base_addr([host0, host1, dev0])
+    db.set_block_len([256, 256, 64])
+    db.set_segment_mem_kinds(["host", "host", "device"])
+
+    addrs, sizes, block_id = db.prepare_value(0, 16, [7])
+
+    assert block_id == 7
+    assert addrs == [host0 + 7 * 256, host1 + 7 * 256, dev0 + 7 * 64]
+    assert sizes == [256, 256, 64]
+    assert len(addrs) == len(db.segment_mem_kinds)
+
+
+def test_register_kv_caches_records_host_mem_kind_for_cpu_tensor():
+    """CPU tensors register as host segments (HiSparse host-resident MLA)."""
+    num_blocks = 10
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
+
+    tensor = torch.zeros(num_blocks, 64, dtype=torch.float16)  # CPU tensor
+    _register_with_mocked_threads(worker, {"layer0": tensor})
+
+    db = worker.token_dbs[0]
+    assert db.segment_mem_kinds == ["host"]
+    assert db.has_mixed_memory is False
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="requires CUDA to allocate a device (indexer) segment",
+)
+def test_register_kv_caches_hisparse_mixed_host_device_segments():
+    """HiSparse registers pinned host MLA + GPU indexer tensors and records the
+    mixed memory kinds, registering both buffers with the store."""
+    num_blocks = 8
+    worker = _make_bare_worker(num_gpu_blocks=num_blocks)
+
+    mla = torch.zeros(
+        num_blocks, 128, dtype=torch.float16, device="cpu", pin_memory=True
+    )
+    indexer = torch.zeros(num_blocks, 32, dtype=torch.float16, device="cuda")
+    _register_with_mocked_threads(
+        worker, {"mla.layer0": mla, "layer0.indexer": indexer}
+    )
+
+    db = worker.token_dbs[0]
+    assert db.segment_mem_kinds == ["host", "device"]
+    assert db.has_mixed_memory is True
+
+    registered = {
+        call.args[0] for call in worker.store.register_buffer.call_args_list
+    }
+    assert mla.untyped_storage().data_ptr() in registered
+    assert indexer.untyped_storage().data_ptr() in registered
+
+
+def test_store_sending_thread_emits_all_mixed_memory_segments():
+    """A save covers every host + device segment of a block so Mooncake writes
+    the whole value in one multi-buffer put."""
+    store = MagicMock()
+    store.batch_is_exist.side_effect = lambda keys: [0] * len(keys)
+    store.batch_put_from_multi_buffers.return_value = [0, 0]
+
+    host0, host1, dev0 = 0x10000, 0x20000, 0x30000
+    db = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), block_size=16
+    )
+    db.set_kv_caches_base_addr([host0, host1, dev0])
+    db.set_block_len([256, 256, 64])
+    db.set_segment_mem_kinds(["host", "host", "device"])
+    thread = _make_store_sending_thread(store, token_databases=[db])
+
+    thread.add_stored_request("r0")
+    thread._handle_request(_make_store_req("r0", [b"a0", b"a1"]))
+
+    addrs = store.batch_put_from_multi_buffers.call_args.args[1]
+    sizes = store.batch_put_from_multi_buffers.call_args.args[2]
+    # Two blocks, each carrying all three (2 host + 1 device) segments.
+    assert len(addrs) == 2
+    assert all(len(addr) == 3 for addr in addrs)
+    assert all(size == [256, 256, 64] for size in sizes)
+    assert addrs[0] == [host0, host1, dev0]
+    assert addrs[1] == [host0 + 256, host1 + 256, dev0 + 64]
+
+
+def test_store_recving_thread_emits_all_mixed_memory_segments():
+    """A load scatters every host + device segment of a block in one
+    multi-buffer get."""
+    from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheGroupSpec
+
+    store = MagicMock()
+    store.batch_get_into_multi_buffers.return_value = [256, 256]
+
+    host0, host1, dev0 = 0x10000, 0x20000, 0x30000
+    db = ChunkedTokenDatabase(
+        KeyMetadata("test-model", 0, 0, 0, 0, group_id=0), block_size=16
+    )
+    db.set_kv_caches_base_addr([host0, host1, dev0])
+    db.set_block_len([256, 256, 64])
+    db.set_segment_mem_kinds(["host", "host", "device"])
+    spec = FullAttentionSpec(block_size=16, num_kv_heads=8, head_size=64, dtype=None)
+    coord = mooncake_store_worker.MooncakeStoreCoordinator(
+        [KVCacheGroupSpec(["layer0"], spec)],
+        scheduler_block_size=16,
+        hash_block_size=16,
+    )
+    thread = mooncake_store_worker.KVCacheStoreRecvingThread(
+        store=store,
+        token_databases=[db],
+        block_size=16,
+        tp_rank=0,
+        ready_event=threading.Event(),
+        coord=coord,
+    )
+    thread.request_queue.task_done = MagicMock()
+
+    thread._handle_request(_make_load_req("r0", [b"a0", b"a1"], token_len=32))
+
+    addrs = store.batch_get_into_multi_buffers.call_args.args[1]
+    sizes = store.batch_get_into_multi_buffers.call_args.args[2]
+    assert len(addrs) == 2
+    assert all(len(addr) == 3 for addr in addrs)
+    assert all(size == [256, 256, 64] for size in sizes)
+
+
+def test_register_cross_layers_rejected_with_hisparse():
+    """Cross-layer block packing can't represent host MLA + device indexer in
+    one tensor, so it must be rejected when HiSparse is enabled."""
+    worker = _make_bare_worker()
+    worker._hisparse_enabled = True
+
+    tensor = torch.zeros(10, 64, dtype=torch.float16)
+    with pytest.raises(ValueError, match="enable_cross_layers_blocks"):
+        worker.register_cross_layers_kv_caches(tensor)
+
+
+def test_get_finished_reports_recv_admission_signal():
+    """The recv thread's finished requests surface as done_recving from
+    get_finished. The scheduler turns that into finished_recving_kv_req_ids,
+    which the model runner uses to reset HiSparse hot rows before decode reads
+    the freshly loaded host pool."""
+    worker = _make_bare_worker(kv_role="kv_consumer")
+    worker.load_async = True
+    recv_thread = MagicMock()
+    recv_thread.get_and_clear_finished_requests.return_value = {"req-a", "req-b"}
+    worker.kv_recv_thread = recv_thread
+
+    meta = MooncakeStoreConnectorMetadata(
+        unfinished_request_ids=set(), preempted_req_ids=set()
+    )
+    done_sending, done_recving = worker.get_finished(set(), meta)
+
+    assert done_recving == {"req-a", "req-b"}
+    assert done_sending == set()
+    recv_thread.get_and_clear_finished_requests.assert_called_once_with()
 
 
 # ---------------------------------------------------------------------------

@@ -1170,6 +1170,63 @@ class VllmConfig:
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if (
+            self.attention_config is not None
+            and self.attention_config.enable_hisparse
+        ):
+            # HiSparse is decode-only: the prefill-from-host path was removed,
+            # so any local prefill on a HiSparse instance fails mid-forward.
+            # Reject deployments that would prefill locally.
+            if (
+                self.kv_transfer_config is None
+                or not self.kv_transfer_config.is_kv_consumer
+            ):
+                raise ValueError(
+                    "HiSparse is decode-only and requires a kv_consumer "
+                    "connector (PD decode instance); a unified / non-PD "
+                    "instance would prefill locally, which HiSparse does not "
+                    "support."
+                )
+            if self.kv_transfer_config.kv_load_failure_policy == "recompute":
+                raise ValueError(
+                    "HiSparse is decode-only and cannot recompute failed KV "
+                    "loads (local prefill is unsupported); set "
+                    "kv_load_failure_policy='fail'."
+                )
+            if self.parallel_config.use_ubatching:
+                raise ValueError(
+                    "HiSparse does not support DBO/ubatching: micro-batches "
+                    "would index the same hot-buffer rows concurrently and "
+                    "corrupt the LRU state."
+                )
+            if self.kv_transfer_config.kv_connector not in (
+                None,
+                "NixlConnector",
+                "MooncakeStoreConnector",
+                "MultiConnector",
+            ):
+                logger.warning(
+                    "HiSparse host-resident KV is configured with connector "
+                    "%s. NixlConnector (direct-to-host RDMA) and "
+                    "MooncakeStoreConnector (shared-store offload) are the "
+                    "validated paths; other connectors are treated as "
+                    "debug/fallback paths.",
+                    self.kv_transfer_config.kv_connector,
+                )
+
+            if self.compilation_config.cudagraph_mode != CUDAGraphMode.NONE:
+                from vllm.v1.attention.backends.mla.hisparse import (
+                    _has_hisparse_ops,
+                )
+
+                if not _has_hisparse_ops():
+                    logger.warning(
+                        "HiSparse CUDA ops are not compiled; the Python "
+                        "fallback is not CUDA-graph capturable. Disabling "
+                        "CUDA graphs."
+                    )
+                    self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+
+        if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
             and not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
