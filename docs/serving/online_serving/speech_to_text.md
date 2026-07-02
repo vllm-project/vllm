@@ -67,7 +67,7 @@ The Transcriptions API supports uploading audio files in various formats includi
 - `response_format`: Format of the response ("json", "text") (optional)
 - `temperature`: Sampling temperature between 0 and 1 (optional)
 
-For the complete list of supported parameters including sampling parameters and vLLM extensions, see the [protocol definitions](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/openai/protocol.py#L2182).
+For the complete list of supported parameters including sampling parameters and vLLM extensions, see the [protocol definitions](https://github.com/vllm-project/vllm/blob/main/vllm/entrypoints/speech_to_text/transcription/protocol.py).
 
 **Response Format:**
 
