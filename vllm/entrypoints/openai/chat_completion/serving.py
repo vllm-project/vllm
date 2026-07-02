@@ -580,8 +580,13 @@ class OpenAIServingChat(OpenAIServing):
                         not delta_text
                         and not output.token_ids
                         and not previous_num_tokens[i]
+                        and output.finish_reason is None
                     ):
-                        # Chunked prefill case, don't return empty chunks
+                        # Chunked prefill case, don't return empty chunks.
+                        # When finish_reason is set (e.g. "error" from a KV
+                        # cache load failure), the output legitimately has no
+                        # tokens and must flow through to _raise_if_error
+                        # below so the SSE error chunk is emitted.
                         continue
 
                     delta_message: DeltaMessage | None

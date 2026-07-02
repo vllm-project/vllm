@@ -326,6 +326,72 @@ async def test_chat_error_stream():
     assert chunks[-1] == "data: [DONE]\n\n"
 
 
+@pytest.mark.asyncio
+async def test_chat_error_stream_empty_first_chunk():
+    """Regression: finish_reason='error' on the first chunk (no tokens yet)
+    must surface as a streaming error.
+
+    Reproduces a KV cache load failure (e.g. NIXL/LMCache connector returning
+    invalid blocks before any tokens have been generated). The engine yields
+    a single output with finish_reason='error', empty text, empty token_ids,
+    and previous_num_tokens still 0. Without the fix, the chunked-prefill
+    skip swallows this output and the client receives only the role chunk
+    plus [DONE] - HTTP 200 with no error indication.
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    completion_output = CompletionOutput(
+        index=0,
+        text="",
+        token_ids=[],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="error",
+    )
+
+    request_output = RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[completion_output],
+        finished=True,
+        metrics=None,
+        lora_request=None,
+        encoder_prompt=None,
+        encoder_prompt_token_ids=None,
+    )
+
+    async def mock_generate(*args, **kwargs):
+        yield request_output
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "Test prompt"}],
+        max_tokens=10,
+        stream=True,
+    )
+
+    response = await serving_chat.create_chat_completion(request)
+
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    assert any("Internal server error" in chunk for chunk in chunks), (
+        f"Expected error message in chunks: {chunks}"
+    )
+    assert chunks[-1] == "data: [DONE]\n\n"
+
+
 @pytest.mark.parametrize(
     "image_content",
     [

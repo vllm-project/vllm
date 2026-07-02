@@ -317,6 +317,71 @@ async def test_completion_error_stream():
     assert chunks[-1] == "data: [DONE]\n\n"
 
 
+@pytest.mark.asyncio
+async def test_completion_error_stream_empty_first_chunk():
+    """Regression: finish_reason='error' on the first chunk (no tokens yet)
+    must surface as a streaming error.
+
+    Reproduces a KV cache load failure (e.g. NIXL/LMCache connector returning
+    invalid blocks before any tokens have been generated). The engine yields
+    a single output with finish_reason='error', empty text, empty token_ids,
+    and previous_num_tokens still 0. Without the fix, the chunked-prefill
+    skip swallows this output and the client receives only [DONE].
+    """
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_completion = _build_serving_completion(mock_engine)
+
+    completion_output = CompletionOutput(
+        index=0,
+        text="",
+        token_ids=[],
+        cumulative_logprob=None,
+        logprobs=None,
+        finish_reason="error",
+    )
+
+    request_output = RequestOutput(
+        request_id="test-id",
+        prompt="Test prompt",
+        prompt_token_ids=[1, 2, 3],
+        prompt_logprobs=None,
+        outputs=[completion_output],
+        finished=True,
+        metrics=None,
+        lora_request=None,
+        encoder_prompt=None,
+        encoder_prompt_token_ids=None,
+    )
+
+    async def mock_generate(*args, **kwargs):
+        yield request_output
+
+    mock_engine.generate = MagicMock(side_effect=mock_generate)
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=10,
+        stream=True,
+    )
+
+    response = await serving_completion.create_completion(request)
+
+    chunks = []
+    async for chunk in response:
+        chunks.append(chunk)
+
+    assert any("Internal server error" in chunk for chunk in chunks), (
+        f"Expected error message in chunks: {chunks}"
+    )
+    assert chunks[-1] == "data: [DONE]\n\n"
+
+
 def test_json_schema_response_format_missing_schema():
     """When response_format type is 'json_schema' but the json_schema field
     is not provided, request construction should raise a validation error
