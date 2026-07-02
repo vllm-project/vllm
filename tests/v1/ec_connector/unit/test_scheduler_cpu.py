@@ -59,24 +59,20 @@ def test_offload_reuse_cycle(monkeypatch):
     s = _make_scheduler(monkeypatch)
     req = _Request([_Feature("h1", length=1)])
 
-    # Step A: first sight — not cached, scheduled for save.
+    # Step A: first sight — allocate, save, AND promote in the same step.
     assert s.has_cache_item("h1") is False
     assert s.ensure_cache_available(req, 0) is True
     s.update_state_after_alloc(req, 0)
     meta_a = s.build_connector_meta(scheduler_output=None)
     assert "h1" in meta_a.saves
     assert meta_a.loads == {}
+    assert s.has_cache_item("h1") is True  # promoted same step
 
-    # Step B: promotion completes on the next build; now cached.
-    meta_b = s.build_connector_meta(scheduler_output=None)
-    assert meta_b.saves == {}
-    assert s.has_cache_item("h1") is True
-
-    # Step C: reuse — cache hit re-serves the same blocks as a load.
+    # Step B: reuse — cache hit re-serves the same blocks as a load.
     s.update_state_after_alloc(req, 0)
-    meta_c = s.build_connector_meta(scheduler_output=None)
-    assert "h1" in meta_c.loads
-    assert meta_c.loads["h1"] == meta_a.saves["h1"]
+    meta_b = s.build_connector_meta(scheduler_output=None)
+    assert "h1" in meta_b.loads
+    assert meta_b.loads["h1"] == meta_a.saves["h1"]
 
     s.shutdown()
 

@@ -101,11 +101,10 @@ def test_build_saves_allocates_and_promotes():
     saves = p.build_saves()
     assert "h1" in saves and len(saves["h1"]) == 1
     assert p._blocks["h1"] == saves["h1"]
-    # Not promoted to local cache until the NEXT build_saves.
-    assert "h1" not in p._local_encodings
-    saves2 = p.build_saves()
-    assert saves2 == {}
+    # Promoted to the local cache in the SAME build_saves.
     assert "h1" in p._local_encodings
+    # A second build_saves has nothing new to do.
+    assert p.build_saves() == {}
     r.cleanup()
 
 
