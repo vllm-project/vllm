@@ -120,6 +120,7 @@ class INCConfigParser:
                             "group_size",
                             self._config.group_size if quantized else -1,
                         )
+                    ),
                     cfg.get("sym", self._config.sym if quantized else True),
                 )
 
