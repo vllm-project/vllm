@@ -358,7 +358,6 @@ build_base_image() {
     local content_args="${ROCM_BASE_CONTENT_ARGS:-${DEFAULT_ROCM_BASE_CONTENT_ARGS}}"
     local content_files_hash=""
     local metadata_version="${ROCM_BASE_METADATA_VERSION:-${DEFAULT_ROCM_BASE_METADATA_VERSION}}"
-    local git_branch="${BUILDKITE_BRANCH:-${VLLM_BRANCH:-}}"
     local -a tags=()
     local -a no_cache_args=()
     local -a sccache_args=()
@@ -462,7 +461,6 @@ build_base_image() {
         --label "vllm.rocm_base.flash_attention_branch=${fa_arg}" \
         --label "vllm.rocm_base.aiter_branch=${aiter_arg}" \
         --label "vllm.rocm_base.mori_branch=${mori_arg}" \
-        --label "vllm.rocm_base.use_sccache=${use_sccache}" \
         "${tags[@]}" \
         --push \
         .
