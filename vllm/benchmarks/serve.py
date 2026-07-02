@@ -663,6 +663,15 @@ def calculate_metrics(
         print("Failed requests during benchmark run detected (capping to 10):")
         for i, err in enumerate(failed_outputs[:10]):
             print(f"Error {i}: {err.error}")
+        num_timed_out = sum("TimeoutError" in output.error for output in failed_outputs)
+        if num_timed_out > 0:
+            warnings.warn(
+                f"{num_timed_out} request(s) timed out waiting for response "
+                "data (stalled or hung stream). They are counted as failed "
+                "and excluded from the metrics. The per-chunk read timeout "
+                "is controlled by the VLLM_BENCH_SOCK_READ env var.",
+                stacklevel=2,
+            )
 
     if successful_outputs:
         min_start_time = min(output.start_time for output in successful_outputs)
@@ -819,7 +828,14 @@ async def benchmark(
     session = aiohttp.ClientSession(
         connector=connector,
         trust_env=True,
-        timeout=aiohttp.ClientTimeout(total=6 * 60 * 60),
+        timeout=aiohttp.ClientTimeout(
+            total=6 * 60 * 60,
+            # Per-chunk read timeout: fail a request if no response chunk arrives for
+            # this many seconds (default off). Kills a stalled/half-open stream so one
+            # hung straggler can't block the run, it finishes and still writes its
+            # result JSON (the straggler just counts as a failed request).
+            sock_read=float(os.getenv("VLLM_BENCH_SOCK_READ", "0")) or None,
+        ),
     )
 
     print("Starting initial single prompt test run...")
