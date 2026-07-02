@@ -508,6 +508,8 @@ class DelegatingParser(Parser):
         if self._tool_parser is not None:
             request = self._apply_structural_tag(request)
         if self._tool_parser is not None:
+            request = self._apply_tool_json_grammar(request)
+        if self._tool_parser is not None:
             request = self._tool_parser.adjust_request(request)
         return request
 
@@ -548,6 +550,88 @@ class DelegatingParser(Parser):
         else:
             request.response_format = None
         return request
+
+    def _apply_tool_json_grammar(
+        self, request: ChatCompletionRequest | ResponsesRequest
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        # Encode-side guided decoding for forced (required/named) tool choice
+        # when the native structural-tag path is NOT used (strict=0). Mirrors
+        # the response_format json path, sourced from the request's own tool
+        # schema, so the forced call is constrained to schema-valid JSON and
+        # the JSON-based parse path (supports_required_and_named) sees output
+        # that conforms instead of unconstrained native syntax.
+        tool_parser = self._tool_parser
+        if tool_parser is None or not tool_parser.supports_required_and_named:
+            return request
+        if not request.tools:
+            return request
+        if request.structured_outputs is not None:
+            return request
+        is_named = isinstance(
+            request.tool_choice,
+            (ToolChoiceFunction, ChatCompletionNamedToolChoiceParam),
+        )
+        is_required = request.tool_choice == "required"
+        if not is_named and not is_required:
+            return request
+        schema = self._build_tool_choice_json_schema(request, is_named)
+        if schema is None:
+            return request
+        request.structured_outputs = StructuredOutputsParams(json=schema)
+        if isinstance(request, ResponsesRequest):
+            request.text = None
+        else:
+            request.response_format = None
+        return request
+
+    def _build_tool_choice_json_schema(
+        self, request: ChatCompletionRequest | ResponsesRequest, is_named: bool
+    ) -> dict | None:
+        functions = [
+            tool.function
+            for tool in request.tools
+            if getattr(tool, "type", "function") == "function"
+            and getattr(tool, "function", None) is not None
+        ]
+        if not functions:
+            return None
+        if is_named:
+            name = self._get_function_name(request)
+            for function in functions:
+                if function.name == name:
+                    return function.parameters or {
+                        "type": "object",
+                        "properties": {},
+                    }
+            return None
+        # "required": match the list[FunctionDefinition] shape the parse path
+        # validates, i.e. an array of {name, parameters} objects. Nesting each
+        # tool's parameters relocates it away from the document root, so hoist
+        # any "$defs" up to the top level to keep "#/$defs/..." refs resolvable.
+        top_defs: dict = {}
+        call_schemas = []
+        for function in functions:
+            params = dict(function.parameters or {"type": "object", "properties": {}})
+            defs = params.pop("$defs", None)
+            if defs:
+                top_defs.update(defs)
+            call_schemas.append(
+                {
+                    "type": "object",
+                    "properties": {
+                        "name": {"const": function.name},
+                        "parameters": params,
+                    },
+                    "required": ["name", "parameters"],
+                }
+            )
+        items_schema = (
+            {"anyOf": call_schemas} if len(call_schemas) > 1 else call_schemas[0]
+        )
+        schema: dict = {"type": "array", "items": items_schema, "minItems": 1}
+        if top_defs:
+            schema["$defs"] = top_defs
+        return schema
 
     def extract_reasoning_streaming(
         self,
