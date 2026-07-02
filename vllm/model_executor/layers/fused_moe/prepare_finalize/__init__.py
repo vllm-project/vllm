@@ -4,6 +4,9 @@
 from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
     BatchedPrepareAndFinalize,
 )
+from vllm.model_executor.layers.fused_moe.prepare_finalize.batched_ag_rs import (
+    BatchedAgRsPrepareAndFinalize,
+)
 from vllm.model_executor.layers.fused_moe.prepare_finalize.naive_dp_ep import (
     MoEPrepareAndFinalizeNaiveDPEPModular,
     MoEPrepareAndFinalizeNaiveDPEPMonolithic,
@@ -17,6 +20,7 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.no_dp_ep import (
 
 __all__ = [
     "BatchedPrepareAndFinalize",
+    "BatchedAgRsPrepareAndFinalize",
     "MoEPrepareAndFinalizeNaiveDPEPMonolithic",
     "MoEPrepareAndFinalizeNaiveDPEPModular",
     "make_moe_prepare_and_finalize_naive_dp_ep",

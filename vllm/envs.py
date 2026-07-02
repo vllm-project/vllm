@@ -89,6 +89,7 @@ if TYPE_CHECKING:
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
     VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
+    VLLM_XPU_MOE_USE_BATCHED_TRITON: bool = False
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -592,6 +593,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Unset disables the check. See `torch.cuda.set_sync_debug_mode`.
     "VLLM_GPU_SYNC_CHECK": env_with_choices(
         "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"]
+    ),
+    # Opt-in: route unquantized XPU MoE through BatchedTritonExperts (the
+    # moe_mmk TD kernel) using the no-comms reference batched prepare/finalize.
+    # Default off keeps XPUExperts as the XPU backend.
+    "VLLM_XPU_MOE_USE_BATCHED_TRITON": lambda: bool(
+        int(os.getenv("VLLM_XPU_MOE_USE_BATCHED_TRITON", "0"))
     ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
