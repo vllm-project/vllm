@@ -26,6 +26,9 @@ struct EngineMetrics {
     spec_decode_num_drafts: U64Counter,
     spec_decode_num_draft_tokens: U64Counter,
     spec_decode_num_accepted_tokens: U64Counter,
+    estimated_flops_per_gpu: U64Counter,
+    estimated_read_bytes_per_gpu: U64Counter,
+    estimated_write_bytes_per_gpu: U64Counter,
 
     // Gauges for instantaneous scheduler state.
     scheduler_running: U64Gauge,
@@ -48,6 +51,9 @@ struct CounterSnapshot {
     spec_decode_num_drafts: u64,
     spec_decode_num_draft_tokens: u64,
     spec_decode_num_accepted_tokens: u64,
+    estimated_flops_per_gpu: u64,
+    estimated_read_bytes_per_gpu: u64,
+    estimated_write_bytes_per_gpu: u64,
 }
 
 /// Derived spec-decoding values for one logging interval.
@@ -58,6 +64,12 @@ struct SpecDecodingLogStats {
     accepted_tokens: u64,
     draft_tokens: u64,
     draft_acceptance_rate: f64,
+}
+
+/// Derived MFU values for one logging interval.
+struct MfuLogStats {
+    tflops_per_gpu: f64,
+    gbps_per_gpu: f64,
 }
 
 /// Periodic stats logger that mirrors Python vLLM's `LoggingStatLogger`.
@@ -124,6 +136,18 @@ fn resolve_engine_metrics(model_name: &str, engine_count: usize) -> Vec<EngineMe
                 spec_decode_num_accepted_tokens: m
                     .scheduler
                     .spec_decode_num_accepted_tokens
+                    .get_or_create_owned(&el),
+                estimated_flops_per_gpu: m
+                    .scheduler
+                    .estimated_flops_per_gpu
+                    .get_or_create_owned(&el),
+                estimated_read_bytes_per_gpu: m
+                    .scheduler
+                    .estimated_read_bytes_per_gpu
+                    .get_or_create_owned(&el),
+                estimated_write_bytes_per_gpu: m
+                    .scheduler
+                    .estimated_write_bytes_per_gpu
                     .get_or_create_owned(&el),
                 scheduler_running: m.scheduler.scheduler_running.get_or_create_owned(&el),
                 scheduler_waiting: m.scheduler.scheduler_waiting.get_or_create_owned(&el),
@@ -203,6 +227,7 @@ async fn run_stats_logger(model_name: String, engine_count: usize) {
         let external_prefix_cache_hit_rate =
             cache_hit_rate(delta_external_hits, delta_external_queries);
         let spec_decoding_log_stats = spec_decoding_log_stats(&curr, &prev, elapsed);
+        let mfu_log_stats = mfu_log_stats(&curr, &prev, elapsed, engines.len());
 
         // Build the log line.
         msg.clear();
@@ -259,6 +284,14 @@ async fn run_stats_logger(model_name: String, engine_count: usize) {
             log_stats_line!("{msg}");
         }
 
+        if let Some(mfu_stats) = mfu_log_stats {
+            log_stats_line!(
+                "MFU: {:.1} TF/s/GPU {:.1} GB/s/GPU",
+                mfu_stats.tflops_per_gpu,
+                mfu_stats.gbps_per_gpu,
+            );
+        }
+
         last_prompt_throughput = prompt_throughput;
         last_generation_throughput = generation_throughput;
         last_log_time = now;
@@ -280,6 +313,9 @@ fn read_counters(engines: &[EngineMetrics]) -> CounterSnapshot {
         snap.spec_decode_num_drafts += e.spec_decode_num_drafts.get();
         snap.spec_decode_num_draft_tokens += e.spec_decode_num_draft_tokens.get();
         snap.spec_decode_num_accepted_tokens += e.spec_decode_num_accepted_tokens.get();
+        snap.estimated_flops_per_gpu += e.estimated_flops_per_gpu.get();
+        snap.estimated_read_bytes_per_gpu += e.estimated_read_bytes_per_gpu.get();
+        snap.estimated_write_bytes_per_gpu += e.estimated_write_bytes_per_gpu.get();
     }
     snap
 }
@@ -361,6 +397,41 @@ fn spec_decoding_log_stats(
     })
 }
 
+/// Compute average per-GPU MFU rates for one logging interval.
+fn mfu_log_stats(
+    curr: &CounterSnapshot,
+    prev: &CounterSnapshot,
+    elapsed: f64,
+    engine_count: usize,
+) -> Option<MfuLogStats> {
+    let flops = curr.estimated_flops_per_gpu.wrapping_sub(prev.estimated_flops_per_gpu);
+    let read_bytes = curr
+        .estimated_read_bytes_per_gpu
+        .wrapping_sub(prev.estimated_read_bytes_per_gpu);
+    let write_bytes = curr
+        .estimated_write_bytes_per_gpu
+        .wrapping_sub(prev.estimated_write_bytes_per_gpu);
+
+    if flops == 0 && read_bytes == 0 && write_bytes == 0 {
+        return None;
+    }
+
+    let denominator = elapsed * engine_count.max(1) as f64;
+    let (tflops_per_gpu, gbps_per_gpu) = if denominator > 0.0 {
+        (
+            flops as f64 / denominator / 1e12,
+            (read_bytes as f64 + write_bytes as f64) / denominator / 1e9,
+        )
+    } else {
+        (0.0, 0.0)
+    };
+
+    Some(MfuLogStats {
+        tflops_per_gpu,
+        gbps_per_gpu,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -394,5 +465,26 @@ mod tests {
         assert_eq!(stats.accepted_tokens, 12);
         assert_eq!(stats.draft_tokens, 20);
         assert_eq!(stats.draft_acceptance_rate, 60.0);
+    }
+
+    #[test]
+    fn mfu_log_stats_averages_per_gpu_across_engines() {
+        let prev = CounterSnapshot {
+            estimated_flops_per_gpu: 10,
+            estimated_read_bytes_per_gpu: 10,
+            estimated_write_bytes_per_gpu: 10,
+            ..Default::default()
+        };
+        let curr = CounterSnapshot {
+            estimated_flops_per_gpu: 4_000_000_000_010,
+            estimated_read_bytes_per_gpu: 2_000_000_010,
+            estimated_write_bytes_per_gpu: 2_000_000_010,
+            ..Default::default()
+        };
+
+        let stats = mfu_log_stats(&curr, &prev, 2.0, 2).unwrap();
+
+        assert_eq!(stats.tflops_per_gpu, 1.0);
+        assert_eq!(stats.gbps_per_gpu, 1.0);
     }
 }
