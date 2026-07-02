@@ -807,7 +807,7 @@ class DeepStreamVideoBackendMixin:
             from nvidia.deepstream_videodecode import DecodePool
 
             if pool_size is None:
-                pool_size = os.environ.get("VLLM_MEDIA_LOADING_THREAD_COUNT", 8)
+                pool_size = int(os.environ.get("VLLM_MEDIA_LOADING_THREAD_COUNT", 8))
             pool_size = max(1, min(int(pool_size), 16))
             logger.info(
                 "[DeepStream] initializing decode pool with %d workers",
@@ -1009,9 +1009,7 @@ class VideoBackend(
             # the deepstream video-decode wheel) — no PyAV/pymediainfo, no path.
             from nvidia.deepstream_videodecode import probe_metadata
 
-            total_frames, original_fps, duration, _w, _h, codec = (
-                probe_metadata(data)
-            )
+            total_frames, original_fps, duration, _w, _h, codec = probe_metadata(data)
             source = cls._prepare_source(
                 VideoSourceMetadata(
                     total_frames_num=total_frames,
@@ -1115,7 +1113,7 @@ class Qwen3VLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
+        backend: Literal["opencv", "pyav", "pynvvideocodec", "deepstream"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -1194,7 +1192,7 @@ class Qwen2VLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
+        backend: Literal["opencv", "pyav", "pynvvideocodec", "deepstream"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -1411,7 +1409,7 @@ class GLM46VVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
+        backend: Literal["opencv", "pyav", "pynvvideocodec", "deepstream"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -1509,7 +1507,7 @@ class GLMGAVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "pynvvideocodec"] = "opencv",
+        backend: Literal["opencv", "pyav", "pynvvideocodec", "deepstream"] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         frames, metadata = super().load_bytes(
