@@ -2,12 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Worker-side handler for SimpleCPUOffloadConnector."""
 
+import threading
 from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.simple_kv_offload.copy_backend import DmaCopyBackend
 from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
@@ -30,6 +32,8 @@ class SimpleCPUOffloadWorker:
         vllm_config: VllmConfig,
         kv_cache_config: "KVCacheConfig | None",
         cpu_capacity_bytes: int,
+        worker_rank: int = 0,
+        async_register_cache: bool = False,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -67,6 +71,17 @@ class SimpleCPUOffloadWorker:
         # Completed store events to report via build_connector_worker_meta
         self._completed_store_events: dict[int, int] = {}
 
+        # Async pin state
+        self._worker_rank = worker_rank
+        self._async_register = async_register_cache
+        # _pin_done: set when memory allocation + cudaHostRegister complete.
+        # Never cleared; readable from any thread after set.
+        self._pin_done = threading.Event()
+        # _readiness_emitted: ensures we signal the scheduler exactly once.
+        # Separate from _pin_done (which is never cleared) so that we don't
+        # re-emit the same signal on every subsequent scheduler step.
+        self._readiness_emitted = False
+
     def register_kv_caches(
         self,
         kv_caches: dict[str, torch.Tensor],
@@ -82,6 +97,8 @@ class SimpleCPUOffloadWorker:
         """
         if not kv_caches:
             logger.warning("No KV caches to offload.")
+            # Nothing to pin; mark as ready so the async gate still opens.
+            self._pin_done.set()
             return
 
         # Resolve each entry to a representative tensor for storage
@@ -158,25 +175,72 @@ class SimpleCPUOffloadWorker:
             logger.warning(
                 "Pinned memory not available. CPU offload performance may be degraded."
             )
-
         self.gpu_kv_caches = unique_gpu_caches
-        self.cpu_kv_caches = {}
-        for name, gpu_tensor in unique_gpu_caches.items():
-            cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
-            # Allocate non-pinned first, then pin via cudaHostRegister to
-            # bypass PyTorch's CUDACachingHostAllocator which rounds up to
-            # the next power of 2 (e.g. 100 GB -> 128 GB).
-            tensor = torch.zeros(cpu_shape, dtype=gpu_tensor.dtype, device="cpu")
-            if pin_memory:
-                pin_tensor(tensor)
-            self.cpu_kv_caches[name] = tensor
 
-        # Use lowest priority so KV cache I/O yields to compute streams.
+        if self._async_register:
+            self._start_async_pin(pin_memory)
+        else:
+            self._do_alloc_pin_init(pin_memory)
+
+    def _do_alloc_pin_init(self, pin_memory: bool) -> None:
+        # Allocate non-pinned first, then pin via cudaHostRegister to
+        # bypass PyTorch's CUDACachingHostAllocator which rounds up to
+        # the next power of 2 (e.g. 100 GB -> 128 GB).
+        assert self.gpu_kv_caches is not None
+        self.cpu_kv_caches = {}
+        for name, gpu_tensor in self.gpu_kv_caches.items():
+            cpu_shape = (self.num_cpu_blocks,) + gpu_tensor.shape[1:]
+            tensor = torch.zeros(cpu_shape, dtype=gpu_tensor.dtype, device="cpu")
+            self.cpu_kv_caches[name] = tensor
+        if pin_memory:
+            for tensor in self.cpu_kv_caches.values():
+                pin_tensor(tensor)
+        self._create_streams_and_backend()
+        self._pin_done.set()
+
+    def _start_async_pin(self, pin_memory: bool) -> None:
+        """Background thread does the init. Main thread returns now so the
+        engine can finish initialisation and start serving requests."""
+
+        def _pin_task() -> None:
+            try:
+                self._setup_device()
+                self._do_alloc_pin_init(pin_memory)
+                logger.info(
+                    "SimpleCPUOffloadWorker rank=%d: async pin complete",
+                    self._worker_rank,
+                )
+            except Exception:
+                # Leave _pin_done unset so the scheduler gate never opens.
+                # The engine continues serving GPU-only instead of crashing.
+                logger.exception(
+                    "SimpleCPUOffloadWorker rank=%d: async pin failed; "
+                    "CPU offload permanently disabled for this worker.",
+                    self._worker_rank,
+                )
+
+        threading.Thread(
+            target=_pin_task,
+            daemon=True,
+            name=f"vllm-kv-pin-{self._worker_rank}",
+        ).start()
+
+    def _setup_device(self) -> None:
+        # New threads start without a CUDA context. Re-establish the device
+        # context so subsequent CUDA calls target the correct GPU.
+        # current_platform.set_device also forces eager context initialisation
+        # via a zero-tensor allocation, working around pytorch/pytorch#155668.
+        assert self.device is not None
+        current_platform.set_device(self.device)
+
+    def _create_streams_and_backend(self) -> None:
+        # Use the lowest priority so KV cache I/O yields to compute streams.
         low_pri, _ = torch.cuda.Stream.priority_range()
         self.load_stream = torch.cuda.Stream(priority=low_pri)
         self.store_stream = torch.cuda.Stream(priority=low_pri)
-
         # Initialize copy backend with caches and streams.
+        assert self.gpu_kv_caches is not None
+        assert self.cpu_kv_caches is not None
         self._backend.init(
             self.gpu_kv_caches,
             self.cpu_kv_caches,
@@ -267,11 +331,22 @@ class SimpleCPUOffloadWorker:
         return None, finished_recving or None
 
     def build_connector_worker_meta(self) -> SimpleCPUOffloadWorkerMetadata | None:
-        """Return completed store events since the last call."""
-        if not self._completed_store_events:
+        """Return completed store events and readiness signal since the last call.
+
+        Emits ready_worker_ids exactly once, guarded by _readiness_emitted.
+        _pin_done is never cleared; the flag prevents re-emitting on every
+        subsequent step after the gate has already opened.
+        """
+        has_stores = bool(self._completed_store_events)
+        ready_ids: frozenset[int] = frozenset()
+        if self._pin_done.is_set() and not self._readiness_emitted:
+            ready_ids = frozenset({self._worker_rank})
+            self._readiness_emitted = True
+        if not has_stores and not ready_ids:
             return None
         meta = SimpleCPUOffloadWorkerMetadata(
             completed_store_events=self._completed_store_events,
+            ready_worker_ids=ready_ids,
         )
         self._completed_store_events = {}
         return meta

@@ -43,6 +43,8 @@ Now supports 9 types of connectors:
 
   For multi-tier offloading (e.g., CPU + filesystem tier) and the full configuration reference, see the [KV Offloading Usage Guide](kv_offloading_usage.md).
 
+- **SimpleCPUOffloadConnector**: lightweight alternative to `OffloadingConnector`. Offloads KV blocks to local CPU RAM on the same machine. Does not transfer KV cache across nodes. For cross-node prefill/decode setups use one of the network-capable connectors above. See [CPU KV Cache Offloading](cpu_kv_offload.md) for more.
+
 - **FlexKVConnectorV1**: refer to [examples/disaggregated/flexkv_connector/prefix_caching_flexkv.py](../../examples/disaggregated/flexkv_connector/prefix_caching_flexkv.py) for the example usage of FlexKVConnectorV1. FlexKV is a distributed KV Store and multi-level cache management system for ultra-large-scale LLM inference.
 
   ```bash

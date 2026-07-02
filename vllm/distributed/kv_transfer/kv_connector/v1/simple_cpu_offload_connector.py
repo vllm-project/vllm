@@ -6,6 +6,7 @@ from collections.abc import Iterable
 from typing import TYPE_CHECKING, Any
 
 import torch
+from pydantic import BaseModel, ConfigDict
 
 from vllm.config import VllmConfig
 from vllm.distributed.kv_events import KVCacheEvent
@@ -38,8 +39,14 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
-# Default CPU capacity: 8 GB
-DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
+
+class _ExtraConfig(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    cpu_bytes_to_use: int = 8 * (1024**3)  # 8 GB
+    cpu_bytes_to_use_per_rank: int | None = None
+    lazy_offload: bool = False
+    async_register_cache: bool = False
 
 
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
@@ -54,27 +61,24 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
         super().__init__(vllm_config, role, kv_cache_config)
 
         enable_prefix_caching = vllm_config.cache_config.enable_prefix_caching
-        extra_config = self._kv_transfer_config.kv_connector_extra_config or {}
+        cfg = _ExtraConfig(**(self._kv_transfer_config.kv_connector_extra_config or {}))
 
-        cpu_capacity_bytes = int(
-            extra_config.get("cpu_bytes_to_use", DEFAULT_CPU_CAPACITY_BYTES)
-        )
         # cpu_bytes_to_use is server-wide for compatibility;
         # cpu_bytes_to_use_per_rank overrides for per-rank capacity.
         world_size = vllm_config.parallel_config.world_size
-        cpu_capacity_per_rank = cpu_capacity_bytes // world_size
-        if "cpu_bytes_to_use_per_rank" in extra_config:
-            explicit = int(extra_config["cpu_bytes_to_use_per_rank"])
-            if explicit != cpu_capacity_per_rank:
-                logger.warning(
-                    "cpu_bytes_to_use_per_rank (%.2f GB) != "
-                    "cpu_bytes_to_use/world_size (%.2f GB). Using per-rank value.",
-                    explicit / (1024**3),
-                    cpu_capacity_per_rank / (1024**3),
-                )
-            cpu_capacity_per_rank = explicit
-
-        lazy_offload = bool(extra_config.get("lazy_offload", False))
+        cpu_capacity_per_rank = cfg.cpu_bytes_to_use // world_size
+        if (
+            cfg.cpu_bytes_to_use_per_rank is not None
+            and cfg.cpu_bytes_to_use_per_rank != cpu_capacity_per_rank
+        ):
+            logger.warning(
+                "cpu_bytes_to_use_per_rank (%.2f GB) != "
+                "cpu_bytes_to_use/world_size (%.2f GB). Using per-rank value.",
+                cfg.cpu_bytes_to_use_per_rank / (1024**3),
+                cpu_capacity_per_rank / (1024**3),
+            )
+        if cfg.cpu_bytes_to_use_per_rank is not None:
+            cpu_capacity_per_rank = cfg.cpu_bytes_to_use_per_rank
 
         self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
         self.worker_handler: SimpleCPUOffloadWorker | None = None
@@ -87,12 +91,13 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             return
 
         logger.info(
-            "SimpleCPUOffloadConnector: role=%s, "
-            "per_rank=%.2f GB, world_size=%d, mode=%s",
+            "SimpleCPUOffloadConnector: role=%s, %.2f GB/rank,"
+            " world_size=%d, mode=%s%s",
             role.name,
             cpu_capacity_per_rank / (1024**3),
             world_size,
-            "lazy" if lazy_offload else "eager",
+            "lazy" if cfg.lazy_offload else "eager",
+            ", async_register_cache=True" if cfg.async_register_cache else "",
         )
 
         if role == KVConnectorRole.SCHEDULER:
@@ -108,11 +113,16 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 cpu_capacity_per_rank,
                 scheduler_block_size=scheduler_block_size,
                 hash_block_size=hash_block_size,
-                lazy_offload=lazy_offload,
+                lazy_offload=cfg.lazy_offload,
+                async_register_cache=cfg.async_register_cache,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
-                vllm_config, kv_cache_config, cpu_capacity_per_rank
+                vllm_config,
+                kv_cache_config,
+                cpu_capacity_per_rank,
+                worker_rank=vllm_config.parallel_config.rank,
+                async_register_cache=cfg.async_register_cache,
             )
 
     # --- Worker-side methods ---

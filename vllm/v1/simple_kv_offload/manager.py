@@ -75,6 +75,7 @@ class SimpleCPUOffloadScheduler:
         scheduler_block_size: int,
         hash_block_size: int,
         lazy_offload: bool = False,
+        async_register_cache: bool = False,
     ):
         self.vllm_config = vllm_config
         self.kv_cache_config = kv_cache_config
@@ -179,6 +180,12 @@ class SimpleCPUOffloadScheduler:
         self._expected_worker_count = vllm_config.parallel_config.world_size
         self._store_event_pending_counts: dict[int, int] = {}
 
+        # Async-register gate: CPU offload is blocked until all workers have
+        # completed their cudaHostRegister background thread.
+        # In sync mode (default) the gate is open from the start.
+        self._gate_open: bool = not async_register_cache
+        self._ready_worker_ids: set[int] = set()
+
     @staticmethod
     def _derive_cpu_config(
         gpu_config: "KVCacheConfig", cpu_capacity_bytes: int
@@ -247,6 +254,9 @@ class SimpleCPUOffloadScheduler:
     ) -> tuple[int | None, bool]:
         """Return (num_new_tokens, is_async) from consecutive CPU cache hits."""
 
+        if not self._gate_open:
+            return 0, False
+
         # Pins found CPU blocks so they survive LRU eviction until
         # update_state_after_alloc() consumes them. Any pin from an earlier
         # call on the same request (e.g. retry after a failed allocate_slots)
@@ -305,7 +315,8 @@ class SimpleCPUOffloadScheduler:
         # Pop the CPU hit cached by get_num_new_matched_tokens(). The
         # found blocks were pinned there to survive LRU eviction in the window
         # between get_num_new_matched_tokens() and this matching call.
-        pending = self._pending_cpu_hits.pop(req_id, None)
+        # Gate closed = CPU memory not yet pinned, don't load from it.
+        pending = self._pending_cpu_hits.pop(req_id, None) if self._gate_open else None
 
         if num_external_tokens == 0:
             if pending is not None:
@@ -409,6 +420,9 @@ class SimpleCPUOffloadScheduler:
         self,
         scheduler_output: SchedulerOutput,
     ) -> SimpleCPUOffloadMetadata:
+        if not self._gate_open:
+            return SimpleCPUOffloadMetadata()
+
         # --- Stores ---
         store_event = -1
         store_gpu, store_cpu, store_req_ids = self.prepare_store_specs(scheduler_output)
@@ -703,6 +717,18 @@ class SimpleCPUOffloadScheduler:
                 self._process_store_event(event_idx)
             else:
                 self._store_event_pending_counts[event_idx] = total
+
+        # --- Readiness gate ---
+        was_closed = not self._gate_open
+        if was_closed and meta.ready_worker_ids:
+            self._ready_worker_ids.update(meta.ready_worker_ids)
+            self._gate_open = len(self._ready_worker_ids) >= self._expected_worker_count
+        if was_closed and self._gate_open:
+            logger.info(
+                "SimpleCPUOffloadScheduler: all %d workers ready, "
+                "CPU offload gate open.",
+                self._expected_worker_count,
+            )
 
     def _process_store_event(self, event_idx: int) -> None:
         """Process a fully-completed store event."""
