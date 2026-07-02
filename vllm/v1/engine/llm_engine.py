@@ -375,6 +375,9 @@ class LLMEngine:
     def is_sleeping(self) -> bool:
         return self.engine_core.is_sleeping()
 
+    def get_sleep_level(self) -> int | None:
+        return self.engine_core.get_sleep_level()
+
     def get_metrics(self) -> list[Metric]:
         assert self.log_stats, "Stat logging disabled"
         return get_metrics_snapshot()

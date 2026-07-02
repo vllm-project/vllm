@@ -227,6 +227,15 @@ class EngineCore:
 
         self._idle_state_callbacks: list[Callable] = []
 
+        # Track the sleep level the engine is currently in, so the dev
+        # HTTP layer (vllm/entrypoints/serve/dev/sleep/api_router.py) can
+        # distinguish "already at requested depth" from "must escalate".
+        # None = fully awake; 0 = scheduler-paused only (no GPU offload);
+        # >= 1 = scheduler-paused + executor offloaded weights/KV.
+        # The composite is_sleeping() can flip True due to scheduler pause
+        # alone, which is NOT enough to satisfy a level>=1 /sleep request.
+        self._current_sleep_level: int | None = None
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -774,6 +783,12 @@ class EngineCore:
         # Pause scheduler before sleeping.
         clear_prefix_cache = level >= 1
         pause_future = self.pause_scheduler(mode=mode, clear_cache=clear_prefix_cache)
+        # Record the (now) current depth so callers can disambiguate
+        # "already at this level" from "must escalate". Set before any
+        # awaited executor.sleep() so a follow-on /sleep that lands
+        # mid-escalation sees the new (deeper) target, not the stale
+        # shallower one.
+        self._current_sleep_level = level
         if level < 1:
             return pause_future
 
@@ -814,9 +829,29 @@ class EngineCore:
         if not self.model_executor.is_sleeping:
             self.resume_scheduler()
 
+        # Update the tracked sleep level. A full wake (tags=None) drops
+        # us back to None. A partial wake (tags set) only clears the
+        # tracked level if the executor reports no remaining sleeping
+        # tags — otherwise we still hold *some* offloaded state and the
+        # level is unchanged from the caller's perspective.
+        if tags is None or not self.model_executor.is_sleeping:
+            self._current_sleep_level = None
+
     def is_sleeping(self) -> bool:
         """Check if engine is sleeping at any level."""
         return self.is_scheduler_paused() or self.model_executor.is_sleeping
+
+    def get_sleep_level(self) -> int | None:
+        """Return the current sleep depth (None = awake; 0 = scheduler
+        paused only; >= 1 = scheduler paused + executor offloaded).
+
+        Used by the dev HTTP /sleep endpoint to decide whether an
+        incoming request must escalate (current < requested) or can be
+        short-circuited (current >= requested). Plain is_sleeping()
+        cannot answer this — it can flip True for a level-0 pause and
+        thereby block a subsequent level-1 escalation.
+        """
+        return self._current_sleep_level
 
     def execute_dummy_batch(self):
         self.model_executor.execute_dummy_batch()

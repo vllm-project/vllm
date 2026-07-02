@@ -175,6 +175,22 @@ class EngineClient(ABC):
         """Check whether the engine is sleeping"""
         ...
 
+    async def get_sleep_level(self) -> int | None:
+        """Return the current sleep level the engine is in.
+
+        - ``None``: fully awake
+        - ``0``: scheduler is paused but no GPU memory has been freed
+        - ``>= 1``: scheduler paused AND model_executor has offloaded
+          weights / KV cache (level-2 also discards the rest of the GPU
+          state).
+
+        Default returns ``0`` if ``is_sleeping()`` is True else ``None``,
+        for backwards compatibility with engine implementations that do
+        not track depth (the v1 engine overrides this with the real
+        recorded level).
+        """
+        return 0 if await self.is_sleeping() else None
+
     @abstractmethod
     async def add_lora(self, lora_request: LoRARequest) -> bool:
         """Load a new LoRA adapter into the engine for future requests."""
