@@ -558,6 +558,7 @@ class CompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    speculative_decoding_stats: dict[str, Any] | None = None
 
 
 class CompletionResponseStreamChoice(OpenAIBaseModel):
@@ -586,6 +587,7 @@ class CompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    speculative_decoding_stats: dict[str, Any] | None = None
     # Set only on the final chunk of a stream to mirror non-streaming responses
     # without the per-chunk serialization overhead.
     system_fingerprint: str | None = None

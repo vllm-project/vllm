@@ -21,6 +21,7 @@ from vllm.v1.engine import (
     FinishReason,
 )
 from vllm.v1.metrics.stats import PrefillStats
+from vllm.v1.spec_decode.metrics import SpecDecodeRequestStats
 from vllm.v1.structured_output.request import StructuredOutputRequest
 from vllm.v1.utils import ConstantList
 
@@ -150,6 +151,7 @@ class Request:
         self.last_sched_seq = 0
 
         self.spec_token_ids: list[int] = []
+        self.spec_decode_stats: SpecDecodeRequestStats | None = None
         self.num_computed_tokens = 0
         self.cache_salt: str | None = cache_salt
 
