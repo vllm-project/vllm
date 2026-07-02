@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+import socket
 from typing import Any
 
 import torch
@@ -239,7 +240,14 @@ class _CPUSHMDistributed:
     def make_group_name(communicator: CpuCommunicator) -> str:
         instance_identifier = os.environ["VLLM_DIST_IDENT"]
         unique_name = communicator.unique_name
-        instance_identifier = f"{instance_identifier}-{unique_name}"
+        # Shared memory is node-local, so ranks on different hosts must not agree
+        # on a single SHM group name. VLLM_DIST_IDENT is broadcast (identical on
+        # every rank), so without the hostname the consistency check in
+        # _all_group_ranks_share_shm_group_name() always passes and the SHM
+        # all-reduce is selected even across nodes -- where it deadlocks, each host
+        # operating on its own segment. Including the hostname makes ranks on
+        # different hosts disagree, so they fall back to torch.distributed.
+        instance_identifier = f"{instance_identifier}-{socket.gethostname()}-{unique_name}"
         group_ranks = [str(rank) for rank in communicator.ranks]
         shm_group_identifier = f"[{'-'.join(group_ranks)}]"
         return f"{instance_identifier}-{shm_group_identifier}-cpushm"
