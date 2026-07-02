@@ -33,8 +33,12 @@ from vllm.model_executor.layers.fused_moe.prepare_finalize.batched import (
 )
 from vllm.model_executor.layers.fused_moe.router.fused_topk_router import fused_topk
 from vllm.model_executor.layers.fused_moe.utils import moe_kernel_quantize_input
+from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import per_block_cast_to_fp8
 from vllm.utils.math_utils import round_up
+
+# Resolve at import time so tests can run on CUDA, ROCm, or XPU without edits.
+DEVICE = current_platform.device_type
 
 
 def shuffle_weight(w: torch.Tensor) -> torch.Tensor:
@@ -75,7 +79,7 @@ def make_dummy_moe_config(
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
         activation=MoEActivation.SILU,
         in_dtype=in_dtype,
-        device="cuda",
+        device=DEVICE,
         routing_method=RoutingMethodType.TopK,
         max_num_tokens=max_num_tokens,
     )
@@ -233,7 +237,7 @@ def make_quantized_test_activations(
     block_shape: list[int] | None = None,
     per_act_token_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
-    a = torch.randn((E, m, k), device="cuda", dtype=in_dtype) / 10
+    a = torch.randn((E, m, k), device=DEVICE, dtype=in_dtype) / 10
     a_q = a
     a_scale = None
 
@@ -343,7 +347,7 @@ def make_test_weight(
     block_shape: list[int] | None = None,
     per_out_ch_quant: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    w_16 = torch.randn((e, rows, cols), device="cuda", dtype=in_dtype) / 15
+    w_16 = torch.randn((e, rows, cols), device=DEVICE, dtype=in_dtype) / 15
 
     if quant_dtype is not None:
         w, w_s, w_gs = moe_quantize_weights(
@@ -423,8 +427,8 @@ def make_test_quant_config(
     a1_gscale: torch.Tensor | None = None
     a2_gscale: torch.Tensor | None = None
     if quant_dtype == "nvfp4":
-        a1_gscale = torch.ones((e,), device="cuda", dtype=torch.float32)
-        a2_gscale = torch.ones((e,), device="cuda", dtype=torch.float32)
+        a1_gscale = torch.ones((e,), device=DEVICE, dtype=torch.float32)
+        a2_gscale = torch.ones((e,), device=DEVICE, dtype=torch.float32)
         a1_scale = a1_gscale
         a2_scale = a2_gscale
     else:
@@ -525,8 +529,8 @@ def make_naive_shared_experts(
     K: int,
     in_dtype: torch.dtype = torch.bfloat16,
 ) -> torch.nn.Module:
-    w1 = torch.randn((K, N * 2), device="cuda", dtype=in_dtype) / 15
-    w2 = torch.randn((N, K), device="cuda", dtype=in_dtype) / 15
+    w1 = torch.randn((K, N * 2), device=DEVICE, dtype=in_dtype) / 15
+    w2 = torch.randn((N, K), device=DEVICE, dtype=in_dtype) / 15
     return TestMLP(w1, w2, out_dtype=in_dtype)
 
 
