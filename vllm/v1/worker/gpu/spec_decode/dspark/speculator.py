@@ -32,7 +32,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
-from vllm.v1.worker.gpu.spec_decode.speculator import draft_gumbel_pos
+from vllm.v1.worker.gpu.spec_decode.utils import draft_gumbel_pos
 
 
 class DSparkSpeculator(DFlashSpeculator):

@@ -18,7 +18,7 @@ import torch
 from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import rejection_sample
-from vllm.v1.worker.gpu.spec_decode.speculator import draft_gumbel_pos
+from vllm.v1.worker.gpu.spec_decode.utils import draft_gumbel_pos
 
 VOCAB_SIZE = 32768
 NUM_REQS = 4096
