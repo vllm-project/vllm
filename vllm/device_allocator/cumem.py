@@ -245,6 +245,30 @@ class CuMemAllocator:
 
         assert isinstance(offload_tags, tuple)
 
+        # Drain in-flight CUDA kernels before any cuMemUnmap / D2H copy.
+        #
+        # The engine-level ``pause_scheduler`` aborts the *Python-side* request
+        # state but does not block on the CUDA stream — kernels already
+        # enqueued by `model_runner.execute_model` (decode steps, P2P sends,
+        # KV writes, the H2D `cudaMemcpy` from a prior `wake_up`) keep
+        # running asynchronously. If we start the offload/unmap loop while
+        # any of those kernels are still executing, the line-202
+        # `cudaMemcpy(cpu_ptr, ptr, size_in_bytes)` reads from a region the
+        # kernel is mid-write into, and `unmap_and_release(handle)`
+        # invalidates pages a kernel still holds — both surface as
+        # `cudaErrorIllegalAddress` / `CUDART error: an illegal memory
+        # access was encountered`, killing the engine.
+        #
+        # Refs:
+        #   * https://github.com/vllm-project/vllm/issues/45520
+        #     (/sleep + in-flight decode → illegal memory access)
+        #   * https://github.com/vllm-project/vllm/issues/36753
+        #     (POST /wake_up crash, same family)
+        #   * The symmetrical sync we already do in
+        #     `_python_free_callback` (line ~158) for the same reason.
+        if libcudart is not None:
+            torch.cuda.synchronize()
+
         total_bytes = 0
         backup_bytes = 0
 
@@ -305,6 +329,25 @@ class CuMemAllocator:
                         cpu_ptr = cpu_backup_tensor.data_ptr()
                         libcudart.cudaMemcpy(ptr, cpu_ptr, size_in_bytes)
                         data.cpu_backup_tensor = None
+
+        # Block until all H2D restore copies complete before returning.
+        #
+        # `libcudart.cudaMemcpy` above is the *synchronous* variant w.r.t. the
+        # current thread, but on a multi-rank executor the per-worker
+        # `wake_up` calls land on different processes / streams. Without a
+        # final `torch.cuda.synchronize()` here, control returns to the
+        # caller (and ultimately the HTTP `/wake_up` 200) while the CUDA
+        # work queue may still hold pending cleanup or implicit-stream
+        # work tied to the restore. A subsequent rapid `/sleep` (a few
+        # seconds later in swap-group / RLHF-rotation / scale-to-zero
+        # patterns) then races those tail kernels and the
+        # offload-loop's `cudaMemcpy` reads from / `cuMemUnmap` invalidates
+        # a region the GPU's MMU still considers active → illegal memory
+        # access. Cost: a single device sync at the end of an already
+        # multi-second restore. See issue #45520 and the rapid
+        # sleep-after-wake postmortem for the failure trace.
+        if libcudart is not None:
+            torch.cuda.synchronize()
 
     @contextmanager
     def use_memory_pool(self, tag: str | None = None):
