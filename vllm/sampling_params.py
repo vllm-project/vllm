@@ -950,6 +950,25 @@ class SamplingParams(
                 "structured_outputs.json_object must be True if set; omit "
                 "structured_outputs to disable structured outputs"
             )
+        # Reject empty string regex early. xgrammar tolerates compile_regex("")
+        # without crashing, but an empty regex provides no constraint and is a
+        # degenerate request; reject at the API layer for consistency.
+        if (
+            isinstance(self.structured_outputs.regex, str)
+            and self.structured_outputs.regex.strip() == ""
+        ):
+            raise ValueError("structured_outputs.regex cannot be an empty string")
+        # Reject empty string structural_tag early to avoid engine-side crashes.
+        # `get_structured_output_key` checks `is not None`, so an empty string
+        # would otherwise reach `json.loads("")` in `compile_grammar` and raise
+        # JSONDecodeError -> EngineDeadError.
+        if (
+            isinstance(self.structured_outputs.structural_tag, str)
+            and self.structured_outputs.structural_tag.strip() == ""
+        ):
+            raise ValueError(
+                "structured_outputs.structural_tag cannot be an empty string"
+            )
 
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
