@@ -386,6 +386,12 @@ class MultiprocExecutor(Executor):
                 try:
                     status, result = mq.dequeue(timeout=dequeue_timeout)
                 except TimeoutError as e:
+                    if self.is_failed:
+                        raise RuntimeError(
+                            f"A worker died during RPC call to {method}, "
+                            "please check the stack trace above "
+                            "for the root cause"
+                        ) from e
                     raise TimeoutError(f"RPC call to {method} timed out.") from e
                 if status != WorkerProc.ResponseStatus.SUCCESS:
                     raise RuntimeError(

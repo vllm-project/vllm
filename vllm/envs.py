@@ -18,6 +18,7 @@ if TYPE_CHECKING:
     VLLM_USE_MODELSCOPE: bool = False
     VLLM_USE_FASTOKENS: bool = False
     VLLM_RINGBUFFER_WARNING_INTERVAL: int = 60
+    VLLM_PP_BROADCAST_TIMEOUT_SECONDS: int = 180
     VLLM_NCCL_SO_PATH: str | None = None
     LD_LIBRARY_PATH: str | None = None
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
@@ -675,6 +676,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Interval in seconds to log a warning message when the ring buffer is full
     "VLLM_RINGBUFFER_WARNING_INTERVAL": lambda: int(
         os.environ.get("VLLM_RINGBUFFER_WARNING_INTERVAL", "60")
+    ),
+    # Timeout in seconds for PP sampled-token broadcast
+    "VLLM_PP_BROADCAST_TIMEOUT_SECONDS": lambda: int(
+        os.environ.get("VLLM_PP_BROADCAST_TIMEOUT_SECONDS", "180")
     ),
     # path to cudatoolkit home directory, under which should be bin, include,
     # and lib directories.

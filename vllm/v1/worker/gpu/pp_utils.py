@@ -2,15 +2,49 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Pipeline Parallelism utils for V2 Model Runner."""
 
+import threading
 from collections import deque
 from dataclasses import dataclass
 
 import numpy as np
 import torch
 
+import vllm.envs as envs
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
+
+
+def _broadcast_with_timeout(
+    tensor: torch.Tensor,
+    src: int,
+    group: torch.distributed.ProcessGroup,
+    stream: torch.cuda.Stream,
+    timeout: float = envs.VLLM_PP_BROADCAST_TIMEOUT_SECONDS,
+) -> None:
+    """Run ``torch.distributed.broadcast`` with a daemon-thread timeout.
+
+    ``dist.broadcast`` is a blocking collective that can hang permanently
+    when a GPU device error (e.g. device lost) occurs on a peer worker.
+    This wrapper runs the broadcast in a daemon thread so the caller can
+    propagate a ``TimeoutError`` after *timeout* seconds instead of
+    hanging indefinitely.
+    """
+
+    def _run():
+        with torch.cuda.stream(stream):
+            torch.distributed.broadcast(tensor, src=src, group=group)
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
+    t.join(timeout=timeout)
+    if t.is_alive():
+        raise TimeoutError(
+            f"PP broadcast timed out after {timeout}s. "
+            "This typically indicates a GPU device error "
+            "(e.g. device lost) on a peer worker. "
+            "Adjust via VLLM_PP_BROADCAST_TIMEOUT_SECONDS."
+        )
 
 
 @dataclass
@@ -142,11 +176,17 @@ class PPHandler:
                 num_reqs, self.max_sample_len, dtype=torch.int64, device=self.device
             )
             combined = torch.empty(2, num_reqs, dtype=torch.int32, device=self.device)
-            torch.distributed.broadcast(
-                sampled_tokens, src=self.last_rank, group=self.broadcast_group
+            _broadcast_with_timeout(
+                sampled_tokens,
+                src=self.last_rank,
+                group=self.broadcast_group,
+                stream=self.broadcast_stream,
             )
-            torch.distributed.broadcast(
-                combined, src=self.last_rank, group=self.broadcast_group
+            _broadcast_with_timeout(
+                combined,
+                src=self.last_rank,
+                group=self.broadcast_group,
+                stream=self.broadcast_stream,
             )
             event = self.broadcast_stream.record_event()
             num_sampled, num_rejected = combined.unbind(dim=0)
@@ -181,14 +221,18 @@ class PPHandler:
         assert sampled_token_ids.dtype == torch.int64
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
-            torch.distributed.broadcast(
+            _broadcast_with_timeout(
                 sampled_token_ids.contiguous(),
                 src=self.last_rank,
                 group=self.broadcast_group,
+                stream=self.broadcast_stream,
             )
             combined = torch.stack((num_sampled, num_rejected), dim=0)
-            torch.distributed.broadcast(
-                combined, src=self.last_rank, group=self.broadcast_group
+            _broadcast_with_timeout(
+                combined,
+                src=self.last_rank,
+                group=self.broadcast_group,
+                stream=self.broadcast_stream,
             )
             for tensor in (sampled_token_ids, num_sampled, num_rejected):
                 tensor.record_stream(self.broadcast_stream)
