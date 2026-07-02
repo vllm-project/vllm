@@ -61,7 +61,7 @@ from vllm.tool_parsers import ToolParserManager
 from vllm.tracing import instrument
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-from vllm.utils.network_utils import is_valid_ipv6_address
+from vllm.utils.network_utils import is_valid_ipv6_address, try_bind_socket
 from vllm.utils.system_utils import decorate_logs, set_ulimit
 from vllm.v1.engine.exceptions import EngineDeadError, EngineGenerateError
 from vllm.version import __version__ as VLLM_VERSION
@@ -509,16 +509,7 @@ async def init_render_app_state(
 
 
 def create_server_socket(addr: tuple[str, int]) -> socket.socket:
-    family = socket.AF_INET
-    if is_valid_ipv6_address(addr[0]):
-        family = socket.AF_INET6
-
-    sock = socket.socket(family=family, type=socket.SOCK_STREAM)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    sock.bind(addr)
-
-    return sock
+    return try_bind_socket(addr[0] or None, addr[1], reuse_addr=True, reuse_port=True)
 
 
 def create_server_unix_socket(path: str) -> socket.socket:

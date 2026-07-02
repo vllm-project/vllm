@@ -30,7 +30,7 @@ from torch.distributed.rendezvous import rendezvous
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.network_utils import get_tcp_uri
+from vllm.utils.network_utils import get_tcp_uri, try_bind_socket
 from vllm.utils.system_utils import suppress_stdout
 
 logger = init_logger(__name__)
@@ -491,10 +491,7 @@ class StatelessProcessGroup:
         """  # noqa
         launch_server = rank == 0
         if launch_server and listen_socket is None:
-            listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            listen_socket.bind((host, port))
-            listen_socket.listen()
+            listen_socket = try_bind_socket(host, port, listen=True)
         store = create_tcp_store(
             host,
             port,

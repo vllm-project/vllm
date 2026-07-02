@@ -22,6 +22,7 @@ from vllm.distributed.utils import (
 )
 from vllm.logger import init_logger
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.utils.network_utils import try_bind_socket
 
 logger = init_logger(__name__)
 
@@ -41,9 +42,7 @@ def _allocate_group_ports(
     socks: list[socket.socket] = []
     ports: list[int] = []
     for _ in range(3):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.bind((host, 0))
-        s.listen()
+        s = try_bind_socket(host, 0, listen=True)
         socks.append(s)
         ports.append(s.getsockname()[1])
     coord_store.set(key, struct.pack(_PORTS_FMT, *ports))
