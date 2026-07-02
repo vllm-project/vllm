@@ -7,6 +7,7 @@ pynvml. However, it should not initialize cuda context.
 from __future__ import annotations
 
 import contextlib
+import importlib.metadata
 import os
 import platform
 from collections.abc import Callable
@@ -14,6 +15,7 @@ from datetime import timedelta
 from functools import cache, lru_cache, wraps
 from typing import TYPE_CHECKING, NamedTuple, TypeVar
 
+import regex as re
 import torch
 from torch.distributed import PrefixStore, ProcessGroup
 from torch.distributed.distributed_c10d import is_nccl_available
@@ -184,6 +186,80 @@ def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
             pynvml.nvmlShutdown()
 
     return wrapper
+
+
+# Consumer Blackwell (sm_120/121, e.g. RTX Pro 6000, GB10/DGX Spark). Unlike
+# datacenter Blackwell, `_vllm_fa2_C` ships no native cubin for these and
+# always falls back to PTX JIT.
+_BLACKWELL_CONSUMER_CAPABILITIES = (DeviceCapability(12, 0), DeviceCapability(12, 1))
+
+
+@with_nvml_context
+def _driver_max_cuda_version() -> tuple[int, int] | None:
+    """Highest CUDA version the installed driver can PTX-JIT for, or None
+    if it can't be determined (e.g. NVML unavailable)."""
+    try:
+        raw = pynvml.nvmlSystemGetCudaDriverVersion_v2()
+    except pynvml.NVMLError:
+        return None
+    return (raw // 1000, (raw % 1000) // 10)
+
+
+_VLLM_LOCAL_VERSION_CUDA_RE = re.compile(r"\bcu(\d{3})\b")
+
+
+def _build_cuda_version() -> tuple[int, int] | None:
+    """CUDA toolkit version vLLM's own C++/CUDA extensions were compiled
+    with, read off the installed package's local version label (e.g.
+    `0.1.dev1+g491f075.cu133` -> (13, 3)), the same `cu\\d{3}` convention
+    `setup.py`'s `detect_system_cuda_variant` writes at build time.
+
+    Deliberately not `torch.version.cuda`: that reflects the CUDA version
+    the pre-built torch *wheel* was compiled with, which is a separate build
+    step from vLLM's own from-source extension compilation and can disagree
+    with it (e.g. a from-source vLLM build using a newer local `nvcc` than
+    the torch wheel it links against).
+    """
+    try:
+        version_str = importlib.metadata.version("vllm")
+    except importlib.metadata.PackageNotFoundError:
+        return None
+    match = _VLLM_LOCAL_VERSION_CUDA_RE.search(version_str)
+    if match is None:
+        return None
+    digits = match.group(1)
+    return (int(digits[:2]), int(digits[2]))
+
+
+def _check_flash_attn_ptx_compat(device_capability: DeviceCapability) -> None:
+    """`_vllm_fa2_C` has no native cubin on consumer Blackwell, so it PTX-JITs
+    at kernel-launch time. If vLLM was built with a newer CUDA toolkit than
+    the installed driver supports, that JIT fails with
+    `cudaErrorUnsupportedPtxVersion` deep inside CUDA graph capture, often
+    after minutes of weight loading. Fail fast here instead.
+    See https://github.com/vllm-project/vllm/issues/47397.
+    """
+    if device_capability not in _BLACKWELL_CONSUMER_CAPABILITIES:
+        return
+    build_cuda = _build_cuda_version()
+    if build_cuda is None:
+        return
+    driver_cuda = _driver_max_cuda_version()
+    if driver_cuda is None:
+        return
+    if build_cuda > driver_cuda:
+        raise RuntimeError(
+            f"vLLM was built with CUDA {build_cuda[0]}.{build_cuda[1]}, but "
+            f"the installed driver only supports CUDA {driver_cuda[0]}."
+            f"{driver_cuda[1]} for runtime PTX compilation. The FLASH_ATTN "
+            f"backend (_vllm_fa2_C) has no native cubin for this GPU "
+            f"(sm_{device_capability.major}{device_capability.minor}) and "
+            "requires PTX JIT, which will fail with "
+            "cudaErrorUnsupportedPtxVersion. Fix: update your driver, "
+            "rebuild vLLM against a CUDA toolkit <= the driver's supported "
+            "version, or pass --attention-backend flashinfer (or "
+            "TRITON_ATTN) to avoid this kernel."
+        )
 
 
 @cache
@@ -413,6 +489,8 @@ class CudaPlatformBase(Platform):
                     f"this configuration. Reason: {invalid_reasons}"
                 )
             else:
+                if selected_backend == AttentionBackendEnum.FLASH_ATTN:
+                    _check_flash_attn_ptx_compat(device_capability)
                 logger.info("Using %s backend.", selected_backend)
                 return _backend_cls_path(backend_class)
 
@@ -472,6 +550,9 @@ class CudaPlatformBase(Platform):
                     names,
                     selected_backend.name,
                 )
+
+        if selected_backend == AttentionBackendEnum.FLASH_ATTN:
+            _check_flash_attn_ptx_compat(device_capability)
 
         logger.info_once(
             "Using %s attention backend out of potential backends: %s.",
