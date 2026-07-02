@@ -22,11 +22,14 @@ from vllm.utils.torch_utils import set_random_seed
 DTYPES = [torch.bfloat16, torch.float]
 QUANT_DTYPES = [torch.int8, current_platform.fp8_dtype()]
 VEC_HIDDEN_SIZES = [1024, 1025, 1027, 1029]
+SINGLE_READ_HIDDEN_SIZES = [2048, 4096, 6144, 8192]
 # Avoid combinatorial explosion with full Cartesian product
 NUM_TOKENS_HIDDEN_SIZES = [
     *[(1, i) for i in [1, 64, 128, *VEC_HIDDEN_SIZES, 5120, 5137]],
     *[(2048, i) for i in [1, 64, *VEC_HIDDEN_SIZES, 5137]],
     *[(4096, i) for i in [1, 64, 5137]],
+    # Single-read fast-path coverage, one shape per VPT (1..4).
+    *[(1, 2048), (83, 4096), (2048, 6144), (2048, 8192)],
 ]
 
 ADD_RESIDUAL = [False, True]
