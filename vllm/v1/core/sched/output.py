@@ -5,6 +5,8 @@ from dataclasses import dataclass
 from functools import cached_property
 from typing import TYPE_CHECKING
 
+import msgspec
+
 if TYPE_CHECKING:
     import numpy as np
     import numpy.typing as npt
@@ -93,13 +95,24 @@ class NewRequestData:
         prefill_token_ids_len = (
             len(self.prefill_token_ids) if self.prefill_token_ids is not None else None
         )
+        # Redact structured-outputs content (json/regex/grammar/structural_tag)
+        # so request schemas don't leak into error-level crash dumps.
+        sampling_params = self.sampling_params
+        if (
+            sampling_params is not None
+            and sampling_params.structured_outputs is not None
+        ):
+            sampling_params = msgspec.structs.replace(
+                sampling_params,
+                structured_outputs=sampling_params.structured_outputs.anonymized(),
+            )
         return (
             f"NewRequestData("
             f"req_id={self.req_id},"
             f"prompt_token_ids_len={prompt_token_ids_len},"
             f"prefill_token_ids_len={prefill_token_ids_len},"
             f"mm_features={self.mm_features},"
-            f"sampling_params={self.sampling_params},"
+            f"sampling_params={sampling_params},"
             f"block_ids={self.block_ids},"
             f"num_computed_tokens={self.num_computed_tokens},"
             f"lora_request={self.lora_request},"
