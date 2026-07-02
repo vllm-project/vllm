@@ -92,6 +92,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         scheduler_config = vllm_config.scheduler_config
         cache_config = vllm_config.cache_config
         model_config = vllm_config.model_config
+        topk_tokens = model_config.hf_config.index_topk
 
         workspace_size = min(
             max(
@@ -99,6 +100,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
                 4 * scheduler_config.max_num_seqs * cache_config.block_size,
             ),
             64 * 1024,
+            scheduler_config.max_num_seqs * topk_tokens,
         )
         return max(
             workspace_size,
