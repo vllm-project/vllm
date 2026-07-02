@@ -3,9 +3,13 @@
 
 import logging
 from collections.abc import Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
+
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.endpoint_plugin import EndpointPlugin
+    from vllm.tasks import SupportedTask
 
 logger = logging.getLogger(__name__)
 
@@ -20,6 +24,10 @@ PLATFORM_PLUGINS_GROUP = "vllm.platform_plugins"
 # Stat logger plugins group will be loaded in process0 only when serve vLLM with
 # async mode.
 STAT_LOGGER_PLUGINS_GROUP = "vllm.stat_logger_plugins"
+# Endpoint plugins group is loaded in the API server front end process only.
+# Each entry point resolves to a factory returning an `EndpointPlugin`
+# (see `vllm/entrypoints/openai/endpoint_plugin.py`).
+ENDPOINT_PLUGINS_GROUP = "vllm.endpoint_plugins"
 
 # make sure one process only loads plugins once
 plugins_loaded = False
@@ -80,3 +88,66 @@ def load_general_plugins():
     # general plugins, we only need to execute the loaded functions
     for func in plugins.values():
         func()
+
+
+def load_endpoint_plugins(
+    supported_tasks: "tuple[SupportedTask, ...] | None" = None,
+) -> "list[EndpointPlugin]":
+    """Discover, gate and instantiate `vllm.endpoint_plugins` entry points.
+
+    Endpoint plugins add HTTP routes to the API server, so they default to
+    not loading. Unlike other plugin groups, a plugin here is only
+    considered when it is explicitly named in `VLLM_PLUGINS`. This is a
+    stricter posture than `load_plugins_by_group` which "load everything unless
+    an allowlist says otherwise". This posture is taken to handle potentially
+    larger exposed network surface.
+
+    A discovered plugin is loaded only if both hold:
+      - it is named in `VLLM_PLUGINS` (enforced by not calling the loader
+        at all when `VLLM_PLUGINS` is unset). Note that `VLLM_PLUGINS=""`
+        parses to `[""]`, not `None`, so it is treated as a (non strict)
+        allowlist that matches no plugin name, not as "unset".
+      - its `required_tasks` is `None` or intersects `supported_tasks`.
+
+    Args:
+        supported_tasks: Tasks the server supports. `None` means no plugin
+            with a non `None` `required_tasks` will be loaded.
+
+    Returns:
+        Instantiated plugins that passed gating in discovery order.
+    """
+    if envs.VLLM_PLUGINS is None:
+        logger.debug(
+            "VLLM_PLUGINS is not set. No endpoint plugins will be loaded. "
+            "Endpoint plugins add HTTP routes and must be explicitly "
+            "allowlisted via VLLM_PLUGINS to be loaded."
+        )
+        return []
+
+    factories = load_plugins_by_group(ENDPOINT_PLUGINS_GROUP)
+
+    endpoint_plugins: list[EndpointPlugin] = []
+    for name, factory in factories.items():
+        try:
+            plugin = factory()
+        except Exception:
+            logger.exception("Failed to instantiate endpoint plugin %s", name)
+            continue
+
+        required_tasks = plugin.required_tasks
+        if required_tasks is not None and (
+            supported_tasks is None or not set(required_tasks) & set(supported_tasks)
+        ):
+            logger.info(
+                "Skipping endpoint plugin %s: requires one of tasks %s, "
+                "server supports %s",
+                name,
+                required_tasks,
+                supported_tasks,
+            )
+            continue
+
+        logger.info("Loaded endpoint plugin %s", name)
+        endpoint_plugins.append(plugin)
+
+    return endpoint_plugins
