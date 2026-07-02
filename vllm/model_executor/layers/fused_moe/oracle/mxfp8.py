@@ -7,8 +7,11 @@ from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 from vllm.model_executor.layers.fused_moe.oracle.fp8 import (
     Fp8MoeBackend,
     backend_to_kernel_cls,
+    select_fp8_moe_backend,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8Dynamic128Sym,
+    kFp8Static128BlockSym,
     kMxfp8Dynamic,
     kMxfp8Static,
 )
@@ -134,12 +137,30 @@ def _select_rocm_mxfp8_backend() -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts
 
 def select_mxfp8_moe_backend(
     config: FusedMoEConfig,
+    *,
+    block_fp8_on_fnuz: bool = False,
 ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
     """Select the MXFP8 MoE backend and the best expert class.
+
+    ``block_fp8_on_fnuz`` must only be enabled by quantization methods that
+    convert their MXFP8 weights to 128x128 block FP8 before kernel setup.
 
     Returns:
         A tuple of (fp8_backend, experts_cls).
     """
+
+    if block_fp8_on_fnuz and current_platform.is_fp8_fnuz():
+        logger.info_once(
+            "MXFP8 MoE weights will be converted to 128x128 block FP8 at load time."
+        )
+        block_fp8_backend, experts_cls = select_fp8_moe_backend(
+            config=config,
+            weight_key=kFp8Static128BlockSym,
+            activation_key=kFp8Dynamic128Sym,
+        )
+        assert block_fp8_backend is not None
+        assert experts_cls is not None
+        return block_fp8_backend, experts_cls
 
     runner_backend = config.moe_backend
     if runner_backend != "auto":

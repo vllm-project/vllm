@@ -72,6 +72,7 @@ from vllm.model_executor.layers.quantization.utils.mxfp8_utils import (
     MXFP8_BLOCK_SIZE,
     MXFP8_SCALE_DTYPE,
     MXFP8_VALUE_DTYPE,
+    convert_mxfp8_to_block_fp8,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
@@ -95,6 +96,7 @@ from vllm.model_executor.parameter import (
     PerTensorScaleParameter,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+from vllm.platforms import current_platform
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.utils import WeightsMapper
@@ -1882,7 +1884,7 @@ class ModelOptMxFp8LinearMethod(LinearMethodBase):
 
 
 class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
-    """FlashInfer TRTLLM MXFP8 block-scale MoE for ModelOpt checkpoints."""
+    """ModelOpt MXFP8 MoE quantization."""
 
     def __init__(
         self,
@@ -1890,11 +1892,17 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
         moe_config: FusedMoEConfig,
     ) -> None:
         super().__init__(moe_config)
-        self.weight_block_size = [1, MXFP8_BLOCK_SIZE]
+        self.requantize_mxfp8_to_block_fp8 = current_platform.is_fp8_fnuz()
+        self.weight_block_size = (
+            [128, 128] if self.requantize_mxfp8_to_block_fp8 else [1, MXFP8_BLOCK_SIZE]
+        )
         self.quant_config = quant_config
         assert self.quant_config.is_checkpoint_mxfp8_serialized
 
-        self.mxfp8_backend, self.experts_cls = select_mxfp8_moe_backend(config=self.moe)
+        self.mxfp8_backend, self.experts_cls = select_mxfp8_moe_backend(
+            config=self.moe,
+            block_fp8_on_fnuz=self.requantize_mxfp8_to_block_fp8,
+        )
 
     def create_weights(
         self,
@@ -2135,15 +2143,35 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
 
         self._check_weight_dtypes(layer)
 
+        if self.requantize_mxfp8_to_block_fp8:
+            w13, w13_scale = convert_mxfp8_to_block_fp8(
+                layer.w13_weight,
+                layer.w13_weight_scale,
+                block_size=(128, 128),
+            )
+            w2, w2_scale = convert_mxfp8_to_block_fp8(
+                layer.w2_weight,
+                layer.w2_weight_scale,
+                block_size=(128, 128),
+            )
+            logger.info_once(
+                "Converted MXFP8 MoE weights to 128x128 block FP8 at load time."
+            )
+        else:
+            w13 = layer.w13_weight
+            w2 = layer.w2_weight
+            w13_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
+
         layer.weight_block_size = self.weight_block_size
 
         w13, w2, w13_scale, w2_scale = convert_to_fp8_moe_kernel_format(
             fp8_backend=self.mxfp8_backend,
             layer=layer,
-            w13=layer.w13_weight,
-            w2=layer.w2_weight,
-            w13_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
+            w13=w13,
+            w2=w2,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
             w13_input_scale=None,
             w2_input_scale=None,
         )
