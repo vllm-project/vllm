@@ -1896,6 +1896,16 @@ class EngineArgs:
             cache_config.kv_cache_dtype_skip_layers = sorted(
                 existing | set(boundary), key=int
             )
+        elif resolved_cache_dtype.startswith("oscar_"):
+            from vllm.model_executor.layers.quantization.oscar.config import (
+                OscarConfig,
+            )
+
+            boundary = OscarConfig.get_boundary_skip_layers(model_config)
+            existing = set(cache_config.kv_cache_dtype_skip_layers)
+            cache_config.kv_cache_dtype_skip_layers = sorted(
+                existing | set(boundary), key=int
+            )
 
         ray_runtime_env = None
         if is_ray_initialized():
@@ -2227,6 +2237,19 @@ class EngineArgs:
         ):
             logger.warning(
                 "TurboQuant is not yet compatible with FlashAttention >= 3. "
+                "Overriding flash_attn_version to 2. To silence this "
+                "warning, pass --attention-config.flash_attn_version=2"
+            )
+            attention_config.flash_attn_version = 2
+
+        # OSCAR shares TurboQuant's boundary-skip layers (standard backend),
+        # so the same FlashAttention >= 3 constraint applies.
+        if resolved_cache_dtype.startswith("oscar_") and (
+            attention_config.flash_attn_version is None
+            or attention_config.flash_attn_version >= 3
+        ):
+            logger.warning(
+                "OSCAR is not yet compatible with FlashAttention >= 3. "
                 "Overriding flash_attn_version to 2. To silence this "
                 "warning, pass --attention-config.flash_attn_version=2"
             )

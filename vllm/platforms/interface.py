@@ -709,6 +709,37 @@ class Platform:
                 attn_page_size_1_token = lcm(tq_page, skip_page)
             else:
                 attn_page_size_1_token = tq_page
+        elif cache_config.cache_dtype.startswith("oscar_"):
+            # OSCAR reuses TQ's packed K|V slot layout (TQFullAttentionSpec);
+            # size the page from the OSCAR slot bytes, lcm'd with the standard
+            # layout used by boundary-skip layers.
+            from vllm.model_executor.layers.quantization.oscar.config import (
+                OscarConfig,
+            )
+            from vllm.v1.kv_cache_interface import TQFullAttentionSpec
+
+            oscar_cfg = OscarConfig.from_cache_dtype(
+                cache_config.cache_dtype, model_config.get_head_size()
+            )
+            oscar_page = TQFullAttentionSpec(
+                block_size=1,
+                num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                head_size=model_config.get_head_size(),
+                head_size_v=model_config.get_head_size(),
+                dtype=kv_cache_dtype,
+                kv_quant_mode=kv_quant_mode,
+                tq_slot_size=oscar_cfg.slot_size_aligned,
+            ).page_size_bytes
+            if cache_config.kv_cache_dtype_skip_layers:
+                skip_page = FullAttentionSpec(
+                    block_size=1,
+                    num_kv_heads=model_config.get_num_kv_heads(parallel_config),
+                    head_size=model_config.get_head_size(),
+                    dtype=model_config.dtype,
+                ).page_size_bytes
+                attn_page_size_1_token = lcm(oscar_page, skip_page)
+            else:
+                attn_page_size_1_token = oscar_page
         else:
             attn_page_size_1_token = FullAttentionSpec(
                 block_size=1,

@@ -107,6 +107,7 @@ Priority is **1 = highest** (tried first).
 | 3 | `TRITON_ATTN` |
 | 4 | `FLEX_ATTENTION` |
 | 5 | `TURBOQUANT` |
+| 6 | `OSCAR` |
 
 **Ampere/Hopper (SM 8.x-9.x):**
 
@@ -117,6 +118,7 @@ Priority is **1 = highest** (tried first).
 | 3 | `TRITON_ATTN` |
 | 4 | `FLEX_ATTENTION` |
 | 5 | `TURBOQUANT` |
+| 6 | `OSCAR` |
 
 ### MLA Attention (DeepSeek-style)
 
@@ -174,6 +176,7 @@ Priority is **1 = highest** (tried first).
 | `TRITON_ATTN` | | fp16, bf16, fp32 | `auto`, `float16`, `bfloat16`, `fp8`, `fp8_e4m3`, `fp8_e5m2`, `int4_per_token_head`, `int8_per_token_head`, `fp8_per_token_head` | %16 | Any | ✅ | ✅ | ✅ | ❌ | All | Any |
 | `TRITON_ATTN_DIFFKV` | | fp16, bf16 | `auto`, `bfloat16` | Any | Any | ❌ | ❌ | ❌ | ❌ | Decoder | Any |
 | `TURBOQUANT` | | fp16, bf16 | `turboquant_k8v4`, `turboquant_4bit_nc`, `turboquant_k3v4_nc`, `turboquant_3bit_nc` | 16, 32, 64, 128 | Any | ❌ | ❌ | ❌ | ❌ | Decoder | Any |
+| `OSCAR` | | fp16, bf16 | `oscar_int2` | 16, 32, 64, 128 | Any | ❌ | ❌ | ❌ | ❌ | Decoder | Any |
 
 > **†** FlashInfer uses TRTLLM attention on Blackwell (SM100), which supports sinks. Disable via `--attention-config.use_trtllm_attention=0`.
 >

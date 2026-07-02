@@ -185,3 +185,69 @@ if __name__ == "__main__":
 ```
 
 For more detailed and up-to-date examples, see the [`llm-compressor` official examples](https://github.com/vllm-project/llm-compressor/tree/main/examples/quantization_kv_cache).
+
+---
+
+## OSCAR INT2 KV Cache (2-bit)
+
+OSCAR (Offline Spectral Covariance-Aware Rotation,
+[arXiv:2605.17757](https://arxiv.org/abs/2605.17757)) quantizes the KV cache to
+~2 bits per element, cutting KV memory by roughly 5x relative to BF16. It applies
+a _calibrated_ per-layer orthogonal rotation to keys and values before asymmetric
+INT2 quantization, so quantization noise lands in the directions attention is
+least sensitive to. The rotation is weight-preserving — model weights are loaded
+unchanged.
+
+Select it with `kv_cache_dtype="oscar_int2"`. Unlike FP8, OSCAR needs an
+auxiliary set of per-layer rotation matrices, supplied via environment variables
+(rather than baked into the checkpoint):
+
+| Variable | Meaning | Recipe default |
+| -------- | ------- | -------------- |
+| `VLLM_OSCAR_K_ROTATION_PATH` | Key rotation `.pt` (per-layer `[head_dim, head_dim]`) | — |
+| `VLLM_OSCAR_V_ROTATION_PATH` | Value rotation `.pt` | — |
+| `VLLM_OSCAR_K_CLIP_RATIO` | Key percentile clip (0 disables) | `0.96` |
+| `VLLM_OSCAR_V_CLIP_RATIO` | Value percentile clip (0 disables) | `0.92` |
+
+Pre-computed rotations for several models (Qwen3-4B/8B/32B, GLM-4.7-FP8, …) are
+published at [`Zhongzhu/OSCAR-RotationZoo`](https://huggingface.co/Zhongzhu/OSCAR-RotationZoo).
+If no rotation path is set, OSCAR degrades gracefully to identity rotation (naive
+clipped INT2), which loses most of the accuracy benefit.
+
+### Example: Qwen3-32B with OSCAR INT2
+
+```bash
+# Download the calibrated rotations for this model.
+hf download Zhongzhu/OSCAR-RotationZoo \
+    "Qwen3-32B/seq16000_prompt69_group128/*" --local-dir ./oscar_rotations
+
+export VLLM_OSCAR_K_ROTATION_PATH=./oscar_rotations/Qwen3-32B/seq16000_prompt69_group128/k_rotation_qqt_r_h_pbr.pt
+export VLLM_OSCAR_V_ROTATION_PATH=./oscar_rotations/Qwen3-32B/seq16000_prompt69_group128/v_rotation_sst_r_h_pbr.pt
+export VLLM_OSCAR_K_CLIP_RATIO=0.96
+export VLLM_OSCAR_V_CLIP_RATIO=0.92
+```
+
+```python
+from vllm import LLM, SamplingParams
+
+llm = LLM(
+    model="Qwen/Qwen3-32B",
+    kv_cache_dtype="oscar_int2",
+)
+out = llm.generate("London is the capital of", SamplingParams(temperature=0))
+print(out[0].outputs[0].text)
+```
+
+Or for online serving (read the same environment variables before launching):
+
+```bash
+vllm serve Qwen/Qwen3-32B --kv-cache-dtype oscar_int2
+```
+
+!!! note
+    The first and last two attention layers are kept in the native dtype
+    (boundary protection), so the effective memory saving is slightly below the
+    nominal 8x. OSCAR is a memory/throughput optimization: it preserves accuracy
+    (e.g. near-zero gap to BF16 on Qwen3-32B) and enables much longer contexts /
+    higher concurrency, but the INT2 decode kernel adds per-token latency at
+    small batch sizes.
