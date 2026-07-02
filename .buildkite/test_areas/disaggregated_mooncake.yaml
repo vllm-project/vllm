@@ -1,0 +1,15 @@
+group: Disaggregated Mooncake
+depends_on: 
+  - image-build
+steps:
+- label: Distributed MooncakeConnector PD accuracy (4 GPUs)
+  key: distributed-mooncakeconnector-pd-accuracy-4-gpus
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 4
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/mooncake/
+    - tests/v1/kv_connector/mooncake_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/mooncake_integration/config_sweep_accuracy_test.sh
