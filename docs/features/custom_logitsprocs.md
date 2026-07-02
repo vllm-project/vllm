@@ -91,6 +91,46 @@ Notes:
 
 Unlike built-in logits processors, custom logits processors may require configuration arguments that are not hard-coded into `SamplingParams` or the vLLM server REST API. To solve this problem, custom logits processors may leverage vLLM [custom arguments](./custom_arguments.md) support to receive configuration settings from the user (although you are also free to design a custom logits processor which utilizes the pre-existing fields in `SamplingParams`.)
 
+### Using Custom Logits Processors with Speculative Decoding
+
+Custom logits processors are disabled by default when speculative decoding is enabled. A processor must explicitly opt in by overriding:
+
+``` python
+@classmethod
+def supports_spec_decode(cls) -> bool:
+    return True
+```
+
+Processors that do not opt in are rejected during engine initialization instead of being silently ignored.
+
+Every opted-in processor must also implement:
+
+``` python
+def apply_with_spec_decode(
+    self,
+    logits: torch.Tensor,
+    num_draft_tokens: list[int],
+) -> torch.Tensor:
+    ...
+```
+
+`logits` contains the target-model logits for all draft-token positions in the batch. `num_draft_tokens` maps request rows to their corresponding draft-token counts. For example, `num_draft_tokens = [2, 3]` means rows `0..1` belong to request 0 and rows `2..4` belong to request 1.
+
+Processors that are not argmax invariant are applied before temperature, top-k, and top-p processing. Argmax-invariant processors are applied only for non-greedy sampling, after temperature processing and before top-k and top-p processing.
+
+By default, custom processors are applied to target-model logits during the rejection sampling step. If the processor must also affect which tokens the draft model proposes, it can additionally implement:
+
+``` python
+def apply_to_speculative_draft_logits(
+    self,
+    logits: torch.Tensor,
+    num_draft_tokens: list[int] | None = None,
+) -> torch.Tensor:
+    ...
+```
+
+This optional hook is applied to draft-model logits before draft tokens are sampled. Implement it only when the processor's constraints must be visible to the draft-token proposer.
+
 ### Example Custom Logits Processor Implementation
 
 The contrived example below implements a custom logits processor which consumes a `(num\_requests) \times (vocab\_size)` logits tensor and masks out all tokens except for one (`target_token`) with `float(-inf)`. The logits processor is disabled for any request that does not specify `target_token`. To determine whether the logits processor is enabled and which token to leave unmasked, the logits processor checks `SamplingParams.extra_args` for a `target_token` custom argument associated with each request:

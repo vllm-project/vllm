@@ -41,7 +41,7 @@ STR_POOLING_REJECTS_LOGITSPROCS = (
 # Error message when the user tries to initialize vLLM with a speculative
 # decoding enabled and custom logitsproces
 STR_SPEC_DEC_REJECTS_LOGITSPROCS = (
-    "Custom logits processors are not supported when speculative decoding is enabled."
+    "Custom logits processors must explicitly opt in to support speculative decoding."
 )
 
 LOGITSPROCS_GROUP = "vllm.logits_processors"
@@ -181,6 +181,68 @@ def _load_custom_logitsprocs(
     return _load_logitsprocs_plugins() + _load_logitsprocs_by_fqcns(logits_processors)
 
 
+def _get_unsupported_spec_decode_logitsprocs(
+    custom_logitproc_classes: Sequence[type[LogitsProcessor]],
+) -> list[type[LogitsProcessor]]:
+    return [
+        ctor for ctor in custom_logitproc_classes if not ctor.supports_spec_decode()
+    ]
+
+
+def _get_missing_spec_decode_apply_logitsprocs(
+    logitproc_classes: Sequence[type[LogitsProcessor]],
+) -> list[type[LogitsProcessor]]:
+    return [
+        ctor
+        for ctor in logitproc_classes
+        if getattr(ctor, "apply_with_spec_decode", None) is None
+    ]
+
+
+def _spec_decode_unsupported_error(
+    unsupported_logitprocs: Sequence[type[LogitsProcessor]],
+) -> ValueError:
+    return ValueError(
+        f"{STR_SPEC_DEC_REJECTS_LOGITSPROCS} "
+        "Custom logits processors can opt in by overriding "
+        "`supports_spec_decode()` to return True. "
+        "Opted-in processors must also implement "
+        "`apply_with_spec_decode(logits, num_draft_tokens)`. "
+        "Processors that should affect draft-token selection may "
+        "also implement `apply_to_speculative_draft_logits(...)`. "
+        f"Unsupported processors: "
+        f"{[ctor.__name__ for ctor in unsupported_logitprocs]}"
+    )
+
+
+def _spec_decode_missing_apply_error(
+    missing_spec_decode_apply: Sequence[str],
+) -> ValueError:
+    return ValueError(
+        "Custom logits processors used with speculative decoding must implement "
+        "`apply_with_spec_decode(logits, num_draft_tokens)`. "
+        f"Unsupported processors: {list(missing_spec_decode_apply)}"
+    )
+
+
+def validate_custom_logitsprocs_with_spec_decode(
+    logits_processors: Sequence[str | type[LogitsProcessor]] | None,
+) -> None:
+    custom_logitproc_classes = _load_custom_logitsprocs(logits_processors)
+    unsupported_logitprocs = _get_unsupported_spec_decode_logitsprocs(
+        custom_logitproc_classes
+    )
+    if unsupported_logitprocs:
+        raise _spec_decode_unsupported_error(unsupported_logitprocs)
+    missing_spec_decode_apply = _get_missing_spec_decode_apply_logitsprocs(
+        custom_logitproc_classes
+    )
+    if missing_spec_decode_apply:
+        raise _spec_decode_missing_apply_error(
+            [ctor.__name__ for ctor in missing_spec_decode_apply]
+        )
+
+
 def build_logitsprocs(
     vllm_config: "VllmConfig",
     device: torch.device,
@@ -199,14 +261,33 @@ def build_logitsprocs(
 
     # Check if speculative decoding is enabled.
     if vllm_config.speculative_config:
-        if custom_logitsprocs:
-            raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
+        custom_logitproc_classes = _load_custom_logitsprocs(custom_logitsprocs)
+        unsupported_logitprocs = _get_unsupported_spec_decode_logitsprocs(
+            custom_logitproc_classes
+        )
+        if unsupported_logitprocs:
+            raise _spec_decode_unsupported_error(unsupported_logitprocs)
+        custom_instances = [
+            ctor(vllm_config, device, is_pin_memory)
+            for ctor in custom_logitproc_classes
+        ]
+        logitsprocs = LogitsProcessors(
+            itertools.chain(
+                (MinTokensLogitsProcessor(vllm_config, device, is_pin_memory),),
+                custom_instances,
+            )
+        )
+        missing_spec_decode_apply = [
+            type(processor).__name__
+            for processor in logitsprocs.all
+            if getattr(processor, "apply_with_spec_decode", None) is None
+        ]
+        if missing_spec_decode_apply:
+            raise _spec_decode_missing_apply_error(missing_spec_decode_apply)
         logger.warning(
             "min_p and logit_bias parameters won't work with speculative decoding."
         )
-        return LogitsProcessors(
-            [MinTokensLogitsProcessor(vllm_config, device, is_pin_memory)]
-        )
+        return logitsprocs
 
     custom_logitsprocs_classes = _load_custom_logitsprocs(custom_logitsprocs)
     return LogitsProcessors(

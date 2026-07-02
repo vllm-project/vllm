@@ -1,8 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
 from itertools import chain
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from vllm.v1.sample.logits_processor.interface import (
     AddedRequest,
@@ -151,6 +151,7 @@ class LogitsProcessors:
     def __init__(self, logitsprocs: Iterable["LogitsProcessor"] | None = None) -> None:
         self.argmax_invariant: list[LogitsProcessor] = []
         self.non_argmax_invariant: list[LogitsProcessor] = []
+        self.spec_decode_draft_logits_hooks: list[Callable[..., Any]] = []
         if logitsprocs:
             for logitproc in logitsprocs:
                 (
@@ -158,6 +159,13 @@ class LogitsProcessors:
                     if logitproc.is_argmax_invariant()
                     else self.non_argmax_invariant
                 ).append(logitproc)
+                apply_to_draft_logits = getattr(
+                    logitproc,
+                    "apply_to_speculative_draft_logits",
+                    None,
+                )
+                if callable(apply_to_draft_logits):
+                    self.spec_decode_draft_logits_hooks.append(apply_to_draft_logits)
 
     @property
     def all(self) -> Iterator["LogitsProcessor"]:
