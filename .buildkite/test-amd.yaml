@@ -1789,7 +1789,7 @@ steps:
   - vllm/
   - tests/test_regression
   commands:
-  - pip install modelscope
+  - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
 
 #---------------------------------------------------------  mi300 · ray_compat  ---------------------------------------------------------#
@@ -3162,5 +3162,5 @@ steps:
   - vllm/
   - tests/test_regression
   commands:
-  - pip install modelscope
+  - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
