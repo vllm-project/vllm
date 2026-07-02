@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import inspect
+
 import torch
 
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -20,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
     kInt4Static,
     kInt4Static32,
+    kMxfp4Dynamic,
     kMxfp4Static,
     kMxfp8Dynamic,
     kMxfp8Static,
@@ -72,7 +76,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        return True
+        return not envs.VLLM_XPU_MOE_ACT_QUANT_IN_PREPARE
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
@@ -158,6 +162,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
             f"got is_fp8={self.is_fp8}, is_int4={self.is_int4}, "
             f"is_mxfp4={self.is_mxfp4}."
         )
+        prequantized_act = not self.expects_unquantized_inputs
         if self.fused_moe_impl is None:
             topk = topk_ids.size(-1)
             self.fused_moe_impl = XpuFusedMoe(
@@ -180,12 +185,15 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 gemm1_clamp_limit=self.gemm1_clamp_limit,
             )
         assert self.fused_moe_impl is not None
-        self.fused_moe_impl.apply(
-            output=output,
-            hidden_states=hidden_states,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-        )
+        apply_kwargs: dict = {
+            "output": output,
+            "hidden_states": hidden_states,
+            "topk_weights": topk_weights,
+            "topk_ids": topk_ids,
+        }
+        if prequantized_act:
+            apply_kwargs["a1q_scale"] = a1q_scale
+        self.fused_moe_impl.apply(**apply_kwargs)
 
 
 class XPUExpertsFp8(XPUExperts):
@@ -327,6 +335,24 @@ class XPUExpertsMxFp4(XPUExperts):
         )
         self.is_mxfp4 = True
 
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # K = a1q.size(-1). When activations are pre-quantized packed mxfp4,
+        # K is the packed hidden_size (= logical / 2); the kernel output is at
+        # logical hidden_size (2 * K). When unquantized (bf16), K is already
+        # the logical size.
+        logical_K = K if self.expects_unquantized_inputs else 2 * K
+        return (0,), (0,), (M, logical_K)
+
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
@@ -334,5 +360,6 @@ class XPUExpertsMxFp4(XPUExperts):
     ) -> bool:
         SUPPORTED_W_A = [
             (kMxfp4Static, None),
+            (kMxfp4Static, kMxfp4Dynamic),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
