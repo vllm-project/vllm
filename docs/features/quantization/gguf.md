@@ -16,7 +16,7 @@ To run a GGUF model with vLLM, you can use the `repo_id:quant_type` format to lo
 
 ```bash
 # We recommend using the tokenizer from base model to avoid long-time and buggy tokenizer conversion.
-vllm serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M --tokenizer Qwen/Qwen3-0.6B
+vllm serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M --tokenizer Qwen/Qwen3-0.6B --dtype float16
 ```
 
 You can also add `--tensor-parallel-size 2` to enable tensor parallelism inference with 2 GPUs:
@@ -24,6 +24,7 @@ You can also add `--tensor-parallel-size 2` to enable tensor parallelism inferen
 ```bash
 vllm serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M \
    --tokenizer Qwen/Qwen3-0.6B \
+   --dtype float16 \
    --tensor-parallel-size 2
 ```
 
@@ -31,7 +32,7 @@ Alternatively, you can download and use a local GGUF file:
 
 ```bash
 wget https://huggingface.co/unsloth/Qwen3-0.6B-GGUF/resolve/main/Qwen3-0.6B-Q4_K_M.gguf
-vllm serve ./Qwen3-0.6B-Q4_K_M.gguf --tokenizer Qwen/Qwen3-0.6B
+vllm serve ./Qwen3-0.6B-Q4_K_M.gguf --tokenizer Qwen/Qwen3-0.6B --dtype float16
 ```
 
 !!! warning
@@ -43,6 +44,7 @@ GGUF assumes that HuggingFace can convert the metadata to a config file. In case
 # If your model is not supported by HuggingFace you can manually provide a HuggingFace compatible config path
 vllm serve unsloth/Qwen3-0.6B-GGUF:Q4_K_M \
    --tokenizer Qwen/Qwen3-0.6B \
+   --dtype float16 \
    --hf-config-path Qwen/Qwen3-0.6B
 ```
 
