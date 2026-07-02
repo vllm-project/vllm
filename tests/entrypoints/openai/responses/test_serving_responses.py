@@ -771,6 +771,26 @@ class TestStreamingReasoningToContentTransition:
     transition, specifically the fix for mixed deltas that carry both
     reasoning and content simultaneously."""
 
+    def test_content_index_resets_for_each_output_item(self):
+        """The first content part of each output item should start at 0."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_reasoning_delta_events,
+            emit_text_delta_events,
+        )
+
+        def first_content_index(events):
+            for event in events:
+                content_index = getattr(event, "content_index", None)
+                if content_index is not None:
+                    return content_index
+            return None
+
+        state = StreamingState()
+
+        assert first_content_index(emit_reasoning_delta_events("x", state)) == 0
+        state.reset_for_new_item()
+        assert first_content_index(emit_text_delta_events("y", state)) == 0
+
     @pytest.mark.asyncio
     async def test_mixed_delta_reasoning_and_content_emits_reasoning_delta(
         self, monkeypatch
