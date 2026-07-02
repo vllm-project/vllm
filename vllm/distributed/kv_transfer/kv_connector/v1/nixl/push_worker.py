@@ -519,38 +519,40 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_block_ids = meta.remote.block_ids
         local_block_ids = meta.local_physical_block_ids
         num_groups = len(local_block_ids)
-        read_specs = [
-            ReadSpec(
-                remote_rank=rank,
-                local_block_ids=[
-                    list(local_block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
-                    for g in range(num_groups)
-                ],
-                remote_block_ids=[
-                    list(remote_block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
-                    for g in range(num_groups)
-                ],
-            )
-            for rank in plan.all_source_ranks
-        ]
 
         if self.use_mla and tp_ratio < 0:
             # MLA latent is replicated across D's TP ranks: the tp-mapping
             # collapses to one rank (fine for reads), but push must WRITE every
             # D rank or the rest decode stale KV; only the dst differs per rank.
-            assert len(read_specs) == 1
-            base_spec = read_specs[0]
+            assert len(plan.all_source_ranks) == 1
+            mla_local_ids = [list(ids) for ids in local_block_ids]
+            mla_remote_ids = [list(ids) for ids in remote_block_ids]
             read_specs = [
                 ReadSpec(
                     remote_rank=rank,
-                    local_block_ids=base_spec.local_block_ids,
-                    remote_block_ids=base_spec.remote_block_ids,
+                    local_block_ids=mla_local_ids,
+                    remote_block_ids=mla_remote_ids,
                 )
-                for rank in self.dst_xfer_side_handles[meta.remote.engine_id]
+                for rank in self.dst_xfer_side_handles[engine_id]
+            ]
+        else:
+            read_specs = [
+                ReadSpec(
+                    remote_rank=rank,
+                    local_block_ids=[
+                        list(local_block_ids[g])
+                        if rank in plan.source_ranks_per_group[g]
+                        else []
+                        for g in range(num_groups)
+                    ],
+                    remote_block_ids=[
+                        list(remote_block_ids[g])
+                        if rank in plan.source_ranks_per_group[g]
+                        else []
+                        for g in range(num_groups)
+                    ],
+                )
+                for rank in plan.all_source_ranks
             ]
 
         handles: list[int] = []
