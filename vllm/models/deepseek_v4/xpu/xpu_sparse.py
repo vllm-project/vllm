@@ -78,19 +78,45 @@ class DeepseekV4XPUAttention(DeepseekV4Attention):
         return num_heads
 
     def _o_proj(self, o: torch.Tensor, positions: torch.Tensor) -> torch.Tensor:
-        # XPU uses BF16 reference wo_a path (same as ROCm).
-        from vllm.models.deepseek_v4.amd.rocm import rocm_inv_rope_einsum
-
-        z = rocm_inv_rope_einsum(
-            self.rotary_emb,
-            o,
-            positions,
-            self.rope_head_dim,
+        # XPU SYCL kernel: inv_rope + reshape -> [T, G, hpg*D] BF16
+        o_inv = torch.ops._xpu_C.deepseek_inv_rope_bf16(
+            o, positions, self.rotary_emb.cos_sin_cache,
             self.n_local_groups,
-            self.o_lora_rank,
-            self.wo_a,
+            self.n_local_heads // self.n_local_groups,
+            self.nope_head_dim, self.rope_head_dim,
         )
+        wo_a_weight = self._get_wo_a_bf16(o_inv.shape[-1])
+        z = torch.einsum("tgd,grd->tgr", o_inv, wo_a_weight)
         return self.wo_b(z.flatten(1))
+
+    def _get_wo_a_bf16(self, hidden_dim: int) -> torch.Tensor:
+        """Dequantize wo_a weight to bf16 once and cache on the module."""
+        cached = getattr(self.wo_a, "_wo_a_bf16_cached", None)
+        if cached is not None:
+            return cached
+        if hasattr(self.wo_a, "weight_scale_inv"):
+            from vllm.v1.attention.ops.rocm_aiter_mla_sparse import (
+                _expand_2d_block_scales,
+            )
+
+            w = self.wo_a.weight.view(
+                self.n_local_groups, self.o_lora_rank, hidden_dim
+            ).to(torch.float32)
+            scale = _expand_2d_block_scales(
+                self.wo_a.weight_scale_inv.view(
+                    self.n_local_groups, -1,
+                    self.wo_a.weight_scale_inv.shape[-1]
+                ),
+                self.o_lora_rank,
+                hidden_dim,
+            )
+            cached = (w * scale).to(torch.bfloat16)
+        else:
+            cached = self.wo_a.weight.view(
+                self.n_local_groups, self.o_lora_rank, hidden_dim
+            ).to(torch.bfloat16)
+        self.wo_a._wo_a_bf16_cached = cached
+        return cached
 
     def forward_mqa(
         self,
