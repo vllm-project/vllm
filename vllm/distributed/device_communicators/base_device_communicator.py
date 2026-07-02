@@ -140,6 +140,7 @@ class DeviceCommunicatorBase:
         unique_name: str = "",
         global_ranks: list[int] | None = None,
         global_world_size: int | None = None,
+        use_all2all: bool = False,
     ):
         self.device = device or torch.device("cpu")
         self.cpu_group = cpu_group
@@ -169,20 +170,15 @@ class DeviceCommunicatorBase:
             self.global_world_size = dist.get_world_size()
             self.rank_in_group = dist.get_group_rank(self.cpu_group, self.global_rank)
 
-        use_ep = False
         all2all_backend = None
         from vllm.config import get_current_vllm_config_or_none
 
         config = get_current_vllm_config_or_none()
         if config is not None:
-            # as long as we use data parallel (coupled data parallel
-            # where all data parallel ranks execute forward together),
-            # we initialize the all2all manager used in expert parallel.
-            use_ep = config.parallel_config.data_parallel_size > 1
             all2all_backend = config.parallel_config.all2all_backend
 
         self.is_ep_communicator = unique_name.split(":")[0] == "ep"
-        self.use_all2all = self.is_ep_communicator and use_ep
+        self.use_all2all = self.is_ep_communicator and use_all2all
         self.all2all_backend = all2all_backend
         self.all2all_manager: All2AllManagerBase | None = None
 

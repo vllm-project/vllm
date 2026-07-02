@@ -85,8 +85,9 @@ def create_standby_groups(
         all_ranks.transpose(1, 2).reshape(-1, new_dp_size * tp_size).unbind(0)
     )
     standby_ep_ranks = [x.tolist() for x in standby_ep_ranks]
+    use_all2all = new_dp_size > 1
     _STANDBY_EP = _init_stateless_group(
-        standby_ep_ranks, "ep", master_ip, backend, coord_store=coord_store
+        standby_ep_ranks, "ep", master_ip, backend, coord_store, use_all2all=use_all2all
     )
 
     if enable_eplb:
