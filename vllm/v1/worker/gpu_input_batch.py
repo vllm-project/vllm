@@ -124,19 +124,24 @@ class InputBatch:
         self._req_ids: list[str | None] = []
         self.req_id_to_index: dict[str, int] = {}
 
-        # TODO(woosuk): This buffer could be too large if max_model_len is big.
-        # Find a way to reduce the CPU memory usage.
-        # This buffer is not directly transferred to the GPU, so it does not
-        # need to be pinned.
+        # Per-request CPU buffers indexed `[req_index, :num_tokens]`. Eagerly
+        # allocating (max_num_reqs, max_model_len) OOM-kills workers on models
+        # that advertise huge default context (e.g. Llama-4 Scout with
+        # max_model_len=10_485_760: each worker reaches >128 GiB RSS, 8 workers
+        # exceed host RAM). Start narrow and grow on demand via
+        # `_ensure_token_buf_cols`.
+        self._token_buf_cols = min(
+            max_model_len, max(max_num_batched_tokens, 8192)
+        )
         self.token_ids_cpu_tensor = torch.zeros(
-            (max_num_reqs, max_model_len),
+            (max_num_reqs, self._token_buf_cols),
             device="cpu",
             dtype=torch.int32,
             pin_memory=False,
         )
         self.token_ids_cpu = self.token_ids_cpu_tensor.numpy()
         self.is_token_ids_tensor = torch.zeros(
-            (max_num_reqs, max_model_len),
+            (max_num_reqs, self._token_buf_cols),
             device="cpu",
             dtype=bool,
             pin_memory=False,
@@ -307,6 +312,41 @@ class InputBatch:
         # while performing state updates to the batch.
         return cast(list[str], self._req_ids)
 
+    def _ensure_token_buf_cols(self, required: int) -> None:
+        """Grow `token_ids_cpu` / `is_token_ids` to fit `required` columns.
+
+        Doubles (amortized) up to `max_model_len`. Called before any write
+        that may extend a request's token extent.
+        """
+        if required <= self._token_buf_cols:
+            return
+        new_cols = self._token_buf_cols
+        while new_cols < required:
+            new_cols *= 2
+        new_cols = min(new_cols, self.max_model_len)
+
+        new_tok = torch.zeros(
+            (self.max_num_reqs, new_cols),
+            device="cpu",
+            dtype=torch.int32,
+            pin_memory=False,
+        )
+        new_tok[:, : self._token_buf_cols] = self.token_ids_cpu_tensor
+        self.token_ids_cpu_tensor = new_tok
+        self.token_ids_cpu = new_tok.numpy()
+
+        new_mask = torch.zeros(
+            (self.max_num_reqs, new_cols),
+            device="cpu",
+            dtype=bool,
+            pin_memory=False,
+        )
+        new_mask[:, : self._token_buf_cols] = self.is_token_ids_tensor
+        self.is_token_ids_tensor = new_mask
+        self.is_token_ids = new_mask.numpy()
+
+        self._token_buf_cols = new_cols
+
     def _register_add_request(self, request: "CachedRequestState") -> int:
         """Track add-request operations for logits processors.
         Not applicable to pooling models.
@@ -358,6 +398,7 @@ class InputBatch:
         self.num_prompt_tokens[req_index] = num_prompt_tokens
         start_idx = num_prompt_tokens
         end_idx = start_idx + len(request.output_token_ids)
+        self._ensure_token_buf_cols(end_idx)
         if request.prompt_token_ids is not None:
             self.token_ids_cpu[req_index, :num_prompt_tokens] = request.prompt_token_ids
             if request.prompt_is_token_ids is not None:
@@ -504,6 +545,7 @@ class InputBatch:
         # _prepare_input_ids.
         start_index = self.num_tokens_no_spec[req_index]
         end_token_index = start_index + num_spec_tokens
+        self._ensure_token_buf_cols(end_token_index)
         self.token_ids_cpu[req_index, start_index:end_token_index] = spec_token_ids
         self.is_token_ids[req_index, start_index:end_token_index] = True
         cur_spec_token_ids.extend(spec_token_ids)
