@@ -378,3 +378,27 @@ def test_negative_prompt_token_ids_flat():
             prompt=[-1],
             max_tokens=10,
         )
+
+
+def test_logprobs_minus_one_allowed():
+    """logprobs=-1 means "return all logprobs". The sampling layer and the chat
+    top_logprobs / prompt_logprobs validators all accept -1, so the completion
+    logprobs validator must accept it too instead of rejecting it as negative."""
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="Test prompt",
+        max_tokens=10,
+        logprobs=-1,
+    )
+    assert request.logprobs == -1
+
+
+def test_logprobs_below_minus_one_rejected():
+    """Values more negative than -1 stay invalid."""
+    with pytest.raises(Exception, match="must be a positive value or -1"):
+        CompletionRequest(
+            model=MODEL_NAME,
+            prompt="Test prompt",
+            max_tokens=10,
+            logprobs=-2,
+        )
