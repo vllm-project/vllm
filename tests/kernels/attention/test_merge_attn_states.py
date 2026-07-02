@@ -390,3 +390,155 @@ def test_merge_attn_states(
         len(NUM_BATCH_TOKENS) * len(HEAD_SIZES) * len(NUM_QUERY_HEADS) * len(DTYPES)
     ):
         generate_markdown_table()
+
+
+# Tests for the smem LSE caching optimization in merge_attn_states.cu.
+# Covers two edge cases: partial last block (OOB threads must still hit barrier)
+# and non-aligned head size (groups span block boundaries, falls back to global).
+
+# Cases hitting partial-block and/or non-aligned fallback paths (bf16/fp16: threads_per_head = head_size/8, NUM_THREADS=128).
+_SMEM_BOUNDARY_CASES = [
+    # aligned (smem path): partial last block
+    (4, 128, 3),   # total=192=128+64, last block has 64 OOB threads
+    (4, 128, 1),   # total=64<128, single partial block
+    (4, 64, 5),    # total=160=128+32
+    (8, 256, 1),   # total=256=2×128, full blocks
+    # non-aligned (fallback): 128 % threads_per_head != 0
+    (4, 96, 3),    # threads_per_head=12, 128%12=8≠0
+    (4, 48, 5),    # threads_per_head=6, 128%6=2≠0
+]
+
+
+@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+@pytest.mark.parametrize("num_heads,head_size,num_tokens", _SMEM_BOUNDARY_CASES)
+@torch.inference_mode()
+def test_smem_block_boundary(
+    dtype: torch.dtype,
+    num_heads: int,
+    head_size: int,
+    num_tokens: int,
+):
+    """CUDA output must match Triton for smem optimization boundary cases."""
+    if not current_platform.is_cuda():
+        pytest.skip("CUDA kernel only available on CUDA")
+
+    element_size = torch.empty([], dtype=dtype).element_size()
+    pack_size = 16 // element_size
+    if head_size % pack_size != 0:
+        pytest.skip(
+            f"head_size={head_size} not divisible by pack_size={pack_size} "
+            f"for dtype={dtype}"
+        )
+
+    prefix_output = torch.randn(
+        num_tokens, num_heads, head_size, dtype=dtype, device="cuda"
+    )
+    suffix_output = torch.randn(
+        num_tokens, num_heads, head_size, dtype=dtype, device="cuda"
+    )
+    prefix_lse = torch.randn(
+        num_heads, num_tokens, dtype=torch.float32, device="cuda"
+    )
+    suffix_lse = torch.randn(
+        num_heads, num_tokens, dtype=torch.float32, device="cuda"
+    )
+    output_cuda = torch.zeros(
+        num_tokens, num_heads, head_size, dtype=dtype, device="cuda"
+    )
+    output_ref = torch.zeros(
+        num_tokens, num_heads, head_size, dtype=dtype, device="cuda"
+    )
+    output_lse_cuda = torch.zeros(
+        num_heads, num_tokens, dtype=torch.float32, device="cuda"
+    )
+    output_lse_ref = torch.zeros(
+        num_heads, num_tokens, dtype=torch.float32, device="cuda"
+    )
+
+    merge_attn_states_cuda(
+        output_cuda, prefix_output, prefix_lse,
+        suffix_output, suffix_lse, output_lse_cuda,
+    )
+    merge_attn_states_triton(
+        output_ref, prefix_output, prefix_lse,
+        suffix_output, suffix_lse, output_lse_ref,
+    )
+
+    atol, rtol = (1e-3, 1e-2) if dtype == torch.bfloat16 else (1e-3, 1e-3)
+    torch.testing.assert_close(
+        output_cuda.float(), output_ref.float(), atol=atol, rtol=rtol
+    )
+    torch.testing.assert_close(
+        output_lse_cuda, output_lse_ref, atol=atol, rtol=rtol
+    )
+
+
+@pytest.mark.parametrize("use_output_lse", [True, False])
+@pytest.mark.parametrize("dtype", [torch.half, torch.bfloat16])
+@pytest.mark.parametrize(
+    "num_heads,head_size,num_tokens",
+    [
+        (8, 128, 256),   # aligned, group_fits_in_block=True
+        (4, 64, 512),    # aligned, group_fits_in_block=True
+        (16, 96, 256),   # non-aligned, group_fits_in_block=False (fallback)
+        (4, 128, 3),     # aligned + partial last block
+    ],
+)
+@torch.inference_mode()
+def test_smem_no_context_tokens(
+    dtype: torch.dtype,
+    num_heads: int,
+    num_tokens: int,
+    head_size: int,
+    use_output_lse: bool,
+):
+    """prefill_tokens_with_context=0 means all tokens are copy-path; output must equal suffix."""
+    if not current_platform.is_cuda():
+        pytest.skip("CUDA kernel only available on CUDA")
+
+    element_size = torch.empty([], dtype=dtype).element_size()
+    pack_size = 16 // element_size
+    if head_size % pack_size != 0:
+        pytest.skip(
+            f"head_size={head_size} not divisible by pack_size={pack_size}"
+        )
+
+    prefix_output = torch.randn(
+        num_tokens, num_heads, head_size, dtype=dtype, device="cuda"
+    )
+    suffix_output = torch.randn(
+        num_tokens, num_heads, head_size, dtype=dtype, device="cuda"
+    )
+    prefix_lse = torch.randn(
+        num_heads, num_tokens, dtype=torch.float32, device="cuda"
+    )
+    suffix_lse = torch.randn(
+        num_heads, num_tokens, dtype=torch.float32, device="cuda"
+    )
+    output_cuda = torch.zeros(
+        num_tokens, num_heads, head_size, dtype=dtype, device="cuda"
+    )
+    output_lse_cuda = (
+        torch.zeros(num_heads, num_tokens, dtype=torch.float32, device="cuda")
+        if use_output_lse
+        else None
+    )
+
+    merge_attn_states_cuda(
+        output_cuda, prefix_output, prefix_lse,
+        suffix_output, suffix_lse, output_lse_cuda,
+        prefill_tokens_with_context=0,
+    )
+
+    atol, rtol = (1e-3, 1e-2) if dtype == torch.bfloat16 else (1e-3, 1e-3)
+
+    # With no context tokens the copy path fires for every token:
+    # output must equal suffix_output exactly.
+    torch.testing.assert_close(
+        output_cuda.float(), suffix_output.float(), atol=atol, rtol=rtol
+    )
+    if use_output_lse:
+        assert output_lse_cuda is not None
+        torch.testing.assert_close(
+            output_lse_cuda, suffix_lse, atol=atol, rtol=rtol
+        )

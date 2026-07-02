@@ -36,14 +36,33 @@ __global__ void merge_attn_states_kernel(
   const uint global_idx = blockIdx.x * NUM_THREADS + threadIdx.x;
   const uint token_head_threads = num_tokens * num_heads * threads_per_head;
 
-  if (global_idx >= token_head_threads) return;
-
-  // global_idx -> token_idx + head_idx + pack_idx
+  // Compute indices before __syncthreads so all threads enter the barrier.
   const uint token_head_idx = global_idx / threads_per_head;
   const uint pack_idx = global_idx % threads_per_head;
-
   const uint token_idx = token_head_idx / num_heads;
   const uint head_idx = token_head_idx % num_heads;
+
+  // Cache LSE in smem: only pack_idx==0 loads from global, rest read smem.
+  // Falls back to direct global reads when groups can span block boundaries
+  // (i.e., NUM_THREADS % threads_per_head != 0, e.g. head_size=96 w/ bf16).
+  __shared__ float smem_p_lse[NUM_THREADS];
+  __shared__ float smem_s_lse[NUM_THREADS];
+  const bool group_fits_in_block = (NUM_THREADS % threads_per_head == 0);
+
+  const bool is_valid = (global_idx < token_head_threads);
+  const uint group_idx = threadIdx.x / threads_per_head;
+
+  if (group_fits_in_block) {
+    // Only merge-path tokens need smem; copy-path tokens skip this.
+    if (is_valid && pack_idx == 0 && token_idx < prefix_num_tokens) {
+      smem_p_lse[group_idx] = prefix_lse[head_idx * num_tokens + token_idx];
+      smem_s_lse[group_idx] = suffix_lse[head_idx * num_tokens + token_idx];
+    }
+    __syncthreads();
+    if (!is_valid) return;  // OOB threads exit only after the barrier.
+  } else {
+    if (!is_valid) return;
+  }
 
   const uint pack_offset = pack_idx * pack_size;  // (0~15)*8, etc.
   const uint src_head_offset = token_idx * num_heads * prefix_head_stride +
@@ -83,16 +102,23 @@ __global__ void merge_attn_states_kernel(
             output_head_ptr)[pack_offset / pack_size] = s_out_pack;
       }
     }
+    // Copy path only reads lse once, no smem needed.
     if (output_lse != nullptr && pack_idx == 0) {
-      float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
-      output_lse[head_idx * num_tokens + token_idx] = s_lse;
+      output_lse[head_idx * num_tokens + token_idx] =
+          suffix_lse[head_idx * num_tokens + token_idx];
     }
     return;
   }
 
-  // For tokens within prefix range, merge prefix and suffix
-  float p_lse = prefix_lse[head_idx * num_tokens + token_idx];
-  float s_lse = suffix_lse[head_idx * num_tokens + token_idx];
+  // Merge path: read lse from smem if it's safe, otherwise from global.
+  float p_lse, s_lse;
+  if (group_fits_in_block) {
+    p_lse = smem_p_lse[group_idx];
+    s_lse = smem_s_lse[group_idx];
+  } else {
+    p_lse = prefix_lse[head_idx * num_tokens + token_idx];
+    s_lse = suffix_lse[head_idx * num_tokens + token_idx];
+  }
   p_lse = std::isinf(p_lse) ? -std::numeric_limits<float>::infinity() : p_lse;
   s_lse = std::isinf(s_lse) ? -std::numeric_limits<float>::infinity() : s_lse;
 
