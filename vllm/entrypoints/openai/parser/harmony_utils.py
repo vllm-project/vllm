@@ -23,6 +23,7 @@ from openai_harmony import (
 )
 
 from vllm import envs
+from vllm.entrypoints.chat_utils import validate_content_part_types
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.logger import init_logger
 
@@ -423,7 +424,8 @@ def parse_chat_input_to_harmony_message(
     if isinstance(content, str):
         contents = [TextContent(text=content)]
     else:
-        # TODO: Support refusal.
+        # Validate content part types - use shared helper for consistency
+        validate_content_part_types(content)
         contents = [TextContent(text=c.get("text", "")) for c in content]
 
     # Only add assistant messages if they have content, as reasoning or tool calling
