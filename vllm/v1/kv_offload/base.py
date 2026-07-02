@@ -413,6 +413,11 @@ class CanonicalKVCacheTensor:
     tensor: torch.Tensor
     # The (possibly padded) page size per block in bytes
     page_size_bytes: int
+    n_heads: int = 0
+    # Bytes per head per token (the head-slice unit)
+    h_stride: int = 0
+    # Bytes per token (== n_heads * h_stride)
+    bs_stride: int = 0
 
 
 @dataclass

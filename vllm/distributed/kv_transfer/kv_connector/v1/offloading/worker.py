@@ -15,6 +15,7 @@ from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     MambaSpec,
+    MLAAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.kv_offload.base import (
@@ -52,6 +53,8 @@ class OffloadingConnectorWorker:
     ):
         kv_cache_config = self.spec.kv_cache_config
         num_blocks = kv_cache_config.num_blocks
+        model_config = self.spec.vllm_config.model_config
+        total_num_kv_heads = model_config.get_total_num_kv_heads()
 
         # Packed layouts (e.g. DSv4) set block_stride > 0; their tensors use
         # stride(0) as the manager-block stride (equals total_num_bytes_per_block).
@@ -69,6 +72,8 @@ class OffloadingConnectorWorker:
         unpadded_page_size_bytes: dict[str, int] = {}
         # layer_name -> size of page in bytes
         page_size_bytes: dict[str, int] = {}
+        # layer_name -> canonical (n_heads, h_stride, bs_stride)
+        head_layout: dict[str, tuple[int, int, int]] = {}
         for kv_cache_group in kv_cache_config.kv_cache_groups:
             group_layer_names = kv_cache_group.layer_names
             group_kv_cache_spec = kv_cache_group.kv_cache_spec
@@ -108,6 +113,16 @@ class OffloadingConnectorWorker:
                     unpadded_page_size_bytes[layer_name] = (
                         layer_kv_cache_spec.real_page_size_bytes
                     )
+                    if not isinstance(layer_kv_cache_spec, MLAAttentionSpec):
+                        h_stride = unpadded_page_size_bytes[layer_name] // (
+                            layer_kv_cache_spec.block_size
+                            * layer_kv_cache_spec.num_kv_heads
+                        )
+                        head_layout[layer_name] = (
+                            total_num_kv_heads,
+                            h_stride,
+                            total_num_kv_heads * h_stride,
+                        )
 
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
                     state_tensors = kv_caches[layer_name]
@@ -153,9 +168,20 @@ class OffloadingConnectorWorker:
                 (block_stride, 1),
                 storage_offset=0,
             )
+            n_heads, h_stride, bs_stride = head_layout.get(
+                packed_kv_cache_tensor.shared_by[0], (0, 0, 0)
+            )
             self._init_worker(
                 CanonicalKVCaches(
-                    [CanonicalKVCacheTensor(packed_tensor, block_stride)],
+                    [
+                        CanonicalKVCacheTensor(
+                            packed_tensor,
+                            block_stride,
+                            n_heads,
+                            h_stride,
+                            bs_stride,
+                        )
+                    ],
                     [
                         [CanonicalKVCacheRef(0, block_stride)]
                         for _ in kv_cache_config.kv_cache_groups
@@ -190,11 +216,15 @@ class OffloadingConnectorWorker:
 
             # pick the first layer to represent the group
             first_layer_name = tensor_layer_names[0]
+            n_heads, h_stride, bs_stride = head_layout.get(first_layer_name, (0, 0, 0))
             for tensor in tensors_per_block[first_layer_name]:
                 block_tensors.append(
                     CanonicalKVCacheTensor(
                         tensor=tensor,
                         page_size_bytes=page_size_bytes[first_layer_name],
+                        n_heads=n_heads,
+                        h_stride=h_stride,
+                        bs_stride=bs_stride,
                     )
                 )
 
