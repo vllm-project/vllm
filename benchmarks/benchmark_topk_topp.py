@@ -132,10 +132,8 @@ def benchmark_function(
     reset_memory_stats()
 
     # Benchmark
-    start_events = [
-        torch.cuda.Event(enable_timing=True) for _ in range(benchmark_iters)
-    ]
-    end_events = [torch.cuda.Event(enable_timing=True) for _ in range(benchmark_iters)]
+    start_events = [torch.Event(enable_timing=True) for _ in range(benchmark_iters)]
+    end_events = [torch.Event(enable_timing=True) for _ in range(benchmark_iters)]
 
     for i in range(benchmark_iters):
         logits_copy = logits.clone()
