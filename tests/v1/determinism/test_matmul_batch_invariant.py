@@ -48,15 +48,15 @@ DEVICE_TYPE = current_platform.device_type
     ],
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.device_type(DEVICE_TYPE)
 def test_matmul_correctness(a_shape, b_shape, dtype):
     """
     Compare matmul_batch_invariant against torch.matmul for various shapes.
     """
-    device = torch.device(DEVICE_TYPE)
 
     torch.manual_seed(42)
-    a = torch.rand(a_shape, dtype=dtype, device=device)
-    b = torch.rand(b_shape, dtype=dtype, device=device)
+    a = torch.rand(a_shape, dtype=dtype)
+    b = torch.rand(b_shape, dtype=dtype)
 
     # Standard implementation (CUDA ops)
     standard_output = torch.matmul(a, b)
@@ -82,21 +82,20 @@ def test_matmul_correctness(a_shape, b_shape, dtype):
 
 @skip_unsupported
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.device_type(DEVICE_TYPE)
 def test_matmul_batch_invariance(dtype):
     """
     Verify that the result for one item is bitwise identical regardless
     of what other items are in the batch.
     """
 
-    device = torch.device(DEVICE_TYPE)
-
     torch.manual_seed(42)
-    a_single = torch.rand((1, 64, 32), dtype=dtype, device=device)
-    b = torch.rand((32, 128), dtype=dtype, device=device)
+    a_single = torch.rand((1, 64, 32), dtype=dtype)
+    b = torch.rand((32, 128), dtype=dtype)
 
     standard_output = matmul_batch_invariant(a_single, b)
 
-    a_batch = torch.rand((8, 64, 32), dtype=dtype, device=device)
+    a_batch = torch.rand((8, 64, 32), dtype=dtype)
     a_batch[3] = a_single[0]
 
     batch_output = matmul_batch_invariant(a_batch, b)

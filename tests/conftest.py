@@ -306,6 +306,26 @@ def dynamo_reset():
     torch._dynamo.reset()
 
 
+@pytest.fixture(autouse=True)
+def set_default_device_from_mark(request):
+    # Retrieve the 'device_type' marker if it exists on the test function
+    marker = request.node.get_closest_marker("device_type")
+
+    if marker:
+        if not marker.args:
+            yield
+            return
+        # The first argument passed to the marker (e.g., 'cuda' or 'cpu')
+        device = marker.args[0]
+
+        # Set the default device context for the duration of the test
+        with torch.device(device):
+            yield
+    else:
+        # Standard execution if no marker is found
+        yield
+
+
 @pytest.fixture
 def example_prompts() -> list[str]:
     return [prompt for filename in _TEST_PROMPTS for prompt in _read_prompts(filename)]

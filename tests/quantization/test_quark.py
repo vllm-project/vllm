@@ -370,11 +370,12 @@ def test_mxfp4_gsm8k_correctness(config: AccuracyTestConfig):
 )
 @pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
+@pytest.mark.device_type(DEVICE_TYPE)
 def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: list[int]):
     torch.manual_seed(0)
 
     hidden_size = 64 * 32
-    inp = (torch.rand(1, hidden_size, dtype=float_dtype, device=DEVICE_TYPE) - 0.5) * 2
+    inp = (torch.rand(1, hidden_size, dtype=float_dtype) - 0.5) * 2
     for i in range(hidden_size // 32):
         inp[:, i * 32 : (i + 1) * 32] = (
             inp[:, i * 32 : (i + 1) * 32] * scalings[i % len(scalings)]
@@ -401,6 +402,7 @@ def test_mxfp4_fused_qdq_match_quark(float_dtype: torch.dtype, scalings: list[in
 )
 @pytest.mark.parametrize("float_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("scalings", [[2.3, 0.03, 7.3, 0.1, 0.004, 17.3, 1e4, 1e-4]])
+@pytest.mark.device_type(DEVICE_TYPE)
 def test_mxfp4_dequant_kernel_match_quark(
     float_dtype: torch.dtype, scalings: list[int]
 ):
@@ -426,7 +428,7 @@ def test_mxfp4_dequant_kernel_match_quark(
     hidden_size = 512
     shape = (11008, hidden_size)
 
-    w = (torch.rand(shape, device=DEVICE_TYPE, dtype=float_dtype) - 0.5) * 2
+    w = (torch.rand(shape, dtype=float_dtype) - 0.5) * 2
 
     # Make it so that different groups have different scales.
     for i in range(hidden_size // 32):
@@ -438,7 +440,7 @@ def test_mxfp4_dequant_kernel_match_quark(
     scale, _ = observer._calculate_qparams()
     weight_quantizer.scale = scale
 
-    w_mxfp4 = weight_quantizer.to_real_quantize_params(w).to(DEVICE_TYPE)
+    w_mxfp4 = weight_quantizer.to_real_quantize_params(w)
     weight_quantizer.maybe_convert_and_transpose_scale()
 
     scale = weight_quantizer.scale

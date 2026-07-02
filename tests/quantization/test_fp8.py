@@ -247,6 +247,7 @@ def test_online_quant_load_format_dummy(
     reason="FP8 is not supported on this GPU type.",
 )
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.device_type(DEVICE_TYPE)
 def test_scaled_fp8_quant(dtype) -> None:
     def quantize_ref(tensor, inv_scale):
         # The reference implementation that fully aligns to
@@ -264,7 +265,7 @@ def test_scaled_fp8_quant(dtype) -> None:
 
     # Note that we use a shape % 4 != 0 to cover edge cases,
     # because scaled_fp8_quant is vectorized by 4.
-    x = (torch.randn(size=(11, 11), device=DEVICE_TYPE) * 13).to(dtype)
+    x = (torch.randn(size=(11, 11)) * 13).to(dtype)
 
     # Dynamic quantization
     ref_y, inv_scale = ops.scaled_fp8_quant(x, None)
@@ -288,9 +289,7 @@ def test_scaled_fp8_quant(dtype) -> None:
 
     # non-contiguous input with padding
     m, n, padded_stride = 975, 512, 576
-    padded_tensor = (torch.randn(size=(m, padded_stride), device=DEVICE_TYPE) * 13).to(
-        dtype
-    )
+    padded_tensor = (torch.randn(size=(m, padded_stride)) * 13).to(dtype)
     x_nc = padded_tensor[:, :n]  # shape (m, n) with stride (padded_stride, 1)
 
     assert not x_nc.is_contiguous()

@@ -9,6 +9,7 @@ from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
+pytestmark = pytest.mark.device_type(DEVICE_TYPE)
 
 
 def round_up(x, base):
@@ -30,7 +31,7 @@ def sample_data(num_experts, max_loras, num_tokens, topk_num):
             topk_ids[i, j] = pool[j]
         token_lora_mapping[i] = random.randint(0, max_loras - 1)
 
-    return topk_ids.to(DEVICE_TYPE), token_lora_mapping.to(DEVICE_TYPE)
+    return topk_ids, token_lora_mapping
 
 
 @pytest.mark.parametrize("num_tokens", [100, 200, 1024, 4096])  # 81920
@@ -59,21 +60,15 @@ def test_moe_lora_align_block_size(
         (max_loras * max_num_tokens_padded,),
         topk_ids.numel(),
         dtype=torch.int32,
-        device=DEVICE_TYPE,
     )
     expert_ids = torch.full(
         (max_loras * max_num_m_blocks,),
         num_experts,
         dtype=torch.int32,
-        device=DEVICE_TYPE,
     )
-    num_tokens_post_pad = torch.zeros(
-        (max_loras,), dtype=torch.int32, device=DEVICE_TYPE
-    )
-    adapter_enabled = torch.ones(
-        (max_loras + 1,), dtype=torch.int32, device=DEVICE_TYPE
-    )
-    lora_ids = torch.arange(max_loras + 2, dtype=torch.int32, device=DEVICE_TYPE)
+    num_tokens_post_pad = torch.zeros((max_loras,), dtype=torch.int32)
+    adapter_enabled = torch.ones((max_loras + 1,), dtype=torch.int32)
+    lora_ids = torch.arange(max_loras + 2, dtype=torch.int32)
 
     # call kernel
     ops.moe_lora_align_block_size(
@@ -152,9 +147,6 @@ def _build_and_run_align(
         for j in range(topk_num):
             topk_ids[i, j] = pool[j]
         token_lora_mapping[i] = 0 if i < num_lora_tokens else -1
-    topk_ids = topk_ids.to(DEVICE_TYPE)
-    token_lora_mapping = token_lora_mapping.to(DEVICE_TYPE)
-
     max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
     max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
     if topk_ids.numel() < num_experts:
@@ -162,18 +154,14 @@ def _build_and_run_align(
     max_num_m_blocks = CEILDIV(max_num_tokens_padded, block_size)
 
     if lora_ids_override is None:
-        lora_ids = torch.full(
-            (max_loras + 1,), -1, dtype=torch.int32, device=DEVICE_TYPE
-        )
+        lora_ids = torch.full((max_loras + 1,), -1, dtype=torch.int32)
         unique_ids = torch.unique(token_lora_mapping, sorted=True)
         lora_ids[: unique_ids.numel()] = unique_ids.to(torch.int32)
     else:
         assert lora_ids_override.numel() == max_loras + 1
-        lora_ids = lora_ids_override.to(dtype=torch.int32, device=DEVICE_TYPE)
+        lora_ids = lora_ids_override.to(dtype=torch.int32)
 
-    adapter_enabled = torch.ones(
-        (max_loras + 1,), dtype=torch.int32, device=DEVICE_TYPE
-    )
+    adapter_enabled = torch.ones((max_loras + 1,), dtype=torch.int32)
     for slot in disabled_slots:
         adapter_enabled[slot] = 0
 
@@ -181,17 +169,13 @@ def _build_and_run_align(
         (max_loras * max_num_tokens_padded,),
         SENTINEL_TOKEN,
         dtype=torch.int32,
-        device=DEVICE_TYPE,
     )
     expert_ids = torch.full(
         (max_loras * max_num_m_blocks,),
         SENTINEL_EXPERT,
         dtype=torch.int32,
-        device=DEVICE_TYPE,
     )
-    num_tokens_post_pad = torch.full(
-        (max_loras,), SENTINEL_NPAD, dtype=torch.int32, device=DEVICE_TYPE
-    )
+    num_tokens_post_pad = torch.full((max_loras,), SENTINEL_NPAD, dtype=torch.int32)
 
     ops.moe_lora_align_block_size(
         topk_ids,
