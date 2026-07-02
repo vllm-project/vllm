@@ -170,6 +170,12 @@ def stack_audio_input_features(
     of one stacked tensor. Pad each clip to the batch-max frame count and stack;
     otherwise just drop the singleton batch dim. Without this, a multi-clip
     audio prompt reaches ``.squeeze(1)`` on a list and raises ``AttributeError``.
+
+    The zero-padding is only safe because the downstream audio tower honors
+    ``input_features_mask`` at every conv layer and never lets the padded
+    frames reach the encoder output; a future change that drops or ignores
+    the mask would silently corrupt transcriptions for the shorter clips in
+    a batch.
     """
     if not isinstance(feats, (list, tuple)):
         return feats.squeeze(1), masks.squeeze(1)
