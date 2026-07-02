@@ -77,7 +77,15 @@ logger = init_logger(__name__)
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
 ConvertOption = Literal["auto", ConvertType]
-TokenizerMode = Literal["auto", "hf", "slow", "mistral", "deepseek_v32", "deepseek_v4"]
+TokenizerMode = Literal[
+    "auto",
+    "hf",
+    "slow",
+    "mistral",
+    "deepseek_v32",
+    "deepseek_v4",
+    "batch_split_message",
+]
 ModelDType = Literal["auto", "half", "float16", "bfloat16", "float", "float32"]
 LogprobsMode = Literal[
     "raw_logits", "raw_logprobs", "processed_logits", "processed_logprobs"
@@ -129,6 +137,11 @@ class ModelConfig:
     - "mistral" will always use the tokenizer from `mistral_common`.
     - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.
     - "deepseek_v4" will always use the tokenizer from `deepseek_v4`.
+    - "batch_split_message" wraps a fast HF tokenizer to encode text by
+      splitting on a special-token delimiter (default: eos) and batch-encoding
+      the segments in parallel; lossless when the delimiter is a special token.
+      Configure via `--tokenizer-mode-config` (split_delimiter, segment_cache,
+      cache_max_entries, cache_max_tokens).
     - Other custom values can be supported via plugins.
 
     To swap the Rust BPE backend that powers HF fast tokenizers for the
@@ -274,6 +287,11 @@ class ModelConfig:
     hf_overrides: HfOverrides = field(default_factory=dict)
     """If a dictionary, contains arguments to be forwarded to the Hugging Face
     config. If a callable, it is called to update the HuggingFace config."""
+    tokenizer_mode_config: dict[str, Any] = field(default_factory=dict)
+    """Extra keyword arguments forwarded to the tokenizer's `from_pretrained`,
+    to configure custom tokenizer modes. Values must be hashable. E.g.
+    `tokenizer_mode="batch_split_message"` reads `split_delimiter`,
+    `segment_cache`, `cache_max_entries`, and `cache_max_tokens` from here."""
     generation_config: str = "auto"
     """The folder path to the generation config. Defaults to `"auto"`, the
     generation config will be loaded from model path. If set to `"vllm"`, no
@@ -389,6 +407,7 @@ class ModelConfig:
             "config_format",
             "hf_token",
             "hf_overrides",
+            "tokenizer_mode_config",
             "override_attention_dtype",
             "logits_processors",
             "io_processor_plugin",
