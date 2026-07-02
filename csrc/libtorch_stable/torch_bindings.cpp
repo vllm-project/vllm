@@ -22,6 +22,12 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "per_token_group_fp8_quant_packed(Tensor input, Tensor! output_q, "
       "Tensor! output_s_packed, int group_size, float eps, float fp8_min, "
       "float fp8_max) -> ()");
+  // FP8 quantization with head_dim padding for ViT attention.
+  // Returns a contiguous FP8 tensor with shape (..., H, padded_D), where
+  // padded_D = round_up(D, 16). Caller must ensure input.stride(-1) == 1.
+  ops.def(
+      "qkv_padded_fp8_quant(Tensor input, Tensor scale, bool skip_scale)"
+      " -> Tensor");
   // Compute per-token-group INT8 quantized tensor and scaling factor.
   ops.def(
       "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "
@@ -634,6 +640,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&per_token_group_quant_8bit_packed));
   ops.impl("per_token_group_quant_int8",
            TORCH_BOX(&per_token_group_quant_int8));
+  ops.impl("qkv_padded_fp8_quant", TORCH_BOX(&qkv_padded_fp8_quant));
 
   ops.impl("permute_cols", TORCH_BOX(&permute_cols));
 
