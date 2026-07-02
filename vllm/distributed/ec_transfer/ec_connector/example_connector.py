@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 import safetensors
+import torch
 
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -84,14 +85,21 @@ class ECExampleConnector(ECConnectorBase):
                 "In connector.start_load_caches, but the connector metadata is None"
             )
             return
+        # `safetensors.torch.load_file(device="cuda")` ignores the calling
+        # process's `torch.cuda.set_device(rank)` and always lands the tensor
+        # on `cuda:0`. Under TP>1 this produces a device mismatch in downstream
+        # `masked_scatter_` (see `_merge_multimodal_embeddings`), which crashes
+        # non-rank-0 workers and wedges the shared-memory broadcast. Pin the
+        # load to the current rank's device instead.
+        device = current_platform.device_type
+        if current_platform.is_cuda_alike():
+            device = f"{device}:{torch.cuda.current_device()}"
         # Load the EC for each mm data
         for mm_data in metadata.mm_datas:
             if mm_data.mm_hash in encoder_cache:
                 continue
             filename = self._generate_filename_debug(mm_data.mm_hash)
-            ec_cache = safetensors.torch.load_file(
-                filename, device=current_platform.device_type
-            )["ec_cache"]
+            ec_cache = safetensors.torch.load_file(filename, device=device)["ec_cache"]
             encoder_cache[mm_data.mm_hash] = ec_cache
             logger.debug("Success load encoder cache for hash %s", mm_data.mm_hash)
 
