@@ -1470,11 +1470,9 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
                 target=hf_processor.image_token,
                 replacement=get_image_replacement_qwen3vl,
             ),
-            # NOTE: We match string on purpose since searching sequence of
-            # token ids takes more time.
             PromptReplacement(
                 modality="video",
-                target="<|vision_start|><|video_pad|><|vision_end|>",
+                target=hf_processor.video_token,
                 replacement=get_video_replacement_qwen3vl,
             ),
         ]
