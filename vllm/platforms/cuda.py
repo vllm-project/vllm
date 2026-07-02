@@ -314,6 +314,18 @@ class CudaPlatformBase(Platform):
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
 
+        if (
+            vllm_config.performance_mode == "interactivity"
+            and cls.has_device_capability(90)
+        ):
+            for env_var in ("TRTLLM_ENABLE_PDL", "TORCHINDUCTOR_ENABLE_PDL"):
+                if env_var not in os.environ:
+                    logger.info_once(
+                        "Enabling %s for 'interactivity' performance mode.",
+                        env_var,
+                    )
+                    os.environ[env_var] = "1"
+
         scheduler_config = vllm_config.scheduler_config
         # Note: model_config may be None during testing
         if (
