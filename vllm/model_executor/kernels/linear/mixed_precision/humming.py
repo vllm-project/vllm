@@ -23,8 +23,6 @@ class HummingLinearKernel(MPLinearKernel):
             return False, "Humming is not installed"
         if c.has_g_idx:
             return False, "Humming does not support act-order (g_idx)"
-        if c.zero_points:
-            return False, "Humming linear kernel only supports symmetric weights"
         return True, None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
@@ -34,15 +32,21 @@ class HummingLinearKernel(MPLinearKernel):
         )
 
         name_map = {"weight": self.w_q_name, "weight_scale": self.w_s_name}
+        if self.w_zp_name is not None and hasattr(layer, self.w_zp_name):
+            name_map["zero_point"] = self.w_zp_name
         group_size = self.config.group_size
         quant_config = {
             "quant_method": "humming",
             "dtype": "int" + str(self.config.weight_type.size_bits),
             "group_size": 0 if group_size == -1 else group_size,
+            "has_zero_point": self.config.zero_points,
         }
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        prepare_humming_layer(layer, quant_config)
+        input_quant_config = getattr(layer, "_humming_input_quant_config", None)
+        prepare_humming_layer(
+            layer, quant_config, input_quant_config=input_quant_config
+        )
 
     def apply_weights(
         self,
