@@ -48,7 +48,13 @@ from vllm.multimodal.processing import (
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+)
+from .module_mapping import MultiModelKeys
 from .utils import AutoWeightsLoader, WeightsMapper, flatten_bn, maybe_prefix
 
 # Cannot find the following 2 numbers from hf config.
@@ -259,7 +265,15 @@ class FuyuMultiModalProcessor(BaseMultiModalProcessor[FuyuProcessingInfo]):
     info=FuyuProcessingInfo,
     dummy_inputs=FuyuDummyInputsBuilder,
 )
-class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
+class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP, SupportsLoRA):
+    # Persimmon fuses attention into a single ``query_key_value`` projection
+    # (QKVParallelLinear). LoRA can only wrap a fused QKV when it is declared
+    # packed, so map it to itself (same pattern as Falcon / GPT-BigCode);
+    # without this the language-model attention LoRA is silently dropped.
+    packed_modules_mapping = {
+        "query_key_value": ["query_key_value"],
+    }
+
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.vision_embed_tokens.": "vision_embed_tokens.",
@@ -366,3 +380,15 @@ class FuyuForCausalLM(nn.Module, SupportsMultiModal, SupportsPP):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
         return loader.load_weights(weights)
+
+    def get_mm_mapping(self) -> MultiModelKeys:
+        # Fuyu has no vision transformer; ``vision_embed_tokens`` is the entire
+        # vision tower (a single linear projecting image patches into the LM).
+        return MultiModelKeys.from_string_field(
+            language_model="language_model",
+            tower_model="vision_embed_tokens",
+        )
+
+    def get_num_mm_encoder_tokens(self, num_image_tokens: int) -> int:
+        # The projection is 1 patch -> 1 embedding, so the count is unchanged.
+        return num_image_tokens
