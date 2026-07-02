@@ -1,0 +1,9 @@
+model_name: "mistralai/Mistral-Small-4-119B-2603-NVFP4"
+accuracy_threshold: 0.90
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1200
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --limit-mm-per-prompt '{"image":0}'
