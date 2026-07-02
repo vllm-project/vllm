@@ -194,6 +194,8 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
+    VLLM_XGRAMMAR_DISK_CACHE: bool = False
+    VLLM_XGRAMMAR_DISK_CACHE_MB: int = 512
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
     VLLM_ALLOW_INSECURE_SERIALIZATION: bool = False
@@ -1504,6 +1506,25 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # of 512 MB should be enough for roughly 1000 JSON schemas.
     # It can be changed with this variable if needed for some reason.
     "VLLM_XGRAMMAR_CACHE_MB": lambda: int(os.getenv("VLLM_XGRAMMAR_CACHE_MB", "512")),
+    # Enable an optional, persistent on-disk cache for compiled xgrammar
+    # grammars (the FSMs used for structured / guided decoding). Off by
+    # default. When enabled, compiled grammars are serialized to JSON and
+    # stored under ``$VLLM_CACHE_ROOT/xgrammar_cache`` so they survive process
+    # restarts, turning cold-start grammar *recompilation* into the cheaper
+    # *deserialize-from-disk*. The cache is bounded (see
+    # VLLM_XGRAMMAR_DISK_CACHE_MB) and keyed by the xgrammar serialization
+    # version + tokenizer, so a stale entry becomes a clean miss. This is an
+    # on-disk cache shared by every request on the host; only enable it with
+    # trusted clients and a non-shared cache directory.
+    "VLLM_XGRAMMAR_DISK_CACHE": lambda: (
+        os.environ.get("VLLM_XGRAMMAR_DISK_CACHE", "0") == "1"
+    ),
+    # Maximum size in MB of the persistent xgrammar disk cache (see
+    # VLLM_XGRAMMAR_DISK_CACHE). Least-recently-used entries are evicted once
+    # this bound is exceeded. Has no effect unless the disk cache is enabled.
+    "VLLM_XGRAMMAR_DISK_CACHE_MB": lambda: int(
+        os.getenv("VLLM_XGRAMMAR_DISK_CACHE_MB", "512")
+    ),
     # Maximum time in seconds allowed for regex compilation in structured
     # output backends (xgrammar, outlines). Prevents ReDoS attacks where
     # adversarial patterns cause exponential DFA state-space explosion.
@@ -2085,6 +2106,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MEDIA_CACHE",
         "VLLM_MEDIA_CACHE_MAX_SIZE_MB",
         "VLLM_MEDIA_CACHE_TTL_HOURS",
+        "VLLM_XGRAMMAR_DISK_CACHE",
+        "VLLM_XGRAMMAR_DISK_CACHE_MB",
         "VLLM_MEDIA_FETCH_MAX_RETRIES",
         "VLLM_MEDIA_URL_ALLOW_REDIRECTS",
         "VLLM_MEDIA_LOADING_THREAD_COUNT",

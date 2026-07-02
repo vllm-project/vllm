@@ -238,6 +238,68 @@ def get_outlines_cache():
     return LRUCache(maxsize=128)
 
 
+def get_xgrammar_disk_cache():
+    """Optional persistent on-disk cache for compiled xgrammar grammars.
+
+    Returns a bounded, LRU-evicting ``diskcache.Cache`` when
+    ``VLLM_XGRAMMAR_DISK_CACHE`` is enabled, else ``None``. There is no
+    in-memory fallback (unlike :func:`get_outlines_cache`): the
+    ``GrammarCompiler`` already holds an in-RAM LRU, so ``None`` adds zero
+    overhead on the default-off path.
+    """
+    if not envs.VLLM_XGRAMMAR_DISK_CACHE:
+        return None
+
+    # Defense-in-depth: if a build lacks the serialization API, disable the
+    # cache rather than crash. The deserialize error classes are included
+    # because the read path names them in an ``except`` tuple -- a missing one
+    # would raise AttributeError during exception handling.
+    if not (
+        hasattr(xgr, "get_serialization_version")
+        and hasattr(xgr, "CompiledGrammar")
+        and hasattr(xgr.CompiledGrammar, "serialize_json")
+        and hasattr(xgr.CompiledGrammar, "deserialize_json")
+        and hasattr(xgr, "TokenizerInfo")
+        and hasattr(xgr.TokenizerInfo, "serialize_json")
+        and hasattr(xgr, "InvalidJSONError")
+        and hasattr(xgr, "DeserializeFormatError")
+        and hasattr(xgr, "DeserializeVersionError")
+    ):
+        logger.warning(
+            "VLLM_XGRAMMAR_DISK_CACHE is set but this xgrammar build lacks the "
+            "grammar serialization API; the xgrammar disk cache is disabled."
+        )
+        return None
+
+    from diskcache import Cache
+
+    logger.warning(
+        "Enabling the xgrammar compiled-grammar disk cache. This is an "
+        "on-disk cache shared by every request on this host; only use it with "
+        "trusted clients and a non-shared cache directory."
+    )
+    cache_dir = os.path.join(envs.VLLM_CACHE_ROOT, "xgrammar_cache")
+    # Bounded, unlike get_outlines_cache (eviction_policy="none").
+    # Floor at 1 MB: size_limit=0 would evict every entry on write -- a
+    # silent no-op cache.
+    size_limit_mb = max(1, envs.VLLM_XGRAMMAR_DISK_CACHE_MB)
+    cache = Cache(
+        cache_dir,
+        size_limit=size_limit_mb * 1024 * 1024,
+        eviction_policy="least-recently-used",
+    )
+
+    # Version-key the whole cache so a serialization-version bump wipes every
+    # entry, complementing the per-entry DeserializeVersionError on load. A
+    # redundant clear (concurrent workers on a bump, or LRU eviction of the
+    # "__version__" entry) only costs a recompile, never incorrectness.
+    version = xgr.get_serialization_version()
+    if cache.get("__version__", None) != version:
+        cache.clear()
+    cache.set("__version__", version)
+    return cache
+
+
 re_llama_byte_token = re.compile(r"^<0x[0-9A-F]{2}>$")
 re_replacement_seq = re.compile(r"^.{0,6}�+.{0,6}$")
 
