@@ -1078,10 +1078,11 @@ class Scheduler(SchedulerInterface):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
+        # Drain new attention block ids every step so the manager-side list
+        # does not grow unbounded; only kv-cache zeroing consumes them.
+        new_attn_block_ids = self.kv_cache_manager.take_new_block_ids()
         new_block_ids_to_zero = (
-            (self.kv_cache_manager.take_new_block_ids() or None)
-            if self.needs_kv_cache_zeroing
-            else None
+            (new_attn_block_ids or None) if self.needs_kv_cache_zeroing else None
         )
 
         # Dynamic speculative decoding: compute optimal K
