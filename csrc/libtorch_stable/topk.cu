@@ -3,6 +3,7 @@
 
 #include <cuda_runtime.h>
 #include <algorithm>
+#include <cstdlib>
 
 #include "torch_utils.h"
 
@@ -32,6 +33,26 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
     num_sms = device_prop->multiProcessorCount;
     max_smem_per_block = device_prop->sharedMemPerBlockOptin;
   }
+
+  // GB10 / consumer-Blackwell parts whose opt-in smem cannot host the 128KB
+  // cooperative-radix fallback. Gate on smem CAPACITY (not capability family:
+  // RTX 50-series is also family-120 with ~100KB smem) so any >=128KB device
+  // (Hopper, datacenter Blackwell) keeps the tuned cooperative path unchanged.
+  // On these parts run every row on a single barrier-free CTA -- the in-kernel
+  // histogram_256_topk path handles arbitrary seq_len at kSmemMedium. This both
+  // fixes the long-context oversubscribe hard-fail (total_ctas > num_sms*occ
+  // would fall back to the 128KB FilteredTopK these parts can't allocate) and
+  // removes the cooperative spin-wait barrier, which is fragile under a
+  // CUDA-graph-captured NCCL collective co-resident on the same SMs.
+  // Escape hatch for A/B + emergencies: VLLM_TOPK_DISABLE_NONCOOP=1 keeps the
+  // cooperative path even on <128KB parts (works below the oversubscribe ceiling;
+  // hard-fails above it -- diagnostic use only).
+  static const bool s_disable_noncoop = [] {
+    const char* e = getenv("VLLM_TOPK_DISABLE_NONCOOP");
+    return e && e[0] == '1';
+  }();
+  const bool force_noncooperative =
+      (max_smem_per_block < 128 * 1024) && !s_disable_noncoop;
 
   if (num_rows > 32 && max_smem_per_block >= 128 * 1024) {
     cudaError_t status =
@@ -84,6 +105,15 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
     size_t smem_size = P::kFixedSmemLarge + chunk_size * sizeof(uint32_t);
     if (smem_size < P::kSmemMedium) smem_size = P::kSmemMedium;
 
+    if (force_noncooperative) {
+      // Single CTA per row (grid == num_rows), no cooperative group / barrier.
+      // Every row runs the in-kernel medium/decode selector; histogram_256_topk
+      // streams the full row from global at kSmemMedium, so the (device-
+      // exceeding) chunk buffer is unnecessary and ctas_per_group collapses.
+      ctas_per_group = 1;
+      smem_size = P::kSmemMedium;
+    }
+
     // Query occupancy for the instantiation that will actually launch;
     // overestimating it deadlocks the cooperative barrier.
     int occupancy = 1;
@@ -110,6 +140,7 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
     // the radix path (seq_len > RADIX_THRESHOLD). Below that, non-CTA-0 CTAs
     // early-exit, so oversubscription can't deadlock and headroom is wasted.
     const bool needs_cooperative =
+        !force_noncooperative &&
         static_cast<uint32_t>(max_seq_len) > P::RADIX_THRESHOLD;
 
     const uint32_t hw_resident_cap =
@@ -201,6 +232,7 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
         workspace.mutable_data_ptr<uint8_t>());
     params.ctas_per_group = ctas_per_group;
     params.max_seq_len = static_cast<uint32_t>(max_seq_len);
+    params.force_noncooperative = force_noncooperative;
 
   #define LAUNCH_PERSISTENT(TOPK_VAL, VS)                                     \
     do {                                                                      \

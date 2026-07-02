@@ -138,6 +138,9 @@ struct PersistentTopKParams {
   uint32_t chunk_size;      // large path: elements per CTA
   uint32_t ctas_per_group;  // 1=medium, >1=large
   uint32_t max_seq_len;     // max seq_len across all rows (for early CTA exit)
+  // <128KB-smem parts (GB10/consumer-Blackwell): run every row on one CTA via
+  // the medium/decode selector, never the multi-CTA cooperative radix barrier.
+  bool force_noncooperative = false;
 };
 
 // ============================================================================
@@ -592,6 +595,113 @@ __device__ __noinline__ void histogram_256_topk(
   }
 }
 
+// Exact, non-cooperative, single-CTA streaming top-k for an arbitrarily long
+// row. histogram_256_topk buffers equal-to-threshold candidates in a bounded
+// smem list (MAX_BUFFERED_ITEMS); at a dense pivot that buffer overflows and
+// the excess is dropped from both the buffer and the refinement histogram,
+// yielding an approximate top-k. This variant never buffers: every radix round
+// and the final collection re-stream the row from global, filtered by the
+// accumulated prefix, so the result is EXACT (bit-identical value multiset to a
+// full top-k; ties at the exact pivot value are broken arbitrarily, matching
+// the cooperative radix path's contract). Fixed ~3 KB smem, no per-row cap.
+// Used for the force_noncooperative (<128 KB smem, e.g. GB10) long-context path
+// where the multi-CTA cooperative radix cannot fit its co-resident barrier.
+template <int TopK>
+__device__ __noinline__ void histogram_streaming_topk(
+    const float* __restrict__ logits, int* __restrict__ output_indices,
+    int logits_offset, int seq_len) {
+  extern __shared__ char medium_smem[];
+  int (*hist)[RADIX + 128] =
+      reinterpret_cast<int (*)[RADIX + 128]>(medium_smem);
+  int* scalars = reinterpret_cast<int*>(medium_smem + kMediumHistBytes);
+  int& shared_threshold_bin = scalars[0];
+  int& shared_output_count = scalars[1];
+  int& shared_final_k = scalars[2];
+
+  const int tid = threadIdx.x;
+  uint32_t prefix = 0u;   // high bits of the pivot key pinned so far
+  int remaining_k = TopK;  // rank (1-indexed) still sought within `prefix`
+
+  // 4 MSD-radix rounds over the 32-bit order-preserving key (8 bits/round).
+  for (int round = 0; round < 4; ++round) {
+    const int bit_offset = 24 - round * 8;
+    // Bits above the current byte (already pinned in prefix); 0 on round 0.
+    const uint32_t hi_mask =
+        (bit_offset + 8 >= 32) ? 0u : (~0u << (bit_offset + 8));
+
+    if (tid < RADIX + 1) hist[0][tid] = 0;
+    __syncthreads();
+
+    // Histogram this byte over elements whose higher bits match the prefix.
+    for (int idx = tid; idx < seq_len; idx += kThreadsPerBlock) {
+      const uint32_t key = convert_to_uint32_v2(logits[idx + logits_offset]);
+      if ((key & hi_mask) == (prefix & hi_mask)) {
+        atomicAdd(&hist[0][(key >> bit_offset) & 0xFF], 1);
+      }
+    }
+    __syncthreads();
+
+    // Suffix scan: hist[0][b] -> count of matching elements with byte >= b
+    // (Hillis-Steele over RADIX bins, ping-pong hist[0]/hist[1]).
+#pragma unroll 8
+    for (int i = 0; i < 8; ++i) {
+      if (__builtin_expect(tid < RADIX, 1)) {
+        const int stride = 1 << i;
+        const int src = i & 1;
+        const int dst = src ^ 1;
+        int value = hist[src][tid];
+        if (tid < RADIX - stride) value += hist[src][tid + stride];
+        hist[dst][tid] = value;
+      }
+      __syncthreads();
+    }
+
+    // Strict pivot: the unique bin b with count(>=b) >= k && count(>=b+1) < k,
+    // so remaining_k -= count(>=b+1) stays >= 1 (no early-exit boundary case).
+    if (tid < RADIX && hist[0][tid] >= remaining_k &&
+        hist[0][tid + 1] < remaining_k) {
+      shared_threshold_bin = tid;
+    }
+    __syncthreads();
+
+    const int threshold_bin = shared_threshold_bin;
+    remaining_k -= hist[0][threshold_bin + 1];  // pin the strictly-greater byte
+    prefix |= (static_cast<uint32_t>(threshold_bin) << bit_offset);
+    __syncthreads();
+  }
+
+  // prefix == exact 32-bit pivot key; remaining_k == #elements equal to the
+  // pivot to emit (>= 1). Stream once more to collect (no buffer).
+  if (tid == 0) {
+    shared_output_count = 0;
+    shared_final_k = remaining_k;
+  }
+  __syncthreads();
+
+  // (1) elements strictly greater than the pivot -- all in the top-k.
+  for (int idx = tid; idx < seq_len; idx += kThreadsPerBlock) {
+    const uint32_t key = convert_to_uint32_v2(logits[idx + logits_offset]);
+    if (key > prefix) {
+      const int pos = atomicAdd(&shared_output_count, 1);
+      if (pos < TopK) output_indices[pos] = idx;
+    }
+  }
+  __syncthreads();
+
+  // (2) elements equal to the pivot, capped at remaining_k (arbitrary ties).
+  for (int idx = tid; idx < seq_len; idx += kThreadsPerBlock) {
+    const uint32_t key = convert_to_uint32_v2(logits[idx + logits_offset]);
+    if (key == prefix) {
+      const int slot = atomicAdd(&shared_final_k, -1);
+      if (slot > 0) {
+        const int pos = atomicAdd(&shared_output_count, 1);
+        if (pos < TopK) output_indices[pos] = idx;
+      }
+    }
+  }
+  __syncthreads();
+}
+
 // ============================================================================
 // Inter-CTA sync primitives
 // ============================================================================
@@ -881,7 +991,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
   if (blockIdx.x >= num_groups * ctas_per_group) return;
 
   // Early exit: non-CTA-0 threads are never needed if no large rows exist
-  if (cta_in_group != 0 && params.max_seq_len <= RADIX_THRESHOLD) return;
+  // (force_noncooperative always launches ctas_per_group==1, so cta_in_group is
+  // always 0 there; the extra clause is defensive).
+  if (cta_in_group != 0 &&
+      (params.max_seq_len <= RADIX_THRESHOLD || params.force_noncooperative))
+    return;
 
   uint32_t* local_histogram = reinterpret_cast<uint32_t*>(smem_raw);
   uint32_t* suffix_sum = local_histogram + RADIX;
@@ -909,7 +1023,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
     int32_t* row_output = params.output + row_idx * params.top_k;
     const float* row_input = params.input + row_idx * params.stride;
 
-    if (seq_len <= RADIX_THRESHOLD) {
+    if (seq_len <= RADIX_THRESHOLD || params.force_noncooperative) {
       if (cta_in_group == 0) {
         if (seq_len <= static_cast<uint32_t>(TopK)) {
           // Trivial case: seq_len <= TopK
@@ -919,8 +1033,14 @@ __global__ void __launch_bounds__(kThreadsPerBlock, 2)
           }
         } else if (seq_len <= static_cast<uint32_t>(HIST2048_THRESHOLD)) {
           histogram_2048_topk<TopK>(row_input, row_output, seq_len);
-        } else {
+        } else if (seq_len <= RADIX_THRESHOLD) {
           histogram_256_topk<TopK>(row_input, row_output, 0, seq_len);
+        } else {
+          // Only reachable when force_noncooperative (otherwise seq_len >
+          // RADIX_THRESHOLD takes the cooperative radix path below). Use the
+          // exact single-CTA streaming radix -- histogram_256_topk's bounded
+          // tie buffer would under-select at dense long-context pivots.
+          histogram_streaming_topk<TopK>(row_input, row_output, 0, seq_len);
         }
       }
       continue;
