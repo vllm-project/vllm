@@ -34,6 +34,7 @@ from vllm.platforms import current_platform
 from vllm.utils.torch_utils import _encode_layer_name
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionMetadata,
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -125,7 +126,9 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             device=device,
         )
 
-    def build_attn_metadata(self, batch_size: int) -> CommonAttentionMetadata:
+    def build_attn_metadata(
+        self, batch_size: int
+    ) -> tuple[AttentionMetadata, torch.Tensor]:
         """Initialize attention metadata."""
         # Create common attn metadata
         batch_spec = BatchSpec(seq_lens=[1] * batch_size, query_lens=[1] * batch_size)
@@ -166,7 +169,7 @@ class QKRoPEKVCacheTestModel(torch.nn.Module):
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
 
-        return attn_metadata
+        return attn_metadata, common_attn_metadata.slot_mapping
 
     def forward(
         self, qkv: torch.Tensor, positions: torch.Tensor
@@ -345,10 +348,8 @@ def test_rope_kvcache_fusion(
 
         with set_forward_context(None, vllm_config):
             forward_context = get_forward_context()
-            attn_metadata = model.build_attn_metadata(T)
-            forward_context.slot_mapping = {
-                model.layer_name: attn_metadata.slot_mapping
-            }
+            _, slot_mapping = model.build_attn_metadata(T)
+            forward_context.slot_mapping = {model.layer_name: slot_mapping}
             q_unfused, k_unfused, v_unfused, dummy = model(qkv_unfused, pos_unfused)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_unfused = attn_layer.kv_cache
@@ -359,10 +360,8 @@ def test_rope_kvcache_fusion(
         with set_forward_context(None, vllm_config):
             model_fused = torch.compile(model, backend=backend)
             forward_context = get_forward_context()
-            attn_metadata = model_fused.build_attn_metadata(T)
-            forward_context.slot_mapping = {
-                model.layer_name: attn_metadata.slot_mapping
-            }
+            _, slot_mapping = model_fused.build_attn_metadata(T)
+            forward_context.slot_mapping = {model.layer_name: slot_mapping}
             q_fused, k_fused, v_fused, dummy = model_fused(qkv, pos)
             attn_layer = forward_context.no_compile_layers[model.layer_name]
             kv_cache_fused = attn_layer.kv_cache

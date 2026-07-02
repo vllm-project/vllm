@@ -232,7 +232,6 @@ class FlashAttentionMetadata:
     max_seq_len: int
     seq_lens: torch.Tensor
     block_table: torch.Tensor
-    slot_mapping: torch.Tensor
 
     # For cascade attention.
     use_cascade: bool
@@ -442,7 +441,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         query_start_loc = common_attn_metadata.query_start_loc
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
-        slot_mapping = common_attn_metadata.slot_mapping
         causal = common_attn_metadata.causal
 
         # Disable AOT schedule for spec-decode proposer (not worth the overhead)
@@ -611,7 +609,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             max_seq_len=max_seq_len,
             seq_lens=seq_lens,
             block_table=block_table_tensor,
-            slot_mapping=slot_mapping,
             max_dcp_context_kv_len=max_dcp_context_kv_len,
             dcp_context_kv_lens=dcp_context_kv_lens,
             use_cascade=use_cascade,
@@ -664,7 +661,6 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
     ) -> FlashAttentionMetadata:
         new_metadata = copy.copy(metadata)
         new_metadata.block_table = blk_table
-        new_metadata.slot_mapping = slot_mapping
         return new_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
