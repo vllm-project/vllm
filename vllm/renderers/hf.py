@@ -455,6 +455,19 @@ def _detect_developer_role_support(chat_template: str) -> bool:
     return '"developer"' in chat_template or "'developer'" in chat_template
 
 
+@lru_cache(maxsize=32)
+def _detect_qwen_system_first_template(chat_template: str) -> bool:
+    # FIXME (chauncey): This is a heuristic for detecting Qwen 3.5/6's
+    # system-first template, which is currently the only known template
+    # that requires the system message to be at the very beginning.
+    # We should replace this with a more robust mechanism
+    # if more templates with this requirement are introduced.
+    return (
+        "System message must be at the beginning" in chat_template
+        and "<|im_start|>system" in chat_template
+    )
+
+
 def _convert_developer_to_system(
     conversation: list[ConversationMessage],
 ) -> list[ConversationMessage]:
@@ -731,11 +744,12 @@ def safe_apply_chat_template(
         msg["role"] == "developer" for msg in conversation
     ) and not _detect_developer_role_support(chat_template):
         conversation = _convert_developer_to_system(conversation)
-        conversation = _consolidate_system_messages(conversation)
         logger.info_once(
             "Chat template does not support the 'developer' message role. "
             "Converting developer messages to 'system' role.",
         )
+    if _detect_qwen_system_first_template(chat_template):
+        conversation = _consolidate_system_messages(conversation)
     resolved_kwargs = resolve_chat_template_kwargs(
         tokenizer=tokenizer,
         chat_template=chat_template,
