@@ -984,6 +984,34 @@ def test_prefill_hybrid_model_combinations_eagle(
     manager.free(req1)
 
 
+def test_hybrid_mamba_eagle_does_not_reuse_lookahead_state():
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    token_ids = [i for i in range(4) for _ in range(block_size)] + [4] * 7
+
+    req0 = make_request("0", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0, len(token_ids), num_computed_tokens, computed_blocks
+    )
+    assert blocks is not None
+    manager.free(req0)
+
+    req1 = make_request("1", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+
+    assert num_computed_tokens == 3 * block_size
+    assert [len(blocks) for blocks in computed_blocks.blocks] == [3, 3]
+
+
 def test_prefill_hybrid_model_mamba_align():
     """Test that MambaManager.cache_blocks() handles null blocks in align mode.
 
