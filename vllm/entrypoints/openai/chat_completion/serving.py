@@ -247,6 +247,15 @@ class OpenAIServingChat(OpenAIServing):
         request: ChatCompletionRequest,
         raw_request: Request | None = None,
     ) -> AsyncGenerator[str, None] | ChatCompletionResponse | ErrorResponse:
+        request_id = (
+            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
+        )
+        request.request_id = request_id
+        self._log_arrival(request_id)
+        request_metadata = RequestResponseMetadata(request_id=request_id)
+        if raw_request:
+            raw_request.state.request_metadata = request_metadata
+
         # Streaming response
         tokenizer = self.renderer.tokenizer
         assert tokenizer is not None
@@ -265,15 +274,13 @@ class OpenAIServingChat(OpenAIServing):
 
         conversation, engine_inputs = result
 
-        request_id = (
-            f"chatcmpl-{self._base_request_id(raw_request, request.request_id)}"
-        )
-
-        request_metadata = RequestResponseMetadata(request_id=request_id)
-        if raw_request:
-            raw_request.state.request_metadata = request_metadata
-
-        lora_request = self._maybe_get_adapters(request, supports_default_mm_loras=True)
+        try:
+            lora_request = self._maybe_get_adapters(
+                request, supports_default_mm_loras=True
+            )
+        except (ValueError, TypeError, RuntimeError) as e:
+            logger.exception("Error preparing request components")
+            return self.create_error_response(e)
 
         model_name = self.models.model_name(lora_request)
 

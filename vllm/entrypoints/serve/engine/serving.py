@@ -90,6 +90,11 @@ class BaseServing:
     def _extract_prompt_len(self, prompt: EngineInput):
         return extract_prompt_len(self.model_config, prompt)
 
+    def _log_arrival(self, request_id: str) -> None:
+        if self.request_logger is None:
+            return
+        self.request_logger.log_arrival(request_id)
+
     def _log_inputs(
         self,
         request_id: str,

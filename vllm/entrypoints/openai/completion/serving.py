@@ -134,20 +134,26 @@ class OpenAIServingCompletion(OpenAIServing):
                 "Streaming is not currently supported with beam search"
             )
 
-        result = await self.render_completion_request(request)
-        if isinstance(result, ErrorResponse):
-            return result
-
-        engine_inputs = result
-
         request_id = f"cmpl-{self._base_request_id(raw_request, request.request_id)}"
+        request.request_id = request_id
+        self._log_arrival(request_id)
         created_time = int(time.time())
 
         request_metadata = RequestResponseMetadata(request_id=request_id)
         if raw_request:
             raw_request.state.request_metadata = request_metadata
 
-        lora_request = self._maybe_get_adapters(request)
+        result = await self.render_completion_request(request)
+        if isinstance(result, ErrorResponse):
+            return result
+
+        engine_inputs = result
+
+        try:
+            lora_request = self._maybe_get_adapters(request)
+        except (ValueError, TypeError, RuntimeError) as e:
+            logger.exception("Error preparing request components")
+            return self.create_error_response(e)
 
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
