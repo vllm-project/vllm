@@ -182,6 +182,40 @@ fn serve_args_forward_disable_log_stats_to_managed_engine() {
 }
 
 #[test]
+fn serve_args_forward_profiler_config_to_managed_engine() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--profiler-config",
+        r#"{"profiler":"torch","torch_profiler_dir":"/tmp/profile"}"#,
+    ])
+    .unwrap();
+
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    assert_eq!(args.runtime.profiler().as_deref(), Some("torch"));
+
+    let config = args.to_managed_engine_config(5555);
+    let profiler_flag_index = config
+        .python_args
+        .iter()
+        .position(|arg| arg == "--profiler-config")
+        .expect("profiler config flag");
+    let profiler_config: serde_json::Value =
+        serde_json::from_str(&config.python_args[profiler_flag_index + 1])
+            .expect("profiler config json");
+    assert_eq!(
+        profiler_config,
+        serde_json::json!({
+            "profiler": "torch",
+            "torch_profiler_dir": "/tmp/profile",
+        })
+    );
+}
+
+#[test]
 fn serve_args_forward_max_logprobs_to_frontend_and_managed_engine() {
     let cli = Cli::try_parse_from([
         "vllm-rs",
