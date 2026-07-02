@@ -895,6 +895,12 @@ _fp16_block_size_n = 256
 
 
 def enable_batch_invariant_mode():
+    if not (current_platform.is_cuda() or current_platform.is_xpu()):
+        raise NotImplementedError(
+            "Batch invariance is only supported on CUDA and XPU platforms, "
+            f"got {current_platform.device_name}"
+        )
+
     global _batch_invariant_MODE, _batch_invariant_LIB
     global _fp16_block_size_n
 
@@ -904,37 +910,41 @@ def enable_batch_invariant_mode():
     _batch_invariant_MODE = True
     _batch_invariant_LIB = torch.library.Library("aten", "IMPL")
 
-    if current_platform.is_device_capability_family(80):
-        # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
-        # triton persistent matmul overrides for mm/addmm/matmul/linear.
-        _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, "CUDA")
-        _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, "CUDA")
-    else:
-        # Hopper (SM90) and Blackwell (SM100): the only source of batch
-        # variance is split-k, which we disable via the cuBLAS workspace
-        # config.
-        os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
-        os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
+    key = current_platform.dispatch_key
 
-    # Triton bmm/persistent-matmul kernels read this for the FP16 N-tile size;
-    # set unconditionally because bmm is overridden on all CUDA platforms.
     if current_platform.is_cuda():
+        if current_platform.is_device_capability_family(80):
+            # SM80 (Ampere) cannot rely on cuBLASLt-only determinism; install the
+            # triton persistent matmul overrides for mm/addmm/matmul/linear.
+            _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
+            _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
+            _batch_invariant_LIB.impl("aten::matmul", matmul_batch_invariant, key)
+            _batch_invariant_LIB.impl("aten::linear", linear_batch_invariant, key)
+        else:
+            # Hopper (SM90) and Blackwell (SM100): the only source of batch
+            # variance is split-k, which we disable via the cuBLAS workspace
+            # config.
+            os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":16:8"
+            os.environ["CUBLASLT_WORKSPACE_SIZE"] = "1"
+
         _fp16_block_size_n = 256 if get_max_shared_memory_bytes() > 106496 else 128
+    elif current_platform.is_xpu():
+        _batch_invariant_LIB.impl("aten::mm", mm_batch_invariant, key)
+        _batch_invariant_LIB.impl("aten::addmm", addmm_batch_invariant, key)
+        # TODO: register matmul and linear for XPU
+        # once suitable Triton kernels are implemented
 
-    _batch_invariant_LIB.impl(
-        "aten::_log_softmax", _log_softmax_batch_invariant, "CUDA"
-    )
-    _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, "CUDA")
-    _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, "CUDA")
-    _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, "CUDA")
+        _fp16_block_size_n = 128
 
+    _batch_invariant_LIB.impl("aten::_log_softmax", _log_softmax_batch_invariant, key)
+    _batch_invariant_LIB.impl("aten::softmax", softmax_batch_invariant, key)
+    _batch_invariant_LIB.impl("aten::_softmax", softmax_batch_invariant, key)
+    _batch_invariant_LIB.impl("aten::mean.dim", mean_batch_invariant, key)
     # torch 2.12+ registers a built-in Triton bmm kernel for CUDA
     # (torch._native.ops.bmm_outer_product), so we need allow_override
     # to replace it at the dispatcher level.
     _batch_invariant_LIB.impl(
-        "aten::bmm", bmm_batch_invariant, "CUDA", allow_override=True
+        "aten::bmm", bmm_batch_invariant, key, allow_override=True
     )
     torch.bmm = bmm_batch_invariant
 
@@ -947,7 +957,8 @@ def enable_batch_invariant_mode():
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = (
         reduced_precision_val
     )
-    torch.backends.cuda.preferred_blas_library(backend="cublaslt")
+    if current_platform.is_cuda():
+        torch.backends.cuda.preferred_blas_library(backend="cublaslt")
 
 
 def override_envs_for_invariance():
