@@ -528,7 +528,7 @@ class _ModuleOffloader:
                 gpu_buffer = offloader._gpu_buffer
                 assert cpu_storage is not None, "CPU storage not initialized"
                 assert gpu_buffer is not None, "GPU buffer not assigned"
-                assert not should_pin_memory() or cpu_storage.is_pinned(), (
+                assert not should_pin_memory() or cpu_storage.is_pinned() or cpu_storage.numel() == 0, (
                     f"CPU storage for {name} is not pinned! "
                     "non_blocking=True H2D copy from non-pinned memory "
                     "causes stream synchronization that breaks "
