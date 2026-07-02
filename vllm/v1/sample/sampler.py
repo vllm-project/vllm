@@ -254,7 +254,11 @@ class Sampler(nn.Module):
 
         logprobs_mode = logprobs_mode_override or self.logprobs_mode
         assert not (sampling_metadata.all_greedy and sampling_metadata.all_random)
-        if sampling_metadata.all_random:
+        # top_k=1 rows must take the greedy branch even when temperature>0:
+        # apply_top_k_only keeps every token tied with the maximum and the
+        # downstream Gumbel-max then picks among the survivors via FP noise,
+        # diverging from argmax (vllm-project/vllm#5404).
+        if sampling_metadata.all_random and not sampling_metadata.has_top_k_one:
             greedy_sampled = None
         else:
             greedy_sampled = self.greedy_sample(logits)
@@ -293,8 +297,11 @@ class Sampler(nn.Module):
         if greedy_sampled is None:
             return random_sampled, processed_logprobs
 
+        use_greedy = sampling_metadata.temperature < _SAMPLING_EPS
+        if sampling_metadata.has_top_k_one:
+            use_greedy = use_greedy | (sampling_metadata.top_k == 1)
         sampled = torch.where(
-            sampling_metadata.temperature < _SAMPLING_EPS,
+            use_greedy,
             greedy_sampled,
             random_sampled,
             out=greedy_sampled,  # Reuse tensor

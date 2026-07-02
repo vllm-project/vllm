@@ -205,6 +205,7 @@ class InputBatch:
         )
         self.top_k_cpu = self.top_k_cpu_tensor.numpy()
         self.top_k_reqs: set[str] = set()
+        self.top_k_one_reqs: set[str] = set()
 
         # Frequency penalty related data structures
         self.frequency_penalties = torch.empty(
@@ -393,6 +394,8 @@ class InputBatch:
             top_k = sampling_params.top_k
             if 0 < top_k < self.vocab_size:
                 self.top_k_reqs.add(req_id)
+                if top_k == 1:
+                    self.top_k_one_reqs.add(req_id)
             else:
                 top_k = self.vocab_size
             self.top_k_cpu[req_index] = top_k
@@ -547,6 +550,7 @@ class InputBatch:
         self.random_reqs.discard(req_id)
         self.top_p_reqs.discard(req_id)
         self.top_k_reqs.discard(req_id)
+        self.top_k_one_reqs.discard(req_id)
         self.frequency_penalties_reqs.discard(req_id)
         self.presence_penalties_reqs.discard(req_id)
         self.repetition_penalties_reqs.discard(req_id)
@@ -918,6 +922,7 @@ class InputBatch:
             all_random=self.all_random,
             top_p=None if self.no_top_p else self.top_p[:num_reqs],
             top_k=None if self.no_top_k else self.top_k[:num_reqs],
+            has_top_k_one=self.has_top_k_one,
             generators=self.generators,
             max_num_logprobs=self.max_num_logprobs,
             logprob_token_ids=logprob_token_ids_by_index,
@@ -1102,6 +1107,10 @@ class InputBatch:
     @property
     def no_top_k(self) -> bool:
         return len(self.top_k_reqs) == 0
+
+    @property
+    def has_top_k_one(self) -> bool:
+        return len(self.top_k_one_reqs) > 0
 
     @property
     def no_penalties(self) -> bool:
