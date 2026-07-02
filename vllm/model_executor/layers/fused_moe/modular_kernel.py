@@ -64,7 +64,7 @@ logger = init_logger(__name__)
 #   finalize method, informed by the FusedMoEExpertsModular method,
 #   may apply weights and/or do the final reduction of the output.
 # * FusedMoEExpertsModular - an abstract base class for the main fused
-#   MoE operation, i.e matmul + act_mul + optionally quant + matmul.
+#   MoE operation, i.e., matmul + act_mul + optionally quant + matmul.
 #   Some FusedMoEExpertsModular implementations may choose to do
 #   the weight application and/or reduction. The class communicates this
 #   to [Finalize] via a TopKWeightAndReduce object.
@@ -221,7 +221,7 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         Some PrepareFinalize All2All implementations are batched. Meaning,
         they can process only as set of tokens at a time. This
-        function returns the batch size i.e the maximum number of tokens
+        function returns the batch size i.e., the maximum number of tokens
         the implementation can process at a time.
         Return None if there are no such restrictions.
         """
