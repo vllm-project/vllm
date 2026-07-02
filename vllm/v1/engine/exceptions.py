@@ -12,7 +12,8 @@ class EngineDeadError(Exception):
     def __init__(self, *args, suppress_context: bool = False, **kwargs):
         ENGINE_DEAD_MESSAGE = "EngineCore encountered an issue. See stack trace (above) for the root cause."  # noqa: E501
 
-        super().__init__(ENGINE_DEAD_MESSAGE, *args, **kwargs)
-        # Make stack trace clearer when using with LLMEngine by
-        # silencing irrelevant ZMQError.
+        # Use the custom message as the sole message, ignoring any user-supplied message in args
+        # to avoid duplication and confusion.
+        super().__init__(ENGINE_DEAD_MESSAGE, **kwargs)
+        # Properly suppress the context for cleaner tracebacks.
         self.__suppress_context__ = suppress_context
