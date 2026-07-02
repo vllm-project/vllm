@@ -5067,6 +5067,7 @@ dependencies = [
  "anyhow",
  "asynk-strim-attr",
  "bytes",
+ "chrono",
  "clap",
  "easy-ext",
  "expect-test",

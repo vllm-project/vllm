@@ -3,11 +3,11 @@
 use std::sync::{Arc, LazyLock};
 
 pub use vllm_parser::tool::{
-    DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser, DeepSeekV32ToolParser,
-    Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser, HermesToolParser, HyV3ToolParser,
-    Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser, MinimaxM2ToolParser,
-    MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser, Qwen3CoderToolParser,
-    Qwen3XmlToolParser, ToolParser, ToolParserError,
+    ApertusToolParser, DeepSeekV3ToolParser, DeepSeekV4ToolParser, DeepSeekV31ToolParser,
+    DeepSeekV32ToolParser, Glm45MoeToolParser, Glm47MoeToolParser, Granite4ToolParser,
+    HermesToolParser, HyV3ToolParser, Internlm2ToolParser, KimiK2ToolParser, Llama3JsonToolParser,
+    MinimaxM2ToolParser, MinimaxM3ToolParser, MistralToolParser, Phi4MiniJsonToolParser,
+    Qwen3CoderToolParser, Qwen3XmlToolParser, ToolParser, ToolParserError,
 };
 
 use crate::parser::ParserFactory;
@@ -15,6 +15,7 @@ use crate::request::ChatTool;
 
 /// Canonical public names for registered tool parsers.
 pub mod names {
+    pub const APERTUS: &str = "apertus";
     pub const DEEPSEEK_V3: &str = "deepseek_v3";
     pub const DEEPSEEK_V31: &str = "deepseek_v31";
     pub const DEEPSEEK_V32: &str = "deepseek_v32";
@@ -60,6 +61,7 @@ impl ToolParserFactory {
         let mut factory = Self::default();
 
         factory
+            .register_parser::<ApertusToolParser>(names::APERTUS)
             .register_parser::<DeepSeekV3ToolParser>(names::DEEPSEEK_V3)
             .register_parser::<DeepSeekV31ToolParser>(names::DEEPSEEK_V31)
             .register_parser::<DeepSeekV32ToolParser>(names::DEEPSEEK_V32)
@@ -114,6 +116,7 @@ impl ToolParserFactory {
             .register_pattern("gemma-4", names::GEMMA4)
             .register_pattern("granite-4", names::GRANITE4)
             .register_pattern("kimi-k2", names::KIMI_K2)
+            .register_pattern("apertus", names::APERTUS)
             .register_pattern("minimax-m3", names::MINIMAX_M3)
             .register_pattern("mm-m3", names::MINIMAX_M3)
             .register_pattern("minimax", names::MINIMAX_M2)
