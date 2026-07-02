@@ -275,6 +275,10 @@ def kernel_unified_attention(
     USE_TD: tl.constexpr = False,
     USE_TD_QO: tl.constexpr = False,
     Q_IS_FP8: tl.constexpr = False,
+    # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
+    # instead of letting them override it. Default False preserves the
+    # original (causal AND SW) OR mm_prefix behavior for all other models.
+    MM_PREFIX_CLAMP_SW: tl.constexpr = False,
 ):
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE >= 2
     USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
@@ -509,6 +513,7 @@ def kernel_unified_attention(
             per_seq_causal_ptr,
             CHUNK_LOOKBACK,
             CHUNK_SIZE,
+            MM_PREFIX_CLAMP_SW,
         )
 
         # S : (BLOCK_M, TILE_SIZE)
@@ -819,6 +824,9 @@ def unified_attention(
     # The non-TD branch is dead-code-eliminated at Triton compile time so
     # disabling this flag costs nothing.
     use_td: bool = False,
+    # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window.
+    # Default False keeps the original behavior for every other model.
+    mm_prefix_clamp_sliding_window: bool = False,
 ):
     # Resolve causal: bool or per-seq tensor.
     use_per_seq_causal = isinstance(causal, torch.Tensor)
@@ -1130,6 +1138,7 @@ def unified_attention(
         CHUNK_SIZE=chunk_size,
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
+        MM_PREFIX_CLAMP_SW=mm_prefix_clamp_sliding_window,
         **launch_kwargs,
     )
 

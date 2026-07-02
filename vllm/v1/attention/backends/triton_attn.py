@@ -676,6 +676,9 @@ class TritonAttentionImpl(AttentionImpl):
             v_scale_cache=v_scale_cache,
             chunk_lookback=self.chunk_lookback,
             use_td=self.use_td,
+            mm_prefix_clamp_sliding_window=getattr(
+                layer, "mm_prefix_clamp_sliding_window", False
+            ),
         )
 
         return output
