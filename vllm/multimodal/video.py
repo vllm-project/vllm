@@ -1112,7 +1112,7 @@ class DynamicVideoBackend(VideoBackend):
         duration = source.duration
         original_fps = source.original_fps
         max_duration = target.max_duration
-        fps = target.fps
+        fps = kwargs.get("fps", target.fps)
         max_frame_idx = source.total_frames_num - 1
 
         # Refer to:
