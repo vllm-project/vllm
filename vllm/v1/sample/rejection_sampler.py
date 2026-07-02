@@ -311,11 +311,11 @@ class RejectionSampler(nn.Module):
         )
         if need_repeat_indices:
             num_requests = len(metadata.num_draft_tokens)
-            num_draft_tokens = torch.tensor(metadata.num_draft_tokens, device="cpu")
-            original_indices = torch.arange(num_requests, device="cpu")
-            repeat_indices_cpu = original_indices.repeat_interleave(num_draft_tokens)
-            repeat_indices = repeat_indices_cpu.to(
-                device=logits.device, non_blocking=True
+            original_indices = torch.arange(num_requests, device=logits.device, dtype=torch.long)
+            repeat_indices = expand_batch_to_tokens(
+                original_indices,
+                metadata.cu_num_draft_tokens,
+                logits.shape[0],
             )
             logits = self.apply_penalties(
                 logits, sampling_metadata, metadata, repeat_indices, output_token_ids
