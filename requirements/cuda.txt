@@ -15,7 +15,8 @@ flashinfer-cubin==0.6.13
 apache-tvm-ffi==0.1.9
 tilelang==0.1.9
 nvidia-cudnn-frontend>=1.19.1
-
+# Required for LLM_NVTX_SCOPES_FOR_PROFILING=1
+nvtx==0.2.15
 # Required for faster safetensors model loading
 fastsafetensors >= 0.3.2
 

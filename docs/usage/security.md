@@ -327,6 +327,27 @@ vLLM supports dynamically loading and unloading LoRA adapters at runtime via the
 
 **Warning:** Dynamic LoRA loading is not a secure operation and should not be enabled in deployments exposed to untrusted clients. If you must enable dynamic LoRA loading, restrict access to the `/v1/load_lora_adapter` and `/v1/unload_lora_adapter` endpoints to trusted administrators only, using a reverse proxy or network-level access controls. Do not expose these endpoints to end users. For details on configuring LoRA adapters, see the [LoRA Adapters documentation](../features/lora.md).
 
+## gRPC Interface
+
+vLLM provides an optional gRPC Generate service on a separate TCP port, enabled via the `--grpc-port` flag. When not specified, no gRPC server is started. The gRPC listener binds to the same host address as the HTTP server.
+
+**Warning:** The gRPC interface is **insecure by default** — it does not implement authentication, authorization, or encryption. It should be considered a private, internal interface intended for use only between co-located services within a trusted network. Do not expose the gRPC port to the public internet or untrusted clients. If you enable the gRPC interface, protect it via network-level access controls such as firewall rules, network segmentation, or deployment on an isolated private network.
+
+### Security Implications
+
+An attacker who can reach the gRPC port can:
+
+1. **Run arbitrary inference** via the `Generate` and `GenerateStream` RPCs without any credentials
+2. **Consume GPU and compute resources** by submitting unbounded generation requests
+3. **Cause Denial of Service** by exploiting bugs in the gRPC interface that can crash vLLM.
+
+### Recommendations
+
+- Only enable `--grpc-port` when you have a specific need for gRPC-based inference
+- Ensure the gRPC port is only accessible from trusted hosts or services
+- Use firewall rules to block external access to the gRPC port
+- Consider deploying the gRPC interface on a dedicated internal network interface
+
 ## Cache Directory Security
 
 vLLM assumes that its cache directories are **private and trusted**. Cache contents are loaded without cryptographic integrity verification, including formats that support arbitrary code execution. If an untrusted user or process can write to vLLM's cache directories, they may be able to crash vLLM or cause it to execute arbitrary code.

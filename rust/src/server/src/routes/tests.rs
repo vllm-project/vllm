@@ -24,14 +24,16 @@ use vllm_chat::{
     NewChatOutputProcessorOptions,
 };
 use vllm_engine_core_client::mock_engine::default_ready_response;
+use vllm_engine_core_client::protocol::decode_value;
 use vllm_engine_core_client::protocol::logprobs::{
     Logprobs, MaybeWireLogprobs, PositionLogprobs, TokenLogprob,
 };
-use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
-use vllm_engine_core_client::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest, StopReason,
-    decode_value,
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs, StopReason,
+    UtilityCallOutput,
 };
+use vllm_engine_core_client::protocol::request::EngineCoreRequest;
+use vllm_engine_core_client::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
 use vllm_engine_core_client::test_utils::{
     IpcNamespace, spawn_mock_engine_task, spawn_mock_engine_task_with_ready,
 };
@@ -231,19 +233,14 @@ fn engine_outputs_for_request(
     request_id: &str,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> EngineCoreOutputs {
-    EngineCoreOutputs {
-        engine_index: 0,
+    RequestBatchOutputs {
         outputs: output_specs
             .into_iter()
             .map(|(token_ids, finish_reason)| request_output(request_id, token_ids, finish_reason))
             .collect(),
-        scheduler_stats: None,
-        timestamp: 0.0,
-        utility_output: None,
-        finished_requests: None,
-        wave_complete: None,
-        start_wave: None,
+        ..Default::default()
     }
+    .into()
 }
 
 fn test_llm(client: EngineCoreClient) -> Llm {
@@ -389,14 +386,15 @@ fn utility_none_result() -> UtilityResultEnvelope {
 }
 
 fn utility_outputs(call_id: u64, result: UtilityResultEnvelope) -> EngineCoreOutputs {
-    EngineCoreOutputs {
-        utility_output: Some(UtilityOutput {
+    UtilityCallOutput {
+        output: UtilityOutput {
             call_id: call_id.into(),
             failure_message: None,
             result: Some(result),
-        }),
+        },
         ..Default::default()
     }
+    .into()
 }
 
 async fn send_outputs(push: &mut PushSocket, outputs: EngineCoreOutputs) {
@@ -2280,8 +2278,7 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(b"hi"),
@@ -2290,13 +2287,9 @@ async fn non_stream_chat_includes_logprobs_and_prompt_logprobs() {
                             Some(sample_logprobs_for_tokens(&bytes_to_token_ids(b"hi"))),
                             Some(prompt_logprobs_for_tokens(&prompt_token_ids)),
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -3120,8 +3113,7 @@ async fn non_stream_completions_include_logprobs() {
                     rmp_serde::from_slice(&add[1]).expect("decode request");
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output_with_logprobs(
                                 &request.request_id,
@@ -3140,13 +3132,10 @@ async fn non_stream_completions_include_logprobs() {
                                 None,
                             ),
                         ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
                         finished_requests: Some(BTreeSet::from([request.request_id.clone()])),
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -3223,8 +3212,7 @@ async fn non_stream_completions_include_prompt_logprobs() {
                     rmp_serde::from_slice(&add[1]).expect("decode request");
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             vec![b'h' as u32, b'i' as u32, b'!' as u32],
@@ -3245,13 +3233,9 @@ async fn non_stream_completions_include_prompt_logprobs() {
                             }),
                             Some(prompt_logprobs_for_hello()),
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -3587,8 +3571,7 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output_with_logprobs(
                                 &request.request_id,
@@ -3608,13 +3591,9 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
                                 Some(json!({"connector": "x"})),
                             ),
                         ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -3707,8 +3686,7 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output_with_logprobs(
                                 &request.request_id,
@@ -3727,13 +3705,9 @@ async fn stream_raw_generate_returns_sse_chunks_and_usage() {
                                 None,
                             ),
                         ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -4425,8 +4399,7 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![
                             request_output_with_logprobs(
                                 &request.request_id,
@@ -4445,13 +4418,9 @@ async fn include_reasoning_false_suppresses_non_stream_output_metadata() {
                                 None,
                             ),
                         ],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -4600,8 +4569,7 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
 
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(b"<think>Need tool.</think>"),
@@ -4612,19 +4580,14 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                             ))),
                             None,
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(b"<tool_call>\n{\"name\":\"get_weather\", "),
@@ -4635,19 +4598,14 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                             ))),
                             None,
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
-                        finished_requests: None,
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
                 send_outputs(
                     push,
-                    EngineCoreOutputs {
-                        engine_index: 0,
+                    RequestBatchOutputs {
                         outputs: vec![request_output_with_logprobs(
                             &request.request_id,
                             bytes_to_token_ids(
@@ -4660,13 +4618,10 @@ async fn tool_call_sse_chunks_can_carry_logprobs() {
                             ))),
                             None,
                         )],
-                        scheduler_stats: None,
-                        timestamp: 0.0,
-                        utility_output: None,
                         finished_requests: Some(BTreeSet::from([request.request_id.clone()])),
-                        wave_complete: None,
-                        start_wave: None,
-                    },
+                        ..Default::default()
+                    }
+                    .into(),
                 )
                 .await;
             })
@@ -6182,4 +6137,147 @@ async fn world_size_excludes_data_parallelism_when_include_dp_false() {
     let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
     let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
     assert_eq!(json, json!({"world_size": 2}));
+}
+
+// ========================= Profiler route tests =========================
+
+async fn test_profiling_app_with_engine_script<F>(script: F) -> (axum::Router, MockEngineTask)
+where
+    F: for<'a> FnOnce(&'a mut DealerSocket, &'a mut PushSocket) -> TestFuture<'a> + Send + 'static,
+{
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-openai-profiler".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        move |dealer, push| script(dealer, push),
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    (
+        build_router(Arc::new(
+            AppState::new(vec!["test-model".to_string()], chat)
+                .with_profiler(Some("torch".to_string())),
+        )),
+        engine_task,
+    )
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn start_profile_route_sends_expected_utility_call() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("profile"));
+            assert_eq!(array[3], Value::Array(vec![Value::from(true), Value::Nil]));
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/start_profile")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn stop_profile_route_sends_expected_utility_call() {
+    let (app, engine_task) = test_profiling_app_with_engine_script(|dealer, push| {
+        boxed_test_future(async move {
+            let utility = recv_engine_message(dealer).await;
+            assert_eq!(utility[0].as_ref(), &[0x03]);
+
+            let payload = decode_value(&utility[1]).expect("decode utility payload");
+            let array = payload.as_array().expect("utility payload array");
+            let call_id = array[1].as_u64().expect("call id");
+
+            assert_eq!(array[2], Value::from("profile"));
+            assert_eq!(array[3], Value::Array(vec![Value::from(false), Value::Nil]));
+
+            send_outputs(push, utility_outputs(call_id, utility_none_result())).await;
+        })
+    })
+    .await;
+
+    let response = app
+        .clone()
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/stop_profile")
+                .body(Body::empty())
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    let status = response.status();
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    assert!(body.is_empty());
+    engine_task.await.expect("mock engine task");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn profile_routes_are_hidden_when_profiling_is_disabled() {
+    let (chat, engine_task) = test_chat_with_engine_handle().await;
+    let app = build_router(Arc::new(AppState::new(
+        vec!["test-model".to_string()],
+        chat,
+    )));
+
+    for (method, uri) in [("POST", "/start_profile"), ("POST", "/stop_profile")] {
+        let response = app
+            .clone()
+            .call(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("build request"),
+            )
+            .await
+            .expect("call app");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{method} {uri}");
+    }
+
+    engine_task.abort_and_join().await;
 }
