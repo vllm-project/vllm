@@ -395,6 +395,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/layernorm_quant_kernels.cu"
     "csrc/libtorch_stable/quantization/fused_kernels/fused_layernorm_dynamic_per_token_quant.cu"
     "csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_block_quant.cu"
+    "csrc/libtorch_stable/quantization/fused_kernels/fused_silu_mul_per_token_quant.cu"
     "csrc/libtorch_stable/attention/merge_attn_states.cu"
     "csrc/libtorch_stable/sampler.cu"
     "csrc/libtorch_stable/topk.cu"

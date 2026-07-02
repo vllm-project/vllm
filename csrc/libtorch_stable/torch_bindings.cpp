@@ -411,6 +411,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "Tensor? scale_ub=None, "
       "bool is_scale_transposed=False) -> ()");
 
+  // Fused SiLU+Mul + per-token dynamic quantization
+  ops.def(
+      "silu_and_mul_per_token_quant("
+      "Tensor! result, "
+      "Tensor input, "
+      "Tensor! scale, "
+      "Tensor? scale_ub=None) -> ()");
+
   // Rotary embedding
   // Apply GPT-NeoX or GPT-J style rotary embedding to query and key.
   ops.def(
@@ -687,6 +695,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("rms_norm_per_block_quant", TORCH_BOX(&rms_norm_per_block_quant));
   ops.impl("silu_and_mul_per_block_quant",
            TORCH_BOX(&silu_and_mul_per_block_quant));
+  ops.impl("silu_and_mul_per_token_quant",
+           TORCH_BOX(&silu_and_mul_per_token_quant));
 
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
