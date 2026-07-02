@@ -36,6 +36,9 @@ constexpr int kMaxBlocks = 36;
 #ifndef USE_ROCM
 const int defaultBlockLimit = 36;
 CUpointer_attribute rangeStartAddrAttr = CU_POINTER_ATTRIBUTE_RANGE_START_ADDR;
+// Used to detect VMM (cuMemMap) backed allocations, which cannot be exported
+// via the legacy cudaIpc* API and must not be registered for custom all-reduce.
+CUpointer_attribute memTypeAttr = CU_POINTER_ATTRIBUTE_MEMORY_TYPE;
 #else
 const int defaultBlockLimit = 16;
 hipPointer_attribute rangeStartAddrAttr =
@@ -452,6 +455,28 @@ class CustomAllreduce {
       if (cuPointerGetAttribute(&base_ptr, rangeStartAddrAttr,
                                 (CUdeviceptr)ptr) != CUDA_SUCCESS)
         throw std::runtime_error("failed to get pointer attr");
+#ifndef USE_ROCM
+      // A buffer allocated through the CUDA Virtual Memory Management API
+      // (cuMemCreate + cuMemMap) — as used by PyTorch expandable_segments
+      // and by vLLM's CuMemAllocator sleep-mode pool — cannot be exported
+      // with the legacy cudaIpcGetMemHandle API. Calling it on such a
+      // pointer returns the opaque "invalid argument" error. Detect this
+      // case up front and raise an actionable error instead so the failure
+      // is diagnosable rather than a bare CUDA error at
+      // custom_all_reduce.cuh:cudaIpcGetMemHandle.
+      unsigned int mem_type = 0;
+      CUresult mt = cuPointerGetAttribute(&mem_type, memTypeAttr,
+                                          (CUdeviceptr)base_ptr);
+      if (mt == CUDA_SUCCESS && mem_type == 0) {
+        throw std::runtime_error(
+            "custom all-reduce cannot register a VMM/cuMemMap-backed buffer "
+            "for CUDA-graph IPC. This happens when sleep mode "
+            "(enable_cumem_allocator) or PYTORCH_CUDA_ALLOC_CONF="
+            "expandable_segments:True is active. Pass "
+            "disable_custom_all_reduce=True (sleep mode now does this "
+            "automatically).");
+      }
+#endif
       CUDACHECK(cudaIpcGetMemHandle(
           (cudaIpcMemHandle_t*)&handles[i * handle_sz], base_ptr));
       offsets[i] = ((char*)ptr) - ((char*)base_ptr);

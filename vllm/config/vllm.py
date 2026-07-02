@@ -878,6 +878,30 @@ class VllmConfig:
 
             self.parallel_config.is_moe_model = self.model_config.is_moe
 
+            # The custom all-reduce kernel registers CUDA-graph activation
+            # buffers for cross-rank IPC via cudaIpcGetMemHandle. That API only
+            # supports legacy cudaMalloc allocations; it returns the opaque
+            # "invalid argument" on VMM/cuMemMap-backed memory. The
+            # CuMemAllocator sleep-mode pool (enable_cumem_allocator) routes
+            # activations through exactly such a VMM pool, so custom all-reduce
+            # crashes during cudagraph capture (custom_all_reduce.cuh
+            # get_graph_buffer_ipc_meta -> cudaIpcGetMemHandle) on TP>1.
+            # Auto-disable it so sleep/wake works out of the box. This mirrors
+            # the platform/multi-node auto-disables in
+            # ParallelConfig._verify_args, but lives here because
+            # enable_cumem_allocator is a ModelConfig field not visible during
+            # ParallelConfig validation.
+            if (
+                self.model_config.enable_cumem_allocator
+                and not self.parallel_config.disable_custom_all_reduce
+            ):
+                self.parallel_config.disable_custom_all_reduce = True
+                logger.info(
+                    "Disabled the custom all-reduce kernel because the cumem "
+                    "allocator (sleep mode) uses VMM-backed memory that cannot "
+                    "be IPC-registered for CUDA graphs."
+                )
+
         if (
             self.model_config is not None
             and self.model_config.enable_return_routed_experts
