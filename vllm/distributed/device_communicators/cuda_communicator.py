@@ -155,6 +155,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
                     tcp_store_group,
                     device_group=self.device_group,
                 )
+            elif self.all2all_backend == "nccl_ep":
+                from .all2all import NcclEPAll2AllManager
+
+                self.all2all_manager = NcclEPAll2AllManager(
+                    self.cpu_group, tcp_store_group
+                )
             elif self.all2all_backend == "nixl_ep":
                 from .all2all import NixlEPAll2AllManager
 

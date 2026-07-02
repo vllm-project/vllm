@@ -16,7 +16,12 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
-from vllm.utils.import_utils import has_deep_ep, has_deep_ep_v2, has_mori
+from vllm.utils.import_utils import (
+    has_deep_ep,
+    has_deep_ep_v2,
+    has_mori,
+    has_nccl_ep,
+)
 
 from .base_device_communicator import All2AllManagerBase, Cache
 
@@ -985,3 +990,102 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
             for _, handle in self.handle_cache._cache.items():
                 handle.destroy()
             self.handle_cache._cache.clear()
+
+
+class NcclEPAll2AllManager(All2AllManagerBase):
+    """
+    All2All communication based on NCCL EP (Expert Parallelism) kernels.
+    Supports both batched (expert-major) and standard (flat) modes
+    via a single backend.
+    """
+
+    def __init__(self, cpu_group, tcp_store_group=None):
+        assert has_nccl_ep(), (
+            "NCCL EP not available. Install nccl4py with EP support: "
+            "pip install 'nccl4py[cu13]'"
+        )
+        super().__init__(cpu_group, tcp_store_group)
+
+        import nccl.core as nccl_core  # type: ignore[import-not-found]
+
+        unique_id = (
+            nccl_core.get_unique_id() if self.rank == 0 else None
+        )
+
+        unique_id_list = [unique_id]
+        dist.broadcast_object_list(unique_id_list, src=0, group=cpu_group)
+        unique_id = unique_id_list[0]
+
+        self.nccl_comm = nccl_core.Communicator.init(
+            nranks=self.world_size,
+            rank=self.rank,
+            unique_id=unique_id,
+        )
+
+        self._ep_groups: dict[str, Any] = {}
+        self._lock = threading.RLock()
+
+    def _get_or_create_group(
+        self,
+        algorithm,
+        num_experts: int,
+        max_dispatch_tokens_per_rank: int,
+        max_token_bytes: int,
+    ) -> Any:
+        import nccl.ep as nccl_ep  # type: ignore[import-not-found]
+
+        key = (
+            int(algorithm),
+            num_experts,
+            max_dispatch_tokens_per_rank,
+            max_token_bytes,
+        )
+
+        with self._lock:
+            if key not in self._ep_groups:
+                config = nccl_ep.GroupConfig(
+                    algorithm=algorithm,
+                    num_experts=num_experts,
+                    max_dispatch_tokens_per_rank=max_dispatch_tokens_per_rank,
+                    max_recv_tokens_per_rank=(
+                        max_dispatch_tokens_per_rank * self.world_size
+                    ),
+                    max_token_bytes=max_token_bytes,
+                )
+                self._ep_groups[key] = nccl_ep.Group.create(
+                    self.nccl_comm, config
+                )
+            return self._ep_groups[key]
+
+    def get_handle(self, kwargs):
+        import nccl.ep as nccl_ep  # type: ignore[import-not-found]
+
+        algorithm_str = kwargs.get("algorithm", "standard")
+        algorithm = (
+            nccl_ep.Algorithm.LOW_LATENCY
+            if algorithm_str == "batched"
+            else nccl_ep.Algorithm.HIGH_THROUGHPUT
+        )
+        num_experts = kwargs["num_experts"]
+        max_dispatch_tokens_per_rank = kwargs["max_dispatch_tokens_per_rank"]
+        hidden = kwargs["hidden"]
+        dtype_bytes = kwargs.get("dtype_bytes", 2)  # bf16 default
+        max_token_bytes = hidden * dtype_bytes
+
+        ep_group = self._get_or_create_group(
+            algorithm=algorithm,
+            num_experts=num_experts,
+            max_dispatch_tokens_per_rank=max_dispatch_tokens_per_rank,
+            max_token_bytes=max_token_bytes,
+        )
+        return ep_group
+
+    def max_sms_used(self) -> int | None:
+        return None
+
+    def destroy(self):
+        with self._lock:
+            for _, group in self._ep_groups.items():
+                group.destroy()
+            self._ep_groups.clear()
+        self.nccl_comm.destroy()
