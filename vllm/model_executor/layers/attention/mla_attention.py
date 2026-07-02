@@ -301,7 +301,8 @@ def _detect_output_quant_key(
         if output.dtype == _FP8_DTYPE:
             # Per-group FP8 uses block scales only, not a separate output_scale
             assert output_scale is None
-            # Infer group size from scale shape
+            # Row-/column-major fp32 scales: shape[-1] == num_groups (the
+            # leading-dim stride may be TMA-aligned, but shape is unchanged).
             num_groups = output_block_scale.shape[-1]
             group_size = output_dim // num_groups
             if group_size == 128:
@@ -310,8 +311,7 @@ def _detect_output_quant_key(
                 return kFp8Dynamic64Sym
             else:
                 raise ValueError(
-                    f"Unsupported group FP8 group_size={group_size} "
-                    f"(output_dim={output_dim}, num_groups={num_groups}). "
+                    f"Unsupported group FP8 group_size={group_size}. "
                     f"Only group_size 128 and 64 are supported."
                 )
         # output_scale None implies MXFP4, not supported
@@ -639,21 +639,19 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         assert output is not None, "Output tensor must be provided."
 
         quant_key = _detect_output_quant_key(
-            output, output_scale, output_block_scale, self.num_heads * self.v_head_dim
+            output,
+            output_scale,
+            output_block_scale,
+            self.num_heads * self.v_head_dim,
         )
         if quant_key is not None:
             # The fusion pass has allocated output with quantized dtype
-            # (FP8 or uint8 for FP4). We can't write into it directly,
-            # so we swap in a temp buffer for computation, then quantize
+            # (FP8 or uint8 for FP4). We can't write BF16 into it directly,
+            # so we swap in a temp BF16 buffer for computation, then quantize
             # into the real output at the end.
-            # NOTE(carlyou): this is temporary until kernels support fp8 output
             quant_output = output
-            output = torch.empty(
-                output.shape[0],
-                self.num_heads * self.v_head_dim,
-                dtype=q.dtype,
-                device=output.device,
-            )
+            bf16_shape = (output.shape[0], self.num_heads * self.v_head_dim)
+            output = torch.empty(bf16_shape, dtype=q.dtype, device=output.device)
 
         if attn_metadata is None:
             # During the profile run try to simulate to worse case output size
@@ -828,46 +826,67 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                         is_lse_base_on_e=self.impl.lse_base_on_e,
                     )
 
-            # v_up projection
-            self._v_up_proj(attn_out, out=mqa_output_slice)
+            # _v_up_proj runs the V up-projection BMM and, when `quant_key` is
+            # set, writes the quantized MQA tokens into `quant_output` —
+            # fusing with the BMM where a fused kernel exists, or quantizing
+            # the bf16 result otherwise.
+            self._v_up_proj(
+                attn_out,
+                out=mqa_output_slice,
+                quant_key=quant_key,
+                quant_output=(
+                    quant_output[:num_mqa_tokens] if quant_key is not None else None
+                ),
+                output_scale=output_scale,
+                output_block_scale=(
+                    output_block_scale[:num_mqa_tokens]
+                    if output_block_scale is not None
+                    else None
+                ),
+                quant_group_size=quant_group_size,
+                quant_scale_ue8m0=quant_scale_ue8m0,
+                quant_col_major=quant_col_major,
+                quant_tma_aligned=quant_tma_aligned,
+            )
 
         if quant_key is not None:
-            quant_idx = num_mqa_tokens if mha_use_quant_output else num_actual_toks
-            if quant_idx == 0:
-                return quant_output
-            actual = output[:quant_idx]
-            if quant_key == kNvfp4Dynamic:
-                # NVFP4: two FP4 values packed into one uint8
-                assert output_block_scale is not None
-                fp4_data, fp4_scales = ops.scaled_fp4_quant(actual, output_scale)
-                quant_output[:quant_idx].copy_(fp4_data)
-                output_block_scale[: fp4_scales.shape[0]].copy_(fp4_scales)
-            elif quant_key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym):
-                # Per-group FP8
-                assert output_block_scale is not None
-                assert quant_group_size is not None, (
-                    "Group FP8 output quant requested but "
-                    "quant_group_size not passed through custom op"
+            # The MQA decode tokens [:num_mqa_tokens] were already quantized
+            # inside _v_up_proj for FP8 keys (fused into the BMM, or via
+            # _quantize_tokens). NVFP4 is not fused — its scale tensor uses a
+            # packed tile layout where shape[0] doesn't track tokens, so it must
+            # be quantized in a single from-zero pass here (a sliced write would
+            # break `output_block_scale[: fp4_scales.shape[0]].copy_(...)`).
+            #
+            # The MHA prefill tokens [num_mqa_tokens:num_actual_toks] were
+            # written as quantized output directly by the prefill backend when
+            # `mha_use_quant_output`, otherwise they are still bf16 in `output`.
+            quant_end = num_mqa_tokens if mha_use_quant_output else num_actual_toks
+            quant_start = 0 if quant_key == kNvfp4Dynamic else num_mqa_tokens
+            if quant_start < quant_end:
+                # NVFP4's scaled_fp4_quant writes scales into a tile-aligned
+                # region whose row count exceeds the per-token slice — pass the
+                # full output_block_scale tensor like the pre-fusion code did.
+                # Other quant keys are token-aligned and stay sliced.
+                bs_arg = (
+                    output_block_scale
+                    if quant_key == kNvfp4Dynamic
+                    else (
+                        output_block_scale[quant_start:quant_end]
+                        if output_block_scale is not None
+                        else None
+                    )
                 )
-                finfo = torch.finfo(_FP8_DTYPE)
-                torch.ops._C.per_token_group_fp8_quant(
-                    actual,
-                    quant_output[:quant_idx],
-                    output_block_scale[:quant_idx],
+                self._quantize_tokens(
+                    output[quant_start:quant_end],
+                    quant_key,
+                    quant_output[quant_start:quant_end],
+                    output_scale,
+                    bs_arg,
                     quant_group_size,
-                    1e-10,  # eps
-                    finfo.min,
-                    finfo.max,
                     quant_scale_ue8m0,
                     quant_col_major,
                     quant_tma_aligned,
                 )
-            elif quant_key == kFp8StaticTensorSym:
-                # Static FP8 quantization
-                fp8_data, _ = self._quant_fp8_op(actual, output_scale)
-                quant_output[:quant_idx].copy_(fp8_data)
-            else:
-                raise ValueError(f"Unsupported quant_key: {quant_key}")
             return quant_output
 
         return output_padded
@@ -1009,29 +1028,156 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             cache_dtype_str=vllm_config.cache_config.cache_dtype,
         )
 
-    def _v_up_proj(self, x: torch.Tensor, out: torch.Tensor):
+    def _v_up_proj(
+        self,
+        x: torch.Tensor,
+        out: torch.Tensor,
+        *,
+        quant_key: QuantKey | None = None,
+        quant_output: torch.Tensor | None = None,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+        quant_group_size: int | None = None,
+        quant_scale_ue8m0: bool | None = None,
+        quant_col_major: bool | None = None,
+        quant_tma_aligned: bool | None = None,
+    ) -> None:
+        """Run the V up-projection BMM and, when `quant_key` is set, write the
+        quantized result into `quant_output` (+ scales).
+
+        Fused paths write `quant_output` directly from the BMM kernel. AITER
+        paths and the unfused fallback produce bf16 into `out` and then
+        quantize via `_quantize_tokens`. Callers never see bf16 when
+        `quant_key` is set.
+        """
         # Convert from (B, N, L) to (N, B, L)
         x = x.view(-1, self.num_heads, self.kv_lora_rank).transpose(0, 1)
-        out = out.view(-1, self.num_heads, self.v_head_dim)
+        out_3d = out.view(-1, self.num_heads, self.v_head_dim)
+
         if self.is_aiter_triton_fp4_bmm_enabled:
-            out = rocm_aiter_ops.batched_gemm_a16wfp4(
+            # ROCm AITER fp4 BMM — no fused FP8 quant; quantize bf16 below.
+            rocm_aiter_ops.batched_gemm_a16wfp4(
                 x,
                 self.W_V,
                 self.W_V_scale,
-                out,
+                out_3d,
                 transpose_bm=True,
                 prequant=True,
                 y_scale=None,
             )
-            x = out.view(-1, self.num_heads * self.v_head_dim)
         elif self.is_aiter_triton_fp8_bmm_enabled:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
-            x = rocm_aiter_ops.triton_fp8_bmm(
-                x, self.W_V, self.W_V_scale, group_size=128, transpose_bm=True, YQ=out
+            rocm_aiter_ops.triton_fp8_bmm(
+                x,
+                self.W_V,
+                self.W_V_scale,
+                group_size=128,
+                transpose_bm=True,
+                YQ=out_3d,
             )
+        elif (
+            quant_key == kFp8Dynamic128Sym
+            and quant_output is not None
+            and output_block_scale is not None
+        ):
+            # Fused per-group FP8. scale_ue8m0 changes scale values; col-major
+            # / TMA-aligned strides are carried by `output_block_scale` itself.
+            from vllm.kernels.triton.ops.bmm_fp8_quant import bmm_fp8_group_quant
+
+            bmm_fp8_group_quant(
+                x,
+                self.W_UV,
+                quant_output,
+                output_block_scale,
+                scale_ue8m0=bool(quant_scale_ue8m0),
+            )
+            return
+        elif (
+            quant_key == kFp8StaticTensorSym
+            and quant_output is not None
+            and output_scale is not None
+        ):
+            # Fused static per-tensor FP8.
+            from vllm.kernels.triton.ops.bmm_fp8_quant import bmm_fp8_quant
+
+            bmm_fp8_quant(x, self.W_UV, output_scale, quant_output)
+            return
         else:
-            # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
-            torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
+            # Unfused fallback: plain BMM into bf16.
+            out_nbv = out_3d.transpose(0, 1)
+            torch.bmm(x, self.W_UV, out=out_nbv)
+            out_new = out_nbv.transpose(0, 1).reshape(
+                -1, self.num_heads * self.v_head_dim
+            )
+            N, B, V = out_nbv.shape
+            out.resize_((B, N * V))
+            out.copy_(out_new)
+
+        # AITER paths + unfused fallback: bf16 output in `out`. Quantize now
+        # so the caller only deals with MHA prefill tokens. NVFP4 is the
+        # exception — its packed scale tile layout breaks per-slice writes,
+        # so we leave the whole output bf16 and let forward_impl quantize
+        # MQA + MHA together, matching the original (pre-fusion) behavior.
+        if quant_key is not None and quant_key != kNvfp4Dynamic:
+            assert quant_output is not None
+            out_2d = out.view(-1, self.num_heads * self.v_head_dim)
+            self._quantize_tokens(
+                out_2d,
+                quant_key,
+                quant_output,
+                output_scale,
+                output_block_scale,
+                quant_group_size,
+                quant_scale_ue8m0,
+                quant_col_major,
+                quant_tma_aligned,
+            )
+
+    def _quantize_tokens(
+        self,
+        bf16_in: torch.Tensor,
+        quant_key: QuantKey,
+        quant_output: torch.Tensor,
+        output_scale: torch.Tensor | None,
+        output_block_scale: torch.Tensor | None,
+        quant_group_size: int | None,
+        quant_scale_ue8m0: bool | None,
+        quant_col_major: bool | None,
+        quant_tma_aligned: bool | None,
+    ) -> None:
+        """Quantize a bf16 token slice into `quant_output` (+ scales) per
+        `quant_key`. Shared between `_v_up_proj` (MQA decode) and the MHA
+        prefill path in `forward_impl`.
+        """
+        if quant_key == kNvfp4Dynamic:
+            assert output_block_scale is not None
+            fp4_data, fp4_scales = ops.scaled_fp4_quant(bf16_in, output_scale)
+            quant_output.copy_(fp4_data)
+            output_block_scale[: fp4_scales.shape[0]].copy_(fp4_scales)
+        elif quant_key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym):
+            assert output_block_scale is not None
+            assert quant_group_size is not None, (
+                "Group FP8 output quant requested but "
+                "quant_group_size not passed through custom op"
+            )
+            finfo = torch.finfo(_FP8_DTYPE)
+            torch.ops._C.per_token_group_fp8_quant(
+                bf16_in,
+                quant_output,
+                output_block_scale,
+                quant_group_size,
+                1e-10,  # eps
+                finfo.min,
+                finfo.max,
+                quant_scale_ue8m0,
+                quant_col_major,
+                quant_tma_aligned,
+            )
+        elif quant_key == kFp8StaticTensorSym:
+            fp8_data, _ = self._quant_fp8_op(bf16_in, output_scale)
+            quant_output.copy_(fp8_data)
+        else:
+            raise ValueError(f"Unsupported quant_key: {quant_key}")
 
 
 def unified_mla_kv_cache_update(
