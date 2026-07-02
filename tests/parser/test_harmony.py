@@ -204,6 +204,26 @@ class TestParse:
         assert content == "The answer is 4."
         assert tool_calls is None
 
+    def test_split_commentary_tokens(self, harmony_parser, chat_request):
+        tokenizer = harmony_parser.model_tokenizer
+        channel_id = tokenizer.convert_tokens_to_ids("<|channel|>") or 200012
+        comment_id = tokenizer.convert_tokens_to_ids("comment") or 12606
+        message_id = tokenizer.convert_tokens_to_ids("<|message|>") or 200005
+        ary_ids = tokenizer.encode("ary", add_special_tokens=False)
+        ary_id = ary_ids[0] if ary_ids else 0
+
+        # Sequence representing: <|channel|>commentary<|message|>Hello
+        token_ids = [channel_id, comment_id, ary_id, message_id] + tokenizer.encode("Hello", add_special_tokens=False)
+
+        reasoning, content, tool_calls = harmony_parser.parse(
+            "",
+            chat_request,
+            model_output_token_ids=token_ids,
+        )
+        assert content == "Hello"
+        assert reasoning is None
+        assert tool_calls is None
+
     @pytest.mark.parametrize(
         "tool_args",
         [
@@ -748,6 +768,34 @@ class TestParseDelta:
             (2, "tool_c", '{"c": 3}'),
         ]
         assert [tool.index for tool in tool_call_headers(third_delta)] == [2]
+
+    def test_split_commentary_tokens_streaming(self, gpt_oss_tokenizer, chat_request):
+        parser = HarmonyParser(gpt_oss_tokenizer)
+        channel_id = gpt_oss_tokenizer.convert_tokens_to_ids("<|channel|>") or 200012
+        comment_id = gpt_oss_tokenizer.convert_tokens_to_ids("comment") or 12606
+        message_id = gpt_oss_tokenizer.convert_tokens_to_ids("<|message|>") or 200005
+        ary_ids = gpt_oss_tokenizer.encode("ary", add_special_tokens=False)
+        ary_id = ary_ids[0] if ary_ids else 0
+
+        # Send channel_id and comment_id
+        first_delta = parser.parse_delta(
+            delta_text="",
+            delta_token_ids=[channel_id, comment_id],
+            request=chat_request,
+            finished=False,
+        )
+
+        # Send ary_id, message_id and "Hello"
+        hello_ids = gpt_oss_tokenizer.encode("Hello", add_special_tokens=False)
+        second_delta = parser.parse_delta(
+            delta_text="",
+            delta_token_ids=[ary_id, message_id] + hello_ids,
+            request=chat_request,
+            finished=False,
+        )
+
+        assert second_delta is not None
+        assert second_delta.content == "Hello"
 
 
 class TestProcessChunk:
