@@ -252,13 +252,12 @@ class MiniMaxM3MoE(nn.Module):
         else:
             self.e_score_correction_bias = None
 
-        # Router weights are stored in fp32; GateLinear upcasts the bf16
-        # activations and computes the gate in fp32 (fp32 router logits).
+        # Keep router weights in bf16 while accumulating fp32 router logits.
         self.gate = GateLinear(
             config.hidden_size,
             config.num_local_experts,
             bias=False,
-            params_dtype=torch.float32,
+            params_dtype=torch.bfloat16,
             out_dtype=torch.float32,
             prefix=f"{prefix}.gate",
         )
