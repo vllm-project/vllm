@@ -291,8 +291,10 @@ __device__ __noinline__ void histogram_2048_topk(
             equal_base = atomicAdd(&decode_smem[sBUF0_abs], equal_count);
           }
           equal_base = __shfl_sync(0xffffffff, equal_base, 0);
-          if (is_equal && __builtin_expect(equal_base + equal_rank < DBUF, 1)) {
-            bufs[0][equal_base + equal_rank] = elem_idx;
+          if (is_equal) {
+            if (equal_base + equal_rank < DBUF) [[likely]] {
+              bufs[0][equal_base + equal_rank] = elem_idx;
+            }
           }
         }
       }
@@ -399,7 +401,7 @@ __device__ __noinline__ void histogram_2048_topk(
           if (slot > 0) output_indices[TopK - slot] = idx;
         } else {
           const int bp = atomicAdd(&decode_smem[SBASE + sBUF0 + dst], 1);
-          if (__builtin_expect(bp < DBUF, 1)) {
+          if (bp < DBUF) [[likely]] {
             bufs[dst][bp] = idx;
             const int nbo = bit_offset - 8;
             atomicAdd(&refine[0][(fp32 >> nbo) & 0xFF], 1);
@@ -456,7 +458,7 @@ __device__ __noinline__ void histogram_256_topk(
   auto compute_cumulative_sum = [&]() {
 #pragma unroll 8
     for (int i = 0; i < 8; ++i) {
-      if (__builtin_expect(thread_id < RADIX, 1)) {
+      if (thread_id < RADIX) [[unlikely]] {
         const int stride = 1 << i;
         const int src_buffer = i & 1;
         const int dst_buffer = src_buffer ^ 1;
@@ -509,7 +511,7 @@ __device__ __noinline__ void histogram_256_topk(
       output_indices[output_pos] = idx;
     } else if (bin == threshold_bin) {
       const int buffer_pos = atomicAdd(&shared_buffered_count[0], 1);
-      if (__builtin_expect(buffer_pos < MAX_BUFFERED_ITEMS, 1)) {
+      if (buffer_pos < MAX_BUFFERED_ITEMS) [[likely]] {
         buffered_indices[0][buffer_pos] = idx;
         const uint32_t fp32_bits = convert_to_uint32_v2(logit_value);
         const int next_bin = (fp32_bits >> 24) & 0xFF;
@@ -579,7 +581,7 @@ __device__ __noinline__ void histogram_256_topk(
         } else {
           const int buffer_pos =
               atomicAdd(&shared_buffered_count[dst_buffer], 1);
-          if (__builtin_expect(buffer_pos < MAX_BUFFERED_ITEMS, 1)) {
+          if (buffer_pos < MAX_BUFFERED_ITEMS) [[likely]] {
             buffered_indices[dst_buffer][buffer_pos] = idx;
             const int next_bit_offset = bit_offset - 8;
             const int next_bin = (fp32_bits >> next_bit_offset) & 0xFF;
@@ -1166,7 +1168,7 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
         s_indices[pos] = index;
       } else if (bin == threshold_bin) {
         const auto pos = atomicAdd(&s_num_input[0], 1);
-        if (__builtin_expect(pos < SMEM_INPUT_SIZE, 1)) {
+        if (pos < SMEM_INPUT_SIZE) [[likely]] {
           s_input_idx[0][pos] = index;
           const auto ordered = Traits::ToOrdered(raw_input);
           const auto sub_bin = (ordered >> FIRST_SHIFT) & 0xFF;
@@ -1243,7 +1245,7 @@ __global__ void __launch_bounds__(FILTERED_TOPK_BLOCK_THREADS)
               }
             } else {
               const auto pos = atomicAdd(&s_num_input[r_idx ^ 1], 1);
-              if (__builtin_expect(pos < SMEM_INPUT_SIZE, 1)) {
+              if (pos < SMEM_INPUT_SIZE) [[likely]] {
                 s_input_idx[r_idx ^ 1][pos] = idx;
                 const auto bin32 = Traits::ToOrdered(raw_input);
                 const auto sub_bin = (bin32 >> (offset - 8)) & 0xFF;
