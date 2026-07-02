@@ -342,21 +342,24 @@ class QuarkConfig(QuantizationConfig):
             and weight_quant.get("symmetric") is True
         )
 
-        if not (
-            is_fp8_dtype
-            and is_static_weight
-            and (is_per_tensor_or_channel_weight or is_per_block_weight)
-        ):
+        if not is_fp8_dtype or not is_static_weight:
             return False
 
-        # Dynamic quantization is always supported if weights supported.
+        if is_per_block_weight:
+            if not input_quant.get("is_dynamic"):
+                return False
+            return (
+                input_quant.get("qscheme") == "per_group"
+                and input_quant.get("group_size") == 128
+                and input_quant.get("symmetric") is True
+            )
+
+        if not is_per_tensor_or_channel_weight:
+            return False
+
+        # Dynamic quantization is always supported if tensor/channel weights
+        # are supported.
         if input_quant.get("is_dynamic"):
-            if is_per_block_weight:
-                return (
-                    input_quant.get("qscheme") == "per_group"
-                    and input_quant.get("group_size") == 128
-                    and input_quant.get("symmetric") is True
-                )
             return True
 
         # Confirm activation scheme is supported.

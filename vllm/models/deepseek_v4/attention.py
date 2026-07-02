@@ -170,7 +170,6 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
         self.prefix = prefix  # Alias for compatibility with compressor
         self.hidden_size = config.hidden_size
-        self.hc_mult = getattr(config, "hc_mult", 1)
         self.n_heads = config.num_attention_heads
         assert self.n_heads % tp_size == 0
         self.n_local_heads = self.n_heads // tp_size
@@ -373,6 +372,8 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
 
     def _select_attn_input(self, hidden_states: torch.Tensor) -> torch.Tensor:
         if hidden_states.dim() == 3:
+            # HC/MTP passes a packed hidden-state buffer where slot 0 is the
+            # target token for attention; later slots are auxiliary predictions.
             return hidden_states[:, 0, :]
         return hidden_states
 

@@ -146,7 +146,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         return self._output_dim
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
-        if self.data.shape == loaded_weight.shape:
+        if self.tp_size == 1 and self.data.shape == loaded_weight.shape:
             self.data.copy_(loaded_weight)
             return
         shard_size = self.data.shape[self.output_dim]
@@ -176,7 +176,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data = self.data
 
         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
-        if param_data.shape == loaded_weight.shape:
+        if self.tp_size == 1 and param_data.shape == loaded_weight.shape:
             param_data.copy_(loaded_weight)
             return
         loaded_weight = loaded_weight.narrow(
@@ -208,7 +208,7 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data = self.data
         shard_id_int = self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
-        if param_data.shape == loaded_weight.shape:
+        if self.tp_size == 1 and param_data.shape == loaded_weight.shape:
             param_data.copy_(loaded_weight)
             return
         loaded_weight = loaded_weight.narrow(
@@ -242,7 +242,7 @@ class RowvLLMParameter(BasevLLMParameter):
         return self._input_dim
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
-        if self.data.shape == loaded_weight.shape:
+        if self.tp_size == 1 and self.data.shape == loaded_weight.shape:
             self.data.copy_(loaded_weight)
             return
         shard_size = self.data.shape[self.input_dim]

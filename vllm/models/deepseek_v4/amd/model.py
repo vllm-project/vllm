@@ -638,12 +638,16 @@ class DeepseekV4Model(nn.Module):
 
                 if is_pp_missing_parameter(name, self):
                     break
-                if name not in params_dict and f"{name}_inv" in params_dict:
-                    name = f"{name}_inv"
-                param = params_dict[name]
+                param_name = name
+                if (
+                    param_name not in params_dict
+                    and f"{param_name}_inv" in params_dict
+                ):
+                    param_name = f"{param_name}_inv"
+                param = params_dict[param_name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name)
+                loaded_params.add(param_name)
                 break
             else:
                 if ".experts." in name:
@@ -694,14 +698,18 @@ class DeepseekV4Model(nn.Module):
                 else:
                     if is_pp_missing_parameter(name, self):
                         continue
-                    if name not in params_dict and f"{name}_inv" in params_dict:
-                        name = f"{name}_inv"
-                    param = params_dict[name]
+                    param_name = name
+                    if (
+                        param_name not in params_dict
+                        and f"{param_name}_inv" in params_dict
+                    ):
+                        param_name = f"{param_name}_inv"
+                    param = params_dict[param_name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
-                    loaded_params.add(name)
+                    loaded_params.add(param_name)
                     continue
 
         return loaded_params
