@@ -648,30 +648,33 @@ class RMSNormQuantFusionPass(VllmPatternMatcherPass):
             # Fuse rms_norm + dynamic per-token fp8 quant
             RMSNormDynamicQuantPattern(epsilon, FP8_DTYPE).register(self.patterns)
 
-            # Only register group quant patterns on CUDA/ROCm where the C++ op exists
-            for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
-                for has_col_major_scales in [True, False]:
-                    for is_e8m0 in [True, False]:
-                        for is_tma_aligned in [False, True]:
-                            # Fuse fused_add_rms_norm + fp8 group quant
-                            FusedAddRMSNormGroupQuantPattern(
-                                epsilon,
-                                FP8_DTYPE,
-                                group_shape=group_shape,
-                                is_e8m0=is_e8m0,
-                                has_col_major_scales=has_col_major_scales,
-                                is_tma_aligned=is_tma_aligned,
-                            ).register(self.patterns)
+            # Only register group quant patterns where the C++ op exists.
+            # per_token_group_fp8_quant is CUDA-only; on ROCm the equivalent
+            # AITER path uses match_rocm_aiter=True which is handled separately.
+            if hasattr(torch.ops._C, "per_token_group_fp8_quant"):
+                for group_shape in [GroupShape(1, 128), GroupShape(1, 64)]:
+                    for has_col_major_scales in [True, False]:
+                        for is_e8m0 in [True, False]:
+                            for is_tma_aligned in [False, True]:
+                                # Fuse fused_add_rms_norm + fp8 group quant
+                                FusedAddRMSNormGroupQuantPattern(
+                                    epsilon,
+                                    FP8_DTYPE,
+                                    group_shape=group_shape,
+                                    is_e8m0=is_e8m0,
+                                    has_col_major_scales=has_col_major_scales,
+                                    is_tma_aligned=is_tma_aligned,
+                                ).register(self.patterns)
 
-                            # Fuse rms_norm + fp8 group quant
-                            RMSNormGroupQuantPattern(
-                                epsilon,
-                                FP8_DTYPE,
-                                group_shape=group_shape,
-                                is_e8m0=is_e8m0,
-                                has_col_major_scales=has_col_major_scales,
-                                is_tma_aligned=is_tma_aligned,
-                            ).register(self.patterns)
+                                # Fuse rms_norm + fp8 group quant
+                                RMSNormGroupQuantPattern(
+                                    epsilon,
+                                    FP8_DTYPE,
+                                    group_shape=group_shape,
+                                    is_e8m0=is_e8m0,
+                                    has_col_major_scales=has_col_major_scales,
+                                    is_tma_aligned=is_tma_aligned,
+                                ).register(self.patterns)
 
         self.dump_patterns(config, self.patterns)
 

@@ -96,7 +96,9 @@ class QuarkConfig(QuantizationConfig):
                 .get("weight", {})
                 .get("dtype")
             )
-            if quant_dtype == "fp4":
+            weight_format = quant_config.get("export", {}).get(
+                "weight_format", "")
+            if quant_dtype == "fp4" and weight_format != "real_quantized":
                 self.dynamic_mxfp4_quant = True
 
     def get_linear_method(self) -> "QuarkLinearMethod":

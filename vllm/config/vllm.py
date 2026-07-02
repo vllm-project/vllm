@@ -173,6 +173,23 @@ def enable_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
     )
 
 
+def enable_aiter_rope_kvcache_mla_fusion(cfg: "VllmConfig") -> bool:
+    """Enable MLA RoPE+KV-cache cat fusion via AITER fused kernel.
+
+    Activates MLARoPEKVCacheCatFusionPass when AITER MLA is enabled AND
+    the fused_qk_rope_concat_and_cache_mla kernel is available.
+    Falls back to the standard condition on other platforms.
+    """
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if (
+        rocm_aiter_ops.is_mla_enabled()
+        and rocm_aiter_ops.has_fused_rope_mla_kv_cache()
+    ):
+        return True
+    return enable_rope_kvcache_mla_fusion(cfg)
+
+
 def enable_norm_pad_fusion(cfg: "VllmConfig") -> bool:
     """Enable if using AITER RMSNorm and hidden size is 2880 i.e. gpt-oss."""
 
@@ -244,7 +261,7 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
-            "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
+            "fuse_rope_kvcache_cat_mla": enable_aiter_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
@@ -265,7 +282,7 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
-            "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
+            "fuse_rope_kvcache_cat_mla": enable_aiter_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
         "use_inductor_graph_partition": False,
