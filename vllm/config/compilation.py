@@ -1426,8 +1426,14 @@ class CompilationConfig:
         # https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
         # Will be removed in the near future when we have separate cudagraph capture
         # sizes for decode and mixed prefill-decode.
+        # Apply for any non-NONE cudagraph mode, not just FULL. PIECEWISE decode
+        # graphs are captured at the same sizes; with spec-decode
+        # (uniform_decode_query_len > 1) a partial-acceptance step dispatches to a
+        # graph keyed on a size that is not a multiple of uniform_decode_query_len,
+        # so slot_mapping/positions are read at offsets from the wrong graph ->
+        # cudaErrorIllegalAddress mid-decode. See issue #28207.
         if (
-            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            cudagraph_mode != CUDAGraphMode.NONE
             and uniform_decode_query_len > 1
         ):
             self.adjust_cudagraph_sizes_for_spec_decode(
