@@ -559,6 +559,8 @@ class AutoAWQMoEMethod(FusedMoEMethodBase):
         self.wna16_moe_backend, self.experts_cls = select_wna16_moe_backend(
             moe,
             kInt4Static,
+            may_have_zp=self.quant_config.zero_point,
+            may_have_bias=True,
         )
 
     def create_weights(

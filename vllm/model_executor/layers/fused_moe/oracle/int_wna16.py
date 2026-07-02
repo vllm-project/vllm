@@ -23,6 +23,9 @@ from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
     MarlinExpertsBase,
 )
+from vllm.model_executor.layers.fused_moe.experts.triton_moe import (
+    TritonWNA16Experts,
+)
 from vllm.model_executor.layers.fused_moe.experts.trtllm_mxint4_moe import (
     TrtLlmMxint4ExpertsMonolithic,
 )
@@ -48,6 +51,7 @@ class WNA16MoEBackend(Enum):
     BATCHED_MARLIN = "BATCHED_MARLIN"
     CPU = "CPU"
     FLASHINFER_TRTLLM = "FLASHINFER_TRTLLM"
+    TRITON = "TRITON"
     XPU = "XPU"
 
 
@@ -61,6 +65,8 @@ def backend_to_kernel_cls(
         return [BatchedMarlinExperts]
     elif backend == WNA16MoEBackend.FLASHINFER_TRTLLM:
         return [TrtLlmMxint4ExpertsMonolithic]
+    elif backend == WNA16MoEBackend.TRITON:
+        return [TritonWNA16Experts]
     elif backend == WNA16MoEBackend.XPU:
         from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
             XPUExpertsWNA16,
@@ -77,7 +83,11 @@ def backend_to_kernel_cls(
         raise ValueError(f"Unknown WNA16 MoE backend: {backend.value}")
 
 
-def _get_priority_backends() -> list[WNA16MoEBackend]:
+def _get_priority_backends(
+    may_have_zp: bool,
+    may_have_bias: bool,
+    allow_marlin: bool,
+) -> list[WNA16MoEBackend]:
     """
     Get available backends in priority order based on platform and config.
     """
@@ -86,17 +96,31 @@ def _get_priority_backends() -> list[WNA16MoEBackend]:
     if current_platform.is_xpu():
         return [WNA16MoEBackend.XPU]
 
-    _AVAILABLE_BACKENDS = [
-        WNA16MoEBackend.FLASHINFER_TRTLLM,
-        WNA16MoEBackend.MARLIN,
-        WNA16MoEBackend.BATCHED_MARLIN,
+    _AVAILABLE_BACKENDS = []
+
+    if not may_have_zp and not may_have_bias:
+        _AVAILABLE_BACKENDS.append(WNA16MoEBackend.FLASHINFER_TRTLLM)
+
+    # Marlin supports ZP and bias
+    if allow_marlin:
+        _AVAILABLE_BACKENDS += [
+            WNA16MoEBackend.MARLIN,
+            WNA16MoEBackend.BATCHED_MARLIN,
+        ]
+
+    _AVAILABLE_BACKENDS += [
+        WNA16MoEBackend.TRITON,
     ]
+
     return _AVAILABLE_BACKENDS
 
 
 def select_wna16_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey,
+    may_have_zp: bool,
+    may_have_bias: bool,
+    allow_marlin: bool = True,
 ) -> tuple[WNA16MoEBackend, type[mk.FusedMoEExperts]]:
     """Select the WNA16 MoE backend.
 
@@ -147,7 +171,9 @@ def select_wna16_moe_backend(
         raise ValueError(_make_log_unsupported(backend, reason))
 
     # Select kernels in order of backend.
-    AVAILABLE_BACKENDS = _get_priority_backends()
+    AVAILABLE_BACKENDS = _get_priority_backends(
+        may_have_zp, may_have_bias, allow_marlin
+    )
 
     for backend in AVAILABLE_BACKENDS:
         activation_key = None  # always BF16 activation for WNA16 MoE
@@ -232,6 +258,7 @@ def make_wna16_moe_kernel(
     assert experts_cls in (
         MarlinExperts,
         BatchedMarlinExperts,
+        TritonWNA16Experts,
         TrtLlmMxint4ExpertsMonolithic,
         XPUExpertsWNA16,
         CPUExpertsInt4,
@@ -249,6 +276,7 @@ def make_wna16_moe_kernel(
     assert prepare_finalize is not None
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__, scope="local")
+    logger.info_once("Using %s", experts_cls.__name__, scope="local")
 
     extra_args: dict[str, Any] = {}
     if issubclass(experts_cls, MarlinExpertsBase):
@@ -260,35 +288,17 @@ def make_wna16_moe_kernel(
             "is_k_full": is_k_full,
         }
 
-    if experts_cls is XPUExpertsWNA16:
-        assert (
-            prepare_finalize.activation_format == mk.FusedMoEActivationFormat.Standard
-        ), (
-            "XPUExpertsWNA16 only supports the Standard activation format; "
-            "xpu_fused_moe(is_int4=True) does not implement BatchedExperts."
-        )
-        experts: mk.FusedMoEExperts = XPUExpertsWNA16(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-        )
-    elif (
-        prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts
-    ):
+    if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
         assert max_num_tokens is not None
-        experts = experts_cls(
-            max_num_tokens=max_num_tokens,
-            num_dispatchers=prepare_finalize.num_dispatchers(),
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            **extra_args,
-        )
-    else:
-        experts = experts_cls(
-            moe_config=moe_config,
-            quant_config=moe_quant_config,
-            **extra_args,
-        )
+        extra_args["max_num_tokens"] = max_num_tokens
+        extra_args["num_dispatchers"] = prepare_finalize.num_dispatchers()
+
+    experts = experts_cls(
+        moe_config=moe_config,
+        quant_config=moe_quant_config,
+        **extra_args,
+    )
 
     return mk.FusedMoEKernel(
         prepare_finalize,
@@ -995,28 +1005,9 @@ def convert_to_wna16_moe_kernel_format(
         )
 
         if isinstance(quant_config, AutoAWQConfig):
-            if w13_qzeros is None or w2_qzeros is None:
-                raise ValueError("AWQ Marlin MoE requires zero-point tensors.")
-
-            weight_bits = quant_config.weight_bits
+            num_bits = quant_config.weight_bits
             pack_factor = quant_config.pack_factor
             group_size = quant_config.group_size
-
-            return _process_awq_weights_marlin(
-                layer,
-                weight_bits,
-                pack_factor,
-                group_size,
-                input_dtype,
-                w13,
-                w2,
-                w13_scale,
-                w2_scale,
-                w13_qzeros,
-                w2_qzeros,
-                w13_bias,
-                w2_bias,
-            )
         elif isinstance(quant_config, AutoGPTQConfig):
             num_bits = quant_config.quant_type.size_bits
             pack_factor = quant_config.pack_factor
@@ -1029,29 +1020,51 @@ def convert_to_wna16_moe_kernel_format(
             actorder = quant_config.actorder
         else:
             raise TypeError(
-                "Marlin WNA16 MoE backend requires AutoAWQConfig, AutoGPTQConfig or "
+                "Marlin WNA16 MoE backend requires AutoGPTQConfig, AutoAWQConfig or "
                 f"QuantizationArgs, got {type(quant_config).__name__}."
             )
-        if w13_g_idx is None or w2_g_idx is None:
-            raise ValueError("GPTQ Marlin MoE requires g_idx tensors.")
-        return _process_weights_marlin(
-            layer,
-            input_dtype,
-            num_bits,
-            pack_factor,
-            group_size,
-            actorder,
-            w13,
-            w2,
-            w13_scale,
-            w2_scale,
-            w13_g_idx,
-            w2_g_idx,
-            w13_qzeros,
-            w2_qzeros,
-            w13_bias,
-            w2_bias,
-        )
+
+        if isinstance(quant_config, AutoAWQConfig):
+            if w13_qzeros is None or w2_qzeros is None:
+                raise ValueError("AWQ Marlin MoE requires zero-point tensors.")
+
+            return _process_awq_weights_marlin(
+                layer,
+                num_bits,
+                pack_factor,
+                group_size,
+                input_dtype,
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+                w13_qzeros,
+                w2_qzeros,
+                w13_bias,
+                w2_bias,
+            )
+        else:
+            if w13_g_idx is None or w2_g_idx is None:
+                raise ValueError("GPTQ Marlin MoE requires g_idx tensors.")
+
+            return _process_weights_marlin(
+                layer,
+                input_dtype,
+                num_bits,
+                pack_factor,
+                group_size,
+                actorder,
+                w13,
+                w2,
+                w13_scale,
+                w2_scale,
+                w13_g_idx,
+                w2_g_idx,
+                w13_qzeros,
+                w2_qzeros,
+                w13_bias,
+                w2_bias,
+            )
     elif backend == WNA16MoEBackend.CPU:
         return _process_weights_cpu(
             quant_config,
@@ -1112,6 +1125,52 @@ def convert_to_wna16_moe_kernel_format(
             None,  # w2_input_global_scale
             w13_bias_out,
             w2_bias_out,
+        )
+    elif backend == WNA16MoEBackend.TRITON:
+        # Three possible input layouts depending on the quantization source:
+        #
+        # MoeWNA16 (uint8):              (E, N_out, K // bit8_pack)  — N-first
+        #   → just view as uint8 (no-op)
+        #
+        # AutoGPTQ (int32, K-first):    (E, K // pack32, N_out)
+        #   → transpose to N-first, then view as uint8 to get
+        #     (E, N_out, K // bit8_pack)  [int32 = 4 bytes → 4 uint8s]
+        #   Scales: (E, K // gs, N_out) → transpose → (E, N_out, K // gs)
+        #
+        # compressed-tensors (int32, N-first "Flashinfer" layout):
+        #   (E, N_out, K // pack32)  — already N-first
+        #   → just view as uint8; scales are already (E, N_out, K // gs)
+        from vllm.model_executor.layers.quantization.auto_gptq import (
+            AutoGPTQConfig,
+        )
+
+        if isinstance(quant_config, AutoGPTQConfig):
+            # AutoGPTQ always builds in Marlin (K-first) format even when
+            # the Triton backend is selected.  Transpose to N-first first.
+            w13_uint8 = w13.transpose(1, 2).contiguous().view(torch.uint8)
+            w2_uint8 = w2.transpose(1, 2).contiguous().view(torch.uint8)
+            w13_scale = w13_scale.transpose(1, 2).contiguous()
+            w2_scale = w2_scale.transpose(1, 2).contiguous()
+        else:
+            # MoeWNA16 and compressed-tensors both use N-first layout when
+            # targeting the Triton backend.
+            w13_uint8 = w13.view(torch.uint8)
+            w2_uint8 = w2.view(torch.uint8)
+        return (
+            w13_uint8,
+            w2_uint8,
+            w13_scale,
+            w2_scale,
+            None,
+            None,
+            None,
+            None,
+            w13_qzeros,
+            w2_qzeros,
+            None,
+            None,
+            w13_bias,
+            w2_bias,
         )
     else:
         raise ValueError(f"Unsupported wna16 MoE backend: {backend.value}")
