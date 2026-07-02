@@ -201,6 +201,12 @@ class Gemma4Config(VerifyAndUpdateConfig):
         uniform kernel path and avoiding the mixed FA3+FA4 penalty.
         When FA4 is not available we fall back to Triton.
         """
+        # XPU platform natively supports heterogeneous head dimensions with
+        # its default FLASH_ATTN backend, so we do not force TRITON_ATTN.
+        from vllm.platforms import current_platform
+
+        if current_platform.is_xpu():
+            return
         hf_text_config = vllm_config.model_config.hf_text_config
         head_dim = getattr(hf_text_config, "head_dim", None)
         global_head_dim = getattr(hf_text_config, "global_head_dim", None)
