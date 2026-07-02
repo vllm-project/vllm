@@ -21,6 +21,7 @@ from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.perf import PerfMetricsLogging, PerfMetricsProm
 from vllm.v1.metrics.prometheus import unregister_vllm_metrics
 from vllm.v1.metrics.stats import (
+    REQUEST_MODALITY_TEXT,
     CachingMetrics,
     IterationStats,
     MultiModalCacheStats,
@@ -687,6 +688,20 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
                 for idx in engine_indexes
             }
 
+        # Count of requests received, split by input modality. The "text" bucket
+        # is pre-created per engine (so it appears as 0 in scrapes); other
+        # modalities are created lazily by prometheus_client on first .labels().
+        self._request_received_model_name = model_name
+        self.counter_request_received = self._counter_cls(
+            name="vllm:request_received",
+            documentation="Count of received requests, by input modality.",
+            labelnames=labelnames + ["modality"],
+        )
+        for idx in engine_indexes:
+            self.counter_request_received.labels(
+                model_name, str(idx), REQUEST_MODALITY_TEXT
+            )
+
         #
         # Histograms of counts
         #
@@ -1180,6 +1195,11 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
             self.histogram_time_to_first_token[engine_idx].observe(ttft)
         for itl in iteration_stats.inter_token_latencies_iter:
             self.histogram_inter_token_latency[engine_idx].observe(itl)
+
+        for modality in iteration_stats.received_requests:
+            self.counter_request_received.labels(
+                self._request_received_model_name, str(engine_idx), modality
+            ).inc()
 
         for finished_request in iteration_stats.finished_requests:
             self.counter_request_success[finished_request.finish_reason][

@@ -32,10 +32,12 @@ from vllm.v1.engine.detokenizer import IncrementalDetokenizer
 from vllm.v1.engine.logprobs import LogprobsProcessor
 from vllm.v1.engine.parallel_sampling import ParentRequest
 from vllm.v1.metrics.stats import (
+    REQUEST_MODALITY_TEXT,
     IterationStats,
     LoRARequestStates,
     RequestStateStats,
     SchedulerStats,
+    compute_request_modality,
 )
 
 # shared empty CPU tensor used as a placeholder pooling output
@@ -149,6 +151,7 @@ class RequestState:
         n: int | None = None,
         temperature: float | None = None,
         stream_input: bool = False,
+        modality: str = REQUEST_MODALITY_TEXT,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -173,7 +176,13 @@ class RequestState:
         self.queue = queue
         self.num_cached_tokens = 0
 
-        self.stats = RequestStateStats(arrival_time=arrival_time) if log_stats else None
+        # The request-level input modality is recorded on the stats object so it
+        # can label the request_received metric when the request is admitted.
+        self.stats = (
+            RequestStateStats(arrival_time=arrival_time, modality=modality)
+            if log_stats
+            else None
+        )
 
         # Routed experts accumulation (prompt + sample chunks)
         self.routed_experts_chunks: list[np.ndarray] = []
@@ -267,6 +276,7 @@ class RequestState:
             log_stats=log_stats,
             stream_interval=stream_interval,
             stream_input=request.resumable,
+            modality=compute_request_modality(request.mm_features),
         )
 
     def make_request_output(
