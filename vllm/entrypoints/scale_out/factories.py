@@ -44,7 +44,7 @@ def init_scale_out_state(
 ):
     init_render_state(state, request_logger)
 
-    from vllm.entrypoints.scale_out.token_in_token_out.serving import ServingTokens
+    from .token_in_token_out.serving import ServingTokens
 
     state.serving_tokens = ServingTokens(
         engine_client,
@@ -56,6 +56,10 @@ def init_scale_out_state(
         enable_log_outputs=args.enable_log_outputs,
         force_no_detokenize=args.tokens_only,
     )
+
+    from .object_storage.serving import ServingObjectStorage
+
+    state.serving_object_storage = ServingObjectStorage()
 
 
 def register_scale_out_api_routers(
@@ -76,3 +80,7 @@ def register_scale_out_api_routers(
         )
 
         attach_disagg_router(app)
+
+    from .object_storage.api_router import router as object_storage_router
+
+    app.include_router(object_storage_router)
