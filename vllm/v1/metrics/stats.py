@@ -197,6 +197,8 @@ class SchedulerStats:
 
     perf_stats: PerfStats | None = None
 
+    custom_stats: dict[str, Any] | None = None
+
 
 @dataclass
 class RequestStateStats:
