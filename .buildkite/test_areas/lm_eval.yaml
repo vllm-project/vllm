@@ -239,7 +239,6 @@ steps:
   key: kv-offload-small
   timeout_in_minutes: 30
   device: h200_35gb
-  optional: true
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
   - tests/evals/gsm8k/test_gsm8k_offloading.py
@@ -250,7 +249,6 @@ steps:
   key: kv-offload-large
   timeout_in_minutes: 60
   device: h100
-  optional: true
   num_devices: 2
   source_file_dependencies:
   - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
