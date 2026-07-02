@@ -59,7 +59,12 @@ from vllm.v1.worker.gpu.attn_utils import (
     init_attn_backend,
     init_kv_cache,
 )
-from vllm.v1.worker.gpu.block_table import BlockTables
+from vllm.v1.worker.gpu.block_table import (
+    BlockTables,
+    BlockTableServingState,
+    restore_block_table_serving_state,
+    save_block_table_serving_state,
+)
 from vllm.v1.worker.gpu.buffer_utils import (
     async_copy_to_gpu,
     set_default_max_concurrency,
@@ -663,6 +668,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
     def post_kv_cache_wake_up(self) -> None:
         self.block_tables.init_block_table_layout_tensors()
+
+    def save_serving_state(self) -> BlockTableServingState:
+        return save_block_table_serving_state(self.block_tables)
+
+    def restore_serving_state(self, saved_state: BlockTableServingState) -> None:
+        restore_block_table_serving_state(self.block_tables, saved_state)
 
     def reset_mm_cache(self) -> None:
         if self.encoder_cache is not None:

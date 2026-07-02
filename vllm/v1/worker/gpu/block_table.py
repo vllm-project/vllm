@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 import torch
 
@@ -194,6 +195,49 @@ class BlockTables:
         # with the same memory address as that used during the model's forward pass,
         # rather than allocating a new tensor.
         return self.slot_mappings[:, :num_tokens]
+
+
+@dataclass
+class BlockTableServingState:
+    block_table_rows: list[torch.Tensor]
+    input_block_tables: list[torch.Tensor]
+    num_blocks: torch.Tensor
+
+
+def save_block_table_serving_state(
+    block_tables: BlockTables,
+) -> BlockTableServingState:
+    saved_state = BlockTableServingState(
+        block_table_rows=[bt.gpu.clone() for bt in block_tables.block_tables],
+        input_block_tables=[
+            input_bt.clone() for input_bt in block_tables.input_block_tables
+        ],
+        num_blocks=block_tables.num_blocks.cpu.clone(),
+    )
+
+    for bt in block_tables.block_tables:
+        bt.gpu.zero_()
+        bt.clear_staged_writes()
+    for input_bt in block_tables.input_block_tables:
+        input_bt.zero_()
+    block_tables.num_blocks.cpu.zero_()
+    block_tables.num_blocks.copy_to_uva()
+    return saved_state
+
+
+def restore_block_table_serving_state(
+    block_tables: BlockTables,
+    saved_state: BlockTableServingState,
+) -> None:
+    for bt, saved_gpu in zip(block_tables.block_tables, saved_state.block_table_rows):
+        bt.gpu.copy_(saved_gpu)
+        bt.clear_staged_writes()
+    for input_bt, saved_input in zip(
+        block_tables.input_block_tables, saved_state.input_block_tables
+    ):
+        input_bt.copy_(saved_input)
+    block_tables.num_blocks.cpu.copy_(saved_state.num_blocks)
+    block_tables.num_blocks.copy_to_uva()
 
 
 @triton.jit(do_not_specialize=["num_reqs"])
