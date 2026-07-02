@@ -579,7 +579,7 @@ class EngineArgs:
     )
     io_processor_plugin: str | None = None
     renderer_num_workers: int = 1
-    skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
+    skip_mm_profiling: bool = envs.VLLM_SKIP_MM_PROFILING
     video_pruning_rate: float | None = MultiModalConfig.video_pruning_rate
     mm_tensor_ipc: MMTensorIPC = MultiModalConfig.mm_tensor_ipc
     mm_ipc_gpu_memory_gb: float = MultiModalConfig.mm_ipc_gpu_memory_gb
