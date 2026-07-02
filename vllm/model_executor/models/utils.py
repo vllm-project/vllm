@@ -123,6 +123,17 @@ class WeightsMapper:
                 key = key.replace(prefix, new_key, 1)
 
         for suffix, new_key in self.orig_to_new_suffix.items():
+            # Skip rules whose ``new_key`` is already the suffix of ``key``.
+            # ``endswith``-based suffix substitution is not idempotent: a rule
+            # like ``"head.weight" -> "lm_head.weight"`` will also fire on the
+            # canonical ``lm_head.weight`` (since it ends with ``head.weight``)
+            # and produce ``lm_lm_head.weight``. Guarding here keeps the rule
+            # a no-op when the tensor name is already in the target form.
+            # ``if new_key and ...`` (not ``is not None``) so that ``None``
+            # (drop) and ``""`` (pure suffix removal, where ``endswith("")``
+            # is trivially True) both still reach the substitution branch.
+            if new_key and key.endswith(new_key):
+                continue
             if key.endswith(suffix):
                 if new_key is None:
                     return None
