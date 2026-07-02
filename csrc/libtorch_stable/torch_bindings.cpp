@@ -29,10 +29,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "()");
   ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 
-#ifndef USE_ROCM
-
-  // TODO: Remove this once ROCm upgrade to torch 2.11.
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
+
+#ifndef USE_ROCM
 
   // Note about marlin kernel 'workspace' arguments:
   // Technically these should be mutable since they are modified by the kernel.
@@ -753,8 +752,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("paged_attention_v2", TORCH_BOX(&paged_attention_v2));
 }
 
-// TODO: Remove this once ROCm upgrade to torch 2.11.
-#ifndef USE_ROCM
 STABLE_TORCH_LIBRARY_IMPL(_C, CPU, ops) {
   ops.impl("get_cuda_view_from_cpu_tensor",
            TORCH_BOX(&get_cuda_view_from_cpu_tensor));
@@ -772,8 +769,6 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cuda_utils, CompositeExplicitAutograd,
   cuda_utils.impl("get_max_shared_memory_per_block_device_attribute",
                   TORCH_BOX(&get_max_shared_memory_per_block_device_attribute));
 }
-
-#endif
 
 // These capability-check functions take only primitive args (no tensors), so
 // there is no device to dispatch on. CompositeExplicitAutograd makes them

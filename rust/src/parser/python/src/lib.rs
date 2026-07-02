@@ -231,8 +231,9 @@ fn _rust_tool_parser(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use serde_json::json;
+
+    use super::*;
 
     fn with_python<R>(f: impl for<'py> FnOnce(Python<'py>) -> R) -> R {
         Python::initialize();

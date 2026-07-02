@@ -18,11 +18,14 @@ from torch._inductor.pattern_matcher import PatternMatcherPass, PatternPrettyPri
 
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 from .fx_utils import is_func
 from .inductor_pass import InductorPass, enable_fake_mode
 
 logger = init_logger(__name__)
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @dataclass
@@ -227,23 +230,23 @@ class VllmPatternReplacement(ABC, Generic[P, R]):
     # Helpers for get_inputs: uninitialized tensors of common dtypes.
     @staticmethod
     def empty(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, device="cuda", **kwargs)
+        return torch.empty(*args, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_bf16(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, dtype=torch.bfloat16, device="cuda", **kwargs)
+        return torch.empty(*args, dtype=torch.bfloat16, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_fp16(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, dtype=torch.float16, device="cuda", **kwargs)
+        return torch.empty(*args, dtype=torch.float16, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_fp32(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, dtype=torch.float32, device="cuda", **kwargs)
+        return torch.empty(*args, dtype=torch.float32, device=DEVICE_TYPE, **kwargs)
 
     @staticmethod
     def empty_i32(*args, **kwargs) -> torch.Tensor:
-        return torch.empty(*args, dtype=torch.int32, device="cuda", **kwargs)
+        return torch.empty(*args, dtype=torch.int32, device=DEVICE_TYPE, **kwargs)
 
 
 def _fx_view_to_reshape(gm: fx.GraphModule) -> None:
