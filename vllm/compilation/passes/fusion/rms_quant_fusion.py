@@ -128,19 +128,16 @@ FUSED_OPS: dict[FusedRMSQuantKey, OpOverload] = {
     FusedRMSQuantKey(
         kFp8DynamicTokenSym, True
     ): torch.ops._C.rms_norm_dynamic_per_token_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8Dynamic128Sym, False
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8Dynamic128Sym, True
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8Dynamic64Sym, False
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
-    FusedRMSQuantKey(
-        kFp8Dynamic64Sym, True
-    ): torch.ops._C.rms_norm_per_block_quant.default,  # noqa: E501
 }
+# rms_norm_per_block_quant is a CUDA-only custom op, absent on some builds (e.g.
+# TPU, VLLM_TARGET_DEVICE=tpu). Guard it like per_token_group_fp8_quant above so
+# importing this module does not raise AttributeError on those platforms.
+if hasattr(torch.ops._C, "rms_norm_per_block_quant"):
+    _rms_norm_per_block_quant = torch.ops._C.rms_norm_per_block_quant.default
+    FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic128Sym, False)] = _rms_norm_per_block_quant  # noqa: E501
+    FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic128Sym, True)] = _rms_norm_per_block_quant  # noqa: E501
+    FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic64Sym, False)] = _rms_norm_per_block_quant  # noqa: E501
+    FUSED_OPS[FusedRMSQuantKey(kFp8Dynamic64Sym, True)] = _rms_norm_per_block_quant  # noqa: E501
 
 
 class RMSNormQuantPattern:
