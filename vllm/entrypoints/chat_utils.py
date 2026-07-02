@@ -1266,15 +1266,16 @@ def validate_chat_template(chat_template: Path | str | None):
         ):
             # Try to find the template in the built-in templates directory
             from vllm.transformers_utils.chat_templates.registry import (
-                CHAT_TEMPLATES_DIR,
+                get_builtin_chat_template_paths,
             )
 
-            builtin_template_path = CHAT_TEMPLATES_DIR / chat_template
-            if not builtin_template_path.exists():
+            builtin_template_paths = get_builtin_chat_template_paths(chat_template)
+            if not any(path.exists() for path in builtin_template_paths):
                 raise ValueError(
                     f"The supplied chat template string ({chat_template}) "
                     f"appears path-like, but doesn't exist! "
-                    f"Tried: {chat_template} and {builtin_template_path}"
+                    f"Tried: {chat_template} and "
+                    f"{', '.join(str(path) for path in builtin_template_paths)}"
                 )
 
     else:
@@ -1308,21 +1309,25 @@ def _load_chat_template(
         if not any(c in chat_template for c in JINJA_CHARS):
             # Try to load from the built-in templates directory
             from vllm.transformers_utils.chat_templates.registry import (
-                CHAT_TEMPLATES_DIR,
+                get_builtin_chat_template_paths,
             )
 
-            builtin_template_path = CHAT_TEMPLATES_DIR / chat_template
-            try:
-                with open(builtin_template_path) as f:
-                    return f.read()
-            except OSError:
-                msg = (
-                    f"The supplied chat template ({chat_template}) "
-                    f"looks like a file path, but it failed to be opened. "
-                    f"Tried: {chat_template} and {builtin_template_path}. "
-                    f"Reason: {e}"
-                )
-                raise ValueError(msg) from e
+            builtin_template_paths = get_builtin_chat_template_paths(chat_template)
+            for builtin_template_path in builtin_template_paths:
+                try:
+                    with open(builtin_template_path) as f:
+                        return f.read()
+                except OSError:
+                    pass
+
+            msg = (
+                f"The supplied chat template ({chat_template}) "
+                f"looks like a file path, but it failed to be opened. "
+                f"Tried: {chat_template} and "
+                f"{', '.join(str(path) for path in builtin_template_paths)}. "
+                f"Reason: {e}"
+            )
+            raise ValueError(msg) from e
 
         # If opening a file fails, set chat template to be args to
         # ensure we decode so our escape are interpreted correctly

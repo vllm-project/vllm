@@ -7,6 +7,8 @@ import pytest
 
 from vllm.entrypoints.openai.cli_args import make_arg_parser, validate_parsed_serve_args
 from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.platforms.cpu import CpuPlatform
+from vllm.transformers_utils.chat_templates import registry
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 from ...utils import VLLM_PATH
@@ -199,10 +201,60 @@ def test_chat_template_validation_for_happy_paths(serve_parser):
     validate_parsed_serve_args(args)
 
 
+@pytest.mark.skip_global_cleanup
+def test_chat_template_validation_for_installed_examples(tmp_path, monkeypatch):
+    """Ensure validation passes for packaged example chat templates."""
+    import vllm.platforms as platforms
+
+    monkeypatch.setattr(platforms, "_current_platform", CpuPlatform())
+    installed_examples_dir = tmp_path / "share" / "vllm" / "examples"
+    installed_examples_dir.mkdir(parents=True)
+    (installed_examples_dir / "tool_chat_template_gemma4.jinja").write_text(
+        "{{ messages }}", encoding="utf-8"
+    )
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        registry,
+        "EXAMPLES_CHAT_TEMPLATES_DIR",
+        installed_examples_dir,
+    )
+
+    serve_parser = _build_vllm_parsers()["vllm serve"]
+    args = serve_parser.parse_args(
+        args=["--chat-template", "examples/tool_chat_template_gemma4.jinja"]
+    )
+    validate_parsed_serve_args(args)
+
+
 def test_chat_template_validation_for_sad_paths(serve_parser):
     """Ensure validation fails if the chat template doesn't exist"""
     args = serve_parser.parse_args(args=["--chat-template", "does/not/exist"])
     with pytest.raises(ValueError):
+        validate_parsed_serve_args(args)
+
+
+@pytest.mark.skip_global_cleanup
+def test_chat_template_validation_for_missing_installed_examples(tmp_path, monkeypatch):
+    """Ensure validation fails for missing packaged example chat templates."""
+    import vllm.platforms as platforms
+
+    monkeypatch.setattr(platforms, "_current_platform", CpuPlatform())
+    installed_examples_dir = tmp_path / "share" / "vllm" / "examples"
+    installed_examples_dir.mkdir(parents=True)
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(
+        registry,
+        "EXAMPLES_CHAT_TEMPLATES_DIR",
+        installed_examples_dir,
+    )
+
+    serve_parser = _build_vllm_parsers()["vllm serve"]
+    args = serve_parser.parse_args(
+        args=["--chat-template", "examples/does_not_exist.jinja"]
+    )
+    with pytest.raises(ValueError, match=str(installed_examples_dir)):
         validate_parsed_serve_args(args)
 
 

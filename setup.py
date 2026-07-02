@@ -1185,6 +1185,10 @@ package_data = {
     ]
 }
 
+example_chat_templates = sorted(
+    str(path.relative_to(ROOT_DIR)) for path in (ROOT_DIR / "examples").glob("*.jinja")
+)
+
 
 def add_vllm_package_data(filename: str) -> None:
     vllm_files = package_data.setdefault("vllm", [])
@@ -1277,4 +1281,8 @@ setup(
     },
     cmdclass=cmdclass,
     package_data=package_data,
+    # Make top-level example chat templates available after pip/uv wheel installs.
+    data_files=[
+        ("share/vllm/examples", example_chat_templates),
+    ],
 )
