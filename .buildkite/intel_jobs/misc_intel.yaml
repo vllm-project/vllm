@@ -6,7 +6,7 @@ steps:
   timeout_in_minutes: 30
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug_b50
     gpu: 1+
     mem: 16+
   no_plugin: true
@@ -36,9 +36,9 @@ steps:
   timeout_in_minutes: 30
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug_b50
     gpu: 1+
-    mem: 16+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
@@ -80,7 +80,7 @@ steps:
   timeout_in_minutes: 60
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug_b50
     gpu: 1+
     mem: 16+
   no_plugin: true
@@ -108,9 +108,9 @@ steps:
   num_devices: 2
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug_b50
     gpu: 2+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -133,7 +133,7 @@ steps:
   timeout_in_minutes: 30
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug_b50
     gpu: 1+
     mem: 16+
   no_plugin: true
@@ -168,7 +168,7 @@ steps:
   num_devices: 2
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug_b50
     gpu: 2+
     mem: 16+
   no_plugin: true
@@ -203,7 +203,7 @@ steps:
   timeout_in_minutes: 30
   device: intel_gpu
   agent_tags:
-    label: production
+    label: debug_b50
     gpu: 1+
     mem: 24+
   no_plugin: true

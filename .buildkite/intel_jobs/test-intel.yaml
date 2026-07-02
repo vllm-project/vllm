@@ -20,7 +20,7 @@ steps:
     timeout_in_minutes: 30
     device: intel_gpu
     agent_tags:
-      label: production
+      label: debug_b50
       gpu: 2+
       mem: 24+
     no_plugin: true
@@ -54,9 +54,9 @@ steps:
     timeout_in_minutes: 30
     device: intel_gpu
     agent_tags:
-      label: production
+      label: debug_b50
       gpu: 1+
-      mem: 16+
+      mem: 24+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -82,7 +82,7 @@ steps:
     timeout_in_minutes: 30
     device: intel_gpu
     agent_tags:
-      label: production
+      label: debug_b50
       gpu: 1+
       mem: 16+
     no_plugin: true
@@ -105,7 +105,7 @@ steps:
     timeout_in_minutes: 30
     device: intel_gpu
     agent_tags:
-      label: production
+      label: debug_b50
       gpu: 1+
       mem: 16+
     no_plugin: true
