@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any
 import vllm.envs as envs
 
 if TYPE_CHECKING:
-    from vllm.entrypoints.openai.endpoint_plugin import EndpointPlugin
+    from vllm.entrypoints.serve.endpoint_plugin import EndpointPlugin
     from vllm.tasks import SupportedTask
 
 logger = logging.getLogger(__name__)
@@ -26,7 +26,7 @@ PLATFORM_PLUGINS_GROUP = "vllm.platform_plugins"
 STAT_LOGGER_PLUGINS_GROUP = "vllm.stat_logger_plugins"
 # Endpoint plugins group is loaded in the API server front end process only.
 # Each entry point resolves to a factory returning an `EndpointPlugin`
-# (see `vllm/entrypoints/openai/endpoint_plugin.py`).
+# (see `vllm/entrypoints/serve/endpoint_plugin.py`).
 ENDPOINT_PLUGINS_GROUP = "vllm.endpoint_plugins"
 
 # make sure one process only loads plugins once
@@ -117,7 +117,7 @@ def load_endpoint_plugins(
         Instantiated plugins that passed gating in discovery order.
     """
     if envs.VLLM_PLUGINS is None:
-        logger.debug(
+        logger.warning(
             "VLLM_PLUGINS is not set. No endpoint plugins will be loaded. "
             "Endpoint plugins add HTTP routes and must be explicitly "
             "allowlisted via VLLM_PLUGINS to be loaded."
