@@ -156,6 +156,7 @@ LinearBackend = Literal[
     "conch",
     "exllama",
     "emulation",
+    "helion",
 ]
 
 
