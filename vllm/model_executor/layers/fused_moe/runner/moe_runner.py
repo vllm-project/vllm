@@ -556,7 +556,6 @@ class MoERunner(MoERunnerInterface):
         )
 
         if self.routed_experts.quant_method.is_monolithic:
-            # Monolithic kernels: pass router_logits to routed_experts
             fused_out = self.routed_experts.forward_monolithic(
                 x=hidden_states,
                 router_logits=router_logits,

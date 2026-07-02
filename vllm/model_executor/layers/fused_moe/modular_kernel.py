@@ -991,6 +991,46 @@ class FusedMoEExpertsMonolithic(FusedMoEExperts):
     def is_monolithic() -> bool:
         return True
 
+    routing_replay_capture_fn: Callable[[torch.Tensor], None] | None = None
+
+    def supports_routing_replay_capture(self) -> bool:
+        """Whether this expert supports routing replay capture.
+
+        Subclasses backed by a kernel that exposes routed expert IDs
+        (e.g. FlashInfer's ``routing_replay_out``) should override.
+        Only the DeepSeekV3 routing path currently writes
+        ``routing_replay_out`` in FlashInfer TRT-LLM kernels.
+        """
+        return False
+
+    def set_routing_replay_capture_fn(
+        self,
+        capture_fn: Callable[[torch.Tensor], None] | None,
+    ) -> None:
+        self.routing_replay_capture_fn = capture_fn
+
+    def _maybe_make_routing_replay_buffer(
+        self,
+        num_tokens: int,
+        device: torch.device,
+    ) -> torch.Tensor | None:
+        if self.routing_replay_capture_fn is None:
+            return None
+        return torch.empty(
+            (num_tokens, self.moe_config.experts_per_token),
+            dtype=torch.int16,
+            device=device,
+        )
+
+    def _maybe_dispatch_routing_replay(
+        self,
+        routing_replay_out: torch.Tensor | None,
+        num_tokens: int,
+    ) -> None:
+        if routing_replay_out is None or self.routing_replay_capture_fn is None:
+            return
+        self.routing_replay_capture_fn(routing_replay_out[:num_tokens])
+
     def apply(
         self,
         hidden_states: torch.Tensor,
@@ -1513,7 +1553,6 @@ class FusedMoEKernelMonolithicImpl:
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             a1q_scale=a1q_scale,
-            # grouped topk + fused topk bias parameters
             num_expert_group=num_expert_group,
             e_score_correction_bias=e_score_correction_bias,
             routed_scaling_factor=routed_scaling_factor,

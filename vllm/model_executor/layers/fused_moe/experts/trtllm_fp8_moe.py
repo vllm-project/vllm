@@ -257,6 +257,9 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
     Fp8 TRTLLM-Gen MoE kernels. Supports monolithic interface.
     """
 
+    def supports_routing_replay_capture(self) -> bool:
+        return self.routing_method_type == RoutingMethodType.DeepSeekV3
+
     def __init__(
         self,
         moe_config: FusedMoEConfig,
@@ -395,6 +398,11 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             n_group = num_expert_group or 0
             selected_topk_group = topk_group or 0
 
+        routing_replay_out = self._maybe_make_routing_replay_buffer(
+            num_tokens=hidden_states.shape[0],
+            device=hidden_states.device,
+        )
+
         kwargs = dict(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
@@ -419,10 +427,15 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             use_shuffled_weight=use_shuffled_weight,
             weight_layout=weight_layout,
             fp8_quantization_type=fp8_quant_type,
+            routing_replay_out=routing_replay_out,
         )
         if is_mxfp8 or activation == MoEActivation.RELU2_NO_MUL:
             kwargs["activation_type"] = activation_type
-        return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(**kwargs)
+        result = flashinfer.fused_moe.trtllm_fp8_block_scale_moe(**kwargs)
+        self._maybe_dispatch_routing_replay(
+            routing_replay_out, num_tokens=hidden_states.shape[0]
+        )
+        return result
 
     def _apply_per_tensor(
         self,
@@ -455,6 +468,14 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         else:
             assert not apply_router_weight_on_input
 
+        if e_score_correction_bias is not None:
+            e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
+
+        routing_replay_out = self._maybe_make_routing_replay_buffer(
+            num_tokens=hidden_states.shape[0],
+            device=hidden_states.device,
+        )
+
         out = flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
@@ -475,6 +496,10 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             use_routing_scales_on_input=apply_router_weight_on_input,
             routing_method_type=self.routing_method_type,
             activation_type=activation_type,
+            routing_replay_out=routing_replay_out,
+        )
+        self._maybe_dispatch_routing_replay(
+            routing_replay_out, num_tokens=hidden_states.shape[0]
         )
         return out
 
