@@ -58,20 +58,16 @@ def _is_one_plus(node: object) -> bool:
 
 @dataclass
 class RMSNormFuser(BaseFuser):
-    """Fuses an HF RMSNorm's `x * rsqrt(mean(x**2) + eps)` normalize into vLLM's
-    fused RMSNorm CustomOp, read structurally from the module's dataflow.
-
-    eps and the weight form (plain, zero-centered or absent) come straight from
-    the graph, so detection does not depend on the class name.
-    """
+    """Fuser for RMSNorm patterns, including Gemma-style zero-centered weights."""
 
     eps: float | None
     """`None` only for a fused `rms_norm` op with default eps; resolved in `fuse`."""
     has_weight: bool
+    """Does the norm have a weight?"""
     zero_centered: bool
     """Gemma-style `(1 + weight)` scaling (weight initialised at zero)."""
     source_cls: str
-    """Class name of the HF norm this was matched from (for logging)."""
+    """Class name of the norm this was matched from (for logging)."""
 
     def info(self, name: str) -> str:
         norm = "GemmaRMSNorm" if self.zero_centered else "RMSNorm"
@@ -79,6 +75,7 @@ class RMSNormFuser(BaseFuser):
 
     @classmethod
     def match(cls, graph: fx.Graph, module: nn.Module) -> "RMSNormFuser | None":
+        """Match a graph to the RMSNorm pattern, returning a fuser if found."""
         x = find_node(graph, lambda n: n.op == "placeholder")
         if x is None:
             return None
@@ -137,10 +134,7 @@ class RMSNormFuser(BaseFuser):
         model_config: "ModelConfig",
         quant_config: "QuantizationConfig",
     ) -> nn.Module:
-        """Build vLLM's RMSNorm from the detected parameters.
-
-        The scale keeps its checkpoint name (`weight`), so no weight remapping is
-        needed. `var_hidden_size` has no Transformers equivalent."""
+        """Fuse the matched RMSNorm pattern into a vLLM fused RMSNorm CustomOp."""
         weight = getattr(module, "weight", None)
         hidden_size = (
             weight.size(0) if weight is not None else model_config.get_hidden_size()
