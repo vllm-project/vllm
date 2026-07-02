@@ -40,6 +40,29 @@ For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
 or the [benchmark CLI guide](../../benchmarking/cli.md).
 
+## Correctness Gate Before Benchmarking
+
+Before running latency or throughput sweeps for a speculative decoding setup,
+compare it against an autoregressive baseline with deterministic requests. The
+helper below calls two OpenAI-compatible servers, checks exact generated output
+(token IDs when a tokenizer is provided, otherwise text), validates required
+JSON keys for structured prompts, and can repeat the gate under a concurrency
+sweep:
+
+```bash
+python benchmarks/spec_decode_correctness.py \
+  --ar-url http://127.0.0.1:8000 \
+  --spec-url http://127.0.0.1:8001 \
+  --ar-model <target-model> \
+  --spec-model <target-model> \
+  --tokenizer <target-tokenizer-or-model> \
+  --concurrency-sweep 1,4,8,16 \
+  --output-json spec_decode_correctness.json
+```
+
+Treat a failed strict gate as a correctness issue before interpreting
+speculative-decoding speedups.
+
 ## Custom Proposer Backend (Experimental)
 
 You can plug in your own custom proposer class for speculative decoding by setting the method to `custom_class` and providing the full module path to your class.
