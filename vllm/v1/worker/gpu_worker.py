@@ -943,6 +943,36 @@ class Worker(WorkerBase):
         )
         return self.profiler.annotate_context_manager(annotation)
 
+    def _data_parallel_index(self) -> int:
+        return getattr(
+            self.parallel_config,
+            "data_parallel_index",
+            self.parallel_config.data_parallel_rank,
+        )
+
+    def _worker_rank_within_dp(self) -> int:
+        parallel_config = self.parallel_config
+        world_size_within_dp = (
+            parallel_config.pipeline_parallel_size
+            * parallel_config.tensor_parallel_size
+            * parallel_config.prefill_context_parallel_size
+        )
+        return self.rank % world_size_within_dp
+
+    def _is_cuda_profiler_control_worker(self) -> bool:
+        profiler_config = self.profiler_config
+
+        control_dp_rank = profiler_config.cuda_profiler_control_dp_rank
+        dp_rank = self._data_parallel_index()
+        if control_dp_rank >= 0 and dp_rank != control_dp_rank:
+            return False
+
+        control_worker_rank = profiler_config.cuda_profiler_control_worker_rank
+        return (
+            control_worker_rank < 0
+            or self._worker_rank_within_dp() == control_worker_rank
+        )
+
     @torch.inference_mode()
     @with_gpu_sync_check
     def sample_tokens(
@@ -1081,8 +1111,20 @@ class Worker(WorkerBase):
                         "Starting torch profiler with trace name: %s", trace_name
                     )
                 elif profiler_type == "cuda":
-                    self.profiler = CudaProfilerWrapper(self.profiler_config)
-                    logger.debug("Starting CUDA profiler")
+                    enable_cuda_profiler_api = self._is_cuda_profiler_control_worker()
+                    self.profiler = CudaProfilerWrapper(
+                        self.profiler_config,
+                        enable_cuda_profiler_api=enable_cuda_profiler_api,
+                    )
+                    if enable_cuda_profiler_api:
+                        logger.debug("Starting CUDA profiler")
+                    else:
+                        logger.debug(
+                            "Skipping CUDA profiler API calls on worker rank %s in "
+                            "DP rank %s.",
+                            self._worker_rank_within_dp(),
+                            self._data_parallel_index(),
+                        )
                 else:
                     # Config validation should prevent this code being reached
                     raise ValueError(
