@@ -367,6 +367,37 @@ class DeepseekCompressor(nn.Module):
                 store_full_fp8=store_full_fp8,
                 fp8_scale=fp8_scale,
             )
+        elif current_platform.is_xpu() and self.head_dim == 512:
+            # XPU sparse-attn (head=512): mirror the CUDA cutedsl dispatch by
+            # trying the specialized SYCL fused kernel first. It returns True
+            # when it handled the insert (early return); otherwise fall through
+            # to the Triton launcher.
+            from .xpu.compress_insert_fp8mix import (
+                _fused_kv_compress_norm_rope_insert_sparse_attn_xpu,
+            )
+
+            if _fused_kv_compress_norm_rope_insert_sparse_attn_xpu(
+                state_cache=state_cache,
+                token_to_req_indices=token_to_req_indices,
+                positions=positions,
+                slot_mapping=slot_mapping,
+                block_table=block_table,
+                cos_sin_cache=cos_sin_cache,
+                kv_cache=kv_cache,
+                k_cache_metadata=k_cache_metadata,
+                compress_ratio=self.compress_ratio,
+                overlap=self.overlap,
+                rope_head_dim=self.rope_head_dim,
+                rms_norm_weight=self.norm.weight,
+                rms_norm_eps=self.rms_norm_eps,
+                token_stride=self._token_stride,
+                scale_dim=self._scale_dim,
+                head_dim=self.head_dim,
+                use_fp4_cache=self.use_fp4_cache,
+            ):
+                return
+            compress_norm_rope_store_fn = compress_norm_rope_store_triton
+            extra_kwargs = {}
         else:
             # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
