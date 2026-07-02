@@ -277,8 +277,15 @@ class DataParallelInferenceEngine:
             ]
         )
 
-    def start_weight_update(self):
-        ray.get([actor.start_weight_update.remote() for actor in self.llm_actors])
+    def start_weight_update(self, is_checkpoint_format: bool = True):
+        ray.get(
+            [
+                actor.start_weight_update.remote(
+                    is_checkpoint_format=is_checkpoint_format
+                )
+                for actor in self.llm_actors
+            ]
+        )
 
     def finish_weight_update(self):
         ray.get([actor.finish_weight_update.remote() for actor in self.llm_actors])
@@ -385,7 +392,7 @@ def main():
     ray.get(inference_engine.wake_up.remote(tags=["weights"]))
 
     print("[sync] Starting weight update...")
-    ray.get(inference_engine.start_weight_update.remote())
+    ray.get(inference_engine.start_weight_update.remote(is_checkpoint_format=True))
 
     print("[sync] Packed IPC transfer FSDP → vLLM...")
     ray.get(

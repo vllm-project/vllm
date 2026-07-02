@@ -244,7 +244,7 @@ class EngineClient(ABC):
         """Initialize weight transfer for RL training."""
         raise NotImplementedError
 
-    async def start_weight_update(self) -> None:
+    async def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
         """Start a new weight update."""
         raise NotImplementedError
 

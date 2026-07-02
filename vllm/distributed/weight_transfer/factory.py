@@ -12,7 +12,7 @@ from vllm.logger import init_logger
 if TYPE_CHECKING:
     import torch
 
-    from vllm.config import VllmConfig
+    from vllm.config.parallel import ParallelConfig
     from vllm.config.weight_transfer import WeightTransferConfig
 
 logger = init_logger(__name__)
@@ -76,16 +76,14 @@ class WeightTransferEngineFactory:
     def create_engine(
         cls,
         config: "WeightTransferConfig",
-        vllm_config: "VllmConfig",
-        device: "torch.device",
+        parallel_config: "ParallelConfig",
         model: "torch.nn.Module",
     ) -> WeightTransferEngine:
         """Create a weight transfer engine instance.
 
         Args:
             config: Weight transfer configuration containing the backend name
-            vllm_config: The full vLLM config (provides parallel/model config)
-            device: The device this worker's model lives on
+            parallel_config: Parallel configuration for the engine
             model: The local model instance which will receive the weights
 
         Returns:
@@ -108,7 +106,7 @@ class WeightTransferEngineFactory:
             engine_cls.__name__,
         )
 
-        return engine_cls(config, vllm_config, device, model)
+        return engine_cls(config, parallel_config, model)
 
 
 # Register built-in weight transfer engines here.
@@ -125,10 +123,4 @@ WeightTransferEngineFactory.register_engine(
     "ipc",
     "vllm.distributed.weight_transfer.ipc_engine",
     "IPCWeightTransferEngine",
-)
-
-WeightTransferEngineFactory.register_engine(
-    "sparse_nccl",
-    "vllm.distributed.weight_transfer.sparse_nccl_engine",
-    "SparseNCCLWeightTransferEngine",
 )
