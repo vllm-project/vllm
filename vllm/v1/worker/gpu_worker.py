@@ -439,6 +439,22 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
+        if (
+            self.cache_config.kv_cache_memory_bytes is None
+            and envs.VLLM_STARTUP_PLAN_DIR
+        ):
+            from vllm.v1.worker.startup_plan import maybe_apply_startup_plan
+
+            applied = maybe_apply_startup_plan(
+                envs.VLLM_STARTUP_PLAN_DIR,
+                self.vllm_config,
+                self.rank,
+                self.parallel_config.world_size,
+                self.init_snapshot.free_memory,
+            )
+            if applied is not None:
+                self.cache_config.kv_cache_memory_bytes = applied
+
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
             # max_num_batched_tokens
@@ -833,6 +849,23 @@ class Worker(WorkerBase):
             )
 
             logger.debug(msg)
+
+            if envs.VLLM_STARTUP_PLAN_DIR:
+                from vllm.v1.worker.startup_plan import (
+                    compute_plan_fingerprint,
+                    save_startup_plan,
+                )
+
+                save_startup_plan(
+                    envs.VLLM_STARTUP_PLAN_DIR,
+                    compute_plan_fingerprint(
+                        self.vllm_config,
+                        self.rank,
+                        self.parallel_config.world_size,
+                    ),
+                    kv_cache_memory_bytes_to_requested_limit,
+                    self.init_snapshot.free_memory,
+                )
 
         if self.use_v2_model_runner:
             # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.

@@ -233,6 +233,7 @@ if TYPE_CHECKING:
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
+    VLLM_STARTUP_PLAN_DIR: str | None = None
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
     VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT: bool = False
     VLLM_GPT_OSS_HARMONY_SYSTEM_INSTRUCTIONS: bool = False
@@ -1721,6 +1722,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each component first checks this folder, then the configs shipped with
     # vLLM (if any). If no JSON matches, it uses a hard-coded heuristic.
     "VLLM_TUNED_CONFIG_FOLDER": lambda: os.getenv("VLLM_TUNED_CONFIG_FOLDER", None),
+    # Directory for persisted startup plans (opt-in). When set, each worker
+    # saves the memory-profiling result (the suggested --kv-cache-memory value
+    # and the free-memory baseline) keyed by a hardware+config fingerprint,
+    # and later boots auto-apply it -- skipping memory profiling -- when the
+    # fingerprint matches and current free memory >= the recorded baseline.
+    # See vllm/v1/worker/startup_plan.py.
+    "VLLM_STARTUP_PLAN_DIR": lambda: os.getenv("VLLM_STARTUP_PLAN_DIR", None),
     # Valid values are container,code_interpreter,web_search_preview
     # ex VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS=container,code_interpreter
     # If the server_label of your mcp tool is not in this list it will
@@ -2055,6 +2063,8 @@ def compile_factors() -> dict[str, object]:
         "VLLM_DEBUG_DUMP_PATH",
         "VLLM_PORT",
         "VLLM_CACHE_ROOT",
+        # Runtime memory-plan persistence; does not affect compiled graphs.
+        "VLLM_STARTUP_PLAN_DIR",
         "LD_LIBRARY_PATH",
         "VLLM_SERVER_DEV_MODE",
         "VLLM_DP_MASTER_IP",
