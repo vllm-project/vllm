@@ -347,6 +347,7 @@ FROM build_rocshmem AS build_deepep
 ARG DEEPEP_BRANCH="a9ea9774"
 ARG DEEPEP_REPO="https://github.com/ROCm/DeepEP.git"
 ARG DEEPEP_NIC="cx7"
+ARG DEEPEP_ROCM_GFX942_FP8_FNUZ_MAX="224"
 
 # Build DeepEP wheel. DeepEP looks for rocshmem at ROCSHMEM_DIR.
 # DeepEP only supports gfx942 and gfx950, so avoid gfx90a in the default list.
@@ -355,7 +356,10 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
  && git clone ${DEEPEP_REPO} \
  && cd DeepEP \
  && git checkout ${DEEPEP_BRANCH} \
- && LDFLAGS="-fuse-ld=mold" MAX_JOBS="${MAX_JOBS:-$(nproc)}" python3 setup.py --variant rocm --rocm-explicit-ctx --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
+ && DEEPEP_ROCM_GFX942_FP8_FNUZ_MAX="${DEEPEP_ROCM_GFX942_FP8_FNUZ_MAX}" \
+    LDFLAGS="-fuse-ld=mold" \
+    MAX_JOBS="${MAX_JOBS:-$(nproc)}" \
+    python3 setup.py --variant rocm --rocm-explicit-ctx --nic ${DEEPEP_NIC} bdist_wheel --dist-dir=/app/deep_install
 
 # MoRI runtime dependencies live in Dockerfile.rocm so NIC backend changes do
 # not force users to rebuild the long-lived Dockerfile.rocm_base image.
