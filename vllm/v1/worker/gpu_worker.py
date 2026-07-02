@@ -1270,6 +1270,22 @@ def init_worker_distributed_environment(
 
     init_method = distributed_init_method or "env://"
 
+    # vLLM's multiproc executor passes rank/world_size as function args
+    # instead of inheriting the standard torchrun envs. Materialise them
+    # so libraries that read RANK/WORLD_SIZE/MASTER_ADDR/MASTER_PORT
+    # from env (torchcomms with auto rank-size detection, profiling
+    # tools, etc.) work transparently.
+    os.environ.setdefault("RANK", str(rank))
+    os.environ.setdefault("WORLD_SIZE", str(parallel_config.world_size))
+    if distributed_init_method:
+        from urllib.parse import urlparse
+
+        parsed = urlparse(init_method)
+        if parsed.hostname:
+            os.environ.setdefault("MASTER_ADDR", parsed.hostname)
+        if parsed.port:
+            os.environ.setdefault("MASTER_PORT", str(parsed.port))
+
     timeout = None
     if parallel_config.distributed_timeout_seconds is not None:
         timeout = timedelta(seconds=parallel_config.distributed_timeout_seconds)

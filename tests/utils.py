@@ -1396,6 +1396,15 @@ def init_test_distributed_environment(
 
     distributed_init_method = f"tcp://localhost:{distributed_init_port}"
 
+    # Ray-spawned workers don't inherit RANK/WORLD_SIZE/MASTER_*. Set the
+    # standard torchrun envs so any library reading them works (torchcomms
+    # auto rank-size detection, profiling tools, etc.) — no need for a
+    # torchcomms-specific branch.
+    os.environ.setdefault("RANK", str(rank))
+    os.environ.setdefault("WORLD_SIZE", str(pp_size * tp_size))
+    os.environ.setdefault("MASTER_ADDR", "localhost")
+    os.environ.setdefault("MASTER_PORT", str(distributed_init_port))
+
     if get_current_vllm_config_or_none() is not None:
         # Config already set, use it directly
         init_distributed_environment(
