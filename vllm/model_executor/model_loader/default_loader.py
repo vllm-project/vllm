@@ -431,6 +431,7 @@ class DefaultModelLoader(BaseModelLoader):
             "Loading weights took %.2f seconds",
             self.counter_after_loading_weights - self.counter_before_loading_weights,
         )
+        
         # We only enable strict check for non-quantized models
         # that have loaded weights tracking by default.
         default_enable_weights_track = (
@@ -462,9 +463,10 @@ class DefaultModelLoader(BaseModelLoader):
                     for param_name, _ in module.named_parameters():
                         full_name = f"{name}.{param_name}" if name else param_name
                         loaded_weights.add(full_name)
-            weights_not_loaded = weights_to_load - loaded_weights
+        weights_not_loaded = weights_to_load - (loaded_weights or set())
+        if loaded_weights is not None:
             if weights_not_loaded:
-                raise ValueError(
-                    "Following weights were not initialized from "
-                    f"checkpoint: {weights_not_loaded}"
-                )
+                 raise ValueError(
+                     "Following weights were not initialized from "
+                       f"checkpoint: {weights_not_loaded}"
+                 )
