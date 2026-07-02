@@ -11,6 +11,7 @@ mod runtime;
 mod server_info;
 mod state;
 mod tls;
+mod tls_reload;
 #[cfg(test)]
 mod tls_tests;
 mod utils;
@@ -48,6 +49,7 @@ use crate::listener::{Listener, MaybeTlsListener};
 use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
 use crate::state::AppState;
+use crate::tls_reload::{ReloadableTls, spawn_cert_reloader};
 
 /// How often the server PINGs an idle gRPC connection to reap a dead peer;
 /// tonic enables no keepalive by default. 2h matches the gRPC-core default.
@@ -163,13 +165,15 @@ where
     config.validate().context("invalid OpenAI frontend configuration")?;
 
     // Build the TLS server config once, up front, so a bad cert/key fails fast
-    // before the (potentially long) engine handshake.
-    let tls_config = config
+    // before the (potentially long) engine handshake. The swappable cell lets
+    // `--enable-ssl-refresh` hot-reload it.
+    let http_cell = config
         .tls
         .as_ref()
         .map(tls::build_server_config)
         .transpose()
-        .context("invalid TLS configuration")?;
+        .context("invalid TLS configuration")?
+        .map(ReloadableTls::new);
 
     // Also check shutdown during the (potentially long) startup handshake.
     let state = tokio::select! {
@@ -193,30 +197,27 @@ where
             .with_context(|| format!("failed to bind gRPC listener on {grpc_host}:{grpc_port}"))?;
         let addr = grpc_listener.local_addr()?;
         let grpc_listener = Listener::Tcp(grpc_listener);
-        // gRPC reuses the HTTP TLS config (same SslContext) plus ALPN h2.
-        let grpc_tls = config
+        // gRPC uses the same TLS material but its own context (ALPN h2).
+        let grpc_cell = config
             .tls
             .as_ref()
             .map(tls::build_grpc_server_config)
             .transpose()
-            .context("invalid gRPC TLS configuration")?;
+            .context("invalid gRPC TLS configuration")?
+            .map(ReloadableTls::new);
         let svc = grpc::GenerateServer::new(grpc::GenerateServiceImpl::new(state.clone()));
         let svc = TonicServer::builder()
             .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
             .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
             .layer(middleware::request_runtime_layer(state.clone()))
             .add_service(svc);
-        info!(%addr, tls = grpc_tls.is_some(), "starting gRPC server");
-        Some((grpc_listener, svc, grpc_tls))
+        info!(%addr, tls = grpc_cell.is_some(), "starting gRPC server");
+        Some((grpc_listener, svc, grpc_cell))
     } else {
         None
     };
 
-    let scheme = if tls_config.is_some() {
-        "https"
-    } else {
-        "http"
-    };
+    let scheme = if http_cell.is_some() { "https" } else { "http" };
     info!(%bind_address, %scheme, %model, "starting OpenAI server");
 
     // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
@@ -260,13 +261,30 @@ where
         keep_alive_enabled: !keep_alive_timeout.is_zero(),
     };
 
+    // Hot-reload the certs into the cells above when `--enable-ssl-refresh` is
+    // set. The handle aborts the watcher when `serve` returns. Warn-and-skip if
+    // TLS is off.
+    let reloader_grpc_cell = grpc_setup.as_ref().and_then(|(_, _, cell)| cell.clone());
+    let _cert_reloader = match (config.enable_ssl_refresh, &config.tls, &http_cell) {
+        (true, Some(tls), Some(cell)) => Some(spawn_cert_reloader(
+            tls.clone(),
+            cell.clone(),
+            reloader_grpc_cell,
+        )),
+        (true, None, _) => {
+            warn!("--enable-ssl-refresh ignored: no TLS certificate configured");
+            None
+        }
+        _ => None,
+    };
+
     let http_fut = {
         let shutdown = server_shutdown.child_token();
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let listener = match tls_config {
-                Some(context) => MaybeTlsListener::tls(listener, context),
+            let listener = match http_cell {
+                Some(cell) => MaybeTlsListener::tls(listener, cell),
                 None => MaybeTlsListener::plain(listener),
             };
             let server = serve_connections(listener, app, shutdown.cancelled_owned(), timeouts);
@@ -291,14 +309,14 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let Some((grpc_listener, svc, grpc_tls)) = grpc_setup else {
+            let Some((grpc_listener, svc, grpc_cell)) = grpc_setup else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
                 shutdown.cancelled().await;
                 return Ok(());
             };
-            let incoming = match grpc_tls {
-                Some(context) => MaybeTlsListener::tls(grpc_listener, context),
+            let incoming = match grpc_cell {
+                Some(cell) => MaybeTlsListener::tls(grpc_listener, cell),
                 None => MaybeTlsListener::plain(grpc_listener),
             };
             let server = svc.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned());

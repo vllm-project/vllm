@@ -24,6 +24,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::config::{HttpListenerMode, TlsConfig};
 use crate::listener::{Listener, MaybeTlsListener};
+use crate::tls_reload::{self, ReloadableTls};
 use crate::{ConnectionTimeouts, serve_connections, tls};
 
 // ============================================================================
@@ -281,7 +282,7 @@ async fn spawn_server_with_timeouts(
     let server_shutdown = shutdown.clone();
     tokio::spawn(async move {
         let listener = match server_config {
-            Some(context) => MaybeTlsListener::tls(listener, context),
+            Some(context) => MaybeTlsListener::tls(listener, ReloadableTls::new(context)),
             None => MaybeTlsListener::plain(listener),
         };
         let _ = serve_connections(listener, app, server_shutdown.cancelled_owned(), timeouts).await;
@@ -523,15 +524,18 @@ async fn tls_handshake_timeout_drops_silent_client() {
     let (addr, shutdown) = spawn_server(Some(server_tls(&certs, 0))).await;
 
     let mut tcp = TcpStream::connect(&addr).await.expect("connect");
-    tokio::task::yield_now().await;
-    tokio::time::advance(tls::TLS_HANDSHAKE_TIMEOUT + Duration::from_millis(1)).await;
-    tokio::task::yield_now().await;
-
+    let start = tokio::time::Instant::now();
     let mut buf = [0u8; 1];
-    let read = tokio::time::timeout(Duration::from_secs(1), tcp.read(&mut buf)).await;
+    let read = tcp.read(&mut buf).await;
     assert!(
-        matches!(read, Ok(Ok(0)) | Ok(Err(_))),
+        matches!(read, Ok(0) | Err(_)),
         "server must drop a stalled TLS handshake (expected close, got {read:?})"
+    );
+    // The close is the handshake deadline, not an earlier one
+    assert!(
+        start.elapsed() >= tls::TLS_HANDSHAKE_TIMEOUT,
+        "closed too early to be the handshake deadline: {:?}",
+        start.elapsed()
     );
     shutdown.cancel();
 }
@@ -673,5 +677,181 @@ async fn disabled_keep_alive_still_closes_silent_client() {
         matches!(read, Ok(Ok(0)) | Ok(Err(_))),
         "disabled keep-alive must still close a silent client (got {read:?})"
     );
+    shutdown.cancel();
+}
+
+// ============================================================================
+// Certificate hot-reload (--enable-ssl-refresh)
+// ============================================================================
+
+/// Serve a trivial HTTPS router whose certificate is read from `cell`, so a test
+/// can reload the cell and observe the change on a fresh connection.
+async fn spawn_reloadable_server(cell: ReloadableTls) -> (String, CancellationToken) {
+    let listener = Listener::bind(&HttpListenerMode::BindTcp {
+        host: "127.0.0.1".to_string(),
+        port: 0,
+    })
+    .await
+    .expect("bind listener");
+    let addr = listener.local_addr_display().expect("local addr");
+    let app = Router::new().route("/health", get(|| async { "ok" }));
+    let shutdown = CancellationToken::new();
+    let server_shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        let listener = MaybeTlsListener::tls(listener, cell);
+        let _ = serve_connections(
+            listener,
+            app,
+            server_shutdown.cancelled_owned(),
+            TEST_TIMEOUTS,
+        )
+        .await;
+    });
+    (addr, shutdown)
+}
+
+/// DER of the leaf certificate the server presents on a fresh handshake, used to
+/// detect (or rule out) a hot-reload swap.
+async fn served_cert_der(certs: &TestCerts, addr: &str) -> Vec<u8> {
+    let stream = connect_tls(certs, addr, None).await.expect("tls connect");
+    stream
+        .ssl()
+        .peer_certificate()
+        .expect("peer certificate")
+        .to_der()
+        .expect("cert der")
+}
+
+/// Overwrite the server cert+key fixtures with a different, still CA-trusted
+/// certificate (the "chain" leaf, signed by an intermediate).
+fn rotate_cert_files(certs: &TestCerts) {
+    std::fs::copy(certs.path("server_chain.pem"), certs.path("server.pem")).expect("rotate cert");
+    std::fs::copy(certs.path("server_chain.key"), certs.path("server.key")).expect("rotate key");
+}
+
+#[tokio::test]
+async fn reload_serves_the_new_certificate() {
+    let certs = TestCerts::generate();
+    let tls = server_tls(&certs, 0);
+    let cell = ReloadableTls::new(tls::build_server_config(&tls).expect("build context"));
+    let (addr, shutdown) = spawn_reloadable_server(cell.clone()).await;
+    let before = served_cert_der(&certs, &addr).await;
+
+    rotate_cert_files(&certs);
+    tls_reload::reload(&tls, &cell, None);
+
+    assert_ne!(
+        served_cert_der(&certs, &addr).await,
+        before,
+        "reload did not swap the certificate"
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn reload_keeps_the_current_certificate_on_a_bad_write() {
+    let certs = TestCerts::generate();
+    let tls = server_tls(&certs, 0);
+    let cell = ReloadableTls::new(tls::build_server_config(&tls).expect("build context"));
+    let (addr, shutdown) = spawn_reloadable_server(cell.clone()).await;
+    let before = served_cert_der(&certs, &addr).await;
+
+    // A truncated / half-written cert must not clear the live certificate.
+    std::fs::write(
+        certs.path("server.pem"),
+        b"-----BEGIN CERTIFICATE-----\nnope\n",
+    )
+    .expect("write partial cert");
+    tls_reload::reload(&tls, &cell, None);
+
+    assert_eq!(
+        served_cert_der(&certs, &addr).await,
+        before,
+        "a bad write must keep the old cert"
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn watcher_reloads_the_certificate_when_files_change() {
+    let certs = TestCerts::generate();
+    let tls = server_tls(&certs, 0);
+    let cell = ReloadableTls::new(tls::build_server_config(&tls).expect("build context"));
+    let (addr, shutdown) = spawn_reloadable_server(cell.clone()).await;
+    let _reloader = tls_reload::spawn_cert_reloader(tls.clone(), cell.clone(), None);
+    let before = served_cert_der(&certs, &addr).await;
+
+    rotate_cert_files(&certs);
+
+    // Wait (bounded) for the watcher to debounce and rebuild.
+    let mut reloaded = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if served_cert_der(&certs, &addr).await != before {
+            reloaded = true;
+            break;
+        }
+    }
+    assert!(
+        reloaded,
+        "watcher did not reload the rotated certificate in time"
+    );
+    shutdown.cancel();
+}
+
+#[tokio::test]
+async fn watcher_reloads_across_atomic_symlink_swap() {
+    use std::os::unix::fs::symlink;
+
+    let certs = TestCerts::generate();
+    let mount = tempfile::tempdir().expect("tempdir");
+    let root = mount.path();
+
+    // Certs behind a `..data` symlink that rotation atomically re-points; the leaf
+    // files never change, so only a directory watch (not a leaf watch) sees it.
+    //   <root>/..v1/{tls.crt,tls.key}   real cert files
+    //   <root>/..data   -> ..v1
+    //   <root>/tls.crt  -> ..data/tls.crt
+    //   <root>/tls.key  -> ..data/tls.key
+    let v1 = root.join("..v1");
+    std::fs::create_dir(&v1).expect("mkdir v1");
+    std::fs::copy(certs.path("server.pem"), v1.join("tls.crt")).expect("v1 cert");
+    std::fs::copy(certs.path("server.key"), v1.join("tls.key")).expect("v1 key");
+    symlink("..v1", root.join("..data")).expect("..data");
+    symlink("..data/tls.crt", root.join("tls.crt")).expect("tls.crt link");
+    symlink("..data/tls.key", root.join("tls.key")).expect("tls.key link");
+
+    let leaf = |name: &str| root.join(name).to_str().expect("utf-8").to_string();
+    let tls = TlsConfig {
+        cert_file: Some(leaf("tls.crt")),
+        key_file: Some(leaf("tls.key")),
+        ca_certs: None,
+        cert_reqs: 0,
+        ciphers: None,
+    };
+    let cell = ReloadableTls::new(tls::build_server_config(&tls).expect("build context"));
+    let (addr, shutdown) = spawn_reloadable_server(cell.clone()).await;
+    let _reloader = tls_reload::spawn_cert_reloader(tls.clone(), cell.clone(), None);
+    let before = served_cert_der(&certs, &addr).await;
+
+    // Stage the new cert in ..v2, then atomically swap ..data -> ..v2.
+    let v2 = root.join("..v2");
+    std::fs::create_dir(&v2).expect("mkdir v2");
+    std::fs::copy(certs.path("server_chain.pem"), v2.join("tls.crt")).expect("v2 cert");
+    std::fs::copy(certs.path("server_chain.key"), v2.join("tls.key")).expect("v2 key");
+    let staged = root.join("..data_tmp");
+    symlink("..v2", &staged).expect("stage ..data");
+    std::fs::rename(&staged, root.join("..data")).expect("atomic swap");
+    std::fs::remove_dir_all(&v1).ok();
+
+    let mut reloaded = false;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        if served_cert_der(&certs, &addr).await != before {
+            reloaded = true;
+            break;
+        }
+    }
+    assert!(reloaded, "watcher did not reload after the symlink swap");
     shutdown.cancel();
 }

@@ -12,13 +12,13 @@ use std::pin::Pin;
 use std::task::{Context, Poll, ready};
 
 use auto_enums::enum_derive;
-use openssl::ssl::SslContext;
 use socket2::Socket;
 use tls_listener::{AsyncAccept, AsyncListener};
 use tokio::net::{TcpListener, TcpStream, UnixListener, UnixStream};
 use tonic::transport::server::{Connected, TcpConnectInfo};
 use tracing::trace;
 
+use crate::tls_reload::ReloadableTls;
 use crate::{HttpListenerMode, tls};
 
 /// Runtime listener type used by the OpenAI-compatible HTTP or gRPC server,
@@ -184,7 +184,7 @@ impl AsyncListener for Listener {
 /// A listener that may be either a plain TCP/UDS listener or a TLS listener over it.
 pub enum MaybeTlsListener {
     Plain(Listener),
-    Tls(tls_listener::TlsListener<Listener, SslContext>),
+    Tls(tls_listener::TlsListener<Listener, ReloadableTls>),
 }
 
 impl MaybeTlsListener {
@@ -193,10 +193,11 @@ impl MaybeTlsListener {
         Self::Plain(listener)
     }
 
-    /// Create a TLS listener over the given plain listener.
-    pub fn tls(listener: Listener, context: SslContext) -> Self {
+    /// Create a TLS listener over the given plain listener, reading its
+    /// certificate from a swappable cell so it can be hot-reloaded.
+    pub fn tls(listener: Listener, acceptor: ReloadableTls) -> Self {
         Self::Tls(
-            tls_listener::builder(context)
+            tls_listener::builder(acceptor)
                 .handshake_timeout(tls::TLS_HANDSHAKE_TIMEOUT)
                 .listen(listener),
         )

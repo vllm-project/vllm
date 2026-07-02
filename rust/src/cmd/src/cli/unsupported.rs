@@ -526,15 +526,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub disable_access_log_for_endpoints: Option<Noop>,
 
-    /// Refresh SSL Context when SSL certificate files change
-    #[arg(
-        long,
-        visible_alias = "no-enable-ssl-refresh",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub enable_ssl_refresh: Option<Unsupported>,
-
     /// FastAPI root_path when app is behind a path based routing proxy.
     #[arg(long)]
     pub root_path: Option<Unsupported>,

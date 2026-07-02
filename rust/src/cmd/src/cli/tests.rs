@@ -71,6 +71,7 @@ fn serve_args_forward_python_flags_with_separator() {
                         ssl_ca_certs: None,
                         ssl_cert_reqs: 0,
                         ssl_ciphers: None,
+                        enable_ssl_refresh: false,
                         profiler_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
@@ -433,6 +434,31 @@ fn serve_passes_tls_into_config() {
 }
 
 #[test]
+fn serve_enable_ssl_refresh_flag_sets_config() {
+    let cli = Cli::try_parse_from([
+        "vllm-rs",
+        "serve",
+        "Qwen/Qwen3-0.6B",
+        "--ssl-certfile",
+        "/tmp/cert.pem",
+        "--enable-ssl-refresh",
+    ])
+    .unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(config.enable_ssl_refresh);
+
+    let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
+    let Command::Serve(args) = cli.command else {
+        panic!("expected serve args");
+    };
+    let config = args.to_frontend_config("tcp://127.0.0.1:62100".to_string());
+    assert!(!config.enable_ssl_refresh);
+}
+
+#[test]
 fn serve_without_ssl_flags_has_no_tls() {
     let cli = Cli::try_parse_from(["vllm-rs", "serve", "Qwen/Qwen3-0.6B"]).unwrap();
 
@@ -767,6 +793,7 @@ fn frontend_args_accept_json() {
                         ssl_ca_certs: None,
                         ssl_cert_reqs: 0,
                         ssl_ciphers: None,
+                        enable_ssl_refresh: false,
                         profiler_config: None,
                     },
                 },
@@ -1289,6 +1316,7 @@ fn serve_args_accept_handshake_aliases() {
                         ssl_ca_certs: None,
                         ssl_cert_reqs: 0,
                         ssl_ciphers: None,
+                        enable_ssl_refresh: false,
                         profiler_config: None,
                     },
                     managed_engine: ManagedEngineArgs {
@@ -1429,6 +1457,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             grpc_port: None,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
+            enable_ssl_refresh: false,
             profiler: None,
         }
     "#]]
@@ -1513,6 +1542,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             grpc_port: None,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
+            enable_ssl_refresh: false,
             profiler: None,
         }
     "#]]
@@ -1615,6 +1645,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             grpc_port: None,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
+            enable_ssl_refresh: false,
             profiler: None,
         }
     "#]]

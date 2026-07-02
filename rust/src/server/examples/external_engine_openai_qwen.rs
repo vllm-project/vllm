@@ -77,6 +77,7 @@ async fn main() -> Result<()> {
         grpc_port: None,
         shutdown_timeout: Duration::ZERO,
         keep_alive_timeout: Duration::from_secs(5),
+        enable_ssl_refresh: false,
         profiler: None,
     };
 

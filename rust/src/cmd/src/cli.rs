@@ -290,6 +290,11 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub ssl_ciphers: Option<String>,
 
+    /// Reload the TLS certificate/key/CA from disk when the files change.
+    #[arg(long)]
+    #[serde(default)]
+    pub enable_ssl_refresh: bool,
+
     /// Profiler configuration forwarded by the Python supervisor.
     ///
     /// When set with a non-null `profiler` type, the Rust frontend registers
@@ -401,6 +406,7 @@ impl SharedRuntimeArgs {
             grpc_port: self.grpc_port,
             shutdown_timeout,
             keep_alive_timeout,
+            enable_ssl_refresh: self.enable_ssl_refresh,
             profiler,
         }
     }
@@ -453,6 +459,7 @@ impl SharedRuntimeArgs {
             grpc_port: self.grpc_port,
             shutdown_timeout,
             keep_alive_timeout,
+            enable_ssl_refresh: self.enable_ssl_refresh,
             profiler,
         }
     }
