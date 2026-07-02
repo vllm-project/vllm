@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import Field, field_validator
 
-from vllm.config.utils import config, get_hash_factors, hash_factors
+from vllm.config.utils import CompileFactors, config, get_compile_factors
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -34,7 +34,7 @@ class IrOpPriorityConfig:
     fused_add_rms_norm: list[str] = Field(default_factory=list)
     """Priority list for vllm.ir.ops.fused_add_rms_norm"""
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
         Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
@@ -42,7 +42,7 @@ class IrOpPriorityConfig:
 
         Also, manually add IR op impl UUIDs to make sure they affect the compile cache.
         """
-        factors = get_hash_factors(self, set())
+        factors = get_compile_factors(self, set())
 
         # Implementations are hidden from Dynamo,
         # so they don't show up in the traced files list.
@@ -56,7 +56,7 @@ class IrOpPriorityConfig:
             for name, p in asdict(self).items()  # type: ignore[call-overload]
         }
 
-        return hash_factors(factors)
+        return factors
 
     @field_validator("*", mode="before")
     @classmethod
@@ -233,7 +233,7 @@ class KernelConfig:
             return value.lower().replace("-", "_")
         return value
 
-    def compute_hash(self) -> str:
+    def compile_factors(self) -> CompileFactors:
         """
         Produces a hash unique to the pass configuration.
         Any new fields that affect compilation should be added to the hash.
@@ -244,9 +244,9 @@ class KernelConfig:
             "enable_flashinfer_autotune",
             "ir_op_priority",  # handled separately below
         }
-        factors = get_hash_factors(self, ignored_factors)
-        factors["ir_op_priority"] = self.ir_op_priority.compute_hash()
-        return hash_factors(factors)
+        factors = get_compile_factors(self, ignored_factors)
+        factors["ir_op_priority"] = self.ir_op_priority.compile_factors()
+        return factors
 
     @field_validator(
         "enable_flashinfer_autotune",
