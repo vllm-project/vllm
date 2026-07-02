@@ -184,6 +184,10 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         # Push mode (P side): newly finished request blocks to be matched
         # against pending D registrations on the P worker.
         self.push_finished_blocks: dict[ReqId, BlockIds] = {}
+        # Local attention blocks that will be overwritten by remote KV loads
+        # in this step. The scheduler can skip zeroing them to avoid racing the
+        # async RDMA transfer.
+        self.blocks_to_skip_kv_cache_zeroing: set[int] = set()
 
     def _add_new_req(
         self,
@@ -223,3 +227,9 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             port=kv_transfer_params["remote_port"],
         )
         self.reqs_to_recv[request_id] = req
+
+    def add_blocks_to_skip_kv_cache_zeroing(self, block_ids: set[int]) -> None:
+        self.blocks_to_skip_kv_cache_zeroing.update(block_ids)
+
+    def get_blocks_to_skip_kv_cache_zeroing(self) -> set[int]:
+        return self.blocks_to_skip_kv_cache_zeroing
