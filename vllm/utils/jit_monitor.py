@@ -22,6 +22,7 @@ Currently monitors:
 
 import functools
 import os
+from collections.abc import Mapping
 from typing import Literal
 
 from vllm.logger import init_logger
@@ -127,20 +128,96 @@ def _handle_jit_event(
     logger.warning_once(message, *args)
 
 
-def _log_triton_jit_compile(fn_name: str, kwargs) -> None:
+def _safe_repr(value: object, *, max_len: int = 120) -> str:
+    try:
+        text = repr(value)
+    except Exception:
+        text = f"<{type(value).__name__}>"
+    if len(text) > max_len:
+        return text[: max_len - 3] + "..."
+    return text
+
+
+def _get_compile_info(kwargs: Mapping[str, object]) -> dict:
     compile_info = kwargs.get("compile")
-    if not isinstance(compile_info, dict):
-        compile_info = {}
-    key = compile_info.get("key") or kwargs.get("key")
-    detail = f"key={key}" if _verbose and key is not None else None
-    event = (
-        "autotune/warmup candidate JIT compilation"
-        if kwargs.get("warmup")
-        else "kernel JIT compilation"
+    if isinstance(compile_info, dict):
+        return compile_info
+    return {}
+
+
+def _constant_name(fn: object, path: object) -> str:
+    jit_function = getattr(fn, "jit_function", None)
+    params = getattr(jit_function, "params", ())
+    if isinstance(path, tuple) and path and isinstance(path[0], int):
+        idx = path[0]
+        if idx < len(params):
+            param_name = getattr(params[idx], "name", None)
+            if param_name is not None:
+                if len(path) == 1:
+                    return param_name
+                suffix = "".join(f"[{part!r}]" for part in path[1:])
+                return f"{param_name}{suffix}"
+    return str(path)
+
+
+def _format_constants(fn: object, compile_info: Mapping[str, object]) -> str:
+    constants = compile_info.get("constants")
+    if not isinstance(constants, Mapping) or not constants:
+        return "{}"
+
+    items = sorted(
+        (
+            (_constant_name(fn, path), _safe_repr(value))
+            for path, value in constants.items()
+        ),
+        key=lambda item: item[0],
     )
+    return "{" + ", ".join(f"{name}={value}" for name, value in items) + "}"
+
+
+def _format_signature(compile_info: Mapping[str, object]) -> str:
+    signature = compile_info.get("signature")
+    if not isinstance(signature, Mapping) or not signature:
+        return "{}"
+    items = sorted((str(k), _safe_repr(v)) for k, v in signature.items())
+    return "{" + ", ".join(f"{name}={value}" for name, value in items) + "}"
+
+
+def _format_extra_compile_info(compile_info: Mapping[str, object]) -> str:
+    skip_keys = frozenset(
+        {
+            "constants",
+            "signature",
+            "key",
+            "fn",
+            "name",
+        }
+    )
+    items = [
+        f"{name}={_safe_repr(value)}"
+        for name, value in sorted(compile_info.items())
+        if name not in skip_keys
+    ]
+    return "{" + ", ".join(items) + "}"
+
+
+def _format_verbose_triton_compile_details(kwargs: Mapping[str, object]) -> str:
+    compile_info = _get_compile_info(kwargs)
+    fn = kwargs.get("fn")
+    key = compile_info.get("key") or kwargs.get("key")
+    return (
+        f"constexprs={_format_constants(fn, compile_info)}; "
+        f"signature={_format_signature(compile_info)}; "
+        f"extra_compile_info={_format_extra_compile_info(compile_info)}; "
+        f"key={_safe_repr(key)}"
+    )
+
+
+def _log_triton_jit_compile(fn_name: str, kwargs) -> None:
+    detail = _format_verbose_triton_compile_details(kwargs) if _verbose else None
     _handle_jit_event(
         backend="Triton",
-        event=event,
+        event="kernel JIT compilation",
         fn_name=fn_name,
         detail=detail,
     )

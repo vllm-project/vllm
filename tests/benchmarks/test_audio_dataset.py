@@ -34,6 +34,16 @@ class _Tokenizer:
         return _TokenizedPrompt(prompt)
 
 
+class CohereAsrTokenizer(_Tokenizer):
+    def __init__(self, name_or_path: str = "/models/cohere-transcribe") -> None:
+        super().__init__(name_or_path)
+
+
+class _CohereNameOnlyTokenizer(_Tokenizer):
+    def __init__(self) -> None:
+        super().__init__("cohere/some-local-checkpoint")
+
+
 def _write_wav(path: Path, duration_s: float = 0.1, sample_rate: int = 16_000) -> None:
     num_samples = int(duration_s * sample_rate)
     sf.write(path, np.zeros(num_samples, dtype=np.float32), sample_rate)
@@ -198,3 +208,64 @@ def test_async_request_openai_audio_handles_decoded_audio_arrays(
     assert session.uploaded_bytes is not None
     assert output.success is True
     assert output.generated_text == "hello"
+
+
+_COHERE_ASR_PROMPT = (
+    "<|startofcontext|><|startoftranscript|>"
+    "<|emo:undefined|><|en|><|en|><|pnc|><|noitn|>"
+    "<|notimestamp|><|nodiarize|>"
+)
+
+
+def _make_asr_dataset(tmp_path: Path) -> datasets_module.ASRDataset:
+    audio_path = tmp_path / "sample.wav"
+    _write_wav(audio_path, duration_s=0.1)
+    dataset = object.__new__(datasets_module.ASRDataset)
+    dataset.data = [
+        {
+            "audio": {"path": str(audio_path), "bytes": None},
+            "text": "hello world",
+        }
+    ]
+    return dataset
+
+
+def test_asr_dataset_cohere_class_name_gets_decoder_prompt(tmp_path: Path) -> None:
+    dataset = _make_asr_dataset(tmp_path)
+    samples = dataset.sample(
+        tokenizer=CohereAsrTokenizer(),
+        num_requests=1,
+        output_len=32,
+        asr_min_audio_len_sec=0.0,
+        asr_max_audio_len_sec=1.0,
+    )
+    assert len(samples) == 1
+    assert samples[0].prompt == _COHERE_ASR_PROMPT
+
+
+def test_asr_dataset_cohere_name_or_path_fallback_gets_decoder_prompt(
+    tmp_path: Path,
+) -> None:
+    dataset = _make_asr_dataset(tmp_path)
+    samples = dataset.sample(
+        tokenizer=_CohereNameOnlyTokenizer(),
+        num_requests=1,
+        output_len=32,
+        asr_min_audio_len_sec=0.0,
+        asr_max_audio_len_sec=1.0,
+    )
+    assert len(samples) == 1
+    assert samples[0].prompt == _COHERE_ASR_PROMPT
+
+
+def test_asr_dataset_unknown_tokenizer_gets_empty_prompt(tmp_path: Path) -> None:
+    dataset = _make_asr_dataset(tmp_path)
+    samples = dataset.sample(
+        tokenizer=_Tokenizer(name_or_path="some-other/asr-model"),
+        num_requests=1,
+        output_len=32,
+        asr_min_audio_len_sec=0.0,
+        asr_max_audio_len_sec=1.0,
+    )
+    assert len(samples) == 1
+    assert samples[0].prompt == ""
