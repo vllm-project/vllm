@@ -743,6 +743,10 @@ def fill_following_kv_cache_block_ids(test_config: TestConfig) -> None:
 
 @create_new_process_for_each_test()
 def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
+    # This test patches the V1 model runner, so pin V1 explicitly: MoE/hybrid
+    # models like Qwen3-Next now default to the V2 runner.
+    monkeypatch.setenv("VLLM_USE_V2_MODEL_RUNNER", "0")
+    envs.disable_envs_cache()
     run_ref_mamba_state_in_subprocess()
     apply_patch(monkeypatch)
     prompt_dataset = datasets.load_dataset("heheda/a_long_article")
