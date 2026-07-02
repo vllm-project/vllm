@@ -214,6 +214,14 @@ def example_round_robin_dp_loader(request_number, dp_size):
     return request_nums % dp_size
 
 
+@app.route("/health", methods=["GET"])
+async def health():
+    # Benchmark harnesses and load balancers often probe the proxy URL and
+    # treat a non-200 response as a dead service. Backends expose /health, but
+    # this proxy used to lack one; report the proxy process itself as healthy.
+    return ("ok", 200)
+
+
 @app.route("/v1/completions", methods=["POST"])
 async def handle_completions_request():
     return await handle_request("/completions", request)
