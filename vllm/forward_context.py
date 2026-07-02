@@ -181,6 +181,7 @@ class ForwardContext:
     # into the graph. Otherwise, the moe custom ops will pop a string from this list.
     all_moe_layers: list[str] | None = None
     moe_layer_index: int = 0
+    shared_attn_metadata: AttentionMetadata | None = None
 
     additional_kwargs: dict[str, Any] = field(default_factory=dict)
 
