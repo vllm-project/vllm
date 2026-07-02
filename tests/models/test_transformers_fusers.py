@@ -32,15 +32,25 @@ class SiluAndMulStub(nn.Module):
         return F.silu(x[..., :d]) * x[..., d:]
 
 
-class GLUMLP(nn.Module):
-    """`act(gate(x)) * up(x)` — the canonical HF GLU MLP."""
+class NoDownGLU(nn.Module):
+    """`act(gate(x)) * up(x)` with no output projection -> `down_name` is None."""
 
     def __init__(self, hidden: int = 16, inter: int = 32, bias: bool = False):
         super().__init__()
         self.gate_proj = nn.Linear(hidden, inter, bias=bias)
         self.up_proj = nn.Linear(hidden, inter, bias=bias)
-        self.down_proj = nn.Linear(inter, hidden, bias=bias)
         self.act_fn = nn.SiLU()
+
+    def forward(self, x):
+        return self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+
+
+class GLUMLP(NoDownGLU):
+    """`down(act(gate(x)) * up(x))` — the canonical HF GLU MLP."""
+
+    def __init__(self, hidden: int = 16, inter: int = 32, bias: bool = False):
+        super().__init__(hidden, inter, bias)
+        self.down_proj = nn.Linear(inter, hidden, bias=bias)
 
     def forward(self, x):
         return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
@@ -160,6 +170,14 @@ class ReversedFakeAttention(FakeAttention):
         return self.o_proj(attn_output.reshape(*input_shape, -1)), None
 
 
+class ExtraProjAttention(FakeAttention):
+    """A second non-qkv linear -> `o_proj` is ambiguous, so `o_name` is None."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.sink_proj = nn.Linear(self.head_dim, self.head_dim, bias=False)
+
+
 class FakeSelfAttn(nn.Module):
     """Stand-in for the vLLM `Attention` looked up in `attention_instances`."""
 
@@ -234,7 +252,8 @@ def test_detects_and_rewrites_glu(mlp_cls, bias):
         fuser.gate_name,
         fuser.up_name,
         fuser.act_name,
-    ) == ("gate_proj", "up_proj", "act_fn")
+        fuser.down_name,
+    ) == ("gate_proj", "up_proj", "act_fn", "down_proj")
 
     # The rewritten forward references the merged projection instead of the
     # sources; the rest of the forward is untouched.
@@ -255,6 +274,18 @@ def test_detects_and_rewrites_glu(mlp_cls, bias):
     torch.testing.assert_close(fused(x), expected, atol=1e-5, rtol=1e-5)
 
 
+def test_glu_identifies_down_projection():
+    """The row projection consuming `act(gate(x)) * up(x)` is identified.
+
+    It is forced to `RowParallelLinear` in `update_attrs` so its sharded input
+    matches the column-parallel merged gate/up; `None` when there is no such
+    projection to force (fusion of gate/up still applies)."""
+    with torch.device("meta"):
+        assert get_fuser(GLUMLP()).down_name == "down_proj"
+        assert get_fuser(ReversedGLUMLP()).down_name == "down_proj"
+        assert get_fuser(NoDownGLU()).down_name is None
+
+
 @pytest.mark.parametrize("attn_cls", [FakeAttention, ReversedFakeAttention])
 @pytest.mark.parametrize("kv_heads", [4, 2])
 def test_detects_and_rewrites_qkv(attn_cls, kv_heads):
@@ -270,6 +301,7 @@ def test_detects_and_rewrites_qkv(attn_cls, kv_heads):
     # assignment.
     assert fuser.q_name == "q_proj"
     assert {fuser.k_name, fuser.v_name} == {"k_proj", "v_proj"}
+    assert fuser.o_name == "o_proj"
 
     # The projections are merged; everything else stays live Python with its
     # original semantics (branches, kwargs, attribute reads)
@@ -297,6 +329,18 @@ def test_detects_and_rewrites_qkv(attn_cls, kv_heads):
     assert fused.layer_idx == 3 and fused.is_causal and fused.config is not None
     out, _ = fused(x, attention_instances=attention_instances)
     torch.testing.assert_close(out, expected, atol=1e-5, rtol=1e-5)
+
+
+def test_qkv_identifies_output_projection():
+    """The output projection consuming the attention output is identified.
+
+    It is forced to `RowParallelLinear` in `update_attrs` so its sharded input
+    matches the head-sharded qkv; `None` (falling back to `tp_plan`) when the
+    attention has more than one non-qkv linear, so `o_proj` is ambiguous."""
+    with torch.device("meta"):
+        assert get_fuser(FakeAttention()).o_name == "o_proj"
+        assert get_fuser(ReversedFakeAttention()).o_name == "o_proj"
+        assert get_fuser(ExtraProjAttention()).o_name is None
 
 
 def test_fuser_is_cached_per_class():
