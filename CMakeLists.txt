@@ -1371,13 +1371,21 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/rocm/skinny_gemms.cu"
     "csrc/rocm/attention.cu")
 
-  set(VLLM_ROCM_HAS_GFX1100 OFF)
-  if(VLLM_GPU_ARCHES MATCHES "gfx1100")
-    set(VLLM_ROCM_HAS_GFX1100 ON)
+  # RDNA3-family scalar W4A16 GEMM kernels: gfx1100 (RDNA3) and gfx1151
+  # (RDNA3.5 / Strix Halo). The separate WMMA prefill TU is gfx1100-only.
+  set(VLLM_ROCM_HAS_RDNA3_GEMM OFF)
+  set(VLLM_ROCM_HAS_RDNA3_WMMA OFF)
+  if(VLLM_GPU_ARCHES MATCHES "gfx1100|gfx1151")
+    set(VLLM_ROCM_HAS_RDNA3_GEMM ON)
     list(APPEND VLLM_ROCM_EXT_SRC
       "csrc/rocm/q_gemm_rdna3.cu"
-      "csrc/rocm/q_gemm_rdna3_wmma.cu"
       "csrc/rocm/moe_q_gemm_rdna3.cu")
+  endif()
+
+  if(VLLM_GPU_ARCHES MATCHES "gfx1100")
+    set(VLLM_ROCM_HAS_RDNA3_WMMA ON)
+    list(APPEND VLLM_ROCM_EXT_SRC
+      "csrc/rocm/q_gemm_rdna3_wmma.cu")
   endif()
 
   define_extension_target(
@@ -1390,8 +1398,11 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     USE_SABI 3
     WITH_SOABI)
 
-  if(VLLM_ROCM_HAS_GFX1100)
-    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_GFX1100)
+  if(VLLM_ROCM_HAS_RDNA3_GEMM)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_RDNA3_GEMM)
+  endif()
+  if(VLLM_ROCM_HAS_RDNA3_WMMA)
+    target_compile_definitions(_rocm_C PRIVATE VLLM_ROCM_RDNA3_WMMA)
   endif()
 endif()
 

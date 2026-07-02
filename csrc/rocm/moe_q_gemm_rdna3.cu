@@ -27,7 +27,7 @@
 
 #include "qdq_4_rdna3.cuh"
 
-#if defined(__HIPCC__) && defined(__gfx1100__)
+#if defined(__HIPCC__) && (defined(__gfx1100__) || defined(__gfx1151__))
   #define __HIP__RDNA3__
 #endif
 

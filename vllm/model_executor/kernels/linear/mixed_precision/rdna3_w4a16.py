@@ -36,10 +36,10 @@ class RDNA3W4A16LinearKernel(MPLinearKernel):
         if not current_platform.is_rocm():
             return False, "RDNA3 W4A16 kernel is ROCm-only"
 
-        from vllm.platforms.rocm import on_gfx1100
+        from vllm.platforms.rocm import on_gfx1100, on_gfx1151
 
-        if not on_gfx1100():
-            return False, "RDNA3 W4A16 kernel requires gfx1100"
+        if not (on_gfx1100() or on_gfx1151()):
+            return False, "RDNA3 W4A16 kernel requires gfx1100 or gfx1151"
 
         # The HIP op is registered by the C++ extension; if a user is running
         # against a vLLM build that doesn't include it (e.g. partial rebuild),
