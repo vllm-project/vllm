@@ -293,30 +293,38 @@ class RequestOffloadState:
         for group_state, new_blocks in zip(self.group_states, new_block_id_groups):
             group_state.block_ids.extend(new_blocks)
 
-    @staticmethod
     def storable_blocks(
-        group_config: "GroupOffloadConfig", num_offloadable_tokens: int
+        self, group_config: "GroupOffloadConfig", num_offloadable_tokens: int
     ) -> int:
         """Number of leading offloaded blocks eligible for store.
 
-        For eagle/MTP groups the single volatile trailing block of the
-        offloadable range is excluded (it lacks a stable hash). This must be
-        applied consistently everywhere ``next_stored_block_idx`` is derived:
-        otherwise the trailing block of each chunked-prefill chunk is skipped
-        on collection but jumped over by ``next_stored_block_idx``, so it is
-        never re-considered and a permanent hole breaks prefix-reuse lookup.
+        For eagle/MTP groups the volatile trailing block of the offloadable
+        range is excluded while decoding: the draft-layer KV of the last
+        accepted position may be rewritten after spec-token rejection. During
+        prefill the trailing block is stable (the draft input for a chunk's
+        last position is the next prompt token), so it is stored immediately.
+        The exclusion must be applied consistently everywhere
+        ``next_stored_block_idx`` is derived: otherwise the trailing block of
+        each step is skipped on collection but jumped over by
+        ``next_stored_block_idx``, so it is never re-considered and a
+        permanent hole breaks prefix-reuse lookup.
         """
         num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
-        if group_config.is_eagle_group:
+        is_decoding = num_offloadable_tokens > self.req.num_prompt_tokens
+        if group_config.is_eagle_group and is_decoding:
             num_blocks = max(0, num_blocks - 1)
         return num_blocks
 
     def advance_stored_idx(self, num_offloadable_tokens: int) -> None:
+        # max(): at the prefill->decode transition of a block-aligned prompt,
+        # storable_blocks drops by one (the eagle exclusion kicks in), and the
+        # index must not move backwards past already-stored blocks.
         for group_config, group_state in zip(
             self.config.kv_group_configs, self.group_states
         ):
-            group_state.next_stored_block_idx = self.storable_blocks(
-                group_config, num_offloadable_tokens
+            group_state.next_stored_block_idx = max(
+                group_state.next_stored_block_idx,
+                self.storable_blocks(group_config, num_offloadable_tokens),
             )
 
     def update_num_hit_blocks(self, num_cached_tokens: int) -> None:
@@ -1001,7 +1009,9 @@ class OffloadingConnectorScheduler:
 
                 group_sizes.append(num_group_blocks)
                 block_indices.append(start_gpu_block_idx or 0)
-                group_state.next_stored_block_idx = num_blocks
+                group_state.next_stored_block_idx = max(
+                    group_state.next_stored_block_idx, num_blocks
+                )
 
             src_spec = GPULoadStoreSpec(
                 src_block_ids, group_sizes=group_sizes, block_indices=block_indices
