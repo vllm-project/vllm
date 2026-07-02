@@ -80,6 +80,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "hy_v3_reasoning_parser",
         "HYV3ReasoningParser",
     ),
+    "hyperclovax_seed_think": (
+        "hyperclovax_seed_think_reasoning_parser",
+        "HyperCLOVAXSeedThinkReasoningParser",
+    ),
     "kimi_k2": (
         "kimi_k2_reasoning_parser",
         "KimiK2ReasoningParser",
