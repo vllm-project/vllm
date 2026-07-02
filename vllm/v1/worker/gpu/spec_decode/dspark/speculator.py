@@ -32,6 +32,7 @@ from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
+from vllm.v1.worker.gpu.spec_decode.speculator import draft_gumbel_pos
 
 
 class DSparkSpeculator(DFlashSpeculator):
@@ -129,14 +130,17 @@ class DSparkSpeculator(DFlashSpeculator):
                     buf = self._draft_scatter_buf[:num_reqs]
                     buf.index_copy_(1, self._d2t_scatter_index, logits_i.to(buf.dtype))
                     logits_i = buf
-                # sample_pos is the predicted token's position Q; the target
-                # verifies it with the predecessor's Gumbel key (Q-1). Pass Q-1.
+                # sample_pos is the predicted token's position Q;
+                # draft_gumbel_pos keys the (salted) draft Gumbel stream by
+                # positions + 1, so pass Q-2 to get a key unique per
+                # predicted position and disjoint from the rejection
+                # sampler's acceptance/recovery keys.
                 draft_sampled_i = gumbel_sample(
                     logits_i,
                     idx_map[:, i],
                     self.temperature,
                     self.seeds,
-                    sample_pos[:, i] - 1,
+                    draft_gumbel_pos(sample_pos[:, i] - 2),
                     apply_temperature=True,
                     output_processed_logits=self.draft_logits,
                     output_processed_logits_col=self._step_cols[i],
