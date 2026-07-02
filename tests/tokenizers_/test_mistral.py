@@ -874,6 +874,22 @@ class TestMistralTokenizer:
                 continue_final_message=False,
             )
 
+    @pytest.mark.parametrize("reasoning_effort", [None, "none", "high"])
+    def test_apply_chat_template_reasoning_effort(
+        self,
+        mistral_tokenizer: MistralTokenizer,
+        reasoning_effort: str | None,
+    ):
+        messages = [{"role": "user", "content": "Hello world !"}]
+        result = mistral_tokenizer.apply_chat_template(
+            messages,
+            tools=[],
+            add_generation_prompt=True,
+            reasoning_effort=reasoning_effort,
+        )
+        assert isinstance(result, list)
+        assert all(isinstance(t, int) for t in result)
+
     @pytest.mark.parametrize(
         "skip_special_tokens,expected_tokens",
         (
