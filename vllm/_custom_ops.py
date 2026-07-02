@@ -675,6 +675,30 @@ def gptq_gemm_rdna3(
     )
 
 
+def mojo_w4a16_gemm(
+    a: torch.Tensor,
+    b_q_weight: torch.Tensor,
+    b_scales: torch.Tensor,
+    b_qzeros: torch.Tensor | None = None,
+    group_size: int | None = None,
+    zp_bias: int = 8,
+    use_v2_format: bool = False,
+) -> torch.Tensor:
+    from vllm.model_executor.kernels.linear.mixed_precision.mojo_w4a16 import (
+        mojo_w4a16_gemm as _mojo_w4a16_gemm,
+    )
+
+    return _mojo_w4a16_gemm(
+        a,
+        b_q_weight,
+        b_scales,
+        b_qzeros,
+        group_size,
+        zp_bias,
+        use_v2_format,
+    )
+
+
 if hasattr(torch.ops, "_rocm_C") and hasattr(torch.ops._rocm_C, "gptq_gemm_rdna3"):
 
     @register_fake("_rocm_C::gptq_gemm_rdna3")

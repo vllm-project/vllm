@@ -19,6 +19,8 @@ Checkpoint layout from compressed_tensors_wNa16 create_weights:
   weight_zero_point: [N//8, K//G]  int32 (output_dim=0, packed_dim=0)
 """
 
+import os
+
 import torch
 
 from vllm.model_executor.layers.quantization.utils import replace_parameter
@@ -288,6 +290,13 @@ class TritonW4A16LinearKernel(MPLinearKernel):
 
     @classmethod
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
+        forced_kernel = os.environ.get("VLLM_W4A16_KERNEL", "auto").lower()
+        if forced_kernel not in ("auto", "triton", "triton_w4a16"):
+            return (
+                False,
+                f"VLLM_W4A16_KERNEL={forced_kernel} requested another kernel",
+            )
+
         if not (current_platform.is_rocm() or current_platform.is_cuda()):
             return False, "TritonW4A16LinearKernel requires CUDA or ROCm"
 

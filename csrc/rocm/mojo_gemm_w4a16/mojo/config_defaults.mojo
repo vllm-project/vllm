@@ -1,0 +1,39 @@
+comptime DEFAULT_MAX_M = 128
+comptime DEFAULT_MAX_N = 5120
+comptime DEFAULT_MAX_K = 5120
+comptime DEFAULT_USE_FP16 = False
+
+comptime DEFAULT_BM = 32
+comptime DEFAULT_BN = 64
+comptime DEFAULT_BK = 64
+comptime DEFAULT_GROUP_SIZE = 128
+comptime DEFAULT_ZP_BIAS = 8
+comptime DEFAULT_USE_QZEROS = False
+comptime DEFAULT_ZERO_OFFSET = 0
+comptime DEFAULT_SMEM_PAD = 8
+
+comptime DEFAULT_RING_PRODUCER_WARPS = 1
+comptime DEFAULT_NUM_STAGES = 2
+comptime DEFAULT_BLOCK_SWIZZLE_SCALE = 0
+comptime DEFAULT_GROUP_SIZE_M = 0
+comptime DEFAULT_USE_LDS_SWIZZLE = False
+comptime DEFAULT_RING_STARTUP_ALL_WARPS = True
+comptime DEFAULT_LOAD_B_BY_QPACK = True
+comptime DEFAULT_QPACK_K_VECTOR_WIDTH = 2
+comptime DEFAULT_DEQUANT_B_IN_BF16 = False
+comptime DEFAULT_SCALE_AFTER_GROUP = True
+comptime DEFAULT_ASSUME_EVEN_K = False
+comptime DEFAULT_ASSUME_EVEN_MN = False
+comptime DEFAULT_ASSUME_EVEN_N = False
+
+comptime DEFAULT_KERNEL_VARIANT = "ring_bonly"
+
+comptime DEFAULT_SPLITK_THREADS = 64
+comptime DEFAULT_SPLITK_BLOCK_K = 256
+comptime DEFAULT_SPLITK_ROWS_PER_CTA = 1
+
+comptime DEFAULT_WARPS_M = 1
+comptime DEFAULT_WARPS_N = 2
+
+comptime DEFAULT_WARMUP_ITERS = 20
+comptime DEFAULT_BENCH_ITERS = 100

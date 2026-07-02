@@ -151,6 +151,7 @@ LinearBackend = Literal[
     "deep_gemm",
     "torch",
     "aiter",
+    "mojo",
     "machete",
     "fbgemm",
     "conch",
@@ -213,6 +214,7 @@ class KernelConfig:
     - "deep_gemm": Use DeepGEMM kernels
     - "torch": Use PyTorch native scaled_mm kernels
     - "aiter": Use AMD AITer kernels (ROCm only)
+    - "mojo": Use Mojo mixed-precision kernels (ROCm only)
     - "machete": Use Machete kernels (mixed-precision)
     - "fbgemm": Use FBGEMM kernels
     - "conch": Use Conch mixed-precision kernels

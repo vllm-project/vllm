@@ -1,0 +1,51 @@
+{
+  "metadata": {
+    "schema": "mojo-w4a16-policy-v3",
+    "source": "bundled_json_policy",
+    "source_schema": "w4a16-policy-v2",
+    "device_name": "AMD_Radeon_8060S",
+    "dtype": "bf16_w4a16",
+    "op": "awq_gemm",
+    "n": 4096,
+    "k": 12288,
+    "group": 32,
+    "kernel": "mojo_gemm_w4a16"
+  },
+  "defaults": {
+    "block_swizzle_scale": 0,
+    "group_size_M": 0,
+    "use_lds_swizzle": false,
+    "load_B_by_qpack": true,
+    "dequant_B_in_bf16": false,
+    "assume_even_N": true,
+    "smem_pad": 8
+  },
+  "configs": {
+    "16": {
+      "variant": "wmma16",
+      "tile_M": 16,
+      "tile_N": 32,
+      "tile_K": 32,
+      "warps_M": 1,
+      "warps_N": 1,
+      "producer_warps": 2,
+      "ring_stages": 2,
+      "block_swizzle_scale": 0,
+      "group_size_M": 0,
+      "use_lds_swizzle": false,
+      "ring_startup_all_warps": true,
+      "load_B_by_qpack": true,
+      "qpack_K_vector_width": 2,
+      "dequant_B_in_bf16": false,
+      "scale_after_group": true,
+      "assume_even_N": true,
+      "splitk_threads": 256,
+      "splitk_block_K": 3072,
+      "splitk_rows_per_CTA": 4,
+      "smem_pad": 8,
+      "warmup_iters": 8,
+      "timed_iters": 30,
+      "mean_ms": 0.1474290666666667
+    }
+  }
+}
