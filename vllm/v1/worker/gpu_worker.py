@@ -74,7 +74,11 @@ from vllm.v1.outputs import (
     DraftTokenIds,
     ModelRunnerOutput,
 )
-from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.utils import (
+    compute_iteration_details,
+    report_usage_stats,
+    should_profile_scheduler_output,
+)
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -921,7 +925,7 @@ class Worker(WorkerBase):
         # add trace annotation so that we can easily distinguish
         # context/generation request numbers in each iteration.
         # A context request is a request that has not yet generated any tokens
-        if not self.profiler:
+        if not self.profiler or not should_profile_scheduler_output(scheduler_output):
             return nullcontext()
 
         self.profiler.step()
