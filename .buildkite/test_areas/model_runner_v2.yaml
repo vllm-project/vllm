@@ -18,9 +18,7 @@ steps:
   - set -x
   - export VLLM_USE_V2_MODEL_RUNNER=1
   - pytest -v -s v1/engine/test_llm_engine.py -k "not test_engine_metrics"
-  # This requires eager until we sort out CG correctness issues.
-  # TODO: remove ENFORCE_EAGER here after https://github.com/vllm-project/vllm/pull/32936 is merged.
-  - ENFORCE_EAGER=1 pytest -v -s v1/e2e/general/test_async_scheduling.py -k "not ngram"
+  - pytest -v -s v1/e2e/general/test_async_scheduling.py -k "not ngram"
   - pytest -v -s v1/e2e/general/test_context_length.py
   - pytest -v -s v1/e2e/general/test_min_tokens.py
   # Temporary hack filter to exclude ngram spec decoding based tests.
