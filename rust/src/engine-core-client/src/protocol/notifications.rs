@@ -70,10 +70,7 @@ mod tests {
     use crate::protocol::decode_msgpack;
 
     fn hex_bytes(hex: &str) -> Vec<u8> {
-        (0..hex.len())
-            .step_by(2)
-            .map(|i| u8::from_str_radix(&hex[i..i + 2], 16).unwrap())
-            .collect()
+        hex::decode(hex).unwrap()
     }
 
     /// Captured from Python:
@@ -129,12 +126,28 @@ mod tests {
     #[test]
     fn engine_event_decodes_python_custom_notification() {
         let event: EngineNotification = decode_msgpack(&hex_bytes(PYTHON_CUSTOM)).unwrap();
-        let EngineNotification::Custom(custom) = event else {
-            panic!("expected custom notification, got {event:?}");
-        };
-        assert_eq!(custom.key, "my_plugin");
-        assert_eq!(custom.payload["count"], rmpv::Value::from(5));
-        assert_eq!(custom.payload["name"], rmpv::Value::from("foo"));
+        expect_test::expect![[r#"
+            Custom(
+                CustomNotification {
+                    key: "my_plugin",
+                    payload: {
+                        "count": Integer(
+                            PosInt(
+                                5,
+                            ),
+                        ),
+                        "name": String(
+                            Utf8String {
+                                s: Ok(
+                                    "foo",
+                                ),
+                            },
+                        ),
+                    },
+                },
+            )
+        "#]]
+        .assert_debug_eq(&event);
     }
 
     #[test]
