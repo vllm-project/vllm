@@ -171,6 +171,14 @@ def normalize_audio(
 # ============================================================
 
 
+# A single planar ``fltp`` AudioFrame's buffer size (``nb_samples * 4`` bytes)
+# is computed as a C ``int``, so it overflows ``INT_MAX`` once a frame holds
+# ~537M samples (~3.1h @ 48kHz). Feed the resampler in blocks below that limit;
+# this value keeps a wide margin. See
+# https://github.com/vllm-project/vllm/issues/46364.
+_MAX_RESAMPLE_FRAME_SAMPLES = 1 << 24  # 16,777,216 samples (~67 MiB at fltp)
+
+
 def resample_audio_pyav(
     audio: npt.NDArray[np.floating],
     *,
@@ -215,14 +223,19 @@ def resample_audio_pyav(
     audio_f32 = np.asarray(audio, dtype=np.float32)
     if len(audio_f32) < _MIN_SAMPLES:
         audio_f32 = np.pad(audio_f32, (0, _MIN_SAMPLES - len(audio_f32)))
-    audio_f32 = audio_f32.reshape(1, -1)
 
     resampler = av.AudioResampler(format="fltp", layout="mono", rate=target_sr_int)
 
-    frame = av.AudioFrame.from_ndarray(audio_f32, format="fltp", layout="mono")
-    frame.sample_rate = orig_sr_int
-
-    out_frames = resampler.resample(frame)
+    # Feed the (stateful) resampler in bounded blocks rather than building one
+    # giant frame for the whole signal, which overflows the int32 AudioFrame
+    # buffer for long audio (see _MAX_RESAMPLE_FRAME_SAMPLES). Streaming the
+    # blocks yields output identical to a single frame.
+    out_frames: list[av.AudioFrame] = []
+    for start in range(0, len(audio_f32), _MAX_RESAMPLE_FRAME_SAMPLES):
+        block = audio_f32[start : start + _MAX_RESAMPLE_FRAME_SAMPLES].reshape(1, -1)
+        frame = av.AudioFrame.from_ndarray(block, format="fltp", layout="mono")
+        frame.sample_rate = orig_sr_int
+        out_frames.extend(resampler.resample(frame))
     out_frames.extend(resampler.resample(None))  # flush buffered samples
 
     result = np.concatenate([f.to_ndarray() for f in out_frames], axis=1).squeeze(0)

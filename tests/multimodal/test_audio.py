@@ -36,6 +36,28 @@ def test_resample_audio_pyav(dummy_audio):
     assert np.all(out_same == dummy_audio)
 
 
+def test_resample_audio_pyav_long_input_streams_in_blocks(monkeypatch):
+    """A signal larger than one frame must resample in bounded blocks and
+    produce output identical to a single-frame resample, instead of building
+    one giant frame that overflows the int32 AudioFrame buffer.
+    See https://github.com/vllm-project/vllm/issues/46364.
+    """
+    import vllm.multimodal.audio as audio_mod
+
+    rng = np.random.default_rng(0)
+    audio = rng.standard_normal(50_000).astype(np.float32)
+
+    # Reference: a single frame for the whole signal (large per-frame cap).
+    reference = resample_audio_pyav(audio, orig_sr=48_000, target_sr=16_000)
+
+    # Force the multi-block path by shrinking the per-frame cap.
+    monkeypatch.setattr(audio_mod, "_MAX_RESAMPLE_FRAME_SAMPLES", 4096)
+    chunked = resample_audio_pyav(audio, orig_sr=48_000, target_sr=16_000)
+
+    assert chunked.shape == reference.shape
+    np.testing.assert_allclose(chunked, reference, atol=1e-5)
+
+
 def test_resample_audio_scipy(dummy_audio):
     out_down = resample_audio_scipy(dummy_audio, orig_sr=4, target_sr=2)
     out_up = resample_audio_scipy(dummy_audio, orig_sr=2, target_sr=4)
