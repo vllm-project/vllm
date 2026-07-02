@@ -14,10 +14,17 @@ preparation.
   window indices for sparse prefill.
 """
 
+from dataclasses import dataclass
+from typing import Any
+
 import torch
 
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     get_fp8_min_max,
+)
+from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    assert_compile_key_matches_triton,
 )
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
@@ -544,8 +551,7 @@ def combine_topk_swa_indices(
         num_tokens, dtype=torch.int32, device=topk_indices.device
     )
 
-    NUM_WORKERS = 128
-    _combine_topk_swa_indices_kernel[(num_reqs, NUM_WORKERS)](
+    _combine_topk_swa_indices_kernel[(num_reqs, _COMBINE_TOPK_SWA_NUM_WORKERS)](
         combined_indices,
         combined_indices.stride(0),
         combined_lens,
@@ -635,6 +641,141 @@ def _combine_topk_swa_indices_kernel(
 
         combined_len = topk_len + swa_len
         tl.store(combined_lens_ptr + token_idx, combined_len)
+
+
+_COMBINE_TOPK_SWA_NUM_WORKERS = 128
+
+
+@dataclass(frozen=True)
+class _CombineTopkSwaWarmupCase:
+    compress_ratio: int
+    topk: int
+    topk_width: int
+    n: int
+
+
+_DSV4_COMBINE_TOPK_SWA_WARMUP_CASES = (
+    _CombineTopkSwaWarmupCase(1, 0, 512, 512),
+    _CombineTopkSwaWarmupCase(4, 512, 512, 512 * 4),
+    # DSv4-Pro C4A traffic uses top-k 1024 with N=1024.
+    _CombineTopkSwaWarmupCase(4, 1024, 1024, 1024),
+    _CombineTopkSwaWarmupCase(128, 8192, 8192, 8192 * 128),
+    # Real C128A traffic also specializes N=1 in one call path.
+    _CombineTopkSwaWarmupCase(128, 8192, 8192, 1),
+)
+
+def _next_power_of_2(x: int) -> int:
+    return 1 << (x - 1).bit_length()
+
+
+def _hf_config_int(vllm_config: Any, name: str, default: int) -> int:
+    model_config = getattr(vllm_config, "model_config", None)
+    hf_config = getattr(model_config, "hf_config", None)
+    return int(getattr(hf_config, name, default) or default)
+
+
+def _scheduler_config_int(vllm_config: Any, name: str, default: int) -> int:
+    scheduler_config = getattr(vllm_config, "scheduler_config", None)
+    return int(getattr(scheduler_config, name, default) or default)
+
+
+class CombineTopkSwaIndicesKernel(
+    VllmJitKernel[
+        "CombineTopkSwaIndicesKernel.CompileKey"
+    ]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        combined_indices_stride: int
+        topk_indices_stride: int
+        M: int
+        N: int
+        TOP_K: int
+        COMPRESS_RATIO: int
+        WINDOW_SIZE: int
+        PADDED_TOP_K: int
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        warmup_case: _CombineTopkSwaWarmupCase,
+        m_selector: int,
+        n_delta: int,
+        num_tokens: int,
+        WINDOW_SIZE: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            combined_indices_stride=(
+                (
+                    warmup_case.topk
+                    + WINDOW_SIZE
+                    + _SPARSE_PREFILL_TOPK_ALIGNMENT
+                    - 1
+                )
+                // _SPARSE_PREFILL_TOPK_ALIGNMENT
+                * _SPARSE_PREFILL_TOPK_ALIGNMENT
+        ),
+            topk_indices_stride=warmup_case.topk_width,
+            M=(
+                WINDOW_SIZE + num_tokens
+                if m_selector == 0
+                else warmup_case.topk_width
+            ),
+            N=(
+                warmup_case.n
+                if warmup_case.n == 1 or n_delta == 0
+                else warmup_case.n + n_delta
+            ),
+            TOP_K=warmup_case.topk,
+            COMPRESS_RATIO=warmup_case.compress_ratio,
+            WINDOW_SIZE=WINDOW_SIZE,
+            PADDED_TOP_K=_next_power_of_2(warmup_case.topk_width),
+        )
+
+    def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
+        num_tokens = min(
+            8,
+            _scheduler_config_int(vllm_config, "max_num_batched_tokens", 0),
+        )
+        if num_tokens <= 0:
+            return []
+
+        window_size = _hf_config_int(vllm_config, "sliding_window", 128)
+        return self._trace_dispatch(self.dispatch)(
+            warmup_case=_DSV4_COMBINE_TOPK_SWA_WARMUP_CASES,
+            m_selector=(0, 1),
+            n_delta=(0, 1),
+            num_tokens=num_tokens,
+            WINDOW_SIZE=window_size,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(_combine_topk_swa_indices_kernel, "warmup", None)
+        assert warmup is not None
+        warmup(
+            torch.int32,
+            compile_key.combined_indices_stride,
+            torch.int32,
+            torch.int32,
+            compile_key.topk_indices_stride,
+            torch.int32,
+            torch.int32,
+            torch.int32,
+            compile_key.M,
+            compile_key.N,
+            TOP_K=compile_key.TOP_K,
+            COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
+            WINDOW_SIZE=compile_key.WINDOW_SIZE,
+            PADDED_TOP_K=compile_key.PADDED_TOP_K,
+            grid=(1, _COMBINE_TOPK_SWA_NUM_WORKERS),
+        )
+
+_COMBINE_TOPK_SWA_INDICES_KERNEL = CombineTopkSwaIndicesKernel()
+CombineTopkSwaIndicesKernelCompileKey = CombineTopkSwaIndicesKernel.CompileKey
+assert_compile_key_matches_triton(
+    _COMBINE_TOPK_SWA_INDICES_KERNEL,
+    _combine_topk_swa_indices_kernel,
+)
 
 
 def build_flashinfer_mixed_sparse_indices(

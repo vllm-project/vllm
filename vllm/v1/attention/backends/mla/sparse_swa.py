@@ -7,9 +7,16 @@ import torch
 
 from vllm.config import CacheConfig, VllmConfig, get_current_vllm_config
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    assert_compile_key_matches_triton,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, next_power_of_2
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -274,6 +281,48 @@ class DeepseekSparseSWAMetadata:
             chunk_start = chunk_end
 
         return chunk_plan
+
+
+class ComputePrefillMetadataKernel(
+    VllmJitKernel[
+        "ComputePrefillMetadataKernel.CompileKey"
+    ]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        BLOCK_SIZE: int
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        num_prefills: int,
+    ) -> CompileKey:
+        return self.CompileKey(
+            BLOCK_SIZE=next_power_of_2(num_prefills),
+        )
+
+    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
+        max_prefills = max(1, min(vllm_config.scheduler_config.max_num_seqs, 8))
+        return self._trace_dispatch(self.dispatch)(
+            num_prefills=WarmupIntRange(1, max_prefills + 1),
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(_compute_prefill_metadata_kernel, "warmup", None)
+        assert warmup is not None
+        warmup(
+            torch.int32,
+            torch.int32,
+            torch.int32,
+            compile_key.BLOCK_SIZE,
+            0,
+            1,
+            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            grid=(1,),
+        )
+
+_COMPUTE_PREFILL_METADATA_KERNEL = ComputePrefillMetadataKernel()
+ComputePrefillMetadataKernelCompileKey = ComputePrefillMetadataKernel.CompileKey
 
 
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
@@ -577,7 +626,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         return result
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_prefills", "num_decodes", "window_size"])
 def _compute_prefill_metadata_kernel(
     # Outputs
     prefill_gather_lens_ptr,
@@ -606,6 +655,12 @@ def _compute_prefill_metadata_kernel(
     gather_len = query_len + tl.minimum(prefix_len, window_size - 1)
 
     tl.store(prefill_gather_lens_ptr + offset, gather_len, mask=mask)
+
+
+assert_compile_key_matches_triton(
+    _COMPUTE_PREFILL_METADATA_KERNEL,
+    _compute_prefill_metadata_kernel,
+)
 
 
 @triton.jit(do_not_specialize=["token_offset"])
