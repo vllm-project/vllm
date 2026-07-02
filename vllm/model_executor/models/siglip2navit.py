@@ -11,6 +11,10 @@ from torch.nn import functional as F
 from transformers import Siglip2VisionConfig
 from transformers.configuration_utils import PretrainedConfig
 
+from vllm.compilation.decorators import (
+    should_torch_compile_mm_encoder,
+    support_torch_compile,
+)
 from vllm.distributed import divide, get_tensor_model_parallel_world_size
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
@@ -234,8 +238,9 @@ class Siglip2Attention(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        position_embeddings: tuple[torch.Tensor, torch.Tensor] | None = None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        rotary_pos_emb_cos: torch.Tensor | None = None,
+        rotary_pos_emb_sin: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """Input shape: Batch x Time x Channel"""
 
         seq_length, embed_dim = hidden_states.shape
@@ -248,12 +253,11 @@ class Siglip2Attention(nn.Module):
         values = values.view(seq_length, self.num_heads_per_partition, self.head_dim)
 
         if self.use_rope:
-            cos, sin = position_embeddings
             queries, keys = apply_rotary_pos_emb(
                 queries.unsqueeze(0),
                 keys.unsqueeze(0),
-                cos,
-                sin,
+                rotary_pos_emb_cos,
+                rotary_pos_emb_sin,
                 self.attn.is_flash_attn_backend,
                 self.apply_rotary_emb,
             )
@@ -309,6 +313,16 @@ class Siglip2MLP(nn.Module):
         return hidden_states
 
 
+@support_torch_compile(
+    dynamic_arg_dims={
+        "hidden_states": 0,
+        "cu_seqlens": 0,
+        "rotary_pos_emb_cos": 0,
+        "rotary_pos_emb_sin": 0,
+    },
+    enable_if=should_torch_compile_mm_encoder,
+    is_encoder=True,
+)
 class Siglip2EncoderLayer(nn.Module):
     def __init__(
         self,
@@ -335,13 +349,15 @@ class Siglip2EncoderLayer(nn.Module):
         self,
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
-        position_embeddings: torch.Tensor,
+        rotary_pos_emb_cos: torch.Tensor,
+        rotary_pos_emb_sin: torch.Tensor,
     ) -> tuple[torch.FloatTensor]:
         """
         Args:
             hidden_states: Input tensor of shape (batch, seq_len, embed_dim).
             cu_seqlens: Cumulative sequence lengths tensor.
-            position_embeddings: Position embeddings tensor.
+            rotary_pos_emb_cos: Cosine of rotary position embeddings.
+            rotary_pos_emb_sin: Sine of rotary position embeddings.
         """
         residual = hidden_states
 
@@ -349,7 +365,8 @@ class Siglip2EncoderLayer(nn.Module):
         hidden_states = self.self_attn(
             hidden_states=hidden_states,
             cu_seqlens=cu_seqlens,
-            position_embeddings=position_embeddings,
+            rotary_pos_emb_cos=rotary_pos_emb_cos,
+            rotary_pos_emb_sin=rotary_pos_emb_sin,
         )
         hidden_states = residual + hidden_states
 
@@ -377,10 +394,11 @@ class Siglip2Encoder(nn.Module):
     ):
         super().__init__()
         self.config = config
+
         self.layers = nn.ModuleList(
             [
                 Siglip2EncoderLayer(
-                    config,
+                    config=config,
                     quant_config=quant_config,
                     prefix=f"{prefix}.layers.{idx}",
                 )
@@ -534,13 +552,21 @@ class Siglip2Encoder(nn.Module):
 
         reverse_indices = torch.argsort(window_index)
 
+        # Unpack position embeddings for torch.compile compatibility
+        rotary_pos_emb_cos, rotary_pos_emb_sin = position_embeddings
+
         hidden_states = inputs_embeds
         for index, block in enumerate(self.layers):
             if not self.fullatt_block_indexes or index in self.fullatt_block_indexes:
                 cu_seqlens_tmp = cu_seqlens
             else:
                 cu_seqlens_tmp = cu_window_seqlens
-            hidden_states = block(hidden_states, cu_seqlens_tmp, position_embeddings)
+            hidden_states = block(
+                hidden_states,
+                cu_seqlens_tmp,
+                rotary_pos_emb_cos,
+                rotary_pos_emb_sin,
+            )
 
         hidden_states = hidden_states.reshape(
             seq_len // self.spatial_merge_unit, self.spatial_merge_unit, -1
