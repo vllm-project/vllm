@@ -354,6 +354,73 @@ class TestToolResultContent:
         ]
         assert len(user_follow_ups) == 0
 
+    def test_tool_result_search_result_blocks(self):
+        request = self._make_tool_result_request(
+            [
+                {
+                    "type": "search_result",
+                    "source": "https://example.com/ref",
+                    "title": "Reference",
+                    "content": [
+                        {"type": "text", "text": "first result"},
+                        {"type": "text", "text": "second result"},
+                    ],
+                    "citations": {"enabled": True},
+                }
+            ]
+        )
+        result = _convert(request)
+
+        tool_msg = [m for m in result.messages if m["role"] == "tool"]
+        assert len(tool_msg) == 1
+        assert tool_msg[0]["content"] == "first result\nsecond result"
+
+
+# ======================================================================
+# search_result content handling
+# ======================================================================
+
+
+class TestSearchResultContent:
+    def test_user_search_result_blocks_become_text_content(self):
+        request = _make_request(
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "search_result",
+                            "source": "https://example.com/api",
+                            "title": "API docs",
+                            "content": [
+                                {"type": "text", "text": "Use an API key."},
+                                {"type": "text", "text": "Limit: 1000 requests."},
+                            ],
+                            "citations": {"enabled": True},
+                        },
+                        {
+                            "type": "text",
+                            "text": "How do I authenticate?",
+                        },
+                    ],
+                }
+            ]
+        )
+        result = _convert(request)
+
+        assert result.messages == [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "Use an API key.\nLimit: 1000 requests.",
+                    },
+                    {"type": "text", "text": "How do I authenticate?"},
+                ],
+            }
+        ]
+
 
 # ======================================================================
 # Attribution header stripping
