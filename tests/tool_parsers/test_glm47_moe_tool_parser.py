@@ -7,12 +7,16 @@ import json
 from unittest.mock import Mock
 
 import pytest
+from openai.types.responses import ResponseFunctionToolCall
 
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
+from vllm.entrypoints.openai.engine.protocol import FunctionCall
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.entrypoints.openai.responses.utils import build_response_output_items
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
@@ -58,7 +62,69 @@ def mock_request(sample_tools) -> ChatCompletionRequest:
     return request
 
 
+@pytest.fixture
+def namespace_tool_request() -> ResponsesRequest:
+    return ResponsesRequest.model_validate(
+        {
+            "input": "hi",
+            "tools": [
+                {
+                    "type": "namespace",
+                    "name": "mcp__computer_use",
+                    "description": "Computer use tools.",
+                    "tools": [
+                        {
+                            "type": "function",
+                            "name": "get_app_state",
+                            "description": "Get app state.",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {
+                                    "app": {"type": "string"},
+                                },
+                            },
+                        }
+                    ],
+                }
+            ],
+        }
+    )
+
+
 class TestGlm47ExtractToolCalls:
+    def test_namespace_tool_call_round_trip_to_responses_output(
+        self, glm47_tokenizer, namespace_tool_request
+    ):
+        parser = Glm47MoeModelToolParser(
+            glm47_tokenizer, tools=namespace_tool_request.tools
+        )
+        out = (
+            "<tool_call>mcp__computer_use__get_app_state"
+            "<arg_key>app</arg_key>"
+            "<arg_value>Google Chrome</arg_value>"
+            "</tool_call>"
+        )
+
+        result = parser.extract_tool_calls(out, request=namespace_tool_request)
+
+        assert result.tools_called
+        tool_call = result.tool_calls[0].function
+        assert tool_call == FunctionCall(
+            name="mcp__computer_use__get_app_state",
+            arguments='{"app": "Google Chrome"}',
+        )
+
+        output_items = build_response_output_items(
+            reasoning=None,
+            content=None,
+            tool_calls=[tool_call],
+            tools=namespace_tool_request.tools,
+        )
+        output_tool_call = output_items[0]
+        assert isinstance(output_tool_call, ResponseFunctionToolCall)
+        assert output_tool_call.name == "get_app_state"
+        assert output_tool_call.namespace == "mcp__computer_use"
+
     def test_no_tool_call(self, glm47_tool_parser, mock_request):
         out = "This is a plain response."
         r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
