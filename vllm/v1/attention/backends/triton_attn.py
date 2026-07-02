@@ -522,15 +522,15 @@ class TritonAttentionImpl(AttentionImpl):
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
 
         # Enable tensor descriptors for Q/K/V load/store on platforms that
-        # benefit from HW 2D block reads (Intel Xe2/Xe3).  The dead branch
+        # benefit from HW 2D block reads (Intel XPU).  The dead branch
         # is eliminated at Triton compile time, so other platforms see
         # zero cost when TD is off.
         #
-        # ``VLLM_TRITON_ATTN_USE_TD`` is tri-state:
+        # ``VLLM_TRITON_USE_TD`` is tri-state:
         #   - unset (None): auto-select (TD on for XPU, off elsewhere),
         #   - ``1``: force TD on regardless of platform,
         #   - ``0``: force TD off regardless of platform (useful for A/B).
-        td_override = envs.VLLM_TRITON_ATTN_USE_TD
+        td_override = envs.VLLM_TRITON_USE_TD
         if td_override is None:
             self.use_td = current_platform.is_xpu()
         else:
