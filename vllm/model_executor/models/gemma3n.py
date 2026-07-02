@@ -16,6 +16,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 from collections.abc import Iterable
+from dataclasses import replace
 
 import torch
 from torch import nn
@@ -944,12 +945,26 @@ class Gemma3nTextModel(nn.Module, SupportsQuant):
         self.per_layer_inputs[:num_padded_logits_indices].copy_(
             per_layer_inputs_adjusted[logits_indices_padded]
         )
+
+        # Update the forward context's batch_descriptor so the
+        # cross-decoder's piecewise CUDAGraphWrapper dispatches to a graph
+        # captured at the reduced batch size, not the full batch size.
+        forward_context = get_forward_context()
+        orig_batch_desc = forward_context.batch_descriptor
+        if orig_batch_desc is not None:
+            forward_context.batch_descriptor = replace(
+                orig_batch_desc, num_tokens=num_padded_logits_indices
+            )
+
         cross_decoder_hidden_states = self.cross_decoder(
             positions=self.positions[:num_padded_logits_indices],
             hidden_states=self.hidden_states[:num_padded_logits_indices],
             per_layer_inputs=self.per_layer_inputs[:num_padded_logits_indices],
             **kwargs,
         )
+
+        # Restore the original batch_descriptor
+        forward_context.batch_descriptor = orig_batch_desc
 
         if num_logits_indices is not None:
             assert num_logits_indices > 0
