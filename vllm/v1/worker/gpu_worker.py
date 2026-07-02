@@ -551,13 +551,13 @@ class Worker(WorkerBase):
                     1.0,
                 )
                 logger.info(
-                    "CUDA graph memory profiling is enabled (default since "
-                    "v0.21.0). The current --gpu-memory-utilization=%.4f is "
-                    "equivalent to --gpu-memory-utilization=%.4f without "
-                    "CUDA graph memory profiling. To maintain the same "
-                    "effective KV cache size as before, increase "
-                    "--gpu-memory-utilization to %.4f. To disable, set "
-                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
+                    "CUDA graph memory profiling is enabled (opt-in via "
+                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1). The current "
+                    "--gpu-memory-utilization=%.4f is equivalent to "
+                    "--gpu-memory-utilization=%.4f without CUDA graph memory "
+                    "profiling. To maintain the same effective KV cache size as "
+                    "before, increase --gpu-memory-utilization to %.4f. To disable, "
+                    "set VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
                     current_util,
                     equiv_util,
                     suggested_util,
@@ -568,13 +568,13 @@ class Worker(WorkerBase):
                     1.0,
                 )
                 logger.warning(
-                    "CUDA graph memory profiling is disabled "
-                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
+                    "CUDA graph memory profiling is disabled (default). "
                     "Without it, CUDA graph memory is not accounted for "
                     "during KV cache allocation, which may require lowering "
-                    "--gpu-memory-utilization to avoid OOM. Consider "
-                    "re-enabling it (the default as of v0.21.0) and increasing "
-                    "--gpu-memory-utilization from %.4f to %.4f.",
+                    "--gpu-memory-utilization to avoid OOM. To enable it "
+                    "(which may overestimate memory), set "
+                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and consider "
+                    "increasing --gpu-memory-utilization from %.4f to %.4f.",
                     current_util,
                     suggested_util,
                 )
