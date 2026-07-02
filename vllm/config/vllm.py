@@ -772,6 +772,68 @@ class VllmConfig:
         )
         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
+    def _downgrade_piecewise_cudagraph_for_non_vllm_compile(self) -> None:
+        """Clamp a piecewise-requiring cudagraph_mode to NONE for any non
+        VLLM_COMPILE mode. Piecewise cudagraphs need VllmBackend's FX splitting;
+        the stock torch.compile path can only use the external full / no-cudagraph
+        wrapper. Called three times: before and after the pooler/enc-dec/KV-connector
+        overrides, and again after current_platform.check_and_update_config, since
+        each of those can re-introduce PIECEWISE; clamping at each point keeps such
+        a mode from surviving to the final piecewise-mode assert. The stock
+        use_inductor_graph_partition path is intentionally NOT clamped: it provides
+        piecewise cudagraphs via Inductor graph partition, so the clamp is a no-op
+        there."""
+        cc = self.compilation_config
+        # STOCK_TORCH_COMPILE provides piecewise cudagraphs through Inductor graph
+        # partition (step 2 of the VllmBackend migration): Inductor partitions at the
+        # attention ops and routes each partition to the external wrapper, so it does
+        # not need VllmBackend's FX splitting. Only clamp when that path is off.
+        stock_inductor_piecewise = (
+            cc.mode == CompilationMode.STOCK_TORCH_COMPILE
+            and cc.use_inductor_graph_partition
+        )
+        if (
+            cc.cudagraph_mode is not None
+            and cc.cudagraph_mode.requires_piecewise_compilation()
+            and cc.mode != CompilationMode.VLLM_COMPILE
+            and not stock_inductor_piecewise
+            and not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+        ):
+            logger.info_once(
+                "Piecewise cudagraphs (%s) are not supported with compilation "
+                "mode %s; disabling piecewise cudagraphs.",
+                cc.cudagraph_mode.name,
+                cc.mode.name,
+            )
+            cc.cudagraph_mode = CUDAGraphMode.NONE
+
+    def _maybe_fallback_stock_to_vllm_compile_for_drafter(self) -> None:
+        """Fall back STOCK_TORCH_COMPILE to VLLM_COMPILE when a model-backed
+        speculative-decode drafter is configured. The stock path compiles only the
+        target in the model runner (GPUModelRunner._compile_model_stock); a drafter's
+        own @support_torch_compile decorator is disabled under STOCK and never
+        compiled by the runner, so it would run eager. Falling back the (engine-global)
+        mode restores the pre-migration path where VllmBackend compiles the drafter.
+        Algorithmic drafters (ngram / ngram_gpu / suffix) have no model and keep the
+        stock path. This intentionally overrides an explicit mode=STOCK, since an
+        uncompiled drafter is a correctness regression, not a perf preference."""
+        if self.compilation_config.mode != CompilationMode.STOCK_TORCH_COMPILE:
+            return
+        if self.speculative_config is None:
+            return
+        # Exclusion form (fail-safe): unknown/future methods fall back to VLLM_COMPILE.
+        if self.speculative_config.method in ("ngram", "ngram_gpu", "suffix"):
+            return
+        logger.warning_once(
+            "Speculative decoding with a draft model (method=%s) is not yet "
+            "supported on CompilationMode.STOCK_TORCH_COMPILE (the drafter would run "
+            "uncompiled). Falling back to CompilationMode.VLLM_COMPILE so the drafter "
+            "is compiled as before; this fallback is removed once drafter "
+            "architectures are migrated to the stock path.",
+            self.speculative_config.method,
+        )
+        self.compilation_config.mode = CompilationMode.VLLM_COMPILE
+
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
 
@@ -849,6 +911,104 @@ class VllmConfig:
             "(sleep mode does this automatically and also "
             "routes KV allocations through CuMemAllocator's pool, where "
             "expandable_segments is automatically disabled)."
+        )
+
+    def _stock_compile_supported(self) -> bool:
+        """Whether the primary model architecture is allowlisted for the stock
+        torch.compile migration path (declares SupportsStockCompile). Migrated
+        architectures default to STOCK_TORCH_COMPILE; everything else (incl. the
+        Transformers backend, which lacks the flag) stays on VllmBackend. Any
+        resolution error returns False (the safe default)."""
+        if self.model_config is None:
+            return False
+        try:
+            return self.model_config.registry.is_stock_compile_supported_model(
+                self.model_config.architectures, self.model_config
+            )
+        except Exception:
+            return False
+
+    def _warn_ignored_vllm_backend_only_flags(self) -> None:
+        """Warn when a model is running on STOCK_TORCH_COMPILE but the user set
+        compilation options that only VllmBackend honors. On the stock path these
+        are inert (shape specialization, FX splitting, the vLLM compile cache) or
+        downgraded (piecewise cudagraphs), so without this they read as active but
+        do nothing. Runs before the opt-level defaults and auto-population so the
+        fields still reflect user input rather than resolved values (cudagraph_mode
+        and splitting_ops/ranges are all None until later)."""
+        cc = self.compilation_config
+        if cc.mode != CompilationMode.STOCK_TORCH_COMPILE:
+            return
+        if self.model_config is None:
+            return
+
+        ignored = []
+        if cc.compile_sizes:
+            ignored.append("compile_sizes (per-size shape specialization)")
+        # NOTE: compile_ranges_endpoints is intentionally NOT checked here. It is
+        # auto-populated (sorted, with any user values merged in) by _set_compile_ranges
+        # later in __post_init__, and __post_init__ may re-run on a reused
+        # compilation_config, so by the time this runs the field can already be a
+        # non-empty resolved value even when the user set nothing -> false positive.
+        # We do not claim every VllmBackend-only flag is covered here; the
+        # user-facing shape-specialization flag (compile_sizes, above) is covered.
+        # use_inductor_graph_partition is NOT inert on the stock path: it enables
+        # piecewise cudagraphs via Inductor graph partition (step 2). When it is on,
+        # splitting_ops is auto-populated with the attention ops (it is the partition
+        # boundary, not VllmBackend FX splitting), so neither is warned. splitting_ops
+        # is only inert when set WITHOUT graph partition (whole-graph stock).
+        if cc.splitting_ops and not cc.use_inductor_graph_partition:
+            ignored.append("splitting_ops (FX graph splitting)")
+        if cc.cudagraph_copy_inputs:
+            ignored.append("cudagraph_copy_inputs")
+        # vLLM's own compile cache is unused on the stock path (torch.compile uses
+        # its own cache). compile_cache_save_format defaults from an env var, so
+        # compare against that default to detect an explicit field override.
+        if cc.cache_dir:
+            ignored.append("cache_dir (vLLM compile cache; stock uses torch's cache)")
+        if cc.compile_cache_save_format != envs.VLLM_COMPILE_CACHE_SAVE_FORMAT:
+            ignored.append("compile_cache_save_format (vLLM compile cache)")
+        if envs.VLLM_DISABLE_COMPILE_CACHE:
+            ignored.append(
+                "VLLM_DISABLE_COMPILE_CACHE (vLLM compile cache; stock uses "
+                "torch's cache)"
+            )
+
+        overridden = []
+        # With use_inductor_graph_partition the stock path DOES provide piecewise
+        # cudagraphs (Inductor partitions at attention and routes capture to the
+        # external wrapper), so only warn about a piecewise downgrade when partition
+        # is off (then it really is clamped to FULL_DECODE_ONLY / NONE).
+        if (
+            cc.cudagraph_mode
+            in (CUDAGraphMode.PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE)
+            and not cc.use_inductor_graph_partition
+        ):
+            overridden.append(
+                f"cudagraph_mode={cc.cudagraph_mode.name} clamped to NONE "
+                "(no cudagraphs); piecewise cudagraphs need "
+                "use_inductor_graph_partition=true on the stock path, or set "
+                "cudagraph_mode=FULL_DECODE_ONLY for decode-only cudagraphs"
+            )
+
+        if not ignored and not overridden:
+            return
+
+        parts = []
+        if ignored:
+            parts.append("ignored: " + ", ".join(ignored))
+        if overridden:
+            parts.append("overridden: " + ", ".join(overridden))
+        logger.warning_once(
+            "Model architecture %s is running on CompilationMode.STOCK_TORCH_COMPILE "
+            "(stock torch.compile). The following options are only honored by "
+            "CompilationMode.VLLM_COMPILE (the legacy custom backend) and have no "
+            "effect here -- %s. To restore the previous behavior, force the legacy "
+            "backend explicitly with `--compilation-config '{\"mode\": 3}'`. The "
+            "legacy backend (mode 3) is deprecated and will be removed once "
+            "VllmBackend is retired.",
+            ", ".join(self.model_config.architectures),
+            "; ".join(parts),
         )
 
     def __post_init__(self):
@@ -1058,6 +1218,20 @@ class VllmConfig:
                 "precision for chunked prefill triton kernels."
             )
 
+        # Capture whether the user explicitly set cudagraph_mode before any
+        # resolution step writes it (enforce_eager below, opt-level defaults
+        # later). The @config pydantic dataclass exposes no fields-set tracking,
+        # so None (the field default) is the only reliable "unset" signal and it
+        # must be read here, before the first writer mutates it.
+        user_set_cudagraph_mode = self.compilation_config.cudagraph_mode is not None
+        # Same rationale: capture whether the user set use_inductor_graph_partition
+        # before the opt-level defaults write it to False, so the stock path can
+        # default it on (graph-partition piecewise) without overriding an explicit
+        # user choice.
+        user_set_graph_partition = (
+            self.compilation_config.use_inductor_graph_partition is not None
+        )
+
         if self.model_config is not None and self.model_config.enforce_eager:
             logger.warning(
                 "Enforce eager set, disabling torch.compile and CUDAGraphs. "
@@ -1134,9 +1308,27 @@ class VllmConfig:
 
         if self.compilation_config.mode is None:
             if self.optimization_level > OptimizationLevel.O0:
-                self.compilation_config.mode = CompilationMode.VLLM_COMPILE
+                # Model-by-model migration off VllmBackend: architectures
+                # allowlisted via SupportsStockCompile run the stock torch.compile
+                # path (codegen + external cudagraph + Inductor-hook fusion); all
+                # others stay on VllmBackend (the default). Users can force via -cc.
+                self.compilation_config.mode = (
+                    CompilationMode.STOCK_TORCH_COMPILE
+                    if self._stock_compile_supported()
+                    else CompilationMode.VLLM_COMPILE
+                )
             else:
                 self.compilation_config.mode = CompilationMode.NONE
+
+        # Spec-decode drafters are compiled by their own @support_torch_compile
+        # decorator under VLLM_COMPILE; the stock path only compiles the target, so
+        # fall back to VLLM_COMPILE when a model-backed drafter is configured.
+        self._maybe_fallback_stock_to_vllm_compile_for_drafter()
+
+        # Warn about VllmBackend-only options that are inert on the stock path.
+        # Runs here (before opt-level defaults / cudagraph + splitting_ops
+        # auto-population) so the fields still reflect what the user actually set.
+        self._warn_ignored_vllm_backend_only_flags()
 
         # By default, enable torch wrapping only when using custom Inductor lowering
         if self.compilation_config.ir_enable_torch_wrap is None:
@@ -1169,18 +1361,55 @@ class VllmConfig:
 
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
+        self._downgrade_piecewise_cudagraph_for_non_vllm_compile()
+
+        # STOCK (vanilla torch.compile) is the full-parity replacement path: use
+        # Inductor for codegen only and let vLLM's own FULL_DECODE_ONLY cudagraph
+        # wrapper capture/replay the whole compiled decode forward (the serving-grade
+        # external cudagraph path), instead of running with no cudagraphs. Only
+        # auto-promote when the user did not set cudagraph_mode (so an explicit
+        # NONE stays NONE) and dynamic spec decode is not in use (it deliberately
+        # avoids full-decode capture because the verification length varies).
+        # The dynamic-SD term is load-bearing, NOT redundant with the drafter
+        # fallback: ngram/suffix drafters stay on STOCK (no model to compile) yet
+        # can still be dynamic, so this is the only guard for that combination.
+        uses_dynamic_sd = (
+            self.speculative_config is not None
+            and self.speculative_config.uses_dynamic_speculative_decoding()
+        )
         if (
-            self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
-            and self.compilation_config.mode != CompilationMode.VLLM_COMPILE
-            and not envs.VLLM_USE_BREAKABLE_CUDAGRAPH
+            self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE
+            and self.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
+            and not user_set_cudagraph_mode
+            and not uses_dynamic_sd
         ):
-            logger.info(
-                "Cudagraph mode %s is not compatible with compilation mode %s."
-                "Overriding to NONE.",
-                self.compilation_config.cudagraph_mode,
-                self.compilation_config.mode,
-            )
-            self.compilation_config.cudagraph_mode = CUDAGraphMode.NONE
+            # SupportsStockCompile models default to graph-partition piecewise: it
+            # recovers prefill cudagraphs at throughput parity and is validated as
+            # part of marking an arch stock-compatible. Inductor graph partition
+            # requires torch>=2.9; on older torch (or if the user explicitly set the
+            # flag) fall back to the choice below. A whole-graph stock compile can
+            # only do a decode-only external cudagraph.
+            from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+            if not user_set_graph_partition and is_torch_equal_or_newer("2.9.0.dev"):
+                self.compilation_config.use_inductor_graph_partition = True
+            if self.compilation_config.use_inductor_graph_partition:
+                self.compilation_config.cudagraph_mode = (
+                    CUDAGraphMode.FULL_AND_PIECEWISE
+                )
+                logger.info_once(
+                    "Using FULL_AND_PIECEWISE cudagraphs for stock torch.compile "
+                    "(decode captured externally; prefill/mixed piecewise-captured "
+                    "via Inductor graph partition)."
+                )
+            else:
+                self.compilation_config.cudagraph_mode = (
+                    CUDAGraphMode.FULL_DECODE_ONLY
+                )
+                logger.info_once(
+                    "Using FULL_DECODE_ONLY external cudagraphs for stock "
+                    "torch.compile (decode captured; prefill/mixed run uncaptured)."
+                )
 
         # async tp is built on top of sequence parallelism and requires it.
         pass_config = self.compilation_config.pass_config
@@ -1282,6 +1511,12 @@ class VllmConfig:
                         self.compilation_config.cudagraph_mode.name,
                     )
                     self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
+            # The pooler / KV-connector overrides above can re-introduce PIECEWISE;
+            # clamp it back to NONE for non-VLLM_COMPILE modes so a stock model
+            # (e.g. a future pooling arch) falls back to no cudagraphs instead of
+            # tripping the piecewise-mode assert below.
+            self._downgrade_piecewise_cudagraph_for_non_vllm_compile()
 
             # disable cudagraph when enforce eager execution
             if self.model_config is not None and self.model_config.enforce_eager:
@@ -1391,6 +1626,14 @@ class VllmConfig:
                         "pipeline parallelism",
                     )
 
+        # current_platform.check_and_update_config above can itself re-introduce a
+        # PIECEWISE cudagraph_mode (e.g. ROCm with decode/prefill context
+        # parallel). Clamp it back to NONE for non-VLLM_COMPILE modes so a stock
+        # model on the no-partition path falls back to no cudagraphs instead of
+        # tripping the piecewise-mode assert below. On stock + graph partition
+        # this is a no-op (that path legitimately supports piecewise cudagraphs).
+        self._downgrade_piecewise_cudagraph_for_non_vllm_compile()
+
         # final check of cudagraph mode after all possible updates
         if current_platform.is_cuda_alike():
             if (
@@ -1406,11 +1649,21 @@ class VllmConfig:
                 )
 
             if self.compilation_config.cudagraph_mode.requires_piecewise_compilation():
+                # STOCK_TORCH_COMPILE also provides piecewise cudagraphs when Inductor
+                # graph partition is on (it partitions at the attention ops and routes
+                # capture through the external wrapper), so it is a valid mode here.
+                stock_inductor_piecewise = (
+                    self.compilation_config.mode
+                    == CompilationMode.STOCK_TORCH_COMPILE
+                    and self.compilation_config.use_inductor_graph_partition
+                )
                 assert (
                     self.compilation_config.mode == CompilationMode.VLLM_COMPILE
+                    or stock_inductor_piecewise
                     or envs.VLLM_USE_BREAKABLE_CUDAGRAPH
                 ), (
                     "Compilation mode should be CompilationMode.VLLM_COMPILE "
+                    "(or STOCK_TORCH_COMPILE with use_inductor_graph_partition) "
                     "when cudagraph_mode piecewise cudagraphs is used, "
                     f"cudagraph_mode={self.compilation_config.cudagraph_mode}"
                 )

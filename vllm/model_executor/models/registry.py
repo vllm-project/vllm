@@ -55,6 +55,7 @@ from .interfaces import (
     supports_multimodal_encoder_tp_data,
     supports_multimodal_raw_input_only,
     supports_pp,
+    supports_stock_compile,
     supports_transcription,
 )
 from .interfaces_base import (
@@ -756,6 +757,7 @@ class _ModelInfo:
     requires_raw_input_tokens: bool
     supports_multimodal_encoder_tp_data: bool
     supports_pp: bool
+    supports_stock_compile: bool
     has_inner_state: bool
     is_attention_free: bool
     is_hybrid: bool
@@ -783,6 +785,7 @@ class _ModelInfo:
                 model
             ),
             supports_pp=supports_pp(model),
+            supports_stock_compile=supports_stock_compile(model),
             has_inner_state=has_inner_state(model),
             is_attention_free=is_attention_free(model),
             is_hybrid=is_hybrid(model),
@@ -1347,6 +1350,14 @@ class _ModelRegistry:
     ) -> bool:
         model_cls, _ = self.inspect_model_cls(architectures, model_config)
         return model_cls.has_noops
+
+    def is_stock_compile_supported_model(
+        self,
+        architectures: str | list[str],
+        model_config: ModelConfig,
+    ) -> bool:
+        model_cls, _ = self.inspect_model_cls(architectures, model_config)
+        return model_cls.supports_stock_compile
 
     def is_transcription_model(
         self,
