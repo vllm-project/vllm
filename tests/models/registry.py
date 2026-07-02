@@ -1284,6 +1284,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "Qwen/Qwen2-Audio-7B-Instruct"
     ),
     "Qwen2VLForConditionalGeneration": _HfExamplesInfo("Qwen/Qwen2-VL-2B-Instruct"),
+    "Qwen3VLReranker": _HfExamplesInfo("Qwen/Qwen3-VL-Reranker-8B"),
     "Qwen2_5_VLForConditionalGeneration": _HfExamplesInfo(
         "Qwen/Qwen2.5-VL-3B-Instruct",
         max_model_len=4096,

@@ -249,6 +249,8 @@ def _try_get_processor_chat_template(
             and hasattr(processor, "chat_template")
             and (chat_template := processor.chat_template) is not None
         ):
+            if isinstance(chat_template, dict):
+                chat_template = chat_template.get("default")
             _PROCESSOR_CHAT_TEMPLATES[cache_key] = chat_template
             return chat_template
     except Exception:
