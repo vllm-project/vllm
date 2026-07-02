@@ -757,7 +757,6 @@ class CompilationConfig:
         "vllm::olmo_hybrid_gdn_full_forward",
         "vllm::kda_attention",
         "vllm::unified_mla_indexer_side_stream",
-        "vllm::unified_mla_dcp_mqa_q_gather",
         "vllm::sparse_attn_indexer",
         "vllm::rocm_aiter_sparse_attn_indexer",
         "vllm::deepseek_v4_attention",

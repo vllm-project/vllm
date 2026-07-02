@@ -569,55 +569,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             group_shape=GroupShape.PER_TENSOR,
             compile_native=True,
         )
-        self._dcp_W_UK_T: torch.Tensor | None = None
-
-    def _get_direct_forward_context_and_metadata(self):
-        forward_context: ForwardContext = get_forward_context()
-        attn_metadata_raw = forward_context.attn_metadata
-        if isinstance(attn_metadata_raw, dict):
-            attn_metadata = attn_metadata_raw[self.layer_name]
-        elif isinstance(attn_metadata_raw, list):
-            # list[dict[str, AttentionMetadata]]: used in speculative decoding
-            # where [0] is the base-model (non-speculative) metadata dict.
-            attn_metadata = attn_metadata_raw[0][self.layer_name]
-        else:
-            attn_metadata = attn_metadata_raw
-        return forward_context, attn_metadata
-
-    def _can_use_dcp_raw_nope_q_gather(self, fp8_attention: bool) -> bool:
-        if self.impl.dcp_world_size == -1:
-            self.impl.dcp_world_size = get_dcp_group().world_size
-        return (
-            isinstance(self.impl, SparseMLAAttentionImpl)
-            and fp8_attention
-            and getattr(self.impl, "supports_quant_query_input", False)
-            and self.impl.dcp_world_size > 1
-            and not self.is_aiter_triton_fp4_bmm_enabled
-            and not self.is_aiter_triton_fp8_bmm_enabled
-            and self.q_pad_num_heads is None
-            and hasattr(self, "W_UK_T")
-        )
-
-    def _get_dcp_gathered_W_UK_T(self) -> torch.Tensor | None:
-        if self._dcp_W_UK_T is None:
-            if torch.cuda.is_current_stream_capturing():
-                return None
-            self._dcp_W_UK_T = get_dcp_group().all_gather(
-                self.W_UK_T.contiguous(), dim=0
-            )
-        return self._dcp_W_UK_T
-
-    def _project_gathered_raw_nope_mqa_q_nope(
-        self,
-        mqa_q_nope: torch.Tensor,
-        W_UK_T: torch.Tensor,
-    ) -> torch.Tensor:
-        mqa_q_nope = mqa_q_nope.transpose(0, 1)
-        N, B, _ = mqa_q_nope.shape
-        _, _, L = W_UK_T.shape
-        mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
-        torch.bmm(mqa_q_nope, W_UK_T, out=mqa_ql_nope)
-        return mqa_ql_nope.transpose(0, 1)
 
     def _run_indexer_on_side_stream_impl(
         self,
@@ -667,110 +618,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             _encode_layer_name(self.layer_name),
         )
 
-    def _dcp_gather_raw_nope_mqa_q(
-        self,
-        mqa_q_nope: torch.Tensor,
-        mqa_q_pe: torch.Tensor,
-    ) -> torch.Tensor | None:
-        W_UK_T = self._get_dcp_gathered_W_UK_T()
-        if W_UK_T is None:
-            return None
-
-        dcp_group = get_dcp_group()
-        mqa_q_nope = dcp_group.all_gather(mqa_q_nope.contiguous(), dim=1)
-        mqa_q_pe = dcp_group.all_gather(mqa_q_pe.contiguous(), dim=1)
-        mqa_ql_nope = self._project_gathered_raw_nope_mqa_q_nope(mqa_q_nope, W_UK_T)
-        return self._decode_concat_quant_fp8_op(mqa_ql_nope, mqa_q_pe, self._q_scale)
-
-    def _compute_dcp_raw_nope_mqa_q(
-        self,
-        q: torch.Tensor,
-        num_actual_tokens: int,
-    ) -> torch.Tensor | None:
-        q = q[:num_actual_tokens, ...]
-        mqa_q_nope, mqa_q_pe = q.split(
-            [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
-        )
-        return self._dcp_gather_raw_nope_mqa_q(mqa_q_nope, mqa_q_pe)
-
-    def _precompute_dcp_raw_nope_mqa_q(
-        self,
-        q: torch.Tensor,
-        attn_metadata: "MLACommonMetadata | None",
-    ) -> torch.Tensor | None:
-        fp8_attention = is_quantized_kv_cache(self.kv_cache_dtype)
-        if (
-            attn_metadata is None
-            or not isinstance(self.impl, SparseMLAAttentionImpl)
-            or not self._can_use_dcp_raw_nope_q_gather(fp8_attention)
-        ):
-            return None
-
-        return torch.ops.vllm.unified_mla_dcp_mqa_q_gather(
-            q,
-            _encode_layer_name(self.layer_name),
-            self.impl.dcp_world_size,
-            attn_metadata.num_actual_tokens,
-        )
-
-    def _project_mqa_q_nope(
-        self,
-        mqa_q_nope: torch.Tensor,
-        mqa_q_pe: torch.Tensor,
-        fp8_attention: bool,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        # Convert from (B, N, P) to (N, B, P)
-        mqa_q_nope = mqa_q_nope.transpose(0, 1)
-
-        if self.q_pad_num_heads is not None:
-            B, N, L = mqa_q_pe.shape
-            mqa_pe_padded = mqa_q_pe.new_empty((B, self.q_pad_num_heads, L))
-            mqa_pe_padded.resize_((B, N, L))
-            mqa_pe_padded.copy_(mqa_q_pe)
-            mqa_q_pe = mqa_pe_padded
-
-        if self.is_aiter_triton_fp4_bmm_enabled:
-            from aiter.ops.triton.batched_gemm_a16wfp4 import (
-                batched_gemm_a16wfp4,
-            )
-
-            mqa_ql_nope = batched_gemm_a16wfp4(
-                mqa_q_nope,
-                self.W_K,
-                self.W_K_scale,
-                transpose_bm=True,
-                prequant=True,
-                y_scale=self._q_scale if fp8_attention else None,
-            )
-        elif self.is_aiter_triton_fp8_bmm_enabled:
-            # (N, B, P) x (N, P, L) -> (N, B, L) -> (B, N, L)
-            mqa_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
-                mqa_q_nope,
-                self.W_K,
-                self.W_K_scale,
-                group_size=128,
-                transpose_bm=True,
-            )
-        else:
-            N, B, _ = mqa_q_nope.shape
-            _, _, L = self.W_UK_T.shape
-            if self.q_pad_num_heads is not None:
-                mqa_ql_nope = mqa_q_nope.new_empty((self.q_pad_num_heads, B, L))
-                mqa_ql_nope.resize_((N, B, L))
-            else:
-                mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
-
-            torch.bmm(mqa_q_nope, self.W_UK_T, out=mqa_ql_nope)
-            mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
-
-        if fp8_attention and self.impl.supports_quant_query_input:
-            assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
-            assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
-            return self._decode_concat_quant_fp8_op(
-                mqa_ql_nope, mqa_q_pe, self._q_scale
-            )
-        return mqa_ql_nope, mqa_q_pe
-
     @property
     def chunked_prefill_workspace_size(self) -> int:
         if self._chunked_prefill_workspace_size is None:
@@ -797,10 +644,18 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 _encode_layer_name(self.layer_name),
             )
 
-        forward_context, attn_metadata = self._get_direct_forward_context_and_metadata()
-        precomputed_mqa_q = self._precompute_dcp_raw_nope_mqa_q(q, attn_metadata)
-
         if self.use_direct_call:
+            forward_context: ForwardContext = get_forward_context()
+            attn_metadata_raw = forward_context.attn_metadata
+            attn_metadata: MLACommonMetadata
+            if isinstance(attn_metadata_raw, dict):
+                attn_metadata = attn_metadata_raw[self.layer_name]  # type: ignore[assignment]
+            elif isinstance(attn_metadata_raw, list):
+                # list[dict[str, AttentionMetadata]]: used in speculative decoding
+                # where [0] is the base-model (non-speculative) metadata dict.
+                attn_metadata = attn_metadata_raw[0][self.layer_name]  # type: ignore[assignment]
+            else:
+                attn_metadata = attn_metadata_raw
             self_kv_cache = self.kv_cache
             slot_mapping = forward_context.slot_mapping
 
@@ -823,7 +678,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self_kv_cache,
                 attn_metadata,
                 output=output,
-                precomputed_mqa_q=precomputed_mqa_q,
                 indexer_dummy_dep=indexer_dummy_dep,
             )
             return output
@@ -843,7 +697,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 k_pe,
                 output,
                 encoded,
-                precomputed_mqa_q=precomputed_mqa_q,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
                 indexer_dummy_dep=indexer_dummy_dep,
             )
@@ -863,7 +716,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_scale_ue8m0: bool | None = None,
         quant_col_major: bool | None = None,
         quant_tma_aligned: bool | None = None,
-        precomputed_mqa_q: torch.Tensor | None = None,
         indexer_dummy_dep: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
@@ -974,23 +826,62 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1
             )
 
-            if precomputed_mqa_q is not None:
-                assert is_sparse_impl and num_mqa_tokens == q.shape[0]
-                mqa_q_gathered = precomputed_mqa_q[:num_mqa_tokens]
-            elif self._can_use_dcp_raw_nope_q_gather(fp8_attention):
-                mqa_q_gathered = self._dcp_gather_raw_nope_mqa_q(mqa_q_nope, mqa_q_pe)
-            else:
-                mqa_q_gathered = None
+            # Convert from (B, N, P) to (N, B, P)
+            mqa_q_nope = mqa_q_nope.transpose(0, 1)
 
-            if mqa_q_gathered is None:
-                mqa_q = self._project_mqa_q_nope(mqa_q_nope, mqa_q_pe, fp8_attention)
-            else:
-                mqa_q = mqa_q_gathered
+            if self.q_pad_num_heads is not None:
+                B, N, L = mqa_q_pe.shape
+                mqa_pe_padded = mqa_q_pe.new_empty((B, self.q_pad_num_heads, L))
+                mqa_pe_padded.resize_((B, N, L))
+                mqa_pe_padded.copy_(mqa_q_pe)
+                mqa_q_pe = mqa_pe_padded
 
-            if self.impl.dcp_world_size > 1 and mqa_q_gathered is None:
-                assert self.impl.need_to_return_lse_for_decode, (
-                    "DCP requires the MLA backend to return softmax LSE for decode."
+            if self.is_aiter_triton_fp4_bmm_enabled:
+                from aiter.ops.triton.batched_gemm_a16wfp4 import batched_gemm_a16wfp4
+
+                mqa_ql_nope = batched_gemm_a16wfp4(
+                    mqa_q_nope,
+                    self.W_K,
+                    self.W_K_scale,
+                    transpose_bm=True,
+                    prequant=True,
+                    y_scale=self._q_scale if fp8_attention else None,
                 )
+            elif self.is_aiter_triton_fp8_bmm_enabled:
+                # Multiply+Transpose (N, B, P)x(N, P, L)->(N, B, L)->(B, N, L)
+                mqa_ql_nope = rocm_aiter_ops.triton_fp8_bmm(
+                    mqa_q_nope,
+                    self.W_K,
+                    self.W_K_scale,
+                    group_size=128,
+                    transpose_bm=True,
+                )
+            else:
+                # Pads the head_dim if necessary (for the underlying kernel)
+                N, B, P = mqa_q_nope.shape
+                _, _, L = self.W_UK_T.shape
+
+                if self.q_pad_num_heads is not None:
+                    mqa_ql_nope = mqa_q_nope.new_empty((self.q_pad_num_heads, B, L))
+                    mqa_ql_nope.resize_((N, B, L))
+                else:
+                    mqa_ql_nope = mqa_q_nope.new_empty((N, B, L))
+
+                # Multiply (N, B, P) x (N, P, L) -> (N, B, L)
+                torch.bmm(mqa_q_nope, self.W_UK_T, out=mqa_ql_nope)
+
+                # Convert from (N, B, L) to (B, N, L)
+                mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
+
+            if fp8_attention and self.impl.supports_quant_query_input:
+                assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
+                assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
+                mqa_q = self._decode_concat_quant_fp8_op(
+                    mqa_ql_nope, mqa_q_pe, self._q_scale
+                )
+            else:
+                mqa_q = (mqa_ql_nope, mqa_q_pe)
+            if self.impl.dcp_world_size > 1:
                 if isinstance(mqa_q, tuple):
                     # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
                     mqa_q = torch.cat(mqa_q, dim=-1)
@@ -1152,12 +1043,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             self.W_UV = W_UV.transpose(0, 1)
             # Convert from (L, N, P) to (N, P, L)
             self.W_UK_T = W_UK.permute(1, 2, 0)
-            if self._can_use_dcp_raw_nope_q_gather(
-                is_quantized_kv_cache(self.kv_cache_dtype)
-            ):
-                self._dcp_W_UK_T = get_dcp_group().all_gather(
-                    self.W_UK_T.contiguous(), dim=0
-                )
 
         # If we should not load quant weights, we initialize the scales to 1.0
         # as the default value. See [Note: Register q/k/v/prob scales in state dict]
@@ -1273,44 +1158,6 @@ direct_register_custom_op(
 )
 
 
-@eager_break_during_capture
-def unified_mla_dcp_mqa_q_gather(
-    q: torch.Tensor,
-    layer_name: LayerNameType,
-    dcp_world_size: int,
-    num_actual_tokens: int,
-) -> torch.Tensor:
-    layer_name = _resolve_layer_name(layer_name)
-    _, layer, _, _ = get_attention_context(layer_name)
-    del dcp_world_size
-    mqa_q = layer._compute_dcp_raw_nope_mqa_q(q, num_actual_tokens)
-    assert mqa_q is not None
-    return mqa_q
-
-
-def unified_mla_dcp_mqa_q_gather_fake(
-    q: torch.Tensor,
-    layer_name: LayerNameType,
-    dcp_world_size: int,
-    num_actual_tokens: int,
-) -> torch.Tensor:
-    del layer_name
-    return torch.empty(
-        (num_actual_tokens, q.shape[1] * dcp_world_size, q.shape[2]),
-        dtype=_FP8_DTYPE,
-        device=q.device,
-    )
-
-
-direct_register_custom_op(
-    op_name="unified_mla_dcp_mqa_q_gather",
-    op_func=unified_mla_dcp_mqa_q_gather,
-    fake_impl=unified_mla_dcp_mqa_q_gather_fake,
-    dispatch_key=current_platform.dispatch_key,
-    tags=(torch.Tag.flexible_layout,),
-)
-
-
 def unified_mla_kv_cache_update(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
@@ -1362,7 +1209,6 @@ def unified_mla_attention_with_output(
     k_pe: torch.Tensor,
     output: torch.Tensor,
     layer_name: LayerNameType,
-    precomputed_mqa_q: torch.Tensor | None = None,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
@@ -1391,7 +1237,6 @@ def unified_mla_attention_with_output(
         quant_scale_ue8m0=quant_scale_ue8m0,
         quant_col_major=quant_col_major,
         quant_tma_aligned=quant_tma_aligned,
-        precomputed_mqa_q=precomputed_mqa_q,
         indexer_dummy_dep=indexer_dummy_dep,
     )
 
@@ -1402,7 +1247,6 @@ def unified_mla_attention_with_output_fake(
     k_pe: torch.Tensor,
     output: torch.Tensor,
     layer_name: LayerNameType,
-    precomputed_mqa_q: torch.Tensor | None = None,
     output_scale: torch.Tensor | None = None,
     output_block_scale: torch.Tensor | None = None,
     kv_cache_dummy_dep: torch.Tensor | None = None,
