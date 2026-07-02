@@ -630,13 +630,120 @@ class Scheduler(SchedulerInterface):
             )
             assert len(scheduled_loras) <= self.lora_config.max_loras
 
+        # Helper: evict a running request to make room for a
+        # higher-priority waiting request.  Undoes any scheduling
+        # already done for the victim in this step.
+        def _evict_runner(victim: Request) -> None:
+            self.running.remove(victim)
+            if victim in scheduled_running_reqs:
+                scheduled_running_reqs.remove(victim)
+                victim_id = victim.request_id
+                nonlocal token_budget
+                token_budget += num_scheduled_tokens.pop(victim_id)
+                req_to_new_blocks.pop(victim_id)
+                scheduled_spec_decode_tokens.pop(victim_id, None)
+                victim_encoder = scheduled_encoder_inputs.pop(
+                    victim_id, None
+                )
+                if victim_encoder:
+                    nonlocal encoder_compute_budget
+                    encoder_compute_budget += sum(
+                        victim.get_num_encoder_embeds(i)
+                        for i in victim_encoder
+                    )
+                # Discard the victim's LoRA only when no remaining
+                # scheduled request still uses it.
+                if self.lora_config and victim.lora_request:
+                    lora_id = victim.lora_request.lora_int_id
+                    if lora_id > 0 and not any(
+                        req.lora_request
+                        and req.lora_request.lora_int_id == lora_id
+                        for req in scheduled_running_reqs
+                    ):
+                        scheduled_loras.discard(lora_id)
+            self._preempt_request(victim, scheduled_timestamp)
+            preempted_reqs.append(victim)
+
         # Next, schedule the WAITING requests.
         if not preempted_reqs and self._pause_state == PauseState.UNPAUSED:
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
                 if len(self.running) == self.max_num_running_reqs:
-                    break
+                    if self.policy == SchedulingPolicy.PRIORITY:
+                        # Priority-based preemption at max_num_seqs:
+                        # A higher-priority waiting request can preempt a
+                        # lower-priority running request.  Run the blocked-
+                        # status and max_loras admission checks first so we
+                        # don't evict a runner for a request that can't be
+                        # admitted this step.
+                        request_queue = self._select_waiting_queue_for_scheduling()
+                        if request_queue is None:
+                            break
+                        request = request_queue.peek_request()
+                        request_id = request.request_id
+
+                        # Blocked-status check: don't preempt for a request
+                        # that is still waiting on async deps.
+                        if self._is_blocked_waiting_status(
+                            request.status
+                        ) and not self._try_promote_blocked_waiting_request(
+                            request
+                        ):
+                            if (
+                                request.status
+                                == RequestStatus.WAITING_FOR_REMOTE_KVS
+                            ):
+                                logger.debug(
+                                    "%s is still in "
+                                    "WAITING_FOR_REMOTE_KVS state.",
+                                    request_id,
+                                )
+                            request_queue.pop_request()
+                            step_skipped_waiting.prepend_request(request)
+                            continue
+
+                        # Max_loras check: don't preempt if the waiting
+                        # request would exceed the LoRA limit.
+                        if (
+                            self.lora_config
+                            and request.lora_request
+                            and (
+                                len(scheduled_loras)
+                                == self.lora_config.max_loras
+                                and request.lora_request.lora_int_id
+                                not in scheduled_loras
+                            )
+                        ):
+                            request_queue.pop_request()
+                            step_skipped_waiting.prepend_request(request)
+                            continue
+
+                        # Find the lowest-priority running request.
+                        lowest_priority_req = max(
+                            self.running,
+                            key=lambda r: (r.priority, r.arrival_time),
+                        )
+
+                        # Preempt only for strictly higher priority
+                        # (lower numerical value).  Equal priority must
+                        # not preempt — it causes ping-pong since the
+                        # preempted request keeps its earlier arrival
+                        # time and would immediately reclaim the slot.
+                        if (
+                            request.priority
+                            >= lowest_priority_req.priority
+                        ):
+                            break
+
+                        # Evict the lowest-priority runner to make
+                        # room for the higher-priority waiter.
+                        _evict_runner(lowest_priority_req)
+                        # Loop back to schedule the waiting request
+                        # (len(self.running) is now < max_num_running_reqs).
+                        continue
+                    else:
+                        break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
                 assert request_queue is not None
@@ -917,6 +1024,27 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
+
+                    # Priority-based preemption for KV cache pressure:
+                    # free blocks by preempting the lowest-priority runner
+                    # so this higher-priority waiting request can fit.
+                    if (
+                        self.policy == SchedulingPolicy.PRIORITY
+                        and self.running
+                    ):
+                        lowest_priority_req = max(
+                            self.running,
+                            key=lambda r: (r.priority, r.arrival_time),
+                        )
+                        if (
+                            request.priority
+                            < lowest_priority_req.priority
+                        ):
+                            _evict_runner(lowest_priority_req)
+                            # Retry allocation for this waiting
+                            # request with the freed blocks.
+                            continue
+
                     break
 
                 # KVTransfer: the connector uses this info to determine
