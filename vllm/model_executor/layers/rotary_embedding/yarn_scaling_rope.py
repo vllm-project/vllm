@@ -29,6 +29,7 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         beta_slow: int = 1,
         apply_yarn_scaling: bool = True,
         truncate: bool = True,
+        attention_factor: float | None = None,
     ) -> None:
         self.scaling_factor = scaling_factor
         self.extrapolation_factor = extrapolation_factor
@@ -36,12 +37,15 @@ class YaRNScalingRotaryEmbedding(RotaryEmbedding):
         self.beta_fast = beta_fast
         self.beta_slow = beta_slow
         self.truncate = truncate
-        # Get n-d magnitude scaling corrected for interpolation
-        self.mscale = (
-            float(yarn_get_mscale(self.scaling_factor) * attn_factor)
-            if apply_yarn_scaling
-            else float(attn_factor)
-        )
+        # HF supplies the final YaRN mscale as `attention_factor`; use it when set.
+        if attention_factor is not None:
+            self.mscale = float(attention_factor)
+        else:
+            self.mscale = (
+                float(yarn_get_mscale(self.scaling_factor) * attn_factor)
+                if apply_yarn_scaling
+                else float(attn_factor)
+            )
         super().__init__(
             head_size, rotary_dim, max_position_embeddings, base, is_neox_style, dtype
         )
