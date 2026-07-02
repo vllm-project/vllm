@@ -192,9 +192,11 @@ def kernel_paged_attention_2d(
         )
 
         if K_load.dtype.is_fp8():
-            K = (K_load.to(tl.float32) * tl.load(k_scale)).to(Q.dtype)
+            K = K_load.to(Q.dtype)
+            qk_scale = scale * tl.load(k_scale)
         else:
             K = K_load
+            qk_scale = scale
 
         # V : (BLOCK_SIZE, HEAD_SIZE)
         V_load = tl.load(
@@ -205,16 +207,18 @@ def kernel_paged_attention_2d(
         )
 
         if V_load.dtype.is_fp8():
-            V = (V_load.to(tl.float32) * tl.load(v_scale)).to(Q.dtype)
+            V = V_load.to(Q.dtype)
+            v_post = tl.load(v_scale)
         else:
             V = V_load
+            v_post = 1.0
 
         seq_offset = j * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
         boundary = tl.full([BLOCK_SIZE], seq_len, dtype=tl.int32)
         seq_mask = seq_offset[None, :] < boundary
 
         # First calculate the dot, then apply the mask.
-        qk = scale * tl.dot(Q, K)
+        qk = qk_scale * tl.dot(Q, K)
         S = tl.where(head_mask[:, None] & seq_mask, qk, float("-inf"))
 
         context_len = seq_len - 1
@@ -248,7 +252,7 @@ def kernel_paged_attention_2d(
         M = m_j
 
         # acc : (num_queries_per_kv, BLOCK_SIZE,)
-        acc += tl.dot(p.to(V.dtype), V)
+        acc += tl.dot(p.to(V.dtype), V) * v_post
 
     # epilogue
     acc = acc / (L[:, None] + 1e-10)
