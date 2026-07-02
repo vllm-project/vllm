@@ -16,7 +16,7 @@ import zmq.asyncio
 from fastapi import APIRouter, HTTPException
 from fastapi import Request as FastAPIRequest
 from fastapi.responses import Response
-from starlette.datastructures import Headers, URL
+from starlette.datastructures import URL, Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from vllm.distributed.kv_events import KVEventBatch
@@ -158,14 +158,14 @@ class PrefixRoutingProxy:
     ) -> list[tuple[list[int], str | None]]:
         render = self.app_state.openai_serving_render
         if path == "/v1/completions":
-            request = CompletionRequest.model_validate(payload)
-            result = await render.render_completion_request(request)
+            completion_request = CompletionRequest.model_validate(payload)
+            result = await render.render_completion_request(completion_request)
             if isinstance(result, ErrorResponse):
                 return []
             return [(req.token_ids, req.cache_salt) for req in result]
         if path == "/v1/chat/completions":
-            request = ChatCompletionRequest.model_validate(payload)
-            result = await render.render_chat_request(request)
+            chat_request = ChatCompletionRequest.model_validate(payload)
+            result = await render.render_chat_request(chat_request)
             if isinstance(result, ErrorResponse):
                 return []
             return [(result.token_ids, result.cache_salt)]
@@ -292,17 +292,27 @@ def _parse_prefix_routing_config(
         raise ValueError("--enable-prefix-routing requires --prefix-routing-config")
     if isinstance(raw_config, str):
         raw_config = json.loads(raw_config)
+    if not isinstance(raw_config, Mapping):
+        raise ValueError("prefix routing config must be a JSON object")
 
-    nodes = [
-        PrefixRoutingNode(
-            node_id=str(node["id"]),
-            url=None if node.get("url") == "local" else node.get("url"),
-            event_endpoint=node.get("event_endpoint"),
-            data_parallel_rank=node.get("data_parallel_rank"),
-            local=bool(node.get("local", node.get("url") == "local")),
+    raw_nodes = raw_config.get("nodes", [])
+    if not isinstance(raw_nodes, list):
+        raise ValueError("prefix routing config 'nodes' must be a list")
+
+    nodes: list[PrefixRoutingNode] = []
+    for node in raw_nodes:
+        if not isinstance(node, Mapping):
+            raise ValueError("prefix routing node config must be a JSON object")
+        node_url = node.get("url")
+        nodes.append(
+            PrefixRoutingNode(
+                node_id=str(node["id"]),
+                url=None if node_url == "local" else node_url,
+                event_endpoint=node.get("event_endpoint"),
+                data_parallel_rank=node.get("data_parallel_rank"),
+                local=bool(node.get("local", node_url == "local")),
+            )
         )
-        for node in raw_config.get("nodes", [])
-    ]
     if not nodes:
         raise ValueError("prefix routing config must include at least one node")
 
@@ -369,34 +379,36 @@ async def _forward_request(
 
     timeout = aiohttp.ClientTimeout(total=request_timeout)
     try:
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.request(
+        async with (
+            aiohttp.ClientSession(timeout=timeout) as session,
+            session.request(
                 method=scope["method"],
                 url=url,
                 data=body,
                 headers=headers,
-            ) as response:
-                response_headers = [
-                    (key.encode("latin-1"), value.encode("latin-1"))
-                    for key, value in response.headers.items()
-                    if key.lower() not in ("transfer-encoding", "content-encoding")
-                ]
+            ) as response,
+        ):
+            response_headers = [
+                (key.encode("latin-1"), value.encode("latin-1"))
+                for key, value in response.headers.items()
+                if key.lower() not in ("transfer-encoding", "content-encoding")
+            ]
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": response.status,
+                    "headers": response_headers,
+                }
+            )
+            async for chunk in response.content.iter_chunked(1024):
                 await send(
                     {
-                        "type": "http.response.start",
-                        "status": response.status,
-                        "headers": response_headers,
+                        "type": "http.response.body",
+                        "body": chunk,
+                        "more_body": True,
                     }
                 )
-                async for chunk in response.content.iter_chunked(1024):
-                    await send(
-                        {
-                            "type": "http.response.body",
-                            "body": chunk,
-                            "more_body": True,
-                        }
-                    )
-                await send({"type": "http.response.body", "body": b""})
+            await send({"type": "http.response.body", "body": b""})
     except aiohttp.ClientError as exc:
         body = json.dumps({"error": f"Prefix routing upstream failed: {exc}"}).encode(
             "utf-8"

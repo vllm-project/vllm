@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Iterator, Sequence
 from typing import Any
 
 from vllm.distributed.kv_events import (
@@ -32,9 +32,9 @@ logger = init_logger(__name__)
 
 
 class BlockHashToBlockMap:
+    """映射表"""
 
-    """ 映射表 """
-    """ 
+    """
     Cache of blocks that are used for prefix caching. It caches blocks
     from hash directly to a block or multiple blocks
     (i.e. {block_hash: KVCacheBlocks})
@@ -139,6 +139,9 @@ class BlockHashToBlockMap:
     def __len__(self) -> int:
         return len(self._cache)
 
+    def __iter__(self) -> Iterator[BlockHashWithGroupId]:
+        return iter(self._cache)
+
     def keys(self) -> list[BlockHashWithGroupId]:
         """Return all cached block hash keys."""
         return list(self._cache.keys())
@@ -148,7 +151,8 @@ class BlockHashToBlockMap:
 
 
 class BlockPool:
-    """ 管理池 """
+    """管理池"""
+
     """BlockPool that manages KVCacheBlocks.
     It provides methods to allocate, free and cache the kv cache blocks. The
     free_block_queue stores the free blocks in eviction order to enable
@@ -731,10 +735,8 @@ class BlockPool:
     def get_cached_block_hashes_by_group(self) -> dict[int, set[ExternalBlockHash]]:
         """Return cached prefix block hashes grouped by KV-cache group ID."""
         group_hashes: dict[int, set[ExternalBlockHash]] = {}
-        for block_hash_with_group_id in self.cached_block_hash_to_block.keys():
-            # group_id 是 KV cache group 的编号
-            # 在 vLLM v1 里，KV cache 不一定只有一种布局。不同 attention 类型或不同 KV cache spec 可能会被分到不同的 kv_cache_group 里
-            # 如普通 full attention 一组，sliding window attention 一组，hybrid 模型里可能有多组，Mamba / MLA 等特殊 cache spec 也可能对应不同 group
+        for block_hash_with_group_id in self.cached_block_hash_to_block:
+            # group_id identifies the KV-cache group for the cached block.
             group_id = get_group_id(block_hash_with_group_id)
             block_hash = maybe_convert_block_hash(
                 get_block_hash(block_hash_with_group_id)

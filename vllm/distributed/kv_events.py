@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
 import queue
 import threading
 import time
@@ -313,7 +314,6 @@ class HttpPrefixCacheEventUploader(EventPublisher):
         )
         self._thread.start()
 
-
     def publish(self, events: EventBatch) -> None:
         if not self._running:
             return
@@ -330,10 +330,8 @@ class HttpPrefixCacheEventUploader(EventPublisher):
 
     def shutdown(self) -> None:
         self._running = False
-        try:
+        with contextlib.suppress(queue.Full):
             self._event_queue.put_nowait(None)
-        except queue.Full:
-            pass
 
         start = time.time()
         while not self._event_queue.empty() and (
@@ -374,9 +372,7 @@ class HttpPrefixCacheEventUploader(EventPublisher):
                 logger.warning("HTTP prefix-cache upload failed: %s", exc)
                 time.sleep(0.1)
             except Exception as exc:
-                logger.exception(
-                    "Unexpected HTTP prefix-cache upload error: %s", exc
-                )
+                logger.exception("Unexpected HTTP prefix-cache upload error: %s", exc)
                 time.sleep(0.1)
             finally:
                 self._event_queue.task_done()
@@ -616,9 +612,7 @@ class EventPublisherFactory:
     }
 
     @classmethod
-    def register_publisher(
-        cls, name: str, ctor: Callable[..., EventPublisher]
-    ) -> None:
+    def register_publisher(cls, name: str, ctor: Callable[..., EventPublisher]) -> None:
         if name in cls._registry:
             raise KeyError(f"publisher '{name}' already registered")
         cls._registry[name] = ctor

@@ -170,9 +170,7 @@ class NodePrefixCacheState:
 
         matched_blocks = 0
         for block_idx in range(max_blocks):
-            cache_key = self._cache_key_for_group_block(
-                block_hashes, block_idx, scale
-            )
+            cache_key = self._cache_key_for_group_block(block_hashes, block_idx, scale)
             if cache_key not in hashes:
                 break
             matched_blocks += 1
@@ -216,9 +214,7 @@ class GlobalPrefixScheduler:
     def update_snapshot(self, snapshot: PrefixCacheSnapshot) -> None:
         state = self._nodes.get(snapshot.node_id)
         if state is None:
-            self._nodes[snapshot.node_id] = NodePrefixCacheState.from_snapshot(
-                snapshot
-            )
+            self._nodes[snapshot.node_id] = NodePrefixCacheState.from_snapshot(snapshot)
         else:
             state.apply_snapshot(snapshot)
 
