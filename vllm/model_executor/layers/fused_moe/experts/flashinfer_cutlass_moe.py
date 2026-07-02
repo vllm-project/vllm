@@ -190,6 +190,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             MoEActivation.GELU_TANH,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.SWIGLUOAI,
+            MoEActivation.GELU_TANH,
         ]
 
     @staticmethod
@@ -270,6 +271,7 @@ class FlashInferExperts(mk.FusedMoEExpertsModular):
             MoEActivation.GELU_TANH: ActivationType.Geglu,
             MoEActivation.SWIGLUOAI: ActivationType.Swiglu,  # gpt-oss alias
             MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
+            MoEActivation.GELU_TANH: ActivationType.GegluTanh,  # gemma gated gelu-tanh
         }
         assert activation in activation_str_to_value_map, (
             f"{activation=} missing from {activation_str_to_value_map.keys()=}"
