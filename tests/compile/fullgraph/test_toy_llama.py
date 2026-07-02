@@ -331,6 +331,7 @@ def run_model(llama_config, compile_config: CompilationConfig) -> torch.Tensor:
     "backend, use_inductor_graph_partition",
     [
         ("eager", False),  # No inductor
+        ("aot_eager", False),  # AOTAutograd trace, no inductor
         ("inductor", False),  # Inductor, Dynamo partition
         ("inductor", True),  # Inductor, Inductor partition
     ],
@@ -389,6 +390,8 @@ def test_toy_llama(
 
     if backend == "inductor":
         kwargs = {"num_inductor_compiles": 1, "num_eager_compiles": 0}
+    elif backend == "aot_eager":
+        kwargs = {"num_aot_eager_compiles": 1, "num_inductor_compiles": 0}
     else:
         kwargs = {"num_eager_compiles": 1, "num_inductor_compiles": 0}
 
@@ -424,6 +427,13 @@ def test_toy_llama(
 
     for i in range(1, len(outputs)):
         assert torch.allclose(outputs[0], outputs[i])
+
+    # aot_eager (like eager) must stay Triton-free: it traces through
+    # AOTAutograd with a no-op compiler and never invokes Inductor codegen.
+    if backend in ("eager", "aot_eager"):
+        from torch._inductor import metrics
+
+        assert metrics.generated_kernel_count == 0
 
 
 @torch.inference_mode

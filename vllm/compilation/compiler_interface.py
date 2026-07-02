@@ -808,3 +808,53 @@ class EagerAdaptor(CompilerInterface):
         # we don't need to compile the graph, just return the graph itself.
         # It does not support caching, return None for the handle.
         return graph, None
+
+
+class AOTEagerAdaptor(CompilerInterface):
+    """Mirrors PyTorch's ``aot_eager`` backend: traces through AOTAutograd
+    with a no-op compiler (no Inductor codegen). Useful for isolating
+    Dynamo/AOTAutograd issues from Inductor issues. Does not support caching.
+    """
+
+    name = "aot_eager"
+
+    def compile(
+        self,
+        graph: fx.GraphModule,
+        example_inputs: list[Any],
+        compiler_config: dict[str, Any],
+        compile_range: Range,
+        key: str | None = None,
+    ) -> tuple[Callable[..., Any] | None, Any | None]:
+        compilation_counter.num_aot_eager_compiles += 1
+        from torch._dynamo.backends.debugging import aot_eager
+        from torch._inductor.compile_fx import graph_returns_tuple
+        from torch.profiler import record_function
+
+        set_functorch_config()
+
+        # aot_eager mutates the graph in place; copy to keep the shared graph
+        # intact (see https://github.com/pytorch/pytorch/issues/138980).
+        graph = copy.deepcopy(graph)
+
+        # aot_module_simplified requires a tuple output; piecewise subgraphs
+        # may produce a single tensor. Wrap and unwrap on call.
+        unwrap_output = not graph_returns_tuple(graph)
+        if unwrap_output:
+            output_node = next(n for n in graph.graph.nodes if n.op == "output")
+            output_node.args = ((output_node.args[0],),)
+            graph.recompile()
+
+        compiled_graph = aot_eager(graph, example_inputs)
+
+        # Match stock torch.compile trace topology so existing profiler
+        # tooling can attribute aten ops to per-subgraph regions.
+        subgraph_index = (compiler_config or {}).get("vllm_subgraph_index", 0)
+        region_name = f"Torch-Compiled Region: {subgraph_index}"
+
+        def runner(*args: Any) -> Any:
+            with record_function(region_name):
+                out = compiled_graph(*args)
+            return out[0] if unwrap_output else out
+
+        return runner, None
