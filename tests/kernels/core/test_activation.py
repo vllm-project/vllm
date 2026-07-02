@@ -197,6 +197,49 @@ def test_silu_and_mul_with_clamp(
 
 
 @pytest.mark.parametrize(
+    "activation,approximate",
+    [
+        ("gelu_and_mul", "none"),
+        ("gelu_and_mul", "tanh"),
+        ("new_gelu", None),
+        ("fast_gelu", None),
+        ("quick_gelu", None),
+    ],
+)
+@pytest.mark.parametrize("num_tokens", [7, 83])
+@pytest.mark.parametrize("d", [512])
+@pytest.mark.parametrize("dtype", [torch.float, torch.bfloat16])
+@torch.inference_mode()
+def test_activation_cpu(
+    default_vllm_config,
+    activation: str,
+    approximate,
+    num_tokens: int,
+    d: int,
+    dtype: torch.dtype,
+) -> None:
+    """Regression test: CPU activations must not crash even when the vLLM
+    CPU C++ extension (_C_AVX2/_C_AVX512) fails to load."""
+    device = "cpu"
+    torch.set_default_device(device)
+    if activation == "gelu_and_mul":
+        x = torch.randn(num_tokens, 2 * d, dtype=dtype)
+        layer = GeluAndMul(approximate=approximate)
+    elif activation == "new_gelu":
+        x = torch.randn(num_tokens, d, dtype=dtype)
+        layer = NewGELU()
+    elif activation == "fast_gelu":
+        x = torch.randn(num_tokens, d, dtype=dtype)
+        layer = FastGELU()
+    elif activation == "quick_gelu":
+        x = torch.randn(num_tokens, d, dtype=dtype)
+        layer = QuickGELU()
+    out = layer(x)
+    ref_out = layer.forward_native(x)
+    torch.testing.assert_close(out, ref_out, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize(
     "activation",
     [
         (FastGELU, torch.ops._C.gelu_fast),
