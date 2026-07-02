@@ -34,7 +34,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import BatchFeature
-from transformers.models.qwen2_vl import Qwen2VLImageProcessor
+from transformers.image_utils import SizeDict
+from transformers.models.qwen2_vl import (
+    Qwen2VLImageProcessor,
+    Qwen2VLImageProcessorFast,
+)
 from transformers.models.qwen2_vl.image_processing_qwen2_vl import (
     smart_resize as image_smart_resize,
 )
@@ -368,8 +372,33 @@ class Qwen3_VisionPatchEmbed(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         L, C = x.shape
-        x = x.view(L, -1, self.temporal_patch_size, self.patch_size, self.patch_size)
-        x = self.proj(x).view(L, self.hidden_size)
+        compact_image_patch_size = (
+            self.proj.in_channels * self.patch_size * self.patch_size
+        )
+        full_temporal_patch_size = compact_image_patch_size * self.temporal_patch_size
+
+        if compact_image_patch_size == C:
+            # Still images duplicate the same frame across the temporal axis,
+            # so summing Conv3D weights over time is the same projection.
+            weight = self.proj.weight.sum(dim=2).reshape(
+                self.hidden_size, compact_image_patch_size
+            )
+            x = F.linear(x, weight, self.proj.bias)
+        elif full_temporal_patch_size == C:
+            x = x.view(
+                L,
+                -1,
+                self.temporal_patch_size,
+                self.patch_size,
+                self.patch_size,
+            )
+            x = self.proj(x).view(L, self.hidden_size)
+        else:
+            raise ValueError(
+                "Qwen3-VL patch input has unexpected flattened size "
+                f"{C}; expected {compact_image_patch_size} for compact images "
+                f"or {full_temporal_patch_size} for temporal inputs."
+            )
         return x
 
 
@@ -1186,6 +1215,94 @@ class Qwen3VLDummyInputsBuilder(BaseDummyInputsBuilder[Qwen3VLProcessingInfo]):
         return video_items
 
 
+_QWEN3_VL_FUSED_COMPACT_PREPROCESS_NATIVE: Callable[
+    [
+        torch.Tensor,
+        Sequence[float],
+        Sequence[float],
+        float,
+        int,
+        int,
+    ],
+    torch.Tensor,
+] | None = None
+
+
+def _qwen3_vl_fused_compact_preprocess_uint8_bchw(
+    images: torch.Tensor,
+    image_mean: Sequence[float],
+    image_std: Sequence[float],
+    rescale_factor: float,
+    patch_size: int,
+    merge_size: int,
+) -> torch.Tensor:
+    """Normalize and patchify Qwen3-VL image tensors into compact patches.
+
+    Native hook signature:
+        (uint8_bchw, image_mean, image_std, rescale_factor, patch_size,
+         merge_size) -> float32 [N, C*P*P]
+
+    The Python fallback keeps B's compact image-patch contract while avoiding
+    the full intermediate normalized BCHW tensor.
+    """
+    if _QWEN3_VL_FUSED_COMPACT_PREPROCESS_NATIVE is not None:
+        return _QWEN3_VL_FUSED_COMPACT_PREPROCESS_NATIVE(
+            images,
+            image_mean,
+            image_std,
+            rescale_factor,
+            patch_size,
+            merge_size,
+        )
+
+    batch_size, channel, height, width = images.shape
+    grid_h = height // patch_size
+    grid_w = width // patch_size
+    block_h = grid_h // merge_size
+    block_w = grid_w // merge_size
+    source = images.reshape(
+        batch_size,
+        channel,
+        block_h,
+        merge_size,
+        patch_size,
+        block_w,
+        merge_size,
+        patch_size,
+    ).permute(0, 2, 5, 3, 6, 1, 4, 7)
+
+    fused_mean = (
+        torch.as_tensor(image_mean, dtype=torch.float32, device=images.device)
+        .view(1, 1, 1, 1, 1, channel, 1, 1)
+        .mul_(1.0 / rescale_factor)
+    )
+    fused_std = (
+        torch.as_tensor(image_std, dtype=torch.float32, device=images.device)
+        .view(1, 1, 1, 1, 1, channel, 1, 1)
+        .mul_(1.0 / rescale_factor)
+    )
+    pixel_values = torch.empty(
+        (
+            batch_size,
+            block_h,
+            block_w,
+            merge_size,
+            merge_size,
+            channel,
+            patch_size,
+            patch_size,
+        ),
+        dtype=torch.float32,
+        device=images.device,
+    )
+    torch.sub(source, fused_mean, out=pixel_values)
+    pixel_values.div_(fused_std)
+    return pixel_values.reshape(
+        batch_size * grid_h * grid_w,
+        channel * patch_size * patch_size,
+    )
+
+
 def _replace_video_token_placeholders(
     prompt_ids: list[int],
     target: list[int],
@@ -1230,6 +1347,206 @@ def _replace_video_token_placeholders(
 
 
 class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo]):
+    @staticmethod
+    def _batch_same_size_rgb_pil_images(images: object) -> object:
+        from PIL import Image as PILImage
+
+        if not isinstance(images, (list, tuple)) or len(images) == 0:
+            return images
+
+        first = images[0]
+        if not isinstance(first, PILImage.Image) or first.mode != "RGB":
+            return images
+
+        width, height = first.size
+        arrays = []
+        for image in images:
+            if (
+                not isinstance(image, PILImage.Image)
+                or image.mode != "RGB"
+                or image.size != (width, height)
+            ):
+                return images
+            arrays.append(np.asarray(image, dtype=np.uint8))
+
+        return torch.from_numpy(np.stack(arrays, axis=0)).permute(0, 3, 1, 2)
+
+    @staticmethod
+    def _can_fast_preprocess_batched_images(
+        image_processor: Qwen2VLImageProcessorFast,
+        images: object,
+        processor_kwargs: Mapping[str, object],
+    ) -> bool:
+        if not isinstance(images, torch.Tensor):
+            return False
+        if images.ndim != 4 or images.dtype != torch.uint8:
+            return False
+
+        try:
+            mean_channels = len(image_processor.image_mean)
+            std_channels = len(image_processor.image_std)
+        except TypeError:
+            return False
+        if images.shape[1] != mean_channels or images.shape[1] != std_channels:
+            return False
+        if not image_processor.do_rescale or not image_processor.do_normalize:
+            return False
+
+        ignored_kwargs = {"disable_grouping"}
+        if any(key not in ignored_kwargs for key in processor_kwargs):
+            return False
+
+        if not image_processor.do_resize:
+            height, width = images.shape[-2:]
+            factor = image_processor.patch_size * image_processor.merge_size
+            return height % factor == 0 and width % factor == 0
+
+        return True
+
+    @staticmethod
+    def _fast_preprocess_batched_images(
+        image_processor: Qwen2VLImageProcessorFast,
+        images: torch.Tensor,
+        return_tensors: str | None = None,
+        **kwargs: object,
+    ) -> BatchFeature:
+        patch_size = image_processor.patch_size
+        merge_size = image_processor.merge_size
+        if image_processor.do_resize:
+            height, width = images.shape[-2:]
+            resized_height, resized_width = image_smart_resize(
+                height,
+                width,
+                factor=patch_size * merge_size,
+                min_pixels=image_processor.size.shortest_edge,
+                max_pixels=image_processor.size.longest_edge,
+            )
+            if (resized_height, resized_width) != (height, width):
+                images = image_processor.resize(
+                    image=images,
+                    size=SizeDict(height=resized_height, width=resized_width),
+                    resample=image_processor.resample,
+                )
+
+        batch_size, channel, height, width = images.shape
+        grid_h = height // patch_size
+        grid_w = width // patch_size
+        if (
+            images.dtype == torch.uint8
+            and image_processor.do_rescale
+            and image_processor.do_normalize
+        ):
+            pixel_values = _qwen3_vl_fused_compact_preprocess_uint8_bchw(
+                images,
+                image_processor.image_mean,
+                image_processor.image_std,
+                image_processor.rescale_factor,
+                patch_size,
+                merge_size,
+            )
+        else:
+            patches = image_processor.rescale_and_normalize(
+                images,
+                image_processor.do_rescale,
+                image_processor.rescale_factor,
+                image_processor.do_normalize,
+                image_processor.image_mean,
+                image_processor.image_std,
+            )
+            batch_size, channel, height, width = patches.shape
+            grid_h = height // patch_size
+            grid_w = width // patch_size
+            patches = patches.reshape(
+                batch_size,
+                channel,
+                grid_h // merge_size,
+                merge_size,
+                patch_size,
+                grid_w // merge_size,
+                merge_size,
+                patch_size,
+            )
+            patches = patches.permute(0, 2, 5, 3, 6, 1, 4, 7).contiguous()
+            pixel_values = patches.reshape(
+                batch_size * grid_h * grid_w,
+                channel * patch_size * patch_size,
+            )
+        image_grid_thw = torch.tensor(
+            [[1, grid_h, grid_w]] * batch_size,
+            dtype=torch.long,
+        )
+        return BatchFeature(
+            data={
+                "pixel_values": pixel_values,
+                "image_grid_thw": image_grid_thw,
+            },
+            tensor_type=return_tensors,
+        )
+
+
+    def _apply_hf_processor_mm_only(
+        self,
+        mm_items: MultiModalDataItems,
+        hf_processor_mm_kwargs: Mapping[str, object],
+        tokenization_kwargs: Mapping[str, object],
+    ) -> BatchFeature:
+        mm_counts = mm_items.get_all_counts()
+        if mm_counts.get("video", 0) > 0:
+            return super()._apply_hf_processor_mm_only(
+                mm_items,
+                hf_processor_mm_kwargs,
+                tokenization_kwargs,
+            )
+
+        valid_mm_items = mm_items.select(
+            {modality for modality, count in mm_counts.items() if count > 0}
+        )
+        processor_data, passthrough_data = self._get_hf_mm_data(valid_mm_items)
+        if set(processor_data) != {"images"}:
+            return super()._apply_hf_processor_mm_only(
+                mm_items,
+                hf_processor_mm_kwargs,
+                tokenization_kwargs,
+            )
+
+        batched_images = self._batch_same_size_rgb_pil_images(
+            processor_data["images"]
+        )
+        prebatched_images = batched_images is not processor_data["images"]
+        if prebatched_images:
+            processor_data = dict(processor_data)
+            processor_data["images"] = batched_images
+
+        # The direct image-processor path does not consume tokenizer kwargs.
+        # Passing tokenizer-only options such as `truncation` into
+        # Qwen2VLImageProcessor makes Transformers validate them as image
+        # kwargs and raise.
+        processor_kwargs = dict(hf_processor_mm_kwargs)
+        if not prebatched_images:
+            processor_kwargs.setdefault("disable_grouping", False)
+        processor_kwargs.pop("return_mm_token_type_ids", None)
+        processor_kwargs.pop("return_token_type_ids", None)
+
+        image_processor = self.info.get_image_processor(**hf_processor_mm_kwargs)
+        if self._can_fast_preprocess_batched_images(
+            image_processor,
+            processor_data["images"],
+            processor_kwargs,
+        ):
+            processed_data = self.info.ctx.call_hf_processor(
+                partial(self._fast_preprocess_batched_images, image_processor),
+                processor_data,
+                processor_kwargs,
+            )
+        else:
+            processed_data = self.info.ctx.call_hf_processor(
+                image_processor,
+                processor_data,
+                processor_kwargs,
+            )
+        processed_data.update(passthrough_data)
+        return processed_data
+
     def _call_hf_processor(
         self,
         prompt: str,
@@ -1824,9 +2141,12 @@ class Qwen3VLForConditionalGeneration(
         # prune+append for video). The encoder CUDA graph path bypasses that
         # post-process, producing inconsistent embedding formats vs eager. So
         # disable CUDA graph for all modalities when pruning is on.
-        modalities = [] if self.is_multimodal_pruning_enabled else ["image", "video"]
+        modalities = [] if self.is_multimodal_pruning_enabled else ["video"]
 
-        # Compute max_frames_per_video for budget sizing.
+        # Compact image patches have a different per-patch width than videos.
+        # The current encoder CUDA graph manager captures one shared input
+        # buffer for image and video, so keep CUDA graph capture on the
+        # unchanged video path and route images through eager vision forward.
         max_frames = self.get_max_frames_per_video() if "video" in modalities else 1
 
         return EncoderCudaGraphConfig(
