@@ -858,6 +858,7 @@ class GPUModelRunner(
         self._num_valid_draft_tokens_cpu: torch.Tensor | None = None
         self._num_valid_draft_tokens_event: torch.Event | None = None
         self._num_valid_draft_tokens_copy_stream: torch.cuda.Stream | None = None
+        self._ngram_invalid_spec_tokens: dict[str, int] | None = None
         if (
             self.speculative_config is not None
             and self.speculative_config.use_ngram_gpu()
@@ -1202,6 +1203,7 @@ class GPUModelRunner(
             self.speculative_config is not None
             and self.speculative_config.use_ngram_gpu()
         )
+        self._ngram_invalid_spec_tokens = None
         if is_ngram_gpu:
             ngram_gpu_new_reqs: list[CachedRequestState] = []
 
@@ -1289,11 +1291,16 @@ class GPUModelRunner(
         ):
             for req_id, toks in scheduled_spec_tokens.items():
                 original_num_spec_per_req[req_id] = len(toks)
-            update_scheduler_for_invalid_drafts(
-                self._num_valid_draft_tokens_event,
-                self._num_valid_draft_tokens_cpu,
-                scheduler_output,
-                self.input_batch.req_id_to_index,
+            assert self._num_valid_draft_tokens_event is not None
+            assert self._num_valid_draft_tokens_cpu is not None
+            self._ngram_invalid_spec_tokens = (
+                update_scheduler_for_invalid_drafts(
+                    self._num_valid_draft_tokens_event,
+                    self._num_valid_draft_tokens_cpu,
+                    scheduler_output,
+                    self.input_batch.req_id_to_index,
+                )
+                or None
             )
         if self.use_async_spec_decode:
             self.prev_num_draft_tokens.np.fill(0)
@@ -4630,6 +4637,11 @@ class GPUModelRunner(
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
                 routed_experts=None,
+                ngram_invalid_spec_tokens=(
+                    self._ngram_invalid_spec_tokens.copy()
+                    if self._ngram_invalid_spec_tokens
+                    else None
+                ),
             )
 
         if not self.use_async_scheduling:
