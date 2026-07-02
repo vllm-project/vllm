@@ -810,9 +810,15 @@ class Scheduler(SchedulerInterface):
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
                     # Pad new decode requests to uniform spec decoding size to
-                    # preserve full cudagraph for this step.
+                    # preserve full cudagraph for this step. Not for diffusion
+                    # (num_sampled_tokens_per_step == 0): its spec tokens are
+                    # the fixed-size denoising canvas, not rejectable drafts,
+                    # so a padded 1 + num_spec_tokens span overflows the
+                    # canvas (hit by resumed requests whose prompt
+                    # prefix-caches to all but one token).
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        and self.num_sampled_tokens_per_step > 0
                         and num_new_tokens == 1
                         and (scheduled_running_reqs and not prefill_scheduled)
                     ):
