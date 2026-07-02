@@ -6,7 +6,7 @@ use serde_json::Value;
 use serde_with::SerializeDisplay;
 use validator::Validate;
 use vllm_chat::ReasoningEffort;
-use vllm_engine_core_client::protocol::RepetitionDetectionParams;
+use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{

@@ -22,13 +22,14 @@ use crate::protocol::multimodal::{
     MmFeatureSpec, MmField, MmFieldElem, MmFlatField, MmKwargValue, MmSlice, PlaceholderRange,
     SliceSpec,
 };
+use crate::protocol::output::{
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, decode_engine_core_outputs,
+};
+use crate::protocol::request::{EngineCoreRequest, EngineCoreRequestType};
+use crate::protocol::sampling::EngineCoreSamplingParams;
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::tensor::WireTensor;
 use crate::protocol::utility::{UtilityOutput, UtilityResultEnvelope};
-use crate::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
-    EngineCoreRequestType, EngineCoreSamplingParams, decode_engine_core_outputs,
-};
 use crate::test_utils::{
     IpcNamespace, setup_bootstrapped_mock_engine, setup_mock_engine_sockets,
     setup_mock_engine_with_init, spawn_mock_engine_task,

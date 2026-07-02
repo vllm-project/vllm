@@ -21,7 +21,7 @@ use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
     CollectedAssistantMessage, FinishReason,
 };
-use vllm_engine_core_client::protocol::StopReason;
+use vllm_engine_core_client::protocol::output::StopReason;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 use crate::config::ApiServerOptions;
@@ -825,7 +825,7 @@ mod tests {
     use vllm_chat::{
         AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatEvent, FinishReason,
     };
-    use vllm_engine_core_client::protocol::StopReason;
+    use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
     use super::{
