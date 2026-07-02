@@ -1353,7 +1353,7 @@ def _hisparse_host_pool_bytes(
         return None
     if config.host_pool_gib is not None:
         return int(config.host_pool_gib * 2**30)
-    return config.host_to_device_ratio * available_memory
+    return int(config.host_to_device_ratio * available_memory)
 
 
 def get_kv_cache_config_from_groups(

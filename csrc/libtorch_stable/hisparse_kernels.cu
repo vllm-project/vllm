@@ -610,7 +610,10 @@ void hisparse_gather_plan(torch::stable::Tensor const& source_cache,
     return;
   }
 
-  constexpr int kBlockSize = 256;
+  // Match the swap-in kernel's block size: the gather serves 3 of every 4
+  // layers' misses (index-sharing replay), so per-row copy parallelism is
+  // the throughput limiter on cold rows.
+  constexpr int kBlockSize = 1024;
   const torch::stable::accelerator::DeviceGuard device_guard(hot_cache.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
   hisparse_gather_plan_kernel<kBlockSize><<<num_rows, kBlockSize, 0, stream>>>(

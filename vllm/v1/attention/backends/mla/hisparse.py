@@ -55,32 +55,11 @@ def is_hisparse_decode_batch(
     return max_query_len == 1 and num_reqs == num_actual_tokens
 
 
-def validate_hisparse_decode_batch(
-    *,
-    max_query_len: int,
-    num_reqs: int,
-    num_actual_tokens: int,
-) -> None:
-    if is_hisparse_decode_batch(
-        max_query_len=max_query_len,
-        num_reqs=num_reqs,
-        num_actual_tokens=num_actual_tokens,
-    ):
-        return
-
-    raise NotImplementedError(
-        "HiSparse decode hot-buffer mode only supports pure decode batches. "
-        "Prefill or mixed sparse MLA batches would need full logical GPU KV "
-        "or a prefill host-staging path; use a decode-only/disaggregated "
-        "deployment for this experimental path."
-    )
-
-
 @dataclass(frozen=True)
 class HiSparseConfig:
     top_k: int
     device_buffer_size: int
-    host_to_device_ratio: int
+    host_to_device_ratio: float
     host_pool_gib: float | None = None
 
     @classmethod
@@ -102,7 +81,7 @@ class HiSparseConfig:
         top_k = int(raw_config.get("top_k", model_top_k))
         device_buffer_size = int(raw_config["device_buffer_size"])
         # Optional: only used to size the host pool when host_pool_gib is unset.
-        host_to_device_ratio = int(raw_config.get("host_to_device_ratio", 2))
+        host_to_device_ratio = float(raw_config.get("host_to_device_ratio", 2))
         host_pool_gib = raw_config.get("host_pool_gib")
         host_pool_gib = None if host_pool_gib is None else float(host_pool_gib)
 
@@ -377,23 +356,11 @@ class HiSparseCoordinator:
         # executes inside the FULL_DECODE_ONLY CUDA graph; a cross-stream wait
         # there raises "dependency created on uncaptured work in another stream"
         # and aborts graph capture (the bug that previously forced enforce_eager).
-        # Running the backup on the capture stream is graph-safe. The per-step
-        # decode backup is only the batch's newest rows (tiny), so losing the
-        # async overlap is negligible; the one-time prefill backup is synchronous
-        # but prefill is not graph-captured. SGLang reclaims the overlap by doing
-        # the backup eagerly in the scheduler prepare phase -- a future option,
-        # toggleable here via VLLM_HISPARSE_ASYNC_BACKUP=1 (only safe with
-        # cudagraphs disabled).
-        _async_backup = (
-            os.environ.get("VLLM_HISPARSE_ASYNC_BACKUP", "0") == "1"
-            and self.device.type == "cuda"
-            and self._use_cuda_ops
-        )
-        self._backup_stream = (
-            torch.cuda.Stream(device=self.device) if _async_backup else None
-        )
-        self._backup_done_event = torch.cuda.Event() if _async_backup else None
-        self._has_pending_backup = False
+        # Running the backup on the capture stream is graph-safe, and the
+        # per-step decode backup is only the batch's newest rows (tiny), so
+        # there is no overlap worth reclaiming. (SGLang overlaps its backup by
+        # issuing it from the scheduler prepare phase, outside capture -- the
+        # only sound place for a future async variant.)
         if not self._use_cuda_ops:
             logger.warning_once(
                 "HiSparse CUDA ops (_C_cache_ops.hisparse_swap_in/backup) are "
@@ -480,13 +447,11 @@ class HiSparseCoordinator:
 
     def reset_hot_state(self) -> None:
         """Drop all hot-buffer bookkeeping (hits become misses)."""
-        self.wait_for_pending_backup()
         self.device_global_indices.fill_(-1)
         self.lru_slots.copy_(self._lru_init.expand_as(self.lru_slots))
 
     def reset_hot_rows(self, rows: torch.Tensor) -> None:
         """Drop hot-buffer bookkeeping for newly assigned batch rows."""
-        self.wait_for_pending_backup()
         if rows.numel() == 0:
             return
         rows = rows[(rows >= 0) & (rows < self.max_num_reqs)]
@@ -494,13 +459,6 @@ class HiSparseCoordinator:
             return
         self.device_global_indices[rows] = -1
         self.lru_slots[rows] = self._lru_init
-
-    def wait_for_pending_backup(self) -> None:
-        if not self._has_pending_backup:
-            return
-        assert self._backup_done_event is not None
-        self._backup_done_event.wait(torch.cuda.current_stream(self.device))
-        self._has_pending_backup = False
 
     def _invalidate_hot_copies(self, slots: torch.Tensor) -> None:
         stale = torch.isin(
@@ -517,7 +475,6 @@ class HiSparseCoordinator:
         mirror mode the stale host rows must not be preferred over the
         rewritten GPU source rows.
         """
-        self.wait_for_pending_backup()
         if self._source_cache is None:
             return
         self._invalidate_hot_copies(slots)
@@ -538,32 +495,13 @@ class HiSparseCoordinator:
         dst_slots: torch.Tensor,
     ) -> None:
         assert self._host_cache is not None and self._host_cache_valid is not None
-        if self._backup_stream is None:
-            torch.ops._C_cache_ops.hisparse_backup(
-                src_cache,
-                src_indices,
-                self._host_cache,
-                self._host_cache_valid,
-                dst_slots,
-            )
-            return
-
-        self.wait_for_pending_backup()
-        current_stream = torch.cuda.current_stream(self.device)
-        with torch.cuda.stream(self._backup_stream):
-            self._backup_stream.wait_stream(current_stream)
-            torch.ops._C_cache_ops.hisparse_backup(
-                src_cache,
-                src_indices,
-                self._host_cache,
-                self._host_cache_valid,
-                dst_slots,
-            )
-            assert self._backup_done_event is not None
-            self._backup_done_event.record(self._backup_stream)
-            for tensor in (src_cache, src_indices, dst_slots):
-                tensor.record_stream(self._backup_stream)
-        self._has_pending_backup = True
+        torch.ops._C_cache_ops.hisparse_backup(
+            src_cache,
+            src_indices,
+            self._host_cache,
+            self._host_cache_valid,
+            dst_slots,
+        )
 
     # -------------------------------------------------------------- mirroring
 
@@ -739,17 +677,14 @@ class HiSparseCoordinator:
 
         # When slot_mapping is None (mixed batches: the newest rows were
         # written to the global store, not the reserved hot slots), newest
-        # tokens are resolved like any other entry (miss -> host load).
+        # tokens are resolved like any other entry (miss -> host load); the
+        # backup kernel runs stream-ordered, so those rows are already
+        # visible in the host pool.
         newest_global = (
             slot_mapping[:num_tokens].to(torch.int32).contiguous()
             if slot_mapping is not None
             else None
         )
-        if newest_global is None:
-            # Mixed batches do not use the reserved newest slot, so a selected
-            # newly written row must be visible in the host pool before miss
-            # handling can read it.
-            self.wait_for_pending_backup()
 
         # For a plan producer, resolve into the group-shared buffers so the
         # group's shared layers can replay the identical plan.
@@ -757,6 +692,10 @@ class HiSparseCoordinator:
             self._plan.global_indices[:num_tokens].copy_(global_indices)
             hot_indices = self._plan.hot_indices[:num_tokens]
             miss_mask = self._plan.miss_mask[:num_tokens]
+            # The kernel skips CUDA-graph padding rows, so their entries in
+            # the persistent plan buffer would otherwise keep stale values;
+            # refill so padded rows come out -1 (masked by attention).
+            hot_indices.fill_(-1)
         else:
             hot_indices = torch.full_like(global_indices, -1)
             miss_mask = None
@@ -1019,8 +958,6 @@ class HiSparseCoordinator:
                 0, gpu_src
             )
         self.hot_cache.index_copy_(0, dst, rows)
-
-        return hot_indices
 
 
 def create_hisparse_coordinator(
