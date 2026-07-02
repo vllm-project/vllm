@@ -2919,6 +2919,7 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.kv_event_publisher = Mock()
     scheduler.finished_req_ids = set()
     scheduler.finished_req_ids_dict = None
+    scheduler._pending_grammar_error_outputs = []
     scheduler.vllm_config = Mock()
     scheduler.vllm_config.model_config.enable_return_routed_experts = False
     scheduler.enable_return_routed_experts = False
@@ -4225,6 +4226,59 @@ def test_remote_kv_promotion_keeps_fcfs_with_grammar_prefix():
         req_remote.request_id,
         req_tail.request_id,
     ]
+
+
+def test_grammar_compilation_failure_does_not_crash_engine():
+    """A request whose grammar fails to compile must fail just that request
+    (as a validation error) instead of propagating and crashing the engine.
+
+    Regression test for https://github.com/vllm-project/vllm/issues/43920.
+    """
+
+    class _RaisingStructuredOutputRequest:
+        """Stand-in whose ``grammar`` access raises, as a real
+        ``StructuredOutputRequest`` does when backend compilation fails."""
+
+        @property
+        def grammar(self):
+            raise ValueError("Failed to compile structured output grammar: boom")
+
+    scheduler = create_scheduler()
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+
+    # Move the request into the blocked-waiting state with a grammar that will
+    # raise on access, then route it through the skipped-waiting queue.
+    request.status = RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR
+    request.structured_output_request = _RaisingStructuredOutputRequest()
+    scheduler.waiting.remove_requests([request])
+    scheduler.skipped_waiting.add_request(request)
+
+    # schedule() must not raise; the offending request is finished and freed.
+    scheduler_output = scheduler.schedule()
+
+    assert not scheduler_output.scheduled_new_reqs
+    assert request.status == RequestStatus.FINISHED_ERROR
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.running
+
+    # The buffered validation error surfaces on the next update_from_output().
+    empty_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+    engine_core_outputs = scheduler.update_from_output(scheduler_output, empty_output)
+
+    outputs = engine_core_outputs[request.client_index].outputs
+    assert len(outputs) == 1
+    assert outputs[0].request_id == request.request_id
+    assert outputs[0].finish_reason == FinishReason.VALIDATION
+    # Buffer is drained after emission.
+    assert not scheduler._pending_grammar_error_outputs
 
 
 def test_fcfs_mixed_skipped_waiting_types_keep_order():

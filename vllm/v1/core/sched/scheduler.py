@@ -51,7 +51,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -182,6 +187,11 @@ class Scheduler(SchedulerInterface):
         # requests skipped in waiting flow due async deps or constraints.
         self.skipped_waiting = create_request_queue(self.policy)
         self.running: list[Request] = []
+
+        # Buffer for error outputs from structured output grammar compilation
+        # failures detected during schedule(); merged into the outputs in the
+        # following update_from_output() call.
+        self._pending_grammar_error_outputs: list[tuple[int, EngineCoreOutput]] = []
 
         # The request IDs that are finished in between the previous and the
         # current steps. This is used to notify the workers about the finished
@@ -654,6 +664,12 @@ class Scheduler(SchedulerInterface):
                 if self._is_blocked_waiting_status(
                     request.status
                 ) and not self._try_promote_blocked_waiting_request(request):
+                    if request.is_finished():
+                        # Grammar compilation failed: the request was already
+                        # finished and freed inside the promotion helper, and an
+                        # error output buffered. Drop it from the queue.
+                        request_queue.pop_request()
+                        continue
                     if request.status == RequestStatus.WAITING_FOR_REMOTE_KVS:
                         logger.debug(
                             "%s is still in WAITING_FOR_REMOTE_KVS state.",
@@ -1804,6 +1820,13 @@ class Scheduler(SchedulerInterface):
             batch = KVEventBatch(ts=time.time(), events=events)
             self.kv_event_publisher.publish(batch)
 
+        # Merge buffered grammar compilation error outputs produced during
+        # schedule() (requests that never entered the running batch).
+        if self._pending_grammar_error_outputs:
+            for client_index, error_output in self._pending_grammar_error_outputs:
+                outputs[client_index].append(error_output)
+            self._pending_grammar_error_outputs.clear()
+
         # Create EngineCoreOutputs for all clients that have requests with
         # outputs in this step.
         engine_core_outputs = {
@@ -2442,8 +2465,33 @@ class Scheduler(SchedulerInterface):
             return True
 
         if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
-            structured_output_req = request.structured_output_request
-            if not (structured_output_req and structured_output_req.grammar):
+            try:
+                structured_output_req = request.structured_output_request
+                if not (structured_output_req and structured_output_req.grammar):
+                    return False
+            except ValueError as e:
+                # Grammar compilation failed for this request. Fail just this
+                # request (as a 400-level validation error) instead of letting
+                # the exception propagate and crash the engine core.
+                logger.error(
+                    "Structured output grammar compilation failed for request %s: %s",
+                    request.request_id,
+                    e,
+                )
+                request.status = RequestStatus.FINISHED_ERROR
+                self._free_request(request)
+                self._pending_grammar_error_outputs.append(
+                    (
+                        request.client_index,
+                        EngineCoreOutput(
+                            request_id=request.request_id,
+                            new_token_ids=[],
+                            finish_reason=FinishReason.VALIDATION,
+                        ),
+                    )
+                )
+                # Not promoted; caller detects the finished status and drops
+                # the request from the queue without re-queueing it.
                 return False
             request.status = RequestStatus.WAITING
             return True
