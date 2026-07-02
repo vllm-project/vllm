@@ -208,6 +208,9 @@ pub struct Config {
     /// Maximum idle time on a keep-alive HTTP connection before the server
     /// closes it (`VLLM_HTTP_TIMEOUT_KEEP_ALIVE`, default 5s).
     pub keep_alive_timeout: Duration,
+    /// When `true`, hot-reload the TLS certificate/key/CA from disk when the
+    /// files change. Ignored when TLS is off.
+    pub enable_ssl_refresh: bool,
 }
 
 impl Config {

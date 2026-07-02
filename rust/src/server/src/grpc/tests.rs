@@ -35,6 +35,7 @@ use super::{GenerateServer, GenerateServiceImpl, pb};
 use crate::listener::{Listener, MaybeTlsListener};
 use crate::state::AppState;
 use crate::tls;
+use crate::tls_reload::ReloadableTls;
 use crate::tls_tests::{TestCerts, server_tls};
 
 // ========================================================================================
@@ -291,7 +292,7 @@ async fn grpc_tls_test_server(
     let addr = listener.local_addr().expect("local addr").to_string();
 
     let server_task = tokio::spawn(async move {
-        let incoming = MaybeTlsListener::tls(Listener::Tcp(listener), context);
+        let incoming = MaybeTlsListener::tls(Listener::Tcp(listener), ReloadableTls::new(context));
         TonicServer::builder()
             .add_service(svc)
             .serve_with_incoming(incoming)

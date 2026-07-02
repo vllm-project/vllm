@@ -290,6 +290,11 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub ssl_ciphers: Option<String>,
 
+    /// Reload the TLS certificate/key/CA from disk when the files change.
+    #[arg(long)]
+    #[serde(default)]
+    pub enable_ssl_refresh: bool,
+
     /// Unsupported Python vLLM frontend arguments recognized but not yet
     /// implemented in Rust.
     #[educe(Debug(ignore))]
@@ -377,6 +382,7 @@ impl SharedRuntimeArgs {
             grpc_port: self.grpc_port,
             shutdown_timeout,
             keep_alive_timeout,
+            enable_ssl_refresh: self.enable_ssl_refresh,
         }
     }
 
@@ -427,6 +433,7 @@ impl SharedRuntimeArgs {
             grpc_port: self.grpc_port,
             shutdown_timeout,
             keep_alive_timeout,
+            enable_ssl_refresh: self.enable_ssl_refresh,
         }
     }
 
