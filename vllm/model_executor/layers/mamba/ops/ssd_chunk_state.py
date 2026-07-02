@@ -8,10 +8,28 @@
 
 import torch
 
+import vllm.envs as envs
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.allocation import set_triton_allocator
 
 from .mamba_ssm import softplus
+
+# Devices whose Triton scratch allocator has already been configured for the
+# TD store path. The allocator is a global singleton, so set it once per device
+# at first use rather than on every forward pass
+_TD_ALLOCATOR_DEVICES: set[torch.device] = set()
+
+
+@triton.jit
+def _td_store_2d(
+    base, value, rows, cols, srow, scol, roff, coff, BR: tl.constexpr, BC: tl.constexpr
+):
+    desc = tl.make_tensor_descriptor(
+        base, shape=[rows, cols], strides=[srow, scol], block_shape=[BR, BC]
+    )
+    desc.store([roff, coff], value)
 
 
 @triton.autotune(
@@ -55,6 +73,8 @@ def _chunk_cumsum_fwd_kernel(
     HAS_DT_BIAS: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr,
     BLOCK_SIZE_CHUNK: tl.constexpr,
+    # TD path gate; dead-code-eliminated when False.
+    USE_TD: tl.constexpr = False,
 ):
     # if dt is long, may cause problems, so use 64 bit
     # https://github.com/triton-lang/triton/issues/1058
@@ -99,11 +119,29 @@ def _chunk_cumsum_fwd_kernel(
     dt = tl.where(
         (offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size_limit), dt, 0.0
     )
-    tl.store(
-        dt_out_ptrs,
-        dt,
-        mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size),
-    )
+    if USE_TD:
+        # TD store of dt_out [BLOCK_SIZE_H, BLOCK_SIZE_CHUNK]; shape bounds zero
+        # heads >= nheads and csize >= chunk_size, replacing the store mask.
+        tl.static_assert((BLOCK_SIZE_H & (BLOCK_SIZE_H - 1)) == 0)
+        tl.static_assert((BLOCK_SIZE_CHUNK & (BLOCK_SIZE_CHUNK - 1)) == 0)
+        _td_store_2d(
+            dt_out_ptr,
+            dt,
+            nheads,
+            chunk_size,
+            stride_dt_out_head,
+            stride_dt_out_csize,
+            pid_h * BLOCK_SIZE_H,
+            0,
+            BLOCK_SIZE_H,
+            BLOCK_SIZE_CHUNK,
+        )
+    else:
+        tl.store(
+            dt_out_ptrs,
+            dt,
+            mask=(offs_h[:, None] < nheads) & (offs_c[None, :] < chunk_size),
+        )
     A = tl.load(A_ptrs, mask=offs_h < nheads, other=0.0).to(tl.float32)
     dA = dt * A[:, None]
     dA_cs = tl.cumsum(dA, axis=1)
@@ -308,6 +346,7 @@ def _chunk_cumsum_fwd(
     dt_bias=None,
     dt_softplus=False,
     dt_limit=(0.0, float("inf")),
+    use_td=None,
 ):
     seqlen, nheads = dt.shape
     assert A.shape == (nheads,)
@@ -321,6 +360,18 @@ def _chunk_cumsum_fwd(
         nheads, nchunks, chunk_size, device=dt.device, dtype=torch.float32
     )
     grid_chunk_cs = lambda META: (nchunks, triton.cdiv(nheads, META["BLOCK_SIZE_H"]))
+
+    # TD toggle. Callers (e.g. tests) may force it explicitly; otherwise fall
+    # back to the tri-state env VLLM_TRITON_USE_TD (unset -> auto on XPU).
+    if use_td is None:
+        td_override = envs.VLLM_TRITON_USE_TD
+        use_td = current_platform.is_xpu() if td_override is None else td_override
+    # TD store of dt_out needs the chunk-size (last) dim contiguous.
+    use_td = use_td and dt_out.stride(2) == 1
+    if use_td and dt.device not in _TD_ALLOCATOR_DEVICES:
+        set_triton_allocator(dt.device)
+        _TD_ALLOCATOR_DEVICES.add(dt.device)
+
     with torch.accelerator.device_index(dt.device.index):
         _chunk_cumsum_fwd_kernel[grid_chunk_cs](
             dt_ptr=dt,
@@ -346,6 +397,7 @@ def _chunk_cumsum_fwd(
             DT_SOFTPLUS=dt_softplus,
             HAS_DT_BIAS=dt_bias is not None,
             BLOCK_SIZE_CHUNK=triton.next_power_of_2(chunk_size),
+            USE_TD=use_td,
         )
     return dA_cumsum, dt_out
 
