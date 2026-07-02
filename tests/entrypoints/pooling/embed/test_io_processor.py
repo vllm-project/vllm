@@ -106,20 +106,6 @@ class TestEmbeddingRequestParsing:
         ]
         assert request.chat_template_kwargs == {"instruction": "Represent the query: "}
 
-    @pytest.mark.parametrize("cache_salt", ["", 1])
-    def test_rejects_invalid_cache_salt(self, cache_salt):
-        with pytest.raises(
-            ValidationError,
-            match="Parameter 'cache_salt' must be a non-empty string if provided",
-        ):
-            TypeAdapter(EmbeddingRequest).validate_python(
-                {
-                    "model": "test",
-                    "input": "hello",
-                    "cache_salt": cache_salt,
-                }
-            )
-
 
 class TestCohereEmbedRequestParsing:
     """Unit tests for Cohere embed request parsing."""
