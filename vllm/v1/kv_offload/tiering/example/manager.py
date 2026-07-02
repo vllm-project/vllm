@@ -13,7 +13,14 @@ import logging
 from collections.abc import Iterable
 from typing import TYPE_CHECKING
 
-from vllm.v1.kv_offload.base import OffloadKey, ReqContext
+from typing_extensions import override
+
+from vllm.v1.kv_offload.base import (
+    LookupResult,
+    OffloadKey,
+    ReqContext,
+    RequestOffloadingContext,
+)
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -61,10 +68,11 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         # key -> True (only care about presence)
         self.blocks: dict[OffloadKey, bool] = {}
 
-        # Completed jobs waiting to be retrieved by get_finished()
+        # Completed jobs waiting to be retrieved by get_finished_jobs()
         self.completed_jobs: list[JobResult] = []
 
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    @override
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """
         Check whether a block exists in this secondary tier.
 
@@ -73,10 +81,11 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
             req_context: Per-request context.
 
         Returns:
-            True if the block is present, False if not found.
+            HIT if the block is present, MISS if not found.
         """
-        return key in self.blocks
+        return LookupResult.HIT if key in self.blocks else LookupResult.MISS
 
+    @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
         """
         Submit a job to store blocks from primary tier to this tier.
@@ -96,6 +105,7 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
             self.blocks[key] = True
         self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
+    @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
         """
         Submit a job to load blocks from this tier to primary tier.
@@ -120,7 +130,8 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
 
         self.completed_jobs.append(JobResult(job_id=job_metadata.job_id, success=True))
 
-    def get_finished(self) -> Iterable[JobResult]:
+    @override
+    def get_finished_jobs(self) -> Iterable[JobResult]:
         """
         Poll for finished jobs.
 
@@ -131,6 +142,16 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         result = self.completed_jobs
         self.completed_jobs = []
         return result
+
+    @override
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return RequestOffloadingContext()
+
+    @override
+    def drain_jobs(self) -> None:
+        """Synchronous tier — submit_*() returns only after the operation
+        completes, so there is nothing to wait for."""
+        return
 
     def get_num_blocks(self) -> int:
         """Get the number of blocks currently stored in this tier."""

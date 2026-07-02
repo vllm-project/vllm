@@ -22,12 +22,17 @@ from torch.nn.attention.flex_attention import (
 )
 
 import vllm.envs as envs
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention import Attention
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
-from vllm.utils.torch_utils import is_quantized_kv_cache, is_torch_equal_or_newer
+from vllm.utils.torch_utils import (
+    async_tensor_h2d,
+    is_quantized_kv_cache,
+    is_torch_equal_or_newer,
+)
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -57,7 +62,7 @@ def _offsets_to_doc_ids_tensor(
     doc_ids = torch.repeat_interleave(
         torch.arange(len(counts), dtype=torch.int32), counts
     )
-    return doc_ids.to(device, non_blocking=True)
+    return async_tensor_h2d(doc_ids, device=device)
 
 
 def pad_to_multiple(x: torch.Tensor, multiple: int, dim: int):
@@ -125,7 +130,15 @@ class FlexAttentionBackend(AttentionBackend):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            return (1, 0, 3, 2, 4, 5)
+        return (0, 2, 1, 3, 4)
 
     @staticmethod
     def get_builder_cls() -> type["FlexAttentionMetadataBuilder"]:
@@ -395,6 +408,11 @@ class FlexAttentionMetadata:
     sliding_window: int | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
     block_sparsity_hint: BlockSparsityHint | None = None
+    # Reference Sliding Window Attention (R-SWA): per-request prefix length
+    # (prompt/image tokens stay globally visible) plus a sliding window over
+    # generated tokens. Both must be set to enable.
+    rswa_prefix_lens: torch.Tensor | None = None
+    rswa_window: int | None = None
 
     @cached_property
     def logical_block_ids(self):
@@ -558,6 +576,52 @@ class FlexAttentionMetadata:
 
         return final_mask_mod
 
+    def get_rswa_mask_mod(self) -> _mask_mod_signature:
+        """Creates the Reference Sliding Window Attention (R-SWA) mask_mod.
+
+        R-SWA keeps the whole prefix (image + prompt tokens, i.e. logical index
+        ``< prefix_len``) globally visible while generated tokens additionally
+        attend a fixed sliding window of recent tokens. This term is combined
+        with the base causal mask via logical AND, so it only ever *removes*
+        far-away generated tokens that fall outside the window and outside the
+        prefix.
+        """
+
+        assert self.doc_ids is not None
+        assert self.rswa_prefix_lens is not None
+        assert self.rswa_window is not None
+        doc_ids = self.doc_ids
+        prefix_lens = self.rswa_prefix_lens
+        window = self.rswa_window
+
+        def rswa_mask_mod(
+            q_req: torch.Tensor,
+            logical_q_idx: torch.Tensor,
+            logical_kv_idx: torch.Tensor,
+        ) -> torch.Tensor:
+            prefix_len = prefix_lens[q_req]
+            in_prefix = logical_kv_idx < prefix_len
+            in_window = (logical_q_idx - logical_kv_idx) < window
+            return in_prefix | in_window
+
+        def final_mask_mod(
+            b: torch.Tensor,
+            h: torch.Tensor,
+            q_idx: torch.Tensor,
+            physical_kv_idx: torch.Tensor,
+        ) -> torch.Tensor:
+            (is_valid, logical_q_idx, logical_kv_idx) = (
+                self._convert_physical_to_logical(doc_ids, q_idx, physical_kv_idx)
+            )
+            q_req = doc_ids[q_idx]
+            return torch.where(
+                is_valid,
+                rswa_mask_mod(q_req, logical_q_idx, logical_kv_idx),
+                False,
+            )
+
+        return final_mask_mod
+
     def get_mask_mod(self):
         # Stage-1: initialize the base mask_mod
         # (causal mask for decoder or bidirectional mask for encoder)
@@ -575,6 +639,10 @@ class FlexAttentionMetadata:
             # Add prefix LM mask for vision-language prefix LM attention
             prefix_lm_mask_mod = self.get_prefix_lm_mask_mod()
             mask_mod = or_masks(mask_mod, prefix_lm_mask_mod)
+        if self.rswa_window is not None and self.rswa_prefix_lens is not None:
+            # Reference Sliding Window Attention: AND with the base causal mask
+            # (prefix stays global, generated tokens use a sliding window).
+            mask_mod = and_masks(mask_mod, self.get_rswa_mask_mod())
         return mask_mod
 
     def get_transformed_score_mod(self) -> _score_mod_signature | None:
@@ -650,9 +718,21 @@ class FlexAttentionMetadata:
             self.doc_ids, : cdiv(self.max_seq_len, self.block_size)
         ]
 
-        custom_hint = self.block_sparsity_hint is not None
+        # block_table slots beyond each request's seq_len may contain garbage
+        # physical page ids (see physical_to_logical_mapping). With batched
+        # decode, max_seq_len is the batch max while shorter requests still
+        # index all columns up to that max unless masked here.
+        num_blocks = self.num_blocks_per_seq[self.doc_ids]
+        past_seq = self.logical_block_ids[None, :] >= num_blocks[:, None]
+        used_pages.masked_fill_(past_seq, 0)
 
-        if self.sliding_window or custom_hint:
+        custom_hint = self.block_sparsity_hint is not None
+        use_rswa = self.rswa_window is not None and self.rswa_prefix_lens is not None
+        needs_per_q_pruning = (
+            self.causal or self.sliding_window or custom_hint or use_rswa
+        )
+
+        if needs_per_q_pruning:
             device = used_pages.device
             assert self.doc_ids is not None
             token_indices = torch.arange(
@@ -663,6 +743,12 @@ class FlexAttentionMetadata:
                 - self.query_start_loc[self.doc_ids]
                 + self.decode_offset[self.doc_ids]
             )
+            block_starts = self.logical_block_ids * self.block_size
+            block_ends = block_starts + self.block_size
+
+            if self.causal:
+                future_blocks = block_starts[None, :] > logical_q_idx[:, None]
+                used_pages.masked_fill_(future_blocks, 0)
 
             if self.sliding_window:
                 assert self.sliding_window is not None
@@ -672,6 +758,23 @@ class FlexAttentionMetadata:
                 min_block_idx = min_kv_idx // self.block_size
                 sliding_mask = self.logical_block_ids >= min_block_idx[:, None]
                 used_pages.masked_fill_(~sliding_mask, 0)
+            if use_rswa:
+                # R-SWA keeps prefix KV globally visible and applies a sliding
+                # window over generated tokens. Prune blocks that fall entirely
+                # in the "hole" between prefix_len and the current window so
+                # FlexAttention does not gather invalid paged-KV slots (this
+                # mirrors uniform sliding-window block pruning above).
+                assert self.rswa_prefix_lens is not None
+                assert self.rswa_window is not None
+                prefix_len = self.rswa_prefix_lens[self.doc_ids]
+                min_kv_window = torch.maximum(
+                    prefix_len,
+                    logical_q_idx - (self.rswa_window - 1),
+                )
+                in_gap = (block_starts[None, :] >= prefix_len[:, None]) & (
+                    block_ends[None, :] <= min_kv_window[:, None]
+                )
+                used_pages.masked_fill_(in_gap, 0)
             if custom_hint:
                 assert self.block_sparsity_hint is not None
                 q_block_idx = logical_q_idx // self.block_size
@@ -785,12 +888,36 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         self.max_num_query_groups = cdiv(max_num_batched_tokens, self.q_block_size)
         max_num_pages_per_seq = cdiv(self.max_model_len, self.block_size)
         self.max_num_kv_indices = self.q_block_size * max_num_pages_per_seq
+        # R-SWA uses q_block_size=1 so block lists are not merged across requests
+        # in a q-group (mixed-length batches otherwise gather foreign paged-KV).
+        self.max_num_rswa_query_groups = max_num_batched_tokens
+        # +1 sentinel column: the flex-attention kernel's get_offset_for_next_block
+        # always prefetches kv_indices[q, kv_num_blocks] (one past the last valid
+        # entry) to compute the jump offset for the next loop iteration.  When
+        # kv_num_blocks[q] == W (every page of the sequence is live), that prefetch
+        # reads column W of the persistent buffer.  Without the extra column this
+        # would land on stale data from a previous step (the buffer is wider than W
+        # but is never fully zeroed), producing an out-of-bounds K/V pointer and a
+        # CUDA illegal memory access.  Allocating W_max+1 columns and initialising
+        # the whole buffer to -1 ensures the sentinel slot is always safe to read.
+        self.max_num_rswa_kv_indices = max_num_pages_per_seq + 1
         self.persistent_kv_num_blocks = torch.empty(
             self.max_num_query_groups, dtype=torch.int32, device=device
+        )
+        self.persistent_rswa_kv_num_blocks = torch.empty(
+            self.max_num_rswa_query_groups, dtype=torch.int32, device=device
         )
         self.persistent_offset_tensor = torch.empty(
             max_num_seqs, dtype=torch.int32, device=device
         )
+        # Persistent buffer for R-SWA per-request prefix lengths so the device
+        # address stays stable across steps (required for CUDA graph replay).
+        self.rswa_window: int | None = self.model_config.rswa_window
+        self.persistent_rswa_prefix_lens: torch.Tensor | None = None
+        if self.rswa_window is not None:
+            self.persistent_rswa_prefix_lens = torch.empty(
+                max_num_seqs, dtype=torch.int32, device=device
+            )
         self.persistent_doc_ids = torch.empty(
             max_num_batched_tokens, dtype=torch.int32, device=device
         )
@@ -798,6 +925,14 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         # initialize later when we can access block_table
         self.persistent_physical_to_logical = None
         self.persistent_kv_indices = None
+        self.persistent_rswa_kv_indices = None
+
+        self.custom_logical_mask_mod: _mask_mod_signature | None = None
+        if self._uses_full_cudagraphs():
+            layers = get_layers_from_vllm_config(
+                vllm_config, Attention, self.layer_names
+            )
+            self.custom_logical_mask_mod = self._maybe_get_custom_mask_mod(layers)
 
     @staticmethod
     def _get_block_sizes(
@@ -844,6 +979,21 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         return self.build(
             common_prefix_len=0, common_attn_metadata=common_attn_metadata
         )
+
+    def _maybe_get_custom_mask_mod(self, layers) -> _mask_mod_signature | None:
+        mask_mods = {
+            getattr(layer, "logical_mask_mod", None) for layer in layers.values()
+        }
+        if len(mask_mods) > 1:
+            raise ValueError(
+                f"Found differing mask mods {mask_mods}, "
+                "cannot use alternating mask mods w/ full CUDA graphs"
+            )
+        return next(iter(mask_mods), None)
+
+    def _uses_full_cudagraphs(self) -> bool:
+        mode = self.vllm_config.compilation_config.cudagraph_mode
+        return mode is not None and mode.has_full_cudagraphs()
 
     def build(
         self,
@@ -901,6 +1051,26 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
                 dtype=torch.int32,
                 device=self.device,
             )
+        if self.persistent_rswa_kv_indices is None:
+            # Initialise to -1 so the +1 sentinel column (see max_num_rswa_kv_indices)
+            # is always a safe pad value for the flex kernel's prefetch.
+            self.persistent_rswa_kv_indices = torch.full(
+                (self.max_num_rswa_query_groups, self.max_num_rswa_kv_indices),
+                fill_value=-1,
+                dtype=torch.int32,
+                device=self.device,
+            )
+
+        use_rswa = self.rswa_window is not None
+        q_block_size = 1 if use_rswa else self.q_block_size
+        persistent_kv_indices = (
+            self.persistent_rswa_kv_indices if use_rswa else self.persistent_kv_indices
+        )
+        persistent_kv_num_blocks = (
+            self.persistent_rswa_kv_num_blocks
+            if use_rswa
+            else self.persistent_kv_num_blocks
+        )
 
         inverse_block_table = copy_to_persistent(
             self.persistent_physical_to_logical, inverse_block_table
@@ -909,6 +1079,13 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
         offset_tensor = common_attn_metadata.compute_num_computed_tokens()
         offset_tensor = copy_to_persistent(self.persistent_offset_tensor, offset_tensor)
 
+        rswa_prefix_lens = common_attn_metadata.rswa_prefix_lens
+        if use_rswa and rswa_prefix_lens is not None:
+            assert self.persistent_rswa_prefix_lens is not None
+            rswa_prefix_lens = copy_to_persistent(
+                self.persistent_rswa_prefix_lens, rswa_prefix_lens
+            )
+
         uses_paged_kv = not isinstance(self.kv_cache_spec, EncoderOnlyAttentionSpec)
         logical_mask_mod = (
             bidirectional_mask_mod
@@ -916,9 +1093,16 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             else causal_mask_mod
         )
 
+        sliding_window = None
+        if self._uses_full_cudagraphs():
+            if self.custom_logical_mask_mod is not None:
+                logical_mask_mod = self.custom_logical_mask_mod
+            sliding_window = getattr(self.kv_cache_spec, "sliding_window", None)
+
         out = FlexAttentionMetadata(
             causal=common_attn_metadata.causal,
             logical_mask_mod=logical_mask_mod,
+            sliding_window=sliding_window,
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
             query_start_loc=query_start_loc,
@@ -944,11 +1128,14 @@ class FlexAttentionMetadataBuilder(AttentionMetadataBuilder[FlexAttentionMetadat
             # attention block mask for encoder-only models, disable it temporarily.
             # see: https://github.com/vllm-project/vllm/pull/27329#issuecomment-3431484053
             direct_build=self.direct_build and uses_paged_kv,
-            q_block_size=self.q_block_size,
+            q_block_size=q_block_size,
             kv_block_size=self.kv_block_size,
-            persistent_kv_indices=self.persistent_kv_indices,
-            persistent_kv_num_blocks=self.persistent_kv_num_blocks,
+            persistent_kv_indices=persistent_kv_indices,
+            persistent_kv_num_blocks=persistent_kv_num_blocks,
             persistent_doc_ids=self.persistent_doc_ids,
+            mm_prefix_range=common_attn_metadata.mm_req_doc_ranges,
+            rswa_prefix_lens=rswa_prefix_lens,
+            rswa_window=self.rswa_window,
         )
 
         # Pre-build block_mask so it is ready before CUDA graph capture.
@@ -1055,7 +1242,7 @@ class FlexAttentionImpl(AttentionImpl):
         if self.attn_type == AttentionType.ENCODER_ONLY:
             return
 
-        key_cache, value_cache = kv_cache.unbind(0)
+        key_cache, value_cache = kv_cache.unbind(1)
         torch.ops._C_cache_ops.reshape_and_cache_flash(
             key,
             value,
@@ -1086,7 +1273,7 @@ class FlexAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, 2, block_size, num_kv_heads, head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -1160,9 +1347,9 @@ class FlexAttentionImpl(AttentionImpl):
 
         else:
             assert self.attn_type == AttentionType.DECODER
-            key_cache, value_cache = kv_cache.unbind(0)
+            key_cache, value_cache = kv_cache.unbind(1)
 
-            # View out the block_size dim
+            # Flatten (num_blocks, block_size) into a single token dim
             key_cache = key_cache.view(-1, self.num_kv_heads, self.head_size)
             value_cache = value_cache.view(-1, self.num_kv_heads, self.head_size)
             query, key_tensor, value_tensor = map(

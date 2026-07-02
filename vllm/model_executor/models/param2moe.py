@@ -705,8 +705,6 @@ class Param2MoEModel(nn.Module):
 class Param2MoEMixtureOfExperts(MixtureOfExperts):
     """Implements the vLLM MixtureOfExperts protocol for Param2MoE."""
 
-    expert_weights: list[torch.Tensor]
-
     def extract_moe_parameters(self, example_moe: Param2MoEMoEBlock | None) -> None:
         if example_moe is None:
             raise RuntimeError(
@@ -744,24 +742,6 @@ class Param2MoEMixtureOfExperts(MixtureOfExperts):
                 fused.n_redundant_experts = self.num_redundant_experts
             if hasattr(fused, "update_expert_map"):
                 fused.update_expert_map()
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        self.expert_weights.clear()
-        for layer_idx, layer in enumerate(self.moe_layers):
-            if hasattr(layer, "get_expert_weights"):
-                self.expert_weights.append(layer.get_expert_weights())
-            if hasattr(layer, "set_eplb_state"):
-                layer.set_eplb_state(
-                    moe_layer_idx=layer_idx,
-                    expert_load_view=expert_load_view,
-                    logical_to_physical_map=logical_to_physical_map,
-                    logical_replica_count=logical_replica_count,
-                )
 
 
 class Param2MoEForCausalLM(
@@ -832,7 +812,6 @@ class Param2MoEForCausalLM(
             self.model.make_empty_intermediate_tensors
         )
 
-        self.expert_weights: list[torch.Tensor] = []
         self.num_moe_layers: int = 0
         self.moe_layers: list = []
         self.moe_mlp_layers: list = []

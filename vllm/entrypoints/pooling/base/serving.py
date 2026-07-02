@@ -16,9 +16,9 @@ from vllm import PoolingParams, PoolingRequestOutput, envs
 from vllm.config import VllmConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import ChatTemplateConfig
-from vllm.entrypoints.logger import RequestLogger
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMNotFoundError
 from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
@@ -52,7 +52,7 @@ class PoolingServingBase(ABC):
         self.engine_client = engine_client
         self.models = models
         self.model_config = models.model_config
-        self.renderer = models.renderer
+        self.renderer = engine_client.renderer
         self.vllm_config = engine_client.vllm_config
         self.max_model_len = self.model_config.max_model_len
         self.request_logger = request_logger
@@ -61,7 +61,7 @@ class PoolingServingBase(ABC):
         self.chat_template_config = chat_template_config
 
         # Shared thread pool executor for preprocessing and postprocessing.
-        self._executor: Executor = models.renderer._executor
+        self._executor: Executor = self.renderer._executor
         self._preprocessing_async = make_async(
             self._preprocessing, executor=self._executor
         )
@@ -283,6 +283,7 @@ class PoolingServingBase(ABC):
         request = ctx.request
         if request.model in self.models.lora_requests:
             ctx.lora_request = self.models.lora_requests[request.model]
+            return None
 
         # Currently only support default modality specific loras
         # if we have exactly one lora matched on the request.

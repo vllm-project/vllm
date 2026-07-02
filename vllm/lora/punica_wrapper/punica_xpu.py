@@ -62,6 +62,10 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             captured_lora_counts=captured_lora_counts,
         )
 
+        # When speculative decoding is enabled, max_num_samples is
+        # max_batches * (num_speculative_decoding_tokens + 1).
+        # This line can be optimized by replacing max_num_batched_tokens
+        # to  max_batches * (num_speculative_decoding_tokens + 1).
         self.prompt_mapping_meta = LoRAKernelMeta.make(
             self.max_loras,
             max_num_batched_tokens,
@@ -106,6 +110,14 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         add_inputs: bool,
     ):
         token_lora_indices = self._get_token_lora_indices(x)
+        # After tensor-parallel all-gather (non-fully-sharded LoRA), x may
+        # have been gathered along the rank dim so x.size(1) == max_lora_rank
+        # * tp_size, while lora_b only uses max_lora_rank elements. The XPU
+        # C++ kernel requires inputs.size(1) == lora_b.size(-1), so truncate
+        # to the actual rank. x[:, :rank] is non-contiguous, hence the copy.
+        rank = w_t_all.size(-1)
+        if x.size(1) != rank:
+            x = x[:, :rank].contiguous()
         bgmv_expand_slice(
             x, w_t_all, y, token_lora_indices, y_offset, y_slice_size, add_inputs
         )
@@ -179,7 +191,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
                 add_inputs=add_inputs,
             )
             offset_start += output_slices[slice_idx]
-        y.view_as(y_org)
+        y = y.view_as(y_org)
 
     def add_lora_embedding(
         self,
@@ -227,7 +239,6 @@ class PunicaWrapperXPU(PunicaWrapperBase):
                     @ lora_b_stacked[indices[i], layer_idx, :, :]
                     * scale
                     ).squeeze(0)
-
         Args:
             y (torch.Tensor): Output tensor. Will be changed in-place.
             x (torch.Tensor): Input tensor
@@ -240,13 +251,17 @@ class PunicaWrapperXPU(PunicaWrapperBase):
 
         assert len(lora_a_stacked) == len(lora_b_stacked) == len(output_slices)
 
-        if buffer is None:
-            r = lora_b_stacked[0].size(-1)
-            buffer = torch.zeros(  # type: ignore
-                (len(output_slices), x.size(0), r),
-                dtype=x.dtype,
-                device=x.device,
-            )
+        assert buffer is None, (
+            "To minimize overhead, the buffer should be created by "
+            ".add_lora_linear() instead of being passed in."
+        )
+        r = lora_b_stacked[0].size(-1)
+        buffer = torch.zeros(  # type: ignore
+            (len(output_slices), x.size(0), r),
+            dtype=x.dtype,
+            device=x.device,
+        )
+        add_inputs = kwargs.pop("add_inputs", True)
         self.add_shrink(
             buffer,  # type: ignore
             x,
@@ -259,7 +274,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             buffer,  # type: ignore
             lora_b_stacked,
             output_slices,
-            add_inputs=True,
+            add_inputs=add_inputs,
             **kwargs,
         )
 
@@ -300,12 +315,16 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         y = y.view(-1, y.shape[-1])
         x = x.view(-1, x.shape[-1])
         r = lora_b_stacked.size(-1)
-        if buffer is None:
-            buffer = torch.zeros((x.size(0), r), dtype=x.dtype, device=x.device)
+
+        assert buffer is None, (
+            "To minimize overhead, the buffer should be created by "
+            ".add_lora_linear() instead of being passed in."
+        )
+        buffer = torch.zeros((x.size(0), r), dtype=x.dtype, device=x.device)
         sampler_indices = torch.narrow(self._sampler_indices, 0, 0, x.size(0))
         bgmv_shrink(x, lora_a_stacked, buffer, sampler_indices, scale)
         bgmv_expand(buffer, lora_b_stacked, y, sampler_indices, add_inputs=True)
-        return y.view_as(y_org)
+        y = y.view_as(y_org)
 
     def moe_lora_align_block_size(
         self,
@@ -318,33 +337,62 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         expert_map: torch.Tensor | None = None,
         pad_sorted_ids: bool = False,
         naive_block_assignment: bool = False,
+        token_lora_mapping: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         """
         Aligns tokens and experts into block-sized chunks for LoRA-based
         mixture-of-experts (MoE) execution.
+
+        When `token_lora_mapping` is provided, it overrides the global mapping
+        read from `self.token_mapping_meta`. This is how EP+LoRA injects the
+        per-rank-local token→LoRA map after all-to-all dispatch.
         """
-        (token_lora_mapping, _, _, _, lora_ids, _, _) = (
-            self.token_mapping_meta.meta_args(
-                num_tokens, self.lora_config.specialize_active_lora
-            )
+        (
+            token_lora_mapping_meta,
+            _,
+            _,
+            _,
+            lora_ids,
+            _,
+            _,
+        ) = self.token_mapping_meta.meta_args(
+            num_tokens, self.lora_config.specialize_active_lora
+        )
+        if token_lora_mapping is None:
+            token_lora_mapping = token_lora_mapping_meta
+        # Under EP the caller passes local_num_experts but topk_ids carries
+        # GLOBAL expert indices. The CUDA kernel uses num_experts to size
+        # its bucketing table; with EP we must size by global_num_experts
+        # so global topk_ids don't overflow. expert_map inside the kernel
+        # then translates global→local so the output expert_ids are local
+        # (mirrors the non-LoRA moe_align_block_size behavior).
+        kernel_num_experts = (
+            expert_map.numel() if expert_map is not None else num_experts
         )
         if naive_block_assignment:
             expert_ids = topk_ids.reshape(-1)
             sorted_ids = None
             num_tokens_post_pad = None
         else:
-            max_num_tokens_padded = topk_ids.numel() + num_experts * (block_size - 1)
+            max_num_tokens_padded = topk_ids.numel() + kernel_num_experts * (
+                block_size - 1
+            )
             if pad_sorted_ids:
                 max_num_tokens_padded = round_up(max_num_tokens_padded, block_size)
+            if topk_ids.numel() < kernel_num_experts:
+                max_num_tokens_padded = topk_ids.numel() * block_size
             sorted_ids = torch.empty(
                 (max_loras * max_num_tokens_padded,),
                 dtype=torch.int32,
                 device=topk_ids.device,
             )
             max_num_m_blocks = triton.cdiv(max_num_tokens_padded, block_size)
-            # Expert ids must be set default to -1 to prevent a blank block
-            expert_ids = torch.empty(
+            # Expert ids are initialized to -1 so unused (lora, expert)
+            # slots don't drive the LoRA Triton kernel into the wrong bucket.
+            # The kernel overwrites only active slots.
+            expert_ids = torch.full(
                 (max_loras * max_num_m_blocks,),
+                -1,
                 dtype=torch.int32,
                 device=topk_ids.device,
             )
@@ -355,7 +403,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             ops.moe_lora_align_block_size(
                 topk_ids,
                 token_lora_mapping,
-                num_experts,
+                kernel_num_experts,
                 block_size,
                 max_loras,
                 max_num_tokens_padded,
@@ -365,11 +413,10 @@ class PunicaWrapperXPU(PunicaWrapperBase):
                 num_tokens_post_pad,
                 adapter_enabled,
                 lora_ids,
+                expert_map,
             )
-            if expert_map is not None:
-                expert_ids = expert_map[expert_ids]
 
-        return None, sorted_ids, expert_ids, num_tokens_post_pad
+        return token_lora_mapping, sorted_ids, expert_ids, num_tokens_post_pad
 
     def add_lora_fused_moe(
         self,
@@ -390,6 +437,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         fully_sharded: bool = False,
         offset: int = 0,
         token_lora_mapping: torch.Tensor | None = None,
+        add_inputs: bool = True,
     ):
         """
         Performs a fused forward computation for LoRA of Mixture-of-Experts (MoE) layer.
@@ -439,6 +487,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             mul_routed_weight,
             fully_sharded,
             offset,
+            add_inputs,
         )
 
     def add_lora_w13(
@@ -461,6 +510,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         num_slices: int,
         fully_sharded: bool,
         use_tuned_config: bool,
+        add_inputs: bool = True,
         token_lora_mapping: torch.Tensor | None = None,
     ) -> tuple[
         torch.Tensor | None,
@@ -522,7 +572,8 @@ class PunicaWrapperXPU(PunicaWrapperBase):
 
         SPARSITY_FACTOR = 8
         naive_block_assignment = (
-            expert_map is None
+            not fully_sharded
+            and expert_map is None
             and num_tokens * top_k * SPARSITY_FACTOR <= local_num_experts * max_loras
         )
 
@@ -540,6 +591,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             adapter_enabled,
             expert_map,
             naive_block_assignment=naive_block_assignment,
+            token_lora_mapping=token_lora_mapping,
         )
 
         _sorted = sorted_token_ids_lora
@@ -564,6 +616,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             adapter_enabled,
             fully_sharded=fully_sharded,
             token_lora_mapping=token_lora_mapping,
+            add_inputs=add_inputs,
         )
 
         return (
@@ -594,6 +647,7 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         fully_sharded: bool,
         tp_rank: int,
         use_tuned_config: bool,
+        add_inputs: bool = True,
     ) -> None:
         import functools
 
@@ -676,4 +730,5 @@ class PunicaWrapperXPU(PunicaWrapperBase):
             fully_sharded=fully_sharded,
             offset=offset,
             token_lora_mapping=token_lora_mapping,
+            add_inputs=add_inputs,
         )

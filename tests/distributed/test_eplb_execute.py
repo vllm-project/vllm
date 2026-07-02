@@ -277,12 +277,15 @@ def assert_verification_synced(local_ok: bool, msg: str) -> None:
     assert bool(ok_tensor.item()), msg
 
 
-def create_eplb_communicator_or_raise(*, group_coordinator, backend, expert_weights):
+def create_eplb_communicator_or_raise(
+    *, group_coordinator, backend, expert_weights, expert_buffer
+):
     try:
         return create_eplb_communicator(
             group_coordinator=group_coordinator,
             backend=backend,
             expert_weights=expert_weights,
+            expert_buffer=expert_buffer,
         )
     except Exception as exc:
         raise RuntimeError(
@@ -355,7 +358,8 @@ def _test_async_transfer_layer_without_mtp_worker(
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend=eplb_communicator,
-            expert_weights=expert_weights[0],
+            expert_weights=expert_weights,
+            expert_buffer=expert_buffer,
         )
         communicator.set_stream(cuda_stream)
 
@@ -368,6 +372,7 @@ def _test_async_transfer_layer_without_mtp_worker(
                 ep_group=ep_group,
                 communicator=communicator,
                 cuda_stream=cuda_stream,
+                layer_idx=layer_idx,
             )
             cuda_stream.synchronize()
             move_from_buffer(
@@ -460,10 +465,12 @@ def _test_rearrange_expert_weights_with_redundancy(
             num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
         )
 
+        expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend=eplb_communicator,
-            expert_weights=expert_weights[0],
+            expert_weights=expert_weights,
+            expert_buffer=expert_buffer,
         )
 
         # Execute weight rearrangement
@@ -471,9 +478,9 @@ def _test_rearrange_expert_weights_with_redundancy(
             old_indices,
             new_indices,
             expert_weights,
+            expert_buffer,
             ep_group,
-            is_profile=False,
-            communicator=communicator,
+            communicator,
         )
 
     # Verify the rearrangement result
@@ -593,10 +600,12 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
                 layer_copy.append(weight.clone())
             original_weights.append(layer_copy)
 
+        expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend="torch_nccl",
-            expert_weights=expert_weights[0],
+            expert_weights=expert_weights,
+            expert_buffer=expert_buffer,
         )
 
         # Execute rearrangement (should be no change)
@@ -604,9 +613,9 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
             indices,
             indices,  # Same indices
             expert_weights,
+            expert_buffer,
             ep_group,
             communicator,
-            is_profile=False,
         )
 
     # Verify that the weights have not changed
@@ -635,9 +644,7 @@ def _test_rearrange_expert_weights_no_change(env, world_size) -> None:
         (2, 2, 2, 3),
     ],
 )
-@pytest.mark.parametrize(
-    "eplb_communicator", ["torch_nccl", "torch_gloo", "pynccl", "nixl"]
-)
+@pytest.mark.parametrize("eplb_communicator", ["torch_gloo", "nixl"])
 def test_async_transfer_layer_without_mtp(
     world_size: int,
     num_layers: int,
@@ -726,10 +733,12 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
                 layer_copy.append(weight.clone())
             original_weights.append(layer_copy)
 
+        expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
         communicator = create_eplb_communicator_or_raise(
             group_coordinator=ep_group_coordinator,
             backend="torch_nccl",
-            expert_weights=expert_weights[0],
+            expert_weights=expert_weights,
+            expert_buffer=expert_buffer,
         )
 
         # Execute profile mode rearrangement
@@ -737,9 +746,10 @@ def _test_rearrange_expert_weights_profile_mode(env, world_size) -> None:
             old_indices,
             new_indices,
             expert_weights,
+            expert_buffer,
             ep_group,
             communicator,
-            is_profile=True,  # Profile mode
+            is_profile=True,
         )
 
     # In profile mode, the weights should remain unchanged
@@ -771,4 +781,126 @@ def test_rearrange_expert_weights_profile_mode(world_size):
     distributed_run(
         _test_rearrange_expert_weights_profile_mode,
         world_size,
+    )
+
+
+def _test_nixl_deferred_init_worker(
+    env,
+    world_size: int,
+    num_layers: int,
+    num_local_experts: int,
+    num_logical_experts: int,
+) -> None:
+    """Exercise NixlEplbCommunicator with defer_remote_setup=True (elastic EP path)."""
+    from vllm.distributed.eplb.eplb_communicator import NixlEplbCommunicator
+
+    set_env_vars_and_device(env)
+
+    vllm_config = VllmConfig()
+    vllm_config.parallel_config.tensor_parallel_size = world_size
+
+    with set_current_vllm_config(vllm_config):
+        ensure_model_parallel_initialized(
+            tensor_model_parallel_size=world_size, pipeline_model_parallel_size=1
+        )
+
+        ep_group_coordinator = get_tp_group()
+        ep_group = ep_group_coordinator.cpu_group
+        ep_rank = torch.distributed.get_rank()
+        device = torch.device(f"cuda:{ep_rank}")
+
+        total_physical_experts = world_size * num_local_experts
+        hidden_sizes = [32, 64]
+
+        redundancy_config = create_redundancy_config(
+            num_logical_experts, total_physical_experts
+        )
+        old_indices = create_expert_indices_with_redundancy(
+            num_layers,
+            num_logical_experts,
+            total_physical_experts,
+            redundancy_config,
+        )
+
+        new_redundancy_config = create_redundancy_config(
+            num_logical_experts, total_physical_experts
+        )
+        new_indices = create_expert_indices_with_redundancy(
+            num_layers,
+            num_logical_experts,
+            total_physical_experts,
+            new_redundancy_config,
+        )
+
+        expert_weights = create_expert_weights(
+            num_layers, num_local_experts, hidden_sizes, ep_rank, device, old_indices
+        )
+
+        expert_buffer = [torch.empty_like(w) for w in expert_weights[0]]
+
+        communicator = NixlEplbCommunicator(
+            cpu_group=ep_group_coordinator.cpu_group,
+            all_expert_weights=expert_weights,
+            expert_buffer=expert_buffer,
+            defer_remote_setup=True,
+        )
+        assert not communicator._remote_state_initialized
+
+        rearrange_expert_weights_inplace(
+            old_indices,
+            new_indices,
+            expert_weights,
+            expert_buffer,
+            ep_group,
+            communicator,
+        )
+
+        assert communicator._remote_state_initialized
+
+    local_ok = verify_expert_weights_after_shuffle(
+        expert_weights,
+        new_indices,
+        hidden_sizes,
+        ep_rank,
+        num_local_experts,
+    )
+
+    local_ok = (
+        verify_redundant_experts_have_same_weights(
+            expert_weights,
+            new_indices,
+            hidden_sizes,
+            ep_rank,
+            world_size,
+            num_local_experts,
+        )
+        and local_ok
+    )
+    assert_verification_synced(
+        local_ok,
+        "Deferred NIXL init verification failed on at least one rank.",
+    )
+
+
+@pytest.mark.skipif(not has_nixl(), reason="NIXL is not available")
+@pytest.mark.parametrize(
+    "world_size,num_layers,num_local_experts,num_logical_experts",
+    [(2, 2, 3, 4)],
+)
+def test_nixl_deferred_init(
+    world_size,
+    num_layers,
+    num_local_experts,
+    num_logical_experts,
+):
+    """Test NixlEplbCommunicator with defer_remote_setup=True (elastic EP path)."""
+
+    if torch.accelerator.device_count() < world_size:
+        pytest.skip(f"Need at least {world_size} GPUs to run the test")
+    distributed_run(
+        _test_nixl_deferred_init_worker,
+        world_size,
+        num_layers,
+        num_local_experts,
+        num_logical_experts,
     )

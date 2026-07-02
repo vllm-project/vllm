@@ -29,9 +29,8 @@ def _gpu_snapshot(tag: str, prev_alloc: float = 0.0) -> dict:
     torch.accelerator.synchronize()
     alloc = torch.accelerator.memory_allocated()
     reserved = torch.accelerator.memory_reserved()
-    # mem_get_info is not available on torch.accelerator
     try:
-        drv_free, drv_total = torch.cuda.mem_get_info()
+        drv_free, drv_total = torch.accelerator.get_memory_info()
         drv_used = drv_total - drv_free
         drv_pct = drv_used / drv_total * 100
     except Exception:
@@ -75,7 +74,7 @@ def test_gpu_memory_rixl_hma(model_name, sw_size):
         "gpu_memory_utilization": 0.5,
         "kv_transfer_config": KVTransferConfig(
             kv_connector="NixlConnector",
-            kv_role="kv_both",
+            kv_role="kv_consumer",
         ),
         "max_model_len": 2048,
         "disable_hybrid_kv_cache_manager": False,

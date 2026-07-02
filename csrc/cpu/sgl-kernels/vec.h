@@ -9,9 +9,19 @@
 #define CPU_CAPABILITY_AVX512
 #endif
 
+#if defined(__riscv_v_min_vlen) && (__riscv_v_min_vlen == 128 || __riscv_v_min_vlen == 256)
+#define CPU_CAPABILITY_RVV
+#endif
+
 #include <ATen/cpu/vec/functional.h>
 #include <ATen/cpu/vec/vec.h>
+#if defined(CPU_CAPABILITY_AVX512)
 #include <immintrin.h>
+#endif
+
+#if defined(CPU_CAPABILITY_RVV)
+#include "../cpu_types_riscv_defs.hpp"
+#endif
 namespace {
 
 using namespace at::vec;
@@ -243,7 +253,7 @@ quantize_row_int8(uint8_t* __restrict__ Aq, float& As, const scalar_t* __restric
 
   for (int64_t k = 0; k < K; ++k) {
     const float val = static_cast<float>(A[k]) * inv_scale;
-    Aq[k] = (uint8_t)(std::round(val)) + 128;
+    Aq[k] = static_cast<uint8_t>(static_cast<int32_t>(std::round(val)) + 128);
   }
   As = scale;
 }

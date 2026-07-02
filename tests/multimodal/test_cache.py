@@ -32,6 +32,8 @@ from vllm.multimodal.inputs import (
 from vllm.multimodal.processing import PromptInsertion
 from vllm.utils.mem_constants import GiB_bytes, MiB_bytes
 
+from ..utils import create_new_process_for_each_test
+
 pytestmark = pytest.mark.cpu_test
 
 
@@ -549,3 +551,43 @@ def test_processor_cache_shared_across_loras():
 
     receiver_cache.get_and_update_features([feature_lora_b])
     assert feature_lora_b.data == item_data
+
+
+_SLEEP_VISION_PROMPT = (
+    "<|im_start|>system\nYou are a helpful assistant.<|im_end|>"
+    "\n<|im_start|>user\n<|vision_start|><|image_pad|><|vision_end|>"
+    "What is in the image?<|im_end|>\n"
+    "<|im_start|>assistant\n"
+)
+
+
+@create_new_process_for_each_test()
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="sleep mode regression requires a CUDA GPU",
+)
+def test_sleep_wake_preserves_mm_cache_consistency():
+    """Regression for vllm-project/vllm#42995."""
+    from vllm import LLM, SamplingParams
+    from vllm.assets.image import ImageAsset
+
+    image = ImageAsset("stop_sign").pil_image
+    prompt = {
+        "prompt": _SLEEP_VISION_PROMPT,
+        "multi_modal_data": {"image": image},
+    }
+    sampling_params = SamplingParams(temperature=0, max_tokens=8)
+
+    llm = LLM(
+        model="Qwen/Qwen2-VL-2B-Instruct",
+        enable_sleep_mode=True,
+        enforce_eager=True,
+        gpu_memory_utilization=0.5,
+        max_model_len=2048,
+    )
+
+    llm.generate([prompt], sampling_params)
+    llm.sleep(level=1)
+    llm.wake_up()
+    output2 = llm.generate([prompt], sampling_params)
+    assert output2[0].outputs[0].text

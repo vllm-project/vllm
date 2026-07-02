@@ -16,6 +16,7 @@ from tests.v1.attention.utils import (
     create_vllm_config,
 )
 from vllm.config import SpeculativeConfig
+from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.attention.backends.gdn_attn import (
     GDNAttentionMetadata,
     GDNAttentionMetadataBuilder,
@@ -123,9 +124,15 @@ GDN_BUILD_TEST_CASES = {
 
 def _create_gdn_builder(
     num_speculative_tokens: int = 0,
+    full_cuda_graph: bool = False,
 ) -> GDNAttentionMetadataBuilder:
     """Create a GDNAttentionMetadataBuilder with minimal config."""
-    vllm_config = create_vllm_config(block_size=BLOCK_SIZE)
+    vllm_config = create_vllm_config(
+        model_name="Qwen/Qwen3.5-0.8B",
+        block_size=BLOCK_SIZE,
+    )
+    if full_cuda_graph:
+        vllm_config.compilation_config.cudagraph_mode = CUDAGraphMode.FULL_AND_PIECEWISE
     if num_speculative_tokens > 0:
         vllm_config.speculative_config = SpeculativeConfig(
             method="ngram",
@@ -189,3 +196,28 @@ def test_has_initial_state_after_reclassification():
     assert meta.has_initial_state is not None
     # req0 has context_lens = 65 - 1 = 64 > 0, so has_initial_state[0] = True
     assert meta.has_initial_state[0].item() is True
+
+
+def test_full_cudagraph_spec_metadata_uses_request_count():
+    """FULL cudagraph token padding must not pad request-indexed metadata."""
+    num_speculative_tokens = 3
+    builder = _create_gdn_builder(
+        num_speculative_tokens=num_speculative_tokens,
+        full_cuda_graph=True,
+    )
+    batch = BatchSpec(seq_lens=[80, 96], query_lens=[4, 4])
+    meta = _build(builder, batch, num_decode_draft_tokens=[3, 3])
+
+    assert meta.num_spec_decodes == batch.batch_size
+    assert meta.num_spec_decode_tokens == batch.compute_num_tokens()
+    assert meta.spec_state_indices_tensor is not None
+    assert meta.spec_state_indices_tensor.shape == (
+        batch.batch_size,
+        num_speculative_tokens + 1,
+    )
+    assert meta.spec_sequence_masks is not None
+    assert meta.spec_sequence_masks.shape == (batch.batch_size,)
+    assert meta.spec_query_start_loc is not None
+    assert meta.spec_query_start_loc.shape == (batch.batch_size + 1,)
+    assert meta.num_accepted_tokens is not None
+    assert meta.num_accepted_tokens.shape == (batch.batch_size,)

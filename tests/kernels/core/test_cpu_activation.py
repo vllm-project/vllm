@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+
 import pytest
 import torch
 
@@ -109,3 +110,103 @@ def test_cpu_unary_activation(
     if not (activation_cls is GELU and dtype != torch.bfloat16):
         raw_out = torch.empty_like(x)
         opcheck(fn, (raw_out, x, *op_args))
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@torch.inference_mode()
+def test_cpu_gelu_tanh_and_mul(
+    default_vllm_config,
+    dtype: torch.dtype,
+) -> None:
+    gate = torch.tensor(
+        [
+            [
+                -12.0,
+                -10.0,
+                -9.01,
+                -5.0,
+                -2.0,
+                -1.0,
+                -0.0,
+                0.0,
+                0.5,
+                1.0,
+                2.0,
+                5.0,
+                9.01,
+                10.0,
+                12.0,
+                11.0,
+            ],
+            [
+                -7.5,
+                -4.5,
+                -3.0,
+                -1.5,
+                -0.75,
+                -0.25,
+                0.25,
+                0.75,
+                1.5,
+                3.0,
+                4.5,
+                7.5,
+                -11.0,
+                11.0,
+                8.75,
+                -8.75,
+            ],
+        ],
+        dtype=dtype,
+    )
+    val = torch.tensor(
+        [
+            [
+                0.25,
+                -0.5,
+                0.75,
+                -1.0,
+                1.25,
+                -1.5,
+                1.75,
+                -2.0,
+                2.25,
+                -2.5,
+                2.75,
+                -3.0,
+                3.25,
+                -3.5,
+                3.75,
+                -4.0,
+            ],
+            [
+                -0.4,
+                0.6,
+                -0.8,
+                1.0,
+                -1.2,
+                1.4,
+                -1.6,
+                1.8,
+                -2.0,
+                2.2,
+                -2.4,
+                2.6,
+                -2.8,
+                3.0,
+                -3.2,
+                3.4,
+            ],
+        ],
+        dtype=dtype,
+    )
+
+    x = torch.cat((val, gate), dim=-1).contiguous()
+    kernel_out = torch.empty_like(val)
+    torch.ops._C.gelu_tanh_and_mul(kernel_out, x)
+
+    torch_ref = torch.nn.functional.gelu(val, approximate="tanh") * gate
+
+    atol = get_default_atol(kernel_out)
+    rtol = get_default_rtol(kernel_out)
+    torch.testing.assert_close(kernel_out, torch_ref, atol=atol, rtol=rtol)
