@@ -467,15 +467,27 @@ class GroupCoordinator:
 
         self.use_device_communicator = use_device_communicator
         self.device_communicator = None
+
         if use_device_communicator and self.world_size > 1:
-            device_comm_cls = resolve_obj_by_qualname(
-                current_platform.get_device_communicator_cls()
+            device_comm_qualname = current_platform.get_device_communicator_cls()
+
+            logger.info(
+                "[verify] selected device communicator class: %s",
+                device_comm_qualname,
             )
+
+            device_comm_cls = resolve_obj_by_qualname(device_comm_qualname)
+
             self.device_communicator = device_comm_cls(
                 cpu_group=self.cpu_group,
                 device=self.device,
                 device_group=self.device_group,
                 unique_name=self.unique_name,
+            )
+
+            logger.info(
+                "[verify] initialized device communicator: %s",
+                type(self.device_communicator).__name__,
             )
 
         from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
