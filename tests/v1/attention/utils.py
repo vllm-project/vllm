@@ -24,16 +24,8 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.mamba_attn import (
-    BaseMambaAttentionMetadata,
-    BaseMambaAttentionMetadataBuilder,
-)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
-from vllm.v1.kv_cache_interface import (
-    EncoderOnlyAttentionSpec,
-    FullAttentionSpec,
-    MambaSpec,
-)
+from vllm.v1.kv_cache_interface import EncoderOnlyAttentionSpec, FullAttentionSpec
 
 
 @dataclass
@@ -384,34 +376,3 @@ full_cg_backend_configs = {
         },
     ),
 }
-
-
-class MockMambaBuilder(BaseMambaAttentionMetadataBuilder[BaseMambaAttentionMetadata]):
-    """Minimal concrete subclass for testing (base class is ABC)."""
-
-    metadata_cls = BaseMambaAttentionMetadata
-
-    @classmethod
-    def build_mamba_metadata(
-        cls,
-        vllm_config: VllmConfig,
-        seq_lens: list[int],
-        query_lens: list[int],
-        is_prefilling: list[bool],
-        *,
-        device: torch.device | None = None,
-    ) -> BaseMambaAttentionMetadata:
-        block_size = vllm_config.cache_config.block_size
-        device = device or torch.device("cpu")
-        mamba_spec = MambaSpec(
-            block_size=block_size, shapes=((1,), (1,)), dtypes=(torch.float32,)
-        )
-        builder = cls(mamba_spec, ["layer0"], vllm_config, device)
-        batch_spec = BatchSpec(seq_lens=seq_lens, query_lens=query_lens)
-        common_metadata = create_common_attn_metadata(
-            batch_spec, block_size=block_size, device=device, arange_block_indices=True
-        )
-        common_metadata = common_metadata.replace(
-            is_prefilling=torch.tensor(is_prefilling, dtype=torch.bool)
-        )
-        return builder.build(0, common_metadata)
