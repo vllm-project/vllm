@@ -27,6 +27,9 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
     RoutedExpertsManager,
 )
+from vllm.model_executor.layers.sparse_attn_indexer_capturer import (
+    IndexerTopkManager,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
@@ -325,6 +328,17 @@ class Scheduler(SchedulerInterface):
             # so update_from_output can read slot data even if a later
             # schedule() frees the blocks (async scheduling race).
             self._re_block_ids: dict[str, list[int]] = {}
+
+        self.enable_return_indexer_topk = (
+            vllm_config.model_config.enable_return_indexer_topk
+        )
+
+        if self.enable_return_indexer_topk:
+            self.indexer_topk_mgr = IndexerTopkManager(
+                vllm_config=vllm_config,
+                kv_cache_config=kv_cache_config,
+            )
+            self._it_block_ids: dict[str, list[int]] = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
@@ -1199,6 +1213,15 @@ class Scheduler(SchedulerInterface):
                 }
             )
 
+        if self.enable_return_indexer_topk:
+            gid = self.indexer_topk_mgr.attn_gid
+            self._it_block_ids.update(
+                {
+                    rid: self.kv_cache_manager.get_blocks(rid).get_block_ids()[gid]
+                    for rid in num_scheduled_tokens
+                }
+            )
+
         # Clear the finished request IDs.
         # NOTE: We shouldn't do self.finished_req_ids.clear() here because
         # it will also affect the scheduler output.
@@ -1548,6 +1571,10 @@ class Scheduler(SchedulerInterface):
                 routing_offsets[rid] = offset
                 offset += num_scheduled_tokens[rid]
 
+        if model_runner_output.indexer_topk is not None:
+            it = model_runner_output.indexer_topk
+            self.indexer_topk_mgr.store_batch(it.topk_data, it.slot_mapping)
+
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
         # to avoid expensive operations inside the loop.
@@ -1682,6 +1709,28 @@ class Scheduler(SchedulerInterface):
                         # Normal decode / re-prefill: token(s) at the END.
                         routed_experts = routing_data[end - len(new_token_ids) : end]
 
+            indexer_topk = None
+            if (
+                self.enable_return_indexer_topk
+                and model_runner_output.indexer_topk is not None
+                and new_token_ids
+            ):
+                block_ids = self._it_block_ids.pop(req_id, [])
+                if num_output_tokens_before == 0:
+                    # Prefill completed: read full prompt topk from slot
+                    # buffer using the block-ID snapshot taken at
+                    # schedule time (immune to async preemption).
+                    if request.sampling_params is not None:
+                        prompt_start = request.sampling_params.indexer_topk_prompt_start
+                        assert prompt_start < request.num_prompt_tokens
+                    else:
+                        prompt_start = 0
+                    indexer_topk = self.indexer_topk_mgr.get(
+                        block_ids,
+                        request.num_prompt_tokens,
+                        token_start=prompt_start,
+                    )
+
             finish_reason = None
             if stopped:
                 # Capture finish_reason BEFORE _handle_stopped_request, which may
@@ -1730,6 +1779,7 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
+                        indexer_topk=indexer_topk,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )

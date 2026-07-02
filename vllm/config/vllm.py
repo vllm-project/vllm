@@ -905,6 +905,24 @@ class VllmConfig:
                     "connectors (PD disaggregation, KV cache offload)."
                 )
 
+        if (
+            self.model_config is not None
+            and self.model_config.enable_return_indexer_topk
+        ):
+            if self.parallel_config.pipeline_parallel_size > 1:
+                raise ValueError(
+                    "--enable-return-indexer-topk is incompatible with "
+                    "pipeline parallelism (PP > 1)."
+                )
+            if (
+                self.kv_transfer_config is not None
+                and self.kv_transfer_config.is_kv_transfer_instance
+            ):
+                raise ValueError(
+                    "--enable-return-indexer-topk is incompatible with KV "
+                    "connectors (PD disaggregation, KV cache offload)."
+                )
+
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
 

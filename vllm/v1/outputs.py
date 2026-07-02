@@ -177,6 +177,44 @@ class RoutedExpertsLists(NamedTuple):
     slot_mapping: np.ndarray
 
 
+class IndexerTopkTensors(NamedTuple):
+    """Device-side snapshot of indexer topk indices, pending async D2H.
+
+    Mirrors :class:`RoutedExpertsTensors` but for sparse-attention topk
+    indices. Shape:
+      - ``topk_data``: (num_scheduled_tokens, num_indexer_layers, index_topk)
+      - ``slot_mapping``: (num_scheduled_tokens,)
+    """
+
+    topk_data: torch.Tensor
+    slot_mapping: torch.Tensor
+
+    def to_cpu_nonblocking(self) -> "IndexerTopkTensors":
+        if self.topk_data.device.type == "cpu":
+            return self
+        return IndexerTopkTensors(
+            self.topk_data.to("cpu", non_blocking=True),
+            self.slot_mapping.to("cpu", non_blocking=True),
+        )
+
+    def tolists(self) -> "IndexerTopkLists":
+        return IndexerTopkLists(
+            self.topk_data.cpu().numpy(),
+            self.slot_mapping.cpu().numpy(),
+        )
+
+
+class IndexerTopkLists(NamedTuple):
+    """CPU-side indexer topk, the form :meth:`IndexerTopkManager.store_batch`
+    consumes.
+    """
+
+    # (num_scheduled_tokens, num_indexer_layers, index_topk)
+    topk_data: np.ndarray
+    # (num_scheduled_tokens,)
+    slot_mapping: np.ndarray
+
+
 # [num_reqs, <dynamic>]
 # The shape of each element depends on the pooler used
 PoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor] | list[torch.Tensor | None]
@@ -279,6 +317,10 @@ class ModelRunnerOutput:
     # its slot buffer via ``slot_buffer[slot_mapping] = routing_data``.
     # ``None`` when ``enable_return_routed_experts`` is off.
     routed_experts: RoutedExpertsLists | None = None
+
+    # Per-token indexer topk indices (sparse-attention selected KV slots).
+    # ``None`` when ``enable_return_indexer_topk`` is off.
+    indexer_topk: IndexerTopkLists | None = None
 
     @staticmethod
     def with_kv_conn_output_only(
