@@ -1043,3 +1043,105 @@ class TestFlashInferDistributionMatch:
             f"{label}: distribution differs from theoretical: "
             f"chi2={chi2:.2f} p_value={p_value:.2e} alpha={self.ALPHA}"
         )
+
+
+@pytest.mark.skipif(
+    not (current_platform.is_cuda() and HAS_TRITON),
+    reason="Requires CUDA GPU and Triton",
+)
+class TestTritonTopkToppWarmupSpecializations:
+    """``_topk_topp_kernel`` warmup must cover every specialization reached
+    at runtime, so no JIT compilation happens during inference.
+
+    The kernel specializes on two axes:
+
+    1. The ``TOPK_ENABLED`` / ``TOPP_ENABLED`` ``tl.constexpr`` flags, derived
+       from whether ``k`` / ``p`` are passed. This yields three runtime
+       combinations (both, top-k only, top-p only).
+    2. Triton's implicit integer specialization of the non-constexpr
+       ``BATCH_SIZE`` argument (``== 1`` / divisible-by-16 / other), which is
+       neutralized via ``do_not_specialize=["BATCH_SIZE"]`` because the value
+       is only the grid-stride loop bound.
+
+    A miss on either axis triggers a JIT compile during inference, which the
+    ``jit_monitor`` flags as a latency spike.
+    """
+
+    def _num_cached_specializations(self) -> int:
+        """Number of compiled ``_topk_topp_kernel`` variants currently cached.
+
+        Counts entries in the Triton ``JITFunction.device_caches`` rather than
+        hooking ``jit_post_compile_hook``: a kernel served from Triton's
+        on-disk cache populates ``device_caches`` but does *not* fire the
+        post-compile hook, so a hook-based count would be unreliable across
+        runs. The relative growth of this count is what matters here.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import _topk_topp_kernel
+
+        return sum(len(dc[0]) for dc in _topk_topp_kernel.device_caches.values())
+
+    def _make_inputs(self, batch_size: int, vocab: int):
+        torch.set_default_device(DEVICE_TYPE)
+        logits = torch.randn(batch_size, vocab, dtype=torch.float32)
+        k = torch.full((batch_size,), 32, dtype=torch.int32)
+        p = torch.full((batch_size,), 0.9, dtype=torch.float32)
+        return logits, k, p
+
+    def test_warmup_covers_all_runtime_specializations(self):
+        """Warming the three k/p combinations must cover every variant reached
+        at inference, so post-warmup requests add no new kernel compilation.
+
+        Uses a dedicated vocab size (a ``VOCAB_SIZE`` constexpr) so the count
+        below is unaffected by other tests sharing the process-wide cache.
+        """
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        vocab = 4099
+
+        # Warmup: exercise all three (TOPK_ENABLED, TOPP_ENABLED) combinations,
+        # mirroring what ``_dummy_sampler_run`` now does at engine startup.
+        for k_arg, p_arg in (("k", "p"), ("k", None), (None, "p")):
+            logits, k, p = self._make_inputs(16, vocab=vocab)
+            apply_top_k_top_p_triton(
+                logits.clone(),
+                k if k_arg else None,
+                p if p_arg else None,
+            )
+
+        after_warmup = self._num_cached_specializations()
+
+        # Inference: every combination again at a different batch-size class
+        # (15 is neither 1 nor divisible by 16). None may add a new variant.
+        for batch_size in (16, 15):
+            logits, k, p = self._make_inputs(batch_size, vocab=vocab)
+            apply_top_k_top_p_triton(logits.clone(), k, p)
+            apply_top_k_top_p_triton(logits.clone(), k, None)
+            apply_top_k_top_p_triton(logits.clone(), None, p)
+
+        assert self._num_cached_specializations() == after_warmup, (
+            "Inference must not compile new _topk_topp_kernel variants after "
+            "warmup covered all (k, p) combinations"
+        )
+
+    def test_batch_size_is_not_specialized(self):
+        """``do_not_specialize=["BATCH_SIZE"]`` means a batch-size class change
+        reuses the cached kernel instead of recompiling."""
+        from vllm.v1.sample.ops.topk_topp_triton import apply_top_k_top_p_triton
+
+        vocab = 6151  # distinct vocab to isolate from the other test
+
+        # Warm a divisible-by-16 batch so the variant is cached.
+        logits, k, p = self._make_inputs(16, vocab=vocab)
+        apply_top_k_top_p_triton(logits.clone(), k, p)
+        after_warmup = self._num_cached_specializations()
+
+        # Other batch-size classes (none == 1, none divisible by 16) must not
+        # add new variants now that BATCH_SIZE is excluded from the key.
+        for batch_size in (15, 8, 24):
+            logits, k, p = self._make_inputs(batch_size, vocab=vocab)
+            apply_top_k_top_p_triton(logits.clone(), k, p)
+
+        assert self._num_cached_specializations() == after_warmup, (
+            "BATCH_SIZE must not trigger recompilation across batch-size "
+            "classes once do_not_specialize is set"
+        )

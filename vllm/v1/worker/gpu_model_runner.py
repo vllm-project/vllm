@@ -6098,15 +6098,24 @@ class GPUModelRunner(
                 "processed_logits",
                 "processed_logprobs",
             ):
-                self.sampler(
-                    logits=logits,
-                    sampling_metadata=replace(
-                        dummy_metadata,
-                        generators={
-                            0: torch.Generator(device=self.device).manual_seed(0)
-                        },
-                    ),
-                )
+                # The Triton top-k/top-p kernel specializes on which of k/p
+                # are present (TOPK_ENABLED/TOPP_ENABLED constexprs), so warm
+                # all three combinations reached at runtime: both set,
+                # top-k only (top_p=None), and top-p only (top_k=None).
+                generators = {0: torch.Generator(device=self.device).manual_seed(0)}
+                for overrides in (
+                    {},
+                    {"top_p": None},
+                    {"top_k": None},
+                ):
+                    self.sampler(
+                        logits=logits,
+                        sampling_metadata=replace(
+                            dummy_metadata,
+                            generators=generators,
+                            **overrides,
+                        ),
+                    )
         except RuntimeError as e:
             if "out of memory" in str(e):
                 raise RuntimeError(
