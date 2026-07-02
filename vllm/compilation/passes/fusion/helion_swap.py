@@ -122,12 +122,19 @@ class HelionKernelSwapPass(VllmInductorPass):
 
     def __init__(self, config: VllmConfig) -> None:
         super().__init__(config)
-        self._op_map = build_helion_op_map()
-        if self._op_map:
+        helion_map = build_helion_op_map()
+        # Route through cudagraph-aware ops: Helion only under CUDA-graph capture,
+        # native _C in eager (avoids Helion's per-call dispatch overhead in eager).
+        if helion_map:
+            from vllm.kernels.helion.routing import build_routed_op_map
+
+            self._op_map = build_routed_op_map(helion_map)
             logger.info(
-                "HelionKernelSwapPass enabled for ops: %s",
+                "HelionKernelSwapPass enabled (cudagraph-routed) for ops: %s",
                 sorted(str(op) for op in self._op_map),
             )
+        else:
+            self._op_map = {}
 
     @VllmInductorPass.time_and_log
     def __call__(self, graph: fx.Graph) -> None:
