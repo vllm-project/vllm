@@ -176,6 +176,10 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     if is_leader:
         logger.info("Using FlashInfer autotune cache file: %s", cache_path)
 
+    # We skip EPLB here since we don't want to record dummy metrics.
+    # When autotuning with number of tokens m, flashinfer will autotune
+    # operations for all number of tokens up to m, so we only need to
+    # run with the max number of tokens.
     dummy_run_kwargs = dict(
         num_tokens=runner.scheduler_config.max_num_batched_tokens,
         skip_eplb=True,

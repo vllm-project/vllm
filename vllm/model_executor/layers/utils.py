@@ -111,9 +111,8 @@ def cuda_flashinfer_bf16_gemm_impl(
 ) -> torch.Tensor:
     """Route an unquantized BF16 matmul through FlashInfer's ``mm_bf16``.
 
-    The FlashInfer model backend never falls back to Torch. Non-contiguous
-    tensors are materialized before dispatch; unsupported dtype/device
-    combinations fail explicitly instead of silently mixing model backends.
+    Unsupported dtype/device combinations fail explicitly instead of silently
+    mixing model backends.
     """
     if x.dim() == 0 or weight.dim() != 2:
         raise ValueError(
@@ -136,19 +135,14 @@ def cuda_flashinfer_bf16_gemm_impl(
         or not weight.is_cuda
         or weight.device != x.device
         or not bias_ok
+        or M == 0
+        or N == 0
+        or K == 0
     ):
-        raise ValueError(
-            "FlashInfer BF16 GEMM received unsupported dtype, device, or bias "
-            "metadata; refusing to fall back to the Torch backend."
-        )
+        logger.warning_once("Using default unquantized gemm (torch).")
+        return torch.nn.functional.linear(x, weight, bias)
 
-    if M == 0 or N == 0 or K == 0:
-        return x.new_empty((*x.shape[:-1], N), dtype=torch.bfloat16)
-
-    x_2d = x.contiguous().reshape(M, K)
-    weight = weight.contiguous()
-    if bias is not None:
-        bias = bias.contiguous()
+    x_2d = x.reshape(M, K)
     out_2d = flashinfer_bf16_mm_impl(x_2d, weight.t(), bias, pdl)
     return out_2d.reshape(*x.shape[:-1], N)
 
@@ -444,21 +438,21 @@ def _get_bf16_linear_config() -> tuple[str, bool]:
 def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
         gemm_impl = rocm_unquantized_gemm
-        gemm_name = gemm_impl.__name__
+        gemm_name = "rocm_unquantized_gemm"
     elif current_platform.is_cpu():
         gemm_impl = cpu_unquantized_gemm
-        gemm_name = gemm_impl.__name__
+        gemm_name = "cpu_unquantized_gemm"
     else:
         bf16_linear_backend, enable_bf16_pdl = _get_bf16_linear_config()
         if bf16_linear_backend == "torch":
             gemm_impl = default_unquantized_gemm
-            gemm_name = gemm_impl.__name__
+            gemm_name = "torch_linear"
         else:
             gemm_impl = functools.partial(
                 cuda_flashinfer_bf16_gemm,
                 pdl=enable_bf16_pdl,
             )
-            gemm_name = f"{cuda_flashinfer_bf16_gemm.__name__}(pdl={enable_bf16_pdl})"
+            gemm_name = f"flashinfer_bf16_gemm(pdl={enable_bf16_pdl})"
 
     logger.info_once(
         "Bound %s for unquantized GEMMs.",
