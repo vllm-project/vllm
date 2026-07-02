@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
 from http import HTTPStatus
-from typing import Any
+from typing import Any, cast
 
 from openai_harmony import Message as OpenAIMessage
 
@@ -228,9 +228,52 @@ class OnlineRenderer:
         Called directly by render_completion_request and delegated to by
         OpenAIServingCompletion.render_completion_request after its engine-aware checks.
         """
-        # Return error for unsupported features.
+        prompt_input = request.prompt
         if request.suffix is not None:
-            return self.create_error_response("suffix is not currently supported")
+            if request.echo:
+                return self.create_error_response(
+                    "Echo is unsupported with suffix.",
+                    param="suffix",
+                )
+
+            if request.prompt_embeds is not None:
+                return self.create_error_response(
+                    "suffix is not supported with prompt_embeds",
+                    param="suffix",
+                )
+
+            if isinstance(request.prompt, str):
+                rendered_prompt = self.renderer.render_completion_suffix(
+                    request.prompt, request.suffix
+                )
+                if rendered_prompt is None:
+                    return self.create_error_response(
+                        "suffix is only supported for models with FIM completion "
+                        "rendering",
+                        param="suffix",
+                    )
+                prompt_input = rendered_prompt
+            elif isinstance(request.prompt, list) and all(
+                isinstance(prompt, str) for prompt in request.prompt
+            ):
+                rendered_prompts = []
+                for prompt in cast(list[str], request.prompt):
+                    rendered_prompt = self.renderer.render_completion_suffix(
+                        prompt, request.suffix
+                    )
+                    if rendered_prompt is None:
+                        return self.create_error_response(
+                            "suffix is only supported for models with FIM completion "
+                            "rendering",
+                            param="suffix",
+                        )
+                    rendered_prompts.append(rendered_prompt)
+                prompt_input = rendered_prompts
+            else:
+                return self.create_error_response(
+                    "suffix requires text prompt input for FIM completion rendering",
+                    param="suffix",
+                )
 
         if request.echo and request.prompt_embeds is not None:
             return self.create_error_response("Echo is unsupported with prompt embeds.")
@@ -242,7 +285,7 @@ class OnlineRenderer:
 
         engine_inputs = await self.preprocess_completion(
             request,
-            prompt_input=request.prompt,
+            prompt_input=prompt_input,
             prompt_embeds=request.prompt_embeds,
             skip_mm_cache=skip_mm_cache,
         )

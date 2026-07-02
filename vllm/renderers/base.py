@@ -160,6 +160,10 @@ class BaseRenderer(ABC, Generic[_T]):
 
         return tokenizer
 
+    def render_completion_suffix(self, prompt: str, suffix: str) -> str | None:
+        """Render OpenAI completion suffix input when the renderer supports FIM."""
+        return None
+
     def _decode(self, *args, **kwargs):
         return self.get_tokenizer().decode(*args, **kwargs)
 
