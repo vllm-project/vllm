@@ -664,7 +664,7 @@ def _resolve_vision_chunk_items(
 ):
     # Process vision_chunk items - extract from (data, modality) tuples
     # and convert to VisionChunk types with proper UUID handling
-    vision_chunks_uuids = [uuid for data, uuid in vision_chunk_items]
+    vision_chunks_uuids: list[str | None] = []
 
     assert len(vision_chunk_items) == len(vision_chunks_modality_order), (
         f"vision_chunk items ({len(vision_chunk_items)}) and "
@@ -685,37 +685,64 @@ def _resolve_vision_chunk_items(
                 processed_chunks.append(
                     VisionChunkImage(type="image", image=image_data, uuid=uuid)
                 )
+                vision_chunks_uuids.append(uuid)
             else:
                 processed_chunks.append(data)  # type: ignore[arg-type]
+                vision_chunks_uuids.append(uuid)
         elif inner_modality == "video":
-            # For video, we may need to split into chunks
-            # if processor supports it
-            # For now, just wrap as a video chunk placeholder
+            # Some unified vision_chunk processors split a single decoded video
+            # into multiple model-native video_chunk items.
             if hasattr(mm_processor, "split_video_chunks") and data is not None:
+                requires_video_chunk_splitting = getattr(
+                    mm_processor, "requires_video_chunk_splitting", False
+                )
                 try:
-                    video_uuid = uuid or random_uuid()
-                    # video await result is (video_data, video_meta) tuple
-                    if isinstance(data, tuple) and len(data) >= 1:
+                    if requires_video_chunk_splitting:
+                        # Keep the full data object. For videos this is usually
+                        # (frames, metadata), and some splitters need metadata
+                        # for timestamps.
+                        video_chunks = mm_processor.split_video_chunks(data)
+                    elif isinstance(data, tuple) and len(data) >= 1:
                         video_data = data[0]
+                        video_chunks = mm_processor.split_video_chunks(video_data)
                     else:
                         video_data = data
-                    video_chunks = mm_processor.split_video_chunks(video_data)
+                        video_chunks = mm_processor.split_video_chunks(video_data)
                     for i, vc in enumerate(video_chunks):
+                        if uuid is None:
+                            chunk_uuid = None
+                        elif len(video_chunks) == 1:
+                            chunk_uuid = uuid
+                        else:
+                            chunk_uuid = f"{uuid}-{i}"
                         processed_chunks.append(
                             VisionChunkVideo(
                                 type="video_chunk",
                                 video_chunk=vc["video_chunk"],
-                                uuid=f"{video_uuid}-{i}",
+                                uuid=chunk_uuid,
                                 video_idx=video_idx,
                                 prompt=vc["prompt"],
                             )
                         )
+                        vision_chunks_uuids.append(chunk_uuid)
                     video_idx += 1
                 except Exception as e:
+                    if requires_video_chunk_splitting:
+                        raise ValueError(
+                            "Video inputs for this model must be split into "
+                            "video_chunk items"
+                        ) from e
                     logger.warning("Failed to split video chunks: %s", e)
                     processed_chunks.append(data)  # type: ignore[arg-type]
+                    vision_chunks_uuids.append(uuid)
             else:
+                if getattr(mm_processor, "requires_video_chunk_splitting", False):
+                    raise ValueError(
+                        "Video inputs for this model must be split into "
+                        "video_chunk items"
+                    )
                 processed_chunks.append(data)  # type: ignore[arg-type]
+                vision_chunks_uuids.append(uuid)
     return processed_chunks, vision_chunks_uuids
 
 
