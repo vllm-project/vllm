@@ -650,7 +650,16 @@ class MiMoV2OmniProcessingInfo(BaseProcessingInfo):
     def get_hf_processor(self, **kwargs: object) -> MiMoOmniProcessor:
         hf_config = self.get_hf_config()
         tokenizer = self.get_tokenizer()
-        return MiMoOmniProcessor.from_hf_config(tokenizer, hf_config)
+        # Thread --allowed-media-domains / --allowed-local-media-path from
+        # ModelConfig into MiMoVLProcessor (see its docstring for the SSRF /
+        # LFI hardening rationale).
+        model_config = self.ctx.model_config
+        return MiMoOmniProcessor.from_hf_config(
+            tokenizer,
+            hf_config,
+            allowed_media_domains=model_config.allowed_media_domains,
+            allowed_local_media_path=model_config.allowed_local_media_path,
+        )
 
     def get_image_processor(self, **kwargs: object):
         return self.get_hf_processor(**kwargs).image_processor
