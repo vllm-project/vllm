@@ -11,6 +11,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
@@ -81,6 +82,14 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
         # Updating the oracle querying logic is out of the scope of this
         # PR. Need to fix the kernel or update structure in follow up.
         if moe_config.moe_parallel_config.dp_size > 1:
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
+
+        # HACK: unquantized FlashInfer aliases SWIGLUOAI to plain Swiglu
+        # (swiglu_alpha/limit only set on the MXFP4 branch). Route to
+        # Triton's swigluoai_and_mul until that's plumbed through. Same
+        # demotion pattern as the Qwen3.5/dp_size hack above.
+        if moe_config.activation == MoEActivation.SWIGLUOAI:
+            _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_TRTLLM)
             _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
 
     elif current_platform.is_xpu():
@@ -292,6 +301,13 @@ def convert_to_unquantized_kernel_format(
             is_gated_act_gemm=is_act_and_mul,
         )
 
+    if (
+        unquantized_backend == UnquantizedMoeBackend.TRITON
+        and current_platform.is_rocm()
+        and envs.VLLM_ROCM_MOE_PADDING
+    ):
+        # Skip .contiguous(): it would undo the ROCm MoE weight padding.
+        return w13_weight, w2_weight
     return w13_weight.contiguous(), w2_weight.contiguous()
 
 

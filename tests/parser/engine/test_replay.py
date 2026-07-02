@@ -18,18 +18,21 @@ from typing import NamedTuple
 import pytest
 
 from tests.parser.engine.replay_harness import (
+    DUMMY_TOOLS,
     MockTokenizer,
     _test_request,
     assert_no_terminal_leakage,
     assert_parse_output,
     collect_output,
     make_mock_tokenizer,
+    parse_non_streaming,
     replay_streaming,
     replay_with_text_holdback,
 )
 from tests.parser.engine.trace_builder import _BUILDERS, build_samples
 from vllm.parser.engine import registered_adapters as _adapters_mod
 from vllm.parser.engine.parser_engine import ParserEngine
+from vllm.parser.engine.parser_engine_config import ParserState
 
 # ── Parser discovery ─────────────────────────────────────────────────
 
@@ -78,7 +81,11 @@ def _discover_parsers() -> list[_ParserInfo]:
                 terminals=sorted(v for v in all_vals if len(v) > 1),
                 tool_end=tool_end,
                 think_end=cfg.terminals.get("THINK_END", ""),
-                tool_start=cfg.terminals.get("TOOL_START", ""),
+                tool_start=(
+                    cfg.terminals["TOOL_SECTION_START"]
+                    if (ParserState.CONTENT, "TOOL_SECTION_START") in cfg.transitions
+                    else cfg.terminals.get("TOOL_START", "")
+                ),
             )
         )
     if missing_builders:
@@ -287,16 +294,18 @@ _TOOL_CALL_SAMPLES = [
 ]
 
 
-def _suppressed_expectations(
-    sample, think_end: str, tool_start: str
+def _tool_suppression_expectations(
+    sample, think_end: str, tool_start: str, *, include_tool_block: bool
 ) -> tuple[str, str]:
-    """Compute expected (reasoning, content) when tools are suppressed.
+    """Expected (reasoning, content) when tool calls are not extracted.
 
-    When an explicit reasoning-end delimiter is present, reasoning ends
-    there and the tool call block becomes content.  When reasoning ends
-    implicitly (the tool-start token triggers both REASONING_END and
-    TOOL_CALL_START), reasoning still ends at the tool start and the raw
-    tool call block becomes content text.
+    With ``include_tool_block=True`` (skip_tool_parsing / reasoning
+    adapter first pass), tool terminal text is preserved as content so
+    a second-pass parser can see it.
+
+    With ``include_tool_block=False`` (_suppress_tool_calls /
+    tool_choice='none'), the state machine consumes tool blocks and
+    only non-tool content survives.
     """
     full_text = "".join(text for _, text in sample.tokens)
     reasoning = sample.expected_reasoning
@@ -307,36 +316,42 @@ def _suppressed_expectations(
     if think_end:
         pos = after_reasoning.find(think_end)
         if pos >= 0:
-            return (reasoning, after_reasoning[pos + len(think_end) :])
+            if include_tool_block:
+                return (reasoning, after_reasoning[pos + len(think_end) :])
+            after_reasoning = after_reasoning[pos + len(think_end) :]
     if tool_start:
         pos = after_reasoning.find(tool_start)
         if pos >= 0:
-            return (reasoning, after_reasoning[pos:])
-    return (full_text, "")
-
-
-_DUMMY_TOOLS = [
-    {
-        "type": "function",
-        "function": {"name": "stub", "parameters": {"type": "object"}},
-    }
-]
+            if include_tool_block:
+                return (reasoning, after_reasoning[pos:])
+            return (reasoning, after_reasoning[:pos])
+    if include_tool_block:
+        return (full_text, "")
+    return (reasoning, after_reasoning)
 
 
 @pytest.mark.parametrize("chunk_size", [1, 5, None], ids=lambda c: f"chunk{c}")
+@pytest.mark.parametrize(
+    "mode",
+    ["skip_tool_parsing", "suppress_tool_calls"],
+    ids=["skip_tool_parsing", "suppress_tool_calls"],
+)
 @pytest.mark.parametrize(
     "parser_cls,sample,think_end,tool_start",
     _TOOL_CALL_SAMPLES,
     ids=lambda v: v.id if hasattr(v, "id") else getattr(v, "__name__", ""),
 )
-class TestSkipToolParsingReplay:
-    """Replay with skip_tool_parsing=True (tool_choice='none').
+class TestToolCallFilteringReplay:
+    """Replay with tool calls not extracted, in both filtering modes.
 
-    Verifies that reasoning is extracted normally and the raw tool call
-    block appears as content text with no tool calls parsed.
+    ``skip_tool_parsing`` (reasoning adapter first pass): tool terminal
+    text is preserved as content for a second-pass tool parser.
+
+    ``suppress_tool_calls`` (tool_choice='none'): tool call blocks are
+    consumed by the state machine and do not leak into content.
     """
 
-    def test_replay(self, parser_cls, sample, think_end, tool_start, chunk_size):
+    def test_replay(self, parser_cls, sample, think_end, tool_start, mode, chunk_size):
         tokenizer = make_mock_tokenizer(sample)
         kwargs = {}
         if sample.chat_template_kwargs:
@@ -344,8 +359,11 @@ class TestSkipToolParsingReplay:
         parser = parser_cls(tokenizer, **kwargs)
 
         request = _test_request()
-        request.tool_choice = "none"
-        request.tools = _DUMMY_TOOLS
+        request.tools = DUMMY_TOOLS
+        if mode == "skip_tool_parsing":
+            parser.skip_tool_parsing = True
+        else:
+            request.tool_choice = "none"
 
         all_ids = [tid for tid, _ in sample.tokens]
         all_texts = [text for _, text in sample.tokens]
@@ -370,10 +388,51 @@ class TestSkipToolParsingReplay:
 
         output = collect_output(results)
 
-        expected_reasoning, expected_content = _suppressed_expectations(
-            sample, think_end, tool_start
+        include_block = mode == "skip_tool_parsing"
+        expected_reasoning, expected_content = _tool_suppression_expectations(
+            sample, think_end, tool_start, include_tool_block=include_block
         )
 
+        assert output.reasoning == expected_reasoning, (
+            f"Reasoning mismatch (mode={mode}):\n"
+            f"  expected: {expected_reasoning!r}\n"
+            f"  actual:   {output.reasoning!r}"
+        )
+        assert output.tool_calls == [], (
+            f"Expected no tool calls (mode={mode}) but got {output.tool_calls}"
+        )
+        assert output.content == expected_content, (
+            f"Content mismatch (mode={mode}):\n"
+            f"  expected: {expected_content!r}\n"
+            f"  actual:   {output.content!r}"
+        )
+
+
+@pytest.mark.parametrize(
+    "parser_cls,sample,think_end,tool_start",
+    _TOOL_CALL_SAMPLES,
+    ids=lambda v: v.id if hasattr(v, "id") else getattr(v, "__name__", ""),
+)
+class TestToolCallFilteringNonStreaming:
+    """Non-streaming parse() with tool_choice='none' must suppress tool
+    calls and not leak special tokens into content."""
+
+    def test_parse(self, parser_cls, sample, think_end, tool_start):
+        tokenizer = make_mock_tokenizer(sample)
+        kwargs = {}
+        if sample.chat_template_kwargs:
+            kwargs["chat_template_kwargs"] = sample.chat_template_kwargs
+        parser = parser_cls(tokenizer, **kwargs)
+
+        request = _test_request()
+        request.tools = DUMMY_TOOLS
+        request.tool_choice = "none"
+
+        output = parse_non_streaming(parser, sample, request)
+
+        expected_reasoning, expected_content = _tool_suppression_expectations(
+            sample, think_end, tool_start, include_tool_block=False
+        )
         assert output.reasoning == expected_reasoning, (
             f"Reasoning mismatch:\n"
             f"  expected: {expected_reasoning!r}\n"
@@ -387,6 +446,135 @@ class TestSkipToolParsingReplay:
             f"  expected: {expected_content!r}\n"
             f"  actual:   {output.content!r}"
         )
+
+
+_WS_TOOL_SAMPLES = [(t[0], t[1]) for t in _TOOL_CALL_SAMPLES if "whitespace" in t[1].id]
+
+
+@pytest.mark.parametrize(
+    "parser_cls,sample",
+    _WS_TOOL_SAMPLES,
+    ids=lambda v: v.id if hasattr(v, "id") else getattr(v, "__name__", ""),
+)
+class TestToolChoiceNoneStreamingParity:
+    """Streaming and non-streaming must return the same content
+    when tool_choice='none' suppresses tool calls."""
+
+    def test_content_matches(self, parser_cls, sample):
+        tokenizer = make_mock_tokenizer(sample)
+        kwargs = {}
+        if sample.chat_template_kwargs:
+            kwargs["chat_template_kwargs"] = sample.chat_template_kwargs
+        request = _test_request()
+        request.tools = DUMMY_TOOLS
+        request.tool_choice = "none"
+
+        ns_output = parse_non_streaming(
+            parser_cls(tokenizer, **kwargs),
+            sample,
+            request,
+        )
+
+        s_parser = parser_cls(tokenizer, **kwargs)
+        results = []
+        for i, (tid, text) in enumerate(sample.tokens):
+            is_last = i == len(sample.tokens) - 1
+            results.append(
+                s_parser.parse_delta(
+                    text,
+                    [tid],
+                    request,
+                    prompt_token_ids=(sample.prompt_token_ids or [])
+                    if i == 0
+                    else None,
+                    finished=is_last,
+                )
+            )
+        s_output = collect_output(results)
+
+        assert ns_output.content == s_output.content, (
+            f"Streaming/non-streaming content mismatch:\n"
+            f"  streaming:     {s_output.content!r}\n"
+            f"  non-streaming: {ns_output.content!r}"
+        )
+
+
+_DROP_TOKENS = {"<bos>": 99990, "<eos>": 99991}
+
+
+def _inject_drop_tokens(sample):
+    """Insert <bos> at stream start and <eos> between the first two tokens."""
+    new_vocab = {**sample.vocab, **_DROP_TOKENS}
+    tokens = list(sample.tokens)
+    tokens.insert(0, (99990, "<bos>"))
+    if len(tokens) >= 3:
+        tokens.insert(2, (99991, "<eos>"))
+    else:
+        tokens.append((99991, "<eos>"))
+    return dataclasses.replace(sample, vocab=new_vocab, tokens=tokens)
+
+
+class TestDropTokenReplay:
+    """Verify unconfigured special tokens are silently dropped across
+    all parsers and chunk sizes."""
+
+    @pytest.mark.parametrize(
+        "parser_info",
+        _PARSERS,
+        ids=[p.name for p in _PARSERS],
+    )
+    @pytest.mark.parametrize("chunk_size", [1, 3, None])
+    def test_drop_tokens_removed_from_output(self, parser_info, chunk_size):
+        for sample in parser_info.samples:
+            injected = _inject_drop_tokens(sample)
+            tokenizer = make_mock_tokenizer(injected)
+            parser = parser_info.parser_cls(
+                tokenizer,
+                tools=sample.tools,
+            )
+
+            results = replay_streaming(
+                parser,
+                injected.tokens,
+                chunk_size=chunk_size,
+                tools=sample.tools,
+                prompt_token_ids=sample.prompt_token_ids,
+            )
+            output = collect_output(results)
+
+            assert_no_terminal_leakage(
+                output,
+                list(_DROP_TOKENS.keys()),
+                context=f"parser={parser_info.name}, chunk={chunk_size}",
+            )
+            assert_parse_output(output, sample)
+
+
+class TestDropTokenNonStreaming:
+    """Non-streaming parse() must also strip unconfigured special tokens."""
+
+    @pytest.mark.parametrize(
+        "parser_info",
+        _PARSERS,
+        ids=[p.name for p in _PARSERS],
+    )
+    def test_drop_tokens_removed_from_output(self, parser_info):
+        for sample in parser_info.samples:
+            injected = _inject_drop_tokens(sample)
+            tokenizer = make_mock_tokenizer(injected)
+            parser = parser_info.parser_cls(
+                tokenizer,
+                tools=sample.tools,
+            )
+
+            request = _test_request(tools=sample.tools)
+            output = parse_non_streaming(parser, injected, request)
+
+            assert_no_terminal_leakage(
+                output,
+                list(_DROP_TOKENS.keys()),
+                context=f"parser={parser_info.name}",
+            )
 
 
 class TestAdapterReferences:

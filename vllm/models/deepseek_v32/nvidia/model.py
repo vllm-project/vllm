@@ -336,7 +336,6 @@ class DeepseekV32ForCausalLM(DeepseekV2ForCausalLM):
     def set_moe_parameters(self):
         # Same as the base, but keyed on the MoE block type rather than the
         # decoder-layer type (DeepseekV32DecoderLayer is a plain nn.Module).
-        self.expert_weights = []
         self.num_expert_groups = getattr(self.config, "n_group", 1)
         self.moe_layers = []
         self.moe_mlp_layers = []

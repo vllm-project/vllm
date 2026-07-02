@@ -141,6 +141,21 @@ if(Python_VERSION VERSION_GREATER_EQUAL "3.11")
 endif()
 
 #
+# fs_io extension (pure CXX; must stay above the non-CUDA device branch
+# so CPU builds define the target before the early return).
+# GIL-releasing filesystem helpers for FileSystemTierManager.
+#
+if(Python_VERSION VERSION_GREATER_EQUAL "3.11")
+  define_extension_target(
+    fs_io_C
+    DESTINATION vllm
+    LANGUAGE CXX
+    SOURCES csrc/fs_io.cpp
+    USE_SABI 3.11
+    WITH_SOABI)
+endif()
+
+#
 # Forward the non-CUDA device extensions to external CMake scripts.
 #
 if (NOT VLLM_TARGET_DEVICE STREQUAL "cuda" AND

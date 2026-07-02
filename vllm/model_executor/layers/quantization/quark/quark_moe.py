@@ -1280,6 +1280,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 gemm1_alpha=getattr(layer, "swiglu_alpha", None),
                 gemm1_beta=getattr(layer, "swiglu_beta", None),
                 swiglu_limit=getattr(layer, "swiglu_limit", None),
+                layer=layer,
             )
 
         # Emulation and other schemes
