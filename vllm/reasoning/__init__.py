@@ -24,6 +24,10 @@ _REASONING_PARSERS_TO_REGISTER = {
         "deepseek_r1_reasoning_parser",  # filename
         "DeepSeekR1ReasoningParser",  # class_name
     ),
+    "intern-s1": (
+        "intern_s1_reasoning_parser",
+        "InternS1ReasoningParser",
+    ),
     "deepseek_v3": (
         "deepseek_v3_reasoning_parser",
         "DeepSeekV3ReasoningParser",
