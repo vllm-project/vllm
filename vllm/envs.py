@@ -114,6 +114,7 @@ if TYPE_CHECKING:
     VLLM_ALLOW_RUNTIME_LORA_UPDATING: bool = False
     VLLM_SKIP_P2P_CHECK: bool = False
     VLLM_DISABLED_KERNELS: list[str] = []
+    VLLM_DISABLE_TURBOQUANT_NATIVE_STORE: bool = False
     VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE: bool = True
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
@@ -1119,6 +1120,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
         []
         if "VLLM_DISABLED_KERNELS" not in os.environ
         else os.environ["VLLM_DISABLED_KERNELS"].split(",")
+    ),
+    "VLLM_DISABLE_TURBOQUANT_NATIVE_STORE": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_TURBOQUANT_NATIVE_STORE", "0"))
     ),
     "VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE": lambda: bool(
         int(os.getenv("VLLM_ENABLE_FLA_PACKED_RECURRENT_DECODE", "1"))

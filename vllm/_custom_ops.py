@@ -1888,6 +1888,53 @@ def silu_and_mul_mxfp4_experts_quant(
 
 
 # fp8
+def turboquant_store_fp8_v4(
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+    stride_block: int,
+    stride_pos: int,
+    stride_head: int,
+    num_heads: int,
+    block_size: int,
+    key_packed_size: int,
+    value_data_bytes: int,
+) -> None:
+    torch.ops._C.turboquant_store_fp8_v4(
+        key,
+        value,
+        kv_cache,
+        slot_mapping,
+        stride_block,
+        stride_pos,
+        stride_head,
+        num_heads,
+        block_size,
+        key_packed_size,
+        value_data_bytes,
+    )
+
+
+if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "turboquant_store_fp8_v4"):
+
+    @register_fake("_C::turboquant_store_fp8_v4")
+    def _turboquant_store_fp8_v4_fake(
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+        stride_block: int,
+        stride_pos: int,
+        stride_head: int,
+        num_heads: int,
+        block_size: int,
+        key_packed_size: int,
+        value_data_bytes: int,
+    ) -> None:
+        return None
+
+
 def scaled_fp8_quant(
     input: torch.Tensor,
     scale: torch.Tensor | None = None,

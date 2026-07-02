@@ -460,6 +460,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
 
     list(APPEND VLLM_STABLE_EXT_SRC
       "csrc/libtorch_stable/cutlass_extensions/common.cpp"
+      "csrc/libtorch_stable/quantization/turboquant/turboquant_store.cu"
       "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_entry.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu"
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu"

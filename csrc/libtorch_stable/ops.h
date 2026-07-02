@@ -223,6 +223,20 @@ void fused_add_rms_norm_static_fp8_quant(torch::stable::Tensor& out,
                                          torch::stable::Tensor& scale,
                                          double epsilon);
 
+#ifndef USE_ROCM
+void turboquant_store_fp8_v4(const torch::stable::Tensor& key,
+                             const torch::stable::Tensor& value,
+                             torch::stable::Tensor& kv_cache,
+                             const torch::stable::Tensor& slot_mapping,
+                             int64_t stride_block,
+                             int64_t stride_pos,
+                             int64_t stride_head,
+                             int64_t num_heads,
+                             int64_t block_size,
+                             int64_t key_packed_size,
+                             int64_t value_data_bytes);
+#endif
+
 // Fused layernorm + dynamic per-token quant kernels (shared CUDA/ROCm)
 void rms_norm_dynamic_per_token_quant(
     torch::stable::Tensor& out, torch::stable::Tensor const& input,

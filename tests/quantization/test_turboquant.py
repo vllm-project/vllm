@@ -638,6 +638,92 @@ class TestHadamardRotation:
 class TestStoreDecodeRoundTrip:
     """End-to-end: store KV into TQ cache, decode, compare vs fp16 ref."""
 
+    @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA not available")
+    @pytest.mark.parametrize("D", [127, 128, 256])
+    @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+    def test_native_fp8_v4_store_matches_triton(self, dtype, D):
+        """Native CUDA FP8-key/V4 store should match the Triton store bytes."""
+        import vllm._custom_ops as ops
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            _use_fp8_e4b15,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        if _use_fp8_e4b15(0):
+            pytest.skip("native TurboQuant store currently covers SM 8.9+ e4nv")
+        assert hasattr(torch.ops, "_C") and hasattr(
+            torch.ops._C, "turboquant_store_fp8_v4"
+        ), "native TurboQuant store op must be built on SM >= 8.9"
+
+        cfg = TurboQuantConfig.from_cache_dtype("turboquant_k8v4", head_dim=D)
+        N = 4
+        Hk = 2
+        block_size = 4
+        num_blocks = 2
+        device = torch.device("cuda")
+
+        torch.manual_seed(123)
+        key = torch.randn(N, Hk, D, device=device, dtype=dtype)
+        value = torch.randn(N, Hk, D, device=device, dtype=dtype)
+        key[0, 0, 0] = 1024.0
+        key[0, 0, 1] = -1024.0
+        slot_mapping = torch.tensor([0, -1, 3, 5], device=device, dtype=torch.int32)
+
+        cache_sentinel = 0xA5
+        kv_triton = torch.full(
+            (
+                num_blocks,
+                block_size,
+                Hk,
+                cfg.slot_size_aligned,
+            ),
+            cache_sentinel,
+            device=device,
+            dtype=torch.uint8,
+        )
+        kv_native = torch.full_like(kv_triton, cache_sentinel)
+
+        triton_turboquant_store(
+            key,
+            value,
+            kv_triton,
+            slot_mapping,
+            torch.empty(0, device=device),
+            torch.empty(0, device=device),
+            mse_bits=cfg.key_mse_bits,
+            key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            key_fp8=cfg.key_fp8,
+            use_native_store=False,
+        )
+
+        k_flat = key.reshape(N * Hk, D).contiguous()
+        v_flat = value.reshape(N * Hk, D).contiguous()
+        value_data_bytes = math.ceil(D * cfg.effective_value_quant_bits / 8)
+        ops.turboquant_store_fp8_v4(
+            k_flat,
+            v_flat,
+            kv_native.view(-1),
+            slot_mapping,
+            kv_native.stride(0),
+            kv_native.stride(1),
+            kv_native.stride(2),
+            Hk,
+            block_size,
+            cfg.key_packed_size,
+            value_data_bytes,
+        )
+        torch.cuda.synchronize()
+
+        assert torch.equal(kv_native, kv_triton)
+        unused_slots = torch.tensor([1, 2, 4, 6, 7], device=device)
+        kv_native_slots = kv_native.view(
+            num_blocks * block_size, Hk, cfg.slot_size_aligned
+        )
+        assert kv_native_slots[unused_slots].eq(cache_sentinel).all().item()
+
     @pytest.mark.parametrize(
         "preset",
         ["turboquant_k8v4", "turboquant_4bit_nc"],
