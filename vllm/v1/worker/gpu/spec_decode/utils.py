@@ -16,17 +16,23 @@ class DraftTokensHandler:
 
         self.req_ids: list[str] = []
         self.draft_tokens_np: np.ndarray | None = None
+        self.num_valid_draft_tokens_np: np.ndarray | None = None
         self.num_draft_tokens: int = 0
 
     def set_draft_tokens(
-        self, input_batch: InputBatch, draft_tokens: torch.Tensor
+        self,
+        input_batch: InputBatch,
+        draft_tokens: torch.Tensor,
+        num_valid_draft_tokens: torch.Tensor | None = None,
     ) -> None:
         self.req_ids = input_batch.req_ids
         self.num_draft_tokens = draft_tokens.shape[1]
-        if not input_batch.has_structured_output_reqs:
-            # No draft token validation needs to be performed by
-            # the scheduler for this batch.
+
+        needs_draft_copy = input_batch.has_structured_output_reqs
+
+        if not needs_draft_copy and num_valid_draft_tokens is None:
             self.draft_tokens_np = None
+            self.num_valid_draft_tokens_np = None
             return
 
         # For spec decoding + structured outputs, we must transfer the
@@ -34,21 +40,46 @@ class DraftTokensHandler:
         current_stream = torch.cuda.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
-            self.draft_tokens_np = async_copy_to_np(draft_tokens)
-            # draft_tokens is a temporary allocation on the main stream and read here on
-            # copy_stream; without record_stream, the caching allocator may reuse its
-            # memory before the async copy executes.
-            draft_tokens.record_stream(self.copy_stream)
+            # draft_tokens / num_valid_draft_tokens are temporary allocations on
+            # the main stream and read here on copy_stream; without record_stream,
+            # the caching allocator may reuse their memory before the async copy
+            # executes.
+            if needs_draft_copy:
+                self.draft_tokens_np = async_copy_to_np(draft_tokens)
+                draft_tokens.record_stream(self.copy_stream)
+            else:
+                self.draft_tokens_np = None
+            if num_valid_draft_tokens is not None:
+                self.num_valid_draft_tokens_np = async_copy_to_np(
+                    num_valid_draft_tokens
+                )
+                num_valid_draft_tokens.record_stream(self.copy_stream)
+            else:
+                self.num_valid_draft_tokens_np = None
             self.copy_event.record()
 
     def get_draft_tokens(self) -> DraftTokenIds | None:
-        if self.draft_tokens_np is not None:
+        if (
+            self.draft_tokens_np is not None
+            or self.num_valid_draft_tokens_np is not None
+        ):
             self.copy_event.synchronize()
+
+        if self.draft_tokens_np is not None:
             draft_token_ids = self.draft_tokens_np.tolist()
         else:
             # This case only happens when async scheduling is disabled.
             draft_token_ids = [[-1] * self.num_draft_tokens for _ in self.req_ids]
-        return DraftTokenIds(self.req_ids, draft_token_ids)
+
+        num_valid_list: list[int] | None = None
+        if self.num_valid_draft_tokens_np is not None:
+            num_valid_list = self.num_valid_draft_tokens_np.tolist()
+
+        return DraftTokenIds(
+            req_ids=self.req_ids,
+            draft_token_ids=draft_token_ids,
+            num_valid_draft_tokens=num_valid_list,
+        )
 
 
 def get_parallel_drafting_token_id(hf_config) -> int:

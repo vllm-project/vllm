@@ -79,7 +79,7 @@ from vllm.v1.engine.utils import (
 from vllm.v1.executor import Executor
 from vllm.v1.kv_cache_interface import KVCacheConfig, get_kv_cache_spec_kind
 from vllm.v1.metrics.stats import SchedulerStats
-from vllm.v1.outputs import ModelRunnerOutput
+from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.serial_utils import MsgpackDecoder, MsgpackEncoder
 from vllm.v1.structured_output import StructuredOutputManager
@@ -157,6 +157,13 @@ class EngineCore:
             hash_block_size=hash_block_size,
         )
         self.use_spec_decode = vllm_config.speculative_config is not None
+        # Variable-length drafters (e.g., ngram_gpu) need to retrieve
+        # num_valid_draft_tokens in async scheduling mode to truncate drafts.
+        # Fixed-length drafters (Eagle/Eagle3/MTP) don't need this extra RPC.
+        self.use_variable_length_drafter = (
+            vllm_config.speculative_config is not None
+            and vllm_config.speculative_config.use_ngram_gpu()
+        )
         self.check_for_draft_tokens = (
             self.use_spec_decode or vllm_config.model_config.is_diffusion
         )
@@ -505,7 +512,31 @@ class EngineCore:
             scheduler_output, model_output
         )
 
-        return engine_core_outputs, scheduler_output.total_num_scheduled_tokens > 0
+        model_executed = scheduler_output.total_num_scheduled_tokens > 0
+        self._maybe_update_async_draft_token_ids(model_executed)
+
+        return engine_core_outputs, model_executed
+
+    def _maybe_update_async_draft_token_ids(
+        self, model_executed: bool
+    ) -> "DraftTokenIds | None":
+        """
+        Consume variable-length draft metadata from the just-completed
+        batch and apply it to scheduler request state.
+        """
+        if not (
+            self.async_scheduling
+            and self.use_variable_length_drafter
+            and model_executed
+        ):
+            return None
+        draft_token_ids = self.model_executor.take_draft_token_ids()
+        if (
+            draft_token_ids is not None
+            and draft_token_ids.num_valid_draft_tokens is not None
+        ):
+            self.scheduler.update_draft_token_ids(draft_token_ids)
+        return draft_token_ids
 
     def post_step(self, model_executed: bool) -> None:
         # When using async scheduling we can't get draft token ids in advance,
@@ -606,14 +637,23 @@ class EngineCore:
             scheduler_output, model_output
         )
 
+        popped_batch_executed = scheduler_output.total_num_scheduled_tokens > 0
+        async_draft_token_ids = self._maybe_update_async_draft_token_ids(
+            popped_batch_executed
+        )
+
         # NOTE(nick): We can either handle the deferred tasks here or save
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
             # When draft tokens are used with structured output, validate them
             # before computing the grammar bitmask for the deferred request.
+            # In async scheduling the variable-length draft metadata is fetched
+            # eagerly above; otherwise pull it from the worker here.
             if self.check_for_draft_tokens:
-                draft_token_ids = self.model_executor.take_draft_token_ids()
+                draft_token_ids = (
+                    async_draft_token_ids or self.model_executor.take_draft_token_ids()
+                )
                 if draft_token_ids is not None:
                     # Update the draft token ids in the scheduler output to
                     # filter out the invalid spec tokens, which will be padded
