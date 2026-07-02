@@ -76,6 +76,13 @@ def _resolve_dsv4_kv_cache_dtype(
     """
     if use_fp8_ds_mla_layout:
         # fp8_ds_mla block format: UE8M0 block-scaled fp8 packed as uint8.
+        # This layout has no non-fp8 variant, so the default "auto" resolves to
+        # fp8 here rather than asserting -- otherwise SM120 crashes on the HF
+        # model card's `vllm serve <model>` (no --kv-cache-dtype flag). It then
+        # flows through the fp8 -> fp8_ds_mla upgrade below (which also writes the
+        # canonical string back onto cache_config for the page-size spec).
+        if kv_cache_dtype in ("auto", None):
+            kv_cache_dtype = "fp8"
         assert kv_cache_dtype.startswith("fp8"), (
             f"DeepseekV4 fp8_ds_mla layout only supports fp8 kv-cache, "
             f"got {kv_cache_dtype}"
