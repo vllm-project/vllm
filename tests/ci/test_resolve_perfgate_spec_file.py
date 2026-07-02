@@ -14,7 +14,10 @@ SCRIPT_PATH = (
 
 
 def load_resolver():
-    spec = importlib.util.spec_from_file_location("resolve_perfgate_spec_file", SCRIPT_PATH)
+    spec = importlib.util.spec_from_file_location(
+        "resolve_perfgate_spec_file",
+        SCRIPT_PATH,
+    )
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -65,7 +68,10 @@ def test_resolve_spec_file_fails_closed_for_unknown_chip_model() -> None:
         )
 
 
-def test_main_writes_absolute_same_spec_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_writes_absolute_same_spec_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     resolver = load_resolver()
     spec_file = (
         tmp_path
@@ -93,3 +99,39 @@ def test_main_writes_absolute_same_spec_file(tmp_path: Path, monkeypatch: pytest
     assert resolver.main() == 0
     env_text = github_env.read_text(encoding="utf-8")
     assert f"SAME_SPEC_SPEC_FILE={spec_file}" in env_text
+
+
+def test_main_falls_back_when_auto_selected_spec_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolver = load_resolver()
+    fallback_spec = (
+        tmp_path
+        / "docs"
+        / "official-baselines"
+        / "official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json"
+    )
+    fallback_spec.parent.mkdir(parents=True)
+    fallback_spec.write_text("{}", encoding="utf-8")
+    github_env = tmp_path / "github-env"
+
+    monkeypatch.setattr(
+        "sys.argv",
+        [
+            "resolve_perfgate_spec_file.py",
+            "--explicit-chip-model",
+            "910B2",
+            "--benchmark-repo",
+            str(tmp_path),
+            "--fallback-spec-file",
+            "docs/official-baselines/"
+            "official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json",
+            "--github-env",
+            str(github_env),
+        ],
+    )
+
+    assert resolver.main() == 0
+    env_text = github_env.read_text(encoding="utf-8")
+    assert f"SAME_SPEC_SPEC_FILE={fallback_spec}" in env_text

@@ -134,7 +134,7 @@ def test_main_benchmark_defaults_match_ascend_main_config():
     assert "Resolve perfgate spec for Ascend runner" in text
     assert "Resolve main same-spec file" in text
     assert "resolve_perfgate_spec_file.py" in text
-    assert "echo \"SAME_SPEC_SPEC_FILE=$resolved_spec_file\" >> \"$GITHUB_ENV\"" in text
+    assert 'echo "SAME_SPEC_SPEC_FILE=$resolved_spec_file" >> "$GITHUB_ENV"' in text
     assert "official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json" in text
 
 
