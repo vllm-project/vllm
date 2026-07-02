@@ -284,6 +284,17 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
+    CUDA_HOME: str | None = None
+    VLLM_CI_USE_S3: bool = False
+    VLLM_FLASHINFER_ALLREDUCE_FUSION_THRESHOLDS_MB: dict[int, float] = {}
+    VLLM_MOE_ROUTING_SIMULATION_STRATEGY: str = ""
+    VLLM_PROCESS_NAME_PREFIX: str = "VLLM"
+    VLLM_TEST_FORCE_FP8_MARLIN: bool = False
+    VLLM_TEST_FORCE_LOAD_FORMAT: str = "dummy"
+    VLLM_USE_SIMPLE_KV_OFFLOAD: bool = False
+    VLLM_USE_SPINLOOP_EXT: bool = False
+    OUTLINES_CACHE_DIR: str | None = None
+    XPU_USE_TRITON_KERNEL: bool = False
 
 
 def get_default_cache_root():
@@ -1957,6 +1968,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Each entry is VAR_NAME or VAR_NAME:<suffix> (suffix appended to
     # RDMA device name). Must be set together with VLLM_GPU_NIC_PCIE_MAPPING.
     "VLLM_NIC_SELECTION_VARS": lambda: os.getenv("VLLM_NIC_SELECTION_VARS", ""),
+    # Directory to store outlines cache.
+    "OUTLINES_CACHE_DIR": lambda: os.getenv("OUTLINES_CACHE_DIR", None),
+    # Whether to use Triton kernels for XPU platform instead of native.
+    "XPU_USE_TRITON_KERNEL": lambda: (os.getenv("XPU_USE_TRITON_KERNEL", "0") == "1"),
 }
 
 
@@ -2097,6 +2112,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",
         "VLLM_ASSETS_CACHE",
         "VLLM_ASSETS_CACHE_MODEL_CLEAN",
+        "OUTLINES_CACHE_DIR",
         "VLLM_WORKER_MULTIPROC_METHOD",
         "VLLM_ENABLE_V1_MULTIPROCESSING",
         "VLLM_V1_OUTPUT_PROC_CHUNK_SIZE",
