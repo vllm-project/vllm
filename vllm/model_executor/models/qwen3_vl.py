@@ -1474,7 +1474,7 @@ class Qwen3VLMultiModalProcessor(BaseMultiModalProcessor[Qwen3VLProcessingInfo])
             # token ids takes more time.
             PromptReplacement(
                 modality="video",
-                target="<|vision_start|><|video_pad|><|vision_end|>",
+                target=hf_processor.video_token,
                 replacement=get_video_replacement_qwen3vl,
             ),
         ]

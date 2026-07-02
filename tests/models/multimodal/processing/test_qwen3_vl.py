@@ -95,6 +95,33 @@ def test_processor_num_frames_timestamp(
 
 
 @pytest.mark.parametrize("model_id", [MODEL_ID])
+def test_processor_video_preserves_outer_vision_wrapper(model_id: str) -> None:
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 0, "video": 1},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    num_frames = 8
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    mm_data = _build_video_mm_data(num_frames=num_frames)
+
+    processed = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs={"num_frames": num_frames},
+    )
+
+    token_ids = processed["prompt_token_ids"]
+    hf_config = processor.info.get_hf_config()
+
+    assert token_ids[0] == hf_config.vision_start_token_id
+    assert token_ids[-1] == hf_config.vision_end_token_id
+    assert token_ids.count(hf_config.vision_start_token_id) == num_frames + 1
+    assert token_ids.count(hf_config.vision_end_token_id) == num_frames + 1
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
 @pytest.mark.parametrize("num_videos", [2, 4])
 def test_processor_multi_video(
     model_id: str,
