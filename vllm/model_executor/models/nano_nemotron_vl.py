@@ -1567,6 +1567,16 @@ class NemotronH_Nano_VL_V2(
             if self.sound_encoder is not None and len(sound_weights) > 0:
                 self.sound_encoder.load_weights(sound_weights)
 
+        # Fix: Reinitialize layer-scale (ls1/ls2) parameters in vision encoder.
+        # These are not stored in HF checkpoints (default value is all-ones),
+        # but dummy weight initialization overwrites them with ~0 random values.
+        # Without this fix, vision encoder output is scaled by ~1e-3 instead of 1.0.
+        if len(vision_weights) > 0:
+            init_factor = getattr(self.config.vision_config, "initializer_factor", 1.0)
+            for name, param in self.vision_model.named_parameters():
+                if name.endswith(".ls1") or name.endswith(".ls2"):
+                    param.data.fill_(init_factor)
+
     def get_vit_model_from_radio_config(self, hf_config):
         hf_config_vision = hf_config.vision_config
         model_name = hf_config_vision.args.get("model")
