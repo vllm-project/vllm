@@ -8,6 +8,7 @@ from typing import cast
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
     chunk_hashes_for_block_size,
 )
+from vllm.utils.math_utils import cdiv
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -173,19 +174,21 @@ class MooncakeStoreCoordinator:
     def store_mask(
         self,
         aligned_token_len: int,
+        start_token: int = 0,
         num_prompt_tokens: int | None = None,
     ) -> tuple[list[bool] | None, ...]:
-        """Per-group store masks.
+        """Per-group store masks for the suffix starting at ``start_token``.
 
-        ``mask[g][i]`` is True iff chunk ``i`` of group ``g`` should be
-        written to the store so a future cache hit can consume it. ``None`` is
-        the all-True sentinel.
+        ``mask[g][i]`` is True iff the i-th chunk of group ``g`` *after*
+        ``start_token`` should be written to the store so a future cache hit
+        can consume it. ``None`` is the all-True sentinel for the suffix.
 
         Reuses the engine's ``SingleTypeKVCacheManager.reachable_block_mask``
         so the store retains exactly the blocks the local prefix cache would.
         """
         return self._reachable_masks(
             aligned_token_len,
+            start_token,
             retention_interval=self.retention_interval,
             num_prompt_tokens=num_prompt_tokens,
         )
@@ -202,6 +205,7 @@ class MooncakeStoreCoordinator:
         """
         return self._reachable_masks(
             aligned_token_len,
+            0,
             retention_interval=None,
             num_prompt_tokens=None,
         )
@@ -209,6 +213,7 @@ class MooncakeStoreCoordinator:
     def _reachable_masks(
         self,
         aligned_token_len: int,
+        start_token: int,
         *,
         retention_interval: int | None,
         num_prompt_tokens: int | None,
@@ -220,20 +225,22 @@ class MooncakeStoreCoordinator:
         masks: list[list[bool] | None] = []
         for g_idx, g in enumerate(self.kv_cache_groups):
             spec = _unwrap_spec(g.kv_cache_spec)
-            num_chunks = aligned_token_len // spec.block_size
+            end_chunk = aligned_token_len // spec.block_size
+            start_chunk = min(end_chunk, max(0, cdiv(start_token, spec.block_size)))
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None
+            use_eagle = g_idx in self.eagle_group_ids
             mask = manager_cls.reachable_block_mask(
-                start_block=0,
-                end_block=num_chunks,
+                start_block=start_chunk,
+                end_block=end_chunk,
                 alignment_tokens=self.lcm_block_size,
                 kv_cache_spec=spec,
-                use_eagle=g_idx in self.eagle_group_ids,
+                use_eagle=use_eagle,
                 retention_interval=retention_interval,
                 num_prompt_tokens=num_prompt_tokens,
             )
             if mask is not None:
-                assert len(mask) == num_chunks
+                assert len(mask) == end_chunk - start_chunk
             masks.append(mask)
         return tuple(masks)
 

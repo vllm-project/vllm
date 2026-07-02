@@ -6,25 +6,47 @@ if(DEFINED ENV{QUTLASS_SRC_DIR})
   set(QUTLASS_SRC_DIR $ENV{QUTLASS_SRC_DIR})
 endif()
 
+# CMP0169 NEW: one-argument FetchContent_Populate(name) after Declare is invalid.
+# Use explicit Populate(...) for git, or set SOURCE_DIR for local trees.
 if(QUTLASS_SRC_DIR)
-  FetchContent_Declare(
-    qutlass
-    SOURCE_DIR ${QUTLASS_SRC_DIR}
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND ""
-  )
+  set(_qutlass_user_src "${QUTLASS_SRC_DIR}")
+  cmake_path(ABSOLUTE_PATH _qutlass_user_src
+    BASE_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    NORMALIZE)
+  set(QUTLASS_SRC_DIR "${_qutlass_user_src}")
+  if(NOT IS_DIRECTORY "${QUTLASS_SRC_DIR}")
+    message(FATAL_ERROR
+      "[QUTLASS] QUTLASS_SRC_DIR is not an existing directory: '${QUTLASS_SRC_DIR}'")
+  endif()
+  set(qutlass_SOURCE_DIR "${QUTLASS_SRC_DIR}")
+  set(qutlass_BINARY_DIR "${CMAKE_BINARY_DIR}/qutlass-binary-dir-unused")
 else()
-  FetchContent_Declare(
-    qutlass
-    GIT_REPOSITORY https://github.com/IST-DASLab/qutlass.git
-    GIT_TAG 830d2c4537c7396e14a02a46fbddd18b5d107c65
-    GIT_PROGRESS TRUE
-    CONFIGURE_COMMAND ""
-    BUILD_COMMAND ""
-  )
-endif()
+  set(_QUTLASS_UPSTREAM_REPO "https://github.com/IST-DASLab/qutlass.git")
+  set(_QUTLASS_UPSTREAM_TAG "830d2c4537c7396e14a02a46fbddd18b5d107c65")
 
-FetchContent_Populate(qutlass)
+  set(_qutlass_fc_root "${FETCHCONTENT_BASE_DIR}")
+  if(NOT _qutlass_fc_root)
+    set(_qutlass_fc_root "${CMAKE_BINARY_DIR}/_deps")
+  endif()
+  set(_qutlass_src "${_qutlass_fc_root}/qutlass-src")
+  set(_qutlass_bin "${_qutlass_fc_root}/qutlass-build")
+  set(_qutlass_sub "${_qutlass_fc_root}/qutlass-subbuild")
+
+  if(EXISTS "${_qutlass_src}/qutlass/csrc/bindings.cpp")
+    set(qutlass_SOURCE_DIR "${_qutlass_src}")
+    set(qutlass_BINARY_DIR "${_qutlass_bin}")
+  else()
+    FetchContent_Populate(
+      qutlass
+      SUBBUILD_DIR "${_qutlass_sub}"
+      SOURCE_DIR "${_qutlass_src}"
+      BINARY_DIR "${_qutlass_bin}"
+      GIT_REPOSITORY "${_QUTLASS_UPSTREAM_REPO}"
+      GIT_TAG "${_QUTLASS_UPSTREAM_TAG}"
+      GIT_PROGRESS TRUE
+    )
+  endif()
+endif()
 
 if(NOT qutlass_SOURCE_DIR)
   message(FATAL_ERROR "[QUTLASS] source directory could not be resolved.")

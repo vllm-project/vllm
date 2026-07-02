@@ -62,6 +62,7 @@ from vllm.v1.attention.backends.utils import (
     KVCacheLayoutType,
     get_dcp_local_seq_lens,
     get_kv_cache_layout,
+    get_num_attention_heads_from_layers,
     get_per_layer_parameters,
     infer_global_hyperparameters,
     split_decodes_and_prefills,
@@ -424,7 +425,12 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
-        return capability >= DeviceCapability(7, 5) and capability <= DeviceCapability(
+        # FlashInfer supports SM75+, but is currently broken on SM75 (Turing):
+        # https://github.com/flashinfer-ai/flashinfer/issues/3620 (fix:
+        # https://github.com/flashinfer-ai/flashinfer/pull/3621). Temporarily
+        # raise the floor to SM80 so it is not auto-selected on SM75 until
+        # that fix lands; revert to DeviceCapability(7, 5) once it does.
+        return capability >= DeviceCapability(8, 0) and capability <= DeviceCapability(
             12, 1
         )
 
@@ -630,9 +636,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.use_dcp and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
 
-        self.num_qo_heads = self.model_config.get_num_attention_heads(
-            self.vllm_config.parallel_config
-        )
+        # Compatible with models with non-uniform per-layer head counts.
+        self.num_qo_heads = get_num_attention_heads_from_layers(
+            vllm_config, layer_names
+        ) or self.model_config.get_num_attention_heads(self.vllm_config.parallel_config)
 
         self.num_kv_heads = self.kv_cache_spec.num_kv_heads
         self.head_dim = self.kv_cache_spec.head_size

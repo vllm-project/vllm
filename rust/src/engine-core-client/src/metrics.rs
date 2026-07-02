@@ -84,6 +84,10 @@ pub(crate) fn record_scheduler_stats(
             .spec_decode_num_accepted_tokens
             .get_or_create(&labels)
             .inc_by(spec_decoding_stats.num_accepted_tokens);
+        metrics.log_stats.get_or_create(&labels).observe_spec_decode(
+            spec_decoding_stats.num_drafts,
+            &spec_decoding_stats.num_accepted_tokens_per_pos,
+        );
 
         for (position, accepted_tokens) in
             spec_decoding_stats.num_accepted_tokens_per_pos.iter().copied().enumerate()
@@ -117,6 +121,15 @@ pub(crate) fn record_scheduler_stats(
             .estimated_write_bytes_per_gpu
             .get_or_create(&labels)
             .inc_by(perf_stats.num_write_bytes_per_gpu);
+    }
+
+    if let Some(cudagraph_stats) = &stats.cudagraph_stats {
+        metrics.log_stats.get_or_create(&labels).observe_cudagraph(
+            cudagraph_stats.num_unpadded_tokens,
+            cudagraph_stats.num_padded_tokens,
+            cudagraph_stats.num_paddings,
+            &cudagraph_stats.runtime_mode,
+        );
     }
 
     // Sampled KV-cache residency histograms.

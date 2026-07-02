@@ -195,3 +195,11 @@ steps:
   - requirements/test/nightly-torch.txt
   commands:
   - bash standalone_tests/pytorch_nightly_dependency.sh
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - requirements/test/nightly-torch.txt
+      - vllm/platforms/rocm.py

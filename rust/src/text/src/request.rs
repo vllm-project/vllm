@@ -3,9 +3,10 @@ use std::collections::HashMap;
 use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use vllm_engine_core_client::protocol::StructuredOutputsParams;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 
 use crate::error::{Error, Result};
 use crate::output::TextDecodeOptions;
@@ -174,6 +175,10 @@ pub struct TextRequest {
     /// Override data parallel rank.
     #[serde(default)]
     pub data_parallel_rank: Option<u32>,
+    /// Optional reasoning-parser kwargs forwarded to engine-side structured
+    /// output logic.
+    #[serde(default)]
+    pub reasoning_parser_kwargs: Option<ReasoningParserKwargs>,
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
@@ -193,6 +198,7 @@ impl TextRequest {
             cache_salt: None,
             add_special_tokens: false,
             data_parallel_rank: None,
+            reasoning_parser_kwargs: None,
             lora_request: None,
         }
     }

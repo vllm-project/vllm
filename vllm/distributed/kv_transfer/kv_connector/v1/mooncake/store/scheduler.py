@@ -67,7 +67,6 @@ class MooncakeStoreScheduler:
         # Per-request state
         self.load_specs: dict[str, LoadSpec] = {}  # to be loaded
         self._request_trackers: dict[str, RequestTracker] = {}  # scheduled new requests
-        self._preempted_req_ids: set[str] = set()  # preempted requests
         self._unfinished_requests: dict[str, tuple[Request, tuple[list[int], ...]]] = {}
         self._unfinished_request_ids: set[str] = set()
 
@@ -175,10 +174,8 @@ class MooncakeStoreScheduler:
             self._request_trackers.pop(finished_req_id, None)
             self._unfinished_requests.pop(finished_req_id, None)
             self._unfinished_request_ids.discard(finished_req_id)
-            self._preempted_req_ids.discard(finished_req_id)
 
         preempted_ids = scheduler_output.preempted_req_ids or set()
-        self._preempted_req_ids.update(preempted_ids)
         for req_id in preempted_ids:
             self.load_specs.pop(req_id, None)
             if request_tracker := self._request_trackers.get(req_id):
@@ -243,13 +240,12 @@ class MooncakeStoreScheduler:
                     continue
 
                 req_meta = None
-                if req_id in self._preempted_req_ids:
+                if req_id in cached_reqs.resumed_req_ids:
                     # Resumed after preemption
                     if isinstance(new_block_ids, tuple):
                         new_block_ids = tuple(b.copy() for b in new_block_ids)
                     else:
                         new_block_ids = (new_block_ids.copy(),)
-                    self._preempted_req_ids.discard(req_id)
                     load_spec = self.load_specs.pop(req_id, None)
                     request_tuple = self._unfinished_requests.get(req_id)
                     request_real = request_tuple[0]  # type: ignore[index]

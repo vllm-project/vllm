@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use half::{bf16, f16};
 use llm_multimodal::{ModelSpecificValue, PreprocessedImages};
-use vllm_engine_core_client::protocol::ModelDtype;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::MmKwargValue as ProtocolKwargValue;
 use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireTensor};
 

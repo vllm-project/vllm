@@ -355,7 +355,7 @@ class Platform:
         try:
             import vllm._C  # noqa: F401
         except ImportError as e:
-            logger.warning("Failed to import from vllm._C: %r", e)
+            logger.warning_once("Failed to import from vllm._C: %r", e)
         with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
 
@@ -859,7 +859,7 @@ class Platform:
             # Pinned memory support under WSL depends on the vendor and driver
             # version. Conservative default: return False. Platform subclasses
             # that can verify support (e.g. CudaPlatformBase) override this.
-            logger.warning(
+            logger.warning_once(
                 "Using 'pin_memory=False' as WSL is detected. "
                 "This may slow down performance."
             )
@@ -1003,7 +1003,7 @@ class Platform:
             if attr is not None:
                 return attr
 
-        logger.warning(
+        logger.warning_once(
             "Current platform %s does not have '%s' attribute.",
             self.device_type,
             key,

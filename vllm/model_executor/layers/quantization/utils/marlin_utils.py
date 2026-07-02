@@ -9,6 +9,7 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
@@ -193,12 +194,11 @@ def verify_marlin_supports_shape(
             "with --quantization gptq."
         )
 
-    if group_size < input_size and input_size_per_partition % group_size != 0:
-        raise ValueError(
-            f"Weight input_size_per_partition = {input_size_per_partition}"
-            f" is not divisible by group_size = {group_size}. "
-            "Consider reducing tensor_parallel_size or running "
-            "with --quantization gptq."
+    if group_size < input_size:
+        verify_group_size_divides_partition(
+            input_size_per_partition,
+            group_size,
+            extra_suggestion=" or running with --quantization gptq",
         )
 
 
@@ -330,12 +330,43 @@ def check_marlin_supports_layer(
     )[0]
 
 
-def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bool:
+def marlin_moe_padded_intermediate(intermediate_size: int, group_size: int = -1) -> int:
+    """Smallest MoE intermediate size satisfying the Marlin MoE thread tiles.
+
+    The kernel needs gate-up ``2 * intermediate % 128 == 0`` and down
+    ``intermediate % 64 == 0``, i.e. ``intermediate % 64 == 0``. A misaligned
+    size is zero-padded to the next valid tile at weight prep, kept a multiple
+    of ``group_size`` so the group count stays integral. The padded region never
+    reaches the MoE output: w13's padded output channels are zeroed by the
+    zero-padded scales, so the padded inputs to w2 are zero.
+    """
+    group = group_size if group_size > 0 else 1
+    padded = round_up(intermediate_size, math.lcm(64, group))
+    if padded != intermediate_size:
+        logger.warning_once(
+            "Marlin requires thread-tile padding for the MoE intermediate size "
+            "of some layers in this model. Padded experts pad/slice activations "
+            "on every forward; performance may be degraded."
+        )
+    return padded
+
+
+def check_moe_marlin_supports_layer(
+    layer: RoutedExperts, group_size: int, allow_tile_padding: bool = False
+) -> bool:
+    """Whether the fused MoE Marlin kernel supports ``layer``.
+
+    Callers without act-order may pass ``allow_tile_padding=True``: a
+    tile-misaligned intermediate size is then zero-padded to a valid thread
+    tile at weight prep (see marlin_moe_padded_intermediate), so only a group
+    straddling the padded boundary stays unsupported. hidden_size is the MoE
+    I/O extent and is never padded. Act-order keeps the strict shape.
+    """
     if current_platform.is_rocm():
         return False
     hidden_size = layer.hidden_size
-    # Note: The layer has not performed rounding on intermediate_size's at this
-    # point. Use the unpadded size which won't change.
+    # The layer has not rounded intermediate_size yet; use the stable unpadded
+    # size. gate-up needs n=2*intermediate % 128, down needs k=intermediate % 64.
     intermediate_size_per_partition = (
         layer.moe_config.intermediate_size_per_partition_unpadded
     )
@@ -343,13 +374,15 @@ def check_moe_marlin_supports_layer(layer: RoutedExperts, group_size: int) -> bo
     # apply_router_weight_on_input is not supported for moe marlin
     supports_router_weight = not layer.apply_router_weight_on_input
 
-    # gate-up: (n, k) = (intermediate_size_per_partition * 2, hidden_size)
-    # down: (n, k) = (hidden_size, intermediate_size_per_partition)
-    # moe marlin requires n % 128 == 0 and k % 64 == 0
-    supports_shape = (
-        hidden_size % 128 == 0
-        and intermediate_size_per_partition % max(64, group_size) == 0
-    )
+    if allow_tile_padding:
+        supports_shape = hidden_size % 128 == 0 and (
+            group_size <= 0 or intermediate_size_per_partition % group_size == 0
+        )
+    else:
+        supports_shape = (
+            hidden_size % 128 == 0
+            and intermediate_size_per_partition % max(64, group_size) == 0
+        )
     supports_group_size = group_size in [-1, 32, 64, 128]
     return supports_shape and supports_group_size and supports_router_weight
 

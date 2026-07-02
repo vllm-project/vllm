@@ -117,8 +117,8 @@ _REASONING_PARSERS_TO_REGISTER = {
         "Qwen3ParserReasoningAdapter",
     ),
     "seed_oss": (
-        "seedoss_reasoning_parser",
-        "SeedOSSReasoningParser",
+        "seed_oss_engine_reasoning_parser",
+        "SeedOssParserReasoningAdapter",
     ),
     "step3": (
         "step3_reasoning_parser",

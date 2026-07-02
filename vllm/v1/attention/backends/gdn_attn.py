@@ -410,9 +410,10 @@ class GDNAttentionMetadataBuilder(AttentionMetadataBuilder[GDNAttentionMetadata]
             f"num_decodes: {num_decodes}, num_spec_decodes: {num_spec_decodes}"
         )
 
-        # Prepare tensors for cudagraph
-        # Note: m.num_actual_tokens is already padded by the model runner for CUDAGraph
-        batch_size = m.num_actual_tokens
+        # Prepare per-request tensors for cudagraph. m.num_actual_tokens is
+        # token-padded for FULL graph replay, but the GDN state/query/accepted
+        # metadata below is indexed by request.
+        batch_size = m.num_reqs
 
         if (
             self.use_full_cuda_graph

@@ -11,6 +11,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
 )
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
+    LookupResult,
     OffloadingEvent,
     OffloadingManager,
     OffloadKey,
@@ -112,7 +113,7 @@ class CPUOffloadingManager(OffloadingManager):
         return RequestOffloadingContext()
 
     @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         if self.counts is not None:
             if key in self.counts:
                 self.counts.move_to_end(key)
@@ -123,10 +124,10 @@ class CPUOffloadingManager(OffloadingManager):
                 self.counts[key] = 1
         block = self._policy.get(key)
         if block is None:
-            return False
+            return LookupResult.MISS
         if not block.is_ready:
-            return None  # write in-flight; caller should retry
-        return True
+            return LookupResult.HIT_PENDING
+        return LookupResult.HIT
 
     @override
     def prepare_load(

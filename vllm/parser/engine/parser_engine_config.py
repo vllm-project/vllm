@@ -24,16 +24,6 @@ from functools import cached_property
 
 from vllm.parser.engine.events import EventType
 
-STRUCTURAL_DROP_TOKENS: frozenset[str] = frozenset(
-    {
-        "<eos>",
-        "<bos>",
-        "<pad>",
-        "<unk>",
-        "<mask>",
-    }
-)
-
 
 class ParserState(Enum):
     CONTENT = auto()
@@ -90,6 +80,9 @@ class ParserEngineConfig:
 
     arg_structural_chars: frozenset[str] | None = None
 
+    # Special tokens exempt from auto-drop but not state-machine terminals.
+    preserve_tokens: frozenset[str] = field(default_factory=frozenset)
+
     # Prevents trailing-whitespace accumulation across multi-turn conversations.
     strip_trailing_reasoning_whitespace: bool = True
 
@@ -101,8 +94,6 @@ class ParserEngineConfig:
 
     # Reject tool calls whose names are absent from the request tools.
     validate_tool_names: bool = False
-
-    drop_tokens: frozenset[str] = field(default_factory=frozenset)
 
     @cached_property
     def terminal_defs(self):

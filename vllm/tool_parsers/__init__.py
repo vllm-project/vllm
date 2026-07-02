@@ -163,8 +163,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Qwen3EngineToolParser",
     ),
     "seed_oss": (
-        "seed_oss_tool_parser",
-        "SeedOssToolParser",
+        "seed_oss_engine_tool_parser",
+        "SeedOssEngineToolParser",
     ),
     "step3": (
         "step3_tool_parser",

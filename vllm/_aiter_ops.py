@@ -171,6 +171,7 @@ def _rocm_aiter_fused_moe_impl(
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
     moe_sorting_dispatch_policy: int = 0,
+    swiglu_limit: float = 0.0,
 ) -> torch.Tensor:
     from aiter import ActivationType, QuantType
     from aiter.fused_moe import fused_moe
@@ -203,6 +204,7 @@ def _rocm_aiter_fused_moe_impl(
         bias1=bias1,
         bias2=bias2,
         moe_sorting_dispatch_policy=moe_sorting_dispatch_policy,
+        swiglu_limit=swiglu_limit,
         **extra_kwargs,
     )
 
@@ -229,6 +231,7 @@ def _rocm_aiter_fused_moe_fake(
     bias1: torch.Tensor | None = None,
     bias2: torch.Tensor | None = None,
     moe_sorting_dispatch_policy: int = 0,
+    swiglu_limit: float = 0.0,
 ) -> torch.Tensor:
     if output_dtype is not None:
         return torch.empty_like(hidden_states, dtype=output_dtype)
@@ -1352,6 +1355,63 @@ def _fused_mla_dual_rms_norm_fake(
     return (torch.empty_like(x1), torch.empty_like(x2))
 
 
+def _fused_mla_dual_rms_norm_per_token_quant_impl(
+    q: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv: torch.Tensor,
+    kv_weight: torch.Tensor,
+    q_epsilon: float,
+    kv_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fused MLA q/kv RMSNorm (+ FP8 per-token quant on q) via AITER.
+
+    Backs the ``fused_mla_dual_rms_norm_per_token_quant`` custom op used by the
+    MLA FP8 attention fusion when the q latent is quantized *per token* (a single
+    ``(M, 1)`` scale). Only the *q* latent is FP8 quantized (it feeds the
+    FP8 ``q_b_proj`` GEMM); the *kv* latent is RMS-normed and consumed by attention as bf16.
+    """
+    from aiter.ops.fused_qk_rmsnorm_group_quant import (
+        fused_qk_rmsnorm_per_token_quant,
+    )
+
+    mq, nq = q.shape
+    q_out = torch.empty((mq, nq), dtype=FP8_DTYPE, device=q.device)
+    q_scale = torch.empty((mq, 1), dtype=torch.float32, device=q.device)
+    kv_normed = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
+
+    # q -> RMSNorm + FP8 per-token quant (q slot); kv -> RMSNorm only (k slot).
+    # `split` views are accepted directly (unit inner stride); the kernel
+    # handles strided inputs, matching the aiter op-test usage.
+    fused_qk_rmsnorm_per_token_quant(
+        q_out_quantized=q_out,
+        q_out_scale=q_scale,
+        q=q,
+        q_weight=q_weight,
+        q_epsilon=q_epsilon,
+        k_out=kv_normed,
+        k=kv,
+        k_weight=kv_weight,
+        k_epsilon=kv_epsilon,
+        gemma_norm=False,
+    )
+    return q_out, q_scale, kv_normed
+
+
+def _fused_mla_dual_rms_norm_per_token_quant_fake(
+    q: torch.Tensor,
+    q_weight: torch.Tensor,
+    kv: torch.Tensor,
+    kv_weight: torch.Tensor,
+    q_epsilon: float,
+    kv_epsilon: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    mq, nq = q.shape
+    q_out = torch.empty((mq, nq), dtype=FP8_DTYPE, device=q.device)
+    q_scale = torch.empty((mq, 1), dtype=torch.float32, device=q.device)
+    kv_normed = torch.empty(kv.shape, dtype=kv.dtype, device=kv.device)
+    return q_out, q_scale, kv_normed
+
+
 def _rocm_aiter_gemm_a8wfp4_impl(
     x: torch.Tensor,
     w: torch.Tensor,
@@ -2043,6 +2103,13 @@ class rocm_aiter_ops:
                 fake_impl=_fused_mla_dual_rms_norm_fake,
             )
 
+            direct_register_custom_op(
+                op_name="fused_mla_dual_rms_norm_per_token_quant",
+                op_func=_fused_mla_dual_rms_norm_per_token_quant_impl,
+                mutates_args=[],
+                fake_impl=_fused_mla_dual_rms_norm_per_token_quant_fake,
+            )
+
             _OPS_REGISTERED = True
 
     @staticmethod
@@ -2116,6 +2183,10 @@ class rocm_aiter_ops:
     @staticmethod
     def get_fused_mla_dual_rms_norm_op() -> OpOverload:
         return torch.ops.vllm.fused_mla_dual_rms_norm.default
+
+    @staticmethod
+    def get_fused_mla_dual_rms_norm_per_token_quant_op() -> OpOverload:
+        return torch.ops.vllm.fused_mla_dual_rms_norm_per_token_quant.default
 
     @staticmethod
     def w8a8_gemm(
@@ -2201,6 +2272,7 @@ class rocm_aiter_ops:
         bias1: torch.Tensor | None = None,
         bias2: torch.Tensor | None = None,
         moe_sorting_dispatch_policy: int = 0,
+        swiglu_limit: float = 0.0,
     ) -> torch.Tensor:
         return torch.ops.vllm.rocm_aiter_fused_moe(
             hidden_states,
@@ -2224,6 +2296,7 @@ class rocm_aiter_ops:
             bias1,
             bias2,
             moe_sorting_dispatch_policy,
+            swiglu_limit,
         )
 
     @staticmethod
@@ -2677,6 +2750,31 @@ class rocm_aiter_ops:
         from aiter.ops.shuffle import shuffle_weight
 
         return tuple(shuffle_weight(tensor, layout=layout) for tensor in tensors)
+
+    @staticmethod
+    def shuffle_mxfp8_moe_weights(
+        w13: torch.Tensor,
+        w2: torch.Tensor,
+        w13_scale: torch.Tensor,
+        w2_scale: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Preshuffle MXFP8 MoE weights + E8M0 scales into AITER's FlyDSL layout:
+        gate/up-interleaved weights, interleaved scale for w13 (gate/up), plain
+        scale for w2 (the interleaved variant is gate/up-only and misaligns w2).
+        """
+        from aiter.ops.shuffle import shuffle_scale, shuffle_weight
+
+        num_experts = w13.shape[0]
+        w13 = shuffle_weight(w13, is_guinterleave=True, gate_up=True)
+        w2 = shuffle_weight(w2, is_guinterleave=True, gate_up=False)
+        w13_scale = shuffle_scale(
+            w13_scale.reshape(-1, w13_scale.shape[-1]),
+            num_experts,
+            is_guinterleave=True,
+            gate_up=True,
+        )
+        w2_scale = shuffle_scale(w2_scale.reshape(-1, w2_scale.shape[-1]))
+        return w13, w2, w13_scale, w2_scale
 
     @staticmethod
     def flash_attn_varlen_func(

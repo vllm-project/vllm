@@ -44,10 +44,13 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from vllm import LLM, SamplingParams
 from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.base import SparseWeightPatch
 from vllm.distributed.weight_transfer.nccl_engine import (
     NCCLTrainerSendWeightsArgs,
     NCCLWeightTransferEngine,
+)
+from vllm.distributed.weight_transfer.sparse_nccl_engine import (
+    SparseNCCLWeightTransferEngine,
+    SparseWeightPatch,
 )
 from vllm.utils.network_utils import get_ip, get_open_port
 
@@ -244,7 +247,6 @@ class TrainModel:
             dtype_names=[str(self.patched_param.dtype).split(".")[-1]],
             shapes=[list(self.patched_param.shape)],
             num_updates_list=[flat_indices.numel()],
-            update_kind="sparse_flat",
         )
         return update_info, selected_token_ids, patch_digest, sparse_payload_bytes
 
@@ -271,7 +273,7 @@ class TrainModel:
             raise RuntimeError("Sparse patch has not been prepared")
 
         start = time.perf_counter()
-        NCCLWeightTransferEngine.trainer_send_sparse_weights(
+        SparseNCCLWeightTransferEngine.trainer_send_weights(
             iter(self.pending_sparse_patches),
             NCCLTrainerSendWeightsArgs(group=self.model_update_group),
         )
@@ -282,6 +284,7 @@ class TrainModel:
 
 def launch_llm(
     scheduling_inference: PlacementGroupSchedulingStrategy,
+    backend: str = "nccl",
 ):
     return ray.remote(
         num_cpus=0,
@@ -293,7 +296,7 @@ def launch_llm(
         tensor_parallel_size=1,
         distributed_executor_backend="ray",
         gpu_memory_utilization=0.7,
-        weight_transfer_config=WeightTransferConfig(backend="nccl"),
+        weight_transfer_config=WeightTransferConfig(backend=backend),
     )
 
 
@@ -332,7 +335,7 @@ def run_dense_phase(
     scheduling_inference: PlacementGroupSchedulingStrategy,
 ) -> dict[str, object]:
     ray.get(train_model.reset_model.remote())
-    llm = launch_llm(scheduling_inference)
+    llm = launch_llm(scheduling_inference, backend="nccl")
     try:
         dense_before = collect_vllm_generations(llm)
 
@@ -351,7 +354,7 @@ def run_dense_phase(
         )
         trainer_init = train_model.init_weight_transfer_group.remote(world_size)
         ray.get([trainer_init, inference_init])
-        ray.get(llm.start_weight_update.remote(is_checkpoint_format=True))
+        ray.get(llm.start_weight_update.remote())
 
         dense_update_info, dense_payload_bytes = ray.get(
             train_model.get_dense_update_info.remote()
@@ -391,7 +394,7 @@ def run_sparse_phase(
     scheduling_inference: PlacementGroupSchedulingStrategy,
 ) -> dict[str, object]:
     ray.get(train_model.reset_model.remote())
-    llm = launch_llm(scheduling_inference)
+    llm = launch_llm(scheduling_inference, backend="sparse_nccl")
     try:
         sparse_before = collect_vllm_generations(llm)
 
@@ -410,7 +413,7 @@ def run_sparse_phase(
         )
         trainer_init = train_model.init_weight_transfer_group.remote(world_size)
         ray.get([trainer_init, inference_init])
-        ray.get(llm.start_weight_update.remote(is_checkpoint_format=False))
+        ray.get(llm.start_weight_update.remote())
 
         sparse_update_info, selected_token_ids, patch_digest, sparse_payload_bytes = (
             ray.get(train_model.prepare_sparse_patch.remote(PROMPTS))

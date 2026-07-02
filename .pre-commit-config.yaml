@@ -132,6 +132,19 @@ repos:
       ]
       files: ^requirements/(common|xpu|test/xpu)\.(in|txt)$
     - id: pip-compile
+      alias: pip-compile-cpu
+      name: pip-compile-cpu
+      args: [
+        requirements/test/cuda.in,
+        -o, requirements/test/cpu.txt,
+        --index-strategy, unsafe-best-match,
+        --torch-backend, cpu,
+        --python-platform, x86_64-manylinux_2_28,
+        --python-version, "3.12",
+      ]
+      files: ^requirements/(common|cpu|test/(cuda|cpu))\.(in|txt)$
+      exclude: ^requirements/test/cuda\.txt$
+    - id: pip-compile
       alias: pip-compile-docs
       name: pip-compile-docs
       args: [

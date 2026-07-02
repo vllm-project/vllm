@@ -102,11 +102,7 @@ class PPTestSettings:
 
 TEXT_GENERATION_MODELS = {
     # [Decoder-only]
-    # Uses Llama
-    # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
     "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(load_format="dummy"),
-    "baichuan-inc/Baichuan-7B": PPTestSettings.fast(),
-    "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(),
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
     "zai-org/chatglm3-6b": PPTestSettings.fast(),
     "CohereLabs/c4ai-command-r-v01": PPTestSettings.fast(load_format="dummy"),
@@ -119,7 +115,6 @@ TEXT_GENERATION_MODELS = {
     "google/gemma-1.1-2b-it": PPTestSettings.fast(),
     "google/gemma-2-9b": PPTestSettings.fast(),
     "gpt2": PPTestSettings.fast(),
-    "bigcode/starcoder": PPTestSettings.fast(),
     "EleutherAI/gpt-j-6b": PPTestSettings.fast(),
     "EleutherAI/pythia-1.4b": PPTestSettings.fast(),
     "ibm/PowerLM-3b": PPTestSettings.fast(),
