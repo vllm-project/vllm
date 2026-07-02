@@ -15,6 +15,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4StaticChannelSym,
     kInt8StaticChannelSym,
     kMxfp4Dynamic,
     kMxfp8Dynamic,
@@ -31,6 +32,7 @@ QUANT_KEY_NAMES: dict[str, QuantKey] = {
     "mxfp8": kMxfp8Dynamic,
     "mxfp4": kMxfp4Dynamic,
     "int8_per_channel_static": kInt8StaticChannelSym,
+    "int4_per_channel_static": kInt4StaticChannelSym,
 }
 
 
@@ -80,7 +82,7 @@ class QuantizationConfigArgs:
     """User-facing quantization configuration.
 
     See `docs/features/quantization/online.md` for the schema and shorthand
-    string forms accepted on `linear` and `moe`.
+    string forms accepted on `linear`, `moe`, and `embedding`.
     """
 
     linear: QuantSpec | None = None
@@ -89,10 +91,13 @@ class QuantizationConfigArgs:
     moe: QuantSpec | None = None
     """Spec applied to ``FusedMoE`` layers."""
 
+    embedding: QuantSpec | None = None
+    """Spec applied to ``VocabParallelEmbedding`` layers."""
+
     ignore: list[str] = Field(default_factory=list)
     """Layers to skip quantization for."""
 
-    @field_validator("linear", "moe", mode="before")
+    @field_validator("linear", "moe", "embedding", mode="before")
     @classmethod
     def _coerce_spec(cls, v: Any, info: ValidationInfo) -> Any:
         if not isinstance(v, str):
@@ -133,6 +138,10 @@ _ONLINE_SHORTHANDS: dict[str, QuantizationConfigArgs] = {
     # INT8 weight-only on MoE; linear stays unquantized (no `linear` field).
     "int8_per_channel_weight_only": QuantizationConfigArgs(
         moe=QuantSpec(weight=kInt8StaticChannelSym),
+    ),
+    # INT4 weight-only on embeddings; linear and MoE stay unquantized.
+    "int4_per_channel_weight_only": QuantizationConfigArgs(
+        embedding=QuantSpec(weight=kInt4StaticChannelSym),
     ),
 }
 
@@ -179,5 +188,6 @@ def resolve_quantization_config(
     return QuantizationConfigArgs(
         linear=quantization_config.linear or base.linear,
         moe=quantization_config.moe or base.moe,
+        embedding=quantization_config.embedding or base.embedding,
         ignore=quantization_config.ignore or base.ignore,
     )
