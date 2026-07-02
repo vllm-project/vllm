@@ -8,6 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from vllm import ir
 from vllm.distributed import (
     divide,
     get_tensor_model_parallel_rank,
@@ -93,24 +94,13 @@ class FatreluAndMul(CustomOp):
     def __init__(self, threshold: float = 0.0):
         super().__init__()
         self.threshold = threshold
-        if current_platform.is_cuda_alike():
-            self.op = torch.ops._C.fatrelu_and_mul
-        elif current_platform.is_cpu():
-            self._forward_method = self.forward_native
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        x1 = x[..., :d]
-        x2 = x[..., d:]
-        x1 = F.threshold(x1, self.threshold, 0.0)
-        return x1 * x2
+        """PyTorch-native implementation equivalent to forward()."""
+        return ir.ops.fatrelu_and_mul(x, self.threshold)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        output_shape = x.shape[:-1] + (d,)
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        self.op(out, x, self.threshold)
-        return out
+        return self.forward_native(x)
 
 
 # --8<-- [start:silu_and_mul]
@@ -297,10 +287,7 @@ class GeluAndMulSparse(CustomOp):
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
-        d = x.shape[-1] // 2
-        out = self._gaussian_topk(x[..., :d])
-        out = F.gelu(out, approximate=self.approximate)
-        return out * x[..., d:]
+        return ir.ops.gelu_and_mul_sparse(x, self.std_multiplier, self.approximate)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_native(x)
@@ -442,20 +429,10 @@ class SwigluOAIAndMul(CustomOp):
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
-
-        gate, up = x[..., ::2], x[..., 1::2]
-        gate = gate.clamp(min=None, max=self.limit)
-        up = up.clamp(min=-self.limit, max=self.limit)
-        glu = gate * torch.sigmoid(gate * self.alpha)
-        gated_output = (up + 1) * glu
-        return gated_output
+        return ir.ops.swigluoai_and_mul(x, self.alpha, self.limit)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-        d = x.shape[-1] // 2
-        output_shape = x.shape[:-1] + (d,)
-        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
-        torch.ops._C.swigluoai_and_mul(out, x, self.alpha, self.limit)
-        return out
+        return self.forward_native(x)
 
     def extra_repr(self) -> str:
         return f"alpha={repr(self.alpha)}, limit={repr(self.limit)}"
@@ -593,7 +570,7 @@ class ReLUSquaredActivation(CustomOp):
 
     def forward_native(self, x: torch.Tensor) -> torch.Tensor:
         """PyTorch-native implementation equivalent to forward()."""
-        return torch.square(F.relu(x))
+        return ir.ops.relu2(x)
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         # TODO : implement cuda kernels
