@@ -18,6 +18,13 @@ loader::
 The MTP head is consumed separately through ``num_nextn_predict_layers`` (see
 ``Exaone4_5MTP``), so dropping the trailing ``layer_types`` entry only unblocks
 the base config validation and leaves MTP behavior unchanged.
+
+This is a temporary compatibility shim, not the canonical fix. The trailing
+``layer_types`` entry is a model-card issue and is better corrected at the
+source: see the LG-AI model-repo discussion
+(https://huggingface.co/LGAI-EXAONE/EXAONE-4.5-33B-FP8/discussions/2). Once the
+published config sets ``len(layer_types) == num_hidden_layers``, the guard below
+never fires and this shim can be removed.
 """
 
 from __future__ import annotations
