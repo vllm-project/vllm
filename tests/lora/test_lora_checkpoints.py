@@ -6,7 +6,6 @@ import pytest
 from vllm.lora.lora_model import LoRAModel
 from vllm.lora.peft_helper import PEFTHelper
 from vllm.lora.utils import parse_fine_tuned_lora_name
-from vllm.model_executor.models.baichuan import BaiChuanBaseForCausalLM
 from vllm.model_executor.models.gemma4 import Gemma4ForCausalLM
 from vllm.model_executor.models.utils import WeightsMapper
 
@@ -18,6 +17,14 @@ BAICHUAN_LORA_MODULES = [
     "down_proj",
 ]
 
+MOCK_PACKED_MAPPING = {
+    "W_pack": ["W_pack"],
+    "gate_up_proj": [
+        "gate_proj",
+        "up_proj",
+    ],
+}
+
 
 @pytest.mark.parametrize("lora_name", lora_lst)
 def test_load_checkpoints(
@@ -27,12 +34,10 @@ def test_load_checkpoints(
     baichuan_regex_lora_files,
     chatglm3_lora_files,
 ):
-    packed_modules_mapping = BaiChuanBaseForCausalLM.packed_modules_mapping
-
     expected_lora_lst: list[str] = []
     for module in BAICHUAN_LORA_MODULES:
-        if module in packed_modules_mapping:
-            expected_lora_lst.extend(packed_modules_mapping[module])
+        if module in MOCK_PACKED_MAPPING:
+            expected_lora_lst.extend(MOCK_PACKED_MAPPING[module])
         else:
             expected_lora_lst.append(module)
     expected_lora_modules = set(expected_lora_lst)
@@ -98,12 +103,10 @@ def test_load_checkpoints(
 
 
 def test_lora_weights_mapping(baichuan_lora_files):
-    packed_modules_mapping = BaiChuanBaseForCausalLM.packed_modules_mapping
-
     expected_lora_lst: list[str] = []
     for module in BAICHUAN_LORA_MODULES:
-        if module in packed_modules_mapping:
-            expected_lora_lst.extend(packed_modules_mapping[module])
+        if module in MOCK_PACKED_MAPPING:
+            expected_lora_lst.extend(MOCK_PACKED_MAPPING[module])
         else:
             expected_lora_lst.append(module)
     expected_lora_modules = set(expected_lora_lst)

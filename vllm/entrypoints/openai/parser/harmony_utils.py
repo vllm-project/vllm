@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import datetime
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 from openai.types.responses.tool import Tool
@@ -13,6 +13,7 @@ from openai_harmony import (
     HarmonyEncodingName,
     Message,
     ReasoningEffort,
+    RenderConversationConfig,
     Role,
     StreamableParser,
     SystemContent,
@@ -220,7 +221,6 @@ def parse_chat_inputs_to_harmony_messages(chat_msgs: list) -> list[Message]:
     for chat_msg in chat_msgs:
         msgs.extend(parse_chat_input_to_harmony_message(chat_msg, tool_id_names))
 
-    msgs = auto_drop_analysis_messages(msgs)
     return msgs
 
 
@@ -447,74 +447,15 @@ def parse_chat_input_to_harmony_message(
 
 
 def render_for_completion(messages: list[Message]) -> list[int]:
+    messages = auto_drop_analysis_messages(messages)
     conversation = Conversation.from_messages(messages)
     token_ids = get_encoding().render_conversation_for_completion(
-        conversation, Role.ASSISTANT
+        conversation,
+        Role.ASSISTANT,
+        config=RenderConversationConfig(auto_drop_analysis=False),
     )
     return token_ids
 
 
 def get_streamable_parser_for_assistant() -> StreamableParser:
     return StreamableParser(get_encoding(), role=Role.ASSISTANT)
-
-
-def parse_output_into_messages(token_ids: Iterable[int]) -> StreamableParser:
-    parser = get_streamable_parser_for_assistant()
-    for token_id in token_ids:
-        parser.process(token_id)
-    return parser
-
-
-def parse_chat_output(
-    token_ids: Sequence[int],
-) -> tuple[str | None, str | None, bool]:
-    """
-    Parse the output of a Harmony chat completion into reasoning and final content.
-    Note that when the `openai` tool parser is used, serving_chat only uses this
-    for the reasoning content and gets the final content from the tool call parser.
-
-    When the `openai` tool parser is not enabled, or when `GptOssReasoningParser` is
-    in use,this needs to return the final content without any tool calls parsed.
-
-    Empty reasoning or final content is returned as None instead of an empty string.
-    """
-    parser = parse_output_into_messages(token_ids)
-    output_msgs = parser.messages
-    is_tool_call = False  # TODO: update this when tool call is supported
-
-    # Get completed messages from the parser
-    # - analysis channel: hidden reasoning
-    # - commentary channel without recipient (preambles): visible to user
-    # - final channel: visible to user
-    # - commentary with recipient (tool calls): handled separately by tool parser
-    reasoning_texts = [
-        msg.content[0].text for msg in output_msgs if msg.channel == "analysis"
-    ]
-    final_texts = [
-        msg.content[0].text
-        for msg in output_msgs
-        if msg.channel == "final" or (msg.channel == "commentary" and not msg.recipient)
-    ]
-
-    # Extract partial messages from the parser
-    if parser.current_channel == "analysis" and parser.current_content:
-        reasoning_texts.append(parser.current_content)
-    elif parser.current_channel == "final" and parser.current_content:
-        final_texts.append(parser.current_content)
-    elif (
-        parser.current_channel == "commentary"
-        and not parser.current_recipient
-        and parser.current_content
-    ):
-        # Preambles (commentary without recipient) are visible to user
-        final_texts.append(parser.current_content)
-
-    # Flatten multiple messages into a single string
-    reasoning: str | None = "\n".join(reasoning_texts)
-    final_content: str | None = "\n".join(final_texts)
-
-    # Return None instead of empty string since existing callers check for None
-    reasoning = reasoning or None
-    final_content = final_content or None
-
-    return reasoning, final_content, is_tool_call

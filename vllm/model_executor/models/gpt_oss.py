@@ -70,6 +70,10 @@ from .utils import (
 
 
 class OAIAttention(nn.Module):
+    # Override to switch RoPE convention. gpt-oss uses NeoX (chunk halves);
+    # privacy-filter and similar derivatives use GPT-J (interleaved pairs).
+    rope_is_neox_style: bool = True
+
     def __init__(
         self,
         config: GptOssConfig,
@@ -99,7 +103,7 @@ class OAIAttention(nn.Module):
                 "beta_slow": config.rope_parameters["beta_slow"],
                 "truncate": config.rope_parameters.get("truncate", True),
             },
-            is_neox_style=True,
+            is_neox_style=self.rope_is_neox_style,
         )
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -133,9 +137,25 @@ class OAIAttention(nn.Module):
         self.num_local_attention_heads = config.num_attention_heads // tp_size
         self.num_local_key_value_heads = config.num_key_value_heads // tp_size
 
+        self.attn = self._build_attention(
+            config=config,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def _build_attention(
+        self,
+        config: GptOssConfig,
+        cache_config: CacheConfig | None,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> Attention:
+        # Override to swap in an encoder-only attention or alter the
+        # per-layer sliding-window policy.
         # Only apply sliding window to every other layer
         sliding_window = config.sliding_window if self.layer_idx % 2 == 0 else None
-        self.attn = Attention(
+        return Attention(
             self.num_local_attention_heads,
             self.head_dim,
             self.scaling,
@@ -222,6 +242,10 @@ class MLPBlock(torch.nn.Module):
 
 
 class TransformerBlock(torch.nn.Module):
+    # Override to swap attention/MLP without re-implementing the block.
+    attention_cls: type[nn.Module] = OAIAttention
+    mlp_cls: type[nn.Module] = MLPBlock
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -234,13 +258,13 @@ class TransformerBlock(torch.nn.Module):
         cache_config = vllm_config.cache_config
 
         self.layer_idx = extract_layer_index(prefix)
-        self.attn = OAIAttention(
+        self.attn = self.attention_cls(
             config,
             prefix=f"{prefix}.attn",
             quant_config=quant_config,
             cache_config=cache_config,
         )
-        self.mlp = MLPBlock(vllm_config, self.layer_idx, prefix=f"{prefix}.mlp")
+        self.mlp = self.mlp_cls(vllm_config, self.layer_idx, prefix=f"{prefix}.mlp")
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
 
@@ -266,6 +290,9 @@ class TransformerBlock(torch.nn.Module):
 
 @support_torch_compile
 class GptOssModel(nn.Module, EagleModelMixin):
+    # Override to swap in an alternative TransformerBlock subclass.
+    block_cls: type[nn.Module] = TransformerBlock
+
     def __init__(
         self,
         *,
@@ -282,7 +309,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
-            lambda prefix: TransformerBlock(
+            lambda prefix: self.block_cls(
                 vllm_config,
                 prefix=prefix,
                 quant_config=self.quant_config,
@@ -635,6 +662,13 @@ class GptOssModel(nn.Module, EagleModelMixin):
                         "an unexpected condition. Please open an issue if encountered."
                     )
 
+                # The MoE refactor (#41184) moved expert params under
+                # `mlp.experts.routed_experts.*`; remap the legacy checkpoint
+                # name so keys like w2_bias resolve against params_dict.
+                fused_name = fused_name.replace(
+                    ".mlp.experts.", ".mlp.experts.routed_experts."
+                )
+
                 moe_quant_method = _get_moe_weight_dtype(layer_id=layer_id)
 
             if (
@@ -972,7 +1006,11 @@ class GptOssModel(nn.Module, EagleModelMixin):
         tp_rank_start = tp_rank * per_rank_intermediate_size
         tp_rank_end = min((tp_rank + 1) * per_rank_intermediate_size, intermediate_size)
 
-        for name, weight in weights:
+        # Use centralized weight remapping for MoE expert parameters.
+        # The FusedMoE refactor moved expert params under
+        # `mlp.experts.routed_experts.*`; this remaps checkpoint names so
+        # MoE weight/bias keys resolve against params_dict.
+        for name, weight in remap_moe_expert_weights(weights, params_dict):
             # Skip layers on other devices.
             if is_pp_missing_parameter(name, self):
                 continue
@@ -1071,7 +1109,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         head_start = tp_rank * heads_per_rank
 
         ep_size = get_ep_group().world_size
-        ep_rank = get_ep_group().rank
+        ep_rank = get_ep_group().rank_in_group
         num_experts = self.config.num_local_experts
         experts_per_rank = num_experts // ep_size
         ep_rank_start = ep_rank * experts_per_rank

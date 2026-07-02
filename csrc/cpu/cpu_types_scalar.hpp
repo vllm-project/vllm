@@ -363,6 +363,13 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     return FP32Vec16(ret);
   }
 
+  FP32Vec16 tanh() const {
+    f32x16_t ret;
+    unroll_loop<int, VEC_ELEM_NUM>(
+        [&ret, this](int i) { ret.val[i] = std::tanh(reg.val[i]); });
+    return FP32Vec16(ret);
+  }
+
   float reduce_sum() const {
     float result = 0.0f;
     unroll_loop<int, VEC_ELEM_NUM>(

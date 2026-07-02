@@ -3,6 +3,7 @@
 #define CPU_TYPES_X86_HPP
 
 #include <immintrin.h>
+#include <sleef.h>
 #include <torch/all.h>
 
 #ifndef __AVX2__
@@ -592,6 +593,8 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
 
   FP32Vec16 abs() const { return FP32Vec16(_mm512_abs_ps(reg)); }
 
+  FP32Vec16 tanh() const { return FP32Vec16(Sleef_tanhf16_u10(reg)); }
+
   float reduce_sum() const { return _mm512_reduce_add_ps(reg); }
 
   float reduce_max() const { return _mm512_reduce_max_ps(reg); }
@@ -787,6 +790,12 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
     const __m256 sign_mask = _mm256_set1_ps(-0.0f);
     return FP32Vec16(_mm256_andnot_ps(sign_mask, reg_low),
                      _mm256_andnot_ps(sign_mask, reg_high));
+  }
+
+  FP32Vec16 tanh() const {
+    FP32Vec8 low(reg_low);
+    FP32Vec8 high(reg_high);
+    return FP32Vec16(low.tanh().reg, high.tanh().reg);
   }
 
   FP32Vec16 min(const FP32Vec16& b) const {

@@ -25,7 +25,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -44,6 +43,7 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -140,7 +140,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         per_frame = image_start + video_token * source_tokens + image_end
         if grids[0] > 0 and grids[1] > 0 and patch_tokens > 0:
             slice_ph = slice_start + video_token * patch_tokens + slice_end
-            rows = [slice_ph * grids[0] for _ in range(grids[1])]
+            rows = [slice_ph * grids[1] for _ in range(grids[0])]
             per_frame += "\n".join(rows)
 
         body = per_frame * num_frames
@@ -424,6 +424,26 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
     def get_hf_config(self):
         return self.ctx.get_hf_config()
 
+    def get_hf_processor(self, **kwargs: object):
+        # MiniCPM-V 4.6 keeps the native transformers MiniCPMV4_6Processor:
+        # this model has its own image/video handling and prompt-update logic
+        # below, so it does not need (and is incompatible with) the vendored
+        # MiniCPMVProcessor used by 2.x/4.0/4.5, whose __init__ assumes a
+        # legacy `image_processor.version` attribute that 4.6 no longer has.
+        hf_processor = self.ctx.get_hf_processor(**kwargs)
+
+        # NumPy arrays are considered as Iterable but not Sequence in
+        # https://github.com/huggingface/transformers/blob/main/src/transformers/image_transforms.py#L428
+        image_processor = getattr(hf_processor, "image_processor", None)
+        if image_processor is not None:
+            # transformers v5+ renamed `mean`/`std` -> `image_mean`/`image_std`
+            for attr in ("mean", "std", "image_mean", "image_std"):
+                val = getattr(image_processor, attr, None)
+                if isinstance(val, np.ndarray):
+                    setattr(image_processor, attr, val.tolist())
+
+        return hf_processor
+
     def _get_expected_hidden_size(self) -> int:
         config = self.get_hf_config()
         if hasattr(config, "text_config") and config.text_config is not None:
@@ -489,22 +509,25 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         downsample_mode = self._get_downsample_mode(downsample_mode)
         token_divisor = 4 if downsample_mode == "4x" else 16
 
+        # vLLM ImageSize is (width, height); transformers expects (height, width)
+        hf_image_size = (image_size.height, image_size.width)
+
         # transformers v5.7+ requires `scale_resolution` arg
         try:
             grids = image_processor.get_sliced_grid(
-                image_size,
+                hf_image_size,
                 max_slice_nums,
                 scale_res,
             )
         except TypeError:
             grids = image_processor.get_sliced_grid(
-                image_size,
+                hf_image_size,
                 max_slice_nums,
             )
 
         if grids is None:
             best_size = image_processor.find_best_resize(
-                image_size,
+                hf_image_size,
                 scale_res,
                 patch_size,
                 allow_upscale=True,
@@ -515,7 +538,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             return [0, 0], source_tokens, 0
 
         best_resize = image_processor.find_best_resize(
-            image_size,
+            hf_image_size,
             scale_res,
             patch_size,
         )
@@ -523,7 +546,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
             best_resize[0] * best_resize[1] // (patch_size * patch_size * token_divisor)
         )
         refine_size = image_processor.get_refine_size(
-            image_size,
+            hf_image_size,
             grids,
             scale_res,
             patch_size,
@@ -573,7 +596,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         if use_image_id:
             placeholder = f"{id_start}{image_idx}{id_end}" + placeholder
 
-        num_cols, num_rows = grids[0], grids[1]
+        num_rows, num_cols = grids[0], grids[1]
         if num_cols > 0 and num_rows > 0 and patch_tokens > 0:
             slice_ph = slice_start + image_token * patch_tokens + slice_end
             slices = [slice_ph * num_cols for _ in range(num_rows)]
@@ -595,6 +618,14 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 
 
 class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            "q_proj": ("qkv_proj", "q"),
+            "k_proj": ("qkv_proj", "k"),
+            "v_proj": ("qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config,
@@ -643,31 +674,8 @@ class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
         return out
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                mapped_name = name.replace(weight_name, param_name, 1)
-                if mapped_name not in params_dict:
-                    continue
-                param = params_dict[mapped_name]
-                param.weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
@@ -898,6 +906,7 @@ class MiniCPMV4_6Merger(nn.Module):
 class MiniCPMV4_6ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsLoRA,
     SupportsPP,
     HasInnerState,
     IsHybrid,

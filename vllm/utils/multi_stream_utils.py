@@ -20,8 +20,8 @@ class EventType(Enum):
 def maybe_execute_in_parallel(
     fn0: Callable[[], Any],
     fn1: Callable[[], Any],
-    event0: torch.cuda.Event,
-    event1: torch.cuda.Event,
+    event0: torch.Event,
+    event1: torch.Event,
     aux_stream: torch.cuda.Stream | None = None,
 ) -> tuple[Any, Any]:
     """Run two functions potentially in parallel on separate CUDA streams.
@@ -61,8 +61,8 @@ def maybe_execute_in_parallel(
 def execute_in_parallel(
     default_fn: Callable[[], Any],
     aux_fns: list[Callable[[], Any] | None],
-    start_event: torch.cuda.Event,
-    done_events: list[torch.cuda.Event],
+    start_event: torch.Event,
+    done_events: list[torch.Event],
     aux_streams: list[torch.cuda.Stream] | None = None,
     enable: bool = False,
 ) -> tuple[Any, list[Any]]:
@@ -108,7 +108,7 @@ def execute_in_parallel(
     )
 
     aux_results = [None] * len(aux_fns)
-    pending: list[torch.cuda.Event] = []
+    pending: list[torch.Event] = []
 
     start_event.record()
     for i, fn in enumerate(aux_fns):

@@ -17,6 +17,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [Suffix Decoding](suffix.md)
 - [Hidden State Extraction](extract_hidden_states.md)
 - [Custom Proposer Backend (Experimental)](#custom-proposer-backend-experimental)
+- [Dynamic Speculative Decoding](dynamic_speculative_decoding.md)
 
 ## Method Selection at a Glance
 
@@ -33,6 +34,7 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | N-gram | Low to medium gain | Medium gain | Lightweight and easy to enable. |
 | Suffix decoding | Low to medium gain | Medium gain | No extra draft model; dynamic speculation depth. |
 | Custom Proposer | Varies | Varies | Bring your own proposer class (experimental). |
+| Dynamic Speculative Decoding | High gain | Higher than base SD method | Useful for RL or workload with fluctuating QPS |
 
 For reproducible measurements in your environment, use
 [`examples/features/speculative_decoding/spec_decode_offline.py`](../../../examples/features/speculative_decoding/spec_decode_offline.py)
@@ -188,7 +190,7 @@ For mitigation strategies, please refer to the FAQ entry *Can the output of a pr
 
 ## Known Feature Incompatibility
 
-1. Pipeline parallelism is not composible with speculative decoding as of `vllm<=0.15.0`
+1. Pipeline parallelism is not composable with speculative decoding as of `vllm<=0.15.0`
 2. Speculative decoding with a draft models is not supported in `vllm<=0.10.0`
 
 ## Resources for vLLM contributors

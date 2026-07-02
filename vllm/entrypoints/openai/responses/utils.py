@@ -12,21 +12,88 @@ from openai.types.chat import (
 from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
-from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputItem,
+    ResponseOutputMessage,
+    ResponseOutputText,
+    ResponseReasoningItem,
+)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
-from openai.types.responses.response_output_message import ResponseOutputMessage
-from openai.types.responses.response_reasoning_item import ResponseReasoningItem
+from openai.types.responses.response_output_text import Logprob
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent,
+)
 from openai.types.responses.tool import Tool
 
 from vllm import envs
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
+from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
 from vllm.logger import init_logger
+from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
+
+
+def build_response_output_items(
+    reasoning: str | None,
+    content: str | None,
+    tool_calls: list[FunctionCall] | None,
+    logprobs: list[Logprob] | None = None,
+) -> list[ResponseOutputItem]:
+    outputs: list[ResponseOutputItem] = []
+
+    if reasoning:
+        outputs.append(
+            ResponseReasoningItem(
+                id=f"rs_{random_uuid()}",
+                summary=[],
+                type="reasoning",
+                content=[
+                    ResponseReasoningTextContent(text=reasoning, type="reasoning_text")
+                ],
+                status=None,
+            )
+        )
+
+    if content:
+        outputs.append(
+            ResponseOutputMessage(
+                id=f"msg_{random_uuid()}",
+                content=[
+                    ResponseOutputText(
+                        text=content,
+                        annotations=[],
+                        type="output_text",
+                        logprobs=logprobs,
+                    )
+                ],
+                role="assistant",
+                status="completed",
+                type="message",
+            )
+        )
+
+    if tool_calls:
+        for idx, tool_call in enumerate(tool_calls):
+            outputs.append(
+                ResponseFunctionToolCall(
+                    id=f"fc_{random_uuid()}",
+                    call_id=tool_call.id
+                    or make_tool_call_id(func_name=tool_call.name, idx=idx),
+                    type="function_call",
+                    status="completed",
+                    name=tool_call.name,
+                    arguments=tool_call.arguments,
+                )
+            )
+
+    return outputs
 
 
 def should_continue_final_message(
@@ -233,6 +300,20 @@ def _construct_message_from_response_item(
             content=item.get("output"),
             tool_call_id=item.get("call_id"),
         )
+    elif isinstance(item, dict) and item.get("role") == "assistant":
+        content = item.get("content")
+        text: str | None = None
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list) and content:
+            text = content[0].get("text")
+        if text is not None:
+            if prev_assistant_msg:
+                previous_content = prev_assistant_msg.get("content")
+                if previous_content is None:
+                    prev_assistant_msg["content"] = text
+                    return None
+            return {"role": "assistant", "content": text}
     return item  # type: ignore[arg-type]
 
 

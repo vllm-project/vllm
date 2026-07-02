@@ -17,7 +17,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 class PendingRecv:
     """Per-step slot data for a deferred postprocess on the main stream."""
 
-    event: torch.cuda.Event
+    event: torch.Event
 
     sampled_tokens: torch.Tensor  # [num_reqs, max_sample_len]
     num_sampled: torch.Tensor  # [num_reqs]

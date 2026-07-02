@@ -3,6 +3,7 @@
 
 # adapted from https://github.com/deepseek-ai/DeepSeek-VL2/blob/faf18023f24b962b32d9f0a2d89e402a8d383a78/deepseek_vl2/models/modeling_deepseek_vl_v2.py#L115-L268
 
+from huggingface_hub.dataclasses import strict
 from transformers import DeepseekV2Config, PretrainedConfig
 
 
@@ -87,16 +88,9 @@ class MlpProjectorConfig(PretrainedConfig):
         super().__init__(**kwargs)
 
 
-if hasattr(DeepseekV2Config, "validate"):
-    # Transformers v5
-    from huggingface_hub.dataclasses import strict
-
-    @strict
-    class DeepseekVLV2TextConfig(DeepseekV2Config):
-        kv_lora_rank: int | None = None
-else:
-    # Transformers v4
-    DeepseekVLV2TextConfig = DeepseekV2Config  # type: ignore[misc]
+@strict
+class DeepseekVLV2TextConfig(DeepseekV2Config):
+    kv_lora_rank: int | None = None
 
 
 class DeepseekVLV2Config(PretrainedConfig):

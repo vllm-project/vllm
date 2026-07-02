@@ -111,7 +111,7 @@ class MockSubscriber:
         self.sub.close()
 
 
-def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> None:
+def _wait_for_prefix_cache_reset(llm: LLM) -> None:
     """Wait for async offload transfers to finish so prefix cache can reset.
 
     The GPU-to-CPU offload runs on a CUDA stream asynchronously. While blocks
@@ -119,14 +119,10 @@ def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> Non
     ``False``. Between retries we send a dummy single-token prefill to force
     the engine to step, which polls the worker for completed transfers and
     frees GPU blocks.
-
-    Args:
-        llm: The LLM instance to reset.
-        reset_connector: If True, also reset the KV connector state.
     """
     _dummy_params = SamplingParams(max_tokens=1)
     deadline = time.monotonic() + _RESET_CACHE_TIMEOUT
-    while not llm.reset_prefix_cache(reset_connector=reset_connector):
+    while not llm.reset_prefix_cache():
         if time.monotonic() > deadline:
             raise TimeoutError(
                 "reset_prefix_cache did not succeed within "
@@ -141,9 +137,11 @@ def _wait_for_prefix_cache_reset(llm: LLM, reset_connector: bool = False) -> Non
         )
 
 
-def _latency_test(
-    llm: LLM, subscriber: MockSubscriber | None, reset_connector: bool = False
-):
+def _latency_test(llm: LLM, subscriber: MockSubscriber | None):
+    # TODO: Reintroduce latency test on ROCm once MRV2 supports cross
+    # layer KV Cache. See https://github.com/vllm-project/vllm/pull/45947
+    if current_platform.is_rocm():
+        return
     sampling_params = SamplingParams(max_tokens=1)
 
     num_times_cpu_better_than_cold = 0
@@ -173,7 +171,7 @@ def _latency_test(
 
         # Wait for the async CPU offload to finish, then reset prefix cache
         # so the next generate() must reload from CPU rather than GPU.
-        _wait_for_prefix_cache_reset(llm, reset_connector=reset_connector)
+        _wait_for_prefix_cache_reset(llm)
 
         # Verify CPU stored events arrived (offload is done before we
         # attempt to load from CPU).
@@ -389,22 +387,6 @@ def test_cpu_offloading_metrics() -> None:
                         total += sample.value
             return total
 
-        # Stats are drained asynchronously — if the transfer finishes
-        # after the last engine step for that generate() call, the metrics
-        # won't appear until a subsequent step.  Retry with dummy generates
-        # to force additional stats drains.
-        deadline = time.monotonic() + _RESET_CACHE_TIMEOUT
-        while time.monotonic() < deadline:
-            store_bytes = _get_counter_value("vllm:kv_offload_store_bytes")
-            load_bytes = _get_counter_value("vllm:kv_offload_load_bytes")
-            if store_bytes > 0 and load_bytes > 0:
-                break
-            llm.generate(
-                [TokensPrompt(prompt_token_ids=[0])],
-                SamplingParams(max_tokens=1),
-                use_tqdm=False,
-            )
-
         # New flat counter metrics
         store_bytes = _get_counter_value("vllm:kv_offload_store_bytes")
         assert store_bytes > 0, f"Expected store_bytes > 0, got {store_bytes}"
@@ -549,8 +531,96 @@ def test_fs_tiering_offloading(tmp_path) -> None:
         topic=kv_events_config.topic,
     )
     try:
-        _latency_test(llm, subscriber, reset_connector=True)
+        _latency_test(llm, subscriber)
         _accuracy_test(llm, subscriber)
     finally:
         subscriber.close()
+        del llm
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="HMA mamba-align CPU offload test is CUDA-only",
+)
+@pytest.mark.parametrize(
+    "model,block_size,tp_size",
+    [
+        # ("Qwen/Qwen3.6-35B-A3B", 1056, 2),
+        # ("tiiuae/falcon-mamba-7b", 16, 1),
+        ("state-spaces/mamba-1.4b-hf", 16, 1)
+    ],
+)
+def test_mamba_align_cpu_offload(model: str, block_size: int, tp_size: int):
+    kv_transfer_config = KVTransferConfig(
+        kv_connector="OffloadingConnector",
+        kv_role="kv_both",
+        kv_connector_extra_config={
+            "cpu_bytes_to_use": 4 << 30,
+            "block_size": block_size,
+        },
+    )
+    llm = LLM(
+        model=model,
+        max_model_len=block_size * 10,
+        gpu_memory_utilization=0.85,
+        tensor_parallel_size=tp_size,
+        kv_transfer_config=kv_transfer_config,
+        language_model_only=True,
+        enable_prefix_caching=True,
+        mamba_cache_mode="align",
+        disable_hybrid_kv_cache_manager=False,
+    )
+
+    _PROMPT_SIZE: int = block_size * 2
+    _PROMPT_TEXT = "Hi. Give me a set of trivia questions and their answers "
+
+    # build prompt ids to match prompt_size
+    tokenizer = llm.get_tokenizer()
+    raw_ids: list[int] = tokenizer.encode(_PROMPT_TEXT)
+    while len(raw_ids) < _PROMPT_SIZE:
+        raw_ids = tokenizer.encode("....") + raw_ids
+    initial_ids: list[int] = raw_ids[:_PROMPT_SIZE]
+
+    sampling_params = SamplingParams(max_tokens=128, temperature=0, ignore_eos=True)
+
+    failures: list[str] = []
+
+    def _get_output_str(outputs):
+        return outputs[0].outputs[0].text
+
+    def _verify(llm, prompt, label: str):
+        cold_outputs = llm.generate([prompt], sampling_params, use_tqdm=False)
+        _wait_for_prefix_cache_reset(llm)
+        cpu_outputs = llm.generate([prompt], sampling_params, use_tqdm=False)
+
+        cold_text = _get_output_str(cold_outputs)
+        cpu_text = _get_output_str(cpu_outputs)
+        print(f"{label} : cold outputs\n{cold_text}")
+        print(f"{label} : cpu outputs\n{cpu_text}")
+
+        if cold_text != cpu_text:
+            failures.append(
+                f"{label}: mismatch\n  cold: {cold_text!r}\n  cpu:  {cpu_text!r}"
+            )
+
+    try:
+        # Mamba has only a single state. The CPU cache stores are triggered
+        # at offload block boundaries. When the prompt is exactly at the boundary,
+        # The CPU offload should not load the cached block.
+        # This is because we'd use that state to recompute the last token. This
+        # does not work for mamba as there is only one KV value and that is for
+        # for the token at the boundary.
+        # This is fine for other attention types as we have all the necessary
+        # token KV values in the hit blocks.
+        prompt = TokensPrompt(prompt_token_ids=initial_ids)
+        _verify(llm, prompt, "block-boundary-prompt")
+
+        # Test for prompt token ids at non-block boundaries.
+        # Reuse is okay for this case.
+        prompt = TokensPrompt(prompt_token_ids=[0] + initial_ids)
+        _verify(llm, prompt, "block-mid-prompt")
+
+        assert not failures, "\n\n".join(failures)
+
+    finally:
         del llm
