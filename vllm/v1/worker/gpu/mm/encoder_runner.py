@@ -8,7 +8,7 @@ from vllm.multimodal.inputs import MultiModalKwargsItem
 from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_kwargs
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.utils import sanity_check_mm_encoder_outputs
-
+from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 
 class EncoderRunner:
     def __init__(
@@ -26,11 +26,18 @@ class EncoderRunner:
         self.encoder_cache = encoder_cache
         self.dtype = dtype
         self.device = device
+        self.encoder_cudagraph_manager: EncoderCudaGraphManager
         self.is_realtime = supports_realtime(model)
 
         self.inputs_embeds = torch.zeros(
             max_num_tokens, hidden_size, dtype=dtype, device=device
         )
+
+    def set_encoder_cudagraph_manager(
+        self,
+        encoder_cudagraph_manager: EncoderCudaGraphManager | None,
+    ) -> None:
+        self.encoder_cudagraph_manager = encoder_cudagraph_manager
 
     def prepare_mm_inputs(
         self, scheduled_encoder_inputs: dict[str, list[int]]
@@ -56,7 +63,19 @@ class EncoderRunner:
         for modality, num_items, mm_kwargs_batch in group_and_batch_mm_kwargs(
             mm_kwargs, device=self.device, pin_memory=True
         ):
-            batch_outputs = self.model.embed_multimodal(**mm_kwargs_batch)
+            cudagraph_outputs = None
+            if (
+                self.encoder_cudagraph_manager is not None
+                and self.encoder_cudagraph_manager.supports_modality(modality)
+            ):
+                # V2 encoder runner will first attempt to reuse the ViT CUDA graph; if the budget is not met, it will fall back to eager execution.
+                cudagraph_outputs = self.encoder_cudagraph_manager.execute(
+                    mm_kwargs_batch
+                )
+            if cudagraph_outputs is not None:
+                batch_outputs = cudagraph_outputs
+            else:
+                batch_outputs = self.model.embed_multimodal(**mm_kwargs_batch)
             sanity_check_mm_encoder_outputs(batch_outputs, expected_num_items=num_items)
             encoder_outputs.extend(batch_outputs)
         return encoder_outputs

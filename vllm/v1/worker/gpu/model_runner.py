@@ -21,19 +21,23 @@ import functools
 import gc
 import time
 from copy import deepcopy
-from typing import Any, NamedTuple
+from typing import Any, NamedTuple, cast
 
 import numpy as np
 import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.compilation import monitor as compilation_monitor
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
+from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+from vllm.config import VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed.parallel_state import (
     get_dcp_group,
     get_pp_group,
+    graph_capture,
     prepare_communication_buffer_for_model,
 )
 from vllm.forward_context import BatchDescriptor, set_forward_context
@@ -42,7 +46,12 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
     initialize_mamba_ssu_backend,
 )
 from vllm.model_executor.model_loader import get_model_loader
+from vllm.model_executor.models.interfaces import (
+    SupportsEncoderCudaGraph,
+    supports_encoder_cudagraph,
+)
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
@@ -111,6 +120,7 @@ from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
 from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
+from vllm.v1.worker.encoder_cudagraph import EncoderCudaGraphManager
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
 from vllm.v1.worker.utils import KVBlockZeroer
 
@@ -237,6 +247,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
         self.cudagraph_manager: ModelCudaGraphManager | None = None
+        self.encoder_cudagraph_manager: EncoderCudaGraphManager | None = None
 
         # LoRA-related workers.
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
@@ -672,13 +683,99 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.encoder_cache is not None:
             self.encoder_cache.reset_encoder_cache()
 
+    @torch.inference_mode()
+    def _create_encoder_cudagraph_manager(self) -> EncoderCudaGraphManager | None:
+        if not (
+            current_platform.is_cuda()
+            and self.compilation_config.cudagraph_mm_encoder
+            and self.supports_mm_inputs
+            and self.is_first_pp_rank
+        ):
+            return None
+
+        raw_model = self.get_model()
+        if not supports_encoder_cudagraph(raw_model):
+            return None
+
+        return EncoderCudaGraphManager(
+            vllm_config=self.vllm_config,
+            device=self.device,
+            dtype=self.dtype,
+            model=cast(SupportsEncoderCudaGraph, raw_model),
+        )
+
+    def _set_encoder_cudagraph_manager(
+        self,
+        encoder_cudagraph_manager: EncoderCudaGraphManager | None,
+    ) -> None:
+        encoder_runner = getattr(self.model_state, "encoder_runner", None)
+        if encoder_runner is not None:
+            encoder_runner.set_encoder_cudagraph_manager(encoder_cudagraph_manager)
+
+    @torch.inference_mode()
+    def _maybe_init_encoder_cudagraph_manager(self) -> None:
+        if self.encoder_cudagraph_manager is not None:
+            return
+        self.encoder_cudagraph_manager = self._create_encoder_cudagraph_manager()
+        self._set_encoder_cudagraph_manager(self.encoder_cudagraph_manager)
+        if self.encoder_cudagraph_manager is not None:
+            logger.info("Initialized EncoderCudaGraphManager for V2 vision encoder")
+
+    @staticmethod
+    def _run_with_gc_frozen(fn):
+        gc_was_enabled = gc.isenabled()
+        gc.collect()
+        gc.disable()
+        try:
+            return fn()
+        finally:
+            if gc_was_enabled:
+                gc.enable()
+    
     def _get_num_input_tokens(self, num_scheduled_tokens: int) -> int:
         # SP is not supported yet.
         return num_scheduled_tokens
 
     def profile_cudagraph_memory(self) -> int:
-        # NOTE(woosuk): It is TBD whether we keep this API or not.
-        return 0
+        encoder_cudagraph_manager = self._create_encoder_cudagraph_manager()
+        if encoder_cudagraph_manager is None:
+            return 0
+
+        saved_num_cudagraph_captured = compilation_counter.num_cudagraph_captured
+        encoder_memory_estimate = 0
+        graph_pool = current_platform.graph_pool_handle()
+
+        def capture_for_profile() -> None:
+            nonlocal encoder_memory_estimate
+            capture_monitor_state = compilation_monitor.cudagraph_capturing_enabled
+            set_cudagraph_capturing_enabled(True)
+            try:
+                with set_current_vllm_config(self.vllm_config), graph_capture(
+                    device=self.device
+                ):
+                    torch.accelerator.synchronize()
+                    torch.accelerator.empty_cache()
+                    mem_before = torch.cuda.mem_get_info()[0]
+                    encoder_cudagraph_manager.capture(graph_pool=graph_pool)
+                    torch.accelerator.synchronize()
+                    free_after = torch.cuda.mem_get_info()[0]
+                    encoder_memory_estimate = max(mem_before - free_after, 0)
+            finally:
+                set_cudagraph_capturing_enabled(capture_monitor_state)
+
+        try:
+            # Estimate the video memory of the V2 ViT encoder graph separately for KV cache planning and reservation.
+            self._run_with_gc_frozen(capture_for_profile)
+        finally:
+            encoder_cudagraph_manager.clear()
+            compilation_counter.num_cudagraph_captured = saved_num_cudagraph_captured
+
+        if encoder_memory_estimate > 0:
+            logger.info(
+                "Estimated V2 encoder CUDA graph memory: %.2f GiB total",
+                encoder_memory_estimate / (1 << 30),
+            )
+        return int(encoder_memory_estimate)
 
     @torch.inference_mode()
     def capture_model(self) -> int:
@@ -712,6 +809,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if self.speculator is not None:
                 self.speculator.capture(attn_states)
+
+            # The decoder CUDA graph manager of V2 does not handle multi-modal encoders, and here it captures the ViT graph separately.
+            self._maybe_init_encoder_cudagraph_manager()
+            if self.encoder_cudagraph_manager is not None:
+                encoder_graph_pool = current_platform.graph_pool_handle()
+                capture_monitor_state = compilation_monitor.cudagraph_capturing_enabled
+                set_cudagraph_capturing_enabled(True)
+                try:
+                    with set_current_vllm_config(self.vllm_config), graph_capture(
+                        device=self.device
+                    ):
+                        self.encoder_cudagraph_manager.capture(
+                            graph_pool=encoder_graph_pool
+                        )
+                finally:
+                    set_cudagraph_capturing_enabled(capture_monitor_state)
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
