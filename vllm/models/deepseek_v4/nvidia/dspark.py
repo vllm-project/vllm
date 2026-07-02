@@ -110,8 +110,12 @@ class DSparkDeepseekV4Model(nn.Module):
         self.hc_head_scale = nn.Parameter(
             torch.empty(1, dtype=torch.float32), requires_grad=False
         )
+        draft_vocab_size = (
+            getattr(config, "draft_vocab_size", None) or config.vocab_size
+        )
         self.markov_head = DSparkMarkovHead(
             config.vocab_size,
+            draft_vocab_size,
             config.dspark_markov_rank,
             prefix=maybe_prefix(prefix, "markov_head"),
         )
@@ -317,6 +321,13 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         """Base logits U_k = lm_head(norm(head_hidden))."""
         return self.logits_processor(self.lm_head, self.model.norm(hidden_states))
+
+    def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        # Full-vocab draft: base logits, no d2t scatter.
+        return self.compute_logits(hidden_states)
+
+    def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
+        return draft_ids  # full-vocab: draft ids are target ids
 
     def markov_embed(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.model.markov_head.embed(token_ids)
