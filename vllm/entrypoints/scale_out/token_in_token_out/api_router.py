@@ -42,6 +42,12 @@ def engine_client(request: Request) -> EngineClient:
 
 router = APIRouter()
 
+# Tasks scheduled with asyncio.create_task() must be referenced until they
+# finish; the event loop only keeps a weak reference, so an unreferenced task
+# can be garbage-collected mid-run.
+# https://docs.python.org/3/library/asyncio-task.html#asyncio.create_task
+_background_tasks: set[asyncio.Task] = set()
+
 
 @router.post(
     "/inference/v1/generate",
@@ -95,8 +101,11 @@ def attach_router(app: FastAPI):
                     status_code=HTTPStatus.BAD_REQUEST.value,
                     detail="Missing 'request_ids' in request body",
                 )
-            # Abort requests in background
-            asyncio.create_task(engine_client(raw_request).abort(request_ids))
+            # Abort requests in background. Keep a strong reference to the task
+            # so it isn't garbage-collected before the abort completes.
+            task = asyncio.create_task(engine_client(raw_request).abort(request_ids))
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
             return Response(status_code=200)
 
     app.include_router(router)
