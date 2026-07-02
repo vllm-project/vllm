@@ -52,34 +52,6 @@ def _ensure_int64(t: torch.Tensor) -> torch.Tensor:
     return t if t.dtype == torch.int64 else t.to(torch.int64)
 
 
-def _eagle_prepare_inputs_padded_kernel_impl(
-    cu_num_draft_tokens,
-    valid_sampled_tokens_count,
-    query_start_loc_gpu,
-    token_indices_to_sample,
-    num_rejected_tokens_gpu,
-    num_reqs,
-):
-    # C++ expects int64 for cu_num_draft_tokens, valid_sampled_tokens_count,
-    # and num_rejected_tokens_gpu, but Python allocates them as int32.
-    orig_rejected_dtype = num_rejected_tokens_gpu.dtype
-    rejected_i64 = (
-        num_rejected_tokens_gpu
-        if orig_rejected_dtype == torch.int64
-        else num_rejected_tokens_gpu.to(torch.int64)
-    )
-    torch.ops._C.eagle_prepare_inputs_padded_kernel_impl(
-        _ensure_int64(cu_num_draft_tokens),
-        _ensure_int64(valid_sampled_tokens_count),
-        query_start_loc_gpu,
-        token_indices_to_sample,
-        rejected_i64,
-        num_reqs,
-    )
-    if orig_rejected_dtype != torch.int64:
-        num_rejected_tokens_gpu.copy_(rejected_i64.to(orig_rejected_dtype))
-
-
 def _eagle_prepare_next_token_padded_kernel_impl(
     sampled_token_ids,
     discard_request_mask,
@@ -452,9 +424,6 @@ def _sample_recovered_tokens_kernel_impl(
         output_token_ids.copy_(output_i64.to(orig_dtype))
 
 
-eagle_prepare_inputs_padded_kernel = _FuncWrapper(
-    _eagle_prepare_inputs_padded_kernel_impl
-)
 eagle_prepare_next_token_padded_kernel = _FuncWrapper(
     _eagle_prepare_next_token_padded_kernel_impl
 )

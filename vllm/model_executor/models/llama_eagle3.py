@@ -18,6 +18,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.model_executor.models.eagle3_aux_rmsnorm import fused_dual_rmsnorm_cat
 from vllm.model_executor.models.llama import LlamaDecoderLayer, LlamaForCausalLM
 from vllm.multimodal.inputs import NestedTensors
 
@@ -66,7 +67,10 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         self.hidden_norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.layer_idx = layer_idx
 
-        if getattr(config, "norm_before_residual", False):
+        self.norm_before_residual = bool(
+            getattr(config, "norm_before_residual", False)
+        )
+        if self.norm_before_residual:
             self._residual_norm = self._norm_before_residual
         else:
             self._residual_norm = self._norm_after_residual
@@ -98,9 +102,33 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if self.layer_idx == 0:
             # First layer: concatenate embeds with hidden_states
-            embeds = self.input_layernorm(embeds)
-            hidden_states, residual = self._residual_norm(hidden_states=hidden_states)
-            hidden_states = torch.cat([embeds, hidden_states], dim=-1)
+            if (
+                not self.norm_before_residual
+                and embeds.is_cuda
+                and embeds.is_contiguous()
+                and hidden_states.is_contiguous()
+                and embeds.shape == hidden_states.shape
+                and embeds.device == hidden_states.device
+                and embeds.dtype == hidden_states.dtype
+                and self.input_layernorm.weight.is_contiguous()
+                and self.hidden_norm.weight.is_contiguous()
+                and self.input_layernorm.variance_epsilon
+                == self.hidden_norm.variance_epsilon
+            ):
+                residual = hidden_states
+                hidden_states = fused_dual_rmsnorm_cat(
+                    embeds,
+                    hidden_states,
+                    self.input_layernorm.weight,
+                    self.hidden_norm.weight,
+                    self.input_layernorm.variance_epsilon,
+                )
+            else:
+                embeds = self.input_layernorm(embeds)
+                hidden_states, residual = self._residual_norm(
+                    hidden_states=hidden_states
+                )
+                hidden_states = torch.cat([embeds, hidden_states], dim=-1)
         else:
             # Subsequent layers: process hidden_states and residuals only
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
