@@ -25,10 +25,18 @@ MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"   # 0 -> prefill writes (default); 1 -
 # vllm-router -> external `vllm/vllm-router` container started on the rank-0 node
 ROUTER_TYPE="${ROUTER_TYPE:-toy}"
 ROUTER_PORT="${ROUTER_PORT:-30000}"
-ROUTER_POLICY="${ROUTER_POLICY:-consistent_hash}"
+ROUTER_POLICY="${ROUTER_POLICY:-round_robin}"
 VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
 PROXY_PING_PORT="${PROXY_PING_PORT:-36367}"   # must equal vllm-router --vllm-discovery-address port
 PROXY_PORT="${PROXY_PORT:-10001}"
+# Intra-node data-parallel size the router uses to route the MoRIIO KV-notify to
+# the right DP rank. Required for wideEP DP (else decode hangs: "remote blocks
+# never arrived"). EP -> GPUS_PER_NODE (matches --data-parallel-size-local); TP -> 1.
+if [[ "${WIDE_EP_MODE}" == "1" ]]; then
+    ROUTER_DP_LOCAL="${ROUTER_DP_LOCAL:-${GPUS_PER_NODE}}"
+else
+    ROUTER_DP_LOCAL="${ROUTER_DP_LOCAL:-1}"
+fi
 if [[ "${ROUTER_TYPE}" == "vllm-router" ]]; then
     GATEWAY_PORT="${GATEWAY_PORT:-${ROUTER_PORT}}"
 else
@@ -178,7 +186,7 @@ export DOCKER_CONT_NAME="vllm_disagg_${MODEL_NAME:-model}_${SLURM_JOB_ID}"
 
 # Router env: forwarded into the main container (cluster.sh honors these) and used
 # host-side to launch the external router container on rank 0.
-export ROUTER_TYPE ROUTER_PORT ROUTER_POLICY VLLM_ROUTER_IMAGE PROXY_PING_PORT GATEWAY_PORT
+export ROUTER_TYPE ROUTER_PORT ROUTER_POLICY VLLM_ROUTER_IMAGE PROXY_PING_PORT GATEWAY_PORT ROUTER_DP_LOCAL
 export ROUTER_CONT_NAME="vllm_router_${SLURM_JOB_ID}"
 
 echo "[disagg-pd] IPADDRS=${IPADDRS}"
@@ -204,10 +212,10 @@ srun --label \
     # prefill/decode register to :$PROXY_PING_PORT (discovery) and clients hit
     # :$ROUTER_PORT. Only started when ROUTER_TYPE=vllm-router.
     if [ "$ROUTER_TYPE" = "vllm-router" ] && [ "$SLURM_PROCID" = "0" ] && [ "$DRY_RUN" = "1" ]; then
-        echo "DRY_RUN: would start vllm-router on $(hostname): $VLLM_ROUTER_IMAGE (discovery :$PROXY_PING_PORT, port :$ROUTER_PORT, policy $ROUTER_POLICY)"
+        echo "DRY_RUN: would start vllm-router on $(hostname): $VLLM_ROUTER_IMAGE (discovery :$PROXY_PING_PORT, port :$ROUTER_PORT, policy $ROUTER_POLICY, dp_local=$ROUTER_DP_LOCAL)"
     elif [ "$ROUTER_TYPE" = "vllm-router" ] && [ "$SLURM_PROCID" = "0" ]; then
         docker rm -f "$ROUTER_CONT_NAME" 2>/dev/null || true
-        echo "Starting vllm-router on $(hostname): $VLLM_ROUTER_IMAGE (discovery :$PROXY_PING_PORT, port :$ROUTER_PORT)"
+        echo "Starting vllm-router on $(hostname): $VLLM_ROUTER_IMAGE (discovery :$PROXY_PING_PORT, port :$ROUTER_PORT, policy $ROUTER_POLICY, dp_local=$ROUTER_DP_LOCAL)"
         mkdir -p "$LOG_PATH" 2>/dev/null || true
         docker run -d \
             --name "$ROUTER_CONT_NAME" \
@@ -215,7 +223,7 @@ srun --label \
             -v "$LOG_PATH":/run_logs \
             -v "$SHARED_MOUNT":"$SHARED_MOUNT" \
             "$VLLM_ROUTER_IMAGE" \
-            bash -lc "exec vllm-router --vllm-pd-disaggregation --kv-connector moriio --vllm-discovery-address 0.0.0.0:$PROXY_PING_PORT --port $ROUTER_PORT --host 0.0.0.0 --policy $ROUTER_POLICY --prefill-policy $ROUTER_POLICY --decode-policy $ROUTER_POLICY --log-level info > $LOG_PATH/vllm_router.log 2>&1" \
+            bash -lc "exec vllm-router --vllm-pd-disaggregation --kv-connector moriio --vllm-discovery-address 0.0.0.0:$PROXY_PING_PORT --port $ROUTER_PORT --host 0.0.0.0 --intra-node-data-parallel-size $ROUTER_DP_LOCAL --policy $ROUTER_POLICY --prefill-policy $ROUTER_POLICY --decode-policy $ROUTER_POLICY --log-level info > $LOG_PATH/vllm_router.log 2>&1" \
           || echo "WARN: failed to start vllm-router container on $(hostname)"
     fi
 

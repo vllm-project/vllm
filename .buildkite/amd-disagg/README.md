@@ -40,8 +40,10 @@ node runs **two** containers: the router (`VLLM_ROUTER_IMAGE`) and the usual mai
 container (`IMAGE`) running `vllm_disagg.sh node`.
 
 Relevant knobs (in `cluster.sh`, env-overridable): `ROUTER_TYPE`, `ROUTER_PORT`,
-`ROUTER_POLICY` (`consistent_hash`), `VLLM_ROUTER_IMAGE`
-(`vllm/vllm-router:nightly`), `GATEWAY_PORT`.
+`ROUTER_POLICY` (`round_robin`), `VLLM_ROUTER_IMAGE`
+(`vllm/vllm-router:nightly`), `GATEWAY_PORT`, `ROUTER_DP_LOCAL`
+(intra-node data-parallel size the router routes across; `GPUS_PER_NODE` for
+wideEP, `1` for TP).
 
 ```bash
 # opt in to the production router (1P1D):

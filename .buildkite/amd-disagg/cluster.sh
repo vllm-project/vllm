@@ -83,7 +83,7 @@ export MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
 # PROXY_IP:PROXY_PING_PORT=36367); only the client HTTP front door differs.
 export ROUTER_TYPE="${ROUTER_TYPE:-toy}"
 export ROUTER_PORT="${ROUTER_PORT:-30000}"
-export ROUTER_POLICY="${ROUTER_POLICY:-consistent_hash}"
+export ROUTER_POLICY="${ROUTER_POLICY:-round_robin}"
 export VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
 # Single client-facing port bench/accuracy target: the router port when routing,
 # else the toy proxy port. Env override always wins.
