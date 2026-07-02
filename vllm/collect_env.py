@@ -310,11 +310,17 @@ def get_pkg_version(run_lambda, pkg):
             return match.group(1).strip() if match else None
         return None
 
+    if pkg == "oneccl":
+        rc, out, _ = run_lambda("mpirun --version")
+        if rc == 0:
+            match = re.search(r"Version\s+(\d+(?:\.\d+)*)", out)
+            return match.group(1).strip() if match else None
+        return None
+
     pkg_map = {
         "igc": ["intel-igc-core", "libigc2", "libigc1"],
         "level_zero_loader": ["level-zero", "libze1"],
         "level_zero_driver": ["libze-intel-gpu1", "intel-level-zero-gpu"],
-        "oneccl": ["intel-oneapi-ccl", "oneccl"],
         "libigdgmm": ["libigdgmm12", "libigdgmm"],
     }
 
