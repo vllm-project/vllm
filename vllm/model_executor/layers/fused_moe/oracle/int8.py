@@ -30,6 +30,9 @@ logger = init_logger(__name__)
 class Int8MoeBackend(Enum):
     TRITON = "TRITON"
     CPU = "CPU"
+    # AMD Zen CPU backend dispatching per-expert int8 GEMMs through
+    # torch.ops.zentorch.*. Requires the zentorch package + a Zen CPU.
+    CPU_ZEN = "CPU_ZEN"
 
 
 def _get_priority_backends(
@@ -46,6 +49,15 @@ def _get_priority_backends(
     def _move_to_front(backends: list[Int8MoeBackend], backend: Int8MoeBackend) -> None:
         backends.insert(0, backends.pop(backends.index(backend)))
 
+    # Prefer the zentorch-backed backend on AMD Zen CPUs, then fall back to the
+    # generic CPU backend and finally Triton; on other CPUs use the generic CPU
+    # backend first.
+    if current_platform.is_zen_cpu():
+        return [
+            Int8MoeBackend.CPU_ZEN,
+            Int8MoeBackend.CPU,
+            Int8MoeBackend.TRITON,
+        ]
     if current_platform.is_cpu():
         _move_to_front(_AVAILABLE_BACKENDS, Int8MoeBackend.CPU)
 
@@ -69,6 +81,13 @@ def backend_to_kernel_cls(
 
         return [CPUExpertsInt8]
 
+    elif backend == Int8MoeBackend.CPU_ZEN:
+        from vllm.model_executor.layers.fused_moe.cpu_int8_experts import (
+            CPUInt8Experts,
+        )
+
+        return [CPUInt8Experts]
+
     else:
         raise ValueError(f"Unknown Int8 MoE backend: {backend.value}")
 
@@ -77,6 +96,7 @@ def map_int8_backend(runner_backend: MoEBackend) -> Int8MoeBackend:
     """Map user's MoEBackend to Int8MoeBackend."""
     mapping = {
         "triton": Int8MoeBackend.TRITON,
+        "cpu_zen": Int8MoeBackend.CPU_ZEN,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -208,7 +228,9 @@ def convert_to_int8_moe_kernel_format(
         )
 
         w13, w2 = prepare_int8_moe_layer_for_cpu(w13, w2)
-    elif int8_backend != Int8MoeBackend.TRITON:
+    elif int8_backend not in (Int8MoeBackend.TRITON, Int8MoeBackend.CPU_ZEN):
+        # CPU_ZEN keeps the loaded [N, K] layout (zentorch packs internally),
+        # so it needs no conversion here.
         raise ValueError(f"Unsupported Int8 MoE backend: {int8_backend.value}")
 
     return w13, w2
