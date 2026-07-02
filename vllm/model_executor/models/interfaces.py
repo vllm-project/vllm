@@ -788,6 +788,39 @@ def is_attention_free(
 
 
 @runtime_checkable
+class SupportsStockCompile(Protocol):
+    """The interface for models validated to run on the stock torch.compile path
+    (backend="inductor" + vLLM's external cudagraph wrapper + Inductor-hook fusion
+    passes) instead of the custom VllmBackend. Opt in per architecture as it passes
+    the migration gate; models without this flag stay on VllmBackend."""
+
+    supports_stock_compile: ClassVar[Literal[True]] = True
+    """
+    A flag that indicates this model is validated for the stock torch.compile path.
+
+    Note:
+        There is no need to redefine this flag if this class is in the
+        MRO of your model class.
+    """
+
+
+@overload
+def supports_stock_compile(model: object) -> TypeIs[SupportsStockCompile]: ...
+
+
+@overload
+def supports_stock_compile(
+    model: type[object],
+) -> TypeIs[type[SupportsStockCompile]]: ...
+
+
+def supports_stock_compile(
+    model: type[object] | object,
+) -> TypeIs[type[SupportsStockCompile]] | TypeIs[SupportsStockCompile]:
+    return getattr(model, "supports_stock_compile", False)
+
+
+@runtime_checkable
 class IsHybrid(Protocol):
     """The interface required for all models like Jamba that have both
     attention and mamba blocks, indicates that

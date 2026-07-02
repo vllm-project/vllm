@@ -12,8 +12,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributed import P2POp
 
-from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphWrapper
+from vllm.compilation.stock_cudagraph import StockTorchCompileCUDAGraphWrapper
 from vllm.compilation.wrapper import reset_compile_wrapper
 from vllm.config import (
     CompilationMode,
@@ -339,6 +339,12 @@ class ElasticEPScalingExecutor:
         elif isinstance(self.worker.model_runner.model, UBatchWrapper):
             raise RuntimeError("DBO is not yet supported in elastic EP")
 
+        # The stock torch.compile path wraps the model (and each Inductor partition)
+        # in StockTorchCompileCUDAGraphWrapper instances rather than CUDAGraphWrapper;
+        # clear all of them so no stale cudagraph is replayed after the rescale
+        # re-compile below.
+        StockTorchCompileCUDAGraphWrapper.clear_all_graphs()
+
         torch.compiler.reset()
         with set_current_vllm_config(self.worker.vllm_config):
             reset_compile_wrapper(self.worker.model_runner.get_model())
@@ -487,16 +493,13 @@ class ElasticEPScalingExecutor:
             self.worker.vllm_config.compilation_config.mode
             == CompilationMode.STOCK_TORCH_COMPILE
         ):
-            # NOTE(yongji): when using stock torch.compile,
-            # torch.compile is triggered during GPUModelRunner's load_model()
-            # TODO(yongji):check do we need to re-trigger torch.compile here?
-            # any changes to the tensor shapes in execution should already
-            # be handled internally by torch.compile.
-            backend = self.worker.vllm_config.compilation_config.init_backend(
-                self.worker.vllm_config
-            )
-            compilation_counter.stock_torch_compile_count += 1
-            self.worker.model_runner.model.compile(fullgraph=True, backend=backend)
+            # NOTE(yongji): when using stock torch.compile, the model was first
+            # compiled during GPUModelRunner.load_model(). After an EP scale event
+            # the expert layout changes, so re-trigger the stock compile through the
+            # shared helper to keep the fusion pass manager + pre-grad pass + pass
+            # context identical to the initial compile (a bare model.compile() here
+            # would silently drop them for fusion-needing models).
+            self.worker.model_runner._compile_model_stock()
 
         multi_block_table = self.worker.model_runner.input_batch.block_table
         saved_block_tables: list[tuple[torch.Tensor, torch.Tensor]] = []

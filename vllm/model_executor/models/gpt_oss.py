@@ -57,6 +57,7 @@ from .interfaces import (
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
+    SupportsStockCompile,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -1134,7 +1135,12 @@ class GptOssModel(nn.Module, EagleModelMixin):
 
 
 class GptOssForCausalLM(
-    nn.Module, SupportsPP, SupportsEagle, SupportsEagle3, SupportsLoRA
+    nn.Module,
+    SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsStockCompile,
 ):
     is_3d_moe_weight: bool = True
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
