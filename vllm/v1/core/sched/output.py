@@ -178,6 +178,14 @@ class CachedRequestData:
 
 
 @dataclass
+class ScheduledEncoderInputStats:
+    """Stats for encoder inputs scheduled in one iteration."""
+
+    num_inputs: int = 0
+    output_tokens: int = 0
+
+
+@dataclass
 class SchedulerOutput:
     # list of the requests that are scheduled for the first time.
     # We cache the request's data in each worker process, so that we don't
@@ -213,6 +221,8 @@ class SchedulerOutput:
     # list of mm_hash strings associated with the encoder outputs to be
     # freed from the encoder cache.
     free_encoder_mm_hashes: list[str]
+
+    scheduled_encoder_input_stats: ScheduledEncoderInputStats | None = None
 
     # Request IDs that are preempted in this step.
     # Only used for v2 model runner.
