@@ -17,6 +17,7 @@ from vllm.v1.simple_kv_offload.metadata import (
 )
 
 if TYPE_CHECKING:
+    from vllm.v1.attention.backend import AttentionBackend
     from vllm.v1.kv_cache_interface import KVCacheConfig
 
 logger = init_logger(__name__)
@@ -184,6 +185,14 @@ class SimpleCPUOffloadWorker:
             self.load_stream,
             self.store_stream,
         )
+
+    def register_cross_layers_kv_cache(
+        self,
+        kv_cache: torch.Tensor,
+        attn_backend: type["AttentionBackend"],
+    ) -> None:
+        """Register a cross-layer KV cache tensor for offloading."""
+        self.register_kv_caches({"cross_layer": kv_cache})
 
     def bind_connector_metadata(self, metadata: SimpleCPUOffloadMetadata) -> None:
         self._connector_metadata = metadata

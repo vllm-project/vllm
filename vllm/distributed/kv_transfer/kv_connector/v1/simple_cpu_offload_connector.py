@@ -30,7 +30,7 @@ from vllm.v1.simple_kv_offload.worker import (
 
 if TYPE_CHECKING:
     from vllm.forward_context import ForwardContext
-    from vllm.v1.attention.backend import AttentionMetadata
+    from vllm.v1.attention.backend import AttentionBackend, AttentionMetadata
     from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
@@ -117,9 +117,21 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
 
     # --- Worker-side methods ---
 
+    @property
+    def prefer_cross_layer_blocks(self) -> bool:
+        return True
+
     def register_kv_caches(self, kv_caches: dict[str, torch.Tensor]) -> None:
         if self.worker_handler is not None:
             self.worker_handler.register_kv_caches(kv_caches)
+
+    def register_cross_layers_kv_cache(
+        self,
+        kv_cache: torch.Tensor,
+        attn_backend: type["AttentionBackend"],
+    ) -> None:
+        if self.worker_handler is not None:
+            self.worker_handler.register_cross_layers_kv_cache(kv_cache, attn_backend)
 
     def bind_connector_metadata(
         self,
