@@ -570,3 +570,7 @@ class CompressedTensorsWNA16MarlinMoEMethod(CompressedTensorsMoEMethod):
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
+
+    @property
+    def supports_eplb(self) -> bool:
+        return self.kernel_backend == "Marlin"
