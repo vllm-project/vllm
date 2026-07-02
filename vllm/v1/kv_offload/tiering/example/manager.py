@@ -47,18 +47,21 @@ class ExampleSecondaryTierManager(SecondaryTierManager):
         offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
+        tier_idx: int,
         custom_param: int = 0,
     ):
         """
         Initialize the example secondary tier.
 
         Args:
+            tier_idx: Index of this secondary tier in the configuration list.
             custom_param: Dummy parameter demonstrating custom args.
         """
         super().__init__(
             offloading_spec=offloading_spec,
             primary_kv_view=primary_kv_view,
             tier_type=tier_type,
+            tier_idx=tier_idx,
         )
 
         logger.info(

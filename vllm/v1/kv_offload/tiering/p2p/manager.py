@@ -111,6 +111,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         offloading_spec: OffloadingSpec,
         primary_kv_view: memoryview,
         tier_type: str = "p2p",
+        tier_idx: int = 0,
         host: str = "0.0.0.0",
         port: int = 7777,
         backends: list[str] | None = None,
@@ -130,6 +131,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             primary_kv_view: Memoryview over the CPU primary tier; the
                 NIXL agent registers this region for RDMA transfers.
             tier_type: Tier identifier (defaults to ``"p2p"``).
+            tier_idx: Index of this secondary tier in the configuration list.
             host: Address the ZMQ control socket binds to.
             port: Port for the ZMQ control socket. Must be reachable
                 from peers.
@@ -144,7 +146,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                 entry.
             **kwargs: Reserved for future tier-specific options.
         """
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        super().__init__(offloading_spec, primary_kv_view, tier_type, tier_idx)
         port = int(port)
         self._local_id = f"{host}:{port}"
 

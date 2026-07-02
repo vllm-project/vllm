@@ -95,11 +95,12 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
+        tier_idx: int,
         store_config: dict,
         prefix: str = "",
         io_threads: int = 4,
     ):
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        super().__init__(offloading_spec, primary_kv_view, tier_type, tier_idx)
         agent_config = nixl_agent_config(backends=[])
         self._agent = nixl_agent("ObjAgent", agent_config)
         obj_config = ObjStoreConfig(**store_config)
