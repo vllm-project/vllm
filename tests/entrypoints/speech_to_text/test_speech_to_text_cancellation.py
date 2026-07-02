@@ -10,6 +10,8 @@ import pytest
 from vllm.entrypoints.speech_to_text.base.serving import OpenAISpeechToText
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionResponse
 
+pytestmark = pytest.mark.skip_global_cleanup
+
 
 async def _never_finishes():
     await asyncio.Event().wait()
@@ -53,7 +55,9 @@ async def test_non_streaming_cancel_aborts_engine_requests(
     server.asr_config = SimpleNamespace(max_audio_clip_s=30)
     server._check_model = AsyncMock(return_value=None)
     server._maybe_get_adapters = Mock(return_value=None)
-    server._preprocess_speech_to_text = AsyncMock(return_value=(engine_inputs, 40.0))
+    server._preprocess_speech_to_text = AsyncMock(
+        return_value=(engine_inputs, 40.0, [0.0 for _ in engine_inputs])
+    )
     server._log_inputs = Mock()
 
     request = SimpleNamespace(
@@ -122,7 +126,9 @@ async def test_non_streaming_cancel_advances_all_chunk_generators():
     server.asr_config = SimpleNamespace(max_audio_clip_s=30)
     server._check_model = AsyncMock(return_value=None)
     server._maybe_get_adapters = Mock(return_value=None)
-    server._preprocess_speech_to_text = AsyncMock(return_value=(engine_inputs, 90.0))
+    server._preprocess_speech_to_text = AsyncMock(
+        return_value=(engine_inputs, 90.0, [0.0 for _ in engine_inputs])
+    )
     server._log_inputs = Mock()
 
     request = SimpleNamespace(

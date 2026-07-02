@@ -28,7 +28,10 @@ from vllm.entrypoints.speech_to_text.base.serving import (
     OpenAISpeechToText,
     asr_inter_chunk_separator,
 )
-from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
+from vllm.entrypoints.speech_to_text.transcription.protocol import (
+    TranscriptionRequest,
+    TranscriptionSegment,
+)
 from vllm.entrypoints.speech_to_text.transcription.serving import (
     OpenAIServingTranscription,
 )
@@ -36,6 +39,8 @@ from vllm.model_executor.models.interfaces import SupportsTranscription
 from vllm.outputs import CompletionOutput, RequestOutput
 
 # --- Unit: helper + protocol -------------------------------------------------
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 def test_default_no_space_languages_includes_zh_and_ja():
@@ -227,7 +232,9 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
     models.lora_requests = {}
     models.is_base_model.return_value = True
 
-    preprocess_mock = AsyncMock(return_value=([MagicMock(), MagicMock()], 1.0))
+    preprocess_mock = AsyncMock(
+        return_value=([MagicMock(), MagicMock()], 1.0, [0.0, 0.5])
+    )
 
     with (
         patch(
@@ -271,3 +278,92 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
         )
         assert not isinstance(out_zh, ErrorResponse)
         assert out_zh.text == "你好世界"
+
+
+@pytest.mark.asyncio
+async def test_verbose_json_uses_actual_chunk_start_times():
+    """Segment offsets should follow real split boundaries, not fixed chunk size."""
+
+    async def gen_seg_a() -> AsyncGenerator[RequestOutput, None]:
+        out = _request_output("seg-a")
+        out.outputs[0].logprobs = [{1: SimpleNamespace(logprob=0.0)}]
+        yield out
+
+    async def gen_seg_b() -> AsyncGenerator[RequestOutput, None]:
+        out = _request_output("seg-b")
+        out.outputs[0].logprobs = [{1: SimpleNamespace(logprob=0.0)}]
+        yield out
+
+    engine_client = MagicMock()
+    engine_client.model_config = MagicMock()
+    engine_client.model_config.get_diff_sampling_param.return_value = {
+        "max_tokens": 256,
+        "temperature": 0.0,
+    }
+    engine_client.model_config.max_model_len = 8192
+    engine_client.errored = False
+    engine_client.generate.side_effect = [gen_seg_a(), gen_seg_b()]
+
+    models = MagicMock(spec=OpenAIServingModels)
+    models.lora_requests = {}
+    models.is_base_model.return_value = True
+
+    preprocess_mock = AsyncMock(
+        return_value=([MagicMock(), MagicMock()], 40.0, [0.0, 29.5])
+    )
+
+    with (
+        patch(
+            "vllm.model_executor.model_loader.get_model_cls",
+            return_value=_StubTranscriptionModel,
+        ),
+        patch.object(OpenAISpeechToText, "_preprocess_speech_to_text", preprocess_mock),
+    ):
+        serving = OpenAIServingTranscription(engine_client, models, request_logger=None)
+        serving.asr_config.max_audio_clip_s = 30.0
+        serving.model_cls.supports_segment_timestamp = True
+        serving._get_verbose_segments = MagicMock(
+            side_effect=[
+                [
+                    TranscriptionSegment.model_construct(
+                        id=0,
+                        avg_logprob=0.0,
+                        compression_ratio=1.0,
+                        end=0.5,
+                        seek=0,
+                        start=0.0,
+                        temperature=0.0,
+                        text="A",
+                        tokens=[1],
+                    )
+                ],
+                [
+                    TranscriptionSegment.model_construct(
+                        id=1,
+                        avg_logprob=0.0,
+                        compression_ratio=1.0,
+                        end=30.0,
+                        seek=0,
+                        start=29.5,
+                        temperature=0.0,
+                        text="B",
+                        tokens=[1],
+                    )
+                ],
+            ]
+        )
+
+        req = TranscriptionRequest.model_construct(
+            file=MagicMock(),
+            model="stub-model",
+            language="en",
+            stream=False,
+            response_format="verbose_json",
+            temperature=0.0,
+        )
+
+        out = await serving.create_transcription(b"\x00\x00", req, raw_request=None)
+        assert not isinstance(out, ErrorResponse)
+        # Ensure second chunk uses the exact split start (29.5), not idx*30.
+        second_call_kwargs = serving._get_verbose_segments.call_args_list[1].kwargs
+        assert second_call_kwargs["start_time"] == pytest.approx(29.5)
