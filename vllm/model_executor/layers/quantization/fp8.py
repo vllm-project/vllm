@@ -304,7 +304,10 @@ class Fp8LinearMethod(LinearMethodBase):
 
             self.activation_quant_key = create_fp8_quant_key(
                 static=self.act_q_static,
-                group_shape=GroupShape(1, self.weight_block_size[0]),
+                # Activations are grouped along the K (contraction) dim, which
+                # is blocked by block_k = weight_block_size[1] (see modelopt.py
+                # and the block GEMM scale-shape asserts in fp8_utils.py).
+                group_shape=GroupShape(1, self.weight_block_size[1]),
             )
             self.weight_quant_key = create_fp8_quant_key(
                 static=True, group_shape=GroupShape(*self.weight_block_size)
