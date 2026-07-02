@@ -62,17 +62,16 @@ class TopKWeightAndReduceNoOP(mk.TopKWeightAndReduce):
         if output is None:
             return fused_expert_output
 
+        assert output.size() == fused_expert_output.size(), (
+            "output shape is expected to match the fused_expert_output shape. "
+            f"But got output={output.size()}, "
+            f"fused_expert_output={fused_expert_output.size()}"
+        )
+
         # Skip self-copy when caller aliased fused_out to output upstream.
         if output is fused_expert_output:
             return output
 
-        # MoEPrepareAndFinalizeNoDPEPModular needs the output to be in the `output`
-        # tensor.
-        assert output.size() == fused_expert_output.size(), (
-            "output shape is expected to match the fused_expert_output shape. "
-            f"But got output={output.size()}, "
-            f"used_expert_output={fused_expert_output.size()}"
-        )
         output.copy_(fused_expert_output, non_blocking=True)
         return output
 

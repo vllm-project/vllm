@@ -315,6 +315,24 @@ class XPUExpertsMxFp4(XPUExperts):
             num_dispatchers,
         )
 
+    def workspace_shapes(
+        self,
+        M: int,
+        N: int,
+        K: int,
+        topk: int,
+        global_num_experts: int,
+        local_num_experts: int,
+        expert_tokens_meta: mk.ExpertTokensMetadata | None,
+        activation: MoEActivation,
+    ) -> tuple[tuple[int, ...], tuple[int, ...], tuple[int, ...]]:
+        # K = a1q.size(-1). When activations are pre-quantized packed mxfp4,
+        # K is the packed hidden_size (= logical / 2); the kernel output is at
+        # logical hidden_size (2 * K). When unquantized (bf16), K is already
+        # the logical size.
+        logical_K = K if self.expects_unquantized_inputs else 2 * K
+        return (0,), (0,), (M, logical_K)
+
     @staticmethod
     def _supports_quant_scheme(
         weight_key: QuantKey | None,
