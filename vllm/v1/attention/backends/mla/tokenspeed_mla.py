@@ -2,10 +2,12 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TokenSpeed CuTe DSL MLA decode backend (Blackwell, FP8 KV cache only)."""
 
+import inspect
 from typing import ClassVar
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -24,6 +26,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import KVCacheLayoutType
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
@@ -35,6 +38,8 @@ logger = init_logger(__name__)
 _TOKENSPEED_MAX_Q_LEN = 8
 
 _g_workspace: dict[torch.device, torch.Tensor] = {}
+
+_DCP_DECODE_KWARGS = frozenset({"return_lse", "causal_seqs", "cp_world", "cp_rank"})
 
 
 def _get_workspace(
@@ -51,9 +56,38 @@ def _get_workspace(
     return _g_workspace[device]
 
 
+def _missing_dcp_decode_kwargs() -> set[str]:
+    try:
+        from tokenspeed_mla import tokenspeed_mla_decode
+    except ImportError:
+        return set(_DCP_DECODE_KWARGS)
+
+    try:
+        params = inspect.signature(tokenspeed_mla_decode).parameters
+    except (TypeError, ValueError):
+        return set(_DCP_DECODE_KWARGS)
+    return set(_DCP_DECODE_KWARGS.difference(params))
+
+
 class TokenspeedMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
+
+    def __init__(
+        self,
+        kv_cache_spec: "AttentionSpec",
+        layer_names: list[str],
+        vllm_config: "VllmConfig",
+        device: torch.device,
+    ) -> None:
+        super().__init__(
+            kv_cache_spec,
+            layer_names,
+            vllm_config,
+            device,
+            MLACommonMetadata,
+            supports_dcp_with_varlen=True,
+        )
 
 
 class TokenspeedMLABackend(MLACommonBackend):
@@ -111,6 +145,15 @@ class TokenspeedMLABackend(MLACommonBackend):
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
+        if vllm_config.parallel_config.decode_context_parallel_size > 1:
+            missing = _missing_dcp_decode_kwargs()
+            if missing:
+                missing_args = ", ".join(sorted(missing))
+                return (
+                    "tokenspeed_mla_decode does not support DCP decode. "
+                    "Install tokenspeed-mla>=0.1.8; missing arguments: "
+                    f"{missing_args}"
+                )
         if vllm_config.model_config is not None:
             hf_text_config = vllm_config.model_config.hf_text_config
             qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 0)
@@ -130,6 +173,11 @@ class TokenspeedMLABackend(MLACommonBackend):
 
 
 class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
+    can_return_lse_for_decode: bool = True
+    # tokenspeed_mla_decode returns LSE in log2 units; its own DCP test merges
+    # partial outputs with exp2(lse).
+    lse_base_on_e: bool = False
+
     def __init__(
         self,
         num_heads: int,
@@ -228,17 +276,31 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
             f"q_scale={layer._q_scale_float}, k_scale={layer._k_scale_float}."
         )
 
+        num_decodes = attn_metadata.num_decodes
+        num_decode_tokens = attn_metadata.num_decode_tokens
+        uniform = num_decode_tokens % num_decodes == 0
+        tokens_per_req = num_decode_tokens // num_decodes if uniform else 1
+        block_tables = attn_metadata.decode.block_table
+        seq_lens = attn_metadata.decode.seq_lens
+        causal_seqs = attn_metadata.decode.dcp_tot_seq_lens
+
         # tokenspeed_mla_decode expects query shape
         # (num_decodes, q_len_per_request, num_heads, head_dim).
-        if attn_metadata.num_decode_tokens % attn_metadata.num_decodes != 0:
+        if not uniform:
             logger.warning_once(
                 """TokenspeedMLAImpl got a query of uneven length.
                 This usually indicates an issue in batch reordering
                 or incorrect setup in dummy_run."""
             )
             q = q.unsqueeze(1)
+        elif self.dcp_world_size > 1 and tokens_per_req > 1:
+            raise NotImplementedError(
+                "TokenSpeed MLA DCP only supports single-token decode in this PR. "
+                "Multi-token DCP decode for EAGLE/MTP requires follow-up "
+                "dcp_split_q support."
+            )
         else:
-            q = q.view(attn_metadata.num_decodes, -1, q.shape[-2], q.shape[-1])
+            q = q.view(num_decodes, -1, q.shape[-2], q.shape[-1])
 
         if self.softmax_scale is None:
             # FP8 KV cache is mandatory for this backend, so q_scale/k_scale
@@ -257,22 +319,29 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         # vLLM kv_c_and_k_pe_cache is already (num_blocks, block_size, head_size).
         # tokenspeed_mla_decode wants 3D — pass as-is (no unsqueeze, unlike trtllm).
-        o = tokenspeed_mla_decode(
+        return_lse = self.need_to_return_lse_for_decode
+        kernel_out = tokenspeed_mla_decode(
             query=q,
             kv_cache=kv_c_and_k_pe_cache,
             workspace_buffer=self._workspace_buffer,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=attn_metadata.decode.block_table,
-            seq_lens=attn_metadata.decode.seq_lens,
+            block_tables=block_tables,
+            seq_lens=seq_lens,
             max_seq_len=attn_metadata.max_seq_len,
             softmax_scale=self.softmax_scale,
             output_scale=self.output_scale,
             enable_pdl=False,
+            return_lse=return_lse,
+            causal_seqs=causal_seqs if self.dcp_world_size > 1 else None,
+            cp_world=self.dcp_world_size,
+            cp_rank=self.dcp_rank,
         )
+        if return_lse:
+            o, lse = kernel_out
+            lse = lse.view(-1, lse.shape[-1])
+        else:
+            o, lse = kernel_out, None
 
-        # Flatten the output for consistent shape
         o = o.view(-1, o.shape[-2], o.shape[-1])
-
-        # tokenspeed_mla_decode does not return LSE.
-        return o, None
+        return o, lse
