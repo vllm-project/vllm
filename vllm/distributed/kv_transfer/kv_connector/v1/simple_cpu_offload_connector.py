@@ -40,6 +40,32 @@ logger = init_logger(__name__)
 
 # Default CPU capacity: 8 GB
 DEFAULT_CPU_CAPACITY_BYTES = 8 * (1024**3)
+_LAZY_OFFLOAD_MIN_PREFIX_TOKENS_KEY = "lazy_offload_min_prefix_tokens"
+
+
+def _parse_lazy_offload_min_prefix_tokens(extra_config: dict[str, Any]) -> int:
+    value = extra_config.get(_LAZY_OFFLOAD_MIN_PREFIX_TOKENS_KEY, 0)
+    if isinstance(value, bool):
+        raise ValueError(
+            f"{_LAZY_OFFLOAD_MIN_PREFIX_TOKENS_KEY} must be a non-negative "
+            "integer."
+        )
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and value.strip().lstrip("+-").isdigit():
+        parsed = int(value)
+    else:
+        raise ValueError(
+            f"{_LAZY_OFFLOAD_MIN_PREFIX_TOKENS_KEY} must be a non-negative "
+            "integer."
+        )
+
+    if parsed < 0:
+        raise ValueError(
+            f"{_LAZY_OFFLOAD_MIN_PREFIX_TOKENS_KEY} must be a non-negative "
+            "integer."
+        )
+    return parsed
 
 
 class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
@@ -75,6 +101,9 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
             cpu_capacity_per_rank = explicit
 
         lazy_offload = bool(extra_config.get("lazy_offload", False))
+        lazy_offload_min_prefix_tokens = _parse_lazy_offload_min_prefix_tokens(
+            extra_config
+        )
 
         self.scheduler_manager: SimpleCPUOffloadScheduler | None = None
         self.worker_handler: SimpleCPUOffloadWorker | None = None
@@ -109,6 +138,7 @@ class SimpleCPUOffloadConnector(KVConnectorBase_V1, SupportsHMA):
                 scheduler_block_size=scheduler_block_size,
                 hash_block_size=hash_block_size,
                 lazy_offload=lazy_offload,
+                lazy_offload_min_prefix_tokens=lazy_offload_min_prefix_tokens,
             )
         elif role == KVConnectorRole.WORKER:
             self.worker_handler = SimpleCPUOffloadWorker(
