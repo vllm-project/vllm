@@ -146,13 +146,12 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
 
     def finalize(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
+    ) -> torch.Tensor:
         assert self.all2all_manager.moe_alltoall is not None  # type: ignore[attr-defined]
 
         ep_size = self.all2all_manager.world_size
@@ -161,8 +160,8 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
             ep_size, self.runtime_max_tokens_per_rank, hidden_size
         )
 
-        combined_output = self.all2all_manager.moe_alltoall.combine(  # type: ignore[attr-defined]
+        # combine() returns a fresh (M, K) tensor; return it directly.
+        return self.all2all_manager.moe_alltoall.combine(  # type: ignore[attr-defined]
             payload=fused_expert_output,
             runtime_max_tokens_per_rank=self.runtime_max_tokens_per_rank,
         )
-        output.copy_(combined_output)

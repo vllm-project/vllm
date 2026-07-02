@@ -123,7 +123,6 @@ class TopKWeightAndReduce(ABC):
     @abstractmethod
     def apply(
         self,
-        output: torch.Tensor | None,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -131,8 +130,8 @@ class TopKWeightAndReduce(ABC):
     ) -> torch.Tensor:
         """
         Apply topk_weights to the fused_experts_outputs and/or reduce.
-        If an output tensor is not passed, it will be created in the
-        function.
+        The output buffer is always allocated (and owned) by the
+        implementation and returned to the caller.
         """
         raise NotImplementedError
 
@@ -354,17 +353,15 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
     @abstractmethod
     def finalize(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: TopKWeightAndReduce,
-    ) -> None:
+    ) -> torch.Tensor:
         """
         Perform any combine plus apply weights and perform a reduction on the
         fused experts output.
-        - output: The output tensor, written in place.  Must be (M, K) shape.
         - fused_expert_output: The unweighted, unreduced output of the fused
           experts, it will have (M, topk, K) shape.
         - topk_weights: The weights to be applied to the fused_experts_output.
@@ -373,12 +370,16 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
           fused_expert_output.
         - weight_and_reduce_impl: An optional TopKWeightAndReduce
           implementation.
+
+        Returns the (M, K) shaped output tensor.  The output shape is recovered
+        from topk_ids (M = topk_ids.shape[0]) and fused_expert_output
+        (K = fused_expert_output.shape[-1]); the implementation owns the
+        allocation of the returned buffer.
         """
         raise NotImplementedError
 
     def finalize_async(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -388,7 +389,6 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         """
         Perform any combine plus apply weights and perform a reduction on the
         fused experts output but do not wait for results from other workers.
-        - output: The output tensor, written in place.  Must be (M, K) shape.
         - fused_expert_output: The unweighted, unreduced output of the fused
           experts, it will have (M, topk, K) shape.
         - topk_weights: The weights to be applied to the fused_experts_output.
@@ -398,23 +398,23 @@ class FusedMoEPrepareAndFinalizeModular(FusedMoEPrepareAndFinalize):
         - weight_and_reduce_impl: An optional TopKWeightAndReduce
           implementation.
 
-        Returns a callback or a hook callback pair that when invoked waits for
-        results from other workers and has the same return signature as
-        `finalize`, if a hook is returned this is more lightweight check that
-        the recv is complete without doing extra work (used by DBO, will be
-        refactored in the very near future)
+        Returns a receiver callback (or a hook/receiver pair) that, when
+        invoked, waits for results from other workers and returns the
+        (M, K) output tensor (same return contract as `finalize`).  If a hook
+        is returned it is a more lightweight check that the recv is complete
+        without doing extra work (used by DBO, will be refactored in the very
+        near future).
 
-        ret = obj.finalize_async(output, ...)
-        ... output not valid yet ...
+        ret = obj.finalize_async(...)
         if isinstance(ret, tuple):
             hook, receiver = ret
             hook()
-        receiver()
+        output = receiver()
         ... output valid here ...
 
         is equivalent to:
 
-        obj.finalize(output, ...)
+        output = obj.finalize(...)
         """
         raise NotImplementedError
 
@@ -1234,7 +1234,6 @@ class FusedMoEKernelModularImpl:
         expert_map: torch.Tensor | None,
         apply_router_weight_on_input: bool,
         expert_tokens_meta: ExpertTokensMetadata | None,
-        output_alias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         _, M_full, N, K, top_k = self.fused_experts.moe_problem_size(
             a1q, w1, w2, topk_ids
@@ -1263,23 +1262,9 @@ class FusedMoEKernelModularImpl:
             activation,
         )
 
-        # If caller's output buffer already matches fused_out shape/dtype, alias
-        # to skip the redundant copy in TopKWeightAndReduceNoOP.apply downstream.
-        # This eliminates ~94% of __amd_rocclr_copyBuffer events (Copy 2 of the
-        # double-copy MoE write-back path).
-        if current_platform.is_rocm():
-            from vllm._aiter_ops import rocm_aiter_ops
-
-            if (
-                rocm_aiter_ops.is_fused_moe_enabled()
-                and output_alias is not None
-                and output_alias.shape == fused_out.shape
-                and output_alias.dtype == fused_out.dtype
-                and output_alias.device == fused_out.device
-                and output_alias.is_contiguous()
-            ):
-                fused_out = output_alias
-
+        # Output-buffer allocation is delegated to finalize (it owns and
+        # returns the result buffer), so no caller-provided output is aliased
+        # into the fused-experts op here.
         self.fused_experts.apply(
             output=fused_out,
             hidden_states=a1q,
@@ -1302,9 +1287,7 @@ class FusedMoEKernelModularImpl:
 
     def _finalize(
         self,
-        output: torch.Tensor,
         fused_out: torch.Tensor,
-        hidden_states: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
@@ -1313,7 +1296,8 @@ class FusedMoEKernelModularImpl:
     ) -> torch.Tensor:
         """
         The _finalize method is a wrapper around self.prepare_finalize.finalize
-        that handles DBO, async and shared expert overlap.
+        that handles DBO, async and shared expert overlap.  The output buffer
+        is allocated by the prepare_finalize implementation and returned.
 
         Args:
             shared_experts: SharedExperts | None. The shared experts if any.
@@ -1326,8 +1310,7 @@ class FusedMoEKernelModularImpl:
         if not self.prepare_finalize.supports_async():
             assert not dbo_enabled()
 
-            self.prepare_finalize.finalize(
-                output,
+            output = self.prepare_finalize.finalize(
                 fused_out,
                 topk_weights,
                 topk_ids,
@@ -1336,7 +1319,6 @@ class FusedMoEKernelModularImpl:
             )
         else:
             finalize_ret = self.prepare_finalize.finalize_async(
-                output,
                 fused_out,
                 topk_weights,
                 topk_ids,
@@ -1364,7 +1346,7 @@ class FusedMoEKernelModularImpl:
                 else:
                     hook()
 
-            receiver()
+            output = receiver()
 
         return output
 
@@ -1410,8 +1392,6 @@ class FusedMoEKernelModularImpl:
         Returns:
         - torch.Tensor: The output tensor after applying the MoE layer.
         """
-        output = torch.empty_like(hidden_states)
-
         local_num_experts = w1.shape[0]
         if global_num_experts == -1:
             global_num_experts = local_num_experts
@@ -1446,16 +1426,13 @@ class FusedMoEKernelModularImpl:
             expert_map=expert_map,
             apply_router_weight_on_input=apply_router_weight_on_input,
             expert_tokens_meta=expert_tokens_meta,
-            output_alias=output,
         )
 
         if lora_ctx is not None:
             lora_ctx.original_hidden_states = None
 
         return self._finalize(
-            output,
             fused_out,
-            hidden_states,
             topk_weights,
             topk_ids,
             apply_router_weight_on_input,

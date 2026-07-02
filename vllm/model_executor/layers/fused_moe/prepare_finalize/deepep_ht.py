@@ -346,14 +346,13 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
     def _finalize(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
         do_async: bool,
-    ) -> Callable | None:
+    ) -> Callable | torch.Tensor:
         a2a_idx = dbo_current_ubatch_id()
         handle = self.handles[a2a_idx]
         assert handle is not None
@@ -364,7 +363,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             if isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate):
                 weight_and_reduce_impl = TopKWeightAndReduceContiguous()
             fused_expert_output = weight_and_reduce_impl.apply(
-                output=None,
                 fused_expert_output=fused_expert_output,
                 topk_weights=topk_weights,
                 topk_ids=topk_ids,
@@ -392,26 +390,27 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
 
         if do_async:
 
-            def _receiver():
+            def _receiver() -> torch.Tensor:
                 if event.event is not None:
                     event.current_stream_wait()
                 dbo_switch_to_comm()
-                output.copy_(combined_x, non_blocking=True)
 
                 # TODO(lucas): refactor the modular kernel so this will be
                 # handled there
                 dbo_yield_and_switch_from_comm_to_compute()
 
+                # combined_x is freshly allocated by the DeepEP combine kernel;
+                # return it directly instead of copying into a caller buffer.
+                return combined_x
+
             return _receiver
         else:
             # TODO(lucas): support this case with the refactored modular kernel
             assert not dbo_enabled()
-            output.copy_(combined_x, non_blocking=True)
-            return None
+            return combined_x
 
     def finalize_async(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
@@ -419,7 +418,6 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> Callable:
         receiver = self._finalize(
-            output,
             fused_expert_output,
             topk_weights,
             topk_ids,
@@ -427,20 +425,18 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             weight_and_reduce_impl,
             True,
         )
-        assert receiver is not None
+        assert callable(receiver)
         return receiver
 
     def finalize(
         self,
-        output: torch.Tensor,
         fused_expert_output: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
-    ) -> None:
-        self._finalize(
-            output,
+    ) -> torch.Tensor:
+        out = self._finalize(
             fused_expert_output,
             topk_weights,
             topk_ids,
@@ -448,3 +444,5 @@ class DeepEPHTPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeModular):
             weight_and_reduce_impl,
             False,
         )
+        assert isinstance(out, torch.Tensor)
+        return out
