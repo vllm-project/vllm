@@ -29,6 +29,7 @@ from vllm.entrypoints.openai.chat_completion.serving import (
     _make_prompt_tokens_details,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
 )
@@ -2127,3 +2128,102 @@ async def test_streaming_n_gt1_independent_tool_parsers():
             f"Choice {choice_idx}: expected finish_reason='tool_calls', "
             f"got '{reasons[0]}'"
         )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_streaming_splits_reasoning_and_content_boundary_delta():
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    serving_chat = _build_serving_chat(mock_engine)
+
+    class MixedReasoningContentParser:
+        tool_parser = None
+
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self._stream_state = MagicMock()
+
+        def parse_delta(self, *args: Any, **kwargs: Any) -> DeltaMessage:
+            delta_text = kwargs["delta_text"]
+            if not delta_text:
+                return DeltaMessage()
+            return DeltaMessage(reasoning="final thought.", content="Answer starts.")
+
+    serving_chat.parser_cls = MixedReasoningContentParser
+
+    request = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "test"}],
+        stream=True,
+    )
+    tokenizer = MagicMock()
+
+    async def result_generator():
+        yield RequestOutput(
+            request_id="test-req",
+            prompt="test",
+            prompt_token_ids=[1],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="final thought.</think>Answer starts.",
+                    token_ids=[101, 2, 102],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                )
+            ],
+            finished=False,
+        )
+        yield RequestOutput(
+            request_id="test-req",
+            prompt="test",
+            prompt_token_ids=[1],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="",
+                    token_ids=[],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason="stop",
+                )
+            ],
+            finished=True,
+        )
+
+    reasoning_chunks: list[str] = []
+    content_chunks: list[str] = []
+    async for chunk_str in serving_chat.chat_completion_stream_generator(
+        request=request,
+        result_generator=result_generator(),
+        request_id="test-req",
+        model_name=MODEL_NAME,
+        conversation=[],
+        tokenizer=tokenizer,
+        request_metadata=RequestResponseMetadata(
+            request_id="test-req",
+            model_name=MODEL_NAME,
+        ),
+    ):
+        if not chunk_str.strip() or "data: [DONE]" in chunk_str:
+            continue
+        data = json.loads(chunk_str[6:].strip())
+        for choice in data.get("choices", []):
+            delta = choice.get("delta", {})
+            assert not (
+                delta.get("reasoning")
+                and (delta.get("content") is not None or delta.get("tool_calls"))
+            )
+            if delta.get("reasoning"):
+                reasoning_chunks.append(delta["reasoning"])
+            if delta.get("content"):
+                content_chunks.append(delta["content"])
+
+    assert reasoning_chunks == ["final thought."]
+    assert content_chunks == ["Answer starts."]
