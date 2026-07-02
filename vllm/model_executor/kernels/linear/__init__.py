@@ -421,6 +421,11 @@ _POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
     PlatformEnum.ROCM: [
         EmulationNvFp4LinearKernel,
     ],
+    # XPU has no native NVFP4 GEMM yet; emulation dequantizes to the
+    # activation dtype and runs regular GEMMs (same as ROCm).
+    PlatformEnum.XPU: [
+        EmulationNvFp4LinearKernel,
+    ],
 }
 
 _POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
