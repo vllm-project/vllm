@@ -220,16 +220,10 @@ class CudaPlatformBase(Platform):
             import vllm._C_stable_libtorch  # noqa: F401
         except ImportError as e:
             logger.warning_once("Failed to import from vllm._C_stable_libtorch: %r", e)
-        try:
+        with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
-        except ImportError as e:
-            logger.warning_once(
-                "Failed to import from vllm._moe_C_stable_libtorch: %r", e
-            )
-        try:
+        with contextlib.suppress(ImportError):
             import vllm._qutlass_C  # noqa: F401
-        except ImportError as e:
-            logger.warning_once("Failed to import from vllm._qutlass_C: %r", e)
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
