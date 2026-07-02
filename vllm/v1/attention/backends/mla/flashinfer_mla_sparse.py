@@ -422,6 +422,7 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
                 ),
             )
         self._hisparse_decode_batch = False
+        self._hisparse_dummy_batch = False
 
         self._workspace_buffer: torch.Tensor | None = None
         self.bmm1_scale: float | None = None
@@ -447,6 +448,10 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         self,
         attn_metadata: FlashInferMLASparseMetadata | None,
     ) -> None:
+        # Dummy runs (memory profiling, warmup) carry no attention metadata
+        # but still execute the KV-cache-update op with an all -1 slot
+        # mapping; do_kv_cache_update must no-op for them.
+        self._hisparse_dummy_batch = attn_metadata is None
         if attn_metadata is None:
             self._hisparse_decode_batch = False
             return
@@ -478,11 +483,21 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
                 k_scale,
             )
 
+        if self._hisparse_dummy_batch:
+            # Dummy run: nothing to write (slot mapping is all -1).
+            return
         # HiSparse is decode-only (KV arrives via NIXL into the host pool on a PD
         # decode instance; no local prefill to write/mirror to host).
-        assert self._hisparse_decode_batch, (
-            "HiSparse is decode-only; unexpected prefill batch on a HiSparse instance."
-        )
+        if not self._hisparse_decode_batch:
+            raise RuntimeError(
+                "HiSparse is decode-only but this instance received a "
+                "prefill/mixed batch. This happens when a request prefills "
+                "locally on a decode instance: preemption-resume under "
+                "memory pressure, kv_load_failure_policy='recompute', or a "
+                "router that sends short prompts straight to decode "
+                "instances. Route all prefills to prefill instances and "
+                "size the host pool to avoid preemption."
+            )
         self.hisparse_coordinator.write_newest_rows(
             kv_c_normed,
             k_pe,
