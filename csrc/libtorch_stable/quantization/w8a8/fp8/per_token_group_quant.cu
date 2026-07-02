@@ -288,8 +288,8 @@ __global__ void per_token_group_quant_8bit_register_kernel(
 
   const int sf_k_local = local_group_id % kGroupsPerBlockX;
   const int row_local = local_group_id / kGroupsPerBlockX;
-  const int sf_k_idx = blockIdx.x * kGroupsPerBlockX + sf_k_local;
-  const int mn_idx = blockIdx.y * kRowsPerBlock + row_local;
+  const int sf_k_idx = blockIdx.y * kGroupsPerBlockX + sf_k_local;
+  const int mn_idx = blockIdx.x * kRowsPerBlock + row_local;
 
   if (mn_idx >= mn) {
     return;
@@ -475,13 +475,13 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
     const int64_t padded_groups_per_row = ((groups_per_row + 3) / 4) * 4;
     const int kx = GetGroupsPerBlockX(padded_groups_per_row);
     const int ry = 16 / kx;
-    const int64_t blocks_x = padded_groups_per_row / kx;
-    const int64_t blocks_y = (mn + ry - 1) / ry;
+    const int64_t blocks_x = (mn + ry - 1) / ry;
+    const int64_t blocks_y = padded_groups_per_row / kx;
     const int num_threads_fast = (kx * ry) * 8;
-    STD_TORCH_CHECK(blocks_x <= static_cast<int64_t>(INT32_MAX) &&
-                        blocks_y <= static_cast<int64_t>(INT32_MAX),
-                    "per_token_group_quant_8bit fast-path grid too large: (",
-                    blocks_x, ", ", blocks_y, ").");
+    STD_TORCH_CHECK(
+        blocks_x <= static_cast<int64_t>(INT32_MAX) && blocks_y <= 65535,
+        "per_token_group_quant_8bit fast-path grid too large: (", blocks_x,
+        ", ", blocks_y, ").");
 
     VLLM_STABLE_DISPATCH_HALF_TYPES(
         input.scalar_type(), "per_token_group_quant_8bit_register", ([&] {
