@@ -284,8 +284,11 @@ class FlashInferMLASparseMetadataBuilder(
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
+        num_q_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config
+        )
         self._init_reorder_batch_threshold(
-            1024,
+            {16: 128, 128: 1024}.get(num_q_heads, 1024),
             supports_spec_as_decode=True,
             supports_dcp_with_varlen=True,
         )
