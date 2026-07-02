@@ -592,6 +592,14 @@ class MambaModelConfig(VerifyAndUpdateConfig):
                 )
             if cache_config.mamba_block_size is None:
                 cache_config.mamba_block_size = model_config.max_model_len
+            logger.info_once(
+                "Prefix caching is disabled for this Mamba/hybrid model. It is "
+                "supported (experimental) for the recurrent layers and can be "
+                "enabled with --enable-prefix-caching, which uses Mamba cache "
+                "'%s' mode and requires chunked prefill (on by default for "
+                "generative models).",
+                "all" if model_config.supports_mamba_prefix_caching else "align",
+            )
 
 
 class NemotronHForCausalLMConfig(VerifyAndUpdateConfig):
