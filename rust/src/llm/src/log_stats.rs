@@ -4,8 +4,8 @@ use std::time::{Duration, Instant};
 use tokio_util::task::AbortOnDropHandle;
 use tracing::{debug, info};
 use vllm_metrics::{
-    EngineLabels, F64Gauge, METRICS, PromptTokenSourceLabels, U64Counter, U64Gauge,
-    WaitingReasonLabels,
+    EngineLabels, F64Gauge, METRICS, PromptTokenSourceLabels, SchedulerLogStatsAccumulator,
+    SchedulerLogStatsInterval, U64Counter, U64Gauge, WaitingReasonLabels,
 };
 
 const LOG_STATS_INTERVAL: Duration = Duration::from_secs(10);
@@ -29,6 +29,7 @@ struct EngineMetrics {
     estimated_flops_per_gpu: U64Counter,
     estimated_read_bytes_per_gpu: U64Counter,
     estimated_write_bytes_per_gpu: U64Counter,
+    log_stats: SchedulerLogStatsAccumulator,
 
     // Gauges for instantaneous scheduler state.
     scheduler_running: U64Gauge,
@@ -63,6 +64,7 @@ struct SpecDecodingLogStats {
     draft_throughput: f64,
     accepted_tokens: u64,
     draft_tokens: u64,
+    per_position_acceptance_rates: Vec<f64>,
     draft_acceptance_rate: f64,
 }
 
@@ -149,6 +151,7 @@ fn resolve_engine_metrics(model_name: &str, engine_count: usize) -> Vec<EngineMe
                     .scheduler
                     .estimated_write_bytes_per_gpu
                     .get_or_create_owned(&el),
+                log_stats: m.scheduler.log_stats.get_or_create_owned(&el),
                 scheduler_running: m.scheduler.scheduler_running.get_or_create_owned(&el),
                 scheduler_waiting: m.scheduler.scheduler_waiting.get_or_create_owned(&el),
                 scheduler_deferred: m
@@ -186,6 +189,7 @@ async fn run_stats_logger(model_name: String, engine_count: usize) {
         }
 
         let curr = read_counters(&engines);
+        let raw_log_stats = drain_scheduler_log_stats(&engines);
 
         let prompt_throughput =
             curr.prompt_tokens.wrapping_sub(prev.prompt_tokens) as f64 / elapsed;
@@ -226,7 +230,8 @@ async fn run_stats_logger(model_name: String, engine_count: usize) {
             curr.external_prefix_cache_hits.wrapping_sub(prev.external_prefix_cache_hits);
         let external_prefix_cache_hit_rate =
             cache_hit_rate(delta_external_hits, delta_external_queries);
-        let spec_decoding_log_stats = spec_decoding_log_stats(&curr, &prev, elapsed);
+        let spec_decoding_log_stats =
+            spec_decoding_log_stats(&curr, &prev, elapsed, &raw_log_stats);
         let mfu_log_stats = mfu_log_stats(&curr, &prev, elapsed, engines.len());
 
         // Build the log line.
@@ -271,18 +276,28 @@ async fn run_stats_logger(model_name: String, engine_count: usize) {
                  Accepted throughput: {:.2} tokens/s, \
                  Drafted throughput: {:.2} tokens/s, \
                  Accepted: {} tokens, \
-                 Drafted: {} tokens, \
-                 Avg Draft acceptance rate: {:.1}%",
+                 Drafted: {} tokens",
                 spec_stats.mean_acceptance_length,
                 spec_stats.accepted_throughput,
                 spec_stats.draft_throughput,
                 spec_stats.accepted_tokens,
                 spec_stats.draft_tokens,
+            )
+            .unwrap();
+            if !spec_stats.per_position_acceptance_rates.is_empty() {
+                msg.push_str(", Per-position acceptance rate: ");
+                format_position_rates(&mut msg, &spec_stats.per_position_acceptance_rates);
+            }
+            write!(
+                msg,
+                ", Avg Draft acceptance rate: {:.1}%",
                 spec_stats.draft_acceptance_rate,
             )
             .unwrap();
             log_stats_line!("{msg}");
         }
+
+        // TODO: Decide on best way to surface CUDAGraph interval samples.
 
         if let Some(mfu_stats) = mfu_log_stats {
             log_stats_line!(
@@ -360,6 +375,7 @@ fn spec_decoding_log_stats(
     curr: &CounterSnapshot,
     prev: &CounterSnapshot,
     elapsed: f64,
+    raw_log_stats: &SchedulerLogStatsInterval,
 ) -> Option<SpecDecodingLogStats> {
     let num_drafts = curr.spec_decode_num_drafts.wrapping_sub(prev.spec_decode_num_drafts);
     if num_drafts == 0 {
@@ -386,6 +402,15 @@ fn spec_decoding_log_stats(
     } else {
         f64::NAN
     };
+    let per_position_acceptance_rates = if raw_log_stats.spec_num_drafts > 0 {
+        raw_log_stats
+            .spec_accepted_tokens_per_pos
+            .iter()
+            .map(|accepted_tokens| *accepted_tokens as f64 / raw_log_stats.spec_num_drafts as f64)
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     Some(SpecDecodingLogStats {
         mean_acceptance_length: 1.0 + accepted_tokens as f64 / num_drafts as f64,
@@ -393,6 +418,7 @@ fn spec_decoding_log_stats(
         draft_throughput,
         accepted_tokens,
         draft_tokens,
+        per_position_acceptance_rates,
         draft_acceptance_rate,
     })
 }
@@ -432,6 +458,25 @@ fn mfu_log_stats(
     })
 }
 
+/// Drain raw scheduler DTO stats for the configured model and engines.
+fn drain_scheduler_log_stats(engines: &[EngineMetrics]) -> SchedulerLogStatsInterval {
+    let mut interval = SchedulerLogStatsInterval::default();
+    for engine in engines {
+        interval.merge(engine.log_stats.drain());
+    }
+    interval
+}
+
+/// Append spec-decoding per-position acceptance rates like Python's logger.
+fn format_position_rates(output: &mut String, rates: &[f64]) {
+    for (position, rate) in rates.iter().enumerate() {
+        if position > 0 {
+            output.push_str(", ");
+        }
+        write!(output, "{rate:.3}").unwrap();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -444,6 +489,11 @@ mod tests {
 
     #[test]
     fn spec_decoding_log_stats_uses_interval_deltas() {
+        let raw_log_stats = SchedulerLogStatsInterval {
+            spec_num_drafts: 4,
+            spec_accepted_tokens_per_pos: vec![4, 2, 1],
+            ..Default::default()
+        };
         let prev = CounterSnapshot {
             spec_decode_num_drafts: 10,
             spec_decode_num_draft_tokens: 100,
@@ -457,13 +507,14 @@ mod tests {
             ..Default::default()
         };
 
-        let stats = spec_decoding_log_stats(&curr, &prev, 2.0).unwrap();
+        let stats = spec_decoding_log_stats(&curr, &prev, 2.0, &raw_log_stats).unwrap();
 
         assert_eq!(stats.mean_acceptance_length, 4.0);
         assert_eq!(stats.accepted_throughput, 6.0);
         assert_eq!(stats.draft_throughput, 10.0);
         assert_eq!(stats.accepted_tokens, 12);
         assert_eq!(stats.draft_tokens, 20);
+        assert_eq!(stats.per_position_acceptance_rates, vec![1.0, 0.5, 0.25]);
         assert_eq!(stats.draft_acceptance_rate, 60.0);
     }
 
@@ -486,5 +537,14 @@ mod tests {
 
         assert_eq!(stats.tflops_per_gpu, 1.0);
         assert_eq!(stats.gbps_per_gpu, 1.0);
+    }
+
+    #[test]
+    fn format_position_rates_uses_three_decimal_places() {
+        let mut output = String::new();
+
+        format_position_rates(&mut output, &[1.0, 0.5, 0.25]);
+
+        assert_eq!(output, "1.000, 0.500, 0.250");
     }
 }
