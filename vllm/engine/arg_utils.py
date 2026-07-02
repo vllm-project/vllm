@@ -482,6 +482,24 @@ class EngineArgs:
     data_parallel_hybrid_lb: bool = False
     data_parallel_external_lb: bool = False
     data_parallel_multi_port_external_lb: bool = False
+    data_parallel_prefix_cache_lb: bool = (
+        ParallelConfig.data_parallel_prefix_cache_lb
+    )
+    data_parallel_prefix_cache_lb_shallow_depth: int = (
+        ParallelConfig.data_parallel_prefix_cache_lb_shallow_depth
+    )
+    data_parallel_prefix_cache_lb_deep_depth: int = (
+        ParallelConfig.data_parallel_prefix_cache_lb_deep_depth
+    )
+    data_parallel_prefix_cache_lb_warm_threshold: int = (
+        ParallelConfig.data_parallel_prefix_cache_lb_warm_threshold
+    )
+    data_parallel_prefix_cache_lb_load_imbalance_ratio: float = (
+        ParallelConfig.data_parallel_prefix_cache_lb_load_imbalance_ratio
+    )
+    data_parallel_prefix_cache_lb_max_prefixes: int = (
+        ParallelConfig.data_parallel_prefix_cache_lb_max_prefixes
+    )
     data_parallel_backend: DataParallelBackend = ParallelConfig.data_parallel_backend
     enable_expert_parallel: bool = ParallelConfig.enable_expert_parallel
     enable_ep_weight_filter: bool = ParallelConfig.enable_ep_weight_filter
@@ -1074,6 +1092,32 @@ class EngineArgs:
             "--data-parallel-external-lb",
             "-dpe",
             **parallel_kwargs["data_parallel_external_lb"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-prefix-cache-lb",
+            **parallel_kwargs["data_parallel_prefix_cache_lb"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-prefix-cache-lb-shallow-depth",
+            **parallel_kwargs["data_parallel_prefix_cache_lb_shallow_depth"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-prefix-cache-lb-deep-depth",
+            **parallel_kwargs["data_parallel_prefix_cache_lb_deep_depth"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-prefix-cache-lb-warm-threshold",
+            **parallel_kwargs["data_parallel_prefix_cache_lb_warm_threshold"],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-prefix-cache-lb-load-imbalance-ratio",
+            **parallel_kwargs[
+                "data_parallel_prefix_cache_lb_load_imbalance_ratio"
+            ],
+        )
+        parallel_group.add_argument(
+            "--data-parallel-prefix-cache-lb-max-prefixes",
+            **parallel_kwargs["data_parallel_prefix_cache_lb_max_prefixes"],
         )
         parallel_group.add_argument(
             "--data-parallel-multi-port-external-lb",
@@ -2076,6 +2120,22 @@ class EngineArgs:
             data_parallel_rank=self.data_parallel_rank or 0,
             data_parallel_external_lb=data_parallel_external_lb,
             data_parallel_size_local=data_parallel_size_local,
+            data_parallel_prefix_cache_lb=self.data_parallel_prefix_cache_lb,
+            data_parallel_prefix_cache_lb_shallow_depth=(
+                self.data_parallel_prefix_cache_lb_shallow_depth
+            ),
+            data_parallel_prefix_cache_lb_deep_depth=(
+                self.data_parallel_prefix_cache_lb_deep_depth
+            ),
+            data_parallel_prefix_cache_lb_warm_threshold=(
+                self.data_parallel_prefix_cache_lb_warm_threshold
+            ),
+            data_parallel_prefix_cache_lb_load_imbalance_ratio=(
+                self.data_parallel_prefix_cache_lb_load_imbalance_ratio
+            ),
+            data_parallel_prefix_cache_lb_max_prefixes=(
+                self.data_parallel_prefix_cache_lb_max_prefixes
+            ),
             master_addr=self.master_addr,
             master_port=self.master_port,
             nnodes=self.nnodes,

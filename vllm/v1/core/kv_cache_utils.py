@@ -114,6 +114,12 @@ def init_none_hash(hash_fn: Callable[[Any], bytes]):
         NONE_HASH = BlockHash(hash_fn(hash_seed))
 
 
+def ensure_none_hash_initialized(hash_fn: Callable[[Any], bytes]) -> None:
+    """Initialize NONE_HASH if the process has not initialized it yet."""
+    if "NONE_HASH" not in globals():
+        init_none_hash(hash_fn)
+
+
 @dataclass(slots=True)
 class KVCacheBlock:
     """KV-cache block metadata."""
@@ -429,7 +435,10 @@ def need_extra_keys(request: Request) -> bool:
 
 
 def _gen_mm_extra_hash_keys(
-    request: Request, start_token_idx: int, end_token_idx: int, start_mm_idx: int
+    mm_features: Sequence[Any],
+    start_token_idx: int,
+    end_token_idx: int,
+    start_mm_idx: int,
 ) -> tuple[list[Any], int]:
     """Generate extra keys related to MultiModal request for block hash
     computation. For multi-modal inputs, the extra keys are
@@ -437,7 +446,7 @@ def _gen_mm_extra_hash_keys(
     block and its starting offset in the block tokens.
 
     Args:
-        request: The request object.
+        mm_features: Multi-modal features sorted by position.
         start_token_idx: The start token index of the block.
         end_token_idx: The end token index of the block.
         start_mm_idx: The start multi-modal index of the block.
@@ -447,7 +456,6 @@ def _gen_mm_extra_hash_keys(
     """
     extra_keys: list[Any] = []
 
-    mm_features = request.mm_features
     if not mm_features:
         return extra_keys, start_mm_idx
 
@@ -495,28 +503,32 @@ def _gen_mm_extra_hash_keys(
     return extra_keys, curr_mm_idx
 
 
-def _gen_lora_extra_hash_keys(request: Request) -> list[str]:
+def _gen_lora_extra_hash_keys(lora_request: Any | None) -> list[str]:
     """Generate extra keys related to LoRA for block hash computation.
 
     Args:
-        request: The request object.
+        lora_request: The LoRA request, if any.
 
     Returns:
         Return LoRA name of the request if it is a LoRA request. Return empty
         list otherwise.
     """
-    if not request.lora_request:
+    if not lora_request:
         return []
-    return [request.lora_request.lora_name]
+    return [lora_request.lora_name]
 
 
 def _gen_prompt_embeds_extra_hash_keys(
-    request: Request, start_token_idx: int, end_token_idx: int
+    prompt_embeds: Any | None,
+    prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes],
+    start_token_idx: int,
+    end_token_idx: int,
 ) -> list[bytes]:
     """Generate extra keys related to prompt embeds for block hash computation.
 
     Args:
-        request: The request object.
+        prompt_embeds: Prompt embedding tensor, if any.
+        prompt_embeds_per_block_hashes: Per-block prompt embedding hash cache.
         start_token_idx: The start token index of the block.
         end_token_idx: The end token index of the block.
 
@@ -524,15 +536,15 @@ def _gen_prompt_embeds_extra_hash_keys(
         Return a stable hash of the block prompt embeddings if prompt embeds
         are present. Return empty list otherwise.
     """
-    if request.prompt_embeds is None:
+    if prompt_embeds is None:
         return []
     block_range = (start_token_idx, end_token_idx)
-    embeds_hash = request._prompt_embeds_per_block_hashes.get(block_range)
+    embeds_hash = prompt_embeds_per_block_hashes.get(block_range)
     if embeds_hash is None:
-        block_prompt_embeds = request.prompt_embeds[start_token_idx:end_token_idx]
+        block_prompt_embeds = prompt_embeds[start_token_idx:end_token_idx]
         # Hash prompt embeds once per block and cache on request
         embeds_hash = hashlib.sha256(tensor_data(block_prompt_embeds)).digest()
-        request._prompt_embeds_per_block_hashes[block_range] = embeds_hash
+        prompt_embeds_per_block_hashes[block_range] = embeds_hash
     return [embeds_hash]
 
 
@@ -552,16 +564,57 @@ def generate_block_hash_extra_keys(
     Returns:
         A tuple of extra keys and the next multi-modal index.
     """
-    mm_extra_keys: list[Any]
-    mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
-        request, start_token_idx, end_token_idx, start_mm_idx
+    return generate_block_hash_extra_keys_from_components(
+        mm_features=request.mm_features,
+        lora_request=request.lora_request,
+        cache_salt=request.cache_salt,
+        prompt_embeds=request.prompt_embeds,
+        prompt_embeds_per_block_hashes=request._prompt_embeds_per_block_hashes,
+        start_token_idx=start_token_idx,
+        end_token_idx=end_token_idx,
+        start_mm_idx=start_mm_idx,
     )
-    lora_extra_keys: list[str] = _gen_lora_extra_hash_keys(request)
+
+
+def generate_block_hash_extra_keys_from_components(
+    *,
+    mm_features: Sequence[Any],
+    lora_request: Any | None,
+    cache_salt: str | None,
+    prompt_embeds: Any | None,
+    prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes],
+    start_token_idx: int,
+    end_token_idx: int,
+    start_mm_idx: int,
+) -> tuple[tuple[Any, ...] | None, int]:
+    """Generate block hash extra keys from request-like components.
+
+    Args:
+        mm_features: Multi-modal features sorted by position.
+        lora_request: LoRA request metadata, if any.
+        cache_salt: Optional salt mixed into the first block.
+        prompt_embeds: Prompt embedding tensor, if any.
+        prompt_embeds_per_block_hashes: Per-block prompt embedding hash cache.
+        start_token_idx: The start token index of the block.
+        end_token_idx: The end token index of the block.
+        start_mm_idx: The start multi-modal index of the block.
+
+    Returns:
+        A tuple of extra keys and the next multi-modal index.
+    """
+
+    mm_extra_keys, new_start_mm_idx = _gen_mm_extra_hash_keys(
+        mm_features, start_token_idx, end_token_idx, start_mm_idx
+    )
+    lora_extra_keys = _gen_lora_extra_hash_keys(lora_request)
     cache_salt_keys: list[str] = (
-        [request.cache_salt] if (start_token_idx == 0 and request.cache_salt) else []
+        [cache_salt] if (start_token_idx == 0 and cache_salt) else []
     )
     prompt_embeds_keys = _gen_prompt_embeds_extra_hash_keys(
-        request, start_token_idx, end_token_idx
+        prompt_embeds,
+        prompt_embeds_per_block_hashes,
+        start_token_idx,
+        end_token_idx,
     )
 
     extra_keys: list[Any] = (
@@ -685,49 +738,79 @@ def get_request_block_hasher(
     """
 
     def request_block_hasher(request: Request) -> list[BlockHash]:
-        start_token_idx = len(request.block_hashes) * hash_block_size
-        num_tokens = request.num_tokens
-
-        if start_token_idx + hash_block_size > num_tokens:
-            # Early stop when there no new full blocks created.
-            return []
-
-        curr_mm_idx = 0
-        if start_token_idx > 0:
-            # Set curr_mm_idx = -1 to indicate the last mm input.
-            # Note that since we reach to this branch only when the block is
-            # completed with generated tokens, we only need to consider the
-            # last mm input.
-            curr_mm_idx = -1
-
-        prev_block_hash_value = (
-            request.block_hashes[-1] if request.block_hashes else None
+        return compute_block_hashes_from_components(
+            all_token_ids=request.all_token_ids,
+            existing_block_hashes=request.block_hashes,
+            mm_features=request.mm_features,
+            lora_request=request.lora_request,
+            cache_salt=request.cache_salt,
+            prompt_embeds=request.prompt_embeds,
+            prompt_embeds_per_block_hashes=request._prompt_embeds_per_block_hashes,
+            block_size=hash_block_size,
+            caching_hash_fn=caching_hash_fn,
         )
-        new_block_hashes: list[BlockHash] = []
-        while True:
-            end_token_idx = start_token_idx + hash_block_size
-            if end_token_idx > num_tokens:
-                # We only hash full blocks
-                break
-
-            # MM and LoRA requests need extra keys for block-hash computation.
-            extra_keys, curr_mm_idx = generate_block_hash_extra_keys(
-                request, start_token_idx, end_token_idx, curr_mm_idx
-            )
-
-            # Compute the hash of the current block
-            block_tokens = request.all_token_ids[start_token_idx:end_token_idx]
-            block_hash = hash_block_tokens(
-                caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
-            )
-
-            new_block_hashes.append(block_hash)
-            start_token_idx += hash_block_size
-            prev_block_hash_value = block_hash
-
-        return new_block_hashes
 
     return request_block_hasher
+
+
+def compute_block_hashes_from_components(
+    *,
+    all_token_ids: Sequence[int],
+    existing_block_hashes: Sequence[BlockHash],
+    mm_features: Sequence[Any],
+    lora_request: Any | None,
+    cache_salt: str | None,
+    prompt_embeds: Any | None,
+    prompt_embeds_per_block_hashes: dict[tuple[int, int], bytes],
+    block_size: int,
+    caching_hash_fn: Callable[[Any], bytes],
+) -> list[BlockHash]:
+    """Compute block hashes from request-like components.
+
+    This keeps front-end routing signatures aligned with the scheduler-side
+    prefix cache keys without requiring a full ``Request`` object.
+    """
+    start_token_idx = len(existing_block_hashes) * block_size
+    num_tokens = len(all_token_ids)
+
+    if start_token_idx + block_size > num_tokens:
+        return []
+
+    curr_mm_idx = 0
+    if start_token_idx > 0:
+        # For generated-token hashing we only need to consider the last MM item.
+        curr_mm_idx = -1
+
+    prev_block_hash_value = (
+        existing_block_hashes[-1] if existing_block_hashes else None
+    )
+    new_block_hashes: list[BlockHash] = []
+    while True:
+        end_token_idx = start_token_idx + block_size
+        if end_token_idx > num_tokens:
+            break
+
+        extra_keys, curr_mm_idx = generate_block_hash_extra_keys_from_components(
+            mm_features=mm_features,
+            lora_request=lora_request,
+            cache_salt=cache_salt,
+            prompt_embeds=prompt_embeds,
+            prompt_embeds_per_block_hashes=prompt_embeds_per_block_hashes,
+            start_token_idx=start_token_idx,
+            end_token_idx=end_token_idx,
+            start_mm_idx=curr_mm_idx,
+        )
+
+        block_tokens = all_token_ids[start_token_idx:end_token_idx]
+        block_hash = hash_block_tokens(
+            caching_hash_fn, prev_block_hash_value, block_tokens, extra_keys
+        )
+
+        new_block_hashes.append(block_hash)
+        start_token_idx += block_size
+        prev_block_hash_value = block_hash
+
+    return new_block_hashes
 
 
 def _check_enough_kv_cache_memory(
