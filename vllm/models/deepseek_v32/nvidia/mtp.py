@@ -130,6 +130,15 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
             if self_attn is not None and hasattr(self_attn, "skip_topk"):
                 self_attn.skip_topk = skip
 
+    def compact_topk_indices(self, slot_ids: torch.Tensor):
+        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        num_slots = slot_ids.numel()
+        for layer in self.layers.values():
+            self_attn = getattr(layer.mtp_block, "self_attn", None)
+            if self_attn is not None and hasattr(self_attn, "topk_indices_buffer"):
+                topk_indices_buffer = self_attn.topk_indices_buffer
+                topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
