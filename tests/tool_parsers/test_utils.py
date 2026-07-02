@@ -8,6 +8,7 @@ import pytest
 from vllm.tool_parsers.utils import (
     coerce_to_schema_type,
     extract_types_from_schema,
+    make_valid_python,
 )
 
 
@@ -279,3 +280,24 @@ class TestExtractTypesFromSchema:
         }
         result = set(extract_types_from_schema(schema))
         assert result == {"integer", "null", "string"}
+
+
+class TestMakeValidPythonEscapes:
+    def test_plain_string_already_closed(self):
+        # A normal closing quote ends the string; nothing to append.
+        assert make_valid_python('"abc"') == ('"abc"', "")
+
+    def test_even_backslashes_close_string(self):
+        # `\\` is an escaped backslash, so the trailing quote really closes the
+        # string. Regression: the old single-char look-back wrongly treated the
+        # quote as escaped, leaving the string open and yielding invalid output.
+        assert make_valid_python('"a\\\\"') == ('"a\\\\"', "")
+
+    def test_four_backslashes_close_string(self):
+        # Two escaped backslashes (even run) — the quote still closes the string.
+        assert make_valid_python('"a\\\\\\\\"') == ('"a\\\\\\\\"', "")
+
+    def test_odd_backslash_keeps_string_open(self):
+        # `\"` is an escaped quote: the string stays open and is closed by the
+        # appended quote. This behavior is unchanged by the fix.
+        assert make_valid_python('"a\\"') == ('"a\\""', '"')
