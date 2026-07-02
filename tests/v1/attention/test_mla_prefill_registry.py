@@ -28,6 +28,28 @@ class CustomMLAPrefillBackend(MLAPrefillBackend):
         raise NotImplementedError
 
 
+def test_prefill_backend_clone_has_isolated_metadata():
+    backend = CustomMLAPrefillBackend(
+        num_heads=4,
+        scale=0.5,
+        kv_lora_rank=8,
+        qk_nope_head_dim=16,
+        qk_rope_head_dim=8,
+        v_head_dim=32,
+        vllm_config=object(),
+    )
+
+    clone = backend.clone()
+
+    assert isinstance(clone, CustomMLAPrefillBackend)
+    assert clone is not backend
+    assert clone.num_heads == backend.num_heads
+    assert clone.scale == backend.scale
+    backend._prefill_metadata = object()
+    clone._prefill_metadata = object()
+    assert clone._prefill_metadata is not backend._prefill_metadata
+
+
 @pytest.fixture(autouse=True)
 def cleanup_overrides():
     """Clear any overrides after each test."""

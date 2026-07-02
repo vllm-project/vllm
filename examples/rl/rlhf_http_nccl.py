@@ -83,14 +83,10 @@ def init_weight_transfer_engine(
     response.raise_for_status()
 
 
-def start_weight_update(
-    base_url: str,
-    is_checkpoint_format: bool = True,
-) -> None:
+def start_weight_update(base_url: str) -> None:
     """Start a weight update via HTTP endpoint."""
     url = f"{base_url}/start_weight_update"
-    payload = {"is_checkpoint_format": is_checkpoint_format}
-    response = requests.post(url, json=payload, timeout=60)
+    response = requests.post(url, json={}, timeout=60)
     response.raise_for_status()
 
 
@@ -223,7 +219,7 @@ def main():
         shapes.append(list(p.shape))
 
     # Start weight update
-    start_weight_update(BASE_URL, is_checkpoint_format=True)
+    start_weight_update(BASE_URL)
 
     # Start the update_weights call in a separate thread since it will block
     # waiting for NCCL broadcasts
