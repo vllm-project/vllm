@@ -1,0 +1,62 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.8.6
+    hooks:
+      - id: ruff
+        args: [--fix, --exit-non-zero-on-fix]
+      - id: ruff-format
+        files: \.py$
+
+  - repo: https://github.com/crate-ci/typos
+    rev: v1.28.4
+    hooks:
+      - id: typos
+
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v19.1.7
+    hooks:
+      - id: clang-format
+        types_or: [c++, c, cuda]
+        exclude: "csrc/quantization/vedic/vedic_matmul.cpp"
+
+  - repo: https://github.com/DavidAnson/markdownlint-cli2
+    rev: v0.17.2
+    hooks:
+      - id: markdownlint-cli2
+        args: ["--fix"]
+
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.7
+    hooks:
+      - id: actionlint
+
+  - repo: https://github.com/astral-sh/uv-pre-commit
+    rev: 0.6.16
+    hooks:
+      - id: uv-lock
+        args: ["--check"]
+
+  - repo: local
+    hooks:
+      - id: mypy
+        name: mypy
+        entry: python3 -m mypy
+        language: system
+        types: [python]
+        require_serial: true
+        exclude: ^tests/
+        args:
+          - --config-file=pyproject.toml
+
+      - id: check-docstring
+        name: check docstring
+        entry: python3 tools/check_docstring.py
+        language: system
+        types: [python]
+
+      - id: check-license
+        name: check license
+        entry: python3 tools/check_license.py
+        language: system
+        types_or: [python, shell, c++, c, cuda, markdown, yaml]
+        exclude: ^csrc/quantization/vedic/  # Exclude our new file from license check
