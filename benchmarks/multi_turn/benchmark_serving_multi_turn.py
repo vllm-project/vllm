@@ -1548,7 +1548,13 @@ async def main() -> None:
 
     args = parser.parse_args()
 
-    logger.info(args)
+    # Mask sensitive credentials in logs
+    args_to_log = argparse.Namespace(**vars(args))
+    if args_to_log.api_key is not None:
+        args_to_log.api_key = "*****"
+    if args_to_log.header is not None:
+        args_to_log.header = "*****"
+    logger.info(args_to_log)
 
     logger.info(f"{Color.GREEN}Input parameters:{Color.RESET}")
     logger.info(f"url={args.url}")
