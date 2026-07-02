@@ -37,9 +37,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
 from vllm.distributed.kv_transfer.kv_connector.v1.nixl.push_worker import (
     NixlPushConnectorWorker,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import (
-    get_base_request_id,
-)
 from vllm.v1.outputs import KVConnectorOutput
 
 from .utils import make_nixl_push_scheduler
@@ -408,29 +405,6 @@ class TestPushWriterMatching:
         assert len(w.start_push_calls) == 0
         assert "req-B" in w._pending_d_registrations
 
-    def test_handle_push_reg_matches_after_stripping_random_suffix(self):
-        """P and D assign the same logical request the same
-        ``cmpl-<uuid>-<index>`` but different per-engine random suffixes;
-        the writer should still match P's finished blocks via the
-        suffix-stripping fallback in ``_pop_matching_finished_blocks``.
-        """
-        w = _StubWriterWorker.fresh()
-        # Same base id + completion index; differ only in the trailing
-        # ``-<8 hex>`` randomization suffix.
-        p_id = "cmpl-12345678-aaaa-bbbb-cccc-1234567890ab-0-aaaaaaaa"
-        d_id = "cmpl-12345678-aaaa-bbbb-cccc-1234567890ab-0-bbbbbbbb"
-        # Sanity: same base id under the helper used by the connector.
-        assert get_base_request_id(p_id) == get_base_request_id(d_id)
-
-        w._push_finished_blocks[p_id] = ([1, 2, 3],)
-        notif = PUSH_REG_NOTIF_PREFIX + msgspec.msgpack.encode(_registration_data(d_id))
-        w._handle_push_reg_notif(notif)
-
-        # Suffix-stripped fallback matched and fired.
-        assert len(w.start_push_calls) == 1
-        assert w.start_push_calls[0][0] == p_id
-        assert p_id not in w._push_finished_blocks
-
     def test_handle_push_reg_drops_malformed(self, caplog):
         # The writer logs WARNING/ERROR when it sees these bad payloads;
         # that's the desired behavior, so suppress the noise from test
@@ -656,21 +630,13 @@ class TestPushWriterNegative:
         w = _StubWriterWorker.fresh()
         assert w._pop_matching_finished_blocks("nope") is None
 
-    def test_pop_matching_registration_no_match_when_base_ids_differ(self):
-        """A registration whose base id (after stripping the random suffix)
-        does NOT match the lookup request_id must not be popped."""
+    def test_pop_matching_registration_no_match_for_different_ids(self):
+        """A registration with a different request_id must not be popped."""
         w = _StubWriterWorker.fresh()
-        # Two unrelated requests: different base UUIDs, so stripping the
-        # trailing ``-<8 hex>`` suffix still yields different base ids.
-        unrelated_d = "cmpl-aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa-0-11111111"
-        lookup = "cmpl-bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb-0-22222222"
-        assert get_base_request_id(unrelated_d) != get_base_request_id(lookup)
-
-        w._pending_d_registrations[unrelated_d] = _registration_data(unrelated_d)
-        result = w._pop_matching_registration(lookup)
+        w._pending_d_registrations["req-A"] = _registration_data("req-A")
+        result = w._pop_matching_registration("req-B")
         assert result is None
-        # Original entry untouched.
-        assert unrelated_d in w._pending_d_registrations
+        assert "req-A" in w._pending_d_registrations
 
     def test_handle_push_reg_with_non_dict_payload_is_dropped(self, caplog):
         """msgpack-encoded non-dict payload (e.g. a list) should be
