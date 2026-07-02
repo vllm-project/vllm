@@ -295,6 +295,9 @@ class DefaultModelLoader(BaseModelLoader):
                         safetensors_prefetch_block_size=(
                             self.load_config.safetensors_prefetch_block_size
                         ),
+                        shuffle_safetensors_files=(
+                            self.load_config.shuffle_safetensors_files
+                        ),
                     )
         else:
             if extra_config.get("enable_multithread_load"):
