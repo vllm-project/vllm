@@ -28,7 +28,7 @@ class DFlashProposer(SpecDecodeBaseProposer):
         runner=None,
     ):
         assert vllm_config.speculative_config is not None
-        assert vllm_config.speculative_config.method == "dflash"
+        assert vllm_config.speculative_config.method in ("dflash", "dspark")
         super().__init__(
             vllm_config=vllm_config,
             device=device,

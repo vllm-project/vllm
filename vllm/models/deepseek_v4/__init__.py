@@ -19,21 +19,19 @@ if current_platform.is_rocm():
     from .amd.mtp import DeepSeekV4MTP
 
     # DSpark is NVIDIA-only for now.
-    DSparkDeepseekV4ForCausalLM = None  # type: ignore[assignment]
+    DeepSeekV4DSpark = None  # type: ignore[assignment]
 elif current_platform.is_xpu():
     from .xpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .xpu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
 
-    DSparkDeepseekV4ForCausalLM = None  # type: ignore[assignment]
+    DeepSeekV4DSpark = None  # type: ignore[assignment]
 else:
-    from .nvidia.dspark import (  # type: ignore[assignment]
-        DSparkDeepseekV4ForCausalLM,
-    )
+    from .nvidia.dspark import DeepSeekV4DSpark  # type: ignore[assignment]
     from .nvidia.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .nvidia.mtp import DeepSeekV4MTP  # type: ignore[assignment]
 
 __all__ = [
-    "DSparkDeepseekV4ForCausalLM",
+    "DeepSeekV4DSpark",
     "DeepSeekV4MTP",
     "DeepseekV4FP8Config",
     "DeepseekV4ForCausalLM",
