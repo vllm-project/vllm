@@ -93,6 +93,7 @@ pub fn lower_sampling_params(
         frequency_penalty,
         presence_penalty,
         repetition_penalty,
+        repetition_detection,
         stop_token_ids,
         ignore_eos,
         logit_bias,
@@ -163,6 +164,11 @@ pub fn lower_sampling_params(
         frequency_penalty,
         presence_penalty,
         repetition_penalty,
+        repetition_detection: if repetition_detection.as_ref().is_some_and(|p| p.is_disabled()) {
+            None
+        } else {
+            repetition_detection
+        },
         stop_token_ids,
         eos_token_id: (!ignore_eos).then_some(primary_eos_token_id).flatten(),
         all_stop_token_ids,
@@ -417,6 +423,7 @@ mod tests {
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.0,
+                repetition_detection: None,
                 stop_token_ids: [
                     77,
                 ],
@@ -469,6 +476,7 @@ mod tests {
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.0,
+                repetition_detection: None,
                 stop_token_ids: [],
                 eos_token_id: None,
                 all_stop_token_ids: {
@@ -600,6 +608,7 @@ mod tests {
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.0,
+                repetition_detection: None,
                 stop_token_ids: [
                     151643,
                 ],
@@ -662,6 +671,7 @@ mod tests {
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.0,
+                repetition_detection: None,
                 stop_token_ids: [
                     11,
                     77,
@@ -732,6 +742,7 @@ mod tests {
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.2,
+                repetition_detection: None,
                 stop_token_ids: [],
                 eos_token_id: None,
                 all_stop_token_ids: {},
@@ -980,6 +991,7 @@ mod tests {
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.2,
+                repetition_detection: None,
                 stop_token_ids: [],
                 eos_token_id: None,
                 all_stop_token_ids: {},

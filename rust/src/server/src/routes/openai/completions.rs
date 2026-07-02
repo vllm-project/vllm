@@ -455,7 +455,8 @@ fn completion_finish_reason_to_openai(
     finish_reason: FinishReason,
 ) -> Result<&'static str, ApiError> {
     match finish_reason {
-        FinishReason::Stop(_) | FinishReason::Repetition => Ok("stop"),
+        FinishReason::Stop(_) => Ok("stop"),
+        FinishReason::Repetition(_) => Ok("repetition"),
         FinishReason::Length => Ok("length"),
         FinishReason::Abort => Ok("abort"),
         FinishReason::Error => {
