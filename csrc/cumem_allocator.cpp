@@ -706,6 +706,32 @@ static PyObject* python_unmap_and_release(PyObject* self, PyObject* args) {
 
   free(p_memHandle);
   free(chunk_sizes);
+
+  // ROCm: hipMemRelease does not return physical VRAM to the free pool while the
+  // virtual-address (VA) reservation is still held. Cycle cuMemAddressFree ->
+  // cuMemAddressReserve at the same address to force the driver to release the
+  // physical pages, keeping the VA for a later wake_up (create_and_map).
+  //
+  // Scoped to the sleep / pool-cleanup path only; NOT in my_free, which frees the
+  // VA itself. Doing this in the shared path regressed TP=2 (see #37533, #40686).
+  if (error_code == no_error) {
+    CUresult st = cuMemAddressFree(d_mem_ptr, recv_size);
+    if (st == no_error) {
+      CUdeviceptr d_mem_new = 0;
+      st = cuMemAddressReserve(&d_mem_new, recv_size, 0, d_mem_ptr, 0);
+      if (st == no_error && d_mem_new != d_mem_ptr) {
+        cuMemAddressFree(d_mem_new, recv_size);
+        snprintf(error_msg, sizeof(error_msg),
+                 "ROCm: VA re-reserve got %p instead of %p", (void*)d_mem_new,
+                 (void*)d_mem_ptr);
+        st = hipErrorNotSupported;
+        std::cerr << error_msg << std::endl;
+      }
+    }
+    if (st != no_error) {
+      error_code = st;
+    }
+  }
 #endif
 
   if (error_code != 0) {
