@@ -374,6 +374,7 @@ void all_reduce(fptr_t _fa, torch::stable::Tensor& inp,
                 int64_t reg_buffer_sz_bytes);
 void dispose(fptr_t _fa);
 int64_t meta_size();
+void close_graph_ipc_handles(fptr_t _fa);
 void register_buffer(fptr_t _fa, const std::vector<int64_t>& fake_ipc_ptrs);
 std::tuple<std::vector<int64_t>, std::vector<int64_t>>
 get_graph_buffer_ipc_meta(fptr_t _fa);

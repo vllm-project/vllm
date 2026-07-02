@@ -2925,6 +2925,10 @@ def register_graph_buffers(
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
 
 
+def close_graph_ipc_handles(fa: int) -> None:
+    torch.ops._C_custom_ar.close_graph_ipc_handles(fa)
+
+
 def allocate_shared_buffer_and_handle(size: int) -> tuple[int, torch.Tensor]:
     return torch.ops._C_custom_ar.allocate_shared_buffer_and_handle(size)
 

@@ -287,6 +287,17 @@ class CustomAllreduce:
             self.free_shared_buffer(self.meta_ptrs, rank=self.rank)
             self.free_shared_buffer(self.buffer_ptrs, rank=self.rank)
 
+    def close_graph_ipc_handles(self):
+        """Close all IPC handles opened during CUDA graph capture and reset
+        the rank-data cursor.
+
+        Call this when discarding captured CUDA graphs (e.g. after
+        profile_cudagraph_memory) to avoid leaking stale IPC mappings.
+        """
+        if not self.disabled and self._ptr:
+            if ops is not None:
+                ops.close_graph_ipc_handles(self._ptr)
+
     def __del__(self):
         self.close()
 

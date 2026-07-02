@@ -884,6 +884,7 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_custom_ar, custom_ar) {
       "int reg_buffer_sz_bytes) -> ()");
   custom_ar.def("dispose(int fa) -> ()");
   custom_ar.def("meta_size() -> int");
+  custom_ar.def("close_graph_ipc_handles(int fa) -> ()");
   custom_ar.def("register_buffer(int fa, int[] ipc_tensors) -> ()");
   custom_ar.def("get_graph_buffer_ipc_meta(int fa) -> (int[], int[])");
   custom_ar.def(
@@ -905,6 +906,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CPU, custom_ar) {
 STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CompositeExplicitAutograd, custom_ar) {
   custom_ar.impl("dispose", TORCH_BOX(&dispose));
   custom_ar.impl("meta_size", TORCH_BOX(&meta_size));
+  custom_ar.impl("close_graph_ipc_handles", TORCH_BOX(&close_graph_ipc_handles));
   custom_ar.impl("register_buffer", TORCH_BOX(&register_buffer));
   custom_ar.impl("get_graph_buffer_ipc_meta",
                  TORCH_BOX(&get_graph_buffer_ipc_meta));

@@ -431,6 +431,23 @@ class ExecuteModelState(NamedTuple):
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
 
 
+def _close_custom_ar_ipc_handles() -> None:
+    """Close IPC handles opened during CUDA graph capture on all groups.
+
+    After profile_cudagraph_memory discards temporary CUDA graphs, the IPC
+    handles that were opened for graph-buffer registration become stale
+    (the underlying tensors are freed).  If we don't close them here they
+    leak GPU memory until the CustomAllreduce destructor runs.
+    """
+    from vllm.distributed.device_communicators.cuda_communicator import (
+        CudaCommunicator,
+    )
+    for group in (get_tp_group(), get_pp_group()):
+        comm = group.device_communicator
+        if isinstance(comm, CudaCommunicator) and comm.ca_comm is not None:
+            comm.ca_comm.close_graph_ipc_handles()
+
+
 class GPUModelRunner(
     LoRAModelRunnerMixin, KVConnectorModelRunnerMixin, ECConnectorModelRunnerMixin
 ):
@@ -6364,6 +6381,9 @@ class GPUModelRunner(
             CUDAGraphWrapper.clear_all_graphs()
             BreakableCUDAGraphWrapper.clear_all_graphs()
             self.encoder_cudagraph_manager = None
+
+        # Close IPC handles opened during graph capture to free GPU memory.
+        _close_custom_ar_ipc_handles()
         self.compilation_config.static_forward_context.clear()
         self.model = None  # type: ignore[assignment]
         _ROPE_DICT.clear()
@@ -6562,6 +6582,10 @@ class GPUModelRunner(
             set_cudagraph_capturing_enabled(False)
             CUDAGraphWrapper.clear_all_graphs()
             BreakableCUDAGraphWrapper.clear_all_graphs()
+            # Close IPC handles opened during profiling's graph capture.
+            # Without this, stale IPC mappings to freed temporary tensors
+            # leak GPU memory until the CustomAllreduce destructor runs.
+            _close_custom_ar_ipc_handles()
             if encoder_cudagraph_manager is not None:
                 encoder_cudagraph_manager.clear()
             all_wrappers = list(CUDAGraphWrapper._all_instances) + list(

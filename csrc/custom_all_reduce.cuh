@@ -397,7 +397,7 @@ class CustomAllreduce {
   // 3. (In Python) all gather the IPC handles.
   // 4. Obtain the peer pointers by opening the IPC handles, and store them in
   // the rank data array at corresponding positions.
-  RankData *d_rank_data_base_, *d_rank_data_end_;
+  RankData *d_rank_data_base_, *d_rank_data_end_, *d_rank_data_origin_;
   std::vector<void*> graph_unreg_buffers_;
   // a map from IPC handles to opened IPC pointers
   std::map<IPC_KEY, char*> ipc_handles_;
@@ -420,7 +420,8 @@ class CustomAllreduce {
         fully_connected_(fully_connected),
         self_sg_(signals[rank]),
         d_rank_data_base_(reinterpret_cast<RankData*>(rank_data)),
-        d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData)) {
+        d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData)),
+        d_rank_data_origin_(d_rank_data_base_) {
     for (int i = 0; i < world_size_; i++) {
       sg_.signals[i] = signals[i];
     }
@@ -614,6 +615,28 @@ class CustomAllreduce {
     }
 #undef REDUCE_CASE
 #undef KL
+  }
+
+  /**
+   * Close all IPC handles opened during graph buffer registration and
+   * reset the rank-data write cursor so the slots can be reused.
+   *
+   * This MUST be called when CUDA graphs captured during profiling are
+   * discarded (e.g. in profile_cudagraph_memory's cleanup), because:
+   *  1. The CUDA graphs that consumed the rank-data slots are destroyed.
+   *  2. The temporary input tensors are freed (cudaFree).
+   *  3. Without this call the IPC mappings in ipc_handles_ become stale
+   *     (pointing to freed physical pages) and are never closed until the
+   *     CustomAllreduce destructor, leaking GPU memory.
+   */
+  void close_graph_ipc_handles() {
+    for (auto [_, ptr] : ipc_handles_) {
+      CUDACHECK(cudaIpcCloseMemHandle(ptr));
+    }
+    ipc_handles_.clear();
+    graph_unreg_buffers_.clear();
+    // Reset rank-data cursor so subsequent graph captures can reuse slots.
+    d_rank_data_base_ = d_rank_data_origin_;
   }
 
   ~CustomAllreduce() {
