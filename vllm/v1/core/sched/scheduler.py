@@ -2556,6 +2556,10 @@ class Scheduler(SchedulerInterface):
                 marked_invalid_block = True
                 # Truncate the computed tokens at the first failed block
                 request.num_computed_tokens = idx * self.block_size
+                # Reset output placeholders since recomputation restarts
+                # from the prefill phase and stale placeholders from a
+                # prior schedule would corrupt scheduling arithmetic.
+                request.num_output_placeholders = 0
                 num_affected_tokens = (
                     req_num_computed_tokens - request.num_computed_tokens
                 )
@@ -2576,6 +2580,10 @@ class Scheduler(SchedulerInterface):
                         request.num_computed_tokens - req_num_computed_tokens
                     )
                     request.num_computed_tokens = req_num_computed_tokens
+                    # Reset output placeholders since recomputation restarts
+                    # from the prefill phase and stale placeholders from a
+                    # prior schedule would corrupt scheduling arithmetic.
+                    request.num_output_placeholders = 0
 
                 affected_req_ids.add(request.request_id)
 
