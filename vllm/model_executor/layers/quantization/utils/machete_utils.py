@@ -16,10 +16,6 @@ def query_machete_supported_quant_types(zero_points: bool) -> list[ScalarType]:
         return [scalar_types.uint4b8, scalar_types.uint8b128]
 
 
-def query_machete_supported_act_types(zero_points: bool) -> list[ScalarType]:
-    return [torch.float16, torch.bfloat16]
-
-
 def query_machete_supported_group_sizes(act_type: torch.dtype) -> list[int]:
     """
     Queries the supported group sizes for Machete based on the activation type.
