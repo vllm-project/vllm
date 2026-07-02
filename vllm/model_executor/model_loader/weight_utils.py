@@ -690,7 +690,24 @@ def _get_available_ram_bytes() -> int:
     """Return the available RAM in bytes."""
     import psutil
 
-    return psutil.virtual_memory().available
+    mem_avail = psutil.virtual_memory().available
+
+    # In containers, mem_avail sometimes returns host memory available
+    # which may be limited by the container. Cap mem_avail by the
+    # max allowed by the container in order to prevent the loader from
+    # thinking that a lot of memory is available and then caching the
+    # weights when this actually causes low memory in the container
+    if os.path.exists("/sys/fs/cgroup/memory.max"):
+        try:
+            with open("/sys/fs/cgroup/memory.max", "r") as f:
+                cgroup_max = int(f.read())
+        except Exception:
+            pass
+
+        if cgroup_max < mem_avail:
+            mem_avail = cgroup_max
+
+    return mem_avail
 
 
 def _get_fs_type(files: list[str]) -> str:
