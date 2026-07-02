@@ -47,9 +47,15 @@ llm = LLM(model="adept/fuyu-8b", max_model_len=2048, max_num_seqs=2)
 
 ## Reduce CUDA Graphs
 
-By default, we optimize model inference using CUDA graphs which take up extra memory in the GPU.
+By default, vLLM optimizes model inference using CUDA graphs, which take up
+extra GPU memory. The default capture list is derived from the scheduler limits
+and can include many batch sizes up to the configured maximum. This improves
+performance, but tight-memory deployments may OOM during graph capture even
+after the model has loaded successfully.
 
-You can adjust `compilation_config` to achieve a better balance between inference speed and memory usage:
+You can reduce the graph memory footprint by limiting the capture sizes. Batches
+larger than the largest captured size will still run, but they will not use a
+CUDA graph.
 
 ??? code
 
@@ -61,11 +67,24 @@ You can adjust `compilation_config` to achieve a better balance between inferenc
         model="meta-llama/Llama-3.1-8B-Instruct",
         compilation_config=CompilationConfig(
             mode=CompilationMode.VLLM_COMPILE,
-            # By default, it goes up to max_num_seqs
             cudagraph_capture_sizes=[1, 2, 4, 8, 16],
         ),
     )
     ```
+
+For the CLI, use either the dedicated flag:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --cudagraph-capture-sizes 1 2 4 8 16
+```
+
+or the equivalent compilation config:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --compilation-config '{"cudagraph_capture_sizes": [1, 2, 4, 8, 16]}'
+```
 
 You can disable graph capturing completely via the `enforce_eager` flag:
 
