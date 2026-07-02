@@ -8,6 +8,7 @@
 # both of them failed because of cuda context mismatch.
 # not sure why, they are created from a different context.
 # the only successful approach is to call cuda driver API in C.
+import atexit
 import gc
 import os
 from collections.abc import Callable, Iterator
@@ -18,8 +19,9 @@ import torch
 
 from vllm.device_allocator import AllocationData, HandleType
 from vllm.logger import init_logger
-from vllm.utils.platform_utils import is_pin_memory_available
+from vllm.platforms import current_platform
 from vllm.utils.system_utils import find_loaded_library
+from vllm.utils.torch_utils import PIN_MEMORY
 
 logger = init_logger(__name__)
 
@@ -115,7 +117,20 @@ class CuMemAllocator:
         assert cumem_available, "cumem allocator is not available"
         if CuMemAllocator.instance is None:
             CuMemAllocator.instance = CuMemAllocator()
+            # Ensure MemPool/allocator wrappers are released before interpreter
+            # finalization tears down PyTorch allocator internals.
+            atexit.register(CuMemAllocator._shutdown_singleton)
         return CuMemAllocator.instance
+
+    @staticmethod
+    def _shutdown_singleton() -> None:
+        instance = CuMemAllocator.instance
+        if instance is None:
+            return
+        try:
+            instance.release_pools()
+        except Exception:
+            logger.exception("CuMemAllocator singleton shutdown failed")
 
     def __init__(self):
         self.pointer_to_data: dict[int, AllocationData] = {}
@@ -126,6 +141,45 @@ class CuMemAllocator:
         # See discussions in https://github.com/vllm-project/vllm/pull/22724
         self.python_malloc_callback = self._python_malloc_callback
         self.python_free_callback = self._python_free_callback
+
+    def release_pools(self) -> None:
+        """Drop Python references to MemPool/pluggable allocators eagerly.
+
+        A cumem ``MemPool`` outlives the ``use_memory_pool`` context (a strong
+        reference is kept in ``allocator_and_pools`` to work around
+        pytorch/pytorch#146431), and a captured CUDA graph can keep it alive
+        longer still. ``MemPool`` only holds a non-owning pointer to the
+        allocator, whose owning reference lives in the Python
+        ``CUDAPluggableAllocator``. If both are instead dropped during
+        interpreter shutdown, GC may finalize the allocator first; the eventual
+        ``~MemPool`` -> ``emptyCache`` -> ``release_block`` then makes a virtual
+        call into the freed allocator -- aborting the process with "pure virtual
+        method called" (pytorch/pytorch#145168).
+
+        Release the kept-alive pools before interpreter finalization, and keep
+        the pluggable allocator wrappers alive while MemPool destructors run.
+        This is safe to call more than once.
+        """
+        if not self.allocator_and_pools:
+            return
+
+        pool_entries = list(self.allocator_and_pools.values())
+        self.allocator_and_pools.clear()
+
+        mem_pools = [entry[0] for entry in pool_entries]
+        allocators = [entry[1] for entry in pool_entries]
+        pool_entries.clear()
+
+        # Phase 1: drop MemPool refs while allocators are still strongly held.
+        mem_pools.clear()
+        gc.collect()
+
+        # Phase 2: now it is safe to release allocator wrappers.
+        allocators.clear()
+
+    def close(self) -> None:
+        """Compatibility alias for deterministic pool release."""
+        self.release_pools()
 
     def _python_malloc_callback(self, allocation_handle: HandleType) -> None:
         """
@@ -150,6 +204,14 @@ class CuMemAllocator:
         data = self.pointer_to_data.pop(ptr)
         if data.cpu_backup_tensor is not None:
             data.cpu_backup_tensor = None
+        if data.is_asleep and current_platform.is_rocm():
+            # On ROCm, sleep() already unmapped and released this allocation's
+            # physical chunks and holds its virtual address as a placeholder
+            # reservation. Return a handle with an empty chunk list so the C
+            # extension skips unmap/release (avoiding a double-free) while
+            # still freeing the placeholder address.
+            device, size, d_mem, _ = data.handle
+            return (device, size, d_mem, [])
         # Drain pending kernels before the C extension's cuMemUnmap.
         # The pluggable allocator path doesn't defer reclaim like the
         # regular caching allocator, so without this, in-flight work
@@ -196,12 +258,15 @@ class CuMemAllocator:
                     size_in_bytes,
                     dtype=torch.uint8,
                     device="cpu",
-                    pin_memory=is_pin_memory_available(),
+                    pin_memory=PIN_MEMORY,
                 )
                 cpu_ptr = cpu_backup_tensor.data_ptr()
                 libcudart.cudaMemcpy(cpu_ptr, ptr, size_in_bytes)
                 data.cpu_backup_tensor = cpu_backup_tensor
-            unmap_and_release(handle)
+            try:
+                unmap_and_release(handle)
+            finally:
+                data.is_asleep = True
 
         logger.info(
             "CuMemAllocator: sleep freed %.2f GiB memory in total, of which "
@@ -230,6 +295,7 @@ class CuMemAllocator:
             if tags is None or data.tag in tags:
                 handle = data.handle
                 create_and_map(handle)
+                data.is_asleep = False
                 if data.cpu_backup_tensor is not None:
                     cpu_backup_tensor = data.cpu_backup_tensor
                     if cpu_backup_tensor is not None:

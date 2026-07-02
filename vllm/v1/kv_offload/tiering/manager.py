@@ -20,16 +20,19 @@ Key Design Principles:
    protecting blocks from eviction until complete_read() is called
 """
 
-from collections import defaultdict
 from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
 from typing_extensions import override
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+)
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     LoadStoreSpec,
+    LookupResult,
     OffloadingEvent,
     OffloadingManager,
     OffloadKey,
@@ -37,6 +40,7 @@ from vllm.v1.kv_offload.base import (
     PrepareStoreOutput,
     ReqContext,
     RequestOffloadingContext,
+    ScheduleEndContext,
 )
 from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.kv_offload.cpu.manager import CPUOffloadingManager
@@ -57,6 +61,14 @@ class PendingPromotion:
     req_context: ReqContext
     keys: list[OffloadKey] = field(default_factory=list)
     block_ids: list[int] = field(default_factory=list)
+
+
+@dataclass(slots=True)
+class RequestState:
+    req_context: ReqContext
+    pending_primary_stores: int = 0
+    is_finished: bool = False
+    request_level_tiers: set[SecondaryTierManager] | None = None
 
 
 class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
@@ -163,12 +175,10 @@ class TieringOffloadingManager(OffloadingManager):
         # Reset at the end of each step in on_schedule_end().
         self._processed_jobs_this_step: bool = False
 
-        # Per-request set of secondary tiers that requested REQUEST_LEVEL
-        # policy. Populated in on_new_request(),
-        # cleaned up in on_request_finished().
-        self._request_level_tiers: defaultdict[str, set[SecondaryTierManager]] = (
-            defaultdict(set)
-        )
+        # Per-request state for prepared GPU->primary stores and finalization.
+        # Secondary tiers are finalized only after pending primary stores reach
+        # complete_store(), since complete_store() can still submit cascades.
+        self._req_state: dict[str, RequestState] = {}
 
     def _next_job_id(self) -> JobId:
         """Generate a unique job ID for async transfer tracking."""
@@ -225,7 +235,7 @@ class TieringOffloadingManager(OffloadingManager):
                     )
 
     @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> bool | None:
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
         """
         Check whether a single block is offloaded and ready.
 
@@ -240,33 +250,34 @@ class TieringOffloadingManager(OffloadingManager):
             req_context: Per-request context.
 
         Returns:
-            True  — block is ready in the primary tier.
-            None  — block found but not yet ready (primary in-flight,
-                    promotion started, or a secondary tier is busy).
-            False — block not found in any tier, or primary is full
-                    and cannot accept a promotion.
+            HIT       — block is ready in the primary tier.
+            HIT_PENDING — block found but not yet readable (write
+                        in-flight on the primary tier).
+            RETRY     — promotion started or a secondary tier is busy.
+            MISS      — block not found in any tier, or primary is full
+                        and cannot accept a promotion.
         """
         self._maybe_process_finished_jobs()
 
         primary_hit = self.primary_tier.lookup(key, req_context)
-        if primary_hit is True:
-            return True
-        if primary_hit is None:
-            return None
+        if primary_hit is LookupResult.HIT:
+            return LookupResult.HIT
+        if primary_hit is LookupResult.HIT_PENDING:
+            return LookupResult.HIT_PENDING
 
-        any_none = False
+        any_retry = False
         for tier in self.secondary_tiers:
             result = tier.lookup(key, req_context)
-            if result is True:
+            if result is LookupResult.HIT:
                 if not self._initiate_promotion(tier, key, req_context):
-                    return False  # primary full, block unavailable
-                return None  # promotion started, retry later
-            if result is None:
-                any_none = True
+                    return LookupResult.MISS
+                return LookupResult.RETRY
+            if result is LookupResult.RETRY:
+                any_retry = True
 
-        if any_none:
-            return None
-        return False
+        if any_retry:
+            return LookupResult.RETRY
+        return LookupResult.MISS
 
     def _initiate_promotion(
         self,
@@ -429,9 +440,13 @@ class TieringOffloadingManager(OffloadingManager):
         if primary_result is None:
             return None
 
+        if primary_result.keys_to_store:
+            state = self._req_state[req_context.req_id]
+            state.pending_primary_stores += 1
+
         # Step 3: For request-level tiers, cascade blocks already in primary
-        request_level_tiers = self._request_level_tiers.get(req_context.req_id)
-        if request_level_tiers is not None:
+        request_level_tiers = self._req_state[req_context.req_id].request_level_tiers
+        if request_level_tiers:
             keys_to_store_set = set(primary_result.keys_to_store)
             keys_already_in_primary = tuple(
                 k for k in keys if k not in keys_to_store_set
@@ -455,7 +470,9 @@ class TieringOffloadingManager(OffloadingManager):
         """
         # Filter out keys that are not ready in primary (e.g. in-flight)
         ready_keys = tuple(
-            k for k in keys if self.primary_tier.lookup(k, req_context) is True
+            k
+            for k in keys
+            if self.primary_tier.lookup(k, req_context) is LookupResult.HIT
         )
         if not ready_keys:
             return
@@ -505,36 +522,38 @@ class TieringOffloadingManager(OffloadingManager):
         # Step 1: Complete store in primary tier (makes blocks loadable)
         self.primary_tier.complete_store(keys, req_context, success)
 
-        if not success:
-            # If GPU→Primary transfer failed, don't cascade to secondary tiers
-            return
+        if success:
+            # Step 2: Cascade to ALL secondary tiers
+            # For each secondary tier, call primary.prepare_read() to get the
+            # LoadStoreSpec AND to increment ref_cnt (protecting blocks from
+            # eviction during the async transfer). One prepare_read() call per
+            # secondary tier.
+            for tier in self.secondary_tiers:
+                primary_blocks_spec = self.primary_tier.prepare_read(keys, req_context)
 
-        # Step 2: Cascade to ALL secondary tiers
-        # For each secondary tier, call primary.prepare_read() to get the
-        # LoadStoreSpec AND to increment ref_cnt (protecting blocks from
-        # eviction during the async transfer). One prepare_read() call per
-        # secondary tier.
-        for tier in self.secondary_tiers:
-            primary_blocks_spec = self.primary_tier.prepare_read(keys, req_context)
+                # Submit async store job: primary→secondary
+                job_id = self._next_job_id()
 
-            # Submit async store job: primary→secondary
-            job_id = self._next_job_id()
+                # Track this store job
+                assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
+                job_metadata = JobMetadata(
+                    job_id=job_id,
+                    keys=keys,
+                    block_ids=primary_blocks_spec.block_ids,
+                    is_promotion=False,
+                    req_context=req_context,
+                )
+                self._transfer_jobs[job_id] = job_metadata
 
-            # Track this store job
-            assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
-            job_metadata = JobMetadata(
-                job_id=job_id,
-                keys=keys,
-                block_ids=primary_blocks_spec.block_ids,
-                is_promotion=False,
-                req_context=req_context,
-            )
-            self._transfer_jobs[job_id] = job_metadata
-
-            tier.submit_store(job_metadata)
+                tier.submit_store(job_metadata)
 
         # Note: The async transfers are now in flight. Their completion is
         # tracked via get_finished_jobs() / _maybe_process_finished_jobs().
+        req_id = req_context.req_id
+        state = self._req_state[req_id]
+        assert state.pending_primary_stores > 0
+        state.pending_primary_stores -= 1
+        self._maybe_finalize_request(req_id)
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -544,14 +563,18 @@ class TieringOffloadingManager(OffloadingManager):
         Returns REQUEST_LEVEL if ANY secondary tier wants request-level.
         Only stores REQUEST_LEVEL tier decisions for use in prepare_store.
         """
+        state = RequestState(req_context=req_context)
         for tier in self.secondary_tiers:
             tier_ctx = tier.on_new_request(req_context)
             if tier_ctx.policy == OffloadPolicy.REQUEST_LEVEL:
-                self._request_level_tiers[req_context.req_id].add(tier)
+                if state.request_level_tiers is None:
+                    state.request_level_tiers = set()
+                state.request_level_tiers.add(tier)
+        self._req_state[req_context.req_id] = state
 
         policy = (
             OffloadPolicy.REQUEST_LEVEL
-            if req_context.req_id in self._request_level_tiers
+            if state.request_level_tiers
             else OffloadPolicy.BLOCK_LEVEL
         )
         return RequestOffloadingContext(policy=policy)
@@ -559,12 +582,29 @@ class TieringOffloadingManager(OffloadingManager):
     @override
     def on_request_finished(self, req_context: ReqContext) -> None:
         self.primary_tier.on_request_finished(req_context)
+        state = self._req_state[req_context.req_id]
+        state.is_finished = True
+        self._maybe_finalize_request(req_context.req_id)
+
+    def _maybe_finalize_request(self, req_id: str) -> None:
+        """Finalize secondary tiers once no more store cascades can be submitted.
+
+        Finalization means forwarding on_request_finished() to secondary tiers.
+        It is delayed until pending GPU->primary stores finish, since their
+        complete_store() callbacks may still submit primary->secondary stores.
+        """
+        state = self._req_state[req_id]
+        if not state.is_finished:
+            return
+        if state.pending_primary_stores != 0:
+            return
+
         for tier in self.secondary_tiers:
-            tier.on_request_finished(req_context)
-        self._request_level_tiers.pop(req_context.req_id, None)
+            tier.on_request_finished(state.req_context)
+        del self._req_state[req_id]
 
     @override
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         """End-of-schedule hook: process finished jobs, flush deferred
         promotions, and reset the per-step gate.
 
@@ -575,7 +615,16 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = False
         self._flush_pending_promotions()
         for tier in self.secondary_tiers:
-            tier.on_schedule_end()
+            tier.on_schedule_end(context)
+
+    @override
+    def has_pending_work(self) -> bool:
+        # In-flight primary<->secondary transfers (pending promotions are
+        # translated to transfer jobs in on_schedule_end), plus any work the
+        # secondary tiers themselves still have outstanding.
+        return bool(self._transfer_jobs) or any(
+            tier.has_pending_work() for tier in self.secondary_tiers
+        )
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
@@ -589,6 +638,65 @@ class TieringOffloadingManager(OffloadingManager):
             self.events.clear()
 
         yield from self.primary_tier.take_events()
+
+    @override
+    def reset_cache(self) -> None:
+        """Reset transfer bookkeeping and primary-tier cache.
+
+        Called during sleep, weight update, or resume. Each secondary tier
+        drains its in-flight transfers via drain_jobs() so no tier I/O is
+        touching primary memory before the primary tier is reset. A stuck
+        tier will block here visibly — preferable to silent corruption
+        from reusing primary slots while a transfer is mid-copy.
+
+        Secondary tiers are intentionally not reset: persistent stores
+        (FS, network) keep their data across resets. Active request state is
+        retained so those requests can continue after the reset; finished
+        requests are finalized and removed.
+        """
+        for tier in self.secondary_tiers:
+            tier.drain_jobs()
+        # All tier I/O has stopped; consume their completion notifications
+        # so manager bookkeeping is consistent before the primary reset.
+        self._process_finished_jobs()
+
+        # Deferred promotion submissions reserve primary slots that the
+        # reset below invalidates; their submit_load() has not yet been
+        # called so no tier I/O is touching that memory.
+        self._pending_load_submissions.clear()
+
+        finished_req_ids = []
+        for req_id, state in self._req_state.items():
+            state.pending_primary_stores = 0
+            if not state.is_finished:
+                continue
+            for tier in self.secondary_tiers:
+                tier.on_request_finished(state.req_context)
+            finished_req_ids.append(req_id)
+
+        self.primary_tier.reset_cache()
+
+        for req_id in finished_req_ids:
+            del self._req_state[req_id]
+        self._processed_jobs_this_step = False
+
+    @override
+    def get_stats(self) -> OffloadingConnectorStats | None:
+        stats = self.primary_tier.get_stats()
+
+        if stats is not None and stats.is_empty():
+            stats = None
+
+        for tier in self.secondary_tiers:
+            tier_stats = tier.get_stats()
+            if tier_stats is None or tier_stats.is_empty():
+                continue
+            if stats is None:
+                stats = tier_stats
+            else:
+                stats.aggregate(tier_stats)
+
+        return stats
 
     @override
     def shutdown(self) -> None:

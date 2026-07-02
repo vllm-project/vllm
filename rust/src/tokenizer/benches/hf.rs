@@ -1,5 +1,6 @@
 use criterion::{Criterion, Throughput, black_box, criterion_group, criterion_main};
-use hf_hub::api::sync::ApiBuilder;
+use hf_hub::api::tokio::ApiBuilder;
+use tokio::runtime::Runtime;
 use vllm_tokenizer::{HuggingFaceTokenizer, Tokenizer};
 
 const MODEL_ID: &str = "Qwen/Qwen3.5-0.8B";
@@ -55,13 +56,16 @@ impl BenchFixture {
 }
 
 fn tokenizer_json() -> std::path::PathBuf {
-    ApiBuilder::from_env()
-        .with_progress(false)
-        .build()
-        .expect("build hf-hub api")
-        .model(MODEL_ID.to_string())
-        .get("tokenizer.json")
-        .expect("fetch tokenizer.json from hf-hub")
+    Runtime::new().expect("build tokio runtime").block_on(async {
+        ApiBuilder::from_env()
+            .with_progress(false)
+            .build()
+            .expect("build hf-hub api")
+            .model(MODEL_ID.to_string())
+            .get("tokenizer.json")
+            .await
+            .expect("fetch tokenizer.json from hf-hub")
+    })
 }
 
 fn bench_encode(c: &mut Criterion) {

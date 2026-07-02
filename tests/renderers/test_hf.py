@@ -428,8 +428,6 @@ def test_resolve_content_format_hf_defined(model, expected_format):
         ("deepseek-ai/deepseek-vl2-tiny", "string"),
         ("adept/fuyu-8b", "string"),
         ("google/paligemma-3b-mix-224", "string"),
-        ("Qwen/Qwen-VL", "string"),
-        ("Qwen/Qwen-VL-Chat", "string"),
     ],
 )
 def test_resolve_content_format_fallbacks(model, expected_format):
@@ -484,7 +482,6 @@ def test_resolve_content_format_fallbacks(model, expected_format):
     ("template_path", "expected_format"),
     [
         ("template_alpaca.jinja", "string"),
-        ("template_baichuan.jinja", "string"),
         ("template_chatglm.jinja", "string"),
         ("template_chatglm2.jinja", "string"),
         ("template_chatml.jinja", "string"),

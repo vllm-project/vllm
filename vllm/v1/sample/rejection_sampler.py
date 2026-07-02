@@ -732,7 +732,11 @@ def rejection_greedy_sample_kernel(
         # Early exit for non-greedy sampling requests.
         return
 
-    start_idx = 0 if req_idx == 0 else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    start_idx = (
+        tl.zeros([], dtype=cu_num_draft_tokens_ptr.dtype.element_ty)
+        if req_idx == 0
+        else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    )
     end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
     num_draft_tokens = end_idx - start_idx
 
@@ -744,7 +748,8 @@ def rejection_greedy_sample_kernel(
             if SYNTHETIC_MODE:
                 uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
                 rate = tl.load(synthetic_conditional_rates_ptr + pos)
-                accepted = uniform_prob < rate
+                # -1 is used for padded draft token ids that should be rejected.
+                accepted = (uniform_prob < rate) and draft_token_id >= 0
                 token_id = draft_token_id if accepted else target_argmax_id
                 rejected = not accepted
             else:
@@ -788,7 +793,11 @@ def rejection_random_sample_kernel(
         # Early exit for greedy sampling requests.
         return
 
-    start_idx = 0 if req_idx == 0 else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    start_idx = (
+        tl.zeros([], dtype=cu_num_draft_tokens_ptr.dtype.element_ty)
+        if req_idx == 0
+        else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    )
     end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
     num_draft_tokens = end_idx - start_idx
 
@@ -797,7 +806,10 @@ def rejection_random_sample_kernel(
         if not rejected:
             draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos)
             uniform_prob = tl.load(uniform_probs_ptr + start_idx + pos)
-            if SYNTHETIC_MODE:
+            if draft_token_id < 0:
+                # -1 is used for padded draft token ids that should be rejected.
+                accepted = False
+            elif SYNTHETIC_MODE:
                 rate = tl.load(synthetic_conditional_rates_ptr + pos)
                 accepted = uniform_prob < rate
             else:
@@ -844,8 +856,8 @@ def expand_kernel(
     MAX_NUM_TOKENS: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    if req_idx == 0:  # noqa: SIM108
-        start_idx = 0
+    if req_idx == 0:
+        start_idx = tl.zeros([], dtype=cu_num_tokens_ptr.dtype.element_ty)
     else:
         start_idx = tl.load(cu_num_tokens_ptr + req_idx - 1)
     end_idx = tl.load(cu_num_tokens_ptr + req_idx)
@@ -871,7 +883,11 @@ def sample_recovered_tokens_kernel(
     USE_FP64_GUMBEL: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
-    start_idx = 0 if req_idx == 0 else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    start_idx = (
+        tl.zeros([], dtype=cu_num_draft_tokens_ptr.dtype.element_ty)
+        if req_idx == 0
+        else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    )
     end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
     num_draft_tokens = end_idx - start_idx
 
@@ -921,12 +937,17 @@ def sample_recovered_tokens_kernel(
             other=0.0,
         )
 
-        # Local tile reduction
+        # Local tile reduction.
+        # Mask out-of-vocabulary entries to -inf so they can never win
+        # the argmax — prevents producing recovered_id >= vocab_size
+        # when all valid entries in the last tile have zero probability.
         score = prob * inv_q
+        score = tl.where(vocab_mask, score, float("-inf"))
         local_max, local_id = tl.max(score, axis=0, return_indices=True)
 
         if local_max > max_val:
             max_val = local_max
             recovered_id = v + local_id
 
+    recovered_id = tl.minimum(recovered_id, vocab_size - 1)
     tl.store(output_token_ids_ptr + token_idx, recovered_id)

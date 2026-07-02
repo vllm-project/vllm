@@ -2,6 +2,25 @@
 
 #include <torch/csrc/stable/library.h>
 #include <torch/csrc/stable/tensor.h>
+#include <torch/headeronly/util/Exception.h>
+
+#include <optional>
+#include <string>
+#include <vector>
+
+#include <torch/csrc/stable/ops.h>
+
+inline torch::stable::Tensor weak_ref_tensor(torch::stable::Tensor& tensor) {
+  // Ensure tensor is on CUDA
+  STD_TORCH_CHECK(tensor.device().is_cuda(), "Tensor must be on CUDA device");
+
+  // Get the raw data pointer
+  void* data_ptr = tensor.mutable_data_ptr();
+
+  /// Create a new tensor from the raw data pointer
+  return torch::stable::from_blob(data_ptr, tensor.sizes(), tensor.strides(),
+                                  tensor.device(), tensor.scalar_type());
+}
 
 void per_token_group_quant_fp8(const torch::stable::Tensor& input,
                                torch::stable::Tensor& output_q,
@@ -185,11 +204,12 @@ torch::stable::Tensor hadacore_transform(torch::stable::Tensor& x,
 
 // Layernorm kernels (shared CUDA/ROCm)
 void rms_norm(torch::stable::Tensor& out, torch::stable::Tensor& input,
-              torch::stable::Tensor& weight, double epsilon);
+              std::optional<torch::stable::Tensor> weight, double epsilon);
 
 void fused_add_rms_norm(torch::stable::Tensor& input,
                         torch::stable::Tensor& residual,
-                        torch::stable::Tensor& weight, double epsilon);
+                        std::optional<torch::stable::Tensor> weight,
+                        double epsilon);
 
 // Layernorm-quant kernels (shared CUDA/ROCm)
 void rms_norm_static_fp8_quant(torch::stable::Tensor& out,
@@ -268,10 +288,6 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
     int64_t cache_block_size);
 
 #ifndef USE_ROCM
-torch::stable::Tensor minimax_allreduce_rms(
-    torch::stable::Tensor const& input,
-    torch::stable::Tensor const& norm_weight, torch::stable::Tensor workspace,
-    int64_t const rank, int64_t const nranks, double const eps);
 std::tuple<torch::stable::Tensor, torch::stable::Tensor>
 minimax_allreduce_rms_qk(torch::stable::Tensor qkv,
                          torch::stable::Tensor const& norm_weight_q,
@@ -280,6 +296,25 @@ minimax_allreduce_rms_qk(torch::stable::Tensor qkv,
                          int64_t const kv_size, int64_t const rank,
                          int64_t const nranks, double const eps);
 #endif
+
+// Horizontally-fused MiniMax-M3 QK-norm + partial NeoX RoPE (+ optional KV /
+// index-cache insert). Dense layer: norm+RoPE only; sparse layer: also packs
+// the index branch and scatters k/v/index_k into their paged caches.
+void fused_minimax_m3_qknorm_rope_kv_insert(
+    torch::stable::Tensor& qkv, torch::stable::Tensor const& q_norm_weight,
+    torch::stable::Tensor const& k_norm_weight,
+    torch::stable::Tensor const& cos_sin_cache,
+    torch::stable::Tensor const& positions, int64_t num_heads,
+    int64_t num_kv_heads, int64_t rotary_dim, double eps,
+    std::optional<torch::stable::Tensor> index_q_norm_weight,
+    std::optional<torch::stable::Tensor> index_k_norm_weight,
+    int64_t num_index_heads, std::optional<torch::stable::Tensor> slot_mapping,
+    std::optional<torch::stable::Tensor> index_slot_mapping,
+    std::optional<torch::stable::Tensor> kv_cache,
+    std::optional<torch::stable::Tensor> index_cache, int64_t block_size,
+    std::optional<torch::stable::Tensor> q_out,
+    std::optional<torch::stable::Tensor> index_q_out,
+    const std::string& kv_cache_dtype);
 
 // Sampler kernels (shared CUDA/ROCm)
 void apply_repetition_penalties_(
@@ -303,6 +338,14 @@ void persistent_topk(const torch::stable::Tensor& logits,
                      torch::stable::Tensor& output,
                      torch::stable::Tensor& workspace, int64_t k,
                      int64_t max_seq_len);
+
+#ifdef VLLM_ENABLE_COOPERATIVE_TOPK
+void cooperative_topk(const torch::stable::Tensor& logits,
+                      const torch::stable::Tensor& lengths,
+                      torch::stable::Tensor& output,
+                      torch::stable::Tensor& workspace, int64_t k,
+                      int64_t max_seq_len);
+#endif
 
 void selective_scan_fwd(
     const torch::stable::Tensor& u, const torch::stable::Tensor& delta,
@@ -346,7 +389,20 @@ void free_shared_buffer(int64_t buffer);
 // Activation kernels (shared CUDA/ROCm)
 void silu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void silu_and_mul_clamp(torch::stable::Tensor& out,
-                        torch::stable::Tensor& input, double limit);
+                        torch::stable::Tensor& input, double limit,
+                        double alpha = 1.0, double beta = 0.0);
+
+void silu_and_mul_quant(torch::stable::Tensor& out,
+                        torch::stable::Tensor& input,
+                        torch::stable::Tensor& scale);
+
+void persistent_masked_m_silu_mul_quant(
+    const torch::stable::Tensor& input,              // (E, T, 2*H)
+    const torch::stable::Tensor& tokens_per_expert,  // (E)
+    torch::stable::Tensor& y_q,                      // (E, T, H) [OUT]
+    torch::stable::Tensor& y_s,  // (E, T, H//group_size) [OUT]
+    bool use_ue8m0);
+
 void mul_and_silu(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_and_mul(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_tanh_and_mul(torch::stable::Tensor& out,
@@ -396,35 +452,6 @@ torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
 
 void gptq_shuffle(torch::stable::Tensor q_weight, torch::stable::Tensor q_perm,
                   int64_t bit);
-
-// GGML kernels (shared CUDA/ROCm)
-torch::stable::Tensor ggml_dequantize(
-    torch::stable::Tensor W, int64_t type, int64_t m, int64_t n,
-    std::optional<torch::headeronly::ScalarType> const& dtype);
-
-torch::stable::Tensor ggml_mul_mat_vec_a8(torch::stable::Tensor W,
-                                          torch::stable::Tensor X, int64_t type,
-                                          int64_t row);
-
-torch::stable::Tensor ggml_mul_mat_a8(torch::stable::Tensor W,
-                                      torch::stable::Tensor X, int64_t type,
-                                      int64_t row);
-
-torch::stable::Tensor ggml_moe_a8(torch::stable::Tensor X,
-                                  torch::stable::Tensor W,
-                                  torch::stable::Tensor sorted_token_ids,
-                                  torch::stable::Tensor expert_ids,
-                                  torch::stable::Tensor num_tokens_post_padded,
-                                  int64_t type, int64_t row, int64_t top_k,
-                                  int64_t tokens);
-
-torch::stable::Tensor ggml_moe_a8_vec(torch::stable::Tensor X,
-                                      torch::stable::Tensor W,
-                                      torch::stable::Tensor topk_ids,
-                                      int64_t top_k, int64_t type, int64_t row,
-                                      int64_t tokens);
-
-int64_t ggml_moe_get_block_size(int64_t type);
 
 void paged_attention_v1(
     torch::stable::Tensor& out, torch::stable::Tensor& query,

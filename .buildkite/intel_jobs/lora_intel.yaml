@@ -5,6 +5,10 @@ steps:
 - label: LoRA Runtime + Utils
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
@@ -34,6 +38,10 @@ steps:
 - label: LoRA Fused/MoE Kernels
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -54,6 +62,10 @@ steps:
 - label: LoRA Punica Kernels
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -69,11 +81,17 @@ steps:
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       set -o pipefail &&
-      pytest -v -s lora/test_punica_ops.py --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[expand-0-xpu:0-dtype0-3-43264-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype1-1-2049-64-128-16]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-1-2049-128-1-32]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-1-2049-256-1-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-1-2049-256-8-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels[expand-0-xpu:0-dtype0-3-2049-128-8-16]" --deselect="tests/lora/test_punica_ops.py::test_kernels[shrink-0-xpu:0-dtype0-1-2049-128-8-32]" --deselect="tests/lora/test_punica_ops.py::test_kernels[expand-0-xpu:0-dtype1-1-2049-256-128-32]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[shrink-0-xpu:0-dtype0-3-64256-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[shrink-0-xpu:0-dtype1-2-29696-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[shrink-0-xpu:0-dtype1-3-49408-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[shrink-0-xpu:0-dtype0-2-16384-32-4-4]" --deselect="tests/lora/test_punica_ops.py::test_kernels_hidden_size[expand-0-xpu:0-dtype0-2-51328-32-4-4]"'
+      pytest -v -s lora/test_punica_ops.py::test_kernels &&
+      pytest -v -s lora/test_punica_ops.py::test_kernels_hidden_size &&
+      pytest -v -s lora/test_punica_ops.py::test_add_lora_fused_moe_early_exit'
 
 - label: LoRA Punica FP8/XPU Ops
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -94,6 +112,10 @@ steps:
 - label: LoRA Models
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
@@ -108,15 +130,19 @@ steps:
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
       'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
-      (pytest -v -s lora/test_mixtral.py --deselect="tests/lora/test_mixtral.py::test_mixtral_lora[4]" || true) &&
       pytest -v -s lora/test_quant_model.py --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model0]" --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model1]" --deselect="tests/lora/test_quant_model.py::test_quant_model_tp_equality[model0]" &&
       pytest -v -s lora/test_transformers_model.py &&
       pytest -v -s lora/test_chatglm3_tp.py &&
+      pytest -v -s lora/test_llama_tp.py::test_llama_lora &&
       pytest -s -v lora/test_minicpmv_tp.py'
 
 - label: LoRA Multimodal
   timeout_in_minutes: 45
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
