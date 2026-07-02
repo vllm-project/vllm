@@ -8,6 +8,7 @@ import shutil
 import pytest
 
 from vllm.config.lora import LoRAConfig
+from vllm.lora import peft_helper as peft_helper_module
 from vllm.lora.peft_helper import PEFTHelper
 
 ERROR_CASES = [
@@ -68,6 +69,53 @@ def test_peft_helper_pass(llama32_lora_files, tmp_path):
     peft_helper.validate_legal(lora_config)
     scaling = peft_helper.lora_alpha / math.sqrt(peft_helper.r)
     assert abs(peft_helper.vllm_lora_scaling_factor - scaling) < 1e-3
+
+
+def test_peft_helper_retries_adapter_config_load_with_jitter(
+    llama32_lora_files, monkeypatch
+):
+    original_json_load = json.load
+    attempts = 0
+    jitter_calls = []
+    sleep_calls = []
+
+    def flaky_json_load(f):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise json.JSONDecodeError("partial config", "{", 0)
+        return original_json_load(f)
+
+    def fake_jitter(start, stop):
+        jitter_calls.append((start, stop))
+        return 0.0
+
+    monkeypatch.setattr(peft_helper_module.json, "load", flaky_json_load)
+    monkeypatch.setattr(peft_helper_module.random, "uniform", fake_jitter)
+    monkeypatch.setattr(
+        peft_helper_module.time, "sleep", lambda sleep_s: sleep_calls.append(sleep_s)
+    )
+
+    peft_helper = PEFTHelper.from_local_dir(
+        llama32_lora_files, max_position_embeddings=4096
+    )
+
+    assert attempts == 2
+    assert jitter_calls
+    assert sleep_calls == [0.0]
+    assert peft_helper.r == 8
+
+
+def test_peft_helper_reraises_adapter_config_load_after_timeout(
+    tmp_path, monkeypatch
+):
+    monotonic_values = iter([0.0, 2.0])
+    monkeypatch.setattr(
+        peft_helper_module.time, "monotonic", lambda: next(monotonic_values)
+    )
+
+    with pytest.raises(FileNotFoundError):
+        PEFTHelper.from_local_dir(tmp_path, max_position_embeddings=4096)
 
 
 @pytest.mark.parametrize("test_name,config_change,expected_error", ERROR_CASES)
