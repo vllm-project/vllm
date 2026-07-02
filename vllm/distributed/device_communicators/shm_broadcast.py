@@ -798,7 +798,8 @@ class MessageQueue:
 
     @staticmethod
     def recv(socket: zmq.Socket, timeout: float | None) -> Any:
-        timeout_ms = None if timeout is None else int(timeout * 1000)
+        # Ensure non-negative timeout passed to zmq poll.
+        timeout_ms = None if timeout is None else max(0, int(timeout * 1000))
         if not socket.poll(timeout=timeout_ms):
             raise TimeoutError
         recv, *recv_oob = socket.recv_multipart(copy=False)
