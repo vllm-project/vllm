@@ -904,6 +904,10 @@ class MoriAll2AllManager(All2AllManagerBase):
             kernel_type=kernel_type,
             rdma_block_num=rdma_block_num,
             gpu_per_node=min(8, num_ep_ranks),
+            # Pin fields required by MoRI dispatch kernels instead of relying
+            # on library defaults. vLLM handles FP8 quantization before dispatch.
+            num_qp_per_pe=2,
+            quant_type="none",
         )
 
     def _make_handle(self, **kwargs):

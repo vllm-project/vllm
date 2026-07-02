@@ -246,6 +246,12 @@ class FusedMoEPrepareAndFinalize(ABC):
         """
         return False
 
+    def finalize_uses_original_topk_ids(self) -> bool:
+        """
+        Indicates finalize must use router top-k ids from before prepare.
+        """
+        return False
+
     def on_commit(self) -> None:
         """
         Runs after this prepare/finalize has been committed to the active
@@ -1416,6 +1422,13 @@ class FusedMoEKernelModularImpl:
         if global_num_experts == -1:
             global_num_experts = local_num_experts
 
+        finalize_uses_original_topk_ids = (
+            self.prepare_finalize.finalize_uses_original_topk_ids()
+        )
+        original_topk_ids = topk_ids
+        if finalize_uses_original_topk_ids:
+            original_topk_ids = topk_ids.clone()
+
         a1q, a1q_scale, expert_tokens_meta, topk_ids, topk_weights = self._prepare(
             hidden_states,
             topk_weights,
@@ -1452,12 +1465,17 @@ class FusedMoEKernelModularImpl:
         if lora_ctx is not None:
             lora_ctx.original_hidden_states = None
 
+        if finalize_uses_original_topk_ids:
+            finalize_topk_ids = original_topk_ids
+        else:
+            finalize_topk_ids = topk_ids
+
         return self._finalize(
             output,
             fused_out,
             hidden_states,
             topk_weights,
-            topk_ids,
+            finalize_topk_ids,
             apply_router_weight_on_input,
             shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
