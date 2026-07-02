@@ -363,7 +363,10 @@ class InprocClient(EngineCoreClient):
         return self.engine_core.collective_rpc(method, timeout, args, kwargs)
 
     def dp_engines_running(self) -> bool:
-        return False
+        # Unfinished requests are already tracked by the output processor.
+        # Only check for finished requests with pending delayed KV connector
+        # frees (e.g. async store to external KV cache).
+        return self.engine_core.scheduler.has_finished_requests()
 
 
 @dataclass
