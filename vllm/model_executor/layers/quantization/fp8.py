@@ -804,6 +804,23 @@ class Fp8MoEMethod(FusedMoEMethodBase):
     def supports_eplb(self) -> bool:
         return True
 
+    def after_eplb_rearrangement(self, layer: RoutedExperts) -> None:
+        # Refresh the fused (w_scale * a_scale) products EPLB just made
+        # stale by rearranging the registered w_scale Parameters in-place.
+        if self.moe_quant_config is None or self.moe_quant_config.g1_alphas is None:
+            return
+        w1_scale = getattr(layer, f"w13_{self.weight_scale_name}")
+        w2_scale = getattr(layer, f"w2_{self.weight_scale_name}")
+        a1_scale = layer.w13_input_scale
+        a2_scale = layer.w2_input_scale
+        assert a1_scale is not None and a2_scale is not None
+        self.moe_quant_config._w1.alpha_or_gscale.copy_(
+            (w1_scale * a1_scale).squeeze()
+        )
+        self.moe_quant_config._w2.alpha_or_gscale.copy_(
+            (w2_scale * a2_scale).squeeze()
+        )
+
     def apply_monolithic(
         self,
         layer: RoutedExperts,

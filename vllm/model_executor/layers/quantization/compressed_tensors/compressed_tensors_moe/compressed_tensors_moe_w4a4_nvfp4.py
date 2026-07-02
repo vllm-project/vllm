@@ -16,6 +16,7 @@ from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEQuantConfig,
 )
 from vllm.model_executor.layers.fused_moe.oracle.nvfp4 import (
+    NvFp4MoeBackend,
     convert_to_nvfp4_moe_kernel_format,
     is_global_sf_supported_for_nvfp4_backend,
     make_nvfp4_moe_kernel,
@@ -30,6 +31,14 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kNvfp4Static,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
+
+_EPLB_SUPPORTED_NVFP4_BACKENDS = frozenset(
+    {
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL,
+        NvFp4MoeBackend.FLASHINFER_CUTEDSL_BATCHED,
+        NvFp4MoeBackend.FLASHINFER_TRTLLM,
+    }
+)
 
 logger = init_logger(__name__)
 
@@ -54,6 +63,12 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         self.use_global_sf = is_global_sf_supported_for_nvfp4_backend(
             self.nvfp4_backend
         )
+
+    @property
+    def supports_eplb(self) -> bool:
+        # Other NVFP4 backends still need their post-process layout audited
+        # for per-expert leading-dim contiguity before EPLB can use them.
+        return self.nvfp4_backend in _EPLB_SUPPORTED_NVFP4_BACKENDS
 
     def create_weights(
         self,
@@ -196,6 +211,14 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             )
         w13_weight_global_scale = layer.w13_weight_global_scale[:, 0].contiguous()
 
+        if self.moe.moe_parallel_config.enable_eplb:
+            # after_eplb_rearrangement() assumes this backend's layout is
+            # EPLB-safe; verify that here instead of trusting callers.
+            assert self.supports_eplb, (
+                f"EPLB rearrangement not verified for NVFP4 backend "
+                f"{self.nvfp4_backend}"
+            )
+
         # Shuffle weights into the NvFp4 kernel format.
         (
             w13,
@@ -221,9 +244,34 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
 
         replace_parameter(layer, "w13_weight", w13)
-        replace_parameter(layer, "w13_weight_scale", w13_scale)
         replace_parameter(layer, "w2_weight", w2)
-        replace_parameter(layer, "w2_weight_scale", w2_scale)
+
+        if (
+            self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
+            and self.moe.moe_parallel_config.enable_eplb
+        ):
+            # Register the per-expert contiguous inverse-permute of the MMA
+            # view so EPLB can slice experts; stash the MMA view itself for
+            # the kernel (see get_fused_moe_quant_config).
+            w13_scale_eplb_view = w13_scale.permute(5, 2, 4, 0, 1, 3)
+            w2_scale_eplb_view = w2_scale.permute(5, 2, 4, 0, 1, 3)
+            assert w13_scale_eplb_view.is_contiguous(), (
+                "Expected the inverse-permuted scale view to be contiguous; "
+                "flashinfer's convert_sf_to_mma_layout storage layout may "
+                "have changed."
+            )
+            assert w2_scale_eplb_view.is_contiguous(), (
+                "Expected the inverse-permuted w2 scale view to be contiguous; "
+                "flashinfer's convert_sf_to_mma_layout storage layout may "
+                "have changed."
+            )
+            layer.w13_weight_scale_mma_view = w13_scale
+            layer.w2_weight_scale_mma_view = w2_scale
+            replace_parameter(layer, "w13_weight_scale", w13_scale_eplb_view)
+            replace_parameter(layer, "w2_weight_scale", w2_scale_eplb_view)
+        else:
+            replace_parameter(layer, "w13_weight_scale", w13_scale)
+            replace_parameter(layer, "w2_weight_scale", w2_scale)
         layer.w13_weight_scale_2 = w13_scale_2
         layer.w2_weight_scale_2 = w2_scale_2
         layer.w13_input_scale = a13_scale
@@ -250,15 +298,35 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
         )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+        if (
+            self.nvfp4_backend == NvFp4MoeBackend.FLASHINFER_CUTEDSL
+            and self.moe.moe_parallel_config.enable_eplb
+        ):
+            # When EPLB is enabled the registered Parameter is the E-leading
+            # contiguous view (for per-expert slicing); the kernel needs the
+            # strided MMA-layout view stashed alongside it.
+            w13_scale = layer.w13_weight_scale_mma_view
+            w2_scale = layer.w2_weight_scale_mma_view
+        else:
+            w13_scale = layer.w13_weight_scale
+            w2_scale = layer.w2_weight_scale
         return make_nvfp4_moe_quant_config(
             backend=self.nvfp4_backend,
-            w13_scale=layer.w13_weight_scale,
-            w2_scale=layer.w2_weight_scale,
+            w13_scale=w13_scale,
+            w2_scale=w2_scale,
             w13_scale_2=layer.w13_weight_scale_2,
             w2_scale_2=layer.w2_weight_scale_2,
             a13_scale=layer.w13_input_scale,
             a2_scale=layer.w2_input_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+        )
+
+    def after_eplb_rearrangement(self, layer: RoutedExperts) -> None:
+        layer.w13_weight_scale_2.copy_(
+            (1.0 / layer.w13_weight_global_scale[:, 0]) * layer.w13_input_scale
+        )
+        layer.w2_weight_scale_2.copy_(
+            (1.0 / layer.w2_weight_global_scale) * layer.w2_input_scale
         )
 
     def apply_monolithic(

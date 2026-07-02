@@ -156,6 +156,17 @@ class FusedMoEMethodBase(QuantizeMethodBase):
     def supports_eplb(self) -> bool:
         return False
 
+    def after_eplb_rearrangement(
+        self,
+        layer: "RoutedExperts",  # type: ignore[name-defined] # noqa: F821
+    ) -> None:
+        """Refresh derived quant-method state after EPLB rearranges Parameters.
+
+        Override when the method holds derived per-expert tensors (separate
+        storage) the in-place rearrangement won't update; default is a no-op.
+        """
+        return
+
     @property
     def method_name(self) -> str:
         return self.__class__.__name__
