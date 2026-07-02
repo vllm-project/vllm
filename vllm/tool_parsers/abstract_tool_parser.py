@@ -134,6 +134,14 @@ class ToolParser:
         ):
             return request
 
+        if (
+            isinstance(request, ChatCompletionRequest)
+            and request.tool_choice == "auto"
+            and request.response_format is not None
+        ):
+            # Let the model choose between a tool call and a text response.
+            request.response_format = None
+
         json_schema_from_tool = get_json_schema_from_tools(
             tool_choice=request.tool_choice, tools=request.tools
         )
