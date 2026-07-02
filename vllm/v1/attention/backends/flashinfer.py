@@ -435,6 +435,19 @@ class FlashInferBackend(AttentionBackend):
         )
 
     @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        # The FlashInfer metadata builder already wires up batch-invariant
+        # planning when ``envs.VLLM_BATCH_INVARIANT`` is true: fixed
+        # ``decode_fixed_split_size`` / ``prefill_fixed_split_size`` values,
+        # ``disable_split_kv=True``, and a larger workspace buffer
+        # (``FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT``). The base
+        # class default of ``False`` was hiding that capability, which forced
+        # the selector to reject FlashInfer whenever batch invariance was
+        # requested. Declaring it here lets users opt in and avoids the
+        # concurrent same-prompt repetition seen with NVFP4 MoE in #31856.
+        return True
+
+    @classmethod
     def supports_sink(cls) -> bool:
         """FlashInfer supports sinks when TRTLLM attention is available (SM100)."""
         from vllm.utils.flashinfer import (
