@@ -917,7 +917,22 @@ class Scheduler(SchedulerInterface):
                     # manager
                     if request.has_encoder_inputs:
                         self.encoder_cache_manager.free(request)
-                    break
+                    if self.running:
+                        # Running requests will free blocks when they
+                        # complete; stop here to preserve queue-order
+                        # admission.
+                        break
+                    # Nothing is running, so no future event frees blocks and
+                    # stopping at this request would freeze this state
+                    # permanently. Requests behind this one may hold blocks
+                    # while parked (async KV loads in WAITING_FOR_REMOTE_KVS)
+                    # and are only promoted when this traversal reaches them.
+                    # Keep scanning so they can be promoted, scheduled, and
+                    # eventually free the blocks this request needs.
+                    # See https://github.com/vllm-project/vllm/issues/45388
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
 
                 # KVTransfer: the connector uses this info to determine
                 # if a load is needed. Note that
