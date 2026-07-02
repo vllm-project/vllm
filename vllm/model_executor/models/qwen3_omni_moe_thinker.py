@@ -45,7 +45,7 @@ from transformers.models.whisper import WhisperFeatureExtractor
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.speech_to_text import SpeechToTextParams
-from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
+from vllm.distributed import get_pp_group, get_sp_group, use_data_parallel, get_tensor_model_parallel_world_size
 from vllm.inputs import PromptType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import _ACTIVATION_REGISTRY
@@ -106,7 +106,7 @@ from .utils import (
     _merge_multimodal_embeddings,
     maybe_prefix,
 )
-from .vision import get_vit_attn_backend
+from .vision import get_vit_attn_backend, is_vit_use_data_parallel
 
 logger = init_logger(__name__)
 
@@ -645,16 +645,25 @@ class Qwen3_VisionBlock(nn.Module):
         rotary_pos_emb_sin: torch.Tensor,
         max_seqlen: torch.Tensor | None,  # Only used for Flash Attention
         sequence_lengths: torch.Tensor | None,  # Only used for FlashInfer CuDNN backend
+        sp_enabled: bool,
+        sp_group: torch.distributed.ProcessGroup | None,
     ) -> torch.Tensor:
-        x = x + self.attn(
-            self.norm1(x),
+        x_normed = self.norm1(x)
+        if sp_enabled:
+            x_normed = sp_group.all_gather(x_normed, dim=0)
+        x_attn = self.attn(
+            x_normed,
             cu_seqlens=cu_seqlens,
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
+            sp_enabled=sp_enabled,
         )
 
+        if sp_enabled:
+            x_attn = sp_group.reduce_scatter(x_attn, dim=0)
+        x = x + x_attn
         x = x + self.mlp(self.norm2(x))
         return x
 
@@ -743,6 +752,26 @@ class Qwen3Omni_VisionTransformer(nn.Module):
         self.num_grid_per_side = self.image_size // self.patch_size
         self.apply_vit_abs_pos_embed = vision_config.apply_vit_abs_pos_embed
         self.deepstack_visual_indexes = vision_config.deepstack_visual_indexes
+
+        use_data_parallel = is_vit_use_data_parallel()
+
+        self.sp_group = None
+        self.sp_size = None
+        self.sp_rank = None
+        self.sp_min_token_num = 500
+
+        from vllm.config import get_current_vllm_config
+
+        config = get_current_vllm_config()
+        multimodal_config = config.model_config.multimodal_config
+        if multimodal_config.enable_mm_encoder_sp == True:
+            self.sp_group = get_sp_group()
+            self.sp_size = self.sp_group.world_size
+            self.sp_rank = (
+                1
+                if use_data_parallel
+                else self.sp_group.rank_in_group
+            )
 
         self.patch_embed = Qwen3_VisionPatchEmbed(
             patch_size=self.patch_size,
@@ -997,6 +1026,17 @@ class Qwen3Omni_VisionTransformer(nn.Module):
             self.device,
         )
 
+        sp_enabled = False
+        seq_len = hidden_states.size(0)
+        if self.sp_group is not None and self.sp_size > 1:
+            sp_enabled = (
+                seq_len >= self.sp_min_token_num
+                and seq_len % self.sp_size == 0
+            )
+        if sp_enabled:
+            seq_chunk = hidden_states.shape[0] // self.sp_size
+            hidden_states = hidden_states[self.sp_rank * seq_chunk : (self.sp_rank + 1) * seq_chunk]
+
         hidden_states_list = []
         deepstack_visual_indexes = self.deepstack_visual_indexes
 
@@ -1008,13 +1048,22 @@ class Qwen3Omni_VisionTransformer(nn.Module):
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen,
                 sequence_lengths=sequence_lengths,
+                sp_enabled=sp_enabled,
+                sp_group=self.sp_group,
             )
             if (
                 deepstack_visual_indexes is not None
                 and layer_num in deepstack_visual_indexes
             ):
-                hidden_states_list.append(hidden_states)
+                deepstack_input = (
+                    self.sp_group.all_gather(hidden_states, dim=0)
+                    if sp_enabled
+                    else hidden_states
+                )
+                hidden_states_list.append(deepstack_input)
 
+        if sp_enabled:
+            hidden_states = self.sp_group.all_gather(hidden_states, dim=0)
         hidden_states = self.merger(hidden_states)
 
         # processing deepstack

@@ -352,6 +352,7 @@ class ModelConfig:
     mm_encoder_fp8_scale_path: InitVar[str | None] = None
     mm_encoder_fp8_scale_save_path: InitVar[str | None] = None
     mm_encoder_fp8_scale_save_margin: InitVar[float | None] = None
+    enable_mm_encoder_sp: InitVar[bool] = False
     interleave_mm_strings: InitVar[bool | None] = None
     skip_mm_profiling: InitVar[bool | None] = None
     video_pruning_rate: InitVar[float | None] = None
@@ -415,6 +416,7 @@ class ModelConfig:
         # here early.
         if self.multimodal_config:
             factors["language_model_only"] = self.multimodal_config.language_model_only
+            factors["enable_mm_encoder_sp"] = self.multimodal_config.enable_mm_encoder_sp
         return hash_factors(factors)
 
     def _update_nested(
@@ -480,6 +482,7 @@ class ModelConfig:
         mm_encoder_fp8_scale_path: str | None,
         mm_encoder_fp8_scale_save_path: str | None,
         mm_encoder_fp8_scale_save_margin: float | None,
+        enable_mm_encoder_sp: bool,
         interleave_mm_strings: bool | None,
         skip_mm_profiling: bool | None,
         video_pruning_rate: float | None,
@@ -678,6 +681,22 @@ class ModelConfig:
                 )
                 mm_encoder_tp_mode = "weights"
 
+            # For non-whitelisted models, force-disable SP to avoid potential issues.
+            SP_WHITELIST = {
+                "Qwen3VLForConditionalGeneration",
+                "Qwen2_5_VLForConditionalGeneration",
+                "Qwen3OmniMoeForConditionalGeneration"
+            }
+            if not arch in SP_WHITELIST:
+                # Force-disable SP for non-whitelisted models
+                if enable_mm_encoder_sp == True:
+                    logger.warning_once(
+                        "Disabling sequence parallelism (enable_mm_encoder_sp) for %s "
+                        "because it is not in the SP whitelist.",
+                        arch,
+                    )
+                enable_mm_encoder_sp = False
+
             mm_config_kwargs = dict(
                 language_model_only=language_model_only,
                 limit_per_prompt=limit_mm_per_prompt,
@@ -694,6 +713,7 @@ class ModelConfig:
                 mm_encoder_fp8_scale_path=mm_encoder_fp8_scale_path,
                 mm_encoder_fp8_scale_save_path=mm_encoder_fp8_scale_save_path,
                 mm_encoder_fp8_scale_save_margin=mm_encoder_fp8_scale_save_margin,
+                enable_mm_encoder_sp=enable_mm_encoder_sp,
                 interleave_mm_strings=interleave_mm_strings,
                 skip_mm_profiling=skip_mm_profiling,
                 video_pruning_rate=video_pruning_rate,
