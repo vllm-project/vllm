@@ -43,6 +43,11 @@ class UVAOffloadConfig:
     This allows distinguishing parameters like "w2_weight" and "w2_weight_scale".
     """
 
+    disable_uva: bool | None = None
+    """Disable UVA (Unified Virtual Addressing) zero-copy offloading even when
+    it is available. `None` falls back to the deprecated
+    `VLLM_WEIGHT_OFFLOADING_DISABLE_UVA` env var (default off)."""
+
 
 @config
 class PrefetchOffloadConfig:
@@ -93,6 +98,12 @@ class OffloadConfig:
 
     prefetch: PrefetchOffloadConfig = Field(default_factory=PrefetchOffloadConfig)
     """Parameters for prefetch offloading backend."""
+
+    disable_pin_memory: bool | None = None
+    """Disable pinned host memory for weight offloading. On unified-memory
+    systems (e.g. GH200) pinned memory eats into GPU memory. `None` falls back
+    to the deprecated `VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY` env var
+    (default off)."""
 
     @model_validator(mode="after")
     def validate_offload_config(self) -> "OffloadConfig":

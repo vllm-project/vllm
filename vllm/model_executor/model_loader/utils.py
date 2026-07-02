@@ -12,7 +12,6 @@ import torch
 from torch import nn
 from typing_extensions import assert_never
 
-import vllm.envs as envs
 from vllm.config import ModelConfig, VllmConfig, set_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import (
@@ -32,7 +31,6 @@ from vllm.model_executor.model_loader.reload import (
 from vllm.model_executor.models.interfaces import SupportsQuant
 from vllm.tracing import instrument
 from vllm.utils.mem_utils import release_device_memory_under_pressure
-from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
 
 logger = init_logger(__name__)
@@ -164,10 +162,9 @@ def device_loading_context(module: torch.nn.Module, target_device: torch.device)
         yield module
 
     finally:
-        use_pin_memory = (
-            is_pin_memory_available()
-            and not envs.VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY
-        )
+        from vllm.model_executor.offloader.base import should_pin_memory
+
+        use_pin_memory = should_pin_memory()
         # Restore parameters to their original devices, ignoring new parameters
         for name, p in module.named_parameters():
             if name in original_device_states:

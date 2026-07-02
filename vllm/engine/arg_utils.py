@@ -514,8 +514,10 @@ class EngineArgs:
     disable_sliding_window: bool = ModelConfig.disable_sliding_window
     disable_cascade_attn: bool = ModelConfig.disable_cascade_attn
     offload_backend: str = OffloadConfig.offload_backend
+    disable_pin_memory: bool | None = OffloadConfig.disable_pin_memory
     cpu_offload_gb: float = UVAOffloadConfig.cpu_offload_gb
     cpu_offload_params: set[str] = get_field(UVAOffloadConfig, "cpu_offload_params")
+    disable_uva: bool | None = UVAOffloadConfig.disable_uva
     offload_group_size: int = PrefetchOffloadConfig.offload_group_size
     offload_num_in_group: int = PrefetchOffloadConfig.offload_num_in_group
     offload_prefetch_step: int = PrefetchOffloadConfig.offload_prefetch_step
@@ -1205,9 +1207,16 @@ class EngineArgs:
         offload_group.add_argument(
             "--offload-backend", **offload_kwargs["offload_backend"]
         )
+        offload_group.add_argument(
+            "--offload-disable-pin-memory",
+            **offload_kwargs["disable_pin_memory"],
+        )
         offload_group.add_argument("--cpu-offload-gb", **uva_kwargs["cpu_offload_gb"])
         offload_group.add_argument(
             "--cpu-offload-params", **uva_kwargs["cpu_offload_params"]
+        )
+        offload_group.add_argument(
+            "--offload-disable-uva", **uva_kwargs["disable_uva"]
         )
         offload_group.add_argument(
             "--offload-group-size",
@@ -2313,9 +2322,11 @@ class EngineArgs:
 
         offload_config = OffloadConfig(
             offload_backend=self.offload_backend,
+            disable_pin_memory=self.disable_pin_memory,
             uva=UVAOffloadConfig(
                 cpu_offload_gb=self.cpu_offload_gb,
                 cpu_offload_params=self.cpu_offload_params,
+                disable_uva=self.disable_uva,
             ),
             prefetch=PrefetchOffloadConfig(
                 offload_group_size=self.offload_group_size,

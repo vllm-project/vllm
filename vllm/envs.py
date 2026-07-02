@@ -1872,10 +1872,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_DEBUG_MFU_METRICS", "0"))
     ),
     # Disable using pytorch's pin memory for CPU offloading.
+    # DEPRECATED: use `--offload-disable-pin-memory` /
+    # `OffloadConfig.disable_pin_memory` instead.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY", "0"))
     ),
     # Disable using UVA (Unified Virtual Addressing) for CPU offloading.
+    # DEPRECATED: use `--offload-disable-uva` /
+    # `OffloadConfig.uva.disable_uva` instead.
     "VLLM_WEIGHT_OFFLOADING_DISABLE_UVA": lambda: bool(
         int(os.getenv("VLLM_WEIGHT_OFFLOADING_DISABLE_UVA", "0"))
     ),
