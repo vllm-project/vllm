@@ -329,13 +329,13 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     encoder_cache = EncoderCache()
     encoder_cache.mm_features["req-with-lora"] = [
         MultiModalFeatureSpec(
-            data=None,
+            data=Mock(),
             modality="image",
             identifier="img-0",
             mm_position=PlaceholderRange(offset=0, length=2),
         ),
         MultiModalFeatureSpec(
-            data=None,
+            data=Mock(),
             modality="image",
             identifier="img-1",
             mm_position=PlaceholderRange(offset=2, length=3),
@@ -343,7 +343,7 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     ]
     encoder_cache.mm_features["req-no-lora"] = [
         MultiModalFeatureSpec(
-            data=None,
+            data=Mock(),
             modality="image",
             identifier="img-2",
             mm_position=PlaceholderRange(offset=0, length=1),
@@ -388,6 +388,76 @@ def test_set_active_mm_loras_builds_tower_and_connector_mappings():
     assert connector_mapping.type is LoRAMappingType.CONNECTOR
     assert connector_mapping.prompt_mapping == (7, 7, 0)
     assert connector_mapping.index_mapping == ((7,) * 14 + (7,) * 13 + (0,) * 12)
+
+
+def test_set_active_mm_loras_skips_items_without_data():
+    """Cache-served items (data=None) are skipped by
+    EncoderRunner.prepare_mm_inputs, so they must not add mapping rows."""
+    model = Mock()
+    model.get_num_mm_encoder_tokens.side_effect = lambda num_embeds: num_embeds + 1
+    model.get_mm_mapping.return_value = SimpleNamespace(connector=True)
+    model.get_num_mm_connector_tokens.side_effect = lambda num_tokens: num_tokens + 10
+
+    lora_manager = Mock()
+    lora_manager.supports_tower_connector_lora.return_value = True
+
+    encoder_cache = EncoderCache()
+    encoder_cache.mm_features["req-with-lora"] = [
+        MultiModalFeatureSpec(
+            data=Mock(),
+            modality="image",
+            identifier="img-0",
+            mm_position=PlaceholderRange(offset=0, length=2),
+        ),
+        MultiModalFeatureSpec(
+            data=None,
+            modality="image",
+            identifier="img-1",
+            mm_position=PlaceholderRange(offset=2, length=3),
+        ),
+    ]
+
+    lora_state = LoraState(max_num_reqs=4)
+    lora_request = LoRARequest("vision-lora", 7, "/tmp/vision-lora")
+    lora_state.add_request("req-with-lora", 0, lora_request)
+
+    set_active_mm_loras(
+        model=model,
+        lora_manager=lora_manager,
+        encoder_cache=encoder_cache,
+        req_id_to_index={"req-with-lora": 0},
+        lora_state=lora_state,
+        scheduled_encoder_inputs={"req-with-lora": [0, 1]},
+    )
+
+    # Only img-0 (data present) contributes rows: 2 embeds -> 3 tower and
+    # 13 connector tokens. The cache-served img-1 adds nothing, matching
+    # EncoderRunner.prepare_mm_inputs.
+    assert lora_manager.set_active_adapters.call_count == 2
+    tower_mapping = lora_manager.set_active_adapters.call_args_list[0].args[1]
+    assert tower_mapping.prompt_mapping == (7,)
+    assert tower_mapping.index_mapping == (7, 7, 7)
+    connector_mapping = lora_manager.set_active_adapters.call_args_list[1].args[1]
+    assert connector_mapping.prompt_mapping == (7,)
+    assert connector_mapping.index_mapping == (7,) * 13
+
+    # A step where every scheduled item is cache-served maps nothing.
+    lora_manager.reset_mock()
+    encoder_cache.mm_features["req-with-lora"][0] = MultiModalFeatureSpec(
+        data=None,
+        modality="image",
+        identifier="img-0",
+        mm_position=PlaceholderRange(offset=0, length=2),
+    )
+    set_active_mm_loras(
+        model=model,
+        lora_manager=lora_manager,
+        encoder_cache=encoder_cache,
+        req_id_to_index={"req-with-lora": 0},
+        lora_state=lora_state,
+        scheduled_encoder_inputs={"req-with-lora": [0, 1]},
+    )
+    lora_manager.set_active_adapters.assert_not_called()
 
 
 def test_update_states_new_request(model_runner, dist_init):
