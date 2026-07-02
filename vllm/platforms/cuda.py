@@ -194,15 +194,23 @@ def with_nvml_context(fn: Callable[_P, _R]) -> Callable[_P, _R]:
 _BLACKWELL_CONSUMER_CAPABILITIES = (DeviceCapability(12, 0), DeviceCapability(12, 1))
 
 
-@with_nvml_context
 def _driver_max_cuda_version() -> tuple[int, int] | None:
     """Highest CUDA version the installed driver can PTX-JIT for, or None
-    if it can't be determined (e.g. NVML unavailable)."""
+    if it can't be determined (e.g. NVML unavailable). Deliberately doesn't
+    use `@with_nvml_context`: that decorator lets `nvmlInit()` failures
+    propagate, which would crash attention-backend selection instead of
+    letting this optional check degrade gracefully."""
     try:
-        raw = pynvml.nvmlSystemGetCudaDriverVersion_v2()
+        pynvml.nvmlInit()
     except pynvml.NVMLError:
         return None
-    return (raw // 1000, (raw % 1000) // 10)
+    try:
+        raw = pynvml.nvmlSystemGetCudaDriverVersion_v2()
+        return (raw // 1000, (raw % 1000) // 10)
+    except pynvml.NVMLError:
+        return None
+    finally:
+        pynvml.nvmlShutdown()
 
 
 _VLLM_LOCAL_VERSION_CUDA_RE = re.compile(r"\bcu(\d{3})\b")
@@ -212,7 +220,10 @@ def _build_cuda_version() -> tuple[int, int] | None:
     """CUDA toolkit version vLLM's own C++/CUDA extensions were compiled
     with, read off the installed package's local version label (e.g.
     `0.1.dev1+g491f075.cu133` -> (13, 3)), the same `cu\\d{3}` convention
-    `setup.py`'s `detect_system_cuda_variant` writes at build time.
+    `setup.py`'s `get_vllm_version()` writes at build time. That suffix is
+    only appended when the build's CUDA version differs from vLLM's pinned
+    main version (`envs.VLLM_MAIN_CUDA_VERSION`) -- when it matches exactly,
+    no suffix is written, so fall back to the main version in that case.
 
     Deliberately not `torch.version.cuda`: that reflects the CUDA version
     the pre-built torch *wheel* was compiled with, which is a separate build
@@ -223,12 +234,16 @@ def _build_cuda_version() -> tuple[int, int] | None:
     try:
         version_str = importlib.metadata.version("vllm")
     except importlib.metadata.PackageNotFoundError:
-        return None
+        version_str = ""
     match = _VLLM_LOCAL_VERSION_CUDA_RE.search(version_str)
-    if match is None:
+    if match is not None:
+        digits = match.group(1)
+        return (int(digits[:2]), int(digits[2]))
+    try:
+        major_str, minor_str = envs.VLLM_MAIN_CUDA_VERSION.split(".")[:2]
+        return (int(major_str), int(minor_str))
+    except ValueError:
         return None
-    digits = match.group(1)
-    return (int(digits[:2]), int(digits[2]))
 
 
 def _check_flash_attn_ptx_compat(device_capability: DeviceCapability) -> None:
