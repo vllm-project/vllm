@@ -27,11 +27,19 @@ def create_error_response(
             "create_error_response called with %s: %s", type(exc).__name__, exc
         )
 
-        from vllm.exceptions import VLLMNotFoundError, VLLMValidationError
+        from vllm.exceptions import (
+            VLLMNotFoundError,
+            VLLMUnprocessableEntityError,
+            VLLMValidationError,
+        )
 
         if isinstance(exc, VLLMValidationError):
             err_type = "BadRequestError"
             status_code = HTTPStatus.BAD_REQUEST
+            param = exc.parameter
+        elif isinstance(exc, VLLMUnprocessableEntityError):
+            err_type = "UnprocessableEntityError"
+            status_code = HTTPStatus.UNPROCESSABLE_ENTITY
             param = exc.parameter
         elif isinstance(exc, VLLMNotFoundError):
             err_type = "NotFoundError"

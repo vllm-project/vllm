@@ -348,6 +348,65 @@ def build_harmony_preamble(
     return messages
 
 
+def _validate_content_parts(content: Any, role: str | None = None) -> None:
+    if role == "tool":
+        return
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict):
+                part_type = c.get("type")
+                if part_type is None:
+                    if "image_url" in c:
+                        part_type = "image_url"
+                    elif "image_pil" in c:
+                        part_type = "image_pil"
+                    elif "image_embeds" in c:
+                        part_type = "image_embeds"
+                    elif "audio_embeds" in c:
+                        part_type = "audio_embeds"
+                    elif "prompt_embeds" in c:
+                        part_type = "prompt_embeds"
+                    elif "audio_url" in c:
+                        part_type = "audio_url"
+                    elif "input_audio" in c:
+                        part_type = "input_audio"
+                    elif "video_url" in c:
+                        part_type = "video_url"
+                    elif "tool_reference" in c:
+                        part_type = "tool_reference"
+                    else:
+                        part_type = "text"
+
+                # Check if it is valid/supported
+                from vllm.exceptions import VLLMValidationError
+
+                supported = {
+                    "text",
+                    "thinking",
+                    "input_text",
+                    "output_text",
+                    "input_image",
+                    "image_url",
+                    "image_embeds",
+                    "audio_embeds",
+                    "prompt_embeds",
+                    "image_pil",
+                    "audio_url",
+                    "input_audio",
+                    "refusal",
+                    "video_url",
+                    "tool_reference",
+                }
+                if part_type not in supported:
+                    supported_str = ", ".join(sorted(supported))
+                    raise VLLMValidationError(
+                        f"Unsupported chat content part type: {part_type!r}. "
+                        f"Supported types: {supported_str}.",
+                        parameter="type",
+                        value=part_type,
+                    )
+
+
 def parse_chat_input_to_harmony_message(
     chat_msg, tool_id_names: dict[str, str] | None = None
 ) -> list[Message]:
@@ -362,6 +421,7 @@ def parse_chat_input_to_harmony_message(
         chat_msg = chat_msg.model_dump(exclude_none=True)
 
     role = chat_msg.get("role")
+    _validate_content_parts(chat_msg.get("content"), role)
     msgs: list[Message] = []
 
     # Assistant message with tool calls
