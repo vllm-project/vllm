@@ -26,6 +26,7 @@ If you only need to use the distributed environment without model/pipeline
 import contextlib
 import gc
 import pickle
+import time
 import weakref
 from collections import namedtuple
 from collections.abc import Callable
@@ -1999,6 +2000,46 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
         _EP.prepare_communication_buffer_for_model(model)
     if _EPLB is not None:
         _EPLB.prepare_communication_buffer_for_model(model)
+
+
+def checkpoint_prepare_distributed_state() -> None:
+    checkpoint_prepare_device_communicators()
+    torch.cuda.synchronize()
+    try:
+        from nccl_checkpoint import NCCLCheckpointLibrary
+    except Exception as exc:
+        logger.warning_once("NCCL checkpoint shim unavailable; skipping: %s", exc)
+    else:
+        logger.info("Calling NCCL checkpoint shim checkpoint_prepare()")
+        NCCLCheckpointLibrary().checkpoint_prepare()
+    torch.cuda.synchronize()
+    time.sleep(1)
+
+
+def checkpoint_restore_distributed_state() -> None:
+    try:
+        from nccl_checkpoint import NCCLCheckpointLibrary
+    except Exception as exc:
+        logger.warning_once("NCCL checkpoint shim unavailable; skipping: %s", exc)
+    else:
+        logger.info("Calling NCCL checkpoint shim checkpoint_restore()")
+        NCCLCheckpointLibrary().checkpoint_restore()
+    torch.cuda.synchronize()
+    checkpoint_restore_device_communicators()
+
+
+def checkpoint_prepare_device_communicators() -> None:
+    for group_ref in _groups.values():
+        group = group_ref()
+        if group is not None and group.device_communicator is not None:
+            group.device_communicator.checkpoint_prepare()
+
+
+def checkpoint_restore_device_communicators() -> None:
+    for group_ref in _groups.values():
+        group = group_ref()
+        if group is not None and group.device_communicator is not None:
+            group.device_communicator.checkpoint_restore()
 
 
 def model_parallel_is_initialized():

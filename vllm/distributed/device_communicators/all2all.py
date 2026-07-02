@@ -22,7 +22,10 @@ from .base_device_communicator import All2AllManagerBase, Cache
 
 if has_flashinfer_nvlink_two_sided():
     from flashinfer.comm import Mapping  # type: ignore[import-not-found]
-    from flashinfer.comm.mnnvl import MnnvlConfig  # type: ignore[import-not-found]
+    from flashinfer.comm.mnnvl import (  # type: ignore[import-not-found]
+        MnnvlConfig,
+        MnnvlMemory,
+    )
     from flashinfer.comm.trtllm_alltoall import (
         MnnvlMoe,  # type: ignore[import-not-found]
     )
@@ -577,6 +580,7 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         )
         self.initialized = False
         self.alltoall_info = None
+        self.mnnvl_config = None
 
     def initialize(
         self,
@@ -604,15 +608,17 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
         # MNNVL workspace is allocated per rank in the comm_backend's group; the
         # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
         # must span the EP group (= DP*PCP*TP), not the DP group.
-        ep_config = MnnvlConfig(
+        self.mnnvl_config = MnnvlConfig(
             comm_backend=CustomCommunicator(self.cpu_group),
             fabric_page_size=1 << 29,  # 512MB
             allocation_granularity=0,  # Auto-detect
         )
 
-        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(self.mapping, ep_config)
+        self.workspace_tensor = MnnvlMoe.get_moe_workspaces(
+            self.mapping, self.mnnvl_config
+        )
         self.prepare_workspace_tensor = MnnvlMoe.get_moe_prepare_workspace(
-            self.mapping, ep_config
+            self.mapping, self.mnnvl_config
         )
 
         self.world_size = world_size
@@ -659,7 +665,20 @@ class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
                 self.workspace_tensor = None
                 self.prepare_workspace_tensor = None
                 self.mapping = None
+                self.mnnvl_config = None
                 self.initialized = False
+
+    def checkpoint_prepare(self) -> None:
+        if self.initialized:
+            MnnvlMoe.moe_workspace.detach_handles()
+            MnnvlMoe.moe_prepare_workspace.detach_handles()
+
+    def checkpoint_restore(self) -> None:
+        if self.initialized:
+            assert self.mnnvl_config is not None
+            MnnvlMemory.set_comm_from_config(self.mapping, self.mnnvl_config)
+            MnnvlMoe.moe_workspace.reattach_handles()
+            MnnvlMoe.moe_prepare_workspace.reattach_handles()
 
 
 class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
@@ -690,6 +709,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         self.max_num_tokens = 0
         self.top_k = 0
         self.num_experts = 0
+        self.mnnvl_config = None
 
     def initialize(
         self,
@@ -778,7 +798,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
         # MNNVL workspace is allocated per rank in the comm_backend's group; the
         # flashinfer kernel asserts workspace.size(0) == moe_ep_size, so the backend
         # must span the EP group (= DP*PCP*TP), not the DP group.
-        ep_config = MnnvlConfig(
+        self.mnnvl_config = MnnvlConfig(
             comm_backend=CustomCommunicator(self.cpu_group),
         )
 
@@ -788,7 +808,7 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             top_k=self.top_k,
             num_experts=self.num_experts,
             workspace_size_per_rank=self.workspace_size,
-            mnnvl_config=ep_config,
+            mnnvl_config=self.mnnvl_config,
         )
 
         self.gpus_per_node = gpus_per_node
@@ -819,7 +839,18 @@ class FlashInferNVLinkOneSidedManager(All2AllManagerBase):
             finally:
                 self.moe_alltoall = None
                 self.mapping = None
+                self.mnnvl_config = None
                 self.initialized = False
+
+    def checkpoint_prepare(self) -> None:
+        if self.initialized:
+            assert self.moe_alltoall is not None
+            self.moe_alltoall.detach_handles()
+
+    def checkpoint_restore(self) -> None:
+        if self.initialized:
+            assert self.moe_alltoall is not None
+            self.moe_alltoall.reattach_handles()
 
 
 class MoriAll2AllManager(All2AllManagerBase):
