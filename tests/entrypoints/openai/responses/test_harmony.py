@@ -466,7 +466,7 @@ async def test_streaming(client: OpenAI, model_name: str, background: bool):
                 "response.content_part.added",
                 "response.reasoning_part.added",
             ]:
-                assert event.content_index == current_content_index + 1
+                assert event.content_index == 0
                 current_content_index = event.content_index
             elif event.type in [
                 "response.output_text.delta",

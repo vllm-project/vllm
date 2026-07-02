@@ -583,6 +583,33 @@ class TestHarmonyPreambleStreaming:
         assert "response.output_text.delta" in type_names
         assert "response.output_item.added" not in type_names
 
+    def test_content_index_resets_for_each_output_item(self) -> None:
+        """Responses API content_index is scoped to each output item."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_reasoning_delta_events,
+            emit_text_delta_events,
+        )
+
+        state = StreamingState()
+
+        reasoning_events = emit_reasoning_delta_events("thinking", state)
+        reasoning_part_added = next(
+            event
+            for event in reasoning_events
+            if event.type == "response.reasoning_part.added"
+        )
+        assert reasoning_part_added.content_index == 0
+
+        state.reset_for_new_item()
+
+        text_events = emit_text_delta_events("answer", state)
+        content_part_added = next(
+            event
+            for event in text_events
+            if event.type == "response.content_part.added"
+        )
+        assert content_part_added.content_index == 0
+
     def test_commentary_with_function_recipient_not_preamble(self) -> None:
         """commentary + recipient='functions.X' must NOT use preamble path."""
         from vllm.entrypoints.openai.responses.streaming_events import (
