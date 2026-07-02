@@ -1247,8 +1247,16 @@ class MoRIIOConnectorWorker:
         remote_tp_size: int,
         expected_engine_id: str,
         remote_dp_rank: int = 0,
+        remote_tp_rank: int | None = None,
     ) -> set[str]:
-        """Do a MoRIIO handshake with a remote instance."""
+        """Do a MoRIIO handshake with a remote instance.
+
+        remote_tp_rank: explicit remote TP index to dial. Flexible-read callers
+        pass the chosen prefill TP rank so the handshake, the (dp, tp) session
+        key and the notify port all address the SAME rank. None falls back to the
+        local-rank mapping _remote_tp_rank -- byte-identical for callers not yet
+        TP-aware.
+        """
 
         start_time = time.perf_counter()
 
@@ -1256,9 +1264,12 @@ class MoRIIOConnectorWorker:
         # a hack to keep us moving. We will switch when moving to etcd
         # or where we have a single ZMQ socket in the scheduler.
 
-        port_offset = get_port_offset(
-            remote_dp_rank, self._remote_tp_rank(remote_tp_size)
+        dial_tp_rank = (
+            self._remote_tp_rank(remote_tp_size)
+            if remote_tp_rank is None
+            else int(remote_tp_rank)
         )
+        port_offset = get_port_offset(remote_dp_rank, dial_tp_rank, remote_tp_size)
         path = make_zmq_path("tcp", host, port + port_offset)
         logger.debug("handshake Querying metadata on path: %s", path)
 
@@ -1709,6 +1720,12 @@ class MoRIIOConnectorWorker:
     def get_engine_name_with_dp(self, engine_name, dp_rank):
         return f"{engine_name}_dp{dp_rank}"
 
+    def get_engine_name_with_dp_tp(self, engine_name, dp_rank, tp_rank):
+        # Per-(dp, tp) session key. The flexible mirror read keys sessions per
+        # (dp, tp) so one decode worker can hold a session to EACH prefill TP
+        # rank and spread reads across them; other configs keep the DP-only key.
+        return f"{engine_name}_dp{dp_rank}_tp{tp_rank}"
+
     def _eager_handshake_all_dp_ranks(self, metadata: MoRIIOConnectorMetadata) -> None:
         """Handshake EVERY remote prefill DP rank BEFORE the decode forward pass,
         identically across all local TP workers.
@@ -1757,15 +1774,40 @@ class MoRIIOConnectorWorker:
             port = int(meta.remote_handshake_port)
             tp_size = int(meta.tp_size)
 
-            # Submit handshakes for every not-yet-known DP rank UNDER the lock; do
+            # Flexible mirror (TP prefill + MLA, world_size==1 decode): the read
+            # round-robins over prefill TP ranks, so pre-warm a session to EVERY
+            # (dp, tp) rank. Other configs pre-warm per DP rank (tp resolved by
+            # the fixed local-rank mapping) -- byte-identical to before. The
+            # mirror's decode is DP+EP, whose forward all-to-all is the collective
+            # that the eager barrier keeps everyone in step for.
+            flexible = (
+                self.world_size == 1
+                and self.use_mla
+                and remote_dp_size == 1
+                and tp_size > 1
+            )
+            # (engine_id, dp_rank, tp_rank_or_None); tp_rank is None on the legacy
+            # path so _moriio_handshake falls back to its _remote_tp_rank mapping.
+            if flexible:
+                targets = [
+                    (self.get_engine_name_with_dp_tp(remote_engine_id, dp, tp), dp, tp)
+                    for dp in range(remote_dp_size)
+                    for tp in range(max(1, tp_size))
+                ]
+            else:
+                targets = [
+                    (self.get_engine_name_with_dp(remote_engine_id, dp), dp, None)
+                    for dp in range(remote_dp_size)
+                ]
+
+            # Submit handshakes for every not-yet-known target UNDER the lock; do
             # NOT hold it across the join or the collective (a stalled recv must
             # not block another thread's lock acquisition). Gate on BOTH
             # _remote_agents AND layer metadata: a rank with an agent entry but no
             # layer metadata is half-handshaked and would KeyError at read time.
             futures: list[tuple[str, Future[set[str]]]] = []
             with self._handshake_lock:
-                for cur_dp_rank in range(remote_dp_size):
-                    eid = self.get_engine_name_with_dp(remote_engine_id, cur_dp_rank)
+                for eid, cur_dp_rank, cur_tp_rank in targets:
                     if (
                         eid in self._remote_agents
                         and eid in self.layer_name_to_remote_kv_cache_metadata
@@ -1778,6 +1820,7 @@ class MoRIIOConnectorWorker:
                         tp_size,
                         eid,
                         cur_dp_rank,
+                        cur_tp_rank,
                     )
                     futures.append((eid, fut))
 
@@ -1854,8 +1897,15 @@ class MoRIIOConnectorWorker:
                 str(meta.remote_host) + ":" + str(meta.remote_handshake_port)
             )
             meta.remote_engine_id = remote_engine_id
+            # The eager handshake above already covered every referenced engine
+            # (and keys the mirror per (dp, tp), which the DP-only dp0 probe below
+            # would miss). Only fall back to the lazy background handshake for an
+            # engine it did not cover.
             dp0_remote_engine_id = self.get_engine_name_with_dp(remote_engine_id, 0)
-            if dp0_remote_engine_id not in self._remote_agents:
+            if (
+                remote_engine_id not in self._eager_handshaked_engines
+                and dp0_remote_engine_id not in self._remote_agents
+            ):
                 # Initiate handshake with remote engine to exchange metadata.
                 with self._handshake_lock:
                     if remote_engine_id not in self._remote_agents:
@@ -1905,12 +1955,53 @@ class MoRIIOConnectorWorker:
                 self.save_kv_layer(metadata, layer_name, kv_layer, None)
             self._writer.seal_pending_transfers()
 
+    def _next_flex_tp_rank(self, remote_tp_size: int) -> int:
+        """Deterministic round-robin over prefill tp0..N-1 for the flexible read.
+
+        Round-robin (not random): exactly uniform and testable, with the same
+        prefill-NIC balancing. Seeded from this decode rank's dp_rank so
+        concurrent decode DP ranks are phase-staggered -- at a given read index
+        distinct decode ranks target distinct prefill TP ranks.
+        """
+        rr = getattr(self, "_flex_tp_rr", None)
+        if rr is None:
+            rr = int(getattr(self, "dp_rank", 0) or 0)
+        self._flex_tp_rr = rr + 1
+        return rr % remote_tp_size
+
+    def _resolve_read_source(self, meta: ReqMeta) -> tuple[int, bool]:
+        """Resolve (chosen_tp, flexible) for reading this request's KV.
+
+        Flexible mirror (decode world_size==1 + MLA + pure-TP prefill): MLA
+        replicates the latent KV across the prefill TP ranks, so any is a valid
+        source; round-robin across them to spread RDMA/NIC load. Otherwise the
+        source TP rank is fixed by the local-rank mapping (_remote_tp_rank) --
+        forward DP8EP->TP8 -> tp0; symmetric TP -> tp_rank -- byte-identical to
+        prior behaviour. chosen_tp is the single value threaded into the (dp, tp)
+        session key, the handshake dial and the notify port, so all three address
+        the SAME prefill rank (drift -> read one rank but notify another -> the
+        read rank's prefill buffer is never freed).
+        """
+        remote_tp_size = int(meta.tp_size)
+        flexible = (
+            self.world_size == 1
+            and self.use_mla
+            and int(meta.remote_dp_size) == 1
+            and remote_tp_size > 1
+        )
+        if flexible:
+            chosen_tp = self._next_flex_tp_rank(remote_tp_size)
+        else:
+            chosen_tp = self._remote_tp_rank(remote_tp_size)
+        return chosen_tp, flexible
+
     def _read_blocks_for_req(self, req_id: str, meta: ReqMeta):
         logger.debug(
             "Remote agent %s available, calling _read_blocks for req %s",
             meta.remote_engine_id,
             req_id,
         )
+        chosen_tp, flexible = self._resolve_read_source(meta)
         self._read_blocks(
             request_id=req_id,
             transfer_id=meta.transfer_id,
@@ -1921,6 +2012,8 @@ class MoRIIOConnectorWorker:
             remote_notify_port=meta.remote_notify_port,
             remote_tp_size=meta.tp_size,
             remote_dp_rank=meta.remote_dp_rank,
+            chosen_tp=chosen_tp,
+            flexible=flexible,
         )
 
     def _write_blocks_for_req(self, req_id: ReqId, meta: ReqMeta, layer_name, kv_layer):
@@ -2057,18 +2150,35 @@ class MoRIIOConnectorWorker:
         remote_notify_port: int,
         remote_tp_size: int,
         remote_dp_rank: int = 0,
+        chosen_tp: int | None = None,
+        flexible: bool = False,
     ) -> None:
         if self.mode == MoRIIOMode.WRITE:
             return
 
-        # Read from the prefill DP rank that actually computed this request's KV
+        # Read from the prefill rank that actually computed this request's KV
         # (forwarded by the proxy). Hardcoding DP0 reads from a different rank's
-        # memory registration; per-DP num_blocks differ, so high block ids can
-        # overrun the wrong rank's region. remote_dp_rank == 0 keeps the
-        # symmetric single-DP behaviour byte-for-byte.
-        remote_dp_engine_id = self.get_engine_name_with_dp(
-            dst_engine_id, int(remote_dp_rank)
+        # memory registration; per-rank num_blocks differ, so high block ids can
+        # overrun the wrong rank's region.
+        #
+        # eff_tp = the remote TP rank this read targets. The flexible mirror
+        # reads from a round-robin-chosen prefill TP rank and keys the session
+        # per (dp, tp); other configs use the fixed local-rank mapping (eff_tp ==
+        # _remote_tp_rank), byte-identical to before. This key MUST match the one
+        # the eager handshake stored the session under.
+        eff_tp = (
+            int(chosen_tp)
+            if chosen_tp is not None
+            else self._remote_tp_rank(remote_tp_size)
         )
+        if flexible:
+            remote_dp_engine_id = self.get_engine_name_with_dp_tp(
+                dst_engine_id, int(remote_dp_rank), eff_tp
+            )
+        else:
+            remote_dp_engine_id = self.get_engine_name_with_dp(
+                dst_engine_id, int(remote_dp_rank)
+            )
         sessions, remote_moriio_meta = self._get_built_session(remote_dp_engine_id)
 
         for layer_name in self.layer_name_to_local_kv_cache_metadata:
@@ -2094,7 +2204,7 @@ class MoRIIOConnectorWorker:
                         remote_notify_port
                         + get_port_offset(
                             int(remote_dp_rank),
-                            self._remote_tp_rank(remote_tp_size),
+                            eff_tp,
                             remote_tp_size,
                         )
                     ),
