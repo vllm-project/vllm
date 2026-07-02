@@ -88,7 +88,7 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
                 is_moe=False,
                 is_quantized=False,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
@@ -219,7 +219,7 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
                 is_quantized=False,
                 is_hybrid=True,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
@@ -230,7 +230,7 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
                 is_quantized=False,
                 is_attention_free=True,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
