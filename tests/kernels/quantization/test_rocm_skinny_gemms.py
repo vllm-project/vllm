@@ -14,7 +14,7 @@ from vllm.utils.platform_utils import num_compute_units
 DTYPES = [torch.bfloat16, torch.float16]
 BIAS_MODES = [0, 1, 2]
 # Specific (N, K, M) combinations for targeted testing
-NKM_FACTORS_LLMM1 = [
+NKM_FACTORS_VEC_MAT_MUL = [
     # Small, medium, large cases
     (1, 8, 16),
     (1, 32, 64),
@@ -172,24 +172,94 @@ def test_rocm_wvsplitkrc_kernel(xnorm, n, k, m, dtype, seed, padded_a, bias_mode
         torch.testing.assert_close(out, ref_out, atol=1e-3, rtol=1e-2)
 
 
-@pytest.mark.parametrize("n,k,m", NKM_FACTORS_LLMM1)
+@pytest.mark.parametrize("n,k,m", NKM_FACTORS_VEC_MAT_MUL)
 @pytest.mark.parametrize("dtype", DTYPES)
 @pytest.mark.parametrize("rows_per_block", [2, 4, 8, 16])
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
 @torch.inference_mode()
-def test_rocm_llmm1_kernel(n, k, m, dtype, rows_per_block, seed):
+def test_rocm_vec_mat_mul_kernel(n, k, m, dtype, rows_per_block, seed):
     torch.manual_seed(seed)
-    # TODO: Zero-centering the inputs causes errors for LLMM1!
-    #      Without that the numbers quickly saturate, and may
-    #      be giving false matches.
-    A = torch.rand(n, k, dtype=dtype, device="cuda")
-    B = torch.rand(m, k, dtype=dtype, device="cuda")
+    A = torch.randn(n, k, dtype=dtype, device="cuda")
+    B = torch.randn(m, k, dtype=dtype, device="cuda")
 
     ref_out = torch.matmul(A, B.t())
-    out = ops.LLMM1(B, A, rows_per_block)
+    out = ops.vecMatMul(B, A, rows_per_block)
 
-    torch.testing.assert_close(out, ref_out, atol=1e-8, rtol=1e-2)
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
+
+
+@pytest.mark.parametrize("rows_per_block", [4, 8, 16])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@torch.inference_mode()
+def test_rocm_vec_mat_mul_rdna4_row_write_regression(rows_per_block, dtype):
+    # Regression for RDNA4 (WARP_SIZE=32): output rows 2+ were silently skipped.
+    # The pre-fix kernel used `lane % 32 == 0` to select the group leader thread
+    # for each packed half2 write. THREADS_PER_ROW_GROUP is WARP_SIZE/ROWS_PER_BLOCK,
+    # so on WARP_SIZE=32 with rows_per_block=4 it is 8, and the second pair's leader
+    # sits at lane 16, which fails `lane % 32 == 0` and never writes.
+    # Fix: `lane % (2 * THREADS_PER_ROW_GROUP)`.
+    # Requires rows_per_block >= 4 to have a second pair; rows_per_block=2 is
+    # unaffected. On CDNA (WARP_SIZE=64), lane % 32 == 0 is correct either way.
+    torch.manual_seed(0)
+    m = rows_per_block * 4  # multiple blocks, all row slots exercised
+    k = 128  # small K to isolate from the cross-warp reduction bug
+    A = torch.randn(1, k, dtype=dtype, device="cuda")
+    B = torch.randn(m, k, dtype=dtype, device="cuda")
+
+    ref_out = torch.matmul(A, B.t())
+    out = ops.vecMatMul(B, A, rows_per_block)
+
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
+
+
+@pytest.mark.parametrize("k", [4096, 8192])
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@torch.inference_mode()
+def test_rocm_vec_mat_mul_rdna4_reduction_regression(k, dtype):
+    # Regression for RDNA4 (WARP_SIZE=32): cross-warp reduction silently dropped
+    # partial sums when num_warps > THREADS_PER_ROW_GROUP. On WARP_SIZE=32 with
+    # rows_per_block=2, THREADS_PER_ROW_GROUP=16, and num_warps exceeds 16 when
+    # K > 4096. The pre-fix loop only accumulated warps 0..THREADS_PER_ROW_GROUP-1,
+    # losing contributions from warps 16+ and producing results that are too small.
+    # Fix: stride the loop by THREADS_PER_ROW_GROUP across all num_warps. On CDNA
+    # (WARP_SIZE=64), THREADS_PER_ROW_GROUP=32 and the test K values don't exceed
+    # the threshold.
+    torch.manual_seed(0)
+    rows_per_block = (
+        2  # isolate from the row-write bug (which needs rows_per_block >= 4)
+    )
+    m = rows_per_block * 4
+    A = torch.randn(1, k, dtype=dtype, device="cuda")
+    B = torch.randn(m, k, dtype=dtype, device="cuda")
+
+    ref_out = torch.matmul(A, B.t())
+    out = ops.vecMatMul(B, A, rows_per_block)
+
+    atol = torch.finfo(dtype).eps * math.sqrt(k)
+    torch.testing.assert_close(out, ref_out, atol=atol, rtol=1e-2)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@torch.inference_mode()
+def test_rocm_vec_mat_mul_checks_n_equals_1():
+    A = torch.rand(2, 64, dtype=torch.float16, device="cuda")
+    B = torch.rand(128, 64, dtype=torch.float16, device="cuda")
+    with pytest.raises(RuntimeError, match="Row number of activation tensor must be 1"):
+        ops.vecMatMul(B, A, 4)
+
+
+@pytest.mark.skipif(not current_platform.is_rocm(), reason="only test for rocm")
+@torch.inference_mode()
+def test_rocm_vec_mat_mul_checks_k_mismatch():
+    A = torch.rand(1, 64, dtype=torch.float16, device="cuda")
+    B = torch.rand(128, 32, dtype=torch.float16, device="cuda")
+    with pytest.raises(RuntimeError, match="K dimension mismatch"):
+        ops.vecMatMul(B, A, 4)
 
 
 @pytest.mark.parametrize("xnorm", [False, True])
