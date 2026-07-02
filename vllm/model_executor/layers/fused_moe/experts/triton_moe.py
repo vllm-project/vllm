@@ -453,6 +453,7 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 self.quant_dtype,
                 self.per_act_token_quant,
                 self.block_shape,
+                ocp_mx_scheme=self.quant_config.ocp_mx_scheme,
                 quantization_emulation=self.quantization_emulation,
             )
 

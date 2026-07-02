@@ -1516,3 +1516,148 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Check accuracy using per-backend thresholds
     check_accuracy(ref, out, atol=0.1, rtol=config["rtol"], percent=config["percent"])
+
+
+# -----------------------------------------------------------------------------
+# OCP MX emulation backend execution tests
+# -----------------------------------------------------------------------------
+# Gates the emulation path for both the fp8-activation scheme (e.g., `w_mxfp4_a_fp8`)
+# and the non-fp8 scheme (e.g., `w_mxfp4_a_mxfp4`, backward-compatibility guard)
+# Gated to ROCm (the emulation backend's current target); remove if enabled elsewhere.
+@pytest.mark.parametrize(
+    "ocp_mx_scheme",
+    [
+        "w_mxfp4_a_mxfp4",  # non-fp8 activation (backward-compat guard)
+        "w_mxfp4_a_fp8",  # static fp8 activation scale (the fixed crash)
+    ],
+)
+@pytest.mark.parametrize("topk", [2])
+@pytest.mark.parametrize("num_experts", [8])
+@pytest.mark.parametrize("num_tokens,hidden_size,intermediate_size", [(16, 256, 256)])
+@pytest.mark.skipif(not ROCM_AVAILABLE, reason="emulation backend targets ROCm")
+@pytest.mark.skipif(
+    not QUARK_MXFP4_AVAILABLE,
+    reason="amd-quark is required to dequantize MXFP4 weights for emulation",
+)
+@torch.inference_mode()
+def test_ocp_mx_emulation_moe(
+    ocp_mx_scheme: str,
+    topk: int,
+    num_experts: int,
+    num_tokens: int,
+    hidden_size: int,
+    intermediate_size: int,
+):
+    """Build the emulation kernel as in production and run a forward; a finite,
+    non-zero output gates the `w_*_a_fp8` crash and the non-fp8 path."""
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.model_executor.layers.fused_moe import FusedMoEConfig
+    from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+    from vllm.model_executor.layers.fused_moe.config import (
+        FusedMoEParallelConfig,
+        RoutingMethodType,
+        mxfp4_w4a8_moe_quant_config,
+        ocp_mx_moe_quant_config,
+    )
+    from vllm.model_executor.layers.fused_moe.experts.ocp_mx_emulation_moe import (
+        OCP_MXQuantizationEmulationTritonExperts,
+    )
+    from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
+        Mxfp4MoeBackend,
+        make_mxfp4_moe_kernel,
+    )
+    from vllm.v1.worker.workspace import init_workspace_manager
+
+    torch.manual_seed(42)
+    device = "cuda:0"
+    dtype = torch.bfloat16
+    block_size = 32  # OCP MX block size (one e8m0 scale per 32 elements)
+
+    init_workspace_manager(torch.accelerator.current_device_index())
+
+    # Packed MXFP4 weights (2 fp4 values per uint8 byte) plus e8m0 (uint8) scales.
+    # w13: [E, 2*I, H//2], w2: [E, H, I//2]; one scale per 32-element block.
+    # Scale bytes are kept near 1.0 (e8m0 byte 127 == 2**0) to bound magnitudes.
+    def rand_packed(*shape):
+        return torch.randint(0, 256, shape, dtype=torch.uint8, device=device)
+
+    def rand_scale(*shape):
+        return torch.randint(124, 129, shape, dtype=torch.uint8, device=device)
+
+    w13_weight = rand_packed(num_experts, 2 * intermediate_size, hidden_size // 2)
+    w2_weight = rand_packed(num_experts, hidden_size, intermediate_size // 2)
+    w13_weight_scale = rand_scale(
+        num_experts, 2 * intermediate_size, hidden_size // block_size
+    )
+    w2_weight_scale = rand_scale(
+        num_experts, hidden_size, intermediate_size // block_size
+    )
+
+    if ocp_mx_scheme == "w_mxfp4_a_fp8":
+        # Static per-tensor fp8 activation scales — the case the fix addresses.
+        a1_scale = torch.ones(1, dtype=torch.float32, device=device)
+        a2_scale = torch.ones(1, dtype=torch.float32, device=device)
+        quant_config = mxfp4_w4a8_moe_quant_config(
+            w1_scale=w13_weight_scale,
+            w2_scale=w2_weight_scale,
+            a1_scale=a1_scale,
+            a2_scale=a2_scale,
+        )
+    else:  # w_mxfp4_a_mxfp4 — no static activation scale
+        quant_config = ocp_mx_moe_quant_config(
+            quant_dtype="mxfp4",
+            weight_dtype="mxfp4",
+            w1_scale=w13_weight_scale,
+            w2_scale=w2_weight_scale,
+            a1_scale=None,
+            a2_scale=None,
+        )
+
+    assert quant_config.ocp_mx_scheme == ocp_mx_scheme
+
+    moe_config = FusedMoEConfig(
+        num_experts=num_experts,
+        experts_per_token=topk,
+        hidden_dim=hidden_size,
+        intermediate_size_per_partition=intermediate_size,
+        num_local_experts=num_experts,
+        num_logical_experts=num_experts,
+        moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
+        activation=MoEActivation.SILU,
+        in_dtype=dtype,
+        device="cuda",
+        routing_method=RoutingMethodType.Renormalize,
+    )
+
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    router_logits = torch.randn(
+        num_tokens, num_experts, dtype=torch.float32, device=device
+    )
+    topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
+    topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
+
+    with set_current_vllm_config(VllmConfig()):
+        kernel = make_mxfp4_moe_kernel(
+            moe_quant_config=quant_config,
+            moe_config=moe_config,
+            mxfp4_backend=Mxfp4MoeBackend.EMULATION,
+            experts_cls=OCP_MXQuantizationEmulationTritonExperts,
+            routing_tables=None,
+        )
+
+        out = kernel.apply(
+            hidden_states=x,
+            w1=w13_weight,
+            w2=w2_weight,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=MoEActivation.SILU,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+
+    assert out.shape == (num_tokens, hidden_size), f"Unexpected shape: {out.shape}"
+    assert not torch.any(torch.isnan(out)), "Output contains NaN"
+    assert not torch.any(torch.isinf(out)), "Output contains Inf"
+    assert out.abs().max() > 0, "Output is all zeros"
