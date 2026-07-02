@@ -542,15 +542,22 @@ def fp8_fp4_mqa_logits(
 
 
 def get_paged_mqa_logits_metadata(
-    context_lens: torch.Tensor, block_size: int, num_sms: int
+    context_lens: torch.Tensor,
+    block_size: int,
+    num_sms: int,
+    indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Build scheduling metadata for paged MQA logits.
 
     Args:
         context_lens: Tensor of shape [B], dtype int32; effective context length
-            per batch element.
+            per batch element. For the varlen path this is [total_tokens, 1].
         block_size: KV-cache block size in tokens (e.g., 64).
         num_sms: Number of SMs available. 132 for Hopper
+        indices: Optional per-row request id, shape [total_tokens], int32. When
+            provided, selects the SM100 varlen path (next_n == 1 rows,
+            block_size in {32, 64}); adjacent equal values form one run. Must be
+            passed to `fp8_fp4_paged_mqa_logits` unchanged.
 
     Returns:
         Backend-specific tensor consumed by `fp8_fp4_paged_mqa_logits` to
@@ -559,7 +566,11 @@ def get_paged_mqa_logits_metadata(
     _lazy_init()
     if _get_paged_mqa_logits_metadata_impl is None:
         return _missing()
-    return _get_paged_mqa_logits_metadata_impl(context_lens, block_size, num_sms)
+    # Only forward `indices` when set so non-varlen callers stay byte-identical.
+    kwargs = {} if indices is None else {"indices": indices}
+    return _get_paged_mqa_logits_metadata_impl(
+        context_lens, block_size, num_sms, **kwargs
+    )
 
 
 def fp8_fp4_paged_mqa_logits(
@@ -571,6 +582,7 @@ def fp8_fp4_paged_mqa_logits(
     schedule_metadata: torch.Tensor,
     max_model_len: int,
     clean_logits: bool,
+    indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Compute MQA logits using a paged KV-cache.
 
@@ -582,19 +594,24 @@ def fp8_fp4_paged_mqa_logits(
         q: Tuple ``(q_values, q_scale)``. FP8 path: q_values is
             [B, next_n, H, D] float8_e4m3fn and q_scale is None. FP4 path:
             q_values is packed uint8 and q_scale is the companion
-            block-scale tensor.
+            block-scale tensor. For the varlen path B is total_tokens and
+            next_n == 1.
         kv_cache: Paged KV-cache. FP8 layout is [num_blocks, block_size, 1,
             D+4], dtype `torch.uint8`, with the last 4 bytes per (block, pos)
             storing the float dequant scale.
         weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
         context_lens: Tensor of shape [B], dtype int32; effective context length
-            for each batch element.
+            for each batch element. For the varlen path this is
+            [total_tokens, 1].
         block_tables: Tensor of shape [B, max_blocks], dtype int32; maps logical
             block indices to physical blocks in the paged cache.
         schedule_metadata: Returned by `get_paged_mqa_logits_metadata`;
             used to distribute work across SMs.
         max_model_len: Maximum sequence length used to size the logits output.
         clean_logits: Whether to clean the unfilled logits into `-inf`.
+        indices: Optional per-row request id, shape [total_tokens], int32. When
+            provided, selects the SM100 varlen path (next_n == 1); must match
+            the tensor passed to `get_paged_mqa_logits_metadata`.
 
     Returns:
         Logits tensor of shape [B * next_n, max_model_len], dtype
@@ -603,6 +620,8 @@ def fp8_fp4_paged_mqa_logits(
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
         return _missing()
+    # Only forward `indices` when set so non-varlen callers stay byte-identical.
+    kwargs = {} if indices is None else {"indices": indices}
     return _fp8_fp4_paged_mqa_logits_impl(
         q,
         kv_cache,
@@ -612,6 +631,7 @@ def fp8_fp4_paged_mqa_logits(
         schedule_metadata,
         max_model_len,
         clean_logits=clean_logits,
+        **kwargs,
     )
 
 
