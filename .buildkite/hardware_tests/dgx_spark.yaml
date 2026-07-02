@@ -1,0 +1,23 @@
+group: Hardware
+steps:
+  - label: "DGX Spark UMA Memory Invariant"
+    key: dgx-spark-uma-mem
+    timeout_in_minutes: 20
+    device: dgx-spark
+    optional: true
+    soft_fail: true
+    num_devices: 1
+    depends_on:
+      - arm64-image-build
+    # Trigger only on the code this invariant actually guards: UMA detection
+    # (platform resolution + is_integrated_gpu) and the free-memory correction,
+    # plus the test itself. Build-wide changes still reach it via run_all.
+    source_file_dependencies:
+      - vllm/platforms/__init__.py
+      - vllm/platforms/cuda.py
+      - vllm/platforms/interface.py
+      - vllm/utils/mem_utils.py
+      - tests/utils_/test_mem_utils_hardware.py
+    commands:
+      - nvidia-smi
+      - pytest -s -v utils_/test_mem_utils_hardware.py
