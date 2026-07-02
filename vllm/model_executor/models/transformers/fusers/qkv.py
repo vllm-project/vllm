@@ -86,8 +86,7 @@ class QKVFuser(StackedFuser):
         names = dict(q_name=q.target, k_name=k.target, v_name=v.target)
         predicate = lambda n, c: isinstance(c, nn.Linear) and n not in names.values()
         others = [n for n, c in module.named_children() if predicate(n, c)]
-        if len(others) == 1:
-            names["o_name"] = others[0]
+        names["o_name"] = others[0] if len(others) == 1 else None
         return cls(source_cls=type(module).__name__, **names)
 
     def update_forward(self, module: nn.Module) -> None:
