@@ -880,6 +880,16 @@ class OffloadingConnectorScheduler:
                 if group_config.is_eagle_group:
                     num_blocks = max(0, num_blocks - 1)
 
+                # Clamp to the number of offload keys we actually have.
+                # num_offloadable_tokens is a forward-looking estimate
+                # (num_computed_tokens + num_scheduled_tokens), but
+                # offload_keys are only generated for tokens whose block
+                # hashes already exist. During decode, a block that
+                # completes in the *current* step won't have its hash
+                # yet — so num_blocks can overshoot. Clamping prevents
+                # silently skipping those blocks.
+                num_blocks = min(num_blocks, len(group_state.offload_keys))
+
                 start_block_idx = group_state.next_stored_block_idx
                 if num_blocks <= start_block_idx:
                     continue
