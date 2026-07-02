@@ -27,6 +27,15 @@ USE_FAST_DETOKENIZER = version.parse(tokenizers.__version__) >= version.parse("0
 INVALID_PREFIX_ERR_MSG = "Invalid prefix encountered"
 
 
+class InvalidTokenIDError(ValueError):
+    """A token id outside the tokenizer vocabulary was passed to detokenize.
+
+    This signals corrupted model output (e.g. NaN/overflow in the forward
+    pass producing an out-of-range sampled id) rather than a detokenization
+    bug, so it is surfaced per request instead of being silently swallowed.
+    """
+
+
 class IncrementalDetokenizer:
     def __init__(self):
         self.token_ids: list[int] = []
@@ -175,6 +184,8 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         self.skip_special_tokens = sampling_params.skip_special_tokens
 
         self.tokenizer: Tokenizer = tokenizer._tokenizer
+        # Full vocab size (incl. added tokens) for out-of-range id validation.
+        self.vocab_size = len(tokenizer)
 
         # Use native prefill to prime the decode stream with prompt tokens.
         # Look up DecodeStream on the module so backend patches (e.g. the
@@ -221,6 +232,17 @@ class FastIncrementalDetokenizer(BaseIncrementalDetokenizer):
         return token or ""
 
     def _protected_step(self, next_token_id: int) -> str | None:
+        # An out-of-range id is not a detokenization glitch: it means the
+        # model emitted a token id outside the vocab (e.g. NaN/overflow in the
+        # forward pass). Surface it per request instead of silently emitting an
+        # empty token (which hides the corruption) or letting it reach the Rust
+        # DecodeStream, which raises a cryptic per-token "StreamInput" TypeError.
+        if not 0 <= next_token_id < self.vocab_size:
+            raise InvalidTokenIDError(
+                f"Model produced out-of-range token id {next_token_id} "
+                f"(valid range [0, {self.vocab_size})); this indicates "
+                f"corrupted model output, not a detokenization error."
+            )
         try:
             token = self.stream.step(self.tokenizer, next_token_id)
         except (OverflowError, TypeError):
