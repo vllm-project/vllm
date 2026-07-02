@@ -78,7 +78,6 @@ class TranslationRequest(OpenAIBaseModel):
     `verbose_json`, or `vtt`.
     """
 
-    # TODO support additional sampling parameters
     # --8<-- [start:translation-sampling-params]
     use_beam_search: bool = False
     """Whether or not beam search should be used."""
@@ -103,6 +102,28 @@ class TranslationRequest(OpenAIBaseModel):
     will use [log probability](https://en.wikipedia.org/wiki/Log_probability)
     to automatically increase the temperature until certain thresholds are hit.
     """
+
+    top_p: float | None = None
+    """Enables nucleus (top-p) sampling, where tokens are selected from the
+    smallest possible set whose cumulative probability exceeds `p`.
+    """
+
+    top_k: int | None = None
+    """Limits sampling to the `k` most probable tokens at each step."""
+
+    min_p: float | None = None
+    """Filters out tokens with a probability lower than `min_p`, ensuring a
+    minimum likelihood threshold during sampling.
+    """
+
+    frequency_penalty: float | None = 0.0
+    """The frequency penalty to use for sampling."""
+
+    repetition_penalty: float | None = None
+    """The repetition penalty to use for sampling."""
+
+    presence_penalty: float | None = 0.0
+    """The presence penalty to use for sampling."""
     # --8<-- [end:translation-sampling-params]
 
     # --8<-- [start:translation-extra-params]
@@ -139,11 +160,23 @@ class TranslationRequest(OpenAIBaseModel):
 
     max_completion_tokens: int | None = None
     """The maximum number of tokens to generate."""
+
+    vllm_xargs: dict[str, str | int | float | bool] | None = Field(
+        default=None,
+        description=(
+            "Additional request parameters with string or "
+            "numeric values, used by custom extensions."
+        ),
+    )
     # --8<-- [end:translation-extra-params]
 
     # Default sampling parameters for translation requests.
     _DEFAULT_SAMPLING_PARAMS: dict = {
+        "repetition_penalty": 1.0,
         "temperature": 0,
+        "top_p": 1.0,
+        "top_k": 0,
+        "min_p": 0.0,
     }
 
     def build_stt_params(
@@ -199,14 +232,38 @@ class TranslationRequest(OpenAIBaseModel):
             temperature = default_sampling_params.get(
                 "temperature", self._DEFAULT_SAMPLING_PARAMS["temperature"]
             )
+        if (top_p := self.top_p) is None:
+            top_p = default_sampling_params.get(
+                "top_p", self._DEFAULT_SAMPLING_PARAMS["top_p"]
+            )
+        if (top_k := self.top_k) is None:
+            top_k = default_sampling_params.get(
+                "top_k", self._DEFAULT_SAMPLING_PARAMS["top_k"]
+            )
+        if (min_p := self.min_p) is None:
+            min_p = default_sampling_params.get(
+                "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
+            )
+        if (repetition_penalty := self.repetition_penalty) is None:
+            repetition_penalty = default_sampling_params.get(
+                "repetition_penalty",
+                self._DEFAULT_SAMPLING_PARAMS["repetition_penalty"],
+            )
 
         return SamplingParams.from_optional(
             temperature=temperature,
             max_tokens=max_tokens,
             seed=self.seed,
+            top_p=top_p,
+            top_k=top_k,
+            min_p=min_p,
+            frequency_penalty=self.frequency_penalty,
+            repetition_penalty=repetition_penalty,
+            presence_penalty=self.presence_penalty,
             output_kind=RequestOutputKind.DELTA
             if self.stream
             else RequestOutputKind.FINAL_ONLY,
+            extra_args=self.vllm_xargs,
             skip_clone=True,  # Created fresh per request, safe to skip clone
         )
 
