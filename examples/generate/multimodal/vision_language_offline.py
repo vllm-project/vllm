@@ -520,6 +520,45 @@ def run_gemma3n(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
+# Gemma 4
+def run_gemma4(questions: list[str], modality: str) -> ModelRequestData:
+    assert modality in ("image", "video")
+    model_name = "google/gemma-4-31B-it"
+
+    # NOTE: Gemma-4-31B is a large model. Users running into Out-Of-Memory (OOM)
+    # errors might need to set `tensor_parallel_size` to > 1.
+    engine_args = EngineArgs(
+        model=model_name,
+        max_model_len=4096,
+        max_num_seqs=2,
+        limit_mm_per_prompt={modality: 1},
+    )
+
+    if modality == "image":
+        prompts = [
+            (
+                "<bos><start_of_turn>user\n"
+                f"<image>\n{question}<end_of_turn>\n"
+                "<start_of_turn>model\n"
+            )
+            for question in questions
+        ]
+    else:  # video
+        prompts = [
+            (
+                "<bos><start_of_turn>user\n"
+                f"<|video|>\n{question}<end_of_turn>\n"
+                "<start_of_turn>model\n"
+            )
+            for question in questions
+        ]
+
+    return ModelRequestData(
+        engine_args=engine_args,
+        prompts=prompts,
+    )
+
+
 # GLM-4v
 def run_glm4v(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -2321,6 +2360,7 @@ model_example_map = {
     "fuyu": run_fuyu,
     "gemma3": run_gemma3,
     "gemma3n": run_gemma3n,
+    "gemma4": run_gemma4,
     "glm4v": run_glm4v,
     "glm4_1v": run_glm4_1v,
     "glm4_5v": run_glm4_5v,
@@ -2392,6 +2432,7 @@ MODELS_NEED_VIDEO_METADATA = [
 
 MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "llama4",
+    "gemma4",
     "qwen2_vl",
     "qwen2_5_vl",
     "qwen3_vl",

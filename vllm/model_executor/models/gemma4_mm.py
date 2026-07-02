@@ -16,7 +16,7 @@ reason about temporal order.
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import TYPE_CHECKING, Annotated, Any, Literal
+from typing import TYPE_CHECKING, Annotated, Any, ClassVar, Literal
 
 import numpy as np
 import torch
@@ -69,6 +69,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -83,6 +84,12 @@ from .utils import (
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.quantization import QuantizationConfig
+    from vllm.v1.worker.encoder_cudagraph_defs import (
+        EncoderCudaGraphCaptureInputs,
+        EncoderCudaGraphConfig,
+        EncoderCudaGraphReplayBuffers,
+        EncoderItemSpec,
+    )
 
 logger = init_logger(__name__)
 
@@ -977,7 +984,10 @@ class Gemma4ForConditionalGeneration(
     SupportsPP,
     SupportsLoRA,
     SupportsEagle3,
+    SupportsEncoderCudaGraph,
 ):
+    supports_encoder_cudagraph: ClassVar[Literal[True]] = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -1015,6 +1025,7 @@ class Gemma4ForConditionalGeneration(
         self.quant_config = quant_config
         self.multimodal_config = multimodal_config
         self.model_dtype = vllm_config.model_config.dtype
+        self.vllm_config = vllm_config
 
         # Only quantize towers when the quant method supports their
         # dimensions.  BNB/torchao handle arbitrary sizes; other methods
@@ -1514,6 +1525,402 @@ class Gemma4ForConditionalGeneration(
                 )
 
         return multimodal_embeddings
+
+    # ------------------------------------------------------------------ #
+    # EncoderCudaGraph protocol methods
+    # ------------------------------------------------------------------ #
+
+    def get_encoder_cudagraph_config(self) -> "EncoderCudaGraphConfig":
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        def pad_pixel_values(dst: torch.Tensor, src: torch.Tensor) -> None:
+            dst.zero_()
+            batch_size, num_patches = src.shape[0], src.shape[1]
+            dst[:batch_size, :num_patches].copy_(src)
+
+        def pad_pixel_position_ids(dst: torch.Tensor, src: torch.Tensor) -> None:
+            dst.fill_(-1)
+            batch_size, num_patches = src.shape[0], src.shape[1]
+            dst[:batch_size, :num_patches].copy_(src)
+
+        return EncoderCudaGraphConfig(
+            modalities=["image", "video"],
+            buffer_keys=[
+                "pixel_values",
+                "pixel_position_ids",
+                "gather_indices",
+            ],
+            out_hidden_size=self.config.text_config.hidden_size,
+            max_frames_per_video=_VIDEO_MAX_FRAMES,
+            padding_logics={
+                "pixel_values": pad_pixel_values,
+                "pixel_position_ids": pad_pixel_position_ids,
+            },
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        min_budget = 64
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.config.text_config.max_position_embeddings,
+        )
+        return (min_budget, max_budget)
+
+    def get_input_modality(self, mm_kwargs: dict[str, Any]) -> str:
+        if "pixel_values" in mm_kwargs:
+            return "image"
+        elif "pixel_values_videos" in mm_kwargs:
+            return "video"
+        raise ValueError("Unsupported modality in mm_kwargs")
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ) -> list["EncoderItemSpec"]:
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        modality = self.get_input_modality(mm_kwargs)
+        if modality == "image":
+            pixel_values = mm_kwargs["pixel_values"]
+            if isinstance(pixel_values, list):
+                return [
+                    EncoderItemSpec(
+                        input_size=pv.shape[0],
+                        output_tokens=pv.shape[0] // 4,
+                    )
+                    for pv in pixel_values
+                ]
+            else:
+                return [
+                    EncoderItemSpec(
+                        input_size=pixel_values.shape[1],
+                        output_tokens=pixel_values.shape[1] // 4,
+                    )
+                    for _ in range(pixel_values.shape[0])
+                ]
+        elif modality == "video":
+            pixel_values_videos = mm_kwargs["pixel_values_videos"]
+            video_frame_counts = mm_kwargs["video_frame_counts"]
+            fc_list = (
+                video_frame_counts.tolist()
+                if isinstance(video_frame_counts, torch.Tensor)
+                else list(video_frame_counts)
+            )
+            np_patches = pixel_values_videos.shape[1]
+            return [
+                EncoderItemSpec(
+                    input_size=fc * np_patches,
+                    output_tokens=fc * (np_patches // 4),
+                )
+                for fc in fc_list
+            ]
+        raise ValueError(f"Unknown modality: {modality}")
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        modality = self.get_input_modality(mm_kwargs)
+        if modality == "image":
+            pixel_values = mm_kwargs["pixel_values"]
+            pixel_position_ids = mm_kwargs["pixel_position_ids"]
+            if len(indices) == 0:
+                is_pv_list = isinstance(pixel_values, list)
+                is_pp_list = isinstance(pixel_position_ids, list)
+                return {
+                    "pixel_values": ([] if is_pv_list else pixel_values[:0]),
+                    "pixel_position_ids": (
+                        [] if is_pp_list else pixel_position_ids[:0]
+                    ),
+                }
+            if isinstance(pixel_values, list):
+                return {
+                    "pixel_values": [pixel_values[i] for i in indices],
+                    "pixel_position_ids": [pixel_position_ids[i] for i in indices],
+                }
+            return {
+                "pixel_values": pixel_values[indices],
+                "pixel_position_ids": pixel_position_ids[indices],
+            }
+        elif modality == "video":
+            pixel_values_videos = mm_kwargs["pixel_values_videos"]
+            pixel_position_ids_videos = mm_kwargs["pixel_position_ids_videos"]
+            video_frame_counts = mm_kwargs["video_frame_counts"]
+
+            if len(indices) == 0:
+                is_fc_tensor = isinstance(video_frame_counts, torch.Tensor)
+                return {
+                    "pixel_values_videos": pixel_values_videos[:0],
+                    "pixel_position_ids_videos": pixel_position_ids_videos[:0],
+                    "video_frame_counts": (
+                        video_frame_counts[:0] if is_fc_tensor else []
+                    ),
+                }
+
+            fc_list = (
+                video_frame_counts.tolist()
+                if isinstance(video_frame_counts, torch.Tensor)
+                else list(video_frame_counts)
+            )
+            cum_frames = [0]
+            for fc in fc_list:
+                cum_frames.append(cum_frames[-1] + fc)
+
+            selected_pv = torch.cat(
+                [
+                    pixel_values_videos[cum_frames[i] : cum_frames[i + 1]]
+                    for i in indices
+                ],
+                dim=0,
+            )
+            selected_pp = torch.cat(
+                [
+                    pixel_position_ids_videos[cum_frames[i] : cum_frames[i + 1]]
+                    for i in indices
+                ],
+                dim=0,
+            )
+            selected_fc = (
+                video_frame_counts[indices]
+                if isinstance(video_frame_counts, torch.Tensor)
+                else [video_frame_counts[i] for i in indices]
+            )
+            return {
+                "pixel_values_videos": selected_pv,
+                "pixel_position_ids_videos": selected_pp,
+                "video_frame_counts": selected_fc,
+            }
+        raise ValueError(f"Unknown modality: {modality}")
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+    ) -> "EncoderCudaGraphCaptureInputs":
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        import math
+        max_size = max(max_batch_size, max_frames_per_batch)
+        # per_item_patches must satisfy k² × per_item_output == per_item_patches
+        # for integer k (_avg_pool_by_positions requirement), and must be large
+        # enough to hold any real image. The largest real image has
+        # default_output_length * pooling_kernel_size² patches (e.g. 280×9=2520
+        # for gemma4). k = ceil(sqrt(max_real_patches / per_item_output)) is the
+        # smallest valid k. When max_batch_size=4 this reduces to the original
+        # token_budget * 4 formula.
+        per_item_output = token_budget // max_batch_size
+        pooling_k = getattr(self.vision_tower.config, "pooling_kernel_size", 3)
+        default_out = getattr(self.vision_tower.config, "default_output_length", 280)
+        max_real_patches = default_out * pooling_k * pooling_k
+        k = math.ceil(math.sqrt(max_real_patches / per_item_output))
+        per_item_patches = k * k * per_item_output
+
+        patch_size = self.vision_tower.config.patch_size
+        num_channels = getattr(self.vision_tower.config, "num_channels", 3)
+        patch_pixels = (patch_size**2) * num_channels
+
+        dummy_pixel_values = torch.zeros(
+            (max_size, per_item_patches, patch_pixels),
+            device=device,
+            dtype=dtype,
+        )
+        dummy_pixel_position_ids = torch.full(
+            (max_size, per_item_patches, 2),
+            -1,
+            device=device,
+            dtype=torch.long,
+        )
+        dummy_gather_indices = torch.zeros(
+            (token_budget,),
+            device=device,
+            dtype=torch.long,
+        )
+
+        return EncoderCudaGraphCaptureInputs(
+            values={
+                "pixel_values": dummy_pixel_values,
+                "pixel_position_ids": dummy_pixel_position_ids,
+                "gather_indices": dummy_gather_indices,
+            }
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ) -> "EncoderCudaGraphReplayBuffers":
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        modality = self.get_input_modality(mm_kwargs)
+        if modality == "image":
+            pixel_values = mm_kwargs["pixel_values"]
+            pixel_position_ids = mm_kwargs["pixel_position_ids"]
+        elif modality == "video":
+            pixel_values = mm_kwargs["pixel_values_videos"]
+            pixel_position_ids = mm_kwargs["pixel_position_ids_videos"]
+        else:
+            raise ValueError(f"Unsupported modality: {modality}")
+
+        if isinstance(pixel_values, list):
+            max_patches = max(pv.shape[0] for pv in pixel_values)
+            batch_size = len(pixel_values)
+            pv_tensor = torch.zeros(
+                (batch_size, max_patches, pixel_values[0].shape[1]),
+                dtype=pixel_values[0].dtype,
+                device=pixel_values[0].device,
+            )
+            pp_tensor = torch.full(
+                (batch_size, max_patches, 2),
+                -1,
+                dtype=pixel_position_ids[0].dtype,
+                device=pixel_position_ids[0].device,
+            )
+            for i, (pv, pp) in enumerate(zip(pixel_values, pixel_position_ids)):
+                pv_tensor[i, : pv.shape[0]].copy_(pv)
+                pp_tensor[i, : pp.shape[0]].copy_(pp)
+            pixel_values = pv_tensor
+            pixel_position_ids = pp_tensor
+
+        item_specs = self.get_encoder_cudagraph_item_specs(mm_kwargs)
+        per_item_out_tokens = [spec.output_tokens for spec in item_specs]
+        total_tokens = sum(per_item_out_tokens)
+
+        min_budget, max_budget = self.get_encoder_cudagraph_budget_range(
+            self.vllm_config
+        )
+        budgets = []
+        b = min_budget
+        while b <= max_budget:
+            budgets.append(b)
+            b *= 2
+        if not budgets or budgets[-1] < max_budget:
+            budgets.append(max_budget)
+
+        token_budget = next((b for b in budgets if b >= total_tokens), budgets[-1])
+        device = pixel_values.device
+        gather_indices = torch.zeros((token_budget,), dtype=torch.long, device=device)
+
+        if modality == "image":
+            dst_offset = 0
+            for i, n_tok in enumerate(per_item_out_tokens):
+                src_start = i * token_budget
+                src_end = src_start + n_tok
+                gather_indices[dst_offset : dst_offset + n_tok] = torch.arange(
+                    src_start, src_end, dtype=torch.long, device=device
+                )
+                dst_offset += n_tok
+        elif modality == "video":
+            video_frame_counts = mm_kwargs["video_frame_counts"]
+            fc_list = (
+                video_frame_counts.tolist()
+                if isinstance(video_frame_counts, torch.Tensor)
+                else list(video_frame_counts)
+            )
+            np_patches = pixel_values.shape[1]
+            frame_output_tokens = np_patches // 4
+
+            dst_offset = 0
+            frame_idx = 0
+            for fc in fc_list:
+                for f in range(fc):
+                    src_start = (frame_idx + f) * token_budget
+                    src_end = src_start + frame_output_tokens
+                    gather_indices[dst_offset : dst_offset + frame_output_tokens] = (
+                        torch.arange(
+                            src_start, src_end, dtype=torch.long, device=device
+                        )
+                    )
+                    dst_offset += frame_output_tokens
+                frame_idx += fc
+
+        return EncoderCudaGraphReplayBuffers(
+            values={
+                "pixel_values": pixel_values,
+                "pixel_position_ids": pixel_position_ids,
+                "gather_indices": gather_indices,
+            }
+        )
+
+    def encoder_cudagraph_forward(
+        self,
+        inputs: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        pixel_values = inputs["pixel_values"]
+        pixel_position_ids = inputs["pixel_position_ids"]
+        gather_indices = inputs["gather_indices"]
+
+        pad_tensor = (pixel_position_ids == -1).all(dim=-1)
+
+        vt = self.vision_tower
+        inputs_embeds = vt.patch_embedder(
+            pixel_values,
+            pixel_position_ids,
+            pad_tensor,
+        ).to(self.model_dtype)
+
+        encoder_outputs = vt.encoder(
+            inputs_embeds=inputs_embeds,
+            attention_mask=~pad_tensor,
+            pixel_position_ids=pixel_position_ids,
+        )
+        hidden_states = encoder_outputs.last_hidden_state
+
+        max_size = pixel_values.shape[0]
+        token_budget = gather_indices.shape[0]
+        per_item_output = token_budget // max_size
+
+        pooled_states, _ = vt.pooler(
+            hidden_states=hidden_states,
+            pixel_position_ids=pixel_position_ids,
+            padding_positions=pad_tensor,
+            output_length=per_item_output,
+        )
+
+        if getattr(vt.config, "standardize", False):
+            pooled_states = (pooled_states - vt.std_bias) * vt.std_scale
+
+        flat_pooled = pooled_states.reshape(-1, pooled_states.shape[-1])
+        gathered_states = flat_pooled[gather_indices]
+
+        flat_proj_embs = self.embed_vision(
+            inputs_embeds=gathered_states.unsqueeze(0)
+        ).squeeze(0)
+
+        return flat_proj_embs
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        modality = self.get_input_modality(mm_kwargs)
+        if modality == "image":
+            image_input = self._parse_and_validate_image_input(**mm_kwargs)
+            assert image_input is not None
+            embeddings = self._process_image_input(image_input)
+        elif modality == "video":
+            video_input = self._parse_and_validate_video_input(**mm_kwargs)
+            assert video_input is not None
+            embeddings = self._process_video_input(video_input)
+        else:
+            raise ValueError(f"Unsupported modality: {modality}")
+
+        return torch.cat(embeddings, dim=0)
 
     def embed_input_ids(
         self,
