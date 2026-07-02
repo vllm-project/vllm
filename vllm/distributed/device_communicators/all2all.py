@@ -946,15 +946,19 @@ class DeepEPV2All2AllManager(All2AllManagerBase):
         hidden: int,
         num_topk: int,
         use_fp8_dispatch: bool,
+        use_nvfp4_dispatch: bool = False,
     ) -> dict:
+        assert not (use_fp8_dispatch and use_nvfp4_dispatch), \
+            "Cannot use both FP8 and NVFP4 dispatch simultaneously"
         return dict(
-            group=self._device_group
-            if self._device_group is not None
+            group=self._device_group if self._device_group is not None
             else self.cpu_group,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
             hidden=hidden,
             num_topk=num_topk,
             use_fp8_dispatch=use_fp8_dispatch,
+            use_nvfp4_dispatch=use_nvfp4_dispatch,
+            use_fp8_sf=use_nvfp4_dispatch,
             allow_hybrid_mode=envs.VLLM_DEEPEP_V2_ALLOW_HYBRID_MODE,
             prefer_overlap_with_compute=envs.VLLM_DEEPEP_V2_PREFER_OVERLAP,
             allow_multiple_reduction=(envs.VLLM_DEEPEP_V2_ALLOW_MULTIPLE_REDUCTION),

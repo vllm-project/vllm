@@ -213,12 +213,17 @@ def maybe_make_prepare_finalize(
             and quant_config.quant_dtype == current_platform.fp8_dtype()
             and quant_config.is_block_quantized
         )
+        use_nvfp4_dispatch = (
+            quant_config is not None
+            and quant_config.quant_dtype == "nvfp4"
+        )
         all_to_all_args = dict(
             num_max_tokens_per_rank=moe.max_num_tokens,
             hidden=moe.hidden_dim,
             num_topk=moe.experts_per_token,
             num_experts=moe.num_experts,
             use_fp8_dispatch=use_fp8_dispatch,
+            use_nvfp4_dispatch=use_nvfp4_dispatch,
         )
         handle = all2all_manager.get_handle(all_to_all_args)
         vllm_config = get_current_vllm_config()
@@ -232,6 +237,7 @@ def maybe_make_prepare_finalize(
             num_experts=moe.num_experts,
             num_topk=moe.experts_per_token,
             use_fp8_dispatch=use_fp8_dispatch,
+            use_nvfp4_dispatch=use_nvfp4_dispatch,
             use_cudagraph=use_cudagraph,
         )
 
