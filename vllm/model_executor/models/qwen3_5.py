@@ -224,10 +224,13 @@ class Qwen3_5Model(Qwen3NextModel):
         self.quant_config = vllm_config.quant_config
 
         self.vocab_size = config.vocab_size
+        quant_config = vllm_config.quant_config
 
         self.embed_tokens = VocabParallelEmbedding(
             self.vocab_size,
             config.hidden_size,
+            quant_config=quant_config,
+            prefix=f"{prefix}.embed_tokens",
         )
 
         def get_layer(prefix: str):
