@@ -29,7 +29,7 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizeMethodBase,
 )
 from vllm.model_executor.layers.utils import (
-    dispatch_unquantized_gemm,
+    select_unquantized_gemm_impl,
 )
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -183,7 +183,7 @@ class UnquantizedLinearMethod(LinearMethodBase):
     """Linear method without quantization."""
 
     def __init__(self) -> None:
-        self._gemm_impl = dispatch_unquantized_gemm()
+        self._gemm_impl = select_unquantized_gemm_impl()
 
     def create_weights(
         self,

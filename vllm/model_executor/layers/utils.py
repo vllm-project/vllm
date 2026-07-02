@@ -434,7 +434,7 @@ def _get_bf16_linear_config() -> tuple[str, bool]:
     return backend, kernel_config.enable_bf16_pdl
 
 
-def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
+def select_unquantized_gemm_impl() -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
         gemm_impl = rocm_unquantized_gemm
         gemm_name = "rocm_unquantized_gemm"

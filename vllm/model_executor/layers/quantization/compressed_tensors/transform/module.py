@@ -17,7 +17,7 @@ from vllm.model_executor.layers.linear import LinearBase
 from vllm.model_executor.layers.quantization.compressed_tensors.transform.utils import (  # noqa: E501
     TransformTuple,
 )
-from vllm.model_executor.layers.utils import dispatch_unquantized_gemm
+from vllm.model_executor.layers.utils import select_unquantized_gemm_impl
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.parameter import SharedWeightParameter
 
@@ -43,7 +43,7 @@ class HadamardTransform(torch.nn.Module):
         output_partition_sizes: list[int],
     ):
         super().__init__()
-        self._gemm_impl = dispatch_unquantized_gemm()
+        self._gemm_impl = select_unquantized_gemm_impl()
         self.transforms = transforms
         self.scales = {}
 

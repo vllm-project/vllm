@@ -41,7 +41,7 @@ def test_unquantized_gemm_is_bound_during_initialization(
         return gemm_impl
 
     selector = MagicMock(side_effect=select_gemm)
-    monkeypatch.setattr(module, "dispatch_unquantized_gemm", selector)
+    monkeypatch.setattr(module, "select_unquantized_gemm_impl", selector)
     monkeypatch.setattr(module.envs, "VLLM_BATCH_INVARIANT", False)
 
     with set_current_vllm_config(config):
@@ -78,7 +78,7 @@ def test_flashinfer_pdl_is_bound_from_config(monkeypatch):
     monkeypatch.setattr(utils, "is_flashinfer_bf16_gemm_supported", lambda: True)
 
     with set_current_vllm_config(config):
-        gemm_impl = utils.dispatch_unquantized_gemm()
+        gemm_impl = utils.select_unquantized_gemm_impl()
 
     assert isinstance(gemm_impl, functools.partial)
     assert gemm_impl.func is utils.cuda_flashinfer_bf16_gemm

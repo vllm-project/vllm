@@ -24,33 +24,6 @@ from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
-_FLASHINFER_BF16_GEMM_BACKENDS = (
-    "cudnn",
-    "cutlass",
-    "tgv",
-    "cublaslt",
-)
-_FLASHINFER_BF16_GEMM_BACKENDS_REQUIRING_NINJA = ("cutlass",)
-
-
-def _get_flashinfer_bf16_gemm_backends(
-    mm_bf16: Any,
-    compute_capability: int,
-    bias: torch.Tensor | None,
-) -> list[str]:
-    """Return supported BF16 GEMM backends, excluding TinyGEMM."""
-    candidates: tuple[str, ...]
-    if bias is not None:
-        candidates = ("tgv", "cudnn")
-    else:
-        candidates = ("cutlass", "tgv", "cudnn", "cublaslt")
-
-    return [
-        backend
-        for backend in candidates
-        if mm_bf16.is_backend_supported(backend, compute_capability)
-    ]
-
 
 def flashinfer_bf16_mm_impl(
     A: torch.Tensor,
@@ -66,39 +39,14 @@ def flashinfer_bf16_mm_impl(
     """
     from flashinfer import mm_bf16
 
-    # FlashInfer 0.6.12 has no public backend allowlist for auto dispatch.
-    # Use its pinned lower dispatcher until TinyGEMM is CUDA-graph safe.
-    from flashinfer.gemm.gemm_base import (
-        DEFAULT_WORKSPACE_SIZE,
-        bf16_gemm_sm100,
+    return mm_bf16(
+        A,
+        B,
+        bias=bias,
+        pdl=pdl,
+        out_dtype=torch.bfloat16,
+        backend="auto",
     )
-    from flashinfer.utils import _get_cache_buf
-
-    major, minor = torch.cuda.get_device_capability(A.device)
-    backends = _get_flashinfer_bf16_gemm_backends(
-        mm_bf16,
-        major * 10 + minor,
-        bias,
-    )
-    if not backends:
-        raise RuntimeError("No supported FlashInfer BF16 GEMM backend found.")
-
-    logger.info_once(
-        "FlashInfer BF16 GEMM candidates: %s (TinyGEMM disabled).",
-        tuple(backends),
-    )
-    out = torch.empty(
-        (A.shape[0], B.shape[1]),
-        dtype=torch.bfloat16,
-        device=A.device,
-    )
-    workspace = _get_cache_buf(
-        "mm_bf16_workspace",
-        DEFAULT_WORKSPACE_SIZE,
-        A.device,
-    )
-    bf16_gemm_sm100(A, B, bias, pdl, out, workspace, backends)
-    return out
 
 
 # This is the storage path for the cubins, it can be replaced
@@ -377,7 +325,7 @@ def is_flashinfer_bf16_gemm_supported(
 
     mod = _get_submodule("flashinfer")
     mm_bf16 = getattr(mod, "mm_bf16", None) if mod else None
-    if mm_bf16 is None or not hasattr(mm_bf16, "is_backend_supported"):
+    if mm_bf16 is None or not hasattr(mm_bf16, "is_compute_capability_supported"):
         return False
 
     if compute_capability is None:
@@ -386,20 +334,10 @@ def is_flashinfer_bf16_gemm_supported(
             return False
         compute_capability = device_capability.to_int()
 
-    for backend in _FLASHINFER_BF16_GEMM_BACKENDS:
-        if (
-            backend in _FLASHINFER_BF16_GEMM_BACKENDS_REQUIRING_NINJA
-            and not has_flashinfer_cubin()
-            and shutil.which("ninja") is None
-        ):
-            continue
-        try:
-            if mm_bf16.is_backend_supported(backend, compute_capability):
-                return True
-        except Exception:
-            continue
-
-    return False
+    try:
+        return mm_bf16.is_compute_capability_supported(compute_capability)
+    except Exception:
+        return False
 
 
 @functools.cache
@@ -683,35 +621,6 @@ if has_flashinfer():
     )
 
     @torch.library.custom_op(
-        "vllm::flashinfer_mm_bf16",
-        mutates_args=[],
-        device_types="cuda",
-    )
-    def flashinfer_mm_bf16(
-        A: torch.Tensor,
-        B: torch.Tensor,
-        bias: torch.Tensor | None,
-        pdl: bool = False,
-    ) -> torch.Tensor:
-        return flashinfer_bf16_mm_impl(A, B, bias, pdl)
-
-    @torch.library.register_fake(
-        "vllm::flashinfer_mm_bf16",
-    )
-    def flashinfer_mm_bf16_fake(
-        A: torch.Tensor,
-        B: torch.Tensor,
-        bias: torch.Tensor | None,
-        pdl: bool = False,
-    ) -> torch.Tensor:
-        return torch.empty(
-            A.shape[0],
-            B.shape[1],
-            dtype=torch.bfloat16,
-            device=A.device,
-        )
-
-    @torch.library.custom_op(
         "vllm::flashinfer_mm_fp4",
         mutates_args=[],
         device_types="cuda",
@@ -912,7 +821,7 @@ def flashinfer_bf16_mm(
         assert bias.dtype == torch.bfloat16
         assert bias.device == a.device
 
-    return torch.ops.vllm.flashinfer_mm_bf16(a, b, bias, pdl)
+    return flashinfer_bf16_mm_impl(a, b, bias, pdl)
 
 
 def flashinfer_mm_mxfp8(
