@@ -838,15 +838,38 @@ def get_pooling_config(
         logger.info("Found pooling configuration.")
 
         config: dict[str, Any] = {"use_activation": normalize}
+        found_pooling_type = False
         for key, val in pooling_dict.items():
-            if val is True:
+            # ST >= 5.4.0 uses a single "pooling_mode": "<mode>" string;
+            # older versions use a per-mode boolean flag.
+            if key == "pooling_mode" and isinstance(val, str):
+                pooling_type = parse_pooling_type(val)
+            elif val is True:
                 pooling_type = parse_pooling_type(key)
-                if pooling_type in SEQ_POOLING_TYPES:
-                    config["seq_pooling_type"] = pooling_type
-                elif pooling_type in TOK_POOLING_TYPES:
-                    config["tok_pooling_type"] = pooling_type
-                else:
-                    logger.debug("Skipping unrelated field: %r=%r", key, val)
+            else:
+                continue
+
+            if pooling_type in SEQ_POOLING_TYPES:
+                config["seq_pooling_type"] = pooling_type
+                found_pooling_type = True
+            elif pooling_type in TOK_POOLING_TYPES:
+                config["tok_pooling_type"] = pooling_type
+                found_pooling_type = True
+            else:
+                logger.debug("Skipping unrelated field: %r=%r", key, val)
+
+        if not found_pooling_type:
+            # Warn instead of silently using the architecture-default pooler.
+            logger.warning(
+                "Found a sentence-transformers pooling configuration at %r but "
+                "could not derive a supported pooling type from it (keys: %s). "
+                "vLLM will fall back to the model architecture's default "
+                "pooler, which may produce incorrect embeddings. Consider "
+                'setting `--pooler-config \'{"pooling_type": "..."}\'` '
+                "explicitly.",
+                pooling_file_name,
+                sorted(pooling_dict.keys()),
+            )
 
         return config
 
