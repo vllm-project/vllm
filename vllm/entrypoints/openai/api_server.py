@@ -508,7 +508,25 @@ async def init_render_app_state(
     state.server_load_metrics = 0
 
 
+def _check_port_available(addr: tuple[str, int]) -> None:
+    """Check if the given port is already in use by another process.
+
+    Raises RuntimeError if the port is occupied, so the server fails fast.
+    """
+    family = socket.AF_INET6 if is_valid_ipv6_address(addr[0]) else socket.AF_INET
+    host = addr[0] if addr[0] else ("::1" if family == socket.AF_INET6 else "127.0.0.1")
+    with socket.socket(family, type=socket.SOCK_STREAM) as s:
+        s.settimeout(0.1)
+        if s.connect_ex((host, addr[1])) == 0:
+            raise RuntimeError(
+                f"Port {addr[1]} on {addr[0] or 'all interfaces'} is already in use by"
+                "another process. "
+                "Please stop the conflicting service or use a different port (--port)."
+            )
+
+
 def create_server_socket(addr: tuple[str, int]) -> socket.socket:
+    _check_port_available(addr=addr)
     family = socket.AF_INET
     if is_valid_ipv6_address(addr[0]):
         family = socket.AF_INET6
