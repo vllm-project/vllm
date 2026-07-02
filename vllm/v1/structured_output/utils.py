@@ -87,6 +87,7 @@ def apply_grammar_bitmask(
     grammar_output: GrammarOutput,
     input_batch: InputBatch,
     logits: torch.Tensor,
+    structured_output_backend: str = "auto",
 ) -> None:
     """
     Apply grammar bitmask to output logits of the model with xgrammar function.
@@ -95,6 +96,8 @@ def apply_grammar_bitmask(
         scheduler_output (SchedulerOutput): The result of engine scheduling.
         input_batch (InputBatch): The input of model runner.
         logits (torch.Tensor): The output logits of model forward.
+        structured_output_backend (str): The structured output backend to use
+            for applying the bitmask.
     """
     # Serialization of np.ndarray is much more efficient than a tensor,
     # so we receive it in that format.
@@ -166,12 +169,22 @@ def apply_grammar_bitmask(
     # See: https://github.com/vllm-project/vllm/issues/31901
     if logits.dtype != torch.float32:
         # Convert to float32, apply bitmask, then convert back
-        logits_fp32 = logits.to(torch.float32)
-        xgr.apply_token_bitmask_inplace(logits_fp32, grammar_bitmask, indices=indices)
+        logits_float32 = logits.to(torch.float32)
+        xgr.apply_token_bitmask_inplace(
+            logits_float32,
+            grammar_bitmask,
+            indices=indices,
+            backend=structured_output_backend,
+        )
         # Copy the modified values back to the original tensor
         logits.copy_(logits_fp32.to(logits.dtype))
     else:
-        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=indices)
+        xgr.apply_token_bitmask_inplace(
+            logits,
+            grammar_bitmask,
+            indices=indices,
+            backend=structured_output_backend,
+        )
 
 
 class OutlinesVocabulary:
