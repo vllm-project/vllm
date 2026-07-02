@@ -358,6 +358,12 @@ class OffloadingConnectorScheduler:
         self._blocks_being_loaded: set[OffloadKey] | None = (
             set() if spec.vllm_config.cache_config.enable_prefix_caching else None
         )
+        # True if any request in the previous scheduling step needed blocks
+        # loaded from CPU (num_external_tokens > 0). Used to gate the
+        # _blocks_being_loaded delay: when the GPU is not under pressure,
+        # blocks found in the CPU cache are already live in GPU and delaying
+        # requests causes an unnecessary convoy without any benefit.
+        self._gpu_kv_cache_under_pressure: bool = False
 
         # Job ID counter shared by loads and stores.
         self._job_counter: int = 0
@@ -616,13 +622,32 @@ class OffloadingConnectorScheduler:
                 if sliding_window_size_in_blocks is not None:
                     offload_keys = offload_keys[-sliding_window_size_in_blocks:]
                 if any(key in self._blocks_being_loaded for key in offload_keys):
-                    # hit blocks are being loaded, delay request
-                    logger.debug(
-                        "Delaying request %s since some of its"
-                        " blocks are already being loaded",
-                        req_status.req.request_id,
-                    )
-                    return None
+                    if self._gpu_kv_cache_under_pressure:
+                        # GPU is under pressure: blocks genuinely need to be
+                        # loaded from CPU and the in-flight load is useful.
+                        # Delay this request so it benefits from the load that
+                        # is already in progress rather than re-prefilling.
+                        # See: https://github.com/vllm-project/vllm/issues/44294
+                        logger.debug(
+                            "Delaying request %s — blocks loading and GPU"
+                            " under pressure; will retry next step",
+                            req_status.req.request_id,
+                        )
+                        return None
+                    else:
+                        # GPU is not under pressure: the hit blocks are still
+                        # live in the GPU KV cache so no load is needed.
+                        # Delaying would create a needless request convoy.
+                        # Skip the CPU hit and let the request proceed;
+                        # the in-flight load will warm the CPU cache for
+                        # future eviction scenarios.
+                        # See: https://github.com/vllm-project/vllm/issues/44294
+                        logger.debug(
+                            "Skipping CPU hit for request %s — blocks loading"
+                            " but GPU not under pressure; avoiding convoy",
+                            req_status.req.request_id,
+                        )
+                        return 0
 
         logger.debug(
             "Request %s hit %s offloaded tokens after %s GPU hit tokens",
@@ -697,6 +722,8 @@ class OffloadingConnectorScheduler:
     ):
         if num_external_tokens == 0:
             return
+        # GPU KV cache had to evict blocks for this request — record pressure.
+        self._gpu_kv_cache_under_pressure = True
 
         req_status = self._req_status[request.request_id]
 
@@ -1027,6 +1054,9 @@ class OffloadingConnectorScheduler:
     def build_connector_meta(
         self, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
+        # Reset the GPU pressure flag for the next step. It will be set True
+        # again by update_state_after_alloc if any request needs CPU blocks.
+        self._gpu_kv_cache_under_pressure = False
         self._update_req_states(scheduler_output)
         schedule_end_context = ScheduleEndContext(
             new_req_ids=[req.req_id for req in scheduler_output.scheduled_new_reqs],
