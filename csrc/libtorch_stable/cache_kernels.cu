@@ -1164,12 +1164,24 @@ void gather_and_maybe_dequant_cache(
 
 namespace vllm {
 
+__device__ __forceinline__ void zero_mla_bf16_entry(__nv_bfloat16* dst_ptr,
+                                                    const int lane_id) {
+  const int4 zero = make_int4(0, 0, 0, 0);
+  int4* nope_dst = reinterpret_cast<int4*>(dst_ptr) + lane_id * 2;
+  nope_dst[0] = zero;
+  nope_dst[1] = zero;
+
+  int* rope_dst = reinterpret_cast<int*>(dst_ptr + 512);
+  rope_dst[lane_id] = 0;
+}
+
 // Gather and upconvert FP8 KV cache tokens to BF16 workspace
 // Similar to cp_gather_cache but specifically for FP8->BF16 conversion
 __global__ void cp_gather_and_upconvert_fp8_kv_cache(
     const uint8_t* __restrict__ src_cache,    // [NUM_BLOCKS, BLOCK_SIZE, 656]
     __nv_bfloat16* __restrict__ dst,          // [total_tokens, 576]
     const int32_t* __restrict__ block_table,  // [num_reqs, BLOCK_INDICES]
+    const int32_t* __restrict__ seq_lens,     // [num_reqs]
     const int32_t* __restrict__ workspace_starts,  // [num_reqs]
     const int32_t num_reqs, const int32_t block_size,
     const int32_t total_tokens, const int64_t block_table_stride,
@@ -1178,6 +1190,12 @@ __global__ void cp_gather_and_upconvert_fp8_kv_cache(
   const int flat_warp_id = (blockIdx.x * blockDim.x + threadIdx.x) >> 5;
   if (flat_warp_id >= total_tokens) return;
   const int lane_id = threadIdx.x & 31;
+  const int out_token_id = flat_warp_id;
+
+  if (num_reqs <= 0) {
+    zero_mla_bf16_entry(dst + out_token_id * dst_entry_stride, lane_id);
+    return;
+  }
 
   // Binary search to find which request owns this output token
   int lo = 0, hi = num_reqs - 1;
@@ -1191,12 +1209,25 @@ __global__ void cp_gather_and_upconvert_fp8_kv_cache(
   const int req_id = lo;
 
   // Compute physical token address via block table
-  const int out_token_id = flat_warp_id;
   const int token_offset = out_token_id - workspace_starts[req_id];
+  if (token_offset < 0 || token_offset >= seq_lens[req_id]) {
+    zero_mla_bf16_entry(dst + out_token_id * dst_entry_stride, lane_id);
+    return;
+  }
+
   const int cache_block_idx = token_offset / block_size;
+  if (cache_block_idx >= block_table_stride) {
+    zero_mla_bf16_entry(dst + out_token_id * dst_entry_stride, lane_id);
+    return;
+  }
+
   const int offset_in_block = token_offset % block_size;
   const int physical_block =
       block_table[req_id * block_table_stride + cache_block_idx];
+  if (physical_block < 0) {
+    zero_mla_bf16_entry(dst + out_token_id * dst_entry_stride, lane_id);
+    return;
+  }
 
   const uint8_t* token_ptr = src_cache + physical_block * cache_block_stride +
                              offset_in_block * cache_entry_stride;
@@ -1443,6 +1474,7 @@ void cp_gather_and_upconvert_fp8_kv_cache(
                                                stream>>>(
       src_ptr, reinterpret_cast<__nv_bfloat16*>(dst.data_ptr()),
       block_table.const_data_ptr<int32_t>(),
+      seq_lens.const_data_ptr<int32_t>(),
       workspace_starts.const_data_ptr<int32_t>(),
       static_cast<int32_t>(batch_size), block_size, total_tokens,
       block_table_stride, cache_block_stride, cache_entry_stride,

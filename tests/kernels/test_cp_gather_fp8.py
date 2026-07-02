@@ -257,6 +257,32 @@ def test_cp_gather_and_upconvert_fp8_kv_cache(seq_lens, block_size):
     assert torch.equal(dst[:, NOPE_DIM:], expected[:, NOPE_DIM:])
 
 
+def test_cp_gather_fp8_workspace_start_oob_zero_fill():
+    """Regression test for #45377.
+
+    If the first workspace start is greater than the first output token, the
+    computed request-relative offset is negative. The kernel should not use that
+    negative offset to index before the block table.
+    """
+    block_size = 16
+    cache = torch.full(
+        (1, block_size, ENTRY_BYTES), 255, dtype=torch.uint8, device="cuda"
+    )
+    block_table = torch.tensor([[0]], dtype=torch.int32, device="cuda")
+    seq_lens_t = torch.tensor([1], dtype=torch.int32, device="cuda")
+    workspace_starts = torch.tensor([block_size], dtype=torch.int32, device="cuda")
+    dst = torch.ones(
+        (1, NOPE_DIM + ROPE_DIM), dtype=torch.bfloat16, device="cuda"
+    )
+
+    ops.cp_gather_and_upconvert_fp8_kv_cache(
+        cache, dst, block_table, seq_lens_t, workspace_starts, 1
+    )
+
+    torch.accelerator.synchronize()
+    assert torch.count_nonzero(dst).item() == 0
+
+
 def test_cp_gather_fp8_shuffled_blocks():
     """Test that the kernel correctly follows the block table when
     physical blocks are non-contiguous and out of order.
