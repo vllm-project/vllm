@@ -107,7 +107,6 @@ class BailingMoeV25MultiTokenPredictorLayer(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_index: int = 0,
     ) -> torch.Tensor:
-        del input_ids, spec_step_index
         assert inputs_embeds is not None
         inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
@@ -224,7 +223,6 @@ class BailingMoeV25MTPModel(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        del intermediate_tensors
         return self.model(
             input_ids,
             positions,
@@ -271,8 +269,6 @@ class BailingMoeV25MTPModel(nn.Module):
             if name is None:
                 return False
             if name not in params_dict or is_pp_missing_parameter(name, self):
-                return False
-            if name.endswith(".bias") and name not in params_dict:
                 return False
 
             param = params_dict[name]
