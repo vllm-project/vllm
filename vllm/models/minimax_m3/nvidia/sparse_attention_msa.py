@@ -76,8 +76,7 @@ class MiniMaxM3SparseMSAImpl(MiniMaxM3SparseImpl):
             assert p is not None
             prefill_topk = topk[:, nd:num_tokens, :]
             qp = q[nd:]
-            k_cache = kv_cache[:, 0].transpose(1, 2)
-            v_cache = kv_cache[:, 1].transpose(1, 2)
+            k_cache, v_cache = kv_cache.split(self.head_size, dim=-1)
             k2q_row_ptr, k2q_q_indices, schedule = build_k2q_csr(
                 prefill_topk,
                 p.cu_seqlens_q,

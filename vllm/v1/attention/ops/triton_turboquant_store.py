@@ -389,7 +389,7 @@ def triton_turboquant_store(
         _tq_fused_store_fp8[grid](
             k_flat,
             v_flat,
-            kv_cache.view(-1),
+            kv_cache,
             slot_mapping,
             stride_cache_block=stride_block,
             stride_cache_pos=stride_pos,
@@ -425,7 +425,7 @@ def triton_turboquant_store(
         norms.squeeze(1),
         v_flat,
         midpoints,
-        kv_cache.view(-1),
+        kv_cache,
         slot_mapping,
         stride_cache_block=stride_block,
         stride_cache_pos=stride_pos,

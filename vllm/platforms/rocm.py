@@ -427,8 +427,8 @@ def _get_backend_priorities(
             ]
 
     backends = []
-    # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
-    # incompatible with KV connectors that require blocks-first layout.
+    # Keep ROCM_ATTN disabled for KV connectors until connector transfer
+    # semantics are validated for its asymmetric native K/V cache views.
     if not use_kv_connector:
         backends.append(AttentionBackendEnum.ROCM_ATTN)
     if rocm_aiter_ops.is_mha_enabled():
@@ -511,6 +511,20 @@ class RocmPlatform(Platform):
             attn_selector_config.use_sparse,
             attn_selector_config.use_kv_connector,
         )
+        from vllm.config import get_current_vllm_config_or_none
+
+        vllm_config = get_current_vllm_config_or_none()
+        is_encoder_decoder = (
+            getattr(getattr(vllm_config, "model_config", None), "attn_type", None)
+            == "encoder_decoder"
+        )
+        # ROCM_ATTN still uses a legacy attention layout (KV is the outer
+        # dimension) that is incompatible with the encoder backend layouts. The
+        # encoder and decoder need the layouts to match. This is currently
+        # enforced implicitly.
+        # TODO: Make this explicit in the selector in a future PR.
+        if is_encoder_decoder and AttentionBackendEnum.ROCM_ATTN in backend_priorities:
+            backend_priorities.remove(AttentionBackendEnum.ROCM_ATTN)
         for priority, backend in enumerate(backend_priorities):
             try:
                 backend_class = backend.get_class()

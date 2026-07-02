@@ -8,7 +8,8 @@ equal the sparse block size (128), so one selected block maps to exactly one
 page.
 
 Main K/V cache layout (vLLM):
-  ``(num_blocks, 2, 128, num_kv_heads, head_dim)``  K=[:,0] V=[:,1]
+  ``(num_blocks, num_kv_heads, 128, 2 * head_dim)``
+  K=[..., :head_dim] V=[..., head_dim:]
 
 Only the paths MiniMax M3 uses are implemented: no attention sink, base-2
 (exp2/log2) softmax. The decode kernels use split-K (flash-decoding) over the
@@ -51,7 +52,7 @@ _FP8_DTYPES = (
 @triton.jit(do_not_specialize_on_alignment=["seq_lens", "prefix_lens"])
 def _gqa_sparse_fwd_kernel(
     q_ptr,  # [total_q, num_heads, head_dim]
-    kv_cache_ptr,  # main cache: [num_blocks, 2, 128, num_kv_heads, head_dim]
+    kv_cache_ptr,  # main cache: [num_blocks, num_kv_heads, 128, 2*head_dim]
     t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
     o_ptr,  # [total_q, num_heads, head_dim]
     block_table_ptr,  # [num_reqs, max_blocks]
@@ -69,9 +70,8 @@ def _gqa_sparse_fwd_kernel(
     stride_qh,
     stride_qd,
     stride_kv_blk,
-    stride_kv_kv,
-    stride_kv_pos,
     stride_kv_h,
+    stride_kv_pos,
     stride_kv_d,
     stride_th,
     stride_tn,
@@ -141,9 +141,8 @@ def _gqa_sparse_fwd_kernel(
             k = tl.load(
                 kv_cache_ptr
                 + page * stride_kv_blk
-                + 0 * stride_kv_kv
-                + off_n[None, :] * stride_kv_pos
                 + pid_kh * stride_kv_h
+                + off_n[None, :] * stride_kv_pos
                 + off_d[:, None] * stride_kv_d,
                 mask=d_mask[:, None] & pos_mask[None, :],
                 other=0.0,
@@ -163,10 +162,9 @@ def _gqa_sparse_fwd_kernel(
             v = tl.load(
                 kv_cache_ptr
                 + page * stride_kv_blk
-                + 1 * stride_kv_kv
-                + off_n[:, None] * stride_kv_pos
                 + pid_kh * stride_kv_h
-                + off_d[None, :] * stride_kv_d,
+                + off_n[:, None] * stride_kv_pos
+                + (head_dim + off_d[None, :]) * stride_kv_d,
                 mask=pos_mask[:, None] & d_mask[None, :],
                 other=0.0,
             )
@@ -208,7 +206,7 @@ def _gqa_sparse_fwd_kernel(
 @triton.jit(do_not_specialize=["decode_query_len"])
 def _gqa_sparse_decode_kernel(
     q_ptr,  # [total_q, num_heads, head_dim]
-    kv_cache_ptr,  # main cache: [num_blocks, 2, 128, num_kv_heads, head_dim]
+    kv_cache_ptr,  # main cache: [num_blocks, num_kv_heads, 128, 2*head_dim]
     t_ptr,  # topk_idx: [num_kv_heads, total_q, topk]
     o_ptr,  # partial out: [NUM_TOPK_CHUNKS, total_q, num_heads, head_dim]
     lse_ptr,  # partial lse (log2): [NUM_TOPK_CHUNKS, total_q, num_heads]
@@ -224,9 +222,8 @@ def _gqa_sparse_decode_kernel(
     stride_qh,
     stride_qd,
     stride_kv_blk,
-    stride_kv_kv,
-    stride_kv_pos,
     stride_kv_h,
+    stride_kv_pos,
     stride_kv_d,
     stride_th,
     stride_tn,
@@ -304,9 +301,8 @@ def _gqa_sparse_decode_kernel(
         k = tl.load(
             kv_cache_ptr
             + page * stride_kv_blk
-            + 0 * stride_kv_kv
-            + off_n[None, :] * stride_kv_pos
             + pid_kh * stride_kv_h
+            + off_n[None, :] * stride_kv_pos
             + off_d[:, None] * stride_kv_d,
             mask=d_mask[:, None] & pos_mask[None, :],
             other=0.0,
@@ -323,10 +319,9 @@ def _gqa_sparse_decode_kernel(
         v = tl.load(
             kv_cache_ptr
             + page * stride_kv_blk
-            + 1 * stride_kv_kv
-            + off_n[:, None] * stride_kv_pos
             + pid_kh * stride_kv_h
-            + off_d[None, :] * stride_kv_d,
+            + off_n[:, None] * stride_kv_pos
+            + (head_dim + off_d[None, :]) * stride_kv_d,
             mask=pos_mask[:, None] & d_mask[None, :],
             other=0.0,
         )
@@ -422,7 +417,7 @@ def _merge_topk_attn_out_kernel(
 @torch.no_grad()
 def minimax_m3_sparse_attn(
     q: torch.Tensor,  # [total_q, num_heads, head_dim]
-    kv_cache: torch.Tensor,  # [num_blocks, 2, 128, num_kv_heads, head_dim]
+    kv_cache: torch.Tensor,  # [num_blocks, num_kv_heads, 128, 2*head_dim]
     topk_idx: torch.Tensor,  # [num_kv_heads, total_q, topk]
     block_table: torch.Tensor,  # [batch, max_blocks]
     cu_seqlens_q: torch.Tensor,  # [batch+1] int32
@@ -463,7 +458,6 @@ def minimax_m3_sparse_attn(
         kv_cache.stride(1),
         kv_cache.stride(2),
         kv_cache.stride(3),
-        kv_cache.stride(4),
         topk_idx.stride(0),
         topk_idx.stride(1),
         topk_idx.stride(2),
@@ -480,7 +474,7 @@ def minimax_m3_sparse_attn(
 @torch.no_grad()
 def minimax_m3_sparse_attn_decode(
     q: torch.Tensor,  # [total_q, num_heads, head_dim]
-    kv_cache: torch.Tensor,  # [num_blocks, 2, 128, num_kv_heads, head_dim]
+    kv_cache: torch.Tensor,  # [num_blocks, num_kv_heads, 128, 2*head_dim]
     topk_idx: torch.Tensor,  # [num_kv_heads, total_q, topk]
     block_table: torch.Tensor,  # [num_reqs, max_blocks]
     seq_lens: torch.Tensor,  # [num_reqs] int32
@@ -533,7 +527,6 @@ def minimax_m3_sparse_attn_decode(
         kv_cache.stride(1),
         kv_cache.stride(2),
         kv_cache.stride(3),
-        kv_cache.stride(4),
         topk_idx.stride(0),
         topk_idx.stride(1),
         topk_idx.stride(2),

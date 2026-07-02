@@ -1067,6 +1067,65 @@ class TestNixlHandshake:
         "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
         FakeNixlWrapper,
     )
+    def test_hybrid_mamba_attention_remote_descs_use_packed_head_slices(
+        self, default_vllm_config, dist_init
+    ):
+        worker = FakeNixlConnectorWorker(
+            create_vllm_config(), "engine", hand_shake_latency=0
+        )
+
+        remote_block_len = 2048
+        local_block_len = remote_block_len // 2
+        worker.block_len_per_layer = [local_block_len]
+        worker._region_is_mla = [False]
+        worker.num_blocks = 1
+        worker.num_regions = 1
+        worker._has_mamba = True
+        worker._mamba_ssm_size = (128, 256)
+        worker.transfer_topo = TransferTopology(
+            tp_rank=1,
+            tp_size=2,
+            block_size=worker.block_size,
+            engine_id=worker.engine_id,
+            is_mla=False,
+            is_mamba=True,
+            total_num_kv_heads=2,
+            attn_backends=worker.attn_backends,
+            tensor_shape=None,
+        )
+        assert worker.transfer_topo.virtually_split_kv_in_blocks
+
+        plan = MagicMock(
+            source_ranks_per_group=((0,), (0,)),
+            rank_offset_factor=1,
+        )
+        meta = MagicMock(
+            kv_caches_base_addr=[0x1000],
+            device_id=0,
+            num_blocks=1,
+            block_lens=[remote_block_len],
+        )
+
+        assert worker.get_backend_aware_kv_block_len(0, mamba_view=False) == (
+            local_block_len
+        )
+        assert (
+            worker.get_backend_aware_kv_block_len(0, first_split=True, mamba_view=True)
+            == worker._mamba_ssm_size[0]
+        )
+        assert (
+            worker.get_backend_aware_kv_block_len(0, first_split=False, mamba_view=True)
+            == worker._mamba_ssm_size[1]
+        )
+
+        assert worker._build_fa_remote(plan, meta, block_size_ratio=1) == [
+            (0x1000 + local_block_len, local_block_len, 0)
+        ]
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
     def test_handshake_mixed_fa_mla_hetero_tp(self, default_vllm_config, dist_init):
         """Mixed full-attn (SPLIT) + MLA (REPLICATE) single KV group under
         heterogeneous TP must NOT raise (previously a NotImplementedError),
@@ -1686,13 +1745,6 @@ def _run_abort_timeout_test(llm: LLM, timeout: int):
                 reason="Attention backend FLASH_ATTN is not supported on ROCm",
             ),
         ),
-        pytest.param(
-            "ROCM_ATTN",
-            marks=pytest.mark.skipif(
-                not current_platform.is_rocm(),
-                reason="Attention backend ROCM_ATTN is only supported on ROCm",
-            ),
-        ),
         "TRITON_ATTN",
     ],
 )
@@ -1819,8 +1871,7 @@ def test_register_kv_caches(
         test_shape = backend_cls.get_kv_cache_shape(
             num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
         )
-        is_blocks_first = len(test_shape) == 5 and test_shape[0] == 1
-        virtually_split = is_blocks_first and not connector.prefer_cross_layer_blocks
+        is_blocks_first = len(test_shape) == 4 and test_shape[0] == 1
 
         if connector.prefer_cross_layer_blocks:
             with set_current_vllm_config(vllm_config):
@@ -1851,7 +1902,7 @@ def test_register_kv_caches(
             ]
             expected_num_entries = 1
 
-            expected_blocks_count = num_blocks * (2 if virtually_split else 1)
+            expected_blocks_count = num_blocks
 
             kv_caches = {"all-layers": cross_layers_kv_cache}
         else:
@@ -1880,6 +1931,7 @@ def test_register_kv_caches(
                     unique_tensor.data_ptr(),
                 ]
                 expected_num_entries = 2
+                expected_blocks_count = kv_cache_config.num_blocks * 2
             else:
                 expected_tensor_size = (
                     shared_tensor[0].element_size() * shared_tensor[0].numel()
@@ -1891,7 +1943,7 @@ def test_register_kv_caches(
                     unique_tensor[1].data_ptr(),
                 ]
                 expected_num_entries = 4
-            expected_blocks_count = kv_cache_config.num_blocks * 4
+                expected_blocks_count = kv_cache_config.num_blocks * 4
 
         # Execute register_kv_caches
         connector.register_kv_caches(kv_caches)
@@ -1925,10 +1977,7 @@ def test_register_kv_caches(
         else:
             num_blocks = kv_cache_config.num_blocks
 
-        if virtually_split:
-            expected_block_len = expected_tensor_size // num_blocks // 2
-        else:
-            expected_block_len = expected_tensor_size // num_blocks
+        expected_block_len = expected_tensor_size // num_blocks
 
         for i, block_entry in enumerate(blocks_data):
             block_start_addr, block_len, tp_rank = block_entry

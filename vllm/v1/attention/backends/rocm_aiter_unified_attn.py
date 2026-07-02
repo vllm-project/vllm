@@ -85,7 +85,8 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (num_blocks, 2, block_size, num_kv_heads, head_size)
+        # K and V are packed into the content dim: logical (B, H, N, 2*hs).
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -148,26 +149,8 @@ class RocmAiterUnifiedAttentionImpl(RocmAttentionImpl):
     def _split_kv_cache(
         self, kv_cache: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.attn_type != AttentionType.ENCODER_DECODER:
-            return kv_cache.unbind(1)
-
-        # NOTE: Encoder-decoder layers can share the same raw KV allocation with
-        # ROCM_ATTN decoder layers, whose physical layout is K/V first. Keep
-        # this cross-attention path on that physical layout so block IDs do not
-        # alias different bytes across the shared allocation.
-        num_blocks, _, block_size, num_kv_heads, head_size = kv_cache.shape
-        block_stride = block_size * num_kv_heads * head_size
-        kv_cache = kv_cache.as_strided(
-            (2, num_blocks, block_size, num_kv_heads, head_size),
-            (
-                num_blocks * block_stride,
-                block_stride,
-                num_kv_heads * head_size,
-                head_size,
-                1,
-            ),
-        )
-        return kv_cache.unbind(0)
+        # (B, H, N, 2*hs) -> ((B, N, H, hs), (B, N, H, hs))
+        return kv_cache.transpose(1, 2).split(self.head_size, dim=-1)
 
     def forward(
         self,
