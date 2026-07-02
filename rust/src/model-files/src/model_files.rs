@@ -26,6 +26,27 @@ pub enum TokenizerSource {
 }
 
 impl TokenizerSource {
+    /// Select a tokenizer source from a tokenizer file path.
+    pub fn from_path(path: impl Into<PathBuf>) -> Result<Self> {
+        let path = path.into();
+        let file_name = path.file_name().and_then(|name| name.to_str()).ok_or_else(|| {
+            Error::new(format!(
+                "tokenizer path has no file name: {}",
+                path.display()
+            ))
+        })?;
+
+        match file_name {
+            "tekken.json" => Ok(Self::Tekken(path)),
+            "tokenizer.json" => Ok(Self::HuggingFace(path)),
+            _ if is_tiktoken_file(&path) => Ok(Self::Tiktoken(path)),
+            _ => Err(Error::new(format!(
+                "unsupported tokenizer file '{}'",
+                path.display()
+            ))),
+        }
+    }
+
     /// Return the local filesystem path for this tokenizer source.
     pub fn path(&self) -> &Path {
         match self {
@@ -169,11 +190,9 @@ async fn resolve_remote_tokenizer_source(
     siblings: &std::collections::BTreeSet<&str>,
     tokenizer_class: Option<&str>,
 ) -> Result<TokenizerSource> {
-    if let Some(tekken_path) = download_if_present(repo, model_id, siblings, "tekken.json").await? {
-        return Ok(TokenizerSource::Tekken(tekken_path));
-    }
-
-    let tokenizer_path = if siblings.contains("tokenizer.json") {
+    let tokenizer_path = if siblings.contains("tekken.json") {
+        download_known_file(repo, model_id, "tekken.json").await?
+    } else if siblings.contains("tokenizer.json") {
         download_known_file(repo, model_id, "tokenizer.json").await?
     } else if let Some(tiktoken_name) = find_tiktoken_sibling(siblings) {
         download_known_file(repo, model_id, tiktoken_name).await?
@@ -184,51 +203,40 @@ async fn resolve_remote_tokenizer_source(
         )));
     };
 
-    Ok(resolve_tokenizer_source(
-        tokenizer_path,
-        tokenizer_class,
-        None,
-    ))
+    resolve_tokenizer_source(tokenizer_path, tokenizer_class)
 }
 
 fn resolve_cached_tokenizer_source(
     cache_repo: &hf_hub::CacheRepo,
     tokenizer_config: &TokenizerConfig,
 ) -> Result<Option<TokenizerSource>> {
-    let tekken_path = cache_repo.get("tekken.json");
-
-    if let Some(tekken_path) = tekken_path {
-        return Ok(Some(TokenizerSource::Tekken(tekken_path)));
-    }
-
-    let Some(tokenizer_path) = cache_repo.get("tokenizer.json").or_else(|| {
-        // tiktoken.model is the most common name, try it first.
-        cache_repo.get("tiktoken.model").or_else(|| {
-            // Scan for any *.tiktoken file in the cache snapshot directory.
-            let snapshot_dir = cache_repo.get("config.json")?.parent()?.to_path_buf();
-            discover_tiktoken_in_dir(&snapshot_dir)
+    let Some(tokenizer_path) = cache_repo
+        .get("tekken.json")
+        .or_else(|| cache_repo.get("tokenizer.json"))
+        .or_else(|| {
+            // tiktoken.model is the most common name, try it first.
+            cache_repo.get("tiktoken.model").or_else(|| {
+                // Scan for any *.tiktoken file in the cache snapshot directory.
+                let snapshot_dir = cache_repo.get("config.json")?.parent()?.to_path_buf();
+                discover_tiktoken_in_dir(&snapshot_dir)
+            })
         })
-    }) else {
+    else {
         return Ok(None);
     };
 
     Ok(Some(resolve_tokenizer_source(
         tokenizer_path,
         tokenizer_config.tokenizer_class.as_deref(),
-        None,
-    )))
+    )?))
 }
 
 fn resolve_local_tokenizer_source(
     model_dir: &Path,
     tokenizer_config: &TokenizerConfig,
 ) -> Result<TokenizerSource> {
-    let tekken_path = local_file_if_exists(model_dir, "tekken.json");
-    if let Some(tekken_path) = tekken_path {
-        return Ok(TokenizerSource::Tekken(tekken_path));
-    }
-
-    let tokenizer_path = local_file_if_exists(model_dir, "tokenizer.json")
+    let tokenizer_path = local_file_if_exists(model_dir, "tekken.json")
+        .or_else(|| local_file_if_exists(model_dir, "tokenizer.json"))
         .or_else(|| local_file_if_exists(model_dir, "tiktoken.model"))
         .or_else(|| discover_tiktoken_in_dir(model_dir))
         .ok_or_else(|| {
@@ -239,43 +247,31 @@ fn resolve_local_tokenizer_source(
             ))
         })?;
 
-    Ok(resolve_tokenizer_source(
-        tokenizer_path,
-        tokenizer_config.tokenizer_class.as_deref(),
-        None,
-    ))
+    resolve_tokenizer_source(tokenizer_path, tokenizer_config.tokenizer_class.as_deref())
 }
 
 /// Choose the tokenizer.
 ///
 /// Selection order:
-/// 1. `tekken.json` — Mistral native tokenizer (preferred over HF `tokenizer.json` because the HF
-///    version has a known regex bug for Mistral models).
-/// 2. File extension — `.tiktoken` / `tiktoken.model` files use tiktoken from BPE data.
-/// 3. `tokenizer_class` in `tokenizer_config.json` — classes containing "Tiktoken" (case-
+/// 1. File extension — `.tiktoken` / `tiktoken.model` files use tiktoken from BPE data.
+/// 2. `tokenizer_class` in `tokenizer_config.json` — classes containing "Tiktoken" (case-
 ///    insensitive) trigger tiktoken loading from a sibling BPE file.
-/// 4. Default — `tokenizer.json` in HuggingFace format.
+/// 3. Default — `tokenizer.json` in HuggingFace format.
 fn resolve_tokenizer_source(
     tokenizer_path: PathBuf,
     tokenizer_class: Option<&str>,
-    tekken_path: Option<PathBuf>,
-) -> TokenizerSource {
-    if let Some(tekken_path) = tekken_path {
-        return TokenizerSource::Tekken(tekken_path);
-    }
+) -> Result<TokenizerSource> {
+    let tokenizer = TokenizerSource::from_path(tokenizer_path)?;
 
-    if is_tiktoken_file(&tokenizer_path) {
-        return TokenizerSource::Tiktoken(tokenizer_path);
-    }
-
-    if tokenizer_class.is_some_and(|cls| cls.to_ascii_lowercase().contains("tiktoken"))
-        && let Some(dir) = tokenizer_path.parent()
+    if let TokenizerSource::HuggingFace(path) = &tokenizer
+        && tokenizer_class.is_some_and(|cls| cls.to_ascii_lowercase().contains("tiktoken"))
+        && let Some(dir) = path.parent()
         && let Some(tiktoken_path) = discover_tiktoken_in_dir(dir)
     {
-        return TokenizerSource::Tiktoken(tiktoken_path);
+        return Ok(TokenizerSource::Tiktoken(tiktoken_path));
     }
 
-    TokenizerSource::HuggingFace(tokenizer_path)
+    Ok(tokenizer)
 }
 
 /// Download `filename` only if it exists in `siblings`.
