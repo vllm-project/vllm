@@ -1657,6 +1657,161 @@ class SpecDecodeBaseProposer:
             use_aux_hidden_state = eagle_config.get("use_aux_hidden_state", True)
         return use_aux_hidden_state
 
+    def dry_run_helper_kernels(self) -> None:
+        """JIT-compile per-step helper kernels using synthetic inputs.
+
+        ``dummy_run()`` warms the draft model forward pass but does NOT
+        exercise the Triton helper kernels (and one ``@torch.compile``
+        function) that run inside ``propose()`` and the model_runner's
+        padded-batch path. As a result the first real request after server
+        start pays the full JIT cost, causing TTFT to spike (see
+        vllm-project/vllm#39790: ~25x first-request regression on H100 +
+        Qwen3-8B + Eagle3 in the original report).
+
+        This base implementation warms the two padded-batch helper kernels
+        that fire from base-class methods used by both Eagle and DFlash.
+        Subclasses extend this via ``super().dry_run_helper_kernels()`` to
+        also warm their method-specific kernels (e.g. EagleProposer's
+        per-step slot-mapping kernel and copy/expand kernel; DFlashProposer's
+        fused first-pass kernel).
+
+        Called once from ``Worker._warmup_spec_decode_helpers()`` in
+        ``vllm/v1/worker/gpu_worker.py`` after the V1 ``_dummy_run`` +
+        ``_dummy_sampler_run`` steps complete. V2 (``VLLM_USE_V2_MODEL_RUNNER=1``)
+        does not call this: its ``warmup_kernels()`` runs a real
+        ``execute_model`` step which naturally JIT-compiles V2's separate
+        spec-decode kernels in ``vllm/v1/worker/gpu/spec_decode/``.
+        """
+        device = self.device
+        num_reqs = 1
+        num_sampled_per_req = self.num_speculative_tokens + 1
+        # ``BLOCK_SIZE_TOKENS`` is the only ``tl.constexpr`` that varies
+        # at call time for these two kernels, so warming with this exact
+        # value matches the first-request JIT cache key.
+        block_size_tokens = next_power_of_2(num_sampled_per_req)
+
+        # ---- eagle_prepare_next_token_padded_kernel ----
+        # Called by base ``prepare_next_token_ids_padded`` from the
+        # padded-batch path in gpu_model_runner.
+        sampled_token_ids = torch.zeros(
+            (num_reqs, num_sampled_per_req), dtype=torch.int64, device=device
+        )
+        discard_mask = torch.zeros(num_reqs, dtype=torch.bool, device=device)
+        backup_tokens = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+        next_token_ids = torch.empty(num_reqs, dtype=torch.int32, device=device)
+        valid_count_out = torch.empty(num_reqs, dtype=torch.int32, device=device)
+        # ``vocab_size`` is a runtime int (used for bounds-checking via
+        # ``tl.where``) and not part of the constexpr cache key, so any
+        # in-range placeholder works.
+        eagle_prepare_next_token_padded_kernel[(num_reqs,)](
+            sampled_token_ids,
+            discard_mask,
+            backup_tokens,
+            next_token_ids,
+            valid_count_out,
+            128,
+            num_sampled_per_req,
+            num_reqs,
+            sampled_token_ids.stride(0),
+            BLOCK_SIZE_TOKENS=block_size_tokens,
+        )
+
+        # ---- eagle_prepare_inputs_padded_kernel ----
+        # Called by base ``prepare_inputs_padded`` from the padded-batch
+        # path. No constexpr params -- grid dimension is the only variable
+        # and is not part of the JIT cache key.
+        cu_num_draft_tokens = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+        valid_sampled_count = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+        query_start_loc = torch.zeros(num_reqs + 1, dtype=torch.int32, device=device)
+        token_indices_to_sample = torch.empty(
+            num_reqs, dtype=torch.int32, device=device
+        )
+        num_rejected_tokens_gpu = torch.empty(
+            num_reqs, dtype=torch.int32, device=device
+        )
+        eagle_prepare_inputs_padded_kernel[(num_reqs,)](
+            cu_num_draft_tokens,
+            valid_sampled_count,
+            query_start_loc,
+            token_indices_to_sample,
+            num_rejected_tokens_gpu,
+            num_reqs,
+        )
+
+        # ---- copy_and_expand_eagle_inputs_kernel ----
+        # Called from base ``set_inputs_first_pass`` when
+        # ``needs_extra_input_slots`` is True (parallel-drafting Eagle and
+        # any DraftModelProposer config that allocates extra slots).
+        # DFlash takes a different path (its own kernel 5) and never
+        # touches this one, so skip it there.
+        if (
+            self.method != "dflash"
+            and self.is_rejected_token_mask is not None
+            and self.is_masked_token_mask is not None
+        ):
+            num_padding_slots_per_request = self.extra_slots_per_request
+            num_query_per_req = 1 + self.net_num_new_slots_per_request
+            total_input_tokens = num_reqs * num_query_per_req
+            total_output_tokens = num_reqs * (
+                num_query_per_req + num_padding_slots_per_request
+            )
+            # Match production sizing in ``set_inputs_first_pass`` (line 700-703):
+            # ``BLOCK_SIZE_TOKENS = min(256, next_power_of_2(max_query_len +
+            # net_num_new_slots_per_request))``. For a first-decode request
+            # ``max_query_len == 1`` so ``num_query_per_req`` is the right key;
+            # using ``total_output_tokens`` here would pick a larger constexpr
+            # bucket and miss the production JIT cache entry.
+            block_size_tokens = min(256, next_power_of_2(num_query_per_req))
+
+            target_token_ids = torch.zeros(
+                total_input_tokens, dtype=torch.int32, device=device
+            )
+            target_positions = torch.zeros(
+                total_input_tokens, dtype=torch.int64, device=device
+            )
+            next_token_ids_buf = torch.zeros(num_reqs, dtype=torch.int32, device=device)
+            qsl = (
+                torch.arange(num_reqs + 1, dtype=torch.int32, device=device)
+                * num_query_per_req
+            )
+            qel = qsl[1:] - 1
+            tts_buf = torch.empty(
+                num_reqs * num_padding_slots_per_request,
+                dtype=torch.int32,
+                device=device,
+            )
+            ohsm_buf = torch.empty(total_input_tokens, dtype=torch.int32, device=device)
+
+            num_blocks = (
+                total_output_tokens + block_size_tokens - 1
+            ) // block_size_tokens
+            copy_and_expand_eagle_inputs_kernel[(num_reqs, num_blocks)](
+                target_token_ids_ptr=target_token_ids,
+                target_positions_ptr=target_positions,
+                next_token_ids_ptr=next_token_ids_buf,
+                out_input_ids_ptr=self.input_ids,
+                out_positions_ptr=self.positions,
+                out_is_rejected_token_mask_ptr=self.is_rejected_token_mask,
+                out_is_masked_token_mask_ptr=self.is_masked_token_mask,
+                out_new_token_indices_ptr=tts_buf,
+                out_hidden_state_mapping_ptr=ohsm_buf,
+                query_start_loc_ptr=qsl,
+                query_end_loc_ptr=qel,
+                padding_token_id=0,
+                parallel_drafting_token_id=self.parallel_drafting_token_id,
+                total_input_tokens=total_input_tokens,
+                num_padding_slots_per_request=num_padding_slots_per_request,
+                shift_input_ids=self.pass_hidden_states_to_model,
+                BLOCK_SIZE_TOKENS=block_size_tokens,
+            )
+
+            # The bool masks are read-only at first-real-request time on
+            # rows the first request will not overwrite, so reset them
+            # to the zero state ``__init__`` established to avoid leaking
+            # warmup writes.
+            self.is_rejected_token_mask.zero_()
+            self.is_masked_token_mask.zero_()
+
     def validate_same_kv_cache_group(self, kv_cache_config: KVCacheConfig) -> None:
         """
         Validate that all drafting layers belong to the same KVCacheGroup.
