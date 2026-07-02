@@ -5,7 +5,7 @@
 import pytest
 import torch
 
-from vllm.model_executor.layers.quantization.int4_embedding import (
+from vllm.model_executor.layers.quantization.online.int4 import (
     Int4PerChannelEmbeddingMethod,
     Int4VocabParallelEmbedding,
 )
