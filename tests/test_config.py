@@ -22,6 +22,7 @@ from vllm.config import (
     PoolerConfig,
     SchedulerConfig,
     SpeculativeConfig,
+    StructuredOutputsConfig,
     VllmConfig,
     update_config,
 )
@@ -36,6 +37,16 @@ from vllm.config.vllm import (
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
+
+
+def test_structured_outputs_disable_any_whitespace_allows_auto_backend():
+    config = StructuredOutputsConfig(
+        backend="auto",
+        disable_any_whitespace=True,
+    )
+
+    assert config.backend == "auto"
+    assert config.disable_any_whitespace
 
 
 def test_compile_config_repr_succeeds():
