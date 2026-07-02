@@ -1459,6 +1459,46 @@ def multi_process_parallel(
         ray.shutdown()
 
 
+def assert_rocm_custom_allreduce_backend_state(
+    use_aiter_custom_ar: bool,
+    quick_reduce_quantization: str,
+) -> None:
+    from vllm.distributed.parallel_state import get_tp_group
+
+    device_communicator = get_tp_group().device_communicator
+    aiter_ar_comm = device_communicator.aiter_ar_comm
+    if use_aiter_custom_ar:
+        assert aiter_ar_comm is not None, "AITER CustomAllreduce was not initialized."
+        assert not aiter_ar_comm.disabled, "AITER CustomAllreduce is disabled."
+        assert device_communicator.ca_comm is None, (
+            "vLLM CustomAllreduce should not be initialized when AITER CA is used."
+        )
+    else:
+        assert aiter_ar_comm is None, (
+            "AITER CustomAllreduce should not be initialized when disabled."
+        )
+        assert device_communicator.ca_comm is not None, (
+            "vLLM CustomAllreduce should be initialized when AITER CA is disabled."
+        )
+
+    qr_comm = device_communicator.qr_comm
+    assert qr_comm is not None, "QuickReduce communicator was not initialized."
+    if quick_reduce_quantization == "NONE":
+        assert qr_comm.disabled, "QuickReduce should be disabled."
+    else:
+        assert not qr_comm.disabled, "QuickReduce should be enabled."
+
+
+def assert_rocm_custom_allreduce_backend_state_on_worker(
+    _worker,
+    use_aiter_custom_ar: bool,
+    quick_reduce_quantization: str,
+) -> None:
+    assert_rocm_custom_allreduce_backend_state(
+        use_aiter_custom_ar, quick_reduce_quantization
+    )
+
+
 @contextmanager
 def error_on_warning(category: type[Warning] = Warning):
     """
