@@ -1579,6 +1579,42 @@ def get_supported_content_part_types() -> set[str]:
     return set(MM_PARSER_MAP.keys() | PART_TYPES_TO_SKIP_NONE_CONTENT)
 
 
+def validate_content_part_types(content: Any) -> None:
+    """Validate that all content parts in a list have supported types.
+
+    This function provides a single source of truth for content type validation
+    across all parsing paths (Harmony and non-Harmony). It raises VLLMValidationError
+    if any unsupported content part types are found.
+
+    Args:
+        content: The content field from a message, which may be a string,
+            a list of content parts, or None.
+
+    Raises:
+        VLLMValidationError: If any content part has an unsupported type.
+
+    Note:
+        - If content is a string or None, validation is skipped (no-op).
+        - Only list content is validated.
+        - Content parts without an explicit 'type' key are not validated
+          (they will be processed as text by the parser).
+    """
+    if not isinstance(content, list):
+        return
+
+    supported_types = get_supported_content_part_types()
+    for c in content:
+        if isinstance(c, dict):
+            part_type = c.get("type")
+            if part_type and part_type not in supported_types:
+                raise VLLMValidationError(
+                    f"Unsupported chat content part type: {part_type!r}. "
+                    f"Supported types: {', '.join(sorted(supported_types))}.",
+                    parameter="type",
+                    value=part_type,
+                )
+
+
 def _parse_chat_message_content_parts(
     role: str,
     parts: Iterable[ChatCompletionContentPartParam],

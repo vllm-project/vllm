@@ -29,7 +29,7 @@ from openai.types.responses.response_reasoning_item import (
 )
 from openai_harmony import Author, Message, Role, TextContent
 
-from vllm.entrypoints.chat_utils import get_supported_content_part_types
+from vllm.entrypoints.chat_utils import validate_content_part_types
 from vllm.entrypoints.openai.parser.harmony_utils import (
     BUILTIN_TOOL_TO_MCP_SERVER_LABEL,
     extract_function_from_recipient,
@@ -41,7 +41,6 @@ from vllm.entrypoints.openai.responses.protocol import (
     ResponseInputOutputItem,
     ResponsesRequest,
 )
-from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 
@@ -60,6 +59,8 @@ def _parse_harmony_format_message(chat_msg: dict) -> Message:
     name = author_dict.get("name")
 
     raw_content = chat_msg.get("content", "")
+    # Validate content part types - use shared helper for consistency
+    validate_content_part_types(raw_content)
     if isinstance(raw_content, list):
         # TODO: Support refusal and non-text content types.
         contents = [TextContent(text=c.get("text", "")) for c in raw_content]
@@ -91,6 +92,9 @@ def _parse_chat_format_message(chat_msg: dict) -> list[Message]:
     role = chat_msg.get("role")
     if role is None:
         raise ValueError(f"Message has no 'role' key: {chat_msg}")
+
+    # Validate content part types - use shared helper for consistency
+    validate_content_part_types(chat_msg.get("content", ""))
 
     # Assistant message with tool calls
     tool_calls = chat_msg.get("tool_calls")
@@ -171,19 +175,8 @@ def response_input_to_harmony(
         elif isinstance(content, str):
             msg = Message.from_role_and_content(role, content)
         else:
-            # Validate content part types - match non-Harmony path validation
-            # Use shared helper to ensure consistency across all parsing paths
-            supported_types = get_supported_content_part_types()
-            for c in content:
-                if isinstance(c, dict):
-                    part_type = c.get("type")
-                    if part_type and part_type not in supported_types:
-                        raise VLLMValidationError(
-                            f"Unsupported chat content part type: {part_type!r}. "
-                            f"Supported types: {', '.join(sorted(supported_types))}.",
-                            parameter="type",
-                            value=part_type,
-                        )
+            # Validate content part types - use shared helper for consistency
+            validate_content_part_types(content)
             contents = [TextContent(text=c.get("text", "")) for c in content]
             msg = Message.from_role_and_contents(role, contents)
         if role == "assistant":

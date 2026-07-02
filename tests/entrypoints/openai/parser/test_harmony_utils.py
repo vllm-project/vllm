@@ -1110,7 +1110,7 @@ class TestUnsupportedContentTypes:
         assert "Unsupported chat content part type: 'file'" in str(error)
         assert error.parameter == "type"
 
-    def test_supported_types_still_work(self) -> None:
+    def test_supported_content_types_pass_validation(self) -> None:
         """Test that supported content types are not affected by validation."""
         chat_msg = {
             "role": "user",
