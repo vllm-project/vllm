@@ -925,17 +925,18 @@ class MixtureOfExperts(Protocol):
 
 
 def get_mixture_of_experts_model(model: object) -> MixtureOfExperts | None:
-    """
-    Given an arbitrary model,
-     - if the model itself is a MixtureOfExperts, return the model directly.
-     - if the model is a multi-modal model, and its `language_model` is a
-       MixtureOfExperts, return the `language_model`.
-     - if neither, return None.
+    """Return the MixtureOfExperts contained within an arbitrary model.
 
-    :param model: Model being served.
-    :type model: object
-    :return: Return MixtureOfExperts instance contained within the model.
-    :rtype: MixtureOfExperts | None
+    - If the model itself is a MixtureOfExperts, return the model directly.
+    - If the model is a multi-modal model, and its `language_model` is a
+      MixtureOfExperts, return the `language_model`.
+    - If neither, return None.
+
+    Args:
+        model: Model being served.
+
+    Returns:
+        The MixtureOfExperts instance contained within the model, or None.
     """
 
     if is_mixture_of_experts(model):
