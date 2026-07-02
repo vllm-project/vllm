@@ -13,6 +13,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
+from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.mem_constants import MiB_bytes
@@ -86,6 +87,18 @@ def get_video_loader_backend_for_processor(
     video_processor: str | None,
 ) -> str | None:
     return VIDEO_LOADER_REGISTRY.get_backend_for_video_processor(video_processor)
+
+
+def _check_frame_pixel_limit(width: int, height: int) -> None:
+    """Reject video frames exceeding VLLM_MAX_IMAGE_PIXELS before decoding."""
+    max_pixels = envs.VLLM_MAX_IMAGE_PIXELS
+    if max_pixels > 0 and width * height > max_pixels:
+        raise ValueError(
+            f"Video frame dimensions {width}x{height} "
+            f"({width * height} pixels) exceed the maximum of "
+            f"{max_pixels} pixels. Set VLLM_MAX_IMAGE_PIXELS to "
+            f"increase this limit."
+        )
 
 
 def resize_video(frames: npt.NDArray, size: tuple[int, int]) -> npt.NDArray:
@@ -733,6 +746,7 @@ class PyNvVideoCodecVideoBackendMixin:
                 temp_file.write(data)
 
             gpu_source = cls._read_source_metadata(temp_path, nvc)
+            _check_frame_pixel_limit(gpu_source.width, gpu_source.height)
             source = cls._prepare_source(gpu_source.source)
             frame_idx = cls.compute_frames_index_to_sample(
                 source=source, target=target, **kwargs
@@ -944,6 +958,10 @@ class VideoBackend(
 
         if backend == "opencv":
             cap = cls.open_video_capture(data)
+            _check_frame_pixel_limit(
+                int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+                int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+            )
             source = cls._prepare_source(cls.get_video_metadata(cap))
             frame_idx = cls.compute_frames_index_to_sample(
                 source=source, target=target, **kwargs
@@ -959,6 +977,8 @@ class VideoBackend(
                 "frame_recovery is only available for `opencv` backend"
             )
             with av.open(BytesIO(data)) as container:
+                stream = container.streams.video[0]
+                _check_frame_pixel_limit(stream.width, stream.height)
                 source = cls._prepare_source(cls.get_metadata(container))
                 frame_idx = cls.compute_frames_index_to_sample(
                     source=source, target=target, **kwargs
@@ -1746,6 +1766,10 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         cap = cls.open_video_capture(data)
+        _check_frame_pixel_limit(
+            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        )
 
         source = OpenCVVideoBackendMixin.get_video_metadata(cap)
         target = VideoTargetMetadata(
@@ -1895,6 +1919,10 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             Tuple of (frames_array, metadata_dict)
         """
         cap = cls.open_video_capture(data)
+        _check_frame_pixel_limit(
+            int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)),
+            int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT)),
+        )
 
         source = OpenCVVideoBackendMixin.get_video_metadata(cap)
 
