@@ -326,30 +326,46 @@ mod tests {
     }
 
     #[test]
-    fn prompt_context_filters_unknown_ids_from_suffix_seed() {
+    fn prompt_context_filters_unknown_ids() {
         let backend = StrictByteBackend;
-        let prompt = &[
-            b'a' as u32,
-            b'b' as u32,
-            b'c' as u32,
-            10_000,
-            b'H' as u32,
-            b'i' as u32,
+        let cases: &[(&str, &[u32], u32, &str)] = &[
+            (
+                "suffix seed",
+                &[
+                    b'a' as u32,
+                    b'b' as u32,
+                    b'c' as u32,
+                    10_000,
+                    b'H' as u32,
+                    b'i' as u32,
+                ],
+                b'!' as u32,
+                "!",
+            ),
+            ("all unknown", &[10_000], b'!' as u32, "!"),
+            (
+                "unknown before incomplete utf-8",
+                &[10_000, 0xe4, 0xbd],
+                0xa0,
+                "你",
+            ),
+            (
+                "incomplete utf-8 before filtered suffix",
+                &[0xe4, 0xbd, 10_000, 10_001, 10_002, 10_003, 10_004, 10_005],
+                0xa0,
+                "你",
+            ),
         ];
-        let mut decoder = backend.create_decode_stream(prompt, false, 0);
 
-        assert_eq!(decoder.push_token(b'!' as u32).unwrap(), 1);
-        assert_eq!(decoder.output(), "!");
-    }
-
-    #[test]
-    fn prompt_context_filters_only_unknown_ids() {
-        let backend = StrictByteBackend;
-        let prompt = &[10_000];
-        let mut decoder = backend.create_decode_stream(prompt, false, 0);
-
-        assert_eq!(decoder.push_token(b'!' as u32).unwrap(), 1);
-        assert_eq!(decoder.output(), "!");
+        for &(name, prompt, token_id, output) in cases {
+            let mut decoder = backend.create_decode_stream(prompt, false, 0);
+            assert_eq!(
+                decoder.push_token(token_id).unwrap(),
+                output.len(),
+                "{name}"
+            );
+            assert_eq!(decoder.output(), output, "{name}");
+        }
     }
 
     #[test]
@@ -360,26 +376,6 @@ mod tests {
 
         let error = decoder.push_token(10_000).unwrap_err();
         assert!(error.to_string().contains("strict byte tokenizer cannot decode token id 10000"));
-    }
-
-    #[test]
-    fn prompt_context_filters_unknown_ids_before_incomplete_utf8() {
-        let backend = StrictByteBackend;
-        let prompt = &[10_000, 0xe4, 0xbd];
-        let mut decoder = backend.create_decode_stream(prompt, false, 0);
-
-        assert_eq!(decoder.push_token(0xa0).unwrap(), 3);
-        assert_eq!(decoder.output(), "你");
-    }
-
-    #[test]
-    fn prompt_context_keeps_incomplete_utf8_before_filtered_suffix() {
-        let backend = StrictByteBackend;
-        let prompt = &[0xe4, 0xbd, 10_000, 10_001, 10_002, 10_003, 10_004, 10_005];
-        let mut decoder = backend.create_decode_stream(prompt, false, 0);
-
-        assert_eq!(decoder.push_token(0xa0).unwrap(), 3);
-        assert_eq!(decoder.output(), "你");
     }
 
     #[test]
