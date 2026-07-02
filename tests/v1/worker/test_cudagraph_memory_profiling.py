@@ -505,3 +505,180 @@ def test_separate_profile_accounts_persistent_and_graph_pool(monkeypatch):
     assert warmup_calls[2][1]["profile_seq_lens"] == 1
     assert warmup_calls[3][1]["profile_seq_lens"] is None
     assert cleanup_calls == ["cleanup"]
+
+
+def test_v2_profile_accounts_attention_workspace(monkeypatch):
+    from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    @contextlib.contextmanager
+    def null_context(*args, **kwargs):
+        yield
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.vllm_config = object()
+
+    events = []
+
+    monkeypatch.setattr(
+        gpu_model_runner_v2,
+        "set_current_vllm_config",
+        lambda *args, **kwargs: null_context(),
+    )
+
+    def reserve_attention_workspace():
+        events.append("reserve")
+        return 4096
+
+    runner._init_minimal_kv_cache_for_profiling = lambda: events.append("init")
+    runner._reserve_attention_workspace_for_cudagraph_capture = (
+        reserve_attention_workspace
+    )
+    runner._cleanup_profiling_kv_cache = lambda: events.append("cleanup")
+
+    estimate = runner.profile_cudagraph_memory()
+
+    assert estimate == 4096
+    assert runner.cudagraph_memory_persistent_estimate == 4096
+    assert runner.cudagraph_memory_graph_pool_estimate == 0
+    assert events == ["init", "reserve", "cleanup"]
+
+
+def test_v2_cleanup_profiling_kv_cache_releases_builder_refs(monkeypatch):
+    from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    class Builder:
+        pass
+
+    builder = Builder()
+    builder_ref = weakref.ref(builder)
+    layer = SimpleNamespace(
+        kv_cache=torch.empty(1),
+        impl=SimpleNamespace(_k_scale_cache=object(), _v_scale_cache=object()),
+    )
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.cache_config = SimpleNamespace(num_gpu_blocks=4)
+    runner.kv_caches = [torch.empty(1)]
+    runner.attn_groups = [[SimpleNamespace(metadata_builders=[builder])]]
+    runner.kv_cache_config = object()
+    runner.block_tables = object()
+    runner.kernel_block_sizes = [16]
+    runner.cudagraph_manager = object()
+    runner.compilation_config = SimpleNamespace(static_forward_context={"layer": layer})
+    del builder
+
+    monkeypatch.setattr(
+        gpu_model_runner_v2.torch.accelerator, "synchronize", lambda: None
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_v2.torch.accelerator, "empty_cache", lambda: None
+    )
+
+    runner._cleanup_profiling_kv_cache()
+    gc.collect()
+
+    assert runner.kv_caches == []
+    assert not hasattr(runner, "attn_groups")
+    assert not hasattr(runner, "kv_cache_config")
+    assert not hasattr(runner, "block_tables")
+    assert not hasattr(runner, "kernel_block_sizes")
+    assert not hasattr(runner, "cudagraph_manager")
+    assert runner.cache_config.num_gpu_blocks is None
+    assert isinstance(layer.kv_cache, torch.Tensor)
+    assert layer.kv_cache.numel() == 0
+    assert layer.impl._k_scale_cache is None
+    assert layer.impl._v_scale_cache is None
+    assert builder_ref() is None
+
+
+def test_v2_capture_reserves_workspace_before_measurement_and_locks(monkeypatch):
+    from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    @contextlib.contextmanager
+    def null_context(*args, **kwargs):
+        yield
+
+    class Builder:
+        reserved = False
+
+        def reserve_workspace_for_cudagraph_capture(self):
+            events.append("builder_reserve")
+            self.reserved = True
+
+    class FakeCudaGraphManager:
+        def needs_capture(self):
+            return True
+
+        def capture(
+            self,
+            model,
+            model_state,
+            input_buffers,
+            intermediate_tensors,
+            block_tables,
+            attn_groups,
+            kv_cache_config,
+            **kwargs,
+        ):
+            events.append("capture")
+            assert attn_groups[0][0].metadata_builders[0].reserved
+            return {}
+
+    events = []
+    builder = Builder()
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.cudagraph_manager = FakeCudaGraphManager()
+    runner.lora_config = None
+    runner.maybe_setup_dummy_loras = lambda lora_config: null_context()
+    runner.model = object()
+    runner.model_state = object()
+    runner.input_buffers = object()
+    runner.intermediate_tensors = None
+    runner.block_tables = object()
+    runner.attn_groups = [[SimpleNamespace(metadata_builders=[builder])]]
+    runner.kv_cache_config = object()
+    runner.use_aux_hidden_state_outputs = False
+    runner.speculator = None
+
+    memory_reserved_values = iter([1_000, 1_128])
+    get_memory_info_values = iter([(10_000, 0), (9_000, 0)])
+
+    monkeypatch.setattr(
+        gpu_model_runner_v2.torch.accelerator, "synchronize", lambda: None
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_v2.torch.accelerator, "empty_cache", lambda: None
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_v2.torch.accelerator,
+        "memory_reserved",
+        lambda device: next(memory_reserved_values),
+    )
+
+    def get_memory_info():
+        events.append("memory_info")
+        return next(get_memory_info_values)
+
+    monkeypatch.setattr(
+        gpu_model_runner_v2.torch.accelerator,
+        "get_memory_info",
+        get_memory_info,
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_v2,
+        "lock_workspace",
+        lambda: events.append("lock"),
+    )
+
+    assert runner.capture_model() == 1_000
+    assert events == [
+        "builder_reserve",
+        "memory_info",
+        "capture",
+        "memory_info",
+        "lock",
+    ]
