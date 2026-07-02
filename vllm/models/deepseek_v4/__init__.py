@@ -15,11 +15,11 @@ from .quant_config import DeepseekV4FP8Config
 # default that mypy sees; the ROCm/XPU branches override at runtime and are
 # kept type-compatible via ``# type: ignore[assignment]``.
 if current_platform.is_rocm():
+    from .amd.dspark import (  # type: ignore[assignment]
+        DSparkDeepseekV4ForCausalLM,
+    )
     from .amd.model import DeepseekV4ForCausalLM
     from .amd.mtp import DeepSeekV4MTP
-
-    # DSpark is NVIDIA-only for now.
-    DSparkDeepseekV4ForCausalLM = None  # type: ignore[assignment]
 elif current_platform.is_xpu():
     from .xpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .xpu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
