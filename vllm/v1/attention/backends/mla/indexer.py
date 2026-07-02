@@ -203,6 +203,9 @@ class DeepSeekV32IndexerDecodeMetadata:
     requires_padding: bool
     schedule_metadata: torch.Tensor
     global_seq_lens: torch.Tensor | None = None
+    # Per-flattened-row request id for the SM100 varlen paged kernel; None
+    # selects the non-varlen paged path.
+    indices: torch.Tensor | None = None
 
 
 @dataclass
@@ -294,10 +297,21 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.use_flattening = not current_platform.is_device_capability_family(
             100
         ) and next_n not in (1, 2)
+        # SM100 supports the varlen paged MQA logits kernel (indices-selected,
+        # next_n == 1 rows). Route all SM100 decode through it so variable-length
+        # decode avoids the pad-to-max_decode_len waste of the native path. Both
+        # use_flattening and use_varlen expand decode into per-token rows and
+        # need require_uniform=False; only varlen passes `indices` to the kernel.
+        self.use_varlen = (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(100)
+            and has_deep_gemm()
+        )
         logger.info_once(
-            "DSA indexer decode path: use_flattening=%s "
+            "DSA indexer decode path: use_flattening=%s use_varlen=%s "
             "(next_n=%d, use_fp4_indexer_cache=%s)",
             self.use_flattening,
+            self.use_varlen,
             next_n,
             self.use_fp4_indexer_cache,
         )
@@ -322,6 +336,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             device=self.device,
         )
         self.global_decode_seq_lens_buffer = torch.zeros(
+            (scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        # Per-row request ids for the SM100 varlen paged kernel.
+        self.decode_indices_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
             device=self.device,
@@ -547,6 +567,48 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.global_decode_seq_lens_buffer[actual_expanded:num_decode_tokens] = 0
         return self.global_decode_seq_lens_buffer[:num_decode_tokens]
 
+    def _build_varlen_decode_indices(
+        self,
+        decode_lens: torch.Tensor,
+        decode_lens_cpu: torch.Tensor,
+        num_decodes: int,
+        num_decode_tokens: int,
+        max_decode_len: int,
+    ) -> torch.Tensor:
+        """Per-flattened-row request id for the SM100 varlen paged kernel.
+
+        Rows are in request-then-token order (matching the per-token expansion
+        in ``_prepare_decode_tensors``); adjacent equal ids form one run.
+        ``decode_lens`` must be the original per-request counts, read before the
+        expansion overwrites the buffer.
+        """
+        if max_decode_len <= 1:
+            # Plain decode: one query token per request, so row == request id.
+            return self.arange_buffer[:num_decodes]
+
+        min_decode_len = int(decode_lens_cpu.min().item())
+        indices = self.decode_indices_buffer[:num_decode_tokens]
+        if min_decode_len == max_decode_len:
+            # Uniform (incl. cudagraph): row r belongs to request
+            # r // max_decode_len. Static closed form, no device sync.
+            indices.copy_(self.arange_buffer[:num_decode_tokens] // max_decode_len)
+        else:
+            # Variable (eager only): repeat each request id by its decode_len.
+            # Pad the tail with non-merging trailing ids so masked pad rows form
+            # singleton runs instead of extending the last real request's run.
+            actual_expanded = int(decode_lens_cpu.sum().item())
+            indices[:actual_expanded] = torch.repeat_interleave(
+                self.arange_buffer[:num_decodes],
+                decode_lens,
+                output_size=actual_expanded,
+            )
+            if actual_expanded < num_decode_tokens:
+                pad = num_decode_tokens - actual_expanded
+                indices[actual_expanded:num_decode_tokens] = (
+                    num_decodes + self.arange_buffer[:pad]
+                )
+        return indices
+
     def build(
         self,
         common_prefix_len: int,
@@ -566,7 +628,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
-                require_uniform=not self.use_flattening,
+                require_uniform=not (self.use_flattening or self.use_varlen),
             )
         )
 
@@ -665,7 +727,10 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             max_decode_len = int(decode_lens_cpu.max().item())
             next_n = 1 + self.num_speculative_tokens
-            use_native = not self.use_flattening and max_decode_len <= next_n
+            use_native = (
+                not (self.use_flattening or self.use_varlen)
+                and max_decode_len <= next_n
+            )
 
             global_seq_lens_for_decode = self._prepare_global_decode_seq_lens(
                 global_seq_lens=global_seq_lens_for_decode,
@@ -676,6 +741,18 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 use_native=use_native,
                 max_decode_len=max_decode_len,
             )
+
+            # Build the varlen per-row request ids from the original per-request
+            # decode_lens, before _prepare_decode_tensors overwrites the buffer.
+            decode_indices = None
+            if self.use_varlen:
+                decode_indices = self._build_varlen_decode_indices(
+                    decode_lens=decode_lens,
+                    decode_lens_cpu=decode_lens_cpu,
+                    num_decodes=num_decodes,
+                    num_decode_tokens=num_decode_tokens,
+                    max_decode_len=max_decode_len,
+                )
 
             seq_lens, block_table, decode_lens, batch_size, requires_padding = (
                 self._prepare_decode_tensors(
@@ -729,6 +806,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     seq_lens,
                     self.kv_cache_spec.storage_block_size,
                     self.num_sms,
+                    indices=decode_indices,
                 )
 
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
@@ -737,6 +815,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
+                indices=decode_indices,
                 global_seq_lens=global_seq_lens_for_decode,
             )
 
