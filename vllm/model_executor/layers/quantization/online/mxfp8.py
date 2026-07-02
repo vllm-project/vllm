@@ -225,6 +225,8 @@ class Mxfp8OnlineMoEMethod(OnlineMoEMethodBase):
             w2_bias=getattr(layer, "w2_bias", None),
             block_shape=self.weight_block_size,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            gemm1_alpha=getattr(layer, "swiglu_alpha", None),
+            gemm1_beta=getattr(layer, "swiglu_beta", None),
             layer=layer,
         )
 
