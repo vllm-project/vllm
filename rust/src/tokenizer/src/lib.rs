@@ -43,6 +43,15 @@ pub trait Tokenizer: Send + Sync {
         false
     }
 
+    /// Whether `decode(a ++ b) == decode(a) ++ decode(b)` at token boundaries.
+    ///
+    /// True for byte-level decoders, false for context-dependent ones like
+    /// Metaspace. Incremental decoding uses it to skip re-decoding the retained
+    /// prefix. Defaults to `false`.
+    fn decode_is_context_independent(&self) -> bool {
+        false
+    }
+
     /// Create a stateful incremental decoder primed with the given prompt
     /// tokens.
     ///

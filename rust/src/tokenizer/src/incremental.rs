@@ -28,6 +28,9 @@ pub(crate) struct DecodeStream<'a, T: Tokenizer + ?Sized> {
     tokenizer: &'a T,
     skip_special_tokens: bool,
     min_bytes_to_buffer: usize,
+    // Reuse the retained prefix from the last decode instead of re-decoding it
+    // (only sound for context-independent decoders).
+    reuse_prefix: bool,
     // mutated state
     ids: Vec<u32>,
     prefix: String,
@@ -47,6 +50,7 @@ impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
             tokenizer,
             skip_special_tokens,
             min_bytes_to_buffer,
+            reuse_prefix: tokenizer.decode_is_context_independent(),
             ids: prompt_token_ids.to_vec(),
             prefix: String::new(),
             prefix_index: 0,
@@ -90,6 +94,18 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
         }
         Ok(())
     }
+
+    /// The next prefix: the decode of the retained tokens (only its length is
+    /// used). A context-independent decoder yields exactly `new_chunk`, so reuse
+    /// it; otherwise re-decode, since the retained tokens may render differently
+    /// in isolation (e.g. a Metaspace leading space).
+    fn retained_prefix(&self, new_chunk: &str) -> Result<String> {
+        if self.reuse_prefix {
+            Ok(new_chunk.to_owned())
+        } else {
+            self.tokenizer.decode(&self.ids[self.prefix_index..], self.skip_special_tokens)
+        }
+    }
 }
 
 impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
@@ -106,11 +122,12 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
         }
         // Ensure we split at a utf-8 char boundary.
         let new_chunk = &string[string.floor_char_boundary(prefix_len)..];
+        let new_chunk_len = new_chunk.len();
         self.cumulative_output.push_str(new_chunk);
+        self.prefix = self.retained_prefix(new_chunk)?;
         self.ids.drain(..self.prefix_index);
-        self.prefix = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
         self.prefix_index = self.ids.len();
-        Ok(new_chunk.len())
+        Ok(new_chunk_len)
     }
 
     fn next_chunk(&mut self) -> Option<String> {
@@ -369,6 +386,119 @@ mod tests {
         let (last_chunk, full_text) = decoder.flush(None).unwrap();
         assert_eq!(last_chunk.as_deref(), Some("lo!"));
         assert_eq!(full_text, "Hello!");
+    }
+
+    /// A Metaspace (SentencePiece) decoder is context-dependent: a leading space
+    /// is rendered only when a token starts the sequence, so the prefix-reuse
+    /// fast path is unsound for it. Reusing the full-context slice would leave
+    /// `prefix.len()` one byte too long and silently swallow the next token
+    /// (e.g. drop the trailing "!"). This checks streaming matches a full decode.
+    #[test]
+    fn streaming_matches_full_decode_metaspace() {
+        use tempfile::tempdir;
+        use tokenizers::Tokenizer as HfTokenizer;
+        use tokenizers::decoders::metaspace::Metaspace;
+        use tokenizers::models::bpe::{BPE, Vocab};
+        use tokenizers::pre_tokenizers::metaspace::Metaspace as MetaspacePre;
+
+        use crate::HuggingFaceTokenizer;
+
+        // Vocab using the SentencePiece space marker U+2581 ("▁").
+        let pieces = ["<unk>", "\u{2581}Hello", "\u{2581}world", "!"];
+        let vocab: Vocab =
+            pieces.iter().enumerate().map(|(i, p)| (p.to_string(), i as u32)).collect();
+        let model = BPE::builder()
+            .vocab_and_merges(vocab, vec![])
+            .unk_token("<unk>".to_string())
+            .build()
+            .expect("build bpe");
+        let mut hf = HfTokenizer::new(model);
+        hf.with_pre_tokenizer(Some(MetaspacePre::default()));
+        hf.with_decoder(Some(Metaspace::default()));
+
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("tokenizer.json");
+        hf.save(&path, false).expect("save tokenizer json");
+        let tokenizer = HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper");
+        assert!(
+            !tokenizer.decode_is_context_independent(),
+            "metaspace decoder must not take the fast path",
+        );
+
+        // Token sequence [▁Hello, ▁world, !].
+        let token_ids = [1u32, 2, 3];
+        let expected = tokenizer.decode(&token_ids, false).expect("decode");
+
+        let mut stream = tokenizer.create_decode_stream(&[], false, 0);
+        let mut streamed = String::new();
+        for &token_id in &token_ids {
+            stream.push_token(token_id).expect("push token");
+            if let Some(chunk) = stream.next_chunk() {
+                streamed.push_str(&chunk);
+            }
+        }
+        let (last_chunk, full_text) = stream.flush(None).expect("flush");
+        if let Some(chunk) = last_chunk {
+            streamed.push_str(&chunk);
+        }
+        assert_eq!(streamed, expected);
+        assert_eq!(full_text, expected);
+    }
+
+    /// Streaming a real byte-level (GPT-2 style) HuggingFace tokenizer one token
+    /// at a time must produce the same text as decoding the whole sequence at
+    /// once. This guards the prefix-reuse fast path (no second `decode()` per
+    /// token) against a real BPE backend rather than the toy test stubs above.
+    #[test]
+    fn streaming_matches_full_decode_real_tokenizer() {
+        use tempfile::tempdir;
+        use tokenizers::models::bpe::BPE;
+        use tokenizers::pre_tokenizers::byte_level::ByteLevel;
+        use tokenizers::{Tokenizer as HfTokenizer, decoders};
+
+        use crate::HuggingFaceTokenizer;
+
+        // Build a byte-level BPE with no merges: every byte is its own token, so
+        // any UTF-8 text (incl. CJK/emoji) round-trips and tokens routinely split
+        // multi-byte characters across boundaries — the case the fast path must
+        // handle.
+        let vocab: tokenizers::models::bpe::Vocab = ByteLevel::alphabet()
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| (c.to_string(), i as u32))
+            .collect();
+        let model = BPE::builder()
+            .vocab_and_merges(vocab, vec![])
+            .build()
+            .expect("build byte-level bpe");
+        let mut hf = HfTokenizer::new(model);
+        hf.with_pre_tokenizer(Some(ByteLevel::default()));
+        hf.with_decoder(Some(decoders::byte_level::ByteLevel::default()));
+
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("tokenizer.json");
+        hf.save(&path, false).expect("save tokenizer json");
+        let tokenizer = HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper");
+
+        let text = "Hello, 世界! Mixing ASCII, CJK 中文, and emoji 🎉🚀 across token \
+                    boundaries to stress incremental decoding.";
+        let token_ids = tokenizer.encode(text, false).expect("encode");
+        let expected = tokenizer.decode(&token_ids, false).expect("decode");
+
+        let mut stream = tokenizer.create_decode_stream(&[], false, 0);
+        let mut streamed = String::new();
+        for &token_id in &token_ids {
+            stream.push_token(token_id).expect("push token");
+            if let Some(chunk) = stream.next_chunk() {
+                streamed.push_str(&chunk);
+            }
+        }
+        let (last_chunk, full_text) = stream.flush(None).expect("flush");
+        if let Some(chunk) = last_chunk {
+            streamed.push_str(&chunk);
+        }
+        assert_eq!(streamed, expected);
+        assert_eq!(full_text, expected);
     }
 
     #[test]

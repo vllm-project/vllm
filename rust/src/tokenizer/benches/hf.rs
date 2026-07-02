@@ -118,5 +118,28 @@ fn bench_decode(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_encode, bench_decode);
+fn bench_incremental_decode(c: &mut Criterion) {
+    let fixture = BenchFixture::load();
+    let mut group = c.benchmark_group("tokenizer_incremental_decode");
+    group.throughput(Throughput::Elements(fixture.token_ids.len() as u64));
+
+    group.bench_function("hf_tokenizers", |b| {
+        b.iter(|| {
+            let mut stream = fixture.hf.create_decode_stream(&[], false, 0);
+            for &token_id in &fixture.token_ids {
+                stream.push_token(black_box(token_id)).expect("push token");
+            }
+            black_box(stream.output().len())
+        })
+    });
+
+    group.finish();
+}
+
+criterion_group!(
+    benches,
+    bench_encode,
+    bench_decode,
+    bench_incremental_decode
+);
 criterion_main!(benches);
