@@ -1,4 +1,3 @@
-Qwen3.5-4B-quantized.w4a16-humming-act-fp8.yaml
 gpt-oss-20b-humming.yaml
 Qwen3-30B-A3B-MXFP4A16-humming.yaml
 Qwen2-1.5B-Instruct-FP8W8-humming.yaml
