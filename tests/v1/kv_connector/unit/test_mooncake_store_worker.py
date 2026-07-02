@@ -1593,11 +1593,6 @@ def _make_bare_worker(
     worker.store_replicate_config = SimpleNamespace()
     worker._kv_connector_stats_lock = threading.Lock()
     worker.kv_connector_stats = MooncakeStoreConnectorStats()
-    # Routed-experts bridge disabled in these layout tests (set by
-    # _init_routed_experts_bridge_config in the real __init__, bypassed here).
-    worker._re_bridge_enabled = False
-    worker._re_bridge = None
-    worker._re_attn_gid = None
 
     spec = FullAttentionSpec(
         block_size=block_size, num_kv_heads=8, head_size=64, dtype=None
