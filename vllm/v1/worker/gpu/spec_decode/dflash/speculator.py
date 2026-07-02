@@ -208,8 +208,9 @@ class DFlashSpeculator(DraftModelSpeculator):
 
         num_sample = num_reqs * self.num_speculative_steps
         sample_hidden_states = last_hidden_states[self.sample_indices[:num_sample]]
-        # sample_pos is the predicted token's position Q; verification keys
-        # Gumbel by the predecessor (Q-1). sample_draft adds +1, so pass Q-2.
+        # sample_pos is the predicted token's position Q; sample_draft keys
+        # the (salted) draft Gumbel stream by positions + 1, so pass Q-2 to
+        # get a key unique per predicted position.
         draft_tokens = self.sample_draft(
             sample_hidden_states,
             self.sample_pos[:num_sample] - 2,
