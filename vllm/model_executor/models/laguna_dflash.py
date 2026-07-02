@@ -86,6 +86,17 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
 
+        self.mask_token_id = self.config.dflash_config.get("mask_token_id")
+        self.register_buffer(
+            "mask_embedding",
+            torch.zeros(
+                self.config.hidden_size,
+                dtype=vllm_config.model_config.dtype,
+            ),
+            persistent=False,
+        )
+        self.has_separate_mask_embedding = False
+
         self.layer_types = _get_dflash_layer_types(self.config)
         target_layer_count = self.config.target_layer_count
         self.layers = nn.ModuleList(
