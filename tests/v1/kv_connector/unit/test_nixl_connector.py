@@ -6,6 +6,7 @@ import inspect
 import os
 import tempfile
 import textwrap
+import threading
 import time
 import uuid
 from collections import defaultdict
@@ -467,6 +468,10 @@ def test_kv_transfer_handshake(dist_init):
 class FakeNixlConnectorWorker(NixlConnectorWorker):
     REMOTE_ENGINE_ID = "remote_engine"
 
+    # Live instances so test teardown can stop their reader threads (see the
+    # ``_shutdown_fake_workers`` autouse fixture).
+    _instances: list["FakeNixlConnectorWorker"] = []
+
     def __init__(
         self,
         *args,
@@ -500,6 +505,19 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         self.compat_hash = compute_nixl_compatibility_hash(
             self.vllm_config, self.backend_name, self.transfer_topo.cross_layers_blocks
         )
+
+        # NOTE: this Fake Connector bypasses register_kv_caches() (see _nixl_handshake),
+        # which is where Real Connector starts the pull reader thread. start_load_kv
+        # only enqueues READ submissions onto the reader, so without the thread
+        # running the reads never execute and get_finished never reports
+        # completion. Start it here to mirror the Real Connector lifecycle.
+        self._pull_reader_thread = threading.Thread(
+            target=self._pull_reader_loop,
+            daemon=True,
+            name="nixl-pull-reader",
+        )
+        self._pull_reader_thread.start()
+        FakeNixlConnectorWorker._instances.append(self)
 
     def _nixl_handshake(
         self, host: str, port: int, remote_tp_size: int, expected_engine_id: str
@@ -556,6 +574,22 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
             )
             remote_agents[remote_tp_rank] = remote_agent_name
         return remote_agents
+
+
+@pytest.fixture(autouse=True)
+def _shutdown_fake_workers():
+    """Stop the pull reader thread started by every FakeNixlConnectorWorker.
+
+    The Fake starts a ``nixl-pull-reader`` daemon thread in its ``__init__``
+    (mirroring register_kv_caches), but tests build the worker directly and
+    never call ``shutdown``. Drain the registry after each test so reader
+    threads don't accumulate across the suite.
+    """
+    yield
+    while FakeNixlConnectorWorker._instances:
+        worker = FakeNixlConnectorWorker._instances.pop()
+        with contextlib.suppress(Exception):
+            worker.shutdown()
 
 
 class TestNixlHandshake:
