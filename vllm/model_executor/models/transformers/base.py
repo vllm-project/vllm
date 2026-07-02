@@ -51,6 +51,11 @@ from vllm.model_executor.models.interfaces import (
     SupportsQuant,
 )
 from vllm.model_executor.models.interfaces_base import VllmModel
+from vllm.model_executor.models.transformers.fusion import (
+    FusedGroup,
+    apply_fused_linears,
+    stacked_params_mapping_from_groups,
+)
 from vllm.model_executor.models.transformers.utils import (
     can_enable_torch_compile,
     get_feature_request_tip,
@@ -174,6 +179,16 @@ class Base(
         self._create_hf_to_vllm_mapper()
         # Remove layers not on this pipeline parallel rank
         self.pipeline_parallel()
+        # Fuse q/k/v and gate/up linear groups before per-Linear replacement so
+        # we can emit packed vLLM layers (QKVParallelLinear, MergedColumnParallel)
+        # in place of multiple unfused colwise Linears.
+        self._fused_groups: list[FusedGroup] = self._fuse_linear_groups()
+        n_qkv = sum(1 for g in self._fused_groups if g.kind == "qkv")
+        n_gu = sum(1 for g in self._fused_groups if g.kind == "gate_up")
+        if n_qkv or n_gu:
+            logger.info(
+                "Transformers backend fused linear groups: "
+                "qkv=%d, gate_up=%d", n_qkv, n_gu)
         # Substitute remaining layers with vLLM's layers as needed
         self.recursive_replace()
         # Create attention instances for KV cache allocation
@@ -421,6 +436,31 @@ class Base(
                 # attrsetter in case the module is nested (e.g. "text_model.norm")
                 attrsetter(name)(self.model, PPMissingLayer())
 
+    def _fuse_linear_groups(self) -> list[FusedGroup]:
+        """Run the structural q/k/v + gate/up fusion pass before per-Linear
+        replacement. Returns the list of groups that were fused (used by
+        load_weights to plumb checkpoint shards into the packed weights).
+        """
+        tp_plan = getattr(self.model, "tp_plan", None) or {}
+        head_dim = self.model_config.get_head_size()
+        num_attention_heads = getattr(
+            self.text_config, "num_attention_heads", None
+        )
+        num_key_value_heads = getattr(
+            self.text_config, "num_key_value_heads", num_attention_heads
+        )
+        if num_attention_heads is None:
+            return []
+        return apply_fused_linears(
+            self.model,
+            tp_plan=tp_plan,
+            quant_config=self.quant_config,
+            head_dim=head_dim,
+            num_attention_heads=num_attention_heads,
+            num_key_value_heads=num_key_value_heads,
+            prefix="model",
+        )
+
     def recursive_replace(self):
         """Recursively replace modules in the model as needed.
 
@@ -648,7 +688,52 @@ class Base(
             ignore_unexpected_prefixes=self.ignore_unexpected_prefixes,
             ignore_unexpected_suffixes=self.ignore_unexpected_suffixes,
         )
+        # If we fused any q/k/v or gate/up groups, route the matching checkpoint
+        # weights to the packed layer's sharded weight_loader manually, and let
+        # AutoWeightsLoader handle everything else.
+        stacked_mapping = stacked_params_mapping_from_groups(self._fused_groups)
+        if stacked_mapping:
+            params_dict = dict(self.named_parameters())
+            extra_loaded: set[str] = set()
+            weights = self._stream_with_fused_shards(
+                weights, stacked_mapping, params_dict, extra_loaded
+            )
+            autoloaded = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+            return autoloaded | extra_loaded
         return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+
+    def _stream_with_fused_shards(
+        self,
+        weights: Iterable[tuple[str, torch.Tensor]],
+        stacked_mapping: list[tuple[str, str, "str | int"]],
+        params_dict: dict[str, torch.nn.Parameter],
+        loaded_out: set[str],
+    ) -> Iterable[tuple[str, torch.Tensor]]:
+        """Filter weights stream: weights matching a fused source pattern are
+        loaded directly into the packed param via shard_id; the rest are
+        yielded for AutoWeightsLoader to handle.
+        """
+        # Apply the same name mapping AutoWeightsLoader would, so the names we
+        # match against are post-rename (e.g. "model.layers.0.self_attn.q_proj.weight").
+        weights = self.hf_to_vllm_mapper.apply(weights)
+        for name, w in weights:
+            matched = False
+            for fused_short, source_short, shard_id in stacked_mapping:
+                if source_short not in name:
+                    continue
+                fused_name = name.replace(source_short, fused_short)
+                if fused_name not in params_dict:
+                    continue
+                param = params_dict[fused_name]
+                weight_loader = getattr(param, "weight_loader", None)
+                if weight_loader is None:
+                    continue
+                weight_loader(param, w, shard_id)
+                loaded_out.add(fused_name)
+                matched = True
+                break
+            if not matched:
+                yield name, w
 
     @staticmethod
     def check_version(min_version: str, feature: str):
