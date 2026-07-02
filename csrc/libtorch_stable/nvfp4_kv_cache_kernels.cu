@@ -45,7 +45,7 @@ __device__ __forceinline__ int swizzle_scale_offset(int t, int s,
 //
 // Threading: one CUDA block per token, threads process heads and
 // groups of 16 elements within each head.
-template <typename scalar_t>
+template <typename scalar_t, bool SwizzleVScale>
 __global__ void reshape_and_cache_nvfp4_kernel(
     const scalar_t* __restrict__ key,      // [num_tokens, num_heads, head_size]
     const scalar_t* __restrict__ value,    // [num_tokens, num_heads, head_size]
@@ -153,12 +153,12 @@ __global__ void reshape_and_cache_nvfp4_kernel(
 #endif
 
       // Write block scale to scale cache.
-      // K (kv==0): linear layout (no swizzle).
-      // V (kv==1): swizzled layout for SM100 trtllm-gen MHA kernel.
+      // K always uses linear layout. V uses the SM100 trtllm-gen swizzle, but
+      // SM120 FlashInfer XQA reads linear V scales.
       if (sf_out_ptr != nullptr) {
         int scale_idx = group_in_head;
         uint8_t* __restrict__ scale_dst;
-        if (kv == 0) {
+        if (kv == 0 || !SwizzleVScale) {
           scale_dst = scale_block + head * scale_head_stride +
                       block_offset * scale_block_offset_stride + scale_idx;
         } else {
@@ -259,19 +259,35 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
   const torch::stable::accelerator::DeviceGuard device_guard(
       key.get_device_index());
   const cudaStream_t stream = get_current_cuda_stream();
+  const cudaDeviceProp* device_prop = get_device_prop();
+  const bool swizzle_v_scale = device_prop->major < 12;
 
   VLLM_STABLE_DISPATCH_HALF_TYPES(
       key.scalar_type(), "reshape_and_cache_nvfp4", [&] {
-        vllm::reshape_and_cache_nvfp4_kernel<scalar_t>
-            <<<grid, block, 0, stream>>>(
-                key.const_data_ptr<scalar_t>(),
-                value.const_data_ptr<scalar_t>(),
-                key_cache.mutable_data_ptr<uint8_t>(),
-                value_cache.mutable_data_ptr<uint8_t>(), key_scale_ptr,
-                value_scale_ptr, slot_mapping.const_data_ptr<int64_t>(),
-                k_scale_ptr, v_scale_ptr, key.stride(0), value.stride(0),
-                num_heads, head_size, block_size, data_block_stride,
-                data_head_stride, data_block_offset_stride, scale_block_stride,
-                scale_head_stride, scale_block_offset_stride);
+        if (swizzle_v_scale) {
+          vllm::reshape_and_cache_nvfp4_kernel<scalar_t, true>
+              <<<grid, block, 0, stream>>>(
+                  key.const_data_ptr<scalar_t>(),
+                  value.const_data_ptr<scalar_t>(),
+                  key_cache.mutable_data_ptr<uint8_t>(),
+                  value_cache.mutable_data_ptr<uint8_t>(), key_scale_ptr,
+                  value_scale_ptr, slot_mapping.const_data_ptr<int64_t>(),
+                  k_scale_ptr, v_scale_ptr, key.stride(0), value.stride(0),
+                  num_heads, head_size, block_size, data_block_stride,
+                  data_head_stride, data_block_offset_stride, scale_block_stride,
+                  scale_head_stride, scale_block_offset_stride);
+        } else {
+          vllm::reshape_and_cache_nvfp4_kernel<scalar_t, false>
+              <<<grid, block, 0, stream>>>(
+                  key.const_data_ptr<scalar_t>(),
+                  value.const_data_ptr<scalar_t>(),
+                  key_cache.mutable_data_ptr<uint8_t>(),
+                  value_cache.mutable_data_ptr<uint8_t>(), key_scale_ptr,
+                  value_scale_ptr, slot_mapping.const_data_ptr<int64_t>(),
+                  k_scale_ptr, v_scale_ptr, key.stride(0), value.stride(0),
+                  num_heads, head_size, block_size, data_block_stride,
+                  data_head_stride, data_block_offset_stride, scale_block_stride,
+                  scale_head_stride, scale_block_offset_stride);
+        }
       });
 }
