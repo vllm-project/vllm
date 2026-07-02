@@ -79,6 +79,11 @@ class TritonAttentionMetadata:
     softmax_segm_output: torch.Tensor
     softmax_segm_max: torch.Tensor
     softmax_segm_expsum: torch.Tensor
+    # Per-(spec-)decode-step query length (1 for pure decode, 1 + num_spec for
+    # MTP/EAGLE).  Gates the 3D flash-decoding path for spec-decode in the
+    # ``unified_attention`` launcher.  Set by the builder from the speculative
+    # config (1 when spec-decode is inactive).
+    decode_query_len: int
 
     causal: bool | torch.Tensor
 
@@ -149,11 +154,32 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
                 key=lambda x: abs(x - self.seq_threshold_3D),
             )
 
+        # Per-(spec-)decode-step query length: 1 for pure decode, or
+        # ``1 + num_speculative_tokens`` when MTP/EAGLE speculative decode is
+        # active (e.g. 5 for num_speculative_tokens=4).  Under spec-decode a
+        # uniform decode step packs up to ``decode_query_len`` query tokens per
+        # sequence, so the 3D segment buffers — which are indexed by the
+        # absolute within-batch query-token position (``query_offset_0`` in
+        # ``kernel_unified_attention``), not by sequence index — must size their
+        # first dim by ``seq_threshold_3D * decode_query_len`` to admit a full
+        # spec-verify batch (num_seqs <= seq_threshold_3D, each with up to
+        # decode_query_len tokens).  With ``decode_query_len == 1`` (non-spec)
+        # this reduces to the original ``seq_threshold_3D`` first dim — no
+        # behavior or memory change for non-spec deployments.
+        spec_config = self.vllm_config.speculative_config
+        self.decode_query_len = 1 + (
+            spec_config.num_speculative_tokens
+            if spec_config is not None
+            and spec_config.num_speculative_tokens is not None
+            else 0
+        )
+        segm_first_dim = self.seq_threshold_3D * self.decode_query_len
+
         self.num_par_softmax_segments = NUM_PAR_SOFTMAX_SEGMENTS
         headdim_padded = next_power_of_2(self.headdim)
         self.softmax_segm_output = torch.empty(
             (
-                self.seq_threshold_3D,
+                segm_first_dim,
                 self.num_heads_q,
                 self.num_par_softmax_segments,
                 headdim_padded,
@@ -162,14 +188,35 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             device=device,
         )
         self.softmax_segm_max = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (segm_first_dim, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
         )
         self.softmax_segm_expsum = torch.empty(
-            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            (segm_first_dim, self.num_heads_q, self.num_par_softmax_segments),
             dtype=torch.float32,
             device=device,
+        )
+        # Buffer-safety invariant (applies to BOTH the global and sliding
+        # builder instances since this __init__ is shared).  The 3D epilogue in
+        # ``kernel_unified_attention`` indexes all three segment buffers by the
+        # absolute within-batch query-token position, whose max over a
+        # 3D-admitted batch is (num_actual_tokens - 1) <= seq_threshold_3D *
+        # decode_query_len - 1.  All three buffers must therefore share the
+        # first dim ``seq_threshold_3D * decode_query_len``; assert the actual
+        # allocated shapes to fail fast on a half-applied resize.
+        expected_first_dim = self.seq_threshold_3D * self.decode_query_len
+        assert (
+            self.softmax_segm_output.shape[0] == expected_first_dim
+            and self.softmax_segm_max.shape[0] == expected_first_dim
+            and self.softmax_segm_expsum.shape[0] == expected_first_dim
+        ), (
+            "3D softmax segment buffers must all have first dim "
+            f"seq_threshold_3D({self.seq_threshold_3D}) * "
+            f"decode_query_len({self.decode_query_len}) = {expected_first_dim}; "
+            f"got output={self.softmax_segm_output.shape[0]}, "
+            f"max={self.softmax_segm_max.shape[0]}, "
+            f"expsum={self.softmax_segm_expsum.shape[0]}."
         )
 
     def build_for_cudagraph_capture(
@@ -235,6 +282,7 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             softmax_segm_output=self.softmax_segm_output,
             softmax_segm_max=self.softmax_segm_max,
             softmax_segm_expsum=self.softmax_segm_expsum,
+            decode_query_len=self.decode_query_len,
         )
 
         mm_ranges = common_attn_metadata.mm_req_doc_ranges
@@ -664,6 +712,7 @@ class TritonAttentionImpl(AttentionImpl):
             k_descale=k_descale,
             v_descale=v_descale,
             seq_threshold_3D=seq_threshold_3D,
+            decode_query_len=attn_metadata.decode_query_len,
             num_par_softmax_segments=num_par_softmax_segments,
             softmax_segm_output=softmax_segm_output,
             softmax_segm_max=softmax_segm_max,

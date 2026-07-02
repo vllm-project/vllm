@@ -21,6 +21,7 @@ from vllm.v1.attention.ops.triton_attention_helpers import (
     cdiv_fn,
     compute_kv_seq_mask,
     compute_tile_loop_bounds,
+    compute_window_segments,
     find_seq_idx,
     init_softmax_M,
     load_qq_bias_tile,
@@ -275,6 +276,13 @@ def kernel_unified_attention(
     USE_TD: tl.constexpr = False,
     USE_TD_QO: tl.constexpr = False,
     Q_IS_FP8: tl.constexpr = False,
+    # When True (3D + sliding-window + spec-decode regime), the
+    # ``NUM_SEGMENTS_PER_SEQ`` parallel-softmax segments tile only the
+    # sliding window's tile range rather than the full sequence, so
+    # segment parallelism is not collapsed to 1/NSEG at long context.
+    # Default False preserves the full-sequence (global / existing)
+    # segmentation byte-for-byte.
+    WINDOW_SEG_3D: tl.constexpr = False,
 ):
     USE_PER_TOKEN_HEAD_SCALES: tl.constexpr = KV_QUANT_MODE >= 2
     USE_FP8_Q_DESCALE: tl.constexpr = KV_QUANT_MODE == 1 and Q_IS_FP8
@@ -302,10 +310,43 @@ def kernel_unified_attention(
     if q_block_local_idx * BLOCK_Q >= cur_batch_query_len:
         return
 
+    # context_len is needed both for window segmentation (3D) and the
+    # tile loop below; compute it once here.
+    context_len = seq_len - cur_batch_query_len
+
     if IS_3D:
-        tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
-        if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
-            return
+        if WINDOW_SEG_3D:
+            # Window-relative segmentation: segments tile only
+            # the sliding window's tile range for THIS q-block.  The
+            # early-return below skips segments past the window's active
+            # count; those segment buffers are left untouched and are
+            # masked out by ``reduce_segments`` (which recomputes the
+            # SAME act_num_segments via compute_window_segments).
+            _ws_tile_start, tiles_per_segment, _ws_act_segments = (
+                compute_window_segments(
+                    context_len,
+                    seq_len,
+                    cur_batch_query_len,
+                    q_block_local_idx,
+                    NUM_SEGMENTS_PER_SEQ,
+                    TILE_SIZE,
+                    BLOCK_M,
+                    BLOCK_Q,
+                    num_queries_per_kv,
+                    SLIDING_WINDOW,
+                    USE_MM_PREFIX,
+                    USE_CAUSAL,
+                    USE_PER_SEQ_CAUSAL,
+                    CHUNK_LOOKBACK,
+                    CHUNK_SIZE,
+                )
+            )
+            if segm_idx >= _ws_act_segments:
+                return
+        else:
+            tiles_per_segment = cdiv_fn(seq_len, NUM_SEGMENTS_PER_SEQ * TILE_SIZE)
+            if segm_idx * tiles_per_segment * TILE_SIZE >= seq_len:
+                return
     else:
         tiles_per_segment = 0
 
@@ -369,8 +410,6 @@ def kernel_unified_attention(
         score_scale = scale * tl.load(q_scale) * tl.load(k_scale)
         value_scale = tl.load(v_scale)
 
-    context_len = seq_len - cur_batch_query_len
-
     if USE_ALIBI_SLOPES:
         alibi_slope = tl.load(
             alibi_slopes_ptr + query_offset_1, mask=query_mask_1, other=0.0
@@ -397,6 +436,7 @@ def kernel_unified_attention(
         USE_PER_SEQ_CAUSAL,
         CHUNK_LOOKBACK,
         CHUNK_SIZE,
+        WINDOW_SEG_3D,
     )
 
     # iterate through tiles (now limited to the sliding window range)
@@ -683,6 +723,21 @@ def reduce_segments(
     USE_FP8: tl.constexpr,  # bool
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
+    # Window-relative segmentation: when WINDOW_SEG_3D is True the
+    # active-segment count is recomputed from the SAME per-q-block window
+    # range the mainloop used (compute_window_segments) instead of the
+    # window-blind full-seq formula.  These constexprs mirror the
+    # mainloop's so the two views CANNOT drift.  Defaults reproduce the
+    # original window-blind behavior byte-for-byte.
+    BLOCK_M: tl.constexpr = 0,
+    num_queries_per_kv: tl.constexpr = 0,
+    SLIDING_WINDOW: tl.constexpr = 0,
+    USE_MM_PREFIX: tl.constexpr = False,
+    USE_CAUSAL: tl.constexpr = True,
+    USE_PER_SEQ_CAUSAL: tl.constexpr = False,
+    CHUNK_LOOKBACK: tl.constexpr = -1,
+    CHUNK_SIZE: tl.constexpr = -1,
+    WINDOW_SEG_3D: tl.constexpr = False,
 ):
     query_token_idx = tl.program_id(0)
     query_head_idx = tl.program_id(1)
@@ -695,11 +750,40 @@ def reduce_segments(
     seq_len = tl.load(seq_lens_ptr + seq_idx)
 
     # number of segments for this particular sequence
-    num_segments = NUM_SEGMENTS_PER_SEQ
-    tiles_per_segment = cdiv_fn(seq_len, num_segments * TILE_SIZE)
+    if WINDOW_SEG_3D:
+        # Reconstruct the SAME q-block geometry the mainloop used for this
+        # query token, then derive the identical window-relative active
+        # segment count.  cur_start / cur_batch_query_len mirror
+        # resolve_seq_and_query_len; q_block_local_idx is the token's
+        # q-block within its sequence (all tokens in a q-block share it).
+        cur_start = tl.load(query_start_len_ptr + seq_idx)
+        cur_stop = tl.load(query_start_len_ptr + seq_idx + 1)
+        cur_batch_query_len = cur_stop - cur_start
+        q_block_local_idx = (query_token_idx - cur_start) // BLOCK_Q
+        context_len = seq_len - cur_batch_query_len
+        _ws_tile_start, tiles_per_segment, act_num_segments = compute_window_segments(
+            context_len,
+            seq_len,
+            cur_batch_query_len,
+            q_block_local_idx,
+            NUM_SEGMENTS_PER_SEQ,
+            TILE_SIZE,
+            BLOCK_M,
+            BLOCK_Q,
+            num_queries_per_kv,
+            SLIDING_WINDOW,
+            USE_MM_PREFIX,
+            USE_CAUSAL,
+            USE_PER_SEQ_CAUSAL,
+            CHUNK_LOOKBACK,
+            CHUNK_SIZE,
+        )
+    else:
+        num_segments = NUM_SEGMENTS_PER_SEQ
+        tiles_per_segment = cdiv_fn(seq_len, num_segments * TILE_SIZE)
+        # create masks for subsequent loads
+        act_num_segments = cdiv_fn(seq_len, tiles_per_segment * TILE_SIZE)
 
-    # create masks for subsequent loads
-    act_num_segments = cdiv_fn(seq_len, tiles_per_segment * TILE_SIZE)
     segm_mask = tl.arange(0, NUM_SEGMENTS_PER_SEQ) < tl.full(
         [NUM_SEGMENTS_PER_SEQ], act_num_segments, dtype=tl.int32
     )
@@ -796,6 +880,13 @@ def unified_attention(
     k_descale,
     v_descale,
     seq_threshold_3D=None,
+    # Max per-sequence query length admitted to the 3D flash-decoding path.
+    # Defaults to 1 (today's pure-decode behavior).  Under MTP/EAGLE
+    # speculative decode this is ``1 + num_speculative_tokens`` so that the
+    # uniform spec-verify decode step (query_len == 1 + num_spec) is still
+    # routed to 3D instead of falling back to the under-occupied 2D split-KV
+    # path.  See ``TritonAttentionMetadataBuilder`` for how it is derived.
+    decode_query_len: int = 1,
     num_par_softmax_segments=None,
     softmax_segm_output=None,
     softmax_segm_max=None,
@@ -1005,18 +1096,49 @@ def unified_attention(
 
     # Launch the 2D kernel if
     # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
-    # 2. The batch includes at least one prefill request, or
+    # 2. The batch includes a query longer than the (spec-)decode query length, i.e.
+    #    a real prefill/chunked-prefill request (``max_seqlen_q > decode_query_len``).
+    #    Under MTP spec-decode ``decode_query_len = 1 + num_spec`` (e.g. 5), so a
+    #    uniform spec-verify decode step (max_seqlen_q == 5) is admitted to 3D rather
+    #    than falling to the under-occupied 2D split-KV path.  With the default
+    #    ``decode_query_len == 1`` this disjunct is byte-for-byte the old
+    #    ``max_seqlen_q > 1`` test (backward-safe no-op for non-spec callers), or
     # 3. The number of sequences exceeds the configured threshold, or
     # 4. Batch invariance is enabled
+    #
+    # Sliding-window layers under spec-decode (``decode_query_len > 1`` and
+    # ``window_size[0] >= 0``) ARE admitted to 3D: the
+    # window-relative segmentation (``WINDOW_SEG_3D`` below) tiles the
+    # segments over the sliding window's tile range instead of the full
+    # sequence, so segment parallelism is not collapsed.  Without
+    # WINDOW_SEG_3D the window-blind segmentation would mis-segment sliding
+    # layers; the flag and the matched ``reduce_segments`` recompute keep
+    # the mainloop and reduction consistent.  ``mm_prefix`` (bidirectional)
+    # sliding layers are NOT window-segmented (the window pruning is
+    # disabled for them in the helpers), so they fall back to full-seq 3D.
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
         or softmax_segm_output is None
         or softmax_segm_max is None
         or softmax_segm_expsum is None
-        or max_seqlen_q > 1
+        or max_seqlen_q > decode_query_len
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
+    )
+
+    # Window-relative 3D segmentation applies only to sliding-window
+    # layers in the spec-decode regime.  Global layers (window_size[0] < 0)
+    # and pure-decode callers (decode_query_len == 1) keep the original
+    # full-sequence segmentation byte-for-byte.  mm_prefix sliding layers are
+    # excluded (window tile-pruning is a no-op under USE_MM_PREFIX, so the
+    # window range would equal the full sequence and segmentation must stay
+    # full-seq to match).
+    window_seg_3d = (
+        use_3d
+        and decode_query_len > 1
+        and window_size[0] >= 0
+        and not use_mm_prefix
     )
 
     # The kernel signature is the same for 2D and 3D — only the launch
@@ -1130,6 +1252,7 @@ def unified_attention(
         CHUNK_SIZE=chunk_size,
         USE_TD=use_td,
         USE_TD_QO=use_td_qo,
+        WINDOW_SEG_3D=window_seg_3d,
         **launch_kwargs,
     )
 
@@ -1153,4 +1276,15 @@ def unified_attention(
             BLOCK_Q=BLOCK_Q,
             NUM_SEGMENTS_PER_SEQ=num_par_softmax_segments,
             USE_FP8=output_scale is not None,
+            # Mirror the mainloop's window-segmentation inputs so
+            # reduce_segments recomputes the IDENTICAL active-segment count.
+            BLOCK_M=BLOCK_M,
+            num_queries_per_kv=num_queries_per_kv,
+            SLIDING_WINDOW=(1 + window_size[0]),
+            USE_MM_PREFIX=use_mm_prefix,
+            USE_CAUSAL=use_causal,
+            USE_PER_SEQ_CAUSAL=use_per_seq_causal,
+            CHUNK_LOOKBACK=chunk_lookback,
+            CHUNK_SIZE=chunk_size,
+            WINDOW_SEG_3D=window_seg_3d,
         )

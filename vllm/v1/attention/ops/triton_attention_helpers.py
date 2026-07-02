@@ -139,40 +139,40 @@ def init_softmax_M(
 
 
 @triton.jit
-def compute_tile_loop_bounds(
+def compute_window_tile_range(
     context_len,
     seq_len,
     cur_batch_query_len,
     q_block_local_idx,
-    segm_idx_or_0,
-    tiles_per_segment_or_0,
     TILE_SIZE: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_Q: tl.constexpr,
     num_queries_per_kv: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
     USE_MM_PREFIX: tl.constexpr,
-    IS_3D: tl.constexpr,
     USE_CAUSAL: tl.constexpr = True,
     USE_PER_SEQ_CAUSAL: tl.constexpr = False,
     CHUNK_LOOKBACK: tl.constexpr = -1,
     CHUNK_SIZE: tl.constexpr = -1,
 ):
-    """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
-    derived ``max_seq_prefix_len`` used for per-tile masking.
+    """Single source of truth for the *un-segmented* tile range
+    ``[tile_start, tile_end)`` spanned by one q-block, plus the
+    derived ``max_seq_prefix_len``.
 
-    Combines three concerns into one helper:
+    Factored out of ``compute_tile_loop_bounds`` so that the attention
+    mainloop, ``compute_tile_loop_bounds``, AND ``reduce_segments`` can
+    all derive the IDENTICAL window range from the same q-block
+    geometry.  This is the keystone that prevents the mainloop and the
+    3D reduction from disagreeing on the window-relative segment layout:
+    any drift between the two would silently read stale /
+    mis-masked segment partials.
 
-    1. Longest prefix spanned by any query token in this q-block.
-       Clamped to ``seq_len`` (causal) or extended to it when
-       mm_prefix is active or non-causal sequences need the full
-       sequence.
-    2. Sliding-window pruning: narrows ``[tile_start, tile_end)`` to
-       only tiles that can contain an allowed key under SWA.
-       For non-causal sequences, the window extends in both directions.
-    3. 3D scoping: when ``IS_3D`` is True, further narrows to the
-       segment's slice via ``(segm_idx * tiles_per_segment,
-       (segm_idx + 1) * tiles_per_segment)``.
+    The prefix is clamped to ``seq_len`` (causal) or extended to it
+    when mm_prefix is active or non-causal/per-seq-causal sequences
+    need the full sequence; for non-causal sequences the sliding
+    window extends in both directions.  For ``SLIDING_WINDOW <= 0``
+    (global layers) this returns ``[0, num_tiles)`` — byte-identical
+    to the previous inline logic.
     """
     # compute the length of the longest sequence prefix spanned by any
     # query token in the current q_block (q_block_local_idx)
@@ -228,9 +228,142 @@ def compute_tile_loop_bounds(
         tile_start = tl.maximum(0, first_allowed_key // TILE_SIZE)
         tile_end = tl.minimum((last_allowed_key // TILE_SIZE) + 1, num_tiles)
 
+    return tile_start, tile_end, max_seq_prefix_len
+
+
+@triton.jit
+def compute_window_segments(
+    context_len,
+    seq_len,
+    cur_batch_query_len,
+    q_block_local_idx,
+    NUM_SEGMENTS: tl.constexpr,
+    TILE_SIZE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_Q: tl.constexpr,
+    num_queries_per_kv: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+    USE_MM_PREFIX: tl.constexpr,
+    USE_CAUSAL: tl.constexpr = True,
+    USE_PER_SEQ_CAUSAL: tl.constexpr = False,
+    CHUNK_LOOKBACK: tl.constexpr = -1,
+    CHUNK_SIZE: tl.constexpr = -1,
+):
+    """Window-relative 3D segmentation for one q-block.
+
+    Returns ``(tile_start, tiles_per_segment, act_num_segments)`` where
+    the ``NUM_SEGMENTS`` parallel-softmax segments tile ONLY the
+    sliding window's tile range ``[tile_start, tile_end)`` rather than
+    the full sequence.  At 27k context with a 1024 window this restores
+    ~11/16 active segments vs the window-blind 1/16 collapse.
+
+    The mainloop (for its early-return + loop bounds) and
+    ``reduce_segments`` (for its segment mask) MUST call this with the
+    SAME q-block geometry so their ``act_num_segments`` agree — the
+    mainloop early-returns (does not overwrite) empty high segments, so
+    the reduction relies on the matching mask to exclude stale data.
+    """
+    tile_start, tile_end, _ = compute_window_tile_range(
+        context_len,
+        seq_len,
+        cur_batch_query_len,
+        q_block_local_idx,
+        TILE_SIZE,
+        BLOCK_M,
+        BLOCK_Q,
+        num_queries_per_kv,
+        SLIDING_WINDOW,
+        USE_MM_PREFIX,
+        USE_CAUSAL,
+        USE_PER_SEQ_CAUSAL,
+        CHUNK_LOOKBACK,
+        CHUNK_SIZE,
+    )
+    window_tiles = tile_end - tile_start
+    # window_tiles >= 1 whenever the q-block has any allowed key (the
+    # caller only reaches here for non-empty q-blocks); guard anyway so
+    # cdiv never divides by zero.
+    window_tiles = tl.maximum(window_tiles, 1)
+    tiles_per_segment = cdiv_fn(window_tiles, NUM_SEGMENTS)
+    act_num_segments = cdiv_fn(window_tiles, tiles_per_segment)
+    return tile_start, tiles_per_segment, act_num_segments
+
+
+@triton.jit
+def compute_tile_loop_bounds(
+    context_len,
+    seq_len,
+    cur_batch_query_len,
+    q_block_local_idx,
+    segm_idx_or_0,
+    tiles_per_segment_or_0,
+    TILE_SIZE: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_Q: tl.constexpr,
+    num_queries_per_kv: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+    USE_MM_PREFIX: tl.constexpr,
+    IS_3D: tl.constexpr,
+    USE_CAUSAL: tl.constexpr = True,
+    USE_PER_SEQ_CAUSAL: tl.constexpr = False,
+    CHUNK_LOOKBACK: tl.constexpr = -1,
+    CHUNK_SIZE: tl.constexpr = -1,
+    WINDOW_SEG_3D: tl.constexpr = False,
+):
+    """Compute the tile-loop bounds ``(loop_lo, loop_hi)`` and the
+    derived ``max_seq_prefix_len`` used for per-tile masking.
+
+    Combines three concerns into one helper:
+
+    1. Longest prefix spanned by any query token in this q-block.
+       Clamped to ``seq_len`` (causal) or extended to it when
+       mm_prefix is active (bidirectional ranges can reach past the
+       causal prefix).
+    2. Sliding-window pruning: narrows ``[tile_start, tile_end)`` to
+       only tiles that can contain an allowed key under SWA.
+    3. 3D scoping: when ``IS_3D`` is True, further narrows to the
+       segment's slice.  Two segmentation modes:
+       - ``WINDOW_SEG_3D``: segments tile the WINDOW range
+         ``[tile_start, tile_end)`` — base offset by ``tile_start``.
+       - default: full-sequence segmentation via
+         ``(segm_idx * tiles_per_segment, (segm_idx + 1) *
+         tiles_per_segment)`` (GLOBAL + existing behavior, unchanged).
+    """
+    tile_start, tile_end, max_seq_prefix_len = compute_window_tile_range(
+        context_len,
+        seq_len,
+        cur_batch_query_len,
+        q_block_local_idx,
+        TILE_SIZE,
+        BLOCK_M,
+        BLOCK_Q,
+        num_queries_per_kv,
+        SLIDING_WINDOW,
+        USE_MM_PREFIX,
+        USE_CAUSAL,
+        USE_PER_SEQ_CAUSAL,
+        CHUNK_LOOKBACK,
+        CHUNK_SIZE,
+    )
+
     if IS_3D:
-        loop_lo = max(segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
-        loop_hi = min((segm_idx_or_0 + 1) * tiles_per_segment_or_0, tile_end)
+        if WINDOW_SEG_3D:
+            # Window-relative segmentation: the ``NUM_SEGMENTS`` segments
+            # tile only the window range ``[tile_start, tile_end)``, with
+            # segment ``segm_idx`` covering
+            # ``[tile_start + segm_idx*tps, tile_start + (segm_idx+1)*tps)``.
+            # ``tiles_per_segment_or_0`` is the WINDOW-relative tps the
+            # mainloop computed via ``compute_window_segments`` on the
+            # same q-block geometry; ``tile_start`` is re-derived here from
+            # the shared ``compute_window_tile_range`` — so neither value
+            # can drift from the early-return / reduce_segments view.
+            loop_lo = max(tile_start + segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
+            loop_hi = min(
+                tile_start + (segm_idx_or_0 + 1) * tiles_per_segment_or_0, tile_end
+            )
+        else:
+            loop_lo = max(segm_idx_or_0 * tiles_per_segment_or_0, tile_start)
+            loop_hi = min((segm_idx_or_0 + 1) * tiles_per_segment_or_0, tile_end)
     else:
         loop_lo = tile_start
         loop_hi = tile_end
