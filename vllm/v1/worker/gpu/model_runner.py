@@ -357,6 +357,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         self.eplb.maybe_start_async_loop(eplb_models_added)
 
+        if (
+            self.parallel_config.enable_eplb
+            and not load_dummy_weights
+            and not eplb_models_added
+        ):
+            raise ValueError(
+                "--enable-eplb was requested, but no loaded model "
+                "implements the MixtureOfExperts interface required "
+                f"by EPLB (main model: {type(self.model).__name__}). "
+                "Either remove --enable-eplb, or use a MoE model "
+                "whose vLLM implementation supports EPLB."
+            )
+
         if not self.is_first_pp_rank:
             # For non-first PP ranks, create intermediate tensors sized
             # for the max capture size so they can be sliced per batch.
