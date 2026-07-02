@@ -51,11 +51,8 @@ from vllm.distributed.weight_transfer import (
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
-from vllm.multimodal.video import (
-    PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
-    PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
-    PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
-    PYNVVIDEOCODEC_VIDEO_BACKEND,
+from vllm.multimodal.gpu_ipc_memory import (
+    get_mm_gpu_ipc_memory_reservation,
 )
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
@@ -457,7 +454,7 @@ class Worker(WorkerBase):
                 "correspondingly."
             )
             logger.info(msg)
-            return self._reserve_mm_ipc_gpu_memory(kv_cache_memory_bytes)
+            return kv_cache_memory_bytes
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -583,18 +580,6 @@ class Worker(WorkerBase):
             int(self.available_kv_cache_memory_bytes)
         )
 
-    @staticmethod
-    def _uses_pynvvideocodec_video_backend(mm_config) -> bool:
-        video_kwargs = mm_config.media_io_kwargs.get("video", {})
-        video_loader_backend = (
-            video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
-        )
-        codec_backend = video_kwargs.get("backend")
-        return (
-            video_loader_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
-            or codec_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
-        )
-
     def _reserve_mm_ipc_gpu_memory(self, available_kv_cache_memory_bytes: int) -> int:
         """Carve frontend multimodal GPU memory out of the KV cache.
 
@@ -604,29 +589,11 @@ class Worker(WorkerBase):
         decoders also keep persistent surfaces around; reserve a fixed upper
         bound for those when the corresponding backend is configured.
         """
-        mm_config = self.model_config.multimodal_config
-        if mm_config is None:
-            return available_kv_cache_memory_bytes
-
-        raw_frame_reserved_bytes = int(mm_config.mm_ipc_gpu_memory_gb * GiB_bytes)
-        # Each api_server_count process runs its OWN decoder surfaces + NVDEC/CUVID
-        # CUDA context on the GPU, outside this (worker) memory pool. Reserve that
-        # per-server footprint x api_server_count so gpu_memory_utilization bounds
-        # TOTAL GPU usage across all API-server processes. Without the multiply,
-        # HW decode overshoots the budget by ~(api_server_count-1) x per-server and
-        # OOMs at high gmu, while SW decode (no per-server GPU allocation) does not.
-        num_api_servers = max(1, getattr(self.parallel_config, "_api_process_count", 1))
-        per_server_decoder_bytes = (
-            PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
-            * PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
-            + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+        reservation = get_mm_gpu_ipc_memory_reservation(
+            self.model_config.multimodal_config,
+            getattr(self.parallel_config, "_api_process_count", 1),
         )
-        decoder_reserved_bytes = (
-            num_api_servers * per_server_decoder_bytes
-            if self._uses_pynvvideocodec_video_backend(mm_config)
-            else 0
-        )
-        reserved_bytes = raw_frame_reserved_bytes + decoder_reserved_bytes
+        reserved_bytes = reservation.total_bytes
         if reserved_bytes <= 0:
             return available_kv_cache_memory_bytes
 
@@ -635,8 +602,8 @@ class Worker(WorkerBase):
             raise ValueError(
                 f"frontend multimodal GPU decoding reserves "
                 f"{format_gib(reserved_bytes)} GiB "
-                f"({format_gib(raw_frame_reserved_bytes)} GiB raw-frame budget, "
-                f"{format_gib(decoder_reserved_bytes)} GiB decoder cache budget), "
+                f"({format_gib(reservation.raw_frame_bytes)} GiB raw-frame budget, "
+                f"{format_gib(reservation.decoder_bytes)} GiB decoder cache budget), "
                 f"but only {format_gib(available_kv_cache_memory_bytes)} GiB is "
                 "available for the KV cache. Reduce mm_ipc_gpu_memory_gb, use a "
                 "different video backend, or increase gpu_memory_utilization."
@@ -647,10 +614,10 @@ class Worker(WorkerBase):
             "across %d API server(s) @ %s GiB/server); "
             "KV cache memory reduced to %s GiB.",
             format_gib(reserved_bytes),
-            format_gib(raw_frame_reserved_bytes),
-            format_gib(decoder_reserved_bytes),
-            num_api_servers,
-            format_gib(per_server_decoder_bytes),
+            format_gib(reservation.raw_frame_bytes),
+            format_gib(reservation.decoder_bytes),
+            reservation.api_process_count,
+            format_gib(reservation.per_server_decoder_bytes),
             format_gib(remaining),
         )
         return remaining
