@@ -1887,6 +1887,12 @@ class EngineArgs:
         )
 
         if resolved_cache_dtype.startswith("turboquant_"):
+            if model_config.is_hybrid and cache_config.kv_cache_dtype_skip_layers:
+                raise NotImplementedError(
+                    "TurboQuant KV cache skip layers are not supported for "
+                    "hybrid (attention + Mamba) models because native and "
+                    "TurboQuant attention cache pages cannot be mixed."
+                )
             from vllm.model_executor.layers.quantization.turboquant.config import (
                 TurboQuantConfig,
             )

@@ -67,7 +67,13 @@ if _HAS_FLASH_ATTN:
 # do_kv_cache_update already stored all tokens to TQ cache, so the decode
 # kernel can read them efficiently. This avoids O(cached_len) dequant work
 # per continuation, eliminating the O(N²/chunk_size) collapse at long context.
-_CONTINUATION_DECODE_THRESHOLD = 128
+_CONTINUATION_DECODE_THRESHOLD = 64
+
+# Full-dequant continuation prefill materializes the cached prefix in fp16.
+# This is faster for moderate prefixes, but can OOM before the compressed KV
+# cache is full. Switch back to the TQ decode kernel once the cached prefix is
+# large enough that avoiding the dequant buffer matters more than throughput.
+_CONTINUATION_DECODE_MAX_CACHED_LEN = 32768
 
 
 def _build_hadamard(d: int, device_str: str) -> torch.Tensor:
@@ -197,7 +203,12 @@ class TurboQuantMetadata(AttentionMetadata):
 class TurboQuantMetadataBuilder(AttentionMetadataBuilder[TurboQuantMetadata]):
     """Builds TurboQuantMetadata from scheduler output."""
 
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    # TurboQuant's prefill path currently reads request offsets on the host.
+    # Preserve CUDA graphs for single-token decode, but avoid claiming graph
+    # support for larger uniform batches until prefill is graph-safe.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
@@ -706,31 +717,52 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                 # Continuation chunk: tokens already stored to TQ cache
                 # by do_kv_cache_update. Use decode kernel directly to
                 # avoid O(cached_len) full-dequant per continuation.
-                # For large continuations, fall back to _continuation_prefill.
+                # Moderate continuations still use _continuation_prefill for
+                # throughput, while long cached prefixes stay memory bounded.
                 cached_len = seq_len - q_len
-                if q_len <= _CONTINUATION_DECODE_THRESHOLD:
-                    # Fast path: treat each query as a decode request
-                    # with incremental seq_lens for causal masking.
-                    # Slice from pre-built arange (no kernel launch)
-                    synth_seq_lens = _arange_cache[cached_len + 1 : seq_len + 1]
-                    synth_bt = attn_metadata.block_table[i : i + 1].expand(q_len, -1)
-                    out = triton_turboquant_decode_attention(
-                        query=q_seq,
-                        kv_cache=kv_cache,
-                        block_table=synth_bt,
-                        seq_lens=synth_seq_lens,
-                        Pi=Pi,
-                        centroids=centroids,
-                        scale=self.scale,
-                        mse_bits=self.tq_config.key_mse_bits,
-                        key_packed_size=self.tq_config.key_packed_size,
-                        value_quant_bits=(self.tq_config.effective_value_quant_bits),
-                        key_fp8=self.tq_config.key_fp8,
-                        norm_correction=self.tq_config.norm_correction,
-                        PiT=PiT,
-                    )
+                use_decode_continuation = (
+                    q_len <= _CONTINUATION_DECODE_THRESHOLD
+                    or cached_len >= _CONTINUATION_DECODE_MAX_CACHED_LEN
+                )
+                if use_decode_continuation:
+                    # Decode path: treat each query as a decode request
+                    # with incremental seq_lens for causal masking. Keep
+                    # large chunks sliced to bound decode scratch memory.
+                    out = torch.empty_like(q_seq)
+                    for q_offset in range(0, q_len, _CONTINUATION_DECODE_THRESHOLD):
+                        q_next = min(q_offset + _CONTINUATION_DECODE_THRESHOLD, q_len)
+                        q_part = q_seq[q_offset:q_next]
+                        part_len = q_next - q_offset
+                        output_part = out[q_offset:q_next]
+                        # Slice from pre-built arange (no kernel launch)
+                        synth_seq_lens = _arange_cache[
+                            cached_len + q_offset + 1 : cached_len + q_next + 1
+                        ]
+                        synth_bt = attn_metadata.block_table[i : i + 1].expand(
+                            part_len, -1
+                        )
+                        triton_turboquant_decode_attention(
+                            query=q_part,
+                            kv_cache=kv_cache,
+                            block_table=synth_bt,
+                            seq_lens=synth_seq_lens,
+                            Pi=Pi,
+                            centroids=centroids,
+                            scale=self.scale,
+                            mse_bits=self.tq_config.key_mse_bits,
+                            key_packed_size=self.tq_config.key_packed_size,
+                            value_quant_bits=(
+                                self.tq_config.effective_value_quant_bits
+                            ),
+                            key_fp8=self.tq_config.key_fp8,
+                            norm_correction=self.tq_config.norm_correction,
+                            PiT=PiT,
+                            output_buf=output_part,
+                            buf_holder=layer,
+                            max_num_kv_splits=self.max_num_kv_splits,
+                        )
                 else:
-                    # Large continuation: dequant cached K/V and use
+                    # Moderate continuation: dequant cached K/V and use
                     # flash_attn for better throughput.
                     out = self._continuation_prefill(
                         layer,
