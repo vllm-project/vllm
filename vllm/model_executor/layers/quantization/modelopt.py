@@ -139,6 +139,18 @@ class ModelOptQuantConfigBase(QuantizationConfig):
         exclude_modules: list[str],
     ):
         super().__init__()
+        # Append extra exclude patterns from the environment so operators can
+        # keep specific modules in BF16 without re-exporting the checkpoint.
+        # Matched by is_layer_excluded() just like checkpoint exclude_modules.
+        extra_patterns = envs.VLLM_MODELOPT_EXTRA_EXCLUDE_MODULES
+        if extra_patterns:
+            exclude_modules = list(exclude_modules) + extra_patterns
+            logger.info_once(
+                "VLLM_MODELOPT_EXTRA_EXCLUDE_MODULES: appended %d pattern(s) "
+                "to ModelOpt exclude_modules: %s",
+                len(extra_patterns),
+                ", ".join(extra_patterns),
+            )
         self.exclude_modules: list[str] = exclude_modules
 
     def is_layer_excluded(self, prefix: str) -> bool:

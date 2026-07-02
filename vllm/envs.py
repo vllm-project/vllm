@@ -118,6 +118,9 @@ if TYPE_CHECKING:
     VLLM_DISABLE_PYNCCL: bool = False
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
+    VLLM_MXFP8_BF16_FALLBACK_SMALL_M: bool = False
+    VLLM_MXFP8_TRITON_SMALLM: bool = False
+    VLLM_MODELOPT_EXTRA_EXCLUDE_MODULES: list[str] = []
     VLLM_ROCM_USE_AITER: bool = False
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
@@ -1143,6 +1146,27 @@ environment_variables: dict[str, Callable[[], Any]] = {
         os.getenv("VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD", "True").lower()
         in ("true", "1")
     ),
+    # Cache a BF16-dequantized copy of MXFP8 linear weights so small-batch
+    # (M < 128) GEMMs can skip FlashInfer mm_mxfp8's 128-row tile padding.
+    # Opt-in: roughly doubles MXFP8 linear weight memory.
+    "VLLM_MXFP8_BF16_FALLBACK_SMALL_M": lambda: (
+        os.getenv("VLLM_MXFP8_BF16_FALLBACK_SMALL_M", "False").lower()
+        in ("true", "1")
+    ),
+    # Use a Triton MXFP8 GEMM for small-batch (M < 128) linear layers instead
+    # of FlashInfer mm_mxfp8, which pads M up to a 128-row tile. Takes
+    # precedence over VLLM_MXFP8_BF16_FALLBACK_SMALL_M when both are set.
+    "VLLM_MXFP8_TRITON_SMALLM": lambda: (
+        os.getenv("VLLM_MXFP8_TRITON_SMALLM", "False").lower() in ("true", "1")
+    ),
+    # Extra ModelOpt exclude_modules patterns (comma-separated fnmatch
+    # wildcards) appended to those from the checkpoint, so operators can keep
+    # specific modules in BF16 without re-exporting the checkpoint.
+    "VLLM_MODELOPT_EXTRA_EXCLUDE_MODULES": lambda: [
+        p.strip()
+        for p in os.environ.get("VLLM_MODELOPT_EXTRA_EXCLUDE_MODULES", "").split(",")
+        if p.strip()
+    ],
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
     ),
