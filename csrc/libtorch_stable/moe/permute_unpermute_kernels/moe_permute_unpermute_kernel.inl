@@ -19,8 +19,12 @@ __global__ void expandInputRowsKernel(
 
   if (threadIdx.x == 0) {
     assert(expanded_dest_row <= INT32_MAX);
-    expanded_source_row_to_expanded_dest_row[expanded_source_row] =
-        static_cast<int>(expanded_dest_row);
+    // expanded_source_row may be a sentinel/padding value indexing past the
+    // reverse map (sized num_rows * k); bounds-check before writing.
+    if (expanded_source_row >= 0 && expanded_source_row < num_rows * k) {
+      expanded_source_row_to_expanded_dest_row[expanded_source_row] =
+          static_cast<int>(expanded_dest_row);
+    }
     // skip non local expert token
     if (!CHECK_SKIPPED || blockIdx.x < *num_dest_rows) {
       permuted_idx[expanded_dest_row] = expanded_source_row;
