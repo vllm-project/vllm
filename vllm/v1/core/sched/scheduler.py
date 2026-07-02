@@ -749,11 +749,14 @@ class Scheduler(SchedulerInterface):
                             step_skipped_waiting.prepend_request(request)
                             continue
 
+                        assert ext_tokens >= 0
+
                         num_external_computed_tokens = ext_tokens
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
                         )
+                        assert ext_tokens <= connector_prefix_cache_queries
                         connector_prefix_cache_hits = num_external_computed_tokens
 
                     # Total computed tokens (local + external).
