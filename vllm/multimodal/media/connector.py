@@ -303,11 +303,16 @@ class MediaConnector:
                 return media_io.load_bytes(cached)
 
             connection = self.connection
-            data = connection.get_bytes(
-                url_spec.url,
-                timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-            )
+            try:
+                data = connection.get_bytes(
+                    url_spec.url,
+                    timeout=fetch_timeout,
+                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                )
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to fetch resource from URL '{url}': {e}"
+                ) from e
 
             self._put_cached_bytes(url, data)
             return media_io.load_bytes(data)
@@ -348,11 +353,16 @@ class MediaConnector:
                 return await future
 
             connection = self.connection
-            data = await connection.async_get_bytes(
-                url_spec.url,
-                timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
-            )
+            try:
+                data = await connection.async_get_bytes(
+                    url_spec.url,
+                    timeout=fetch_timeout,
+                    allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                )
+            except Exception as e:
+                raise ValueError(
+                    f"Failed to fetch resource from URL '{url}': {e}"
+                ) from e
 
             await loop.run_in_executor(
                 global_thread_pool, self._put_cached_bytes, url, data
