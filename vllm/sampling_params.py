@@ -742,6 +742,8 @@ class SamplingParams(
     ) -> None:
         self._validate_logprobs(model_config)
         self._validate_logit_bias(model_config)
+        self._validate_stop_token_ids(model_config)
+        self._validate_logprob_token_ids(model_config)
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
@@ -828,6 +830,44 @@ class SamplingParams(
                 f"token_id(s) {invalid_token_ids} in logit_bias contain "
                 f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
                 parameter="logit_bias",
+                value=invalid_token_ids,
+            )
+
+    def _validate_stop_token_ids(self, model_config: ModelConfig) -> None:
+        """Validate stop_token_ids are within vocabulary range."""
+        if not self.stop_token_ids:
+            return
+
+        vocab_size = model_config.get_vocab_size()
+        invalid_token_ids = [
+            token_id
+            for token_id in self.stop_token_ids
+            if token_id < 0 or token_id >= vocab_size
+        ]
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                f"stop_token_ids contains out-of-vocab token id(s) "
+                f"{invalid_token_ids}. Vocabulary size: {vocab_size}",
+                parameter="stop_token_ids",
+                value=invalid_token_ids,
+            )
+
+    def _validate_logprob_token_ids(self, model_config: ModelConfig) -> None:
+        """Validate logprob_token_ids are within vocabulary range."""
+        if not self.logprob_token_ids:
+            return
+
+        vocab_size = model_config.get_vocab_size()
+        invalid_token_ids = [
+            token_id
+            for token_id in self.logprob_token_ids
+            if token_id < 0 or token_id >= vocab_size
+        ]
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                f"logprob_token_ids contains out-of-vocab token id(s) "
+                f"{invalid_token_ids}. Vocabulary size: {vocab_size}",
+                parameter="logprob_token_ids",
                 value=invalid_token_ids,
             )
 
