@@ -205,9 +205,7 @@ def iter_response_function_tool_dicts(
 ) -> list[dict[str, Any]]:
     function_tools: list[dict[str, Any]] = []
     for tool in tools:
-        if isinstance(tool, FunctionTool):
-            function_tools.append(tool.model_dump())
-        elif isinstance(tool, NamespaceTool):
+        if isinstance(tool, NamespaceTool):
             namespace = tool.name
             for namespaced_tool in tool.tools:
                 if namespaced_tool.type != "function":
@@ -217,6 +215,8 @@ def iter_response_function_tool_dicts(
                     namespace, namespaced_tool.name
                 )
                 function_tools.append(tool_dict)
+        else:
+            function_tools.append(tool.model_dump())
     return function_tools
 
 
