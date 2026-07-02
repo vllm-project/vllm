@@ -518,8 +518,12 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         max_tokens = self.vllm_config.scheduler_config.max_num_batched_tokens
+        # The non-causal (DSpark draft) path widens each token's SWA index list
+        # to ``noncausal_index_width`` (>= window_size), so size the persistent
+        # ragged buffer to the wider bound to cover both causal and non-causal.
+        swa_index_width = max(self.window_size, self.noncausal_index_width)
         self.decode_swa_ragged_indices_buffer = torch.empty(
-            max_tokens * self.window_size,
+            max_tokens * swa_index_width,
             dtype=torch.int32,
             device=self.device,
         )
@@ -558,7 +562,9 @@ class DeepseekV4ROCMAiterSparseSWAMetadataBuilder(DeepseekSparseSWAMetadataBuild
                 self.decode_swa_ragged_indices_buffer,
                 self.decode_swa_ragged_indptr_buffer,
                 base.num_decode_tokens,
-                self.window_size,
+                # Actual dense width for this build: window_size (causal) or
+                # noncausal_index_width (DSpark non-causal draft).
+                base.decode_swa_indices.shape[-1],
             )
 
         return DeepseekV4ROCMAiterSparseSWAMetadata(
