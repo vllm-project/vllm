@@ -1,12 +1,20 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import EngineCoreOutput, FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
 )
+
+
+class _DummyLoRAStates:
+    def request_waiting(self, req_id: str, lora_name: str | None) -> None:
+        pass
+
+    def request_running(self, req_id: str, lora_name: str | None) -> None:
+        pass
 
 
 def test_iteration_stats_repr():
@@ -244,3 +252,40 @@ def test_prompt_token_stats_full_external_transfer_recompute():
     assert stats.external_kv_transfer == 999
     assert stats.cached_tokens == 999
     assert stats.total == 1000
+
+
+def test_inter_token_latency_tracks_each_committed_decode_token():
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    lora_states = _DummyLoRAStates()
+
+    iteration_stats.update_from_output(
+        EngineCoreOutput(request_id="req", new_token_ids=[1]),
+        engine_core_timestamp=1.0,
+        is_prefilling=True,
+        req_stats=req_stats,
+        lora_states=lora_states,
+        lora_name=None,
+    )
+    iteration_stats.update_from_output(
+        EngineCoreOutput(request_id="req", new_token_ids=[2, 3, 4]),
+        engine_core_timestamp=4.0,
+        is_prefilling=False,
+        req_stats=req_stats,
+        lora_states=lora_states,
+        lora_name=None,
+    )
+    iteration_stats.update_from_output(
+        EngineCoreOutput(request_id="req", new_token_ids=[5, 6]),
+        engine_core_timestamp=6.0,
+        is_prefilling=False,
+        req_stats=req_stats,
+        lora_states=lora_states,
+        lora_name=None,
+    )
+
+    assert iteration_stats.num_generation_tokens == 6
+    assert req_stats.num_generation_tokens == 6
+    assert iteration_stats.inter_token_latencies_iter == [1.0] * 5
+    assert req_stats.first_token_ts == 1.0
+    assert req_stats.last_token_ts == 6.0
