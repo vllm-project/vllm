@@ -8,6 +8,15 @@ import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.distributed import get_dcp_group
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.jit_warmup import (
+    VllmJitKernel,
+    WarmupIntRange,
+)
+from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonPointerInputVariant,
+    TritonWarmupTensor,
+    assert_compile_key_matches_triton,
+)
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.deep_gemm import (
@@ -184,6 +193,95 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     local_cu_seq_lens: torch.Tensor | None = None
     local_total_seq_lens: int = 0
     max_local_total_seq_lens: int = 0
+
+
+_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS = (
+    TritonPointerInputVariant.from_offsets(uncompressed_seq_lens=False),
+    TritonPointerInputVariant.from_offsets(uncompressed_seq_lens=True),
+)
+
+
+class BuildPrefillChunkMetadataKernel(
+    VllmJitKernel[
+        "BuildPrefillChunkMetadataKernel.CompileKey"
+    ]
+):
+    @dataclass(frozen=True)
+    class CompileKey:
+        query_slice_start: int
+        query_slice_stop: int
+        DCP_RANK: int
+        DCP_WORLD: int
+        DCP_INTERLEAVE: int
+        BLOCK_SIZE: int
+        COMPRESS_RATIO: int
+        input_variant: TritonPointerInputVariant
+
+    def dispatch(  # type: ignore[override]
+        self,
+        *,
+        query_slice_start: int,
+        query_slice_stop: int,
+        DCP_RANK: int,
+        DCP_WORLD: int,
+        DCP_INTERLEAVE: int,
+        BLOCK_SIZE: int,
+        COMPRESS_RATIO: int,
+        input_variant: TritonPointerInputVariant,
+    ) -> CompileKey:
+        return self.CompileKey(
+            query_slice_start=query_slice_start,
+            query_slice_stop=query_slice_stop,
+            DCP_RANK=DCP_RANK,
+            DCP_WORLD=DCP_WORLD,
+            DCP_INTERLEAVE=DCP_INTERLEAVE,
+            BLOCK_SIZE=BLOCK_SIZE,
+            COMPRESS_RATIO=COMPRESS_RATIO,
+            input_variant=input_variant,
+        )
+
+    def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
+        max_tokens = max(1, min(vllm_config.scheduler_config.max_num_batched_tokens, 8))
+        hf_config = vllm_config.model_config.hf_config
+        compress_ratios = tuple(
+            int(ratio)
+            for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
+        )
+        return self._trace_dispatch(self.dispatch)(
+            query_slice_start=WarmupIntRange(0, 2),
+            query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
+            DCP_RANK=0,
+            DCP_WORLD=1,
+            DCP_INTERLEAVE=1,
+            BLOCK_SIZE=1024,
+            COMPRESS_RATIO=list(compress_ratios),
+            input_variant=_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS,
+        )
+
+    def compile(self, compile_key: CompileKey) -> None:
+        warmup = getattr(_build_prefill_chunk_metadata_kernel, "warmup", None)
+        assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        warmup(
+            int32_ptr,
+            compile_key.input_variant.pointer("uncompressed_seq_lens", torch.int32),
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            compile_key.query_slice_start,
+            compile_key.query_slice_stop,
+            compile_key.DCP_RANK,
+            compile_key.DCP_WORLD,
+            compile_key.DCP_INTERLEAVE,
+            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+            COMPRESS_RATIO=compile_key.COMPRESS_RATIO,
+            grid=(1,),
+        )
+
+_BUILD_PREFILL_CHUNK_METADATA_KERNEL = BuildPrefillChunkMetadataKernel()
+PrefillChunkMetadataKernelCompileKey = BuildPrefillChunkMetadataKernel.CompileKey
 
 
 @dataclass
@@ -940,3 +1038,10 @@ def _build_prefill_chunk_metadata_kernel(
         offset = i + tl.arange(0, BLOCK_SIZE)
         mask = offset < compressed_seq_len
         tl.store(token_to_seq_ptr + seq_start + offset, batch_idx, mask=mask)
+
+
+assert_compile_key_matches_triton(
+    _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+    _build_prefill_chunk_metadata_kernel,
+    extra_compile_key_fields=("input_variant",),
+)
