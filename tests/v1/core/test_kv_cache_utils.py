@@ -2509,3 +2509,28 @@ def test_hma_not_disabled_when_kv_events_enabled():
     assert vllm_config.scheduler_config.disable_hybrid_kv_cache_manager is False, (
         "kv_events_config must not force-disable the hybrid KV cache manager."
     )
+
+
+@pytest.mark.parametrize("use_override", [True, False])
+def test_kv_cache_reserves_null_block_for_max_model_len(use_override):
+    """A KV cache sized to exactly the blocks a max_model_len request needs must
+    be rejected. BlockPool keeps one block as the null block, so only
+    num_blocks - 1 are usable; accepting num_blocks == needed would leave the
+    request unschedulable and hang the engine. Covers both the
+    num_gpu_blocks_override path and the memory-derived block count.
+    """
+    block_size = 16
+    max_model_len = 512  # needs 512 / 16 = 32 blocks
+    vllm_config = VllmConfig(model_config=ModelConfig(max_model_len=max_model_len))
+    spec = new_kv_cache_spec(block_size=block_size)
+
+    # 32 blocks -> only 31 usable after the null block: one short -> reject.
+    if use_override:
+        # Ample raw memory; the override alone constrains the block count.
+        vllm_config.cache_config.num_gpu_blocks_override = 32
+        available_memory = [spec.page_size_bytes * 1024]
+    else:
+        available_memory = [spec.page_size_bytes * 32]
+
+    with pytest.raises(ValueError, match="max seq len"):
+        get_kv_cache_configs(vllm_config, [{"layer1": spec}], available_memory)
