@@ -4,9 +4,23 @@
 import torch
 from einops import rearrange
 
+import vllm.envs as envs
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
+
+
+@triton.jit
+def _td_store_2d(
+    base, value, rows, cols, srow, scol, roff, coff, BR: tl.constexpr, BC: tl.constexpr
+):
+    # Tensor-descriptor 2D store. The descriptor's shape bounds replace the
+    # store mask: out-of-range rows/cols (>= rows/cols) are dropped by the
+    # hardware, so callers can pass a full power-of-2 block tile.
+    desc = tl.make_tensor_descriptor(
+        base, shape=[rows, cols], strides=[srow, scol], block_shape=[BR, BC]
+    )
+    desc.store([roff, coff], value)
 
 
 @triton.jit
@@ -328,6 +342,8 @@ def _fwd_none_diag_kernel(
     E_FBLOCK: tl.constexpr,
     CBLOCK: tl.constexpr,
     NUM_CBLOCK: tl.constexpr,
+    # TD path gate; dead-code-eliminated when False.
+    USE_TD: tl.constexpr = False,
 ):
     # This kernel computes the non-diagonal blocks of the attention matrix
     # Each non-diagonal block represents attention
@@ -390,9 +406,27 @@ def _fwd_none_diag_kernel(
     qkv = qkv_diag + qkv_none_diag
 
     # Store the result
-    tl.store(
-        O_block_ptr, qkv.to(O_block_ptr.dtype.element_ty), mask=q_index[:, None] < n
-    )
+    if USE_TD:
+        # TD store of the non-diagonal output tile [CBLOCK, E_FBLOCK] into the
+        # (n, e) output region for this batch-head; row bound n replaces mask.
+        tl.static_assert((CBLOCK & (CBLOCK - 1)) == 0)
+        tl.static_assert((E_FBLOCK & (E_FBLOCK - 1)) == 0)
+        _td_store_2d(
+            Out + off_bh * n * e,
+            qkv.to(Out.dtype.element_ty),
+            n,
+            e,
+            e,
+            1,
+            block_offset,
+            e_offset,
+            CBLOCK,
+            E_FBLOCK,
+        )
+    else:
+        tl.store(
+            O_block_ptr, qkv.to(O_block_ptr.dtype.element_ty), mask=q_index[:, None] < n
+        )
 
 
 class _attention(torch.autograd.Function):
@@ -421,6 +455,19 @@ class _attention(torch.autograd.Function):
 
         # Initialize output tensor
         o = torch.empty((b, h, n, e), dtype=q.dtype, device=q.device)
+
+        # Tri-state TD toggle (VLLM_TRITON_USE_TD): unset -> auto (on for XPU).
+        # Used by the _fwd_none_diag_kernel output store; the launch additionally
+        # gates on a contiguous, power-of-2 output feature dim.
+        td_override = envs.VLLM_TRITON_USE_TD
+        use_td = current_platform.is_xpu() if td_override is None else td_override
+        use_td = use_td and o.stride(-1) == 1 and (e & (e - 1)) == 0
+        if use_td:
+            triton.set_allocator(
+                lambda size, alignment, stream: torch.empty(
+                    size, device=q.device, dtype=torch.int8
+                )
+            )
 
         # Set block sizes
         BLOCK = 256
@@ -520,6 +567,7 @@ class _attention(torch.autograd.Function):
             E_FBLOCK=E_FBLOCK,
             CBLOCK=CBLOCK,
             NUM_CBLOCK=NUM_CBLOCK,
+            USE_TD=use_td,
         )
 
         # Save tensors for backward pass
