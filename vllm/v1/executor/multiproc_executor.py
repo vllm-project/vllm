@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import multiprocessing
 import os
 import pickle
@@ -555,6 +556,7 @@ class WorkerProc:
     """Wrapper that runs one Worker in a separate process."""
 
     READY_STR = "READY"
+    FAILED_STR = "FAILED"
     rpc_broadcast_mq: MessageQueue | None
     worker_response_mq: MessageQueue | None
 
@@ -751,6 +753,12 @@ class WorkerProc:
                     unready_proc_handle = pipes.pop(pipe)
                     response: dict[str, Any] = pipe.recv()
                     if response["status"] != "READY":
+                        root_cause = response.get("exception")
+                        if root_cause is not None:
+                            raise Exception(
+                                "WorkerProc initialization failed. Root cause "
+                                f"from the worker process:\n{root_cause}"
+                            )
                         raise e
 
                     idx = unready_proc_handle.rank % len(ready_proc_handles)
@@ -896,6 +904,16 @@ class WorkerProc:
 
             if ready_writer is not None:
                 logger.exception("WorkerProc failed to start.")
+                # Send the root cause to the parent so wait_for_ready can
+                # surface it, instead of only logging it to this worker's
+                # stderr (see #47415).
+                with contextlib.suppress(Exception):
+                    ready_writer.send(
+                        {
+                            "status": WorkerProc.FAILED_STR,
+                            "exception": traceback.format_exc(),
+                        }
+                    )
             elif shutdown_requested.is_set():
                 logger.debug_once(
                     "[shutdown] WorkerProc: exiting after shutdown request"
