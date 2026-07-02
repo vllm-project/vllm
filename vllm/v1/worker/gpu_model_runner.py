@@ -3541,8 +3541,14 @@ class GPUModelRunner(
             positions = self.xdrope_positions.gpu[:, :num_input_tokens]
         else:
             positions = self.positions[:num_input_tokens]
-            if num_input_tokens > num_scheduled_tokens:
-                self.positions[num_scheduled_tokens:num_input_tokens].zero_()
+
+        if num_input_tokens > num_scheduled_tokens:
+            pad_slice = slice(num_scheduled_tokens, num_input_tokens)
+            if input_ids is not None:
+                input_ids[pad_slice].zero_()
+            if inputs_embeds is not None:
+                inputs_embeds[pad_slice].zero_()
+            positions[..., pad_slice].zero_()
 
         if is_first_rank:
             intermediate_tensors = None
