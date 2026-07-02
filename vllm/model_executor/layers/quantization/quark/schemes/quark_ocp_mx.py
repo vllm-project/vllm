@@ -207,6 +207,19 @@ class QuarkOCP_MX(QuarkScheme):
             self.input_dtype != "mxfp4" or self.weight_dtype != "mxfp4"
         )
 
+        # On gfx1100 run weight-only MXFP4 linears on the native RDNA3 GEMM
+        # instead of dequant emulation; chosen per-layer once shapes are known.
+        self.rdna3_kernel = None
+        if self.weight_dtype == "mxfp4" and not self.dynamic_mxfp4_quant:
+            from vllm.model_executor.kernels.linear.mxfp4.rocm import (
+                Rdna3MxFp4LinearKernel,
+            )
+
+            if Rdna3MxFp4LinearKernel.is_supported()[0]:
+                from vllm.model_executor.kernels.linear import MxFp4LinearLayerConfig
+
+                self.rdna3_kernel = Rdna3MxFp4LinearKernel(MxFp4LinearLayerConfig())
+
         self.rocm_use_aiter_fp4_asm_gemm = (
             rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
         )
@@ -265,8 +278,23 @@ class QuarkOCP_MX(QuarkScheme):
         layer.weight_scale = torch.nn.Parameter(w_s.T.contiguous(), requires_grad=False)
         layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
 
+    def _rdna3_dims_ok(self, layer: torch.nn.Module) -> bool:
+        # The HIP kernel needs N%16==0 and K%32==0; layer.weight is [N, K/2] u8.
+        n, k_half = layer.weight.shape
+        return n % 16 == 0 and (k_half * 2) % 32 == 0
+
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.weight = torch.nn.Parameter(layer.weight.data, requires_grad=False)
+
+        if self.rdna3_kernel is not None and self._rdna3_dims_ok(layer):
+            layer.output_size_per_partition = layer.weight.shape[0]
+            layer.weight_scale = torch.nn.Parameter(
+                layer.weight_scale.data, requires_grad=False
+            )
+            self.rdna3_kernel.process_weights_after_loading(layer)
+            return
+        # Shapes not supported by the HIP kernel; fall back to emulation.
+        self.rdna3_kernel = None
 
         if self.emulate:
             if self.dynamic_mxfp4_quant:
@@ -363,6 +391,8 @@ class QuarkOCP_MX(QuarkScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        if self.rdna3_kernel is not None:
+            return self.rdna3_kernel.apply_weights(layer, x, bias)
         if self.emulate:
             dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
             qdq_x = self.quant_dequant_func(x)

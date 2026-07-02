@@ -21,6 +21,10 @@ from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
 from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
     MarlinExperts,
 )
+from vllm.model_executor.layers.fused_moe.experts.rdna3_mxfp4_moe import (
+    RDNA3Mxfp4Experts,
+    repack_experts_rdna3,
+)
 from vllm.model_executor.layers.fused_moe.experts.xpu_moe import (
     XPUExpertsMxFp4,
 )
@@ -56,6 +60,10 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             self.mxfp4_backend = Mxfp4MoeBackend.XPU
             self.experts_cls = XPUExpertsMxFp4
             logger.info_once("Using XPUExpertsMxFp4 for MXFP4 MoE on XPU platform")
+        elif RDNA3Mxfp4Experts._supports_current_device():
+            self.mxfp4_backend = Mxfp4MoeBackend.RDNA3_MXFP4
+            self.experts_cls = RDNA3Mxfp4Experts
+            logger.info_once("Using RDNA3Mxfp4Experts (native gfx1100 HIP kernel)")
         else:
             logger.info_once("Using MarlinExperts for MXFP4 MoE")
             self.experts_cls = MarlinExperts
@@ -190,6 +198,19 @@ class CompressedTensorsW4A4Mxfp4MoEMethod(CompressedTensorsMoEMethod):
             )
         elif current_platform.is_xpu():
             pass
+        elif self.mxfp4_backend == Mxfp4MoeBackend.RDNA3_MXFP4:
+            # Repack to the [E, K/8, N] uint32 + [E, K/32, N] layout the HIP
+            # kernel reads (no gate/up de-interleave for compressed-tensors).
+            b_q13, b_s13 = repack_experts_rdna3(
+                layer.w13_weight.data, layer.w13_weight_scale.data, False
+            )
+            b_q2, b_s2 = repack_experts_rdna3(
+                layer.w2_weight.data, layer.w2_weight_scale.data, False
+            )
+            layer.w13_weight = torch.nn.Parameter(b_q13, requires_grad=False)
+            layer.w13_weight_scale = torch.nn.Parameter(b_s13, requires_grad=False)
+            layer.w2_weight = torch.nn.Parameter(b_q2, requires_grad=False)
+            layer.w2_weight_scale = torch.nn.Parameter(b_s2, requires_grad=False)
         else:
             logger.warning_once(
                 "Your GPU does not have native support for FP4 computation "
