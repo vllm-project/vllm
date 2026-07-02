@@ -133,6 +133,20 @@ def test_modelopt_mixed_precision_quantizes_parallel_lm_head():
     assert isinstance(method, ModelOptNvFp4LinearMethod)
 
 
+@pytest.mark.skip_global_cleanup
+def test_modelopt_mixed_precision_parent_fallback_requires_packed_module():
+    config = _mixed_precision_config(
+        {
+            "model.layers.0.mixer.in_proj": {
+                "quant_algo": "FP8",
+            },
+        }
+    )
+    config.packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+
+    assert config._resolve_quant_algo("model.layers.0.mixer.conv1d") is None
+
+
 def test_vocab_parallel_embedding_weight_loader_accepts_scalar_scale():
     holder = Mock()
     scale = torch.nn.Parameter(torch.empty(1))
