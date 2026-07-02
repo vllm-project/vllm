@@ -120,6 +120,9 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
         "mask_token_id": config_dict["mask_token_id"],
         "target_layer_ids": [i - 1 for i in aux_layer_ids],
     }
+    pre_trained_config["dflash_config"]["causal"] = not config_dict.get(
+        "sliding_window_non_causal", True
+    )
 
 
 @register_speculator("dspark")
