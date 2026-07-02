@@ -83,13 +83,10 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         the intermediate logprob dictionary.
         """
         self.start_indices.append(len(self.logprobs))
-        for token_id, logprob, rank, decoded_token in zip(
-            token_ids, logprobs, ranks, decoded_tokens
-        ):
-            self.token_ids.append(token_id)
-            self.logprobs.append(logprob)
-            self.ranks.append(rank)
-            self.decoded_tokens.append(decoded_token)
+        self.token_ids.extend(token_ids)
+        self.logprobs.extend(logprobs)
+        self.ranks.extend(ranks)
+        self.decoded_tokens.extend(decoded_tokens)
         self.end_indices.append(len(self.logprobs))
 
     def extend(self, logprobs_multi_positions) -> None:
@@ -148,8 +145,8 @@ class FlatLogprobs(MutableSequence[LogprobsOnePosition | None]):
         Iterates the container and yields LogprobsOnePosition for
         each position.
         """
-        for i in range(0, len(self.start_indices)):
-            yield self.__getitem__(i)
+        for i in range(len(self.start_indices)):
+            yield self[i]
 
 
 # {token_id -> logprob} per each sequence group. None if the corresponding
