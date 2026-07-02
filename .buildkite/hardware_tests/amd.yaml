@@ -6,6 +6,7 @@ steps:
   # differ ci_base is rebuilt and pushed automatically.
   - label: "AMD: :docker: ensure ci_base"
     key: ensure-ci-base-amd
+    soft_fail: false
     depends_on: []
     device: amd_cpu
     no_plugin: true
@@ -26,6 +27,7 @@ steps:
 
   - label: "AMD: :docker: build test image and artifacts"
     key: image-build-amd
+    soft_fail: false
     depends_on:
       - ensure-ci-base-amd
     device: amd_cpu

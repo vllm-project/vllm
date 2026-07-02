@@ -267,6 +267,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     reasoning, content, _ = parser.parse(
                         output.text,
                         request=request,  # type: ignore[arg-type]
+                        model_output_token_ids=output.token_ids,
                     )
                     if not request.include_reasoning:
                         reasoning = None

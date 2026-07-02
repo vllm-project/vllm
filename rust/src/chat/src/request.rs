@@ -4,9 +4,9 @@ use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
+pub use vllm_parser::tool::Tool as ChatTool;
 pub use vllm_text::SamplingParams;
 use vllm_text::TextDecodeOptions;
-pub use vllm_tool_parser::Tool as ChatTool;
 
 use crate::AssistantMessageExt;
 use crate::error::{Error, Result};

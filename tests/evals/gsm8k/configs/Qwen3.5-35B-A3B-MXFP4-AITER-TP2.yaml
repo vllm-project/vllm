@@ -3,7 +3,6 @@ accuracy_threshold: 0.89
 tolerance: 0.03
 num_questions: 1319
 num_fewshot: 5
-startup_max_wait_seconds: 3600
 server_args: >-
   --max-model-len 4096
   --tensor-parallel-size 2
@@ -11,3 +10,4 @@ server_args: >-
   --moe-backend aiter
 env:
   VLLM_ROCM_USE_AITER: "1"
+  ENABLE_CK: "0"  # Avoid AITER CK-based MHA JIT compilation to save time

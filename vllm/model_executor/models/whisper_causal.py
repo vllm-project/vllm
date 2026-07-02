@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.models.mistral import MistralMLP
 from vllm.model_executor.models.whisper import WhisperPosEmbedType
+from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadata,
@@ -39,7 +40,7 @@ except ImportError:
 from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
 from vllm.v1.attention.backends.triton_attn import TritonAttentionBackend
 from vllm.v1.attention.selector import get_attn_backend
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.kv_cache_interface import AttentionSpec, SlidingWindowSpec
 
 from .utils import make_layers
 
@@ -111,7 +112,9 @@ class WhisperCausalConv1d(nn.Conv1d):
 
 @functools.lru_cache
 def create_whisper_attention_backend_with_block_pooling(
-    underlying_attn_backend: AttentionBackend, block_pool_size: int
+    underlying_attn_backend: AttentionBackend,
+    block_pool_size: int,
+    sliding_window: int | None = None,
 ) -> type[AttentionBackend]:
     prefix = "WhisperCausalAttentionWithBlockPooling_"
     underlying_builder = underlying_attn_backend.get_builder_cls()
@@ -126,11 +129,22 @@ def create_whisper_attention_backend_with_block_pooling(
             device: torch.device,
         ):
             assert kv_cache_spec.num_kv_heads % block_pool_size == 0
-            kv_cache_spec = replace(
-                kv_cache_spec,
+            # Scale pooled-unit quantities back to unpooled (encoder-token)
+            # units for the underlying attention metadata: the KV cache spec
+            # counts blocks in pooled units, but the kernel runs on the
+            # `block_pool_size`x-expanded sequence built below.
+            spec_overrides = dict(
                 block_size=kv_cache_spec.block_size * block_pool_size,
                 num_kv_heads=kv_cache_spec.num_kv_heads // block_pool_size,
             )
+            if isinstance(kv_cache_spec, SlidingWindowSpec):
+                # The manager keeps `sliding_window` in pooled units; the kernel
+                # runs on the expanded sequence, so give it the model's window in
+                # unpooled units (`get_kv_cache_spec` sizes the pooled window so
+                # this window always stays resident).
+                assert sliding_window is not None
+                spec_overrides["sliding_window"] = sliding_window
+            kv_cache_spec = replace(kv_cache_spec, **spec_overrides)
             super().__init__(kv_cache_spec, layer_names, vllm_config, device)
             # Override model_config-derived values with the actual
             # encoder values from kv_cache_spec
@@ -302,7 +316,7 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             attn_type=attn_type,
         )
         attn_backend = create_whisper_attention_backend_with_block_pooling(
-            underlying_attn_backend, block_pool_size
+            underlying_attn_backend, block_pool_size, per_layer_sliding_window
         )
 
         super().__init__(
@@ -329,6 +343,14 @@ class WhisperCausalAttentionWithBlockPooling(Attention):
             kv_cache_spec,
             num_kv_heads=self.block_pool_size * kv_cache_spec.num_kv_heads,
         )
+        if isinstance(kv_cache_spec, SlidingWindowSpec):
+            # The manager counts blocks in pooled units, so express the window in
+            # pooled units to avoid reserving `block_pool_size`x too many blocks.
+            # The `+1` is an eviction margin: block-aligned eviction only keeps
+            # `pooled - 1` pooled tokens, so this guarantees the kernel's full
+            # (unpooled) window still stays resident.
+            pooled = cdiv(kv_cache_spec.sliding_window, self.block_pool_size) + 1
+            kv_cache_spec = replace(kv_cache_spec, sliding_window=pooled)
         return kv_cache_spec
 
 

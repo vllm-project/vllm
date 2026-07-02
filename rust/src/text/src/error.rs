@@ -20,6 +20,11 @@ pub enum Error {
     Logprobs(#[from] LogprobsError),
     #[error(transparent)]
     TokenIds(#[from] TokenIdsError),
+    #[error(
+        "`min_tokens` must be less than or equal to `max_tokens`, \
+         got min_tokens={min_tokens}, max_tokens={max_tokens}"
+    )]
+    MinTokensExceedsMaxTokens { min_tokens: u32, max_tokens: u32 },
     #[error("`thinking_token_budget` must be a non-negative integer or -1 for unlimited.")]
     InvalidThinkingTokenBudget,
     #[error("text request stream `{request_id}` closed before terminal output")]
@@ -31,6 +36,24 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    /// Whether this error represents invalid user request parameters.
+    pub fn is_request_validation_error(&self) -> bool {
+        match self {
+            Self::PromptTooLong { .. }
+            | Self::EmptyPromptTokenIds { .. }
+            | Self::Logprobs(_)
+            | Self::TokenIds(_)
+            | Self::MinTokensExceedsMaxTokens { .. }
+            | Self::InvalidThinkingTokenBudget
+            // An empty tokenized prompt detected later, at request prepare
+            // time, surfaces through the transparent Llm wrapper.
+            | Self::Llm(LlmError::EmptyPromptTokenIds { .. }) => true,
+            _ => false,
+        }
+    }
+}
 
 impl From<vllm_tokenizer::TokenizerError> for Error {
     fn from(error: vllm_tokenizer::TokenizerError) -> Self {

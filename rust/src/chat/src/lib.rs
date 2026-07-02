@@ -29,8 +29,8 @@ pub use parser::reasoning::{
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
-    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, RenderedPrompt,
-    RendererSelection,
+    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer,
+    HarmonyChatRenderer, RenderedPrompt, RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
@@ -50,7 +50,8 @@ mod request;
 mod stream;
 
 use vllm_engine_core_client::EngineCoreClient;
-use vllm_engine_core_client::protocol::{ModelDtype, ReasoningParserKwargs};
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
 

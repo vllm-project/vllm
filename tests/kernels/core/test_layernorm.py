@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from tests.kernels.quant_utils import FP8_DTYPE
-from tests.kernels.utils import opcheck
+from tests.kernels.utils import fp8_ulp_distance, opcheck
 from vllm import ir
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.platforms import current_platform
@@ -204,12 +204,22 @@ def test_fused_rms_norm_quant(
             (out_quant_fused, x, weight, quant_scale_t, 1e-6),
         )
 
-    torch.testing.assert_close(
-        out_quant.to(dtype=torch.float32),
-        out_quant_fused.to(dtype=torch.float32),
-        atol=1e-3,
-        rtol=1e-3,
-    )
+    if current_platform.is_rocm():
+        # Fused and unfused FP8 paths can land on opposite sides of an E4M3 tie;
+        # tolerate a tiny number of isolated fp8 outliers on ROCm.
+        ulp = fp8_ulp_distance(out_quant, out_quant_fused)
+        max_outliers = ulp.numel() // 100_000 + 8
+        num_outliers = int((ulp > 0).sum().item())
+        assert num_outliers <= max_outliers, (
+            f"FP8 quant mismatch: {num_outliers} fp8 outliers (allowed {max_outliers})"
+        )
+    else:
+        torch.testing.assert_close(
+            out_quant.to(dtype=torch.float32),
+            out_quant_fused.to(dtype=torch.float32),
+            atol=1e-3,
+            rtol=1e-3,
+        )
 
 
 @torch.inference_mode()

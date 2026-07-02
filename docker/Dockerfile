@@ -311,9 +311,10 @@ ENV CARGO_BUILD_JOBS=4
 # Build the release artifacts. Cache cargo registry/git, but not target/,
 # because stale target metadata can outlive source updates across BuildKit
 # cache reuse.
-RUN --mount=type=cache,target=/root/.cargo/registry \
-    --mount=type=cache,target=/root/.cargo/git \
+RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
+    --mount=type=cache,target=/root/.cargo/git,sharing=locked \
     bash build_rust.sh
+
 #################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
@@ -792,7 +793,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
 # From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.12
+ARG FLASHINFER_VERSION=0.6.13
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')

@@ -630,6 +630,19 @@ def _make_mock_worker_for_desc_ids(
     worker._has_mamba = has_mamba
     worker._group_spec_types = group_spec_types
     worker.block_len_per_layer = block_len_per_layer or [100]
+    worker._conv_decomp = None
+    if has_mamba:
+        from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (  # noqa: E501
+            MambaConvSplitInfo,
+        )
+
+        # Mamba2/GDN layout: 3 conv sub-projections -> 4 NIXL regions per layer.
+        worker._conv_decomp = MambaConvSplitInfo(
+            conv_rows=3,
+            local_proj_dims=(1, 1, 1),
+            conv_dtype_size=2,
+            ssm_sizes=(0, 0),
+        )
     worker._compute_desc_ids = NixlConnectorWorker._compute_desc_ids.__get__(
         worker, NixlConnectorWorker
     )
@@ -976,6 +989,37 @@ def test_compute_physical_blocks_per_logical(ssm_sizes, block_len, expected_rati
             (256, 256, 768),
             id="qwen35_27b_tp8",
         ),
+        # ai21labs/AI21-Jamba2-Mini (Mamba1)
+        # mamba d_inner = mamba_expand(2) * hidden_size(4096) = 8192
+        # mamba_d_state=16, mamba_d_conv=4 → conv_rows=3.
+        # Conv state holds only x: a single contiguous sub-projection.
+        pytest.param(
+            "mamba1",
+            1,
+            8192,
+            3,
+            (8192, 16),
+            (8192,),
+            id="jamba_mini_tp1",
+        ),
+        pytest.param(
+            "mamba1",
+            4,
+            2048,
+            3,
+            (2048, 16),
+            (2048,),
+            id="jamba_mini_tp4",
+        ),
+        pytest.param(
+            "mamba1",
+            8,
+            1024,
+            3,
+            (1024, 16),
+            (1024,),
+            id="jamba_mini_tp8",
+        ),
     ],
 )
 def test_derive_mamba_conv_split(
@@ -999,6 +1043,7 @@ def test_derive_mamba_conv_split(
     from vllm.v1.kv_cache_interface import MambaSpec
 
     _TYPE_MAP = {
+        "mamba1": MambaAttentionBackendEnum.MAMBA1,
         "mamba2": MambaAttentionBackendEnum.MAMBA2,
         "gdn_attention": MambaAttentionBackendEnum.GDN_ATTN,
     }

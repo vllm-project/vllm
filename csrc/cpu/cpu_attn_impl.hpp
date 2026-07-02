@@ -124,7 +124,7 @@ struct AttentionMetadata {
         workitem_group_num(workitem_group_num),
         reduction_item_num(reduction_item_num),
         reduction_split_num(reduction_split_num),
-        thread_num(omp_get_max_threads()),
+        thread_num(cpu_utils::get_max_threads()),
         effective_thread_num(thread_num),
         split_kv_q_token_num_threshold(split_kv_q_token_num_threshold),
         attention_scratchpad_size_per_thread(0),
@@ -405,7 +405,7 @@ class AttentionScheduler {
   torch::Tensor schedule(const ScheduleInput& input) const {
     const bool causal = input.causal;
     const bool is_dynamic_causal = input.dynamic_causal != nullptr;
-    const int32_t thread_num = omp_get_max_threads();
+    const int32_t thread_num = cpu_utils::get_max_threads();
     const int64_t cache_size = cpu_utils::get_available_l2_size();
     const int32_t max_num_q_per_iter = input.max_num_q_per_iter;
     const int32_t kv_len_alignment = input.kv_block_alignment;
@@ -1423,7 +1423,7 @@ class AttentionMainLoop {
 
  public:
   void operator()(const AttentionInput* input) {
-    const int thread_num = omp_get_max_threads();
+    const int thread_num = cpu_utils::get_max_threads();
     TORCH_CHECK_EQ(input->metadata->thread_num, thread_num);
     std::atomic<int32_t> guard_counter(0);
     std::atomic<int32_t>* guard_counter_ptr = &guard_counter;

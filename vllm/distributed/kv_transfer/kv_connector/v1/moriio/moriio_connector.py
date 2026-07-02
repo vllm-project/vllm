@@ -1061,7 +1061,7 @@ class MoRIIOConnectorWorker:
         # when mori-io supports ibgda functionality
 
         stream = torch.cuda.current_stream()
-        event = torch.cuda.Event()
+        event = torch.Event()
         event.record(stream)
 
         task = WriteTask(
