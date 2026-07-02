@@ -52,7 +52,11 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    KVCacheConfig,
+    KVCacheSpecKind,
+    get_kv_cache_spec_kind,
+)
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -680,40 +684,64 @@ class Scheduler(SchedulerInterface):
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
                     # Get locally-cached tokens.
-                    if (
+                    coordinator = self.kv_cache_manager.coordinator
+                    computed_per_group: tuple[list[KVCacheBlock], ...] | None = None
+                    kv_transfer_config = self.vllm_config.kv_transfer_config
+                    request_kv_params = request.kv_transfer_params or {}
+                    is_pd_remote_prefill_consumer = (
+                        kv_transfer_config is not None
+                        and kv_transfer_config.is_kv_consumer
+                        and bool(request_kv_params.get("do_remote_prefill"))
+                    )
+                    is_hybrid_per_group_cache_hit = (
                         self.connector is not None
-                        and self.has_mamba_layers
-                        and isinstance(
-                            self.kv_cache_manager.coordinator,
-                            HybridKVCacheCoordinator,
-                        )
-                    ):
+                        and self.kv_cache_manager.enable_caching
+                        and not request.skip_reading_prefix_cache
+                        and isinstance(coordinator, HybridKVCacheCoordinator)
+                    )
+                    use_hybrid_remote_prefill_hit = (
+                        is_pd_remote_prefill_consumer
+                        and is_hybrid_per_group_cache_hit
+                    )
+                    if use_hybrid_remote_prefill_hit:
+                        assert isinstance(coordinator, HybridKVCacheCoordinator)
                         computed, per_group_hits = (
-                            self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
+                            coordinator.find_longest_cache_hit_per_group(
                                 request.block_hashes,
                                 request.num_tokens - 1,
                             )
                         )
-                        new_computed_blocks = (
-                            self.kv_cache_manager.create_kv_cache_blocks(computed)
+                        # The connector scalar represents reusable dense
+                        # prefix tokens. Non-dense/state/tail groups are left
+                        # empty so external-token allocation creates receive
+                        # target blocks according to each manager's semantics.
+                        dense_kinds = (
+                            KVCacheSpecKind.FULL_ATTENTION,
+                            KVCacheSpecKind.MLA_ATTENTION,
+                            KVCacheSpecKind.SINK_FULL_ATTENTION,
                         )
-                        # NOTE(ZhanqiuHu): For Mamba hybrid models,
-                        # num_new_local_computed_tokens should be the FA hit
-                        # length. This value is passed to the connector's
-                        # get_num_new_matched_tokens which computes:
-                        # external = total - local_computed.
-                        # Using the FA hit skips re-transferring FA blocks
-                        # already cached on D-side. The Mamba state (always
-                        # the last block) is transferred unconditionally by
-                        # _apply_prefix_caching in nixl/worker.py.
-                        num_new_local_computed_tokens = max(per_group_hits)
-                        if self.kv_cache_manager.log_stats:
-                            assert self.kv_cache_manager.prefix_cache_stats is not None
-                            self.kv_cache_manager.prefix_cache_stats.record(
-                                num_tokens=request.num_tokens,
-                                num_hits=num_new_local_computed_tokens,
-                                preempted=request.num_preemptions > 0,
-                            )
+                        dense_hits: list[int] = []
+                        for group in coordinator.attention_groups:
+                            if get_kv_cache_spec_kind(group.spec) in dense_kinds:
+                                dense_hits.extend(
+                                    per_group_hits[group_id]
+                                    for group_id in group.group_ids
+                                )
+                            else:
+                                for group_id in group.group_ids:
+                                    computed[group_id].clear()
+                        num_new_local_computed_tokens = (
+                            min(dense_hits) if dense_hits else 0
+                        )
+                        for group in coordinator.attention_groups:
+                            if get_kv_cache_spec_kind(group.spec) in dense_kinds:
+                                num_dense_blocks = (
+                                    num_new_local_computed_tokens
+                                    // group.spec.block_size
+                                )
+                                for group_id in group.group_ids:
+                                    del computed[group_id][num_dense_blocks:]
+                        computed_per_group = computed
                     else:
                         new_computed_blocks, num_new_local_computed_tokens = (
                             self.kv_cache_manager.get_computed_blocks(request)
@@ -750,11 +778,40 @@ class Scheduler(SchedulerInterface):
                         )
                         connector_prefix_cache_hits = num_external_computed_tokens
 
+                    if (
+                        computed_per_group is not None
+                        and num_external_computed_tokens == 0
+                    ):
+                        # TODO: When dense groups are fully cached on D but
+                        # state/tail groups are not, we would like to reuse
+                        # dense KV and fetch only the missing state/tail
+                        # groups from P. That requires connector-level
+                        # per-group transfer planning; until that contract is
+                        # verified, fall back to the convergent all-group hit.
+                        new_computed_blocks, num_new_local_computed_tokens = (
+                            self.kv_cache_manager.get_computed_blocks(request)
+                        )
+                        computed_per_group = None
+                        num_external_computed_tokens = 0
+
                     # Total computed tokens (local + external).
                     num_computed_tokens = (
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
                     assert num_computed_tokens <= request.num_tokens
+                    if computed_per_group is not None:
+                        if self.kv_cache_manager.log_stats:
+                            assert self.kv_cache_manager.prefix_cache_stats is not None
+                            self.kv_cache_manager.prefix_cache_stats.record(
+                                num_tokens=request.num_tokens,
+                                num_hits=num_new_local_computed_tokens,
+                                preempted=request.num_preemptions > 0,
+                            )
+                        new_computed_blocks = (
+                            self.kv_cache_manager.create_kv_cache_blocks(
+                                computed_per_group
+                            )
+                        )
 
                     # Skip request with pending mm encoding prefetches
                     if (
