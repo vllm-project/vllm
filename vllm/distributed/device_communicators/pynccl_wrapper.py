@@ -51,6 +51,35 @@ class ncclUniqueId(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_byte * 128)]
 
 
+# NCCL 2.30+ ncclCommProperties_t — mirrors src/include/nccl_device/core.h.
+# The struct has a versioned header (size/magic/version) followed by
+# user-visible fields.  We only read ginType so padding mismatches for
+# trailing fields are harmless.
+class ncclCommProperties(ctypes.Structure):
+    _fields_ = [
+        ("size", ctypes.c_size_t),
+        ("magic", ctypes.c_uint),
+        ("version", ctypes.c_uint),
+        ("rank", ctypes.c_int),
+        ("nRanks", ctypes.c_int),
+        ("cudaDev", ctypes.c_int),
+        ("nvmlDev", ctypes.c_int),
+        ("deviceApiSupport", ctypes.c_bool),
+        ("multimemSupport", ctypes.c_bool),
+        ("ginType", ctypes.c_int),
+        ("nLsaTeams", ctypes.c_int),
+        ("hostRmaSupport", ctypes.c_bool),
+        ("railedGinType", ctypes.c_int),
+    ]
+
+
+class ncclGinTypeEnum:
+    NONE = 0
+    PROXY = 2
+    GDAKI = 3
+    GPI = 4
+
+
 cudaStream_t = ctypes.c_void_p
 buffer_type = ctypes.c_void_p
 
@@ -317,6 +346,14 @@ class NCCLLibrary:
         # ncclResult_t ncclCommWindowDeregister(
         #   ncclComm_t comm, ncclWindow_t win);
         Function("ncclCommWindowDeregister", ncclResult_t, [ncclComm_t, ncclWindow_t]),
+        # ncclResult_t ncclCommQueryProperties(
+        #   ncclComm_t comm, ncclCommProperties_t* props);
+        # Available since NCCL 2.29; used to detect GIN support.
+        Function(
+            "ncclCommQueryProperties",
+            ncclResult_t,
+            [ncclComm_t, ctypes.POINTER(ncclCommProperties)],
+        ),
     ]
 
     # class attribute to store the mapping from the path to the library
@@ -375,6 +412,9 @@ class NCCLLibrary:
                             # Having an exception here on ROCm platform is
                             # not allowed during graph capturing
                             continue
+                    elif func.name == "ncclCommQueryProperties":
+                        # NCCL >= 2.29 only; silently skip on older versions
+                        continue
                     raise
             NCCLLibrary.path_to_dict_mapping[so_file] = _funcs
         self._funcs = NCCLLibrary.path_to_dict_mapping[so_file]

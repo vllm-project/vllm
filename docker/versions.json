@@ -10,6 +10,9 @@
     "UBUNTU_VERSION": {
       "default": "22.04"
     },
+    "NCCL_VERSION": {
+      "default": "2.30.7"
+    },
     "BUILD_BASE_IMAGE": {
       "default": "nvidia/cuda:13.0.2-devel-ubuntu22.04"
     },
@@ -56,7 +59,7 @@
       "default": "cuda"
     },
     "DEEPEP_COMMIT_HASH": {
-      "default": "73b6ea4"
+      "default": "d4f41e4e93"
     },
     "GIT_REPO_CHECK": {
       "default": "0"

@@ -36,6 +36,10 @@ if has_deep_ep_v2():
 P = ParamSpec("P")
 
 
+class GINNotAvailableError(RuntimeError):
+    pass
+
+
 @dataclasses.dataclass
 class ProcessGroupInfo:
     world_size: int
@@ -96,19 +100,26 @@ def parallel_launch(
     **kwargs: P.kwargs,
 ) -> None:
     assert not kwargs
-    spawn(
-        _worker_parallel_launch,
-        args=(
-            world_size,
-            world_size,
-            0,
-            f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{get_open_port()}",
-            worker,
+    try:
+        spawn(
+            _worker_parallel_launch,
+            args=(
+                world_size,
+                world_size,
+                0,
+                f"tcp://{os.getenv('LOCALHOST', 'localhost')}:{get_open_port()}",
+                worker,
+            )
+            + args,
+            nprocs=world_size,
+            join=True,
         )
-        + args,
-        nprocs=world_size,
-        join=True,
-    )
+    except Exception as exc:
+        if "GINNotAvailableError" in str(exc):
+            import pytest
+
+            pytest.skip("NCCL GIN not available (no IBGDA-capable hardware)")
+        raise
 
 
 ## DeepEP specific utils
@@ -224,6 +235,16 @@ def make_deepep_v2_a2a(
     use_cudagraph: bool = False,
 ):
     import deep_ep
+
+    from vllm.utils.nccl import query_nccl_gin_type
+
+    # GIN availability can only be checked after NCCL comm init, which
+    # happens inside the spawned workers. Raise GINNotAvailableError so
+    # parallel_launch() can catch it (via string match across the process
+    # boundary) and convert to pytest.skip.
+    gin_type = query_nccl_gin_type(pg)
+    if gin_type is None or gin_type == 0:
+        raise GINNotAvailableError(f"NCCL GIN not available (ginType={gin_type})")
 
     buffer = deep_ep.ElasticBuffer(
         group=pg,
