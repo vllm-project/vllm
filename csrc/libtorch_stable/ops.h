@@ -181,12 +181,11 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 // AllSpark ops: declarations are in the source files
 // (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 
-// TODO: Move this out once ROCm upgrade their torch to 2.11.
-// CPU tensor -> CUDA UVA view (shared CUDA)
+#endif
+
+// CPU tensor -> CUDA UVA view (shared CUDA/ROCm)
 torch::stable::Tensor get_cuda_view_from_cpu_tensor(
     torch::stable::Tensor& cpu_tensor);
-
-#endif
 
 // Attention kernels (shared CUDA/ROCm)
 void merge_attn_states(
