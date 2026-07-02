@@ -193,6 +193,15 @@ def enable_mla_dual_rms_norm_fusion(cfg: "VllmConfig") -> bool:
     return rocm_aiter_ops.is_enabled() and check_aiter_fused_qk_rmsnorm()
 
 
+def enable_qk_norm_rope_kvcache(cfg: "VllmConfig") -> bool:
+    """Enable fused QK-norm + RoPE + KV cache update on ROCm with AITER."""
+    from vllm._aiter_ops import rocm_aiter_ops
+
+    if not rocm_aiter_ops.is_enabled():
+        return False
+    return cfg.compilation_config.is_custom_op_enabled("rotary_embedding")
+
+
 OPTIMIZATION_LEVEL_00 = {
     "compilation_config": {
         "pass_config": {
@@ -205,6 +214,8 @@ OPTIMIZATION_LEVEL_00 = {
             "fuse_act_padding": False,
             "fuse_mla_dual_rms_norm": False,
             "fuse_rope_kvcache": False,
+            "fuse_qk_norm_rope_kvcache": False,
+            "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": False,
         },
         "cudagraph_mode": CUDAGraphMode.NONE,
@@ -226,6 +237,8 @@ OPTIMIZATION_LEVEL_01 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": False,
+            "fuse_qk_norm_rope_kvcache": False,
+            "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": False,
         },
         "cudagraph_mode": CUDAGraphMode.PIECEWISE,
@@ -247,6 +260,8 @@ OPTIMIZATION_LEVEL_02 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -268,6 +283,8 @@ OPTIMIZATION_LEVEL_03 = {
             "fuse_act_padding": enable_norm_pad_fusion,
             "fuse_mla_dual_rms_norm": enable_mla_dual_rms_norm_fusion,
             "fuse_rope_kvcache": enable_rope_kvcache_fusion,
+            "fuse_qk_norm_rope_kvcache": enable_qk_norm_rope_kvcache,
+            "enable_qk_norm_rope_fusion": False,
             "fuse_rope_kvcache_cat_mla": enable_rope_kvcache_mla_fusion,
         },
         "cudagraph_mode": CUDAGraphMode.FULL_AND_PIECEWISE,
@@ -1905,6 +1922,21 @@ class VllmConfig:
                     logger.debug(
                         "Max num batched tokens below rope+kvcache fusion threshold, "
                         "rope+kvcache fusion enabled for num_tokens <= %d.",
+                        compile_range_end,
+                    )
+
+        if compilation_config.pass_config.fuse_qk_norm_rope_kvcache:
+            max_token_num = (
+                compilation_config.pass_config.rope_kvcache_fusion_max_token_num
+            )
+            if max_token_num is not None:
+                if compile_range_end is not None and max_token_num < compile_range_end:
+                    computed_compile_ranges_endpoints.append(max_token_num)
+                else:
+                    logger.debug(
+                        "Max num batched tokens below qk_norm+rope+kvcache "
+                        "fusion threshold, fusion enabled for "
+                        "num_tokens <= %d.",
                         compile_range_end,
                     )
 
