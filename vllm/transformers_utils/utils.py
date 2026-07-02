@@ -44,23 +44,24 @@ def modelscope_list_repo_files(
     token: str | bool | None = None,
 ) -> list[str]:
     """List files in a modelscope repo."""
+    import inspect
+
     from modelscope.hub.api import HubApi
 
     api = HubApi()
     api.login(token)
-    # same as huggingface_hub.list_repo_files
-    # modelscope >= 1.38 removed the `revision` kwarg from the
-    # LegacyHubApi compat layer; fall back to calling without it.
-    try:
-        model_files = api.get_model_files(
-            model_id=repo_id, revision=revision, recursive=True
-        )
-    except TypeError:
-        model_files = api.get_model_files(
-            model_id=repo_id, recursive=True
-        )
+    # modelscope >= 1.38 dropped the `revision` parameter from the
+    # get_model_files() compat shim. Inspect the signature so we pass it
+    # when supported and automatically pick it up again once upstream
+    # restores it.
+    kwargs: dict = {"model_id": repo_id, "recursive": True}
+    sig = inspect.signature(api.get_model_files)
+    if "revision" in sig.parameters:
+        kwargs["revision"] = revision
     files = [
-        file["Path"] for file in model_files if file["Type"] == "blob"
+        file["Path"]
+        for file in api.get_model_files(**kwargs)
+        if file["Type"] == "blob"
     ]
     return files
 
