@@ -612,10 +612,35 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
     ) -> torch.Tensor:
         N, Hq, D = query.shape
 
+        # Guard the fast path: it is only valid when NO continuation requests
+        # exist in the batch.  max_query_len == max_seq_len alone is NOT
+        # sufficient — a long first-chunk prefill (q_len == seq_len) can
+        # coexist with shorter continuation requests (q_len < seq_len, prefix
+        # cache hit), causing flash_attn_varlen with cu_seqlens_k=
+        # query_start_loc to LOSE the cached prefix K/V for continuations.
+        #
+        # Vectorized check on CPU tensors: diff() computes all query lengths,
+        # ne() + any() short-circuits on the first mismatch.  .item() on a
+        # CPU scalar tensor is a host read — no GPU sync.
+        _has_continuation = False
+        if (
+            attn_metadata.query_start_loc_cpu is not None
+            and attn_metadata.seq_lens_cpu is not None
+        ):
+            _qsl = attn_metadata.query_start_loc_cpu
+            _sl = attn_metadata.seq_lens_cpu
+            _has_continuation = (
+                ((_qsl[1 : len(_sl) + 1] - _qsl[: len(_sl)]) != _sl).any().item()
+            )
+
         # Fast path: use flash_attn for first-chunk prefills (all K/V in batch).
-        # max_query_len == max_seq_len means no request has prior cached KV.
-        # Both are Python ints — no GPU sync.
-        if _HAS_FLASH_ATTN and attn_metadata.max_query_len == attn_metadata.max_seq_len:
+        # Guarded: only fires when NO continuation requests exist in the batch.
+        # Both max values are Python ints — no GPU sync.
+        if (
+            _HAS_FLASH_ATTN
+            and attn_metadata.max_query_len == attn_metadata.max_seq_len
+            and not _has_continuation
+        ):
             return self._flash_attn_varlen(
                 q=query,
                 k=key,
