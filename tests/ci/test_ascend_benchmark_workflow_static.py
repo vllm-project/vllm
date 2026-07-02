@@ -129,7 +129,12 @@ def test_main_benchmark_defaults_match_ascend_main_config():
     assert 'MAX_MODEL_LEN: ""' in text
     assert "&& '64' || '1024'" in text
     assert "&& '16' || '256'" in text
-    assert "perfgate-ascend-qwen25-3b-910b3.json" in text
+    assert "PERFGATE_SPEC_FILE: ${{ vars.VLLM_HUST_PERFGATE_SPEC_FILE || '' }}" in text
+    assert "VLLM_HUST_PERFGATE_HARDWARE_CHIP_MODEL" in text
+    assert "Resolve perfgate spec for Ascend runner" in text
+    assert "Resolve main same-spec file" in text
+    assert "resolve_perfgate_spec_file.py" in text
+    assert "echo \"SAME_SPEC_SPEC_FILE=$resolved_spec_file\" >> \"$GITHUB_ENV\"" in text
     assert "official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json" in text
 
 

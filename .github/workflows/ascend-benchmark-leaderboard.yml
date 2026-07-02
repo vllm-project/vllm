@@ -283,14 +283,14 @@ jobs:
       BENCH_METADATA_LENGTHS: ${{ github.event_name == 'workflow_dispatch' && inputs.metadata_lengths || '' }}
       INPUT_BENCHMARK_SCENARIO: ${{ github.event_name == 'issue_comment' && needs.issue-comment-command.outputs.benchmark_scenario || (github.event_name == 'workflow_dispatch' && inputs.benchmark_scenario || '') }}
       PR_LABELS: ${{ github.event_name == 'pull_request' && toJson(github.event.pull_request.labels) || '[]' }}
-      SOC_VERSION: ascend910b3
+      SOC_VERSION: ""
       HARDWARE_VENDOR: Huawei
-      HARDWARE_CHIP_MODEL: 910B3
+      HARDWARE_CHIP_MODEL: ${{ vars.VLLM_HUST_PERFGATE_HARDWARE_CHIP_MODEL || '' }}
       CHIP_COUNT: "1"
       NODE_COUNT: "1"
       SAME_SPEC_BENCHMARK_ENABLED: ${{ vars.VLLM_HUST_SAME_SPEC_BENCHMARK_ENABLED || '1' }}
       PERFGATE_MODE: ${{ vars.VLLM_HUST_PERFGATE_MODE || 'report' }}
-      PERFGATE_SPEC_FILE: ${{ vars.VLLM_HUST_PERFGATE_SPEC_FILE || 'docs/official-baselines/perfgate-ascend-qwen25-3b-910b3.json' }}
+      PERFGATE_SPEC_FILE: ${{ vars.VLLM_HUST_PERFGATE_SPEC_FILE || '' }}
       MAIN_SAME_SPEC_SPEC_FILE: ${{ vars.VLLM_HUST_MAIN_SAME_SPEC_SPEC_FILE || 'docs/official-baselines/official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json' }}
       SAME_SPEC_SPEC_FILE: ${{ vars.VLLM_HUST_SAME_SPEC_SPEC_FILE || '' }}
       SAME_SPEC_CONSTRAINTS_FILE: ${{ vars.VLLM_HUST_SAME_SPEC_CONSTRAINTS_FILE || '' }}
@@ -584,6 +584,28 @@ jobs:
           }
 
           clone_with_retry "$BENCHMARK_REPO_URL" "$GITHUB_WORKSPACE/vllm-hust-benchmark" "$BENCHMARK_REPO_REF"
+
+      - name: Resolve perfgate spec for Ascend runner
+        if: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
+        env:
+          VLLM_HUST_BENCHMARK_REPO: ${{ github.workspace }}/vllm-hust-benchmark
+        run: |
+          "${PYTHON_BIN:-python3}" .github/workflows/scripts/resolve_perfgate_spec_file.py
+
+      - name: Resolve main same-spec file
+        if: ${{ github.event_name != 'pull_request' && github.event_name != 'issue_comment' }}
+        run: |
+          spec_file="${SAME_SPEC_SPEC_FILE:-$MAIN_SAME_SPEC_SPEC_FILE}"
+          if [[ "$spec_file" = /* ]]; then
+            resolved_spec_file="$spec_file"
+          else
+            resolved_spec_file="$GITHUB_WORKSPACE/vllm-hust-benchmark/$spec_file"
+          fi
+          if [[ ! -f "$resolved_spec_file" ]]; then
+            echo "main same-spec file not found: $resolved_spec_file" >&2
+            exit 2
+          fi
+          echo "SAME_SPEC_SPEC_FILE=$resolved_spec_file" >> "$GITHUB_ENV"
 
       - name: Checkout website repo
         run: |
@@ -1110,7 +1132,6 @@ jobs:
           VLLM_HUST_BENCHMARK_REPO: ${{ github.workspace }}/vllm-hust-benchmark
           VLLM_HUST_WEBSITE_REPO: ${{ github.workspace }}/vllm-hust-website
           RUN_ID: ci-${{ github.run_id }}-${{ github.run_attempt }}-${{ env.TARGET_REPO_SHA }}
-          SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.SAME_SPEC_SPEC_FILE || ((github.event_name == 'pull_request' || github.event_name == 'issue_comment') && env.PERFGATE_SPEC_FILE || env.MAIN_SAME_SPEC_SPEC_FILE) }}
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           max_attempts=${NODE_ENV_RETRY_MAX_ATTEMPTS:-3}
@@ -1141,8 +1162,6 @@ jobs:
       - name: Performance gate - Stage 1 comparison
         if: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
         shell: bash
-        env:
-          SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.SAME_SPEC_SPEC_FILE || env.PERFGATE_SPEC_FILE }}
         run: bash .github/workflows/scripts/perfgate_stage1_compare.sh
 
 
@@ -1155,7 +1174,6 @@ jobs:
           VLLM_HUST_REPO: ${{ github.workspace }}
           VLLM_HUST_BENCHMARK_REPO: ${{ github.workspace }}/vllm-hust-benchmark
           VLLM_HUST_WEBSITE_REPO: ${{ github.workspace }}/vllm-hust-website
-          SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.SAME_SPEC_SPEC_FILE || env.PERFGATE_SPEC_FILE }}
         run: |
           source "${VLLM_ASCEND_HUST_REPO}/scripts/use_single_ascend_env.sh"
           bash .github/workflows/scripts/perfgate_stage2_rebase_and_benchmark.sh
@@ -1163,8 +1181,6 @@ jobs:
       - name: Performance gate - two-stage comparison
         if: ${{ github.event_name == 'pull_request' || github.event_name == 'issue_comment' }}
         shell: bash
-        env:
-          SAME_SPEC_SPEC_FILE: ${{ github.workspace }}/vllm-hust-benchmark/${{ env.SAME_SPEC_SPEC_FILE || env.PERFGATE_SPEC_FILE }}
         run: bash .github/workflows/scripts/perfgate_compare.sh
 
       - name: Cleanup leftover Ascend CI processes
