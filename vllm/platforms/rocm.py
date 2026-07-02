@@ -18,7 +18,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from .interface import DeviceCapability, Platform, PlatformEnum
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ParallelConfig, VllmConfig
     from vllm.config.kernel import IrOpPriorityConfig
     from vllm.v1.attention.selector import AttentionSelectorConfig
 
@@ -818,6 +818,34 @@ class RocmPlatform(Platform):
 
         if parallel_config.worker_cls == "auto":
             parallel_config.worker_cls = "vllm.v1.worker.gpu_worker.Worker"
+
+        cls._verify_aiter_fused_shared_experts(parallel_config)
+
+    @classmethod
+    def _verify_aiter_fused_shared_experts(
+        cls, parallel_config: "ParallelConfig"
+    ) -> None:
+        """Reject AITER fused shared-experts + incompatible features.
+
+        The fused shared-expert slot changes the per-rank routed-expert count,
+        which breaks EPLB bookkeeping and dual batch overlap (DBO).
+        """
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        if not rocm_aiter_ops.is_fusion_moe_shared_experts_enabled():
+            return
+
+        if parallel_config.enable_eplb:
+            raise ValueError(
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is incompatible with "
+                "EPLB. Disable one of them."
+            )
+
+        if parallel_config.use_ubatching:
+            raise ValueError(
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS is incompatible with "
+                "dual batch overlap (DBO). Disable one of them."
+            )
 
     @classmethod
     def verify_model_arch(cls, model_arch: str) -> None:
