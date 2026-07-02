@@ -71,6 +71,7 @@ SpeculativeMethod = Literal[
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
+EagleAuxLayerSemantics = Literal["vllm", "sglang"]
 
 
 @config
@@ -138,6 +139,25 @@ class SpeculativeConfig:
     for draft token generation. Reduces communication from O(vocab_size) to
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
+    eagle_aux_layer_semantics: EagleAuxLayerSemantics | None = None
+    """Convention used to interpret EAGLE-3 auxiliary hidden-state layer
+    indices (`eagle_aux_hidden_state_layer_ids`). Only valid for the
+    `eagle3` method; other methods (e.g. dflash) normalize their indices at
+    config-load time and reject this setting.
+
+    vLLM captures auxiliary hidden states *after* each decoder layer, so a
+    stored index `k` corresponds to the output of layer `k - 1`. Different
+    EAGLE-3 draft heads are trained against different conventions:
+
+    - `"vllm"` (default when unset): indices are used verbatim, matching
+      vLLM's historical behavior.
+    - `"sglang"`: indices follow SGLang's convention, where index `k` refers
+      to the output of layer `k`. vLLM applies a `+1` shift to map these onto
+      its capture slots, so both frameworks feed identical tensors to the same
+      draft config (see `sglang/srt/models/*::set_eagle3_layers_to_capture`).
+
+    If unset, the value is read from the draft model's HF config field of the
+    same name when present; otherwise it defaults to `"vllm"`."""
 
     use_heterogeneous_vocab: bool = False
     """Allow draft and target models to use different vocabularies.
@@ -313,6 +333,9 @@ class SpeculativeConfig:
             if layer_ids is not None:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
+            # The semantics determine the actual capture slots, so they also
+            # affect the computation graph.
+            factors.append(self.eagle_aux_layer_semantics)
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
@@ -904,6 +927,14 @@ class SpeculativeConfig:
                         self.target_parallel_config, self.draft_tensor_parallel_size
                     )
                 )
+
+        if self.eagle_aux_layer_semantics is not None and self.method != "eagle3":
+            raise ValueError(
+                "eagle_aux_layer_semantics is only supported for the 'eagle3' "
+                f"method, but method is '{self.method}'. Other methods (e.g. "
+                "dflash) normalize their auxiliary-layer indices at config-load "
+                "time, so this setting must not be used with them."
+            )
         return self
 
     def _validate_suffix_decoding(self):

@@ -5382,7 +5382,13 @@ class GPUModelRunner(
                 layer_ids = eagle_config.get("eagle_aux_hidden_state_layer_ids")
 
         if layer_ids and isinstance(layer_ids, (list, tuple)):
-            return tuple(layer_ids)
+            from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+                apply_eagle3_aux_layer_semantics,
+            )
+
+            return apply_eagle3_aux_layer_semantics(
+                tuple(layer_ids), self.speculative_config
+            )
 
         return None
 
