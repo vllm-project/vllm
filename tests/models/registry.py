@@ -113,6 +113,13 @@ class _HfExamplesInfo:
     max_num_seqs: int | None = None
     """Maximum number of sequences to be processed in a single iteration."""
 
+    min_gpu_memory_gb: float | None = None
+    """
+    The minimum per-device memory (in GiB) required to initialize this model.
+    The test is skipped when the device has less memory than this. Use for very
+    large models that OOM in CI even with the reduced-layer dummy config.
+    """
+
     use_original_num_layers: bool = False
     """
     If True, use the original number of layers from the model config
@@ -421,7 +428,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "Ministral3ForCausalLM": _HfExamplesInfo("mistralai/Ministral-3-3B-Instruct-2512"),
     "MistralForCausalLM": _HfExamplesInfo("mistralai/Mistral-7B-Instruct-v0.1"),
     "MistralLarge3ForCausalLM": _HfExamplesInfo(
-        "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4"
+        "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+        min_gpu_memory_gb=256,
     ),
     "MixtralForCausalLM": _HfExamplesInfo(
         "mistralai/Mixtral-8x7B-Instruct-v0.1",

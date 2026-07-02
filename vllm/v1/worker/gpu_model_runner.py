@@ -5965,7 +5965,7 @@ class GPUModelRunner(
                     **model_kwargs,
                 )
 
-            if self.use_aux_hidden_state_outputs:
+            if self.use_aux_hidden_state_outputs and isinstance(outputs, tuple):
                 hidden_states, _ = outputs
             else:
                 hidden_states = outputs
