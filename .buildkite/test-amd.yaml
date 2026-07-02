@@ -2210,6 +2210,59 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
+- label: Hybrid SSM NixlConnector PD prefix cache test (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/v1/core/sched/
+  - vllm/v1/core/kv_cache_coordinator.py
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
+
+- label: MultiConnector (Nixl+Offloading) PD accuracy (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
+
+- label: MultiConnector (Nixl+Offloading) PD edge cases (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
+
 - label: V1 e2e (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
