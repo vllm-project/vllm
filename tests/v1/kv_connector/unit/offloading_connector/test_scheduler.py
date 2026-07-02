@@ -12,6 +12,7 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
     _ConnectorMetricName,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
@@ -37,7 +38,12 @@ from vllm.v1.request import RequestStatus
 
 def _reduce_kv_connector_stats(runner):
     reduced: dict[str, int | float] = {}
-    for stats in runner.kv_connector_stats:
+    for payload in runner.kv_connector_stats:
+        stats = (
+            payload
+            if hasattr(payload, "reduce")
+            else OffloadingConnectorStats(data=payload)
+        )
         for key, value in stats.reduce().items():
             reduced[key] = reduced.get(key, 0) + value
     return reduced
