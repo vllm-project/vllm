@@ -64,7 +64,9 @@ __global__ void reshape_and_cache_nvfp4_kernel(
     const int64_t data_block_offset_stride,  // data cache stride for tokens
     const int64_t scale_block_stride,        // scale cache stride for dim 0
     const int64_t scale_head_stride,         // scale cache stride for heads
-    const int64_t scale_block_offset_stride  // scale cache stride for tokens
+    const int64_t scale_block_offset_stride,  // scale cache stride for tokens
+    const bool swizzle_v_sf  // V scale layout: true = SM100 trtllm-gen 4-token
+                             // swizzle; false = linear (FlashInfer FA2 sm12x)
 ) {
   using CudaType = typename CUDATypeConverter<scalar_t>::Type;
   using PVec = PackedVec<CudaType, CVT_FP4_PACK16>;
@@ -153,12 +155,14 @@ __global__ void reshape_and_cache_nvfp4_kernel(
 #endif
 
       // Write block scale to scale cache.
-      // K (kv==0): linear layout (no swizzle).
-      // V (kv==1): swizzled layout for SM100 trtllm-gen MHA kernel.
+      // K (kv==0): always linear layout (no swizzle).
+      // V (kv==1): swizzled layout for the SM100 trtllm-gen MHA kernel when
+      //   swizzle_v_sf is true; linear (same as K) when false, which the
+      //   FlashInfer FA2 paged nvfp4 reader on sm120/sm121 requires.
       if (sf_out_ptr != nullptr) {
         int scale_idx = group_in_head;
         uint8_t* __restrict__ scale_dst;
-        if (kv == 0) {
+        if (kv == 0 || !swizzle_v_sf) {
           scale_dst = scale_block + head * scale_head_stride +
                       block_offset * scale_block_offset_stride + scale_idx;
         } else {
@@ -207,41 +211,70 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
 
   STD_TORCH_CHECK(head_size % 16 == 0,
                   "head_size must be divisible by 16 for NVFP4 KV cache");
-  STD_TORCH_CHECK(block_size % 4 == 0,
-                  "block_size must be divisible by 4 for NVFP4 KV cache "
-                  "swizzle");
 
-  // Detect physical layout from strides (based on full_dim).
-  // HND: head stride > block_offset stride.
-  bool is_hnd = key_cache.stride(2) > key_cache.stride(1);
+  // SM120/SM121 (consumer Blackwell) serve NVFP4 KV via the FlashInfer FA2
+  // paged reader, which derives the scale-factor stride as data_stride/8 and
+  // reads V scales linearly. That requires a contiguous [all-data | all-SF]
+  // page layout (NHD), not the SM100 trtllm-gen per-page [data|scale]
+  // interleave with the 4-token V swizzle. Select the layout by arch.
+  const bool contiguous_layout = get_device_prop()->major >= 12;
+  const bool swizzle_v_sf = !contiguous_layout;
 
-  int64_t data_block_stride = key_cache.stride(0);  // page_bytes
-  int64_t data_head_stride, data_block_offset_stride;
-  if (is_hnd) {
-    data_head_stride = (int64_t)block_size * data_dim;
-    data_block_offset_stride = data_dim;
-  } else {
+  STD_TORCH_CHECK(!swizzle_v_sf || block_size % 4 == 0,
+                  "block_size must be divisible by 4 for NVFP4 KV cache V "
+                  "scale-factor swizzle (SM100 trtllm-gen path)");
+
+  uint8_t* key_data_cache;
+  uint8_t* value_data_cache;
+  uint8_t* key_scale_ptr;
+  uint8_t* value_scale_ptr;
+  int64_t data_block_stride, data_head_stride, data_block_offset_stride;
+  int64_t scale_block_stride, scale_head_stride, scale_block_offset_stride;
+
+  if (contiguous_layout) {
+    // One contiguous data region (num_blocks, 2, block, heads, data_dim) in NHD
+    // order, followed by one contiguous SF region (..., scale_dim). K/V are
+    // dim 1; the per-block stride spans both sides so sf_stride == data_stride/8
+    // holds for each side (matches nvfp4_kv_cache_split_views global split).
+    int64_t num_blocks = key_cache.size(0);
+    uint8_t* buf = key_cache.mutable_data_ptr<uint8_t>();
+    int64_t kv_data_off = (int64_t)block_size * num_heads * data_dim;
+    int64_t kv_scale_off = (int64_t)block_size * num_heads * scale_dim;
+    int64_t data_count = num_blocks * 2 * kv_data_off;
+    key_data_cache = buf;
+    value_data_cache = buf + kv_data_off;
+    key_scale_ptr = buf + data_count;
+    value_scale_ptr = buf + data_count + kv_scale_off;
+    data_block_stride = 2 * kv_data_off;
     data_head_stride = data_dim;
     data_block_offset_stride = (int64_t)num_heads * data_dim;
-  }
-
-  // Page layout: [K_data | K_scale | V_data | V_scale]
-  // Scale follows data within each KV side.
-  int64_t data_per_kv = (int64_t)num_heads * block_size * data_dim;
-
-  uint8_t* key_scale_ptr = key_cache.mutable_data_ptr<uint8_t>() + data_per_kv;
-  uint8_t* value_scale_ptr =
-      value_cache.mutable_data_ptr<uint8_t>() + data_per_kv;
-
-  // Scale strides: same page stride, inner strides from layout.
-  int64_t scale_block_stride = data_block_stride;
-  int64_t scale_head_stride, scale_block_offset_stride;
-  if (is_hnd) {
-    scale_head_stride = (int64_t)block_size * scale_dim;
-    scale_block_offset_stride = scale_dim;
-  } else {
+    scale_block_stride = 2 * kv_scale_off;
     scale_head_stride = scale_dim;
     scale_block_offset_stride = (int64_t)num_heads * scale_dim;
+  } else {
+    // SM100 trtllm-gen per-page layout: [K_data | K_scale | V_data | V_scale].
+    bool is_hnd = key_cache.stride(2) > key_cache.stride(1);
+    data_block_stride = key_cache.stride(0);  // page_bytes
+    if (is_hnd) {
+      data_head_stride = (int64_t)block_size * data_dim;
+      data_block_offset_stride = data_dim;
+    } else {
+      data_head_stride = data_dim;
+      data_block_offset_stride = (int64_t)num_heads * data_dim;
+    }
+    int64_t data_per_kv = (int64_t)num_heads * block_size * data_dim;
+    key_data_cache = key_cache.mutable_data_ptr<uint8_t>();
+    value_data_cache = value_cache.mutable_data_ptr<uint8_t>();
+    key_scale_ptr = key_cache.mutable_data_ptr<uint8_t>() + data_per_kv;
+    value_scale_ptr = value_cache.mutable_data_ptr<uint8_t>() + data_per_kv;
+    scale_block_stride = data_block_stride;
+    if (is_hnd) {
+      scale_head_stride = (int64_t)block_size * scale_dim;
+      scale_block_offset_stride = scale_dim;
+    } else {
+      scale_head_stride = scale_dim;
+      scale_block_offset_stride = (int64_t)num_heads * scale_dim;
+    }
   }
 
   const float* k_scale_ptr = k_scale.const_data_ptr<float>();
@@ -265,13 +298,12 @@ void reshape_and_cache_nvfp4_dispatch(torch::stable::Tensor& key,
         vllm::reshape_and_cache_nvfp4_kernel<scalar_t>
             <<<grid, block, 0, stream>>>(
                 key.const_data_ptr<scalar_t>(),
-                value.const_data_ptr<scalar_t>(),
-                key_cache.mutable_data_ptr<uint8_t>(),
-                value_cache.mutable_data_ptr<uint8_t>(), key_scale_ptr,
-                value_scale_ptr, slot_mapping.const_data_ptr<int64_t>(),
-                k_scale_ptr, v_scale_ptr, key.stride(0), value.stride(0),
-                num_heads, head_size, block_size, data_block_stride,
-                data_head_stride, data_block_offset_stride, scale_block_stride,
-                scale_head_stride, scale_block_offset_stride);
+                value.const_data_ptr<scalar_t>(), key_data_cache,
+                value_data_cache, key_scale_ptr, value_scale_ptr,
+                slot_mapping.const_data_ptr<int64_t>(), k_scale_ptr, v_scale_ptr,
+                key.stride(0), value.stride(0), num_heads, head_size, block_size,
+                data_block_stride, data_head_stride, data_block_offset_stride,
+                scale_block_stride, scale_head_stride, scale_block_offset_stride,
+                swizzle_v_sf);
       });
 }

@@ -208,8 +208,41 @@ class Gemma4Config(VerifyAndUpdateConfig):
         if head_dim is None or global_head_dim is None or head_dim == global_head_dim:
             return
 
-        from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        # NVFP4 KV cache on consumer Blackwell (CC 12.x): the FlashInfer
+        # FA2 asymmetric paged kernel handles head_dim_qk=512 /
+        # head_dim_vo=256 directly (the campaign VO-split path), so route
+        # the heterogeneous-head Gemma 4 config to FLASHINFER instead of
+        # the TRITON_ATTN fallback below. Gated on VLLM_NVFP4_KV_VOSPLIT
+        # (default-on for nvfp4) and only when the user did not pin a
+        # backend. Returns before the FA4/Triton selection.
+        import vllm.envs as envs
+        from vllm.platforms import current_platform
+
+        cache_config = vllm_config.cache_config
+        if (
+            cache_config is not None
+            and cache_config.cache_dtype == "nvfp4"
+            and envs.VLLM_NVFP4_KV_VOSPLIT
+            and vllm_config.attention_config.backend is None
+            and current_platform.is_device_capability_family(120)
+        ):
+            vllm_config.attention_config.backend = AttentionBackendEnum.FLASHINFER
+            logger.info(
+                "Gemma4 model has heterogeneous head dimensions "
+                "(head_dim=%d, global_head_dim=%d) with NVFP4 KV cache on "
+                "CC 12.x. Routing to FLASHINFER (FA2 VO-split asymmetric "
+                "head_dim_qk=%d/head_dim_vo=%d kernel) instead of "
+                "TRITON_ATTN.",
+                head_dim,
+                global_head_dim,
+                global_head_dim,
+                head_dim,
+            )
+            return
+
+        from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
 
         max_head_dim = max(head_dim, global_head_dim)
 
@@ -256,11 +289,25 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
 
         attention_config = vllm_config.attention_config
         if attention_config.backend == AttentionBackendEnum.FLASHINFER:
-            raise ValueError(
-                "FlashInfer does not support DiffusionGemma's mixed "
-                "causal/bidirectional attention. Use --attention-backend "
-                "FLASH_ATTN or TRITON_ATTN instead."
-            )
+            import vllm.envs as envs
+
+            if envs.VLLM_NVFP4_KV_VOSPLIT:
+                # The unified FlashInfer prefill grouping (FIPrefillGroup, keyed
+                # by ``(is_mm, causal)``) serves DiffusionGemma's mixed
+                # causal/bidirectional batches (encoder=causal, denoise=
+                # non-causal), including the D=512 NVFP4 VO-split path. Allowed
+                # when the NVFP4 VO-split path is enabled.
+                logger.info(
+                    "DiffusionGemma on FLASHINFER via unified per-request "
+                    "causal grouping (NVFP4 VO-split active)."
+                )
+            else:
+                raise ValueError(
+                    "FlashInfer does not support DiffusionGemma's mixed "
+                    "causal/bidirectional attention without the NVFP4 VO-split "
+                    "path. Use --attention-backend FLASH_ATTN or TRITON_ATTN "
+                    "instead."
+                )
         if attention_config.backend is None and not attention_config.use_non_causal:
             attention_config.use_non_causal = True
             logger.info(

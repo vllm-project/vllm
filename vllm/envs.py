@@ -193,6 +193,8 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
+    VLLM_NVFP4_KV_VOSPLIT: bool = True
+    VLLM_FLASHINFER_MM_PREFIX: bool = True
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -1579,6 +1581,24 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Control the workspace buffer size for the FlashInfer backend.
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
         os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
+    ),
+    # NVFP4 KV cache VO-split on consumer Blackwell (CC 12.x): route
+    # Gemma-4 heterogeneous-head full-attention layers (head_dim_qk=512,
+    # head_dim_vo=256) through the FlashInfer FA2 asymmetric paged kernel
+    # instead of forcing TRITON_ATTN. Default-on for nvfp4 KV; "0" is the
+    # escape hatch back to the Triton fallback.
+    "VLLM_NVFP4_KV_VOSPLIT": lambda: bool(
+        int(os.getenv("VLLM_NVFP4_KV_VOSPLIT", "1"))
+    ),
+    # Let the FlashInfer backend serve mm-prefix LMs (Gemma 3 / Gemma 4
+    # multimodal): image-token spans attend bidirectionally via FA2
+    # packed custom masks on a second prefill wrapper; text requests
+    # stay on the fast causal path. Lifts the is_mm_prefix_lm backend
+    # rejection without requiring --language-model-only. Default-on so
+    # multimodal Gemma 3/4 masks image spans correctly out of the box;
+    # set to "0" to route mm-prefix models away from FlashInfer instead.
+    "VLLM_FLASHINFER_MM_PREFIX": lambda: bool(
+        int(os.getenv("VLLM_FLASHINFER_MM_PREFIX", "1"))
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
