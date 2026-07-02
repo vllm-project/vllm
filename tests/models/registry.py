@@ -497,6 +497,8 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         },
     ),
     "Qwen2MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen1.5-MoE-A2.7B-Chat"),
+    "OrthrusForCausalLM": _HfExamplesInfo("chiennv/Orthrus-Qwen3-1.7B"),
+    "OrthrusLM": _HfExamplesInfo("chiennv/Orthrus-Qwen3-1.7B"),
     "Qwen3ForCausalLM": _HfExamplesInfo("Qwen/Qwen3-8B"),
     "Qwen3MoeForCausalLM": _HfExamplesInfo("Qwen/Qwen3-30B-A3B"),
     "MellumForCausalLM": _HfExamplesInfo("JetBrains/Mellum2-12B-A2.5B-Base"),
