@@ -22,16 +22,24 @@ template <typename AllReduceKernel, typename T>
 __global__ __quickreduce_launch_bounds_two_shot__ static void
 allreduce_prototype_twoshot(T const* A, T* B, uint32_t N, uint32_t num_blocks,
                             int rank, uint8_t** dbuffer_list,
-                            uint32_t data_offset, uint32_t flag_color,
+                            uint32_t data_offset, uint32_t* d_flag_counters,
                             int64_t data_size_per_phase) {
   int block = blockIdx.x;
   int grid = gridDim.x;
+
+  // Load this block's counter from device memory and advance it on-device,
+  // so the color keeps changing across graph replays instead of being frozen.
+  uint32_t flag_color = d_flag_counters[blockIdx.x];
 
   while (block < num_blocks) {
     AllReduceKernel::run(A, B, N, block, rank, dbuffer_list, data_offset,
                          flag_color, data_size_per_phase);
     block += grid;
     flag_color++;
+  }
+  // All threads compute the same final value; one writer per block is enough.
+  if (threadIdx.x == 0 && threadIdx.y == 0) {
+    d_flag_counters[blockIdx.x] = flag_color;
   }
 }
 
@@ -42,21 +50,21 @@ allreduce_prototype_twoshot(T const* A, T* B, uint32_t N, uint32_t num_blocks,
     hipLaunchKernelGGL((allreduce_prototype_twoshot<AllReduceKernel, T>),   \
                        dim3(grid), dim3(kBlockTwoShot), 0, stream, A, B, N, \
                        num_blocks, rank, dbuffer_list, data_offset,         \
-                       flag_color, this->kMaxProblemSize);                  \
+                       d_flag_counters, this->kMaxProblemSize);             \
   } else if (world_size == 4) {                                             \
     using LineCodec = __codec<T, 4>;                                        \
     using AllReduceKernel = AllReduceTwoshot<T, LineCodec, cast_bf2half>;   \
     hipLaunchKernelGGL((allreduce_prototype_twoshot<AllReduceKernel, T>),   \
                        dim3(grid), dim3(kBlockTwoShot), 0, stream, A, B, N, \
                        num_blocks, rank, dbuffer_list, data_offset,         \
-                       flag_color, this->kMaxProblemSize);                  \
+                       d_flag_counters, this->kMaxProblemSize);             \
   } else if (world_size == 8) {                                             \
     using LineCodec = __codec<T, 8>;                                        \
     using AllReduceKernel = AllReduceTwoshot<T, LineCodec, cast_bf2half>;   \
     hipLaunchKernelGGL((allreduce_prototype_twoshot<AllReduceKernel, T>),   \
                        dim3(grid), dim3(kBlockTwoShot), 0, stream, A, B, N, \
                        num_blocks, rank, dbuffer_list, data_offset,         \
-                       flag_color, this->kMaxProblemSize);                  \
+                       d_flag_counters, this->kMaxProblemSize);             \
   }
 
 // INT3 only retains good performance on TP2 (world_size == 2). On TP4/TP8
@@ -69,7 +77,7 @@ allreduce_prototype_twoshot(T const* A, T* B, uint32_t N, uint32_t num_blocks,
     hipLaunchKernelGGL((allreduce_prototype_twoshot<AllReduceKernel, T>),   \
                        dim3(grid), dim3(kBlockTwoShot), 0, stream, A, B, N, \
                        num_blocks, rank, dbuffer_list, data_offset,         \
-                       flag_color, this->kMaxProblemSize);                  \
+                       d_flag_counters, this->kMaxProblemSize);             \
   } else {                                                                  \
     throw std::runtime_error(                                               \
         "INT3 quick all-reduce is only supported for world_size == 2 "      \
@@ -94,7 +102,7 @@ struct DeviceComms {
   static int constexpr kMaxWorldSize = 8;
 
   bool initialized = false;
-  uint32_t flag_color = 1;
+  uint32_t* d_flag_counters = nullptr;
   int world_size;
   int rank;
 
@@ -128,6 +136,16 @@ struct DeviceComms {
     // Clear the flags buffer.
     HIP_CHECK(hipMemset(dbuffer, 0, flags_buffer_size));
 
+    // One flag-color counter per block, advanced by the kernel. Start at 1
+    // to stay clear of the flags buffer we just zeroed.
+    HIP_CHECK(hipMalloc(&d_flag_counters, kMaxNumBlocks * sizeof(uint32_t)));
+    {
+      std::vector<uint32_t> init_color(kMaxNumBlocks, 1u);
+      HIP_CHECK(hipMemcpy(d_flag_counters, init_color.data(),
+                          kMaxNumBlocks * sizeof(uint32_t),
+                          hipMemcpyHostToDevice));
+    }
+
     // Device-side list of IPC buffers.
     buffer_list.resize(world_size);
     HIP_CHECK(hipMalloc(&dbuffer_list, world_size * sizeof(uint8_t*)));
@@ -144,6 +162,12 @@ struct DeviceComms {
   hipIpcMemHandle_t const get_handle() { return buffer_ipc_handle; }
 
   void destroy() {
+    // Allocated before `initialized` flips true, so free it on its own guard
+    // to avoid a leak if init fails partway through.
+    if (d_flag_counters) {
+      HIP_CHECK(hipFree(d_flag_counters));
+      d_flag_counters = nullptr;
+    }
     if (initialized) {
       for (int i = 0; i < world_size; i++) {
         if (i != rank) {
@@ -211,8 +235,7 @@ struct DeviceComms {
         break;
     }
     HIP_CHECK(cudaGetLastError());
-    // Rotate the flag color.
-    flag_color += divceil(N, grid);
+    // Color rotation happens inside the kernel now; nothing to do on the host.
   }
 };
 
