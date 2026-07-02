@@ -78,7 +78,7 @@ def has_precompiled_rust_extensions() -> bool:
     return not get_missing_precompiled_rust_extension_modules()
 
 
-if sys.platform.startswith("darwin") and VLLM_TARGET_DEVICE != "cpu":
+if sys.platform.startswith("darwin") and os.getenv("VLLM_TARGET_DEVICE") is None:
     logger.warning("VLLM_TARGET_DEVICE automatically set to `cpu` due to macOS")
     VLLM_TARGET_DEVICE = "cpu"
 elif not (sys.platform.startswith("linux") or sys.platform.startswith("darwin")):
