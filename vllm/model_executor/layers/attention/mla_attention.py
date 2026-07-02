@@ -604,6 +604,13 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if not current_platform.is_cuda():
             return indexer(hidden_states, q_c, positions, indexer_rope_emb)
 
+        dcp_world_size = self.impl.dcp_world_size
+        if dcp_world_size == -1:
+            dcp_world_size = get_dcp_group().world_size
+            self.impl.dcp_world_size = dcp_world_size
+        if dcp_world_size <= 1:
+            return indexer(hidden_states, q_c, positions, indexer_rope_emb)
+
         topk_indices_buffer = getattr(indexer, "topk_indices_buffer", None)
         if topk_indices_buffer is None:
             return self._run_indexer_on_side_stream_impl(
