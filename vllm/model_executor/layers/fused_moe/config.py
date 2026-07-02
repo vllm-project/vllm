@@ -1301,6 +1301,7 @@ class FusedMoEConfig:
     swiglu_beta: float | None = None
 
     max_capture_size: int = 0
+    enforce_eager: bool = False
 
     # Set by __post_init__
     intermediate_size_per_partition: int = -1
