@@ -49,6 +49,31 @@ You can configure how the quantization scales are computed in vLLM using three d
 - `kv_cache_dtype="fp8_e4m3"`: Supported on CUDA 11.8+ and ROCm (AMD GPUs)
 - `kv_cache_dtype="fp8_e5m2"`: Supported on CUDA 11.8+
 
+### TurboQuant KV Cache
+
+TurboQuant is an experimental KV-cache compression backend exposed through
+`kv_cache_dtype` presets. It is intended for deployments that need more KV-cache
+capacity than FP8 provides and can accept model/backend-specific compatibility
+checks at startup.
+
+Available presets include:
+
+- `turboquant_k8v4`: FP8 keys and 4-bit values
+- `turboquant_4bit_nc`: 4-bit keys and values with norm correction
+- `turboquant_k3v4_nc`: 3-bit keys and 4-bit values with norm correction
+- `turboquant_3bit_nc`: 3-bit keys and values with norm correction
+
+Example:
+
+```bash
+vllm serve meta-llama/Llama-3.1-8B-Instruct \
+    --kv-cache-dtype turboquant_k8v4
+```
+
+TurboQuant support depends on the selected model architecture, attention
+backend, head dimension, and cache layout. If startup rejects a TurboQuant
+preset, use FP8 KV cache or `auto` as the portable fallback.
+
 ---
 
 ## Examples
