@@ -1130,6 +1130,31 @@ def test_requester_worker_init_skips_disk_budget_when_offload_disabled(
     assert w.disk_offload_buffer_budget_bytes is None
 
 
+def test_requester_worker_init_keeps_dense_store_retention(tmp_path, monkeypatch):
+    """Store retention stays dense when local HBM retention is disabled."""
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "protocol": "tcp",
+                "device_name": "",
+                "master_server_address": "10.0.0.7:50051",
+            },
+        ),
+    )
+
+    w = worker.MooncakeStoreWorker(_make_vllm_config(), _make_kv_cache_config())
+
+    assert w.coord.retention_interval is None
+
+
 def test_requester_worker_init_builds_replicate_config_for_preferred_segment(
     tmp_path,
     monkeypatch,
