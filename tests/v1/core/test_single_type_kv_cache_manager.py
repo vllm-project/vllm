@@ -6,6 +6,8 @@ import random
 import pytest
 import torch
 
+from vllm.v1 import kv_cache_interface as kv_cache_specs
+from vllm.v1.core import single_type_kv_cache_manager as kv_cache_managers
 from vllm.v1.core.block_pool import BlockPool
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -49,6 +51,72 @@ def get_chunked_local_attention_manager(
         scheduler_block_size=chunked_local_attention_spec.block_size,
         max_admission_blocks_per_request=10**9,
     )
+
+
+def test_mamba_none_allocates_fixed_request_blocks():
+    mamba_spec = kv_cache_specs.MambaSpec(
+        block_size=16,
+        shapes=((8,),),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="none",
+        num_speculative_blocks=2,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=mamba_spec.blocks_per_request + 1,
+        enable_caching=False,
+        hash_block_size=mamba_spec.block_size,
+    )
+    manager = kv_cache_managers.MambaManager(
+        mamba_spec,
+        block_pool=block_pool,
+        enable_caching=False,
+        kv_cache_group_id=0,
+        scheduler_block_size=mamba_spec.block_size,
+    )
+
+    assert (
+        manager.get_num_blocks_to_allocate(
+            request_id="req",
+            num_tokens=1024,
+            new_computed_blocks=[],
+            total_computed_tokens=0,
+            num_tokens_main_model=1024,
+        )
+        == mamba_spec.blocks_per_request
+    )
+    blocks = manager.allocate_new_blocks(
+        request_id="req",
+        num_tokens=1024,
+        num_tokens_main_model=1024,
+    )
+    assert len(blocks) == mamba_spec.blocks_per_request
+    assert block_pool.get_num_free_blocks() == 0
+
+    assert (
+        manager.get_num_blocks_to_allocate(
+            request_id="req",
+            num_tokens=2048,
+            new_computed_blocks=[],
+            total_computed_tokens=1024,
+            num_tokens_main_model=2048,
+        )
+        == 0
+    )
+    manager.remove_skipped_blocks("req", num_computed_tokens=2048)
+    assert len(manager.req_to_blocks["req"]) == mamba_spec.blocks_per_request
+
+    manager.free("req")
+    assert block_pool.get_num_free_blocks() == mamba_spec.blocks_per_request
+
+    manager.allocate_external_computed_blocks(
+        request_id="req_external",
+        num_local_computed_tokens=0,
+        num_external_computed_tokens=1024,
+    )
+    assert len(manager.req_to_blocks["req_external"]) == mamba_spec.blocks_per_request
+    assert block_pool.get_num_free_blocks() == 0
+    manager.free("req_external")
+    assert block_pool.get_num_free_blocks() == mamba_spec.blocks_per_request
 
 
 def test_chunked_local_attention_possible_cached_prefix():

@@ -916,6 +916,39 @@ def is_kv_cache_spec_uniform(kv_cache_spec: dict[str, KVCacheSpec]) -> bool:
     return True
 
 
+def _kv_transfer_config_uses_simple_cpu_offload(
+    kv_connector: str | None,
+    extra_config: dict[str, Any] | None,
+) -> bool:
+    if kv_connector == "SimpleCPUOffloadConnector":
+        return True
+    if kv_connector != "MultiConnector" or not extra_config:
+        return False
+
+    connectors = extra_config.get("connectors")
+    if not isinstance(connectors, list):
+        return False
+    for connector_config in connectors:
+        if not isinstance(connector_config, dict):
+            continue
+        if _kv_transfer_config_uses_simple_cpu_offload(
+            connector_config.get("kv_connector"),
+            connector_config.get("kv_connector_extra_config"),
+        ):
+            return True
+    return False
+
+
+def _uses_simple_cpu_offload(vllm_config: VllmConfig) -> bool:
+    kv_transfer_config = vllm_config.kv_transfer_config
+    if kv_transfer_config is None:
+        return False
+    return _kv_transfer_config_uses_simple_cpu_offload(
+        kv_transfer_config.kv_connector,
+        kv_transfer_config.kv_connector_extra_config,
+    )
+
+
 def get_max_concurrency_for_kv_cache_config(
     vllm_config: VllmConfig, kv_cache_config: KVCacheConfig
 ) -> float:
@@ -933,7 +966,7 @@ def get_max_concurrency_for_kv_cache_config(
         * num_layer_per_group
     )
     num_block_per_request = cdiv(max_memory_usage_per_request, memory_per_block)
-    max_concurrency = kv_cache_config.num_blocks / num_block_per_request
+    max_concurrency = max(kv_cache_config.num_blocks - 1, 0) / num_block_per_request
     return max_concurrency
 
 
@@ -1315,7 +1348,7 @@ def _get_kv_cache_config_packed(
 _get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_packed
 
 
-def get_kv_cache_config_from_groups(
+def _get_token_proportional_kv_cache_config_from_groups(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
     available_memory: int,
@@ -1397,6 +1430,21 @@ def get_kv_cache_config_from_groups(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
         kv_cache_groups=kv_cache_groups,
+    )
+
+
+def get_kv_cache_config_from_groups(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+    check_available_memory: bool = True,
+) -> KVCacheConfig:
+    # Kept for the profiling path that builds a minimal override config with
+    # zero profiled memory. The shared-pool builder below handles override
+    # sizing directly and does not need a separate availability check switch.
+    del check_available_memory
+    return _get_token_proportional_kv_cache_config_from_groups(
+        vllm_config, kv_cache_groups, available_memory
     )
 
 
@@ -1896,6 +1944,20 @@ def _estimate_max_model_len_from_groups(
         vllm_config.model_config.max_model_len = original_max
 
 
+def _get_fit_available_memory(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> int:
+    """Available memory for per-request fit checks, excluding null blocks."""
+    if not kv_cache_groups:
+        return available_memory
+
+    return max(
+        available_memory - _pool_bytes_per_block(vllm_config, kv_cache_groups), 0
+    )
+
+
 def _auto_fit_max_model_len(
     vllm_config: VllmConfig,
     projected_groups_per_worker: list[list[KVCacheGroupSpec]],
@@ -2002,6 +2064,48 @@ def _project_kv_cache_groups_to_worker(
     return projected_groups
 
 
+def _shrink_kv_cache_configs_to_min_blocks(
+    kv_cache_configs: list[KVCacheConfig],
+) -> None:
+    min_blocks_by_pool_id: dict[int, int] = {}
+    for kv_cache_config in kv_cache_configs:
+        for pool_config in kv_cache_config.pool_configs:
+            pool_id = pool_config.pool_id
+            min_blocks_by_pool_id[pool_id] = min(
+                min_blocks_by_pool_id.get(pool_id, pool_config.num_blocks),
+                pool_config.num_blocks,
+            )
+
+    for kv_cache_config in kv_cache_configs:
+        old_blocks_by_pool_id = {
+            pool_config.pool_id: pool_config.num_blocks
+            for pool_config in kv_cache_config.pool_configs
+        }
+        for pool_config in kv_cache_config.pool_configs:
+            pool_config.num_blocks = min_blocks_by_pool_id[pool_config.pool_id]
+        if kv_cache_config.pool_configs:
+            kv_cache_config.num_blocks = kv_cache_config.pool_configs[0].num_blocks
+
+        layer_to_group_id: dict[str, int] = {}
+        for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+            for layer_name in group.layer_names:
+                layer_to_group_id[layer_name] = group_id
+
+        for tensor in kv_cache_config.kv_cache_tensors:
+            tensor_pool_id: int | None = None
+            for layer_name in tensor.shared_by:
+                tensor_group_id = layer_to_group_id.get(layer_name)
+                if tensor_group_id is not None:
+                    tensor_pool_id = kv_cache_config.group_to_pool_id[tensor_group_id]
+                    break
+            if tensor_pool_id is None:
+                continue
+            num_blocks_old = old_blocks_by_pool_id[tensor_pool_id]
+            num_blocks_new = min_blocks_by_pool_id[tensor_pool_id]
+            assert tensor.size % num_blocks_old == 0
+            tensor.size = tensor.size // num_blocks_old * num_blocks_new
+
+
 def get_kv_cache_configs(
     vllm_config: VllmConfig,
     kv_cache_specs: list[dict[str, KVCacheSpec]],
@@ -2089,20 +2193,41 @@ def get_kv_cache_configs(
             adjusted_memory.append(override * bytes_per_block)
         available_memory = adjusted_memory
 
+    fit_available_memory = [
+        _get_fit_available_memory(vllm_config, groups, avail_mem)
+        for groups, avail_mem in zip(
+            projected_groups_per_worker,
+            available_memory,
+        )
+    ]
+
     if vllm_config.model_config.original_max_model_len == -1:
         _auto_fit_max_model_len(
-            vllm_config, projected_groups_per_worker, available_memory
+            vllm_config,
+            projected_groups_per_worker,
+            fit_available_memory,
         )
 
     # Check if the available memory is enough per worker.
-    for groups, avail_mem in zip(projected_groups_per_worker, available_memory):
+    for groups, avail_mem in zip(
+        projected_groups_per_worker,
+        fit_available_memory,
+    ):
         if not groups:
             continue
         _check_enough_kv_cache_memory(
             avail_mem,
-            partial(_max_memory_usage_bytes_from_groups, vllm_config, groups),
+            partial(
+                _max_memory_usage_bytes_from_groups,
+                vllm_config,
+                groups,
+            ),
             vllm_config.model_config.max_model_len,
-            partial(_estimate_max_model_len_from_groups, vllm_config, groups),
+            partial(
+                _estimate_max_model_len_from_groups,
+                vllm_config,
+                groups,
+            ),
         )
 
     kv_cache_configs: list[KVCacheConfig] = []
@@ -2121,18 +2246,8 @@ def get_kv_cache_configs(
     # Change the num_blocks of each rank to the smallest among all ranks.
     # We also need to shrink the tensor size proportionally to avoid
     # allocating unused memory.
-    min_num_blocks = min(
-        kv_cache_config.num_blocks for kv_cache_config in kv_cache_configs
-    )
+    _shrink_kv_cache_configs_to_min_blocks(kv_cache_configs)
     for kv_cache_config in kv_cache_configs:
-        num_blocks_old = kv_cache_config.num_blocks
-        kv_cache_config.num_blocks = min_num_blocks
-
-        # Shrink tensor size proportionally
-        for tensor in kv_cache_config.kv_cache_tensors:
-            assert tensor.size % num_blocks_old == 0
-            tensor.size = tensor.size // num_blocks_old * min_num_blocks
-
         if len(kv_cache_config.kv_cache_groups) > 0:
             max_model_len = vllm_config.model_config.max_model_len
             # GPU KV cache size in tokens = max_concurrency * max_model_len:

@@ -1448,16 +1448,36 @@ class CompilationConfig:
             and cudagraph_mode.has_full_cudagraphs()
             and not is_profiling
             and kv_cache_config.has_mamba_layers
-            and max_num_reqs > kv_cache_config.num_blocks
         ):
-            raise ValueError(
-                f"max_num_seqs ({max_num_reqs}) exceeds available Mamba cache "
-                f"blocks ({kv_cache_config.num_blocks}). Each decode sequence "
-                "requires one Mamba cache block, so CUDA graph capture cannot "
-                "proceed. Please lower max_num_seqs to at most "
-                f"{kv_cache_config.num_blocks} or increase "
-                "gpu_memory_utilization."
-            )
+            from vllm.v1.kv_cache_interface import MambaSpec, MemoryModel
+
+            mamba_cache_capacity = kv_cache_config.num_blocks
+            request_mamba_capacity: int | None = None
+            for group_id, group in enumerate(kv_cache_config.kv_cache_groups):
+                if not isinstance(group.kv_cache_spec, MambaSpec):
+                    continue
+                if group.kv_cache_spec.memory_model != MemoryModel.REQUEST_CONSTANT:
+                    continue
+                pool_config = kv_cache_config.get_pool_config_for_group(group_id)
+                group_capacity = (
+                    pool_config.num_blocks - 1
+                ) // group.kv_cache_spec.blocks_per_request
+                request_mamba_capacity = (
+                    group_capacity
+                    if request_mamba_capacity is None
+                    else min(request_mamba_capacity, group_capacity)
+                )
+            if request_mamba_capacity is not None:
+                mamba_cache_capacity = request_mamba_capacity
+            if max_num_reqs > mamba_cache_capacity:
+                raise ValueError(
+                    f"max_num_seqs ({max_num_reqs}) exceeds available Mamba cache "
+                    f"capacity ({mamba_cache_capacity}). Each decode sequence "
+                    "requires a Mamba cache reservation, so CUDA graph capture cannot "
+                    "proceed. Please lower max_num_seqs to at most "
+                    f"{mamba_cache_capacity} or increase "
+                    "gpu_memory_utilization."
+                )
 
         self.cudagraph_mode = cudagraph_mode
         return cudagraph_mode
