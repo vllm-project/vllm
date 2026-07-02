@@ -178,6 +178,20 @@ kInt4Static = QuantKey(INT4_DTYPE, scale=kInt4StaticGroupScale, symmetric=True)
 kInt8StaticGroupScale = ScaleDesc(torch.float16, True, GroupShape(1, -1))
 kInt8Static = QuantKey(INT8_DTYPE, scale=kInt8StaticGroupScale, symmetric=True)
 
+# TurboQuant: WHT rotation + Lloyd-Max codebook. Per-group bf16 norm scale.
+# Three bit-widths; one QuantKey each so the online dispatch table picks the
+# right method class. Group size 128 is the only validated codebook today.
+kTurboquantGroupNormScale = ScaleDesc(torch.bfloat16, False, GroupShape(1, 128))
+kTurboquantW2 = QuantKey(
+    scalar_types.uint2b2, scale=kTurboquantGroupNormScale, symmetric=True
+)
+kTurboquantW3 = QuantKey(
+    scalar_types.uint3b4, scale=kTurboquantGroupNormScale, symmetric=True
+)
+kTurboquantW4 = QuantKey(
+    scalar_types.uint4b8, scale=kTurboquantGroupNormScale, symmetric=True
+)
+
 kInt4Static32GroupScale = ScaleDesc(torch.float16, True, GroupShape(1, 32))
 kInt4Static32 = QuantKey(INT4_DTYPE, scale=kInt4Static32GroupScale, symmetric=True)
 
