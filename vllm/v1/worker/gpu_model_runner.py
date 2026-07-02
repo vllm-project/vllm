@@ -4629,6 +4629,11 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                lora_cache_stats=(
+                    self.lora_manager.get_lora_cache_stats()
+                    if self.lora_config
+                    else None
+                ),
                 routed_experts=None,
             )
 

@@ -1221,6 +1221,30 @@ class LRUCacheLoRAModelManager(LoRAModelManager):
 
         self._active_adapters.pin(lora_id)
 
+    def get_lora_cache_stats(
+        self,
+    ) -> dict:
+        gpu_ids = list(self._active_adapters.cache)
+        cpu_only_ids = [
+            k for k in self._registered_adapters.cache if k not in self._active_adapters
+        ]
+        pinned_ids = list(
+            self._active_adapters.pinned_items | self._registered_adapters.pinned_items
+        )
+        gpu_stat = self._active_adapters.stat()
+        cpu_stat = self._registered_adapters.stat()
+        return {
+            "gpu_ids": gpu_ids,
+            "cpu_only_ids": cpu_only_ids,
+            "pinned_ids": pinned_ids,
+            "gpu_usage": self._active_adapters.usage,
+            "cpu_usage": self._registered_adapters.usage,
+            "gpu_hits": gpu_stat.hits,
+            "gpu_lookups": gpu_stat.total,
+            "cpu_hits": cpu_stat.hits,
+            "cpu_lookups": cpu_stat.total,
+        }
+
 
 def create_lora_manager(
     model: SupportsLoRAModel,
