@@ -55,6 +55,12 @@ def encode_output(harmony_str: str) -> list[int]:
     return get_encoding().encode(harmony_str, allowed_special="all")
 
 
+# The ``<|message|>`` control token. Feeding this where the streaming parser
+# expects a ``<|start|>`` token reproduces the malformed-stream HarmonyError
+# ("Unexpected token ... while expecting start token 200006").
+MESSAGE_TOKEN_ID = encode_output("<|message|>")[0]
+
+
 def assistant(content: str, channel: str) -> Message:
     return Message.from_role_and_content(Role.ASSISTANT, content).with_channel(channel)
 
@@ -821,3 +827,45 @@ class TestProcessChunk:
             ("analysis", "One"),
             ("final", "Two"),
         ]
+
+    def test_malformed_token_stream_does_not_raise(self, harmony_parser):
+        # Regression test for a malformed model-emitted token stream that made
+        # the streaming Harmony parser raise HarmonyError, which escaped the
+        # stream generator and surfaced as an opaque HTTP 500/503 instead of a
+        # graceful response. Here a complete message terminated by <|return|>
+        # is followed by a stray <|message|> where the parser expects a
+        # <|start|>, reproducing "Unexpected token ... while expecting start
+        # token 200006".
+        malformed = encode_output("<|channel|>final<|message|>hi<|return|>") + [
+            MESSAGE_TOKEN_ID
+        ]
+
+        # Must not raise; the content decoded before the malformed token is
+        # still surfaced.
+        result = harmony_parser.process_chunk(malformed)
+
+        assert "".join(s.delta for s in result.segments if s.delta) == "hi"
+
+    def test_malformed_token_stream_via_parse_delta(
+        self, gpt_oss_tokenizer, chat_request
+    ):
+        # The streaming delta path (parse_delta -> process_chunk) is what the
+        # OpenAI chat-completion stream generator drives per chunk; a malformed
+        # token stream here previously bubbled a HarmonyError out as an HTTP
+        # 500/503. It must now degrade gracefully instead.
+        parser = HarmonyParser(gpt_oss_tokenizer)
+        malformed = encode_output("<|channel|>final<|message|>hi<|return|>") + [
+            MESSAGE_TOKEN_ID
+        ]
+
+        delta = parser.parse_delta(
+            delta_text="",
+            delta_token_ids=malformed,
+            request=chat_request,
+            finished=False,
+        )
+
+        # No exception escapes; the content parsed before the bad token is
+        # surfaced to the client.
+        assert delta is not None
+        assert delta.content == "hi"
