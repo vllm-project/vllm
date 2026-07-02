@@ -678,7 +678,7 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
             q_scale=layer._q_scale,
             kv_scale=layer._k_scale,
         )
-        if attn_metadata.work_meta_data is not None:
+        if False:  # NONPERSIST: force non-persistent split-KV decode
             mla_kwargs.update(
                 work_meta_data=attn_metadata.work_meta_data,
                 work_indptr=attn_metadata.work_indptr,
