@@ -157,3 +157,27 @@ def test_hf_registry_coverage():
         "Please add the following architectures to "
         f"`tests/models/registry.py`: {untested_archs}"
     )
+
+
+def test_supports_stock_compile_marker():
+    # The SupportsStockCompile marker is the single bit that opts an architecture
+    # into the stock torch.compile path; guard it so the GPT-OSS opt-in cannot be
+    # dropped and no other architecture is migrated by accident.
+    from vllm.model_executor.models.interfaces import supports_stock_compile
+
+    gptoss = ModelRegistry._try_load_model_cls("GptOssForCausalLM")
+    llama = ModelRegistry._try_load_model_cls("LlamaForCausalLM")
+    assert supports_stock_compile(gptoss)
+    assert not supports_stock_compile(llama)
+
+    # Also exercise the production resolution path (the _ModelInfo field hop that
+    # config resolution actually consults), not just the marker free function.
+    from unittest.mock import MagicMock
+
+    model_config = MagicMock(model_impl="vllm")
+    assert ModelRegistry.is_stock_compile_supported_model(
+        "GptOssForCausalLM", model_config
+    )
+    assert not ModelRegistry.is_stock_compile_supported_model(
+        "LlamaForCausalLM", model_config
+    )
