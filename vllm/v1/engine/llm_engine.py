@@ -319,15 +319,22 @@ class LLMEngine:
 
         # 4) Record stats
         with record_function_or_nullcontext("llm_engine step: record_stats"):
-            if (
-                self.logger_manager is not None
-                and outputs.scheduler_stats is not None
-                and len(outputs.outputs) > 0
+            record_stats = (
+                outputs.scheduler_stats is not None and len(outputs.outputs) > 0
+            )
+            engine_notifications = outputs.engine_notifications
+            if self.logger_manager is not None and (
+                record_stats or engine_notifications
             ):
+                # The manager is always single-engine here (engine_idxs=[0]),
+                # so don't forward outputs.engine_index: in offline DP it
+                # carries the DP rank, which is not a key in the per-engine
+                # metrics.
                 self.logger_manager.record(
-                    scheduler_stats=outputs.scheduler_stats,
-                    iteration_stats=iteration_stats,
+                    scheduler_stats=outputs.scheduler_stats if record_stats else None,
+                    iteration_stats=iteration_stats if record_stats else None,
                     mm_cache_stats=self.renderer.stat_mm_cache(),
+                    engine_notifications=engine_notifications,
                 )
                 self.do_log_stats_with_interval()
 

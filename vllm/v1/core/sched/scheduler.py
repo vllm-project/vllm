@@ -55,6 +55,7 @@ from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutp
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
+from vllm.v1.notifications import EngineNotification
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
@@ -103,6 +104,10 @@ class Scheduler(SchedulerInterface):
         )
         # Track requests scheduled in prior step (MRV1-only).
         self.prev_step_scheduled_req_ids: set[str] = set()
+
+        # Notifications the scheduler emits this step, drained by EngineCore.
+        # Empty unless a plugin calls publish_notification().
+        self._pending_notifications: list[EngineNotification] = []
 
         # Scheduling constraints.
         self.max_num_running_reqs = self.scheduler_config.max_num_seqs
@@ -2299,6 +2304,19 @@ class Scheduler(SchedulerInterface):
             cudagraph_stats=cudagraph_stats,
             perf_stats=perf_stats,
         )
+
+    def publish_notification(self, notification: EngineNotification) -> None:
+        """Queue a notification to forward on the next step.
+
+        Producer side: a plugin holding the scheduler appends here, EngineCore
+        drains via take_notifications(). Additive, so emit as many as you want.
+        """
+        self._pending_notifications.append(notification)
+
+    def take_notifications(self) -> list[EngineNotification]:
+        notifications = self._pending_notifications
+        self._pending_notifications = []
+        return notifications
 
     def make_spec_decoding_stats(
         self,
