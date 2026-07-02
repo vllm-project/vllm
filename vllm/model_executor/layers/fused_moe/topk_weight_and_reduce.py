@@ -164,13 +164,23 @@ class TopKWeightAndReduceNaiveBatched(mk.TopKWeightAndReduce):
         first_expert = num_local_experts * self.rank
         last_expert = first_expert + num_local_experts
 
-        for expert_id in range(first_expert, last_expert):
-            matching_tokens = topk_ids == expert_id
-            topks = torch.any(matching_tokens, dim=1).flatten()
-            rows = torch.count_nonzero(topks)
-            rhs = fused_expert_output[expert_id - first_expert, :rows, :]
-            if not apply_router_weight_on_input:
-                rhs.mul_(topk_weights[matching_tokens].view(rhs.size(0), 1))
-            output[topks] = output[topks] + rhs
+        # Vectorized weighted scatter-add. Equivalent to the per-expert loop
+        # below, but builds the [E, T] hit mask and per-expert slot offsets in
+        # one shot and does a single device sync (nonzero) instead of one per
+        # local expert; the Python loop is launch-bound, dominates decode
+        # latency (mirrors the dispatch path in BatchedPrepareAndFinalize).
+        local_ids = torch.arange(
+            first_expert, last_expert, device=topk_ids.device
+        ).view(-1, 1, 1)
+        matching = topk_ids.unsqueeze(0) == local_ids  # [E_local, T, topk]
+        hits = matching.any(dim=2)  # [E_local, T]
+        slots = hits.to(torch.int32).cumsum(dim=1) - 1  # [E_local, T]
+        e_idx, t_idx = hits.nonzero(as_tuple=True)
+        gathered = fused_expert_output[e_idx, slots[e_idx, t_idx], :]
+        if not apply_router_weight_on_input:
+            # weight of token t at expert e: the topk weight on the matching slot
+            weights = (matching * topk_weights.unsqueeze(0)).sum(dim=2)  # [E_local, T]
+            gathered = gathered * weights[e_idx, t_idx].unsqueeze(1).to(gathered.dtype)
+        output.index_add_(0, t_idx, gathered.to(output.dtype))
 
         return output
