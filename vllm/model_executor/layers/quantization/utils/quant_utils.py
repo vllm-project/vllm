@@ -189,6 +189,7 @@ kInt4Static32Asym = QuantKey(
 )
 
 kInt8StaticChannelSym = QuantKey(torch.int8, kStaticChannelScale, symmetric=True)
+kInt4StaticChannelSym = QuantKey(INT4_DTYPE, kStaticChannelScale, symmetric=True)
 kInt8DynamicTokenSym = QuantKey(torch.int8, kDynamicTokenScale, symmetric=True)
 
 # INT4 W4A8 quantization keys

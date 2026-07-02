@@ -25,6 +25,10 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding,
+)
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
@@ -32,6 +36,9 @@ from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerTensorOnlineMoEMethod,
     Fp8PtpcOnlineLinearMethod,
     Fp8PtpcOnlineMoEMethod,
+)
+from vllm.model_executor.layers.quantization.online.int4 import (
+    Int4PerChannelEmbeddingMethod,
 )
 from vllm.model_executor.layers.quantization.online.int8 import (
     Int8OnlineMoEMethod,
@@ -45,6 +52,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kInt4StaticChannelSym,
     kInt8StaticChannelSym,
     kMxfp8Dynamic,
 )
@@ -70,6 +78,10 @@ _ONLINE_MOE_METHODS: dict[QuantKey, type] = {
     kInt8StaticChannelSym: Int8OnlineMoEMethod,
 }
 
+_ONLINE_EMBEDDING_METHODS: dict[QuantKey, type] = {
+    kInt4StaticChannelSym: Int4PerChannelEmbeddingMethod,
+}
+
 
 class OnlineQuantizationConfig(QuantizationConfig):
     """Model-level config for online quantization (quantize fp16/bf16 weights
@@ -80,11 +92,11 @@ class OnlineQuantizationConfig(QuantizationConfig):
         args: QuantizationConfigArgs,
     ) -> None:
         super().__init__()
-        if args.linear is None and args.moe is None:
+        if args.linear is None and args.moe is None and args.embedding is None:
             raise ValueError(
                 "OnlineQuantizationConfig requires at least one of "
-                "quantization_config.linear or quantization_config.moe "
-                "to be set."
+                "quantization_config.linear, quantization_config.moe, or "
+                "quantization_config.embedding to be set."
             )
         self.args = args
         self.ignored_layers: list[str] = args.ignore
@@ -167,4 +179,15 @@ class OnlineQuantizationConfig(QuantizationConfig):
                 if method is not None
                 else UnquantizedFusedMoEMethod(layer.moe_config)
             )
+        elif isinstance(layer, VocabParallelEmbedding):
+            if should_ignore_layer(
+                prefix,
+                ignore=self.ignored_layers,
+                fused_mapping=self.packed_modules_mapping,
+            ):
+                return UnquantizedEmbeddingMethod()
+            method = self._dispatch(
+                self.args.embedding, _ONLINE_EMBEDDING_METHODS, layer
+            )
+            return method if method is not None else UnquantizedEmbeddingMethod()
         return None
