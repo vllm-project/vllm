@@ -132,6 +132,14 @@ def _fused_norm_rope_kernel(
     mla_cache_entry_stride,
     MLA_CACHE_FP8: tl.constexpr,
     mla_cache_scale_ptr,
+    # fp8_ds_mla cache views (block-scaled fp8 NoPE + unquantized bf16 RoPE).
+    # mla_cache_ptr is the fp8 (1-byte) view, so the block/entry strides above
+    # are byte offsets; these two share the same buffer as fp32 / bf16 views.
+    mla_cache_ds_scale_ptr,
+    mla_cache_ds_rope_ptr,
+    MLA_CACHE_DS_MLA: tl.constexpr,
+    MLA_NUM_TILES: tl.constexpr,
+    MLA_TILE_DIM: tl.constexpr,
     # Top k indices
     topk_indices_ptr,
     topk_indices_stride,
@@ -209,6 +217,37 @@ def _fused_norm_rope_kernel(
         mla_block_size = mla_cache_block_stride // mla_cache_entry_stride
         mla_block_idx = slot_idx // mla_block_size
         mla_block_off = slot_idx % mla_block_size
+
+        if MLA_CACHE_DS_MLA:
+            # fp8_ds_mla layout (DeepSeek-V3.2, KV_DIM == 512): per-128-element
+            # tile of the NoPE is dynamically quantized to fp8 with its own
+            # float32 scale; the RoPE tail is stored unquantized in bf16.
+            #   bytes [0, KV_DIM)            : KV_DIM fp8 NoPE values
+            #   bytes [KV_DIM, KV_DIM + 16)  : MLA_NUM_TILES float32 scales
+            #   bytes [KV_DIM + 16, ...)     : 2 * KPE_HALF_ROT_DIM bf16 RoPE
+            # mla_cache_block_stride / mla_cache_entry_stride are byte strides
+            # (mla_cache_ptr is the 1-byte fp8 view of the uint8 cache).
+            byte_base = (
+                mla_block_idx * mla_cache_block_stride
+                + mla_block_off * mla_cache_entry_stride
+            )
+            kv_2d = tl.reshape(kv_c, (MLA_NUM_TILES, MLA_TILE_DIM))
+            tile_amax = tl.max(tl.abs(kv_2d), axis=1, keep_dims=True)
+            # scale = amax / 448 (fp8 e4m3 max), matching the reference
+            # concat_and_cache_ds_mla kernel; floored to FLT_MIN.
+            tile_scale = tl.maximum(tile_amax * (1.0 / 448.0), 1.1754944e-38)
+            kv_c_fp8 = tl.reshape((kv_2d / tile_scale).to(tl.float8e4nv), (KV_DIM,))
+            tl.store(mla_cache_ptr + byte_base + kv_block, kv_c_fp8)
+            tile_off = tl.arange(0, MLA_NUM_TILES)
+            tl.store(
+                mla_cache_ds_scale_ptr + byte_base // 4 + KV_DIM // 4 + tile_off,
+                tl.reshape(tile_scale, (MLA_NUM_TILES,)),
+            )
+            rope_dst = mla_cache_ds_rope_ptr + byte_base // 2 + (KV_DIM // 2 + 8)
+            tl.store(rope_dst + dim_off * 2, r1.to(tl.bfloat16))
+            tl.store(rope_dst + dim_off * 2 + 1, r2.to(tl.bfloat16))
+            return
+
         dst = (
             mla_cache_ptr
             + mla_block_idx * mla_cache_block_stride
@@ -397,12 +436,29 @@ def fused_norm_rope(
             )
 
     # --- MLA KV cache setup ---
-    mla_cache_fp8 = mla_kv_cache_dtype != "auto"
+    mla_cache_ds_mla = mla_kv_cache_dtype == "fp8_ds_mla"
+    mla_cache_fp8 = mla_kv_cache_dtype not in ("auto", "fp8_ds_mla")
+    mla_num_tiles = 1
+    mla_ds_scale_view = torch.empty(0, dtype=torch.float32, device=device)
+    mla_ds_rope_view = torch.empty(0, dtype=torch.bfloat16, device=device)
     if mla_kv_cache is not None:
-        mla_block_stride = mla_kv_cache.stride(0)
-        mla_entry_stride = mla_kv_cache.stride(1)
-        if mla_cache_fp8 and mla_kv_cache.dtype == torch.uint8:
-            mla_kv_cache = mla_kv_cache.view(torch.float8_e4m3fn)
+        if mla_cache_ds_mla:
+            # 656-byte custom layout addressed in bytes; mla_cache_ptr is the
+            # 1-byte fp8 view, so block/entry strides are byte offsets and the
+            # fp32/bf16 views share the same buffer.
+            assert kv_dim == 512, "fp8_ds_mla requires kv_lora_rank == 512"
+            mla_num_tiles = kv_dim // 128
+            u8_cache = mla_kv_cache.view(torch.uint8)
+            mla_block_stride = u8_cache.stride(0)
+            mla_entry_stride = u8_cache.stride(1)
+            mla_ds_scale_view = u8_cache.view(torch.float32)
+            mla_ds_rope_view = u8_cache.view(torch.bfloat16)
+            mla_kv_cache = u8_cache.view(torch.float8_e4m3fn)
+        else:
+            mla_block_stride = mla_kv_cache.stride(0)
+            mla_entry_stride = mla_kv_cache.stride(1)
+            if mla_cache_fp8 and mla_kv_cache.dtype == torch.uint8:
+                mla_kv_cache = mla_kv_cache.view(torch.float8_e4m3fn)
         if mla_k_scale is None:
             mla_k_scale = torch.ones(1, dtype=torch.float32, device=device)
     else:
@@ -461,6 +517,11 @@ def fused_norm_rope(
         mla_entry_stride,
         mla_cache_fp8,
         mla_k_scale,
+        mla_ds_scale_view,
+        mla_ds_rope_view,
+        mla_cache_ds_mla,
+        mla_num_tiles,
+        kv_dim // mla_num_tiles if mla_cache_ds_mla else 1,
         # Top k indices buffer
         topk_indices_buffer,
         topk_indices_buffer.stride(0),
@@ -506,6 +567,11 @@ def _fused_q_kernel(
     q_scale_ptr,
     QL_NOPE_DIM: tl.constexpr,
     QL_NOPE_BLOCK: tl.constexpr,
+    # bf16 MQA query RoPE output (when QUANTIZE_MQA is False); the NoPE part is
+    # consumed directly from ql_nope, so only the RoPE'd q_pe is written here.
+    q_pe_out_ptr,
+    q_pe_out_stride0,
+    q_pe_out_stride1,
     # Index weights
     index_weights_ptr,
     index_weights_stride,
@@ -515,13 +581,17 @@ def _fused_q_kernel(
     index_weights_out_stride,
     HAS_INDEXER: tl.constexpr,
     INDEX_ROPE_INTERLEAVE: tl.constexpr,
+    QUANTIZE_MQA: tl.constexpr,
 ):
     pid = tl.program_id(0)
     tok_idx = tl.program_id(1)
     head_idx = tl.program_id(2)
 
     if pid == 2:
-        # ql_nope quantize + pack into the front of mqa_q_fp8.
+        # ql_nope quantize + pack into the front of mqa_q_fp8. On the bf16
+        # query path ql_nope is consumed as-is (no pack), so skip entirely.
+        if not QUANTIZE_MQA:
+            return
         if 2 * head_idx >= NUM_Q_HEADS:
             return
 
@@ -581,23 +651,34 @@ def _fused_q_kernel(
                 ).to(tl.float32)
                 r1 = x1 * cos - x2 * sin
                 r2 = x2 * cos + x1 * sin
-                tl.store(
-                    mqa_q_fp8_ptr
-                    + tok_idx * mqa_q_fp8_stride0
-                    + q_head_idx * mqa_q_fp8_stride1
-                    + QL_NOPE_DIM
-                    + rot_off * 2,
-                    (r1 / scale).to(tl.float8e4nv),
-                )
-                tl.store(
-                    mqa_q_fp8_ptr
-                    + tok_idx * mqa_q_fp8_stride0
-                    + q_head_idx * mqa_q_fp8_stride1
-                    + QL_NOPE_DIM
-                    + rot_off * 2
-                    + 1,
-                    (r2 / scale).to(tl.float8e4nv),
-                )
+                if QUANTIZE_MQA:
+                    tl.store(
+                        mqa_q_fp8_ptr
+                        + tok_idx * mqa_q_fp8_stride0
+                        + q_head_idx * mqa_q_fp8_stride1
+                        + QL_NOPE_DIM
+                        + rot_off * 2,
+                        (r1 / scale).to(tl.float8e4nv),
+                    )
+                    tl.store(
+                        mqa_q_fp8_ptr
+                        + tok_idx * mqa_q_fp8_stride0
+                        + q_head_idx * mqa_q_fp8_stride1
+                        + QL_NOPE_DIM
+                        + rot_off * 2
+                        + 1,
+                        (r2 / scale).to(tl.float8e4nv),
+                    )
+                else:
+                    # bf16 query: write the RoPE'd q_pe unquantized.
+                    out_ty = q_pe_out_ptr.dtype.element_ty
+                    q_pe_dst = (
+                        q_pe_out_ptr
+                        + tok_idx * q_pe_out_stride0
+                        + q_head_idx * q_pe_out_stride1
+                    )
+                    tl.store(q_pe_dst + rot_off * 2, r1.to(out_ty))
+                    tl.store(q_pe_dst + rot_off * 2 + 1, r2.to(out_ty))
         return
     elif pid == 1:
         # Index Q RoPE + fp8 quant, all in registers. The roped bf16 index_q is
@@ -681,7 +762,16 @@ def fused_q(
     index_weights_head_scale: float,
     has_indexer: bool = True,
     index_rope_interleave: bool = False,
+    quantize_mqa: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fuse the MQA-query and indexer-query RoPE/quantization.
+
+    Returns ``(index_q_fp8, index_weights_out, mqa_q)``. When ``quantize_mqa``
+    is True (FlashInfer sparse, fp8 query) ``mqa_q`` is a single fp8 tensor
+    packing ``[ql_nope; q_pe]``. When False (FlashMLA sparse, bf16 query) it is
+    the RoPE'd ``q_pe`` in bf16; the caller pairs it with ``ql_nope`` as the
+    ``(ql_nope, q_pe)`` tuple the backend expects.
+    """
     assert positions.ndim == 1
     assert q_pe.ndim == 3
     assert q_pe_cos_sin_cache.ndim == 2
@@ -705,13 +795,23 @@ def fused_q(
     num_index_q_heads = index_q.shape[1]
     index_q_head_dim = index_q.shape[2]
     grid_heads = max(mqa_grid_heads, num_index_q_heads)
-    mqa_q_fp8 = torch.empty(
-        q_pe.shape[0],
-        q_pe.shape[1],
-        ql_nope.shape[2] + q_pe.shape[2],
-        dtype=torch.float8_e4m3fn,
-        device=q_pe.device,
-    )
+    if quantize_mqa:
+        # fp8 path: pack [ql_nope; q_pe] into a single fp8 tensor.
+        mqa_q_fp8 = torch.empty(
+            q_pe.shape[0],
+            q_pe.shape[1],
+            ql_nope.shape[2] + q_pe.shape[2],
+            dtype=torch.float8_e4m3fn,
+            device=q_pe.device,
+        )
+        # Placeholder; pid 0 packs q_pe into mqa_q_fp8 instead.
+        q_pe_out = mqa_q_fp8
+        mqa_q = mqa_q_fp8
+    else:
+        # bf16 path: only the RoPE'd q_pe is produced; ql_nope used directly.
+        q_pe_out = torch.empty_like(q_pe)
+        mqa_q_fp8 = q_pe_out  # unused placeholder for the fp8 pack pointer
+        mqa_q = q_pe_out
 
     index_q_fp8 = torch.empty_like(index_q, dtype=torch.float8_e4m3fn)
     index_weights_out = torch.empty_like(index_weights, dtype=torch.float32)
@@ -744,6 +844,9 @@ def fused_q(
         q_scale,
         ql_nope.shape[2],
         triton.next_power_of_2(ql_nope.shape[2]),
+        q_pe_out,
+        q_pe_out.stride(0),
+        q_pe_out.stride(1),
         index_weights,
         index_weights.stride(0),
         index_weights_softmax_scale,
@@ -752,12 +855,13 @@ def fused_q(
         index_weights_out.stride(0),
         HAS_INDEXER=has_indexer,
         INDEX_ROPE_INTERLEAVE=index_rope_interleave,
+        QUANTIZE_MQA=quantize_mqa,
         # num_warps=1 is optimal here: each program is a single 128-element
         # rope+quant, so the kernel is program-count/occupancy bound, not
         # per-program compute bound (swept 1/2/4/8 — 1 wins or ties everywhere).
         num_warps=1,
     )
-    return index_q_fp8, index_weights_out, mqa_q_fp8
+    return index_q_fp8, index_weights_out, mqa_q
 
 
 @triton.jit

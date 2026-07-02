@@ -11,7 +11,9 @@ from vllm.config import VllmConfig
 from vllm.config.utils import replace
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
+from vllm.tokenizers.registry import get_tokenizer
 from vllm.v1.spec_decode.llm_base_proposer import SpecDecodeBaseProposer
+from vllm.v1.spec_decode.vocab_mapping import VocabMapping
 
 logger = init_logger(__name__)
 
@@ -39,9 +41,10 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             self._init_heterogeneous_vocab(device)
         else:
             self._raise_if_vocab_size_mismatch()
+            self.vocab_mapping = None
+            self.slem_mapper = None
 
     def _init_heterogeneous_vocab(self, device: torch.device):
-        from vllm.tokenizers.registry import get_tokenizer
         from vllm.v1.spec_decode.slem import SlemMapper
 
         spec = self.speculative_config
@@ -55,11 +58,23 @@ class DraftModelProposer(SpecDecodeBaseProposer):
             trust_remote_code=spec.draft_model_config.trust_remote_code,
         )
 
-        self.slem_mapper: SlemMapper | None = SlemMapper(
-            target_tokenizer=target_tokenizer,
-            draft_tokenizer=draft_tokenizer,
-            device=device,
-        )
+        if self.heterogeneous_vocab_method == "slem":
+            self.slem_mapper: SlemMapper | None = SlemMapper(
+                target_tokenizer=target_tokenizer,
+                draft_tokenizer=draft_tokenizer,
+                device=device,
+            )
+            self.vocab_mapping: VocabMapping | None = None
+        else:
+            # TLI: Token-Level Intersection
+            self.slem_mapper = None
+            self.vocab_mapping = VocabMapping(
+                target_tokenizer=target_tokenizer,
+                draft_tokenizer=draft_tokenizer,
+                target_vocab_size=spec.target_model_config.get_vocab_size(),
+                draft_vocab_size=spec.draft_model_config.get_vocab_size(),
+                device=device,
+            )
 
     def _raise_if_vocab_size_mismatch(self):
         self.speculative_config.verify_equal_vocab_size_if_draft_model()

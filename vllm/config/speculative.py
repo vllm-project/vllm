@@ -9,7 +9,7 @@ from typing_extensions import Self
 
 from vllm.config import LoadConfig
 from vllm.config.kernel import MoEBackend
-from vllm.config.model import ModelConfig
+from vllm.config.model import HfOverrides, ModelConfig
 from vllm.config.parallel import ParallelConfig
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -54,6 +54,7 @@ MTPModelTypes = Literal[
 ]
 NgramGPUTypes = Literal["ngram_gpu"]
 DFlashModelTypes = Literal["dflash"]
+DSparkModelTypes = Literal["dspark"]
 EagleModelTypes = Literal[
     "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
 ]
@@ -66,8 +67,9 @@ SpeculativeMethod = Literal[
     "custom_class",
     EagleModelTypes,
     NgramGPUTypes,
+    DSparkModelTypes,
 ]
-RejectionSampleMethod = Literal["standard", "synthetic"]
+RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 
@@ -144,6 +146,7 @@ class SpeculativeConfig:
 
     heterogeneous_vocab_method: str = "slem"
     """Method for heterogeneous vocabulary handling.
+    "tli": Token-Level Intersection — constrains draft logits to shared tokens.
     "slem": String-Level Exact Match — draft uses full vocab, verify via text.
     Only applies when use_heterogeneous_vocab=True."""
 
@@ -211,7 +214,9 @@ class SpeculativeConfig:
     """The rejection sampling method to use. 'standard' uses probabilistic
     rejection sampling (with or without cached draft logits, controlled by
     draft_sample_method). 'synthetic' accepts draft tokens with a decaying
-    probability calibrated to synthetic_acceptance_rate."""
+    probability calibrated to synthetic_acceptance_rate. 'block' uses block
+    verification (Sun et al.), which jointly verifies the draft tokens as a
+    block instead of one at a time."""
 
     synthetic_acceptance_rates: list[float] | None = None
     """Per-position *unconditional* acceptance rates for synthetic rejection
@@ -299,6 +304,7 @@ class SpeculativeConfig:
             "eagle3",
             "extract_hidden_states",
             "dflash",
+            "dspark",
         )
         factors.append(uses_aux_hidden_states)
 
@@ -616,6 +622,13 @@ class SpeculativeConfig:
                 # --quantization fp8 with a bf16 checkpoint.
                 if not self.quantization:
                     self.quantization = self.target_model_config.quantization
+            elif self.method == "dspark":
+                # DeepSeek DSpark can ship the weights inside the target checkpoint
+                if self.target_model_config is None:
+                    raise ValueError("target_model_config must be present for dspark")
+                self.model = self.target_model_config.model
+                if not self.quantization:
+                    self.quantization = self.target_model_config.quantization
             elif self.method in ("ngram", "[ngram]"):
                 self.model = "ngram"
             elif self.method == "ngram_gpu":
@@ -720,6 +733,15 @@ class SpeculativeConfig:
             self.prompt_lookup_min = 0
 
             if self.model is not None:
+                # Old-format Medusa checkpoints (e.g. FasterDecoding/medusa-*)
+                # lack a model_type key in config.json, so AutoConfig cannot
+                # detect them. When the method is explicitly "medusa", inject
+                # model_type so MedusaConfig.from_pretrained is used instead.
+                draft_hf_overrides: HfOverrides
+                if self.method == "medusa":
+                    draft_hf_overrides = {"model_type": "medusa"}
+                else:
+                    draft_hf_overrides = SpeculativeConfig.hf_config_override
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
@@ -742,23 +764,40 @@ class SpeculativeConfig:
                     quantization=self.quantization,
                     enforce_eager=self.target_model_config.enforce_eager,
                     max_logprobs=self.target_model_config.max_logprobs,
-                    hf_overrides=SpeculativeConfig.hf_config_override,
+                    hf_overrides=draft_hf_overrides,
                     config_format=self.target_model_config.config_format,
                 )
 
+                # Old-format Medusa checkpoints (e.g. FasterDecoding/medusa-*)
+                # omit vocab_size in config.json, so MedusaConfig falls back to
+                # its default (32001). Align with the target model's vocab size
+                # to avoid shape mismatches when loading LM-head weights.
+                if self.method == "medusa":
+                    target_vocab = self.target_model_config.hf_config.vocab_size
+                    draft_hf = self.draft_model_config.hf_config
+                    if draft_hf.vocab_size != target_vocab:
+                        draft_hf.vocab_size = target_vocab
+                        draft_hf.truncated_vocab_size = target_vocab
+
                 # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash"):
+                if self.method in ("eagle", "eagle3", "dflash", "dspark"):
                     pass
                 # examples:
                 # yuhuili/EAGLE-LLaMA3-Instruct-8B
                 # yuhuili/EAGLE3-LLaMA3.1-Instruct-8B
                 # AngelSlim/Qwen3-8B_eagle3
+                # deepseek-ai/dspark_qwen3_8b_block7
                 elif "eagle-" in self.draft_model_config.model.lower():
                     self.method = "eagle"
                 elif "eagle3" in self.draft_model_config.model.lower():
                     self.method = "eagle3"
                 elif "dflash" in self.draft_model_config.model.lower():
                     self.method = "dflash"
+                elif (
+                    "dspark" in self.draft_model_config.model.lower()
+                    or "Qwen3DSparkModel" in self.draft_model_config.architectures
+                ):
+                    self.method = "dspark"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
                     self.method = "medusa"
                 elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
@@ -805,7 +844,18 @@ class SpeculativeConfig:
                         self.draft_model_config.hf_config = eagle_config
                         self.update_arch_()
 
-                if self.method == "dflash":
+                if self.method == "dspark" and (
+                    "Qwen3DSparkModel" not in self.draft_model_config.architectures
+                ):
+                    # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
+                    # and its weights ship in the target checkpoint.
+                    self.draft_model_config.hf_config.model_type = "deepseek_v4"
+                    self.draft_model_config.hf_config.architectures = [
+                        "DSparkDraftModel"
+                    ]
+                    self.update_arch_()
+
+                if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
 
                 if self.num_speculative_tokens is not None and hasattr(
@@ -1073,10 +1123,19 @@ class SpeculativeConfig:
                 raise ValueError(
                     "use_heterogeneous_vocab only works with method='draft_model'"
                 )
-            if self.heterogeneous_vocab_method not in ("slem",):
+            if self.heterogeneous_vocab_method not in ("tli", "slem"):
                 raise ValueError(
-                    f"heterogeneous_vocab_method must be 'slem', "
+                    f"heterogeneous_vocab_method must be 'tli' or 'slem', "
                     f"got '{self.heterogeneous_vocab_method}'"
+                )
+            if (
+                self.heterogeneous_vocab_method == "tli"
+                and self.draft_sample_method != "greedy"
+            ):
+                raise ValueError(
+                    "heterogeneous_vocab_method='tli' currently only supports "
+                    "greedy draft sampling. Set draft_sample_method='greedy' "
+                    "(the default) or omit it."
                 )
         else:
             self.verify_equal_vocab_size_if_draft_model()
@@ -1132,10 +1191,16 @@ class SpeculativeConfig:
         )
 
     def use_eagle(self) -> bool:
-        return self.method in ("eagle", "eagle3", "mtp", "dflash")
+        # NOTE: This method is usually a stand-in for "speculative decoding using
+        # target model hidden states"
+        # TODO(ben): Refactor this so the naming is clearer
+        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
+
+    def use_dspark(self) -> bool:
+        return self.method == "dspark"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
