@@ -189,6 +189,19 @@ class GuidanceGrammar(StructuredOutputGrammar):
         if self.ll_matcher.is_stopped():
             return []
 
+        # Speculative proposers (e.g. ngram_gpu) pad unfilled draft slots with
+        # -1. A negative id is never a valid token, and the underlying Rust
+        # matcher raises OverflowError converting it to an unsigned int, so
+        # validate only the leading run of real tokens (everything from the
+        # first -1 on is padding and cannot be an accepted prefix anyway).
+        # See https://github.com/vllm-project/vllm/issues/47025.
+        for i, token in enumerate(tokens):
+            if token < 0:
+                tokens = tokens[:i]
+                break
+        if len(tokens) == 0:
+            return []
+
         num_tokens = self.ll_matcher.validate_tokens(tokens)
 
         self.check_error()
