@@ -3,6 +3,7 @@
 
 import time
 from dataclasses import dataclass, field
+from typing import NamedTuple
 
 import numpy as np
 import prometheus_client
@@ -12,6 +13,27 @@ from vllm.logger import init_logger
 from vllm.v1.metrics.utils import create_metric_per_engine
 
 logger = init_logger(__name__)
+
+
+class SpecDecodeRequestStats(NamedTuple):
+    """Request-level speculative decoding stats."""
+
+    num_accepted_tokens: int
+    num_draft_tokens: int
+
+    @property
+    def acceptance_rate(self) -> float:
+        if self.num_draft_tokens == 0:
+            return float("nan")
+        return self.num_accepted_tokens / self.num_draft_tokens
+
+    def merge(self, other: "SpecDecodeRequestStats | None") -> "SpecDecodeRequestStats":
+        if other is None:
+            return self
+        return SpecDecodeRequestStats(
+            num_accepted_tokens=(self.num_accepted_tokens + other.num_accepted_tokens),
+            num_draft_tokens=self.num_draft_tokens + other.num_draft_tokens,
+        )
 
 
 @dataclass
@@ -196,6 +218,7 @@ class SpecDecodingProm:
     """
 
     _counter_cls = prometheus_client.Counter
+    _histogram_cls = prometheus_client.Histogram
 
     def __init__(
         self,
@@ -211,6 +234,34 @@ class SpecDecodingProm:
         self.spec_decoding_enabled = speculative_config is not None or is_diffusion
         if not self.spec_decoding_enabled:
             return
+
+        if not is_diffusion:
+            histogram_request_acceptance_rate = self._histogram_cls(
+                name="vllm:request_spec_decode_acceptance_rate",
+                documentation=(
+                    "Histogram of request-level speculative decoding draft "
+                    "acceptance rates for finished requests."
+                ),
+                buckets=[
+                    0.0,
+                    0.1,
+                    0.2,
+                    0.3,
+                    0.4,
+                    0.5,
+                    0.6,
+                    0.7,
+                    0.8,
+                    0.9,
+                    1.0,
+                ],
+                labelnames=labelnames,
+            )
+            self.histogram_request_spec_decode_acceptance_rate = (
+                create_metric_per_engine(
+                    histogram_request_acceptance_rate, per_engine_labelvalues
+                )
+            )
 
         if is_diffusion:
             counter_specs = [
@@ -279,3 +330,20 @@ class SpecDecodingProm:
             self.counter_spec_decode_num_accepted_tokens_per_pos.get(engine_idx, [])
         ):
             counter.inc(spec_decoding_stats.num_accepted_tokens_per_pos[pos])
+
+    def observe_finished_request(
+        self,
+        spec_decode_stats: SpecDecodeRequestStats | None,
+        engine_idx: int = 0,
+    ) -> None:
+        if (
+            not self.spec_decoding_enabled
+            or self.is_diffusion
+            or spec_decode_stats is None
+            or spec_decode_stats.num_draft_tokens <= 0
+        ):
+            return
+
+        self.histogram_request_spec_decode_acceptance_rate[engine_idx].observe(
+            spec_decode_stats.acceptance_rate
+        )
