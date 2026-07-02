@@ -46,6 +46,26 @@ export CPU_ARCH=$(uname -m) # x86_64 or aarch64
 uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cu${CUDA_VERSION}-cp38-abi3-manylinux_2_35_${CPU_ARCH}.whl --extra-index-url https://download.pytorch.org/whl/cu${CUDA_VERSION}
 ```
 
+!!! warning "CUDA architecture coverage"
+
+    Pre-built CUDA wheels are compiled for the CUDA architectures selected by
+    vLLM's release and build pipelines. This list is intentionally smaller than
+    every architecture CMake can build, because each additional architecture
+    increases wheel size.
+
+    In particular, CUDA 12.9 wheels do not use CUDA 13 family-specific targets.
+    To keep wheel size bounded, published CUDA 12.9 wheels may omit some newer
+    architecture-specific Blackwell/Thor targets, such as `sm_103` or
+    `sm_121`, even though vLLM can build them from source. CUDA 13 wheels use
+    family-specific targets such as `sm_100f`, `sm_110f`, and `sm_120f`, which
+    cover the corresponding major-version GPU family.
+
+    If vLLM logs a warning that your visible CUDA device is not covered by the
+    wheel's compiled CUDA architectures, or if you see a CUDA error such as
+    `no kernel image is available for execution on the device`, install a CUDA
+    13 wheel when possible, or build from source with a `TORCH_CUDA_ARCH_LIST`
+    that includes your GPU.
+
 #### Install the latest code
 
 LLM inference is a fast-evolving field, and the latest code may contain bug fixes, performance improvements, and new features that are not released yet. To allow users to try the latest code without waiting for the next release, vLLM provides wheels for every commit since `v0.5.3` on <https://wheels.vllm.ai/nightly>. There are multiple indices that could be used:

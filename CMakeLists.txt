@@ -218,6 +218,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   cuda_archs_loose_intersection(CUDA_ARCHS
     "${CUDA_SUPPORTED_ARCHS}" "${CUDA_ARCHS}")
   message(STATUS "CUDA supported target architectures: ${CUDA_ARCHS}")
+
+  set(VLLM_COMPILED_CUDA_ARCHS)
+  foreach(_ARCH ${CUDA_ARCHS})
+    set(_COMPILED_ARCH "${_ARCH}")
+    if(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 13.0)
+      if(_ARCH MATCHES "^(10|11|12)\\.0$")
+        set(_COMPILED_ARCH "${_ARCH}f")
+      endif()
+    elseif(CMAKE_CUDA_COMPILER_VERSION VERSION_GREATER_EQUAL 12.8)
+      if(_ARCH MATCHES "^(10\\.(0|1|3)|12\\.(0|1))$")
+        set(_COMPILED_ARCH "${_ARCH}a")
+      endif()
+    endif()
+    list(APPEND VLLM_COMPILED_CUDA_ARCHS "${_COMPILED_ARCH}")
+  endforeach()
+  list(JOIN VLLM_COMPILED_CUDA_ARCHS "," VLLM_COMPILED_CUDA_ARCHS_STR)
 else()
   #
   # For other GPU targets override the GPU architectures detected by cmake/torch
@@ -378,8 +394,20 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   #
   # _C_stable_libtorch extension (ops registered via STABLE_TORCH_LIBRARY)
   #
+  # Shared entry sources are part of the base extension source list, but some
+  # optional kernel families below append source-local feature macros to them.
+  set(VLLM_STABLE_TORCH_BINDINGS_SRC
+    "csrc/libtorch_stable/torch_bindings.cpp")
+  set(CACHE_KERNELS_SRC "csrc/libtorch_stable/cache_kernels.cu")
+  set(SCALED_MM_ENTRY_SRC
+    "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_entry.cu")
+  set(NVFP4_QUANT_ENTRY_SRC
+    "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu")
+  set(NVFP4_SCALED_MM_ENTRY_SRC
+    "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu")
+
   set(VLLM_STABLE_EXT_SRC
-    "csrc/libtorch_stable/torch_bindings.cpp"
+    "${VLLM_STABLE_TORCH_BINDINGS_SRC}"
     "csrc/libtorch_stable/activation_kernels.cu"
     "csrc/libtorch_stable/quantization/activation_kernels.cu"
     "csrc/libtorch_stable/quantization/w8a8/int8/scaled_quant.cu"
@@ -401,8 +429,7 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     "csrc/libtorch_stable/mamba/selective_scan_fwd.cu"
     "csrc/libtorch_stable/attention/paged_attention_v1.cu"
     "csrc/libtorch_stable/attention/paged_attention_v2.cu"
-    "csrc/libtorch_stable/cache_kernels.cu"
-    "csrc/libtorch_stable/cache_kernels.cu"
+    "${CACHE_KERNELS_SRC}"
     "csrc/libtorch_stable/cache_kernels_fused.cu"
     "csrc/libtorch_stable/custom_all_reduce.cu"
     "csrc/libtorch_stable/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu")
@@ -417,11 +444,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     else()
       cuda_archs_loose_intersection(COOPERATIVE_TOPK_ARCHS
         "9.0a;10.0a;10.1a;10.3a;12.0a;12.1a" "${CUDA_ARCHS}")
-    endif()
-
-    if(COOPERATIVE_TOPK_ARCHS)
-      list(APPEND VLLM_GPU_FLAGS "-DVLLM_ENABLE_COOPERATIVE_TOPK=1")
-
     endif()
   endif()
 
@@ -462,11 +484,14 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       "csrc/libtorch_stable/cuda_view.cu"
       "csrc/libtorch_stable/cuda_utils_kernels.cu"
       "csrc/libtorch_stable/cutlass_extensions/common.cpp"
-      "csrc/libtorch_stable/quantization/w8a8/cutlass/scaled_mm_entry.cu"
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_entry.cu"
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_entry.cu"
+      "${SCALED_MM_ENTRY_SRC}"
+      "${NVFP4_QUANT_ENTRY_SRC}"
+      "${NVFP4_SCALED_MM_ENTRY_SRC}"
       "csrc/libtorch_stable/quantization/awq/gemm_kernels.cu"
       "csrc/libtorch_stable/minimax_reduce_rms_kernel.cu")
+    set_compile_definitions_for_srcs(
+      SRCS "${VLLM_STABLE_TORCH_BINDINGS_SRC}"
+      DEFINITIONS VLLM_COMPILED_CUDA_ARCHS=\"${VLLM_COMPILED_CUDA_ARCHS_STR}\")
 
     #
     # Machete kernels
@@ -542,11 +567,15 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       CUDA_ARCHS "${CUDA_ARCHS}")
 
     if(COOPERATIVE_TOPK_ARCHS)
+      set(COOPERATIVE_TOPK_SRC "csrc/libtorch_stable/cooperative_topk.cu")
       list(APPEND VLLM_STABLE_EXT_SRC
-        "csrc/libtorch_stable/cooperative_topk.cu")
+        "${COOPERATIVE_TOPK_SRC}")
       set_gencode_flags_for_srcs(
-        SRCS "csrc/libtorch_stable/cooperative_topk.cu"
+        SRCS "${COOPERATIVE_TOPK_SRC}"
         CUDA_ARCHS "${COOPERATIVE_TOPK_ARCHS}")
+      set_compile_definitions_for_srcs(
+        SRCS "${VLLM_STABLE_TORCH_BINDINGS_SRC};${COOPERATIVE_TOPK_SRC}"
+        DEFINITIONS VLLM_ENABLE_COOPERATIVE_TOPK=1)
     endif()
 
     # Only build Marlin kernels if we are building for at least some compatible archs.
@@ -755,8 +784,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     set_gencode_flags_for_srcs(
       SRCS "${SCALED_MM_SM90_SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
+    set_compile_definitions_for_srcs(
+      SRCS "${SCALED_MM_ENTRY_SRC};${SCALED_MM_SM90_SRCS}"
+      DEFINITIONS ENABLE_SCALED_MM_SM90=1)
     list(APPEND VLLM_STABLE_EXT_SRC "${SCALED_MM_SM90_SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM90=1")
     # Let scaled_mm_c2x know it doesn't need to build these arches
     list(APPEND SCALED_MM_3X_ARCHS "${SCALED_MM_ARCHS}")
     message(STATUS "Building scaled_mm_c3x_sm90 for archs: ${SCALED_MM_ARCHS}")
@@ -789,8 +820,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     set_gencode_flags_for_srcs(
       SRCS "${SCALED_MM_SM120_SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
+    set_compile_definitions_for_srcs(
+      SRCS "${SCALED_MM_ENTRY_SRC};${SCALED_MM_SM120_SRCS}"
+      DEFINITIONS ENABLE_SCALED_MM_SM120=1)
     list(APPEND VLLM_STABLE_EXT_SRC "${SCALED_MM_SM120_SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM120=1")
     # Let scaled_mm_c2x know it doesn't need to build these arches
     list(APPEND SCALED_MM_3X_ARCHS "${SCALED_MM_ARCHS}")
     message(STATUS "Building scaled_mm_c3x_sm120 for archs: ${SCALED_MM_ARCHS}")
@@ -823,8 +856,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     set_gencode_flags_for_srcs(
       SRCS "${SCALED_MM_SM100_SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
+    set_compile_definitions_for_srcs(
+      SRCS "${SCALED_MM_ENTRY_SRC};${SCALED_MM_SM100_SRCS}"
+      DEFINITIONS ENABLE_SCALED_MM_SM100=1)
     list(APPEND VLLM_STABLE_EXT_SRC "${SCALED_MM_SM100_SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_SM100=1")
     # Let scaled_mm_c2x know it doesn't need to build these arches
     list(APPEND SCALED_MM_3X_ARCHS "${SCALED_MM_ARCHS}")
     message(STATUS "Building scaled_mm_c3x_sm100 for archs: ${SCALED_MM_ARCHS}")
@@ -853,8 +888,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     set_gencode_flags_for_srcs(
       SRCS "${SCALED_MM_C2X_SRCS}"
       CUDA_ARCHS "${SCALED_MM_2X_ARCHS}")
+    set_compile_definitions_for_srcs(
+      SRCS "${SCALED_MM_ENTRY_SRC};${SCALED_MM_C2X_SRCS}"
+      DEFINITIONS ENABLE_SCALED_MM_C2X=1)
     list(APPEND VLLM_STABLE_EXT_SRC "${SCALED_MM_C2X_SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_SCALED_MM_C2X=1")
     message(STATUS "Building scaled_mm_c2x for archs: ${SCALED_MM_2X_ARCHS}")
   else()
     if (SCALED_MM_3X_ARCHS)
@@ -879,8 +916,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     set_gencode_flags_for_srcs(
       SRCS "${CUTLASS_MOE_SM90_SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
+    set_compile_definitions_for_srcs(
+      SRCS "${SCALED_MM_ENTRY_SRC};${CUTLASS_MOE_SM90_SRCS}"
+      DEFINITIONS ENABLE_CUTLASS_MOE_SM90=1)
     list(APPEND VLLM_STABLE_EXT_SRC "${CUTLASS_MOE_SM90_SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM90=1")
     message(STATUS "Building grouped_mm_c3x for archs: ${SCALED_MM_ARCHS}")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.3 AND SCALED_MM_ARCHS)
@@ -903,8 +942,13 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     set_gencode_flags_for_srcs(
       SRCS "${CUTLASS_MOE_SM100_SRCS}"
       CUDA_ARCHS "${SCALED_MM_ARCHS}")
+    set_compile_definitions_for_srcs(
+      SRCS "${SCALED_MM_ENTRY_SRC};${CUTLASS_MOE_SM100_SRCS}"
+      DEFINITIONS ENABLE_CUTLASS_MOE_SM10X_OR_SM11X=1)
     list(APPEND VLLM_STABLE_EXT_SRC "${CUTLASS_MOE_SM100_SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
+    # The implementation is named sm100 historically, but it is built for the
+    # SM10x/SM11x family: CUDA 12 Thor reports SM101, CUDA 13 Thor reports
+    # SM110. Keep the compile-time macro aligned with runtime dispatch.
     message(STATUS "Building grouped_mm_c3x for archs: ${SCALED_MM_ARCHS}")
   else()
     if (NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND SCALED_MM_ARCHS)
@@ -945,10 +989,16 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   # FP4/NVFP4 kernels (moved from _C to _C_stable_libtorch)
   #
 
-  # SM12x FP4 kernels. These share some generic NVFP4 quantization entry
-  # sources with the SM10x/11x block below; set_gencode_flags_for_srcs appends
-  # per-source flags, so shared files accumulate both SM12x and SM10x/11x
-  # gencodes when both families are requested.
+  # Shared FP4 implementation sources live next to the FP4 arch logic because
+  # both SM12x and SM10x/11x append family-specific gencodes and feature macros
+  # to them.
+  set(FP4_SHARED_SRCS
+    "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_kernels.cu"
+    "csrc/libtorch_stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
+    "csrc/libtorch_stable/quantization/fp4/nvfp4_experts_quant.cu"
+    "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
+    "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
+
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 13.0)
     cuda_archs_loose_intersection(FP4_SM120_ARCHS "12.0f" "${CUDA_ARCHS}")
   else()
@@ -956,18 +1006,19 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_SM120_ARCHS)
     set(FP4_SM120_SRCS
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_kernels.cu"
-      "csrc/libtorch_stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_experts_quant.cu"
+      ${FP4_SHARED_SRCS}
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_sm120_kernels.cu"
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
-      "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
+    )
     set_gencode_flags_for_srcs(
       SRCS "${FP4_SM120_SRCS}"
       CUDA_ARCHS "${FP4_SM120_ARCHS}")
+    set_compile_definitions_for_srcs(
+      SRCS "${NVFP4_QUANT_ENTRY_SRC};${NVFP4_SCALED_MM_ENTRY_SRC};${CACHE_KERNELS_SRC};${FP4_SM120_SRCS}"
+      DEFINITIONS ENABLE_NVFP4_SM120=1)
+    set_compile_definitions_for_srcs(
+      SRCS "${SCALED_MM_ENTRY_SRC}"
+      DEFINITIONS ENABLE_CUTLASS_MOE_SM120=1)
     list(APPEND VLLM_STABLE_EXT_SRC "${FP4_SM120_SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM120=1")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM120=1")
     message(STATUS "Building SM12x NVFP4 for archs: ${FP4_SM120_ARCHS}")
   else()
     message(STATUS "Not building SM12x NVFP4 as no compatible archs were found.")
@@ -982,14 +1033,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
   endif()
   if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.8 AND FP4_SM100_ARCHS)
     set(FP4_SM100_SRCS
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_quant_kernels.cu"
-      "csrc/libtorch_stable/quantization/fp4/activation_nvfp4_quant_fusion_kernels.cu"
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_experts_quant.cu"
+      ${FP4_SHARED_SRCS}
       "csrc/libtorch_stable/quantization/fp4/nvfp4_scaled_mm_kernels.cu"
-      "csrc/libtorch_stable/quantization/fp4/nvfp4_blockwise_moe_kernel.cu"
       "csrc/libtorch_stable/quantization/fp4/mxfp4_experts_quant.cu"
-      "csrc/libtorch_stable/quantization/fp4/mxfp4_blockwise_moe_kernel.cu"
-      "csrc/libtorch_stable/nvfp4_kv_cache_kernels.cu")
+      "csrc/libtorch_stable/quantization/fp4/mxfp4_blockwise_moe_kernel.cu")
     if(NOT ${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.9)
       message(STATUS
         "Building mxfp4_experts_quant unsupported stubs because CUDA compiler version is not >= 12.9 (found ${CMAKE_CUDA_COMPILER_VERSION}).")
@@ -997,9 +1044,10 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     set_gencode_flags_for_srcs(
       SRCS "${FP4_SM100_SRCS}"
       CUDA_ARCHS "${FP4_SM100_ARCHS}")
+    set_compile_definitions_for_srcs(
+      SRCS "${NVFP4_QUANT_ENTRY_SRC};${NVFP4_SCALED_MM_ENTRY_SRC};${CACHE_KERNELS_SRC};${FP4_SM100_SRCS}"
+      DEFINITIONS ENABLE_NVFP4_SM100=1)
     list(APPEND VLLM_STABLE_EXT_SRC "${FP4_SM100_SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_NVFP4_SM100=1")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MOE_SM100=1")
     message(STATUS "Building SM10x/11x NVFP4/MXFP4 for archs: ${FP4_SM100_ARCHS}")
   else()
     message(STATUS "Not building SM10x/11x NVFP4/MXFP4 as no compatible archs were found.")
@@ -1053,7 +1101,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
       SRCS "${CUTLASS_MLA_SRCS}"
       CUDA_ARCHS "${MLA_ARCHS}")
     list(APPEND VLLM_STABLE_EXT_SRC "${CUTLASS_MLA_SRCS}")
-    list(APPEND VLLM_GPU_FLAGS "-DENABLE_CUTLASS_MLA=1")
     # Add MLA-specific include directories only to MLA source files
     set_source_files_properties(${CUTLASS_MLA_SRCS}
       PROPERTIES INCLUDE_DIRECTORIES "${CUTLASS_DIR}/examples/77_blackwell_fmha;${CUTLASS_DIR}/examples/common")
@@ -1100,10 +1147,6 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
     target_compile_definitions(_C_stable_libtorch PRIVATE
       TORCH_TARGET_VERSION=0x020B000000000000ULL)
     target_compile_definitions(_C_stable_libtorch PRIVATE USE_CUDA)
-    if(COOPERATIVE_TOPK_ARCHS)
-      target_compile_definitions(_C_stable_libtorch PRIVATE
-        VLLM_ENABLE_COOPERATIVE_TOPK=1)
-    endif()
     # Needed by CUTLASS kernels
     target_compile_definitions(_C_stable_libtorch PRIVATE
       CUTLASS_ENABLE_DIRECT_CUDA_DRIVER_CALL=1)

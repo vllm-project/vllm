@@ -898,12 +898,16 @@ def cutlass_scaled_mm_azp(
 
 
 def cutlass_group_gemm_supported(cuda_device_capability: int) -> bool:
-    if cuda_device_capability < 90 or cuda_device_capability >= 110:
+    # CUTLASS grouped FP8 MoE uses the same sm100-named implementation for
+    # SM10x and SM11x. Thor reports SM101 with CUDA 12 and SM110 with CUDA 13,
+    # so keep this Python guard aligned with the C++ support query/dispatch.
+    if cuda_device_capability < 90 or cuda_device_capability >= 120:
         return False
     try:
         return torch.ops._C.cutlass_group_gemm_supported(cuda_device_capability)
-    except AttributeError:
-        # Return False on non-CUDA platforms where it is not available
+    except (AttributeError, RuntimeError):
+        # Return False on non-CUDA platforms where it is not available or not
+        # implemented for the current build.
         return False
 
 
