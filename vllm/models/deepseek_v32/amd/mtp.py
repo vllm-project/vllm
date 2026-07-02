@@ -1,5 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+"""Multi-Token Predictor for DeepSeek V3.2 on ROCm.
+
+Extends the NVIDIA MTP (nvidia/mtp.py) with:
+  - ROCm aiter shared-expert fusion in load_weights
+  - DeepseekV32ROCMAiterDecoderLayer for the decoder block inside the MTP layer
+"""
+
 import typing
 from collections.abc import Callable, Iterable
 
@@ -36,10 +43,10 @@ from vllm.models.deepseek_v32.common.kernels import fused_eh_norm
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
-from .model import DeepseekV32DecoderLayer
+from .model import DeepseekV32ROCMAiterDecoderLayer
 
 
-class DeepseekV32MultiTokenPredictorLayer(nn.Module):
+class DeepseekV32ROCMAiterMultiTokenPredictorLayer(nn.Module):
     def __init__(self, vllm_config: VllmConfig, prefix: str) -> None:
         super().__init__()
         assert vllm_config.speculative_config is not None
@@ -60,7 +67,7 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
-        self.mtp_block = DeepseekV32DecoderLayer(
+        self.mtp_block = DeepseekV32ROCMAiterDecoderLayer(
             vllm_config,
             prefix,
             config=config,
@@ -76,7 +83,6 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         spec_step_index: int = 0,
     ) -> torch.Tensor:
         assert inputs_embeds is not None
-        # Fused: zero pos-0 embeds + enorm(embeds) + hnorm(prev) + cat -> [N, 2H].
         eh_input = fused_eh_norm(
             positions,
             inputs_embeds,
@@ -89,17 +95,11 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        # mtp_block's MoE output is left un-reduced (skip_final_all_reduce); the
-        # main model fuses that all-reduce into the next norm, but here the
-        # recycle hidden is consumed directly, so reduce it now.
         hidden_states = tensor_model_parallel_all_reduce(hidden_states)
-        # Return the pre-final-norm recycle hidden (re-fed as the next spec
-        # step's previous_hidden_states); shared_head norm is applied in
-        # compute_logits. Matches the V2-runner / deepseek_v4 MTP contract.
         return residual + hidden_states
 
 
-class DeepseekV32MultiTokenPredictor(nn.Module):
+class DeepseekV32ROCMAiterMultiTokenPredictor(nn.Module):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         config = vllm_config.model_config.hf_config
@@ -107,7 +107,7 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         self.num_mtp_layers = config.num_nextn_predict_layers
         self.layers = torch.nn.ModuleDict(
             {
-                str(idx): DeepseekV32MultiTokenPredictorLayer(
+                str(idx): DeepseekV32ROCMAiterMultiTokenPredictorLayer(
                     vllm_config, f"{prefix}.layers.{idx}"
                 )
                 for idx in range(
@@ -124,20 +124,10 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
     def set_skip_topk(self, skip: bool):
-        # index_share_for_mtp_iteration: step 0 computes top-k, steps 1+ reuse.
         for layer in self.layers.values():
             self_attn = getattr(layer.mtp_block, "self_attn", None)
             if self_attn is not None and hasattr(self_attn, "skip_topk"):
                 self_attn.skip_topk = skip
-
-    def compact_topk_indices(self, slot_ids: torch.Tensor):
-        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
-        num_slots = slot_ids.numel()
-        for layer in self.layers.values():
-            self_attn = getattr(layer.mtp_block, "self_attn", None)
-            if self_attn is not None and hasattr(self_attn, "topk_indices_buffer"):
-                topk_indices_buffer = self_attn.topk_indices_buffer
-                topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -173,12 +163,12 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         )
 
 
-class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
+class DeepseekV32ROCMAiterMTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
-        self.model = DeepseekV32MultiTokenPredictor(
+        self.model = DeepseekV32ROCMAiterMultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
         self.set_moe_parameters()
@@ -387,8 +377,8 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
                             param, "weight_loader", default_weight_loader
                         )
                         weight_loader(param, loaded_weight)
-            if not is_fusion_moe_shared_experts_layer:
-                loaded_params.add(name)
+                if not is_fusion_moe_shared_experts_layer:
+                    loaded_params.add(name)
 
         loaded_layers: set[int] = set()
         for param_name in loaded_params:
