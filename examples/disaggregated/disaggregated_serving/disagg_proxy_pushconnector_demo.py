@@ -9,9 +9,9 @@ the same; the difference is in how P and D coordinate the KV transfer:
 * Pull mode: proxy forwards P's ``kv_transfer_params`` (including
   ``remote_block_ids``) to D, and D pulls KV from P via NIXL READ.
 * Push mode: proxy hands D **only** P's coordinates
-  (``remote_engine_id``, ``remote_host``, ``remote_port``, ``tp_size``)
-  and the shared ``remote_request_id``. D registers its locally allocated
-  blocks with P over a NIXL notification; P then pushes the KV to D via
+  (``remote_engine_id``, ``remote_host``, ``remote_port``, ``tp_size``,
+  ``pp_size``) and the shared ``remote_request_id``. D registers its locally
+  allocated blocks with P over a NIXL notification; P then pushes the KV to D via
   NIXL WRITE.
 
 Launch multiple vLLM instances configured with ``NixlPushConnector`` and
@@ -26,6 +26,7 @@ disagg_proxy_pushconnector_demo.py \
        --prefill-kv-host  10.0.0.1 \
        --prefill-side-channel-port 5600 \
        --prefill-tp-size 1 \
+       --prefill-pp-size 1 \
        --port 8000
 """
 
@@ -89,6 +90,7 @@ class PushProxy:
         prefill_kv_host: str,
         prefill_side_channel_port: int,
         prefill_tp_size: int,
+        prefill_pp_size: int,
         custom_create_completion: Callable[[Request], StreamingResponse] | None = None,
         custom_create_chat_completion: Callable[[Request], StreamingResponse]
         | None = None,
@@ -110,6 +112,7 @@ class PushProxy:
             "remote_host": prefill_kv_host,
             "remote_port": prefill_side_channel_port,
             "tp_size": prefill_tp_size,
+            "pp_size": prefill_pp_size,
         }
 
         self.custom_create_completion = custom_create_completion
@@ -198,6 +201,7 @@ class PushProxy:
             "prefill_kv_host": self.push_metadata["remote_host"],
             "prefill_side_channel_port": self.push_metadata["remote_port"],
             "prefill_tp_size": self.push_metadata["tp_size"],
+            "prefill_pp_size": self.push_metadata["pp_size"],
         }
 
     # ── push-mode request handling ──────────────────────────────────── #
@@ -316,6 +320,7 @@ class PushProxyServer:
             prefill_kv_host=args.prefill_kv_host,
             prefill_side_channel_port=args.prefill_side_channel_port,
             prefill_tp_size=args.prefill_tp_size,
+            prefill_pp_size=args.prefill_pp_size,
             custom_create_completion=create_completion,
             custom_create_chat_completion=create_chat_completion,
         )
@@ -419,6 +424,12 @@ def parse_args():
         type=int,
         default=1,
         help="Tensor parallel size of the prefill vLLM instance",
+    )
+    parser.add_argument(
+        "--prefill-pp-size",
+        type=int,
+        default=1,
+        help="Pipeline parallel size of the prefill vLLM instance",
     )
     return parser.parse_args()
 

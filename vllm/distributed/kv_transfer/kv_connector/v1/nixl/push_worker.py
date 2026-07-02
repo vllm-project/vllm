@@ -80,11 +80,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     ):
         super().__init__(vllm_config, engine_id, kv_cache_config)
 
+        # Heartbeat handshakes to a PP-sharded producer must be notif-only,
+        # like the PUSH_REG path.
+        self._hb_handshake_notif_only = True
+
         # Push-specific state.
         # P-side: outgoing WRITE handles awaiting completion, keyed by
-        # request_id. Mutated by writer (submit) and main thread
-        # (``_pop_done_transfers``); guarded by
-        # ``_sending_transfers_lock``.
+        # request_id. Owned by the writer thread (it submits and polls them);
+        # the lock guards its submit/poll critical sections.
         self._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
         self._sending_transfers_lock = threading.Lock()
 
@@ -105,6 +108,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # ``_push_finished_blocks`` so an unmatched entry doesn't keep the
         # writer busy-polling forever.
         self._evict_finished_inbox: queue.Queue[str] = queue.Queue()
+        # Writer → main thread: req_ids whose WRITE transfers have completed
+        # (detected by the writer's poll); ``get_finished`` drains it.
+        self._done_sends_inbox: queue.Queue[str] = queue.Queue()
 
         # Wake signal from engine main thread (start_load_kv / get_finished).
         # Writer self-polls at _PUSH_WRITER_POLL_INTERVAL_MS while it has
@@ -233,13 +239,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                             self._handle_push_reg_notif(notif)
                         else:
                             self._pending_completion_notifs.put(notif)
+
+                # 4. Drive + detect in-flight WRITE transfers here (not in
+                # ``get_finished``) so they advance while the engine is idle.
+                with self._sending_transfers_lock:
+                    done_sends = self._pop_done_transfers(self._sending_transfers)
+                for done_rid in done_sends:
+                    self._done_sends_inbox.put(done_rid)
             except Exception:
                 logger.exception("nixl-push-writer error; continuing")
 
-            # Self-poll only while there is no other wake source: P-side
-            # finished blocks waiting for a D PUSH_REG match. All other
-            # progress is event-driven (see module docstring).
-            if self._push_finished_blocks:
+            # Self-poll while there's work needing the writer to keep driving
+            # NIXL progress: blocks awaiting a D PUSH_REG, or in-flight WRITEs
+            # (the engine main thread may be parked when the producer idles).
+            with self._sending_transfers_lock:
+                has_inflight_sends = bool(self._sending_transfers)
+            if self._push_finished_blocks or has_inflight_sends:
                 self._push_writer_stop.wait(timeout=sleep_s)
             else:
                 self._push_writer_wake.wait()
@@ -275,18 +290,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         and the request is re-queued onto ``_reg_send_inbox`` once it
         completes (at which point ``_ensure_handshake`` returns ``None`` and we
         send directly)."""
+        remote_pp_size = reg_data.get("remote_pp_size", 1)
         fut = self._ensure_handshake(
             reg_data["remote_engine_id"],
             reg_data["remote_host"],
             reg_data["remote_port"],
             reg_data["remote_tp_size"],
+            pp_size=remote_pp_size,
+            # D never addresses P memory in push mode; just load P's agents.
+            notif_agents_only=remote_pp_size > 1,
         )
         if fut is None:
             self._do_send_reg_notif(req_id, reg_data)
             return
 
         def _on_handshake(
-            f: Future[dict[int, str]],
+            f: Future[dict[tuple[int, int], str]],
             rid: str = req_id,
             rd: dict[str, Any] = reg_data,
         ) -> None:
@@ -500,28 +519,43 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_block_ids = meta.remote.block_ids
         local_block_ids = meta.local_physical_block_ids
         num_groups = len(local_block_ids)
-        read_specs = [
-            ReadSpec(
-                remote_rank=rank,
-                local_block_ids=[
-                    list(local_block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
-                    for g in range(num_groups)
-                ],
-                remote_block_ids=[
-                    list(remote_block_ids[g])
-                    if rank in plan.source_ranks_per_group[g]
-                    else []
-                    for g in range(num_groups)
-                ],
-            )
-            for rank in plan.all_source_ranks
-        ]
 
         if self.use_mla and tp_ratio < 0:
-            assert len(read_specs) == 1
+            # MLA latent is replicated across D's TP ranks: the tp-mapping
+            # collapses to one rank (fine for reads), but push must WRITE every
+            # D rank or the rest decode stale KV; only the dst differs per rank.
+            assert len(plan.all_source_ranks) == 1
+            mla_local_ids = [list(ids) for ids in local_block_ids]
+            mla_remote_ids = [list(ids) for ids in remote_block_ids]
+            read_specs = [
+                ReadSpec(
+                    remote_rank=rank,
+                    local_block_ids=mla_local_ids,
+                    remote_block_ids=mla_remote_ids,
+                )
+                for rank in self.dst_xfer_side_handles[engine_id]
+            ]
+        else:
+            read_specs = [
+                ReadSpec(
+                    remote_rank=rank,
+                    local_block_ids=[
+                        list(local_block_ids[g])
+                        if rank in plan.source_ranks_per_group[g]
+                        else []
+                        for g in range(num_groups)
+                    ],
+                    remote_block_ids=[
+                        list(remote_block_ids[g])
+                        if rank in plan.source_ranks_per_group[g]
+                        else []
+                        for g in range(num_groups)
+                    ],
+                )
+                for rank in plan.all_source_ranks
+            ]
 
+        handles: list[int] = []
         for i, spec in enumerate(read_specs):
             remote_block_size = remote_info.remote_block_size
             logger.debug(
@@ -544,7 +578,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 spec.remote_rank
             ]
 
-            self._xfer_blocks(
+            handle = self._xfer_blocks(
                 read_spec=spec,
                 request_id=req_id,
                 dst_engine_id=meta.remote.engine_id,
@@ -552,13 +586,15 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 local_xfer_side_handle=local_xfer_side_handle,
                 remote_xfer_side_handle=remote_xfer_side_handle,
             )
+            if handle is not None:
+                handles.append(handle)
 
-        if self.use_mla and tp_ratio < 0 and read_specs:
-            notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
-            remote_agents = self._remote_agents[meta.remote.engine_id]
-            for rank_to_notify, agent in remote_agents.items():
-                if rank_to_notify != read_specs[0].remote_rank:
-                    self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
+        # Publish all the request's WRITE handles in one locked update: a
+        # partial set would let ``_pop_done_transfers`` finish the request
+        # early, then double-report it as the remaining writes land.
+        if handles:
+            with self._sending_transfers_lock:
+                self._sending_transfers[req_id].extend(handles)
 
     def _xfer_blocks(
         self,
@@ -568,8 +604,12 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         remote_request_id: str,
         local_xfer_side_handle: int,
         remote_xfer_side_handle: int,
-    ):
-        """Post a WRITE point-to-point xfer request."""
+    ) -> int | None:
+        """Post a WRITE point-to-point xfer request.
+
+        Returns the in-flight transfer handle (so the caller can track all of
+        a request's handles atomically), or ``None`` if nothing was submitted.
+        """
         assert self.transfer_topo is not None
         remote_rank = read_spec.remote_rank
         local_block_ids = read_spec.local_block_ids
@@ -597,7 +637,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         if len(local_block_ids) == 0:
             logger.warning("No blocks to push for request %s", request_id)
-            return
+            return None
 
         # Align per-group block counts for push.
         local_block_ids = list(local_block_ids)
@@ -637,9 +677,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                 notif_msg=notif_id,
             )
             self.nixl_wrapper.transfer(handle)
-            # Track push WRITE handles so P can free blocks once done.
-            with self._sending_transfers_lock:
-                self._sending_transfers[request_id].append(handle)
+            # Caller tracks the handle (atomically with the request's other
+            # writes) so P can free blocks once all of them are done.
+            return handle
         except Exception as e:
             self._log_failure(
                 failure_type="transfer_setup_failed",
@@ -656,6 +696,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             if handle is not None:
                 self.nixl_wrapper.release_xfer_handle(handle)
             self.xfer_stats.record_failed_transfer()
+            return None
 
     # --- Notification handling on engine main thread ------------------ #
 
@@ -683,12 +724,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
             # Not tracked as a P-side send/process for this notif.
             if req_id not in self._reqs_to_send and req_id not in self._reqs_to_process:
-                if req_id in self._recving_metadata:
-                    # D-side: P signalled push completion. The transfer was
-                    # driven entirely by P (we don't own a NIXL handle here),
-                    # so materialise an empty entry in ``_recving_transfers``
-                    # and let ``_pop_done_transfers`` report it done on the
-                    # next ``get_finished``.
+                if (meta := self._recving_metadata.get(req_id)) is not None:
+                    # D-side: P signalled push completion. Each of the
+                    # producer's pp_size stages sends one notif; wait for all.
+                    self.consumer_notification_counts_by_req[req_id] += 1
+                    if self.consumer_notification_counts_by_req[req_id] < meta.pp_size:
+                        continue
+                    del self.consumer_notification_counts_by_req[req_id]
+                    # P drove the transfer (we own no NIXL handle), so
+                    # materialise an empty ``_recving_transfers`` entry for
+                    # ``_pop_done_transfers`` to report done.
                     self._recving_transfers.setdefault(req_id, [])
                 else:
                     # Not tracked on either side (lease may have expired
@@ -716,16 +761,22 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def get_finished(self) -> tuple[set[str], set[str]]:
         # Engine main thread asking for completions: also wake the writer
         # so it gets a chance to drain NIXL notifs (heartbeats, completion
-        # notifs, late PUSH_REGs) even if it had been parked.
+        # notifs, late PUSH_REGs) and poll in-flight WRITE transfers even if
+        # it had been parked.
         self._push_writer_wake.set()
 
         done_sending, done_recving = super().get_finished()
 
-        # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
-        # writer thread also appends to it, so guard the pop.
-        with self._sending_transfers_lock:
-            done_pushing = self._pop_done_transfers(self._sending_transfers)
-        for req_id in done_pushing:
+        # Drain WRITE transfers the writer reported complete. Skip any request
+        # the lease-expiry path in ``super().get_finished`` already finalised,
+        # so a late completion can't double-report a freed request (asserts).
+        while True:
+            try:
+                req_id = self._done_sends_inbox.get_nowait()
+            except queue.Empty:
+                break
+            if req_id not in self._reqs_to_process and req_id not in self._reqs_to_send:
+                continue
             self._reqs_to_send.pop(req_id, None)
             self._reqs_to_process.discard(req_id)
             self.consumer_notification_counts_by_req.pop(req_id, None)
