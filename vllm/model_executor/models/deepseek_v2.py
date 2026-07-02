@@ -87,6 +87,7 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     extract_layer_index,
+    is_shared_expert_fse_compatible,
     sequence_parallel_chunk,
 )
 from vllm.platforms import current_platform
@@ -334,7 +335,19 @@ class DeepseekV2MoE(nn.Module):
         self.is_rocm_aiter_moe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
         self.is_fusion_moe_shared_experts_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            and is_shared_expert_fse_compatible(quant_config)
         )
+        if (
+            rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            and not self.is_fusion_moe_shared_experts_enabled
+        ):
+            logger.warning_once(
+                "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=1 but the "
+                "quantization config is incompatible with shared expert "
+                "fusion (FSE). Falling back to non-fused shared expert "
+                "path. Quark OCP-MX (fp4/fp6) requires a non-emulation "
+                "MoE backend."
+            )
         if (
             self.is_rocm_aiter_moe_enabled
             and self.gate.e_score_correction_bias is not None
@@ -1503,6 +1516,7 @@ class DeepseekV2Model(nn.Module):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         rocm_aiter_moe_shared_expert_enabled = (
             rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            and is_shared_expert_fse_compatible(get_current_vllm_config().quant_config)
         )
         stacked_params_mapping = [
             # (param_name, shard_name, shard_id)
