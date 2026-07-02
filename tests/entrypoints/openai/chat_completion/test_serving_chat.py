@@ -1200,6 +1200,78 @@ async def test_serving_chat_data_parallel_rank_extraction():
     assert mock_engine.generate.call_args.kwargs["data_parallel_rank"] is None
 
 
+@pytest.mark.asyncio
+async def test_serving_chat_session_id_header_extraction():
+    """Session/conversation id headers are captured into
+    sampling_params.extra_args["session_id"], with X-Session-ID taking
+    precedence over X-Correlation-ID."""
+    mock_engine = MagicMock(spec=AsyncLLM)
+    mock_engine.errored = False
+    mock_engine.model_config = MockModelConfig()
+    mock_engine.input_processor = MagicMock()
+    mock_engine.renderer = _build_renderer(mock_engine.model_config)
+
+    async def mock_generate(*args, **kwargs):
+        from vllm.outputs import CompletionOutput, RequestOutput
+
+        yield RequestOutput(
+            request_id="test-request",
+            prompt="test prompt",
+            prompt_token_ids=[1, 2, 3],
+            prompt_logprobs=None,
+            outputs=[
+                CompletionOutput(
+                    index=0,
+                    text="test response",
+                    token_ids=[4, 5, 6],
+                    cumulative_logprob=0.0,
+                    logprobs=None,
+                    finish_reason="stop",
+                    stop_reason=None,
+                )
+            ],
+            finished=True,
+        )
+
+    mock_engine.generate = AsyncMock(side_effect=mock_generate)
+    serving_chat = _build_serving_chat(mock_engine)
+
+    def _session_id_passed_to_engine() -> str | None:
+        # generate(engine_input, sampling_params, sub_request_id, ...)
+        sampling_params = mock_engine.generate.call_args.args[1]
+        extra_args = sampling_params.extra_args or {}
+        return extra_args.get("session_id")
+
+    req = ChatCompletionRequest(
+        model=MODEL_NAME,
+        messages=[{"role": "user", "content": "what is 1+1?"}],
+    )
+
+    # X-Correlation-ID is captured.
+    raw = MagicMock()
+    raw.headers = {"X-Correlation-ID": "conv-abc"}
+    raw.state = MagicMock()
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req, raw)
+    assert _session_id_passed_to_engine() == "conv-abc"
+
+    # X-Session-ID wins when both are present.
+    raw_both = MagicMock()
+    raw_both.headers = {"X-Session-ID": "sess-1", "X-Correlation-ID": "conv-abc"}
+    raw_both.state = MagicMock()
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req, raw_both)
+    assert _session_id_passed_to_engine() == "sess-1"
+
+    # No header -> no session_id injected.
+    raw_none = MagicMock()
+    raw_none.headers = {}
+    raw_none.state = MagicMock()
+    with suppress(Exception):
+        await serving_chat.create_chat_completion(req, raw_none)
+    assert _session_id_passed_to_engine() is None
+
+
 async def _render_chat_prompt_token_ids(
     serving_chat: OpenAIServingChat,
     messages: list[dict[str, str]],

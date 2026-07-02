@@ -12,7 +12,10 @@ use crate::error::ApiError;
 pub struct ResolvedRequestContext {
     pub request_id: String,
     pub data_parallel_rank: Option<u32>,
+    pub session_id: Option<String>,
 }
+
+const SESSION_ID_HEADERS: [&str; 2] = ["X-Session-ID", "X-Correlation-ID"];
 
 /// Return the current Unix timestamp in seconds for OpenAI response objects.
 pub fn unix_timestamp() -> u64 {
@@ -41,6 +44,20 @@ pub fn merge_kv_transfer_params(
             // This is safe because we know that `kv_params` is already valid JSON.
             serde_json::to_value(kv_params).unwrap(),
         );
+    }
+    xargs
+}
+
+/// Inject the session id into `vllm_xargs["session_id"]`, mirroring the Python
+/// frontend. An explicit body value is preserved.
+pub fn merge_session_id(
+    mut xargs: Option<HashMap<String, Value>>,
+    session_id: Option<&str>,
+) -> Option<HashMap<String, Value>> {
+    if let Some(session_id) = session_id {
+        let map = xargs.get_or_insert_with(HashMap::new);
+        map.entry("session_id".to_string())
+            .or_insert_with(|| Value::String(session_id.to_owned()));
     }
     xargs
 }
@@ -86,9 +103,20 @@ pub fn resolve_request_context(
     let request_id_header = headers.get("X-Request-Id").and_then(|value| value.to_str().ok());
     let request_id = resolve_base_request_id(request_id_header, request_id);
 
+    // First present session header wins.
+    let session_id = SESSION_ID_HEADERS.iter().find_map(|name| {
+        headers
+            .get(*name)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+    });
+
     ResolvedRequestContext {
         request_id,
         data_parallel_rank,
+        session_id,
     }
 }
 
