@@ -16,6 +16,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     KVConnectorBase_V1,
     KVConnectorMetadata,
     KVConnectorRole,
+    SupportsHMA,
 )
 from vllm.logger import init_logger
 from vllm.v1.attention.backend import AttentionMetadata
@@ -69,7 +70,7 @@ class LMCacheKVEvents(KVConnectorKVEvents):
         return f"<LMCacheKVEvents events={self.get_all_events()}>"
 
 
-class LMCacheConnectorV1(KVConnectorBase_V1):
+class LMCacheConnectorV1(KVConnectorBase_V1, SupportsHMA):
     @classmethod
     def requires_piecewise_for_cudagraph(cls, extra_config: dict[str, Any]) -> bool:
         """
@@ -89,6 +90,7 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
         super().__init__(
             vllm_config=vllm_config, role=role, kv_cache_config=kv_cache_config
         )
+        self.kv_cache_config = kv_cache_config
         assert vllm_config.kv_transfer_config is not None
         use_native = vllm_config.kv_transfer_config.get_from_extra_config(
             "use_native", False
@@ -338,6 +340,29 @@ class LMCacheConnectorV1(KVConnectorBase_V1):
             returned by the engine.
         """
         return self._lmcache_engine.request_finished(request, block_ids)
+
+    def request_finished_all_groups(
+        self,
+        request: "Request",
+        block_ids: tuple[list[int], ...],
+    ) -> tuple[bool, dict[str, Any] | None]:
+        """
+        Called when a request has finished with hybrid KV cache groups enabled.
+
+        LMCache currently stores and loads one paged attention KV cache group.
+        Hybrid models can put that group after state-cache groups, so use the
+        group selected by the LMCache adapter instead of assuming group 0.
+        """
+        get_group_id = getattr(
+            self._lmcache_engine, "get_lmcache_kv_cache_group_id", None
+        )
+        kv_cache_group_id = get_group_id() if callable(get_group_id) else 0
+        if kv_cache_group_id >= len(block_ids):
+            raise ValueError(
+                f"LMCache selected KV cache group {kv_cache_group_id}, "
+                f"but vLLM provided {len(block_ids)} block-id group(s)"
+            )
+        return self.request_finished(request, block_ids[kv_cache_group_id])
 
     def take_events(self) -> Iterable["KVCacheEvent"]:
         """
