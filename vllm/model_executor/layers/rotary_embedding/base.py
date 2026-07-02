@@ -6,6 +6,7 @@ import torch
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.model_executor.custom_op import CustomOp
+from vllm.utils.torchembed import is_torchembed_available
 
 from .common import ApplyRotaryEmb
 
@@ -72,6 +73,16 @@ class RotaryEmbeddingBase(CustomOp):
                 )
             else:
                 self.cos_sin_cache_bf16 = None
+
+        # Auto-detect torchembed for standard 2D cos/sin cache layouts.
+        self.use_torchembed = (
+            self.enabled()
+            and is_torchembed_available()
+            and self.is_neox_style
+            and hasattr(self, "cos_sin_cache")
+            and self.cos_sin_cache.dim() == 2
+            and self.cos_sin_cache.shape[-1] == self.rotary_dim
+        )
 
         self.apply_rotary_emb = ApplyRotaryEmb(
             is_neox_style=self.is_neox_style,
@@ -218,6 +229,62 @@ class RotaryEmbedding(RotaryEmbeddingBase):
             self.is_neox_style,
         )
 
+    def _forward_torchembed(
+        self,
+        positions: torch.Tensor,
+        query: torch.Tensor,
+        key: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Apply RoPE via the torchembed fused triton kernel.
+
+        The kernel expects a ``(batch, seq_len, dim)`` layout where
+        ``seq_len`` is the second-to-last dimension.  vLLM's intermediate
+        layout is ``(num_tokens, num_heads, dim)``, so we transpose
+        to ``(num_heads, num_tokens, dim)`` before calling the kernel
+        and transpose back afterwards.
+
+        .. note::
+            The two transposes copy the tensor.  A future version of the
+            kernel could accept an arbitrary stride layout and avoid this
+            overhead entirely.
+        """
+        from torchembed._triton import fused_rope_forward
+
+        positions = positions.flatten()
+        num_tokens = positions.shape[0]
+        cos_sin = self.cos_sin_cache.index_select(0, positions)
+        c, s = cos_sin.chunk(2, dim=-1)
+
+        q = query.view(num_tokens, -1, self.head_size)
+        q_rot = q[..., :self.rotary_dim]
+        q_pass = q[..., self.rotary_dim:]
+        num_qh = q.shape[1]
+
+        q_t = q_rot.transpose(0, 1).contiguous()
+        c_q = c.unsqueeze(0).expand(num_qh, -1, -1)
+        s_q = s.unsqueeze(0).expand(num_qh, -1, -1)
+
+        if key is not None:
+            k = key.view(num_tokens, -1, self.head_size)
+            k_rot = k[..., :self.rotary_dim]
+            k_pass = k[..., self.rotary_dim:]
+            num_kvh = k.shape[1]
+
+            c_k = c.unsqueeze(0).expand(num_kvh, -1, -1)
+            s_k = s.unsqueeze(0).expand(num_kvh, -1, -1)
+            k_t = k_rot.transpose(0, 1).contiguous()
+
+            q_out_t, k_out_t = fused_rope_forward(q_t, k_t, c_q, s_k)
+            k_out = k_out_t.transpose(0, 1).contiguous()
+            key_out = torch.cat((k_out, k_pass), dim=-1).reshape(key.shape)
+        else:
+            q_out_t, _ = fused_rope_forward(q_t, q_t, c_q, s_q)
+            key_out = None
+
+        q_out = q_out_t.transpose(0, 1).contiguous()
+        query_out = torch.cat((q_out, q_pass), dim=-1).reshape(query.shape)
+        return query_out, key_out
+
     def forward_cuda(
         self,
         positions: torch.Tensor,
@@ -234,6 +301,9 @@ class RotaryEmbedding(RotaryEmbeddingBase):
                 self.is_neox_style,
             )
             return query, key
+
+        if self.use_torchembed:
+            return self._forward_torchembed(positions, query, key)
 
         from vllm import _custom_ops as ops
 
