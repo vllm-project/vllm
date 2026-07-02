@@ -42,7 +42,10 @@ class HummingLinearKernel(MPLinearKernel):
         }
 
         convert_linear_layer_to_humming_standard(layer=layer, name_map=name_map)
-        prepare_humming_layer(layer, quant_config)
+        input_quant_config = getattr(layer, "_humming_input_quant_config", None)
+        prepare_humming_layer(
+            layer, quant_config, input_quant_config=input_quant_config
+        )
 
     def apply_weights(
         self,
