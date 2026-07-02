@@ -17,7 +17,6 @@ from vllm.model_executor.models.moss_audio import (
     MOSS_AUDIO_PLACEHOLDER,
     MOSS_AUDIO_TOKEN,
     MOSS_AUDIO_TOKEN_ID,
-    GatedMLP,
     MossAudioConfig,
     MossAudioDummyInputsBuilder,
     MossAudioEncoder,
@@ -592,53 +591,6 @@ def test_moss_qwen3_deepstack_keys_for_pp(monkeypatch):
     )
     assert isinstance(forward_tensors, IntermediateTensors)
     assert set(forward_tensors.tensors) == set(tensors.tensors)
-
-
-@pytest.mark.parametrize("tp_size", [1, 2])
-def test_moss_audio_gated_mlp_tp_shapes_and_loading(monkeypatch, tp_size):
-    from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.config.device import DeviceConfig
-
-    _patch_tensor_parallel_for_linear_layers(monkeypatch, tp_size=tp_size)
-    with set_current_vllm_config(VllmConfig(device_config=DeviceConfig(device="cpu"))):
-        mlp = GatedMLP(input_size=4, hidden_size=8, output_size=6)
-
-    params = dict(mlp.named_parameters())
-    assert params["gate_up_proj.weight"].shape == torch.Size([16 // tp_size, 4])
-    assert params["down_proj.weight"].shape == torch.Size([6, 8 // tp_size])
-
-    gate_weight = torch.arange(32, dtype=torch.float32).reshape(8, 4)
-    up_weight = torch.arange(100, 132, dtype=torch.float32).reshape(8, 4)
-    down_weight = torch.arange(48, dtype=torch.float32).reshape(6, 8)
-    loaded = mlp.load_weights(
-        [
-            ("gate_proj.weight", gate_weight),
-            ("up_proj.weight", up_weight),
-            ("down_proj.weight", down_weight),
-        ]
-    )
-
-    assert loaded == {"gate_up_proj.weight", "down_proj.weight"}
-    shard = 8 // tp_size
-    assert torch.equal(params["gate_up_proj.weight"][:shard], gate_weight[:shard])
-    assert torch.equal(params["gate_up_proj.weight"][shard:], up_weight[:shard])
-    assert torch.equal(params["down_proj.weight"], down_weight[:, : 8 // tp_size])
-
-    with set_current_vllm_config(VllmConfig(device_config=DeviceConfig(device="cpu"))):
-        packed_mlp = GatedMLP(input_size=4, hidden_size=8, output_size=6)
-    packed_params = dict(packed_mlp.named_parameters())
-    loaded = packed_mlp.load_weights(
-        [("gate_up_proj.weight", torch.cat([gate_weight, up_weight], dim=0))]
-    )
-    assert loaded == {"gate_up_proj.weight"}
-    assert torch.equal(
-        packed_params["gate_up_proj.weight"][:shard],
-        gate_weight[:shard],
-    )
-    assert torch.equal(
-        packed_params["gate_up_proj.weight"][shard:],
-        up_weight[:shard],
-    )
 
 
 def test_moss_audio_encoder_loads_realistic_attention_weight_names(monkeypatch):

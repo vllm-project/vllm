@@ -68,28 +68,6 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Aya Vision
-def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-    model_name = "CohereLabs/aya-vision-8b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=2048,
-        max_num_seqs=2,
-        mm_processor_kwargs={"crop_to_patches": True},
-        limit_mm_per_prompt={modality: 1},
-    )
-    prompts = [
-        f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|><image>{question}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
-        for question in questions
-    ]
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Bee-8B
 def run_bee(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1377,28 +1355,6 @@ def run_llava_onevision(questions: list[str], modality: str) -> ModelRequestData
     )
 
 
-# Mantis
-def run_mantis(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    llama3_template = "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"  # noqa: E501
-    prompts = [llama3_template.format(f"{question}\n<image>") for question in questions]
-
-    engine_args = EngineArgs(
-        model="TIGER-Lab/Mantis-8B-siglip-llama3",
-        max_model_len=4096,
-        hf_overrides={"architectures": ["MantisForConditionalGeneration"]},
-        limit_mm_per_prompt={modality: 1},
-    )
-    stop_token_ids = [128009]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
-    )
-
-
 # MiniCPM-V
 def run_minicpmv_base(questions: list[str], modality: str, model_name):
     assert modality in ["image", "video", "image+video"]
@@ -2347,68 +2303,8 @@ def run_step_vl(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# omni-research/Tarsier-7b
-def run_tarsier(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-    model_name = "omni-research/Tarsier-7b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        trust_remote_code=True,
-        max_model_len=4096,
-        limit_mm_per_prompt={modality: 1},
-    )
-    prompts = [(f"USER: <image>\n{question} ASSISTANT:") for question in questions]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
-def run_tarsier2(questions: list[str], modality: str) -> ModelRequestData:
-    model_name = "omni-research/Tarsier2-Recap-7b"
-
-    mm_limit = {"image": 1, "video": 1} if modality == "image+video" else {modality: 1}
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=4096,
-        hf_overrides={
-            "architectures": ["Tarsier2ForConditionalGeneration"],
-            "model_type": "tarsier2",
-        },
-        limit_mm_per_prompt=mm_limit,
-    )
-
-    image_placeholder = "<|vision_start|><|image_pad|><|vision_end|>"
-    video_placeholder = "<|vision_start|><|video_pad|><|vision_end|>"
-
-    if modality == "image":
-        placeholder = image_placeholder
-    elif modality == "video":
-        placeholder = video_placeholder
-    elif modality == "image+video":
-        placeholder = image_placeholder + video_placeholder
-
-    prompts = [
-        (
-            "<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n"
-            f"<|im_start|>user\n{placeholder}"
-            f"{question}<|im_end|>\n"
-            "<|im_start|>assistant\n"
-        )
-        for question in questions
-    ]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 model_example_map = {
     "aria": run_aria,
-    "aya_vision": run_aya_vision,
     "bagel": run_bagel,
     "cheers": run_cheers,
     "bee": run_bee,
@@ -2449,7 +2345,6 @@ model_example_map = {
     "llava-next": run_llava_next,
     "llava-next-video": run_llava_next_video,
     "llava-onevision": run_llava_onevision,
-    "mantis": run_mantis,
     "minicpmo": run_minicpmo,
     "minicpmv": run_minicpmv,
     "mistral3": run_mistral3,
@@ -2479,8 +2374,6 @@ model_example_map = {
     "smolvlm": run_smolvlm,
     "step3": run_step3,
     "stepvl": run_step_vl,
-    "tarsier": run_tarsier,
-    "tarsier2": run_tarsier2,
 }
 
 

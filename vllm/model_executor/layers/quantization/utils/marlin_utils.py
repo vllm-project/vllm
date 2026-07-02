@@ -9,6 +9,7 @@ import torch
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
+from vllm.distributed.utils import verify_group_size_divides_partition
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import LinearBase
@@ -193,12 +194,11 @@ def verify_marlin_supports_shape(
             "with --quantization gptq."
         )
 
-    if group_size < input_size and input_size_per_partition % group_size != 0:
-        raise ValueError(
-            f"Weight input_size_per_partition = {input_size_per_partition}"
-            f" is not divisible by group_size = {group_size}. "
-            "Consider reducing tensor_parallel_size or running "
-            "with --quantization gptq."
+    if group_size < input_size:
+        verify_group_size_divides_partition(
+            input_size_per_partition,
+            group_size,
+            extra_suggestion=" or running with --quantization gptq",
         )
 
 
