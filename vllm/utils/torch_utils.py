@@ -468,29 +468,60 @@ def _nvfp4_split_data_scale(
     return data, scale
 
 
-def nvfp4_kv_cache_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
+def _nvfp4_global_split_views(kv_cache: torch.Tensor) -> tuple[tuple, tuple]:
+    """Contiguous [all-data | all-SF] split for the FlashInfer FA2 nvfp4 path.
+
+    The FA2 paged nvfp4 kernel derives the scale-factor stride as
+    ``data_stride / 8`` (it does not read the SF tensor's own strides), so the
+    data and scale regions must each be contiguous with that exact 8:1 ratio at
+    every dim.  We therefore lay the page buffer out as one contiguous data
+    region followed by one contiguous SF region (rather than the trtllm-gen
+    per-page ``[data|scale]`` interleave).  Slicing K/V from dim 1 preserves the
+    8:1 ratio on each side (both skip the other side's region by the same
+    factor).  Requires a contiguous (NHD) ``kv_cache``.
+    """
+    full = kv_cache.shape[-1]
+    data_dim = full * 8 // 9
+    scale_dim = full - data_dim
+    flat = kv_cache.reshape(-1)
+    if kv_cache.dim() == 4:
+        nb, d1, d2 = kv_cache.shape[:3]
+        dc = nb * d1 * d2 * data_dim
+        data = flat[:dc].view(nb, d1, d2, data_dim)
+        scale = flat[dc:].view(nb, d1, d2, scale_dim).view(torch.float8_e4m3fn)
+        return (data,), (scale,)
+    nb, two, d1, d2 = kv_cache.shape[:4]
+    dc = nb * two * d1 * d2 * data_dim
+    data = flat[:dc].view(nb, two, d1, d2, data_dim)
+    scale = flat[dc:].view(nb, two, d1, d2, scale_dim).view(torch.float8_e4m3fn)
+    return (data[:, 0], data[:, 1]), (scale[:, 0], scale[:, 1])
+
+
+def nvfp4_kv_cache_split_views(
+    kv_cache: torch.Tensor, contiguous_sf_layout: bool = False
+) -> tuple[tuple, tuple]:
     """Split an NVFP4 KV cache tensor into data and scale views.
 
     Accepts either a 5D tensor ``(num_pages, 2, dim_2, dim_3, full_dim)``
     or a 4D single-side tensor ``(num_pages, dim_2, dim_3, full_dim)``.
 
-    Per-page layout: [K_data | K_scale | V_data | V_scale].
-    Each KV side is self-contained (data followed by its scale), so the
-    5D case simply splits each side independently.
+    Two physical layouts are supported, selected by ``contiguous_sf_layout``:
 
-    The returned views are in the same dim order as the input (NHD or
-    HND), so callers get views matching whichever order they passed in.
+    * ``False`` (default, trtllm-gen / sm100f): per-page ``[data|scale]`` — each
+      KV side is self-contained (data followed by its scale) within its page.
+    * ``True`` (FlashInfer FA2 / sm120/sm121): contiguous ``[all-data|all-SF]``
+      — required because the FA2 nvfp4 kernel derives the SF stride as
+      ``data_stride/8``.  See :func:`_nvfp4_global_split_views`.
 
-    Args:
-        kv_cache: 5D or 4D uint8 tensor where the last dimension is
-            ``full_dim = data_dim + scale_dim = 9 * head_size / 16``.
+    The returned views are in the same dim order as the input (NHD or HND).
 
     Returns:
-        For 5D input:
-            ``(k_data, v_data), (k_scale, v_scale)``
-        For 4D input (single KV side):
-            ``(data,), (scale,)``
+        For 5D input: ``(k_data, v_data), (k_scale, v_scale)``.
+        For 4D input (single KV side): ``(data,), (scale,)``.
     """
+    if contiguous_sf_layout:
+        return _nvfp4_global_split_views(kv_cache)
+
     if kv_cache.dim() == 4:
         data, scale = _nvfp4_split_data_scale(kv_cache)
         return (data,), (scale,)
