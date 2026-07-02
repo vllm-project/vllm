@@ -669,6 +669,19 @@ class DeepseekV4MoE(nn.Module):
         self.physical_expert_start = self.experts_start_idx
         self.physical_expert_end = self.experts_end_idx
 
+        num_expert_group = getattr(config, "n_group", None)
+        topk_group = getattr(config, "topk_group", None)
+        use_grouped_topk = (
+            self.scoring_func == "sigmoid"
+            and num_expert_group is not None
+            and topk_group is not None
+            and num_expert_group > 0
+            and topk_group > 0
+        )
+        if not use_grouped_topk:
+            num_expert_group = None
+            topk_group = None
+
         self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             gate=self.gate,
@@ -682,6 +695,9 @@ class DeepseekV4MoE(nn.Module):
             scoring_func=self.scoring_func,
             routed_scaling_factor=self.routed_scaling_factor,
             e_score_correction_bias=self.gate.e_score_correction_bias,
+            use_grouped_topk=use_grouped_topk,
+            num_expert_group=num_expert_group,
+            topk_group=topk_group,
             hash_indices_table=self.gate.tid2eid,
             swiglu_limit=self.swiglu_limit,
             router_logits_dtype=torch.float32,
