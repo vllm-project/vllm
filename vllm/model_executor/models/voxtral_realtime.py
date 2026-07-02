@@ -4,6 +4,7 @@
 import asyncio
 import math
 from collections.abc import AsyncGenerator, Iterable, Iterator, Mapping
+from typing import cast
 
 import numpy as np
 import torch
@@ -18,7 +19,7 @@ from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.engine.protocol import StreamingInput
 from vllm.envs import VLLM_ENGINE_ITERATION_TIMEOUT_S
-from vllm.inputs import PromptType, TokensPrompt
+from vllm.inputs import MultiModalInput, PromptType, TokensPrompt, mm_input
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
 from vllm.model_executor.models.voxtral import (
@@ -29,7 +30,13 @@ from vllm.model_executor.models.voxtral import (
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import _I, BaseMultiModalProcessorCache
-from vllm.multimodal.inputs import MultiModalKwargsOptionalItems
+from vllm.multimodal.inputs import (
+    MultiModalBatchedField,
+    MultiModalFieldElem,
+    MultiModalKwargsItem,
+    MultiModalKwargsOptionalItems,
+    PlaceholderRange,
+)
 from vllm.multimodal.parse import MultiModalDataItems
 from vllm.multimodal.processing import BaseDummyInputsBuilder
 from vllm.multimodal.processing.processor import (
@@ -215,6 +222,46 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
     # transformers' currently has limited support for MistralCommon backend
     # and cached_get_processor. Let's skip until fixed
     skip_warmup_audio_preprocessing = True
+
+    @classmethod
+    def build_realtime_engine_input(
+        cls,
+        prompt: PromptType,
+        model_config: ModelConfig,
+        mm_identifier: str,
+        arrival_time: float,
+    ) -> MultiModalInput:
+        tokens_prompt = cast(TokensPrompt, prompt)
+        prompt_token_ids = tokens_prompt["prompt_token_ids"]
+        multi_modal_data = tokens_prompt.get("multi_modal_data") or {}
+        audio_item = multi_modal_data.get("audio")
+        if audio_item is None:
+            raise ValueError("Voxtral realtime prompt must contain one audio frame")
+
+        audio_array = audio_item[0] if isinstance(audio_item, tuple) else audio_item
+        audio_tensor = torch.as_tensor(audio_array)
+        tokenizer = cached_tokenizer_from_config(model_config)
+        audio_config = tokenizer.instruct.audio_encoder.audio_config
+        num_audio_tokens = audio_config.num_audio_tokens(audio_tensor.shape[0])
+
+        audio_kwargs = MultiModalKwargsItem(
+            {
+                "audio_arrays": MultiModalFieldElem(
+                    data=audio_tensor,
+                    field=MultiModalBatchedField(),
+                )
+            }
+        )
+        engine_input = mm_input(
+            prompt_token_ids=prompt_token_ids,
+            mm_kwargs={"audio": [audio_kwargs]},
+            mm_hashes={"audio": [mm_identifier]},
+            mm_placeholders={
+                "audio": [PlaceholderRange(offset=0, length=num_audio_tokens)]
+            },
+        )
+        engine_input["arrival_time"] = arrival_time
+        return engine_input
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
