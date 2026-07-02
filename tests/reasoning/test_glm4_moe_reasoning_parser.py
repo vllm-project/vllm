@@ -216,6 +216,52 @@ def test_reasoning(
     assert is_reasoning_end == param_dict["is_reasoning_end"]
 
 
+def test_reasoning_token_count(glm45_tokenizer):
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        glm45_tokenizer
+    )
+    output = glm45_tokenizer.tokenize("<think>This is a reasoning section</think>Final")
+    output_ids = glm45_tokenizer.convert_tokens_to_ids(output)
+
+    assert parser.count_reasoning_tokens(output_ids) > 0
+
+
+def test_reasoning_token_count_ignores_prefix_before_start_token(glm45_tokenizer):
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        glm45_tokenizer
+    )
+    output = glm45_tokenizer.tokenize("<think>This is a reasoning section</think>Final")
+    prefixed_output = glm45_tokenizer.tokenize(
+        "\n<think>This is a reasoning section</think>Final"
+    )
+
+    assert parser.count_reasoning_tokens(
+        glm45_tokenizer.convert_tokens_to_ids(prefixed_output)
+    ) == parser.count_reasoning_tokens(glm45_tokenizer.convert_tokens_to_ids(output))
+
+
+def test_reasoning_token_count_no_start_token(glm45_tokenizer):
+    """GLM5 outputs reasoning without <think> prefix, only </think> suffix."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        glm45_tokenizer
+    )
+    output = glm45_tokenizer.tokenize("This is a reasoning section</think>Final")
+    output_ids = glm45_tokenizer.convert_tokens_to_ids(output)
+
+    assert parser.count_reasoning_tokens(output_ids) > 0
+
+
+def test_reasoning_token_count_no_markers(glm45_tokenizer):
+    """Without any think markers, reasoning token count should be 0."""
+    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
+        glm45_tokenizer
+    )
+    output = glm45_tokenizer.tokenize("This is plain content with no markers")
+    output_ids = glm45_tokenizer.convert_tokens_to_ids(output)
+
+    assert parser.count_reasoning_tokens(output_ids) == 0
+
+
 @pytest.mark.parametrize("prompt, is_reasoning_end", REASONING_END_TEST_CASES)
 def test_is_reasoning_end_full_prompt(
     prompt: str, is_reasoning_end: bool, glm45_tokenizer
