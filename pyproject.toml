@@ -153,6 +153,7 @@ FoPE = "FoPE"
 k_ot = "k_ot"
 view_seperator = "view_seperator"
 inverse_std_variences = "inverse_std_variences"
+stride_bse = "stride_bse"
 
 [tool.typos.default.extend-words]
 iy = "iy"
@@ -162,6 +163,8 @@ tme = "tme"
 dout = "dout"
 Pn = "Pn"
 arange = "arange"
+writeable = "writeable"
+layrnorm = "layrnorm"
 thw = "thw"
 # temporal position ids (parallels hpos/wpos in vision RoPE)
 tpos = "tpos"
