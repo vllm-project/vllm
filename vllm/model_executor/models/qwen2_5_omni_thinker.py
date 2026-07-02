@@ -1392,6 +1392,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                     second_per_grid_ts = _get_feature_tensor(
                         mm_feature, "second_per_grid_ts"
                     ).item()
+                if not np.isfinite(second_per_grid_ts):
+                    second_per_grid_ts = 1.0
+                second_per_grid_ts = max(second_per_grid_ts, 1e-3)
                 use_audio_in_video = False
                 if mm_feature.data.get("use_audio_in_video"):
                     use_audio_in_video = bool(
@@ -1432,6 +1435,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         audio_len = data["audio_feature_length"]
 
         thinker_config = self.config
+        max_mrope_pos = getattr(thinker_config, "max_position_embeddings", 32768) * 4
         tokens_per_second = getattr(
             thinker_config.vision_config, "tokens_per_second", 25
         )
@@ -1439,7 +1443,10 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
         t_ntoken_per_chunk = int(tokens_per_second * seconds_per_chunk)
 
         # Temporal indices with scaling
-        t_index = (np.arange(grid_t) * t_factor).astype(np.int64)
+        t_index = np.minimum(
+            np.arange(grid_t) * t_factor,
+            max_mrope_pos - 1,
+        ).astype(np.int64)
 
         # Split temporal indices into chunks
         t_index_split_chunk: list[list[int]] = [
@@ -1510,6 +1517,8 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             |V_1 ...    V_n|A_1 ...   A_n|V_n+1 ... V_2n|A_n+1 ... A_2n|...
             |vision chunk 1|audio chunk 1|vision chunk 2|audio chunk 2 |...
         """
+        max_mrope_pos = getattr(self.config, "max_position_embeddings", 32768) * 4
+
         llm_pos_ids_list: list[np.ndarray] = []
         st = 0
 
@@ -1542,7 +1551,10 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
 
                 grid_indices = np.indices((grid_t, grid_h, grid_w))
                 if t_factor != 1.0:
-                    grid_indices[0] = (grid_indices[0] * t_factor).astype(np.int64)
+                    grid_indices[0] = np.minimum(
+                        grid_indices[0] * t_factor,
+                        max_mrope_pos - 1,
+                    ).astype(np.int64)
                 llm_pos_ids_list.append(grid_indices.reshape(3, -1) + st_idx)
                 st = offset + grid_t * grid_h * grid_w
 
@@ -1556,7 +1568,10 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                     # Simple video (same as Qwen2-VL)
                     grid_indices = np.indices((grid_t, grid_h, grid_w))
                     if t_factor != 1.0:
-                        grid_indices[0] = (grid_indices[0] * t_factor).astype(np.int64)
+                        grid_indices[0] = np.minimum(
+                            grid_indices[0] * t_factor,
+                            max_mrope_pos - 1,
+                        ).astype(np.int64)
                     llm_pos_ids_list.append(grid_indices.reshape(3, -1) + st_idx)
                     st = offset + grid_t * grid_h * grid_w
                 else:
@@ -1576,6 +1591,14 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
             )
 
         llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
+        if llm_positions.max() >= max_mrope_pos:
+            logger.warning(
+                "MRoPE positions exceed cache bounds (max=%d, limit=%d). "
+                "Clamping to prevent out-of-bounds access.",
+                llm_positions.max(),
+                max_mrope_pos,
+            )
+            np.clip(llm_positions, 0, max_mrope_pos - 1, out=llm_positions)
         mrope_position_delta = int(llm_positions.max()) + 1 - len(input_tokens)
 
         return torch.from_numpy(llm_positions), mrope_position_delta
