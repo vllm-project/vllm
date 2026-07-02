@@ -589,6 +589,13 @@ class OpenAIServingCompletion(OpenAIServing):
             )
 
         request_metadata.final_usage_info = usage
+        # x-vllm-* headers reflect a single request's timing. For multi-prompt
+        # batch requests the per-prompt FinishedRequestStats can't be
+        # meaningfully aggregated (queue/prefill/decode intervals are
+        # per-prompt), so we skip emitting headers entirely in that case.
+        # Token counts in usage are correctly summed across all prompts.
+        if last_final_res is not None and len(final_res_batch) == 1:
+            request_metadata.finished_stats = last_final_res.finished_stats
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
         return CompletionResponse(

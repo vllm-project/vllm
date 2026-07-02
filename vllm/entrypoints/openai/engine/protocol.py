@@ -21,6 +21,7 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
+from vllm.v1.metrics.stats import FinishedRequestStats
 
 logger = init_logger(__name__)
 
@@ -116,8 +117,11 @@ class UsageInfo(OpenAIBaseModel):
 
 
 class RequestResponseMetadata(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
     request_id: str
     final_usage_info: UsageInfo | None = None
+    finished_stats: FinishedRequestStats | None = None
 
 
 class JsonSchemaResponseFormat(OpenAIBaseModel):
