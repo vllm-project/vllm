@@ -521,6 +521,14 @@ class TritonAttentionImpl(AttentionImpl):
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
 
+        # DIAGNOSTIC LOGGING: Track FP8 configuration
+        logger.info(
+            f"[GEMMA4_FP8_DEBUG] TritonAttentionImpl.__init__: "
+            f"kv_cache_dtype={kv_cache_dtype}, "
+            f"_kv_quant_mode={self._kv_quant_mode.name}({self._kv_quant_mode.value}), "
+            f"is_per_token_head={self._is_per_token_head_quant}"
+        )
+
         # Enable tensor descriptors for Q/K/V load/store on platforms that
         # benefit from HW 2D block reads (Intel Xe2/Xe3).  The dead branch
         # is eliminated at Triton compile time, so other platforms see
@@ -604,6 +612,11 @@ class TritonAttentionImpl(AttentionImpl):
             k_scale_cache = self._k_scale_cache
             v_scale_cache = self._v_scale_cache
             q_descale = k_descale = v_descale = None
+            # DIAGNOSTIC LOGGING
+            logger.info(
+                f"[GEMMA4_FP8_DEBUG] forward: Using per-token-head quant path, "
+                f"mode={self._kv_quant_mode.name}"
+            )
         # FP8 per-tensor / auto path (original flow).
         else:
             key_cache, value_cache = kv_cache.unbind(1)
@@ -613,6 +626,22 @@ class TritonAttentionImpl(AttentionImpl):
             ):
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
+                # DIAGNOSTIC LOGGING
+                logger.info(
+                    f"[GEMMA4_FP8_DEBUG] forward: FP8 quantized KV cache detected, "
+                    f"kv_cache_dtype={self.kv_cache_dtype}, "
+                    f"key_cache.dtype={key_cache.dtype}, "
+                    f"value_cache.dtype={value_cache.dtype}"
+                )
+            else:
+                # DIAGNOSTIC LOGGING
+                logger.info(
+                    f"[GEMMA4_FP8_DEBUG] forward: Non-quantized or already correct dtype, "
+                    f"kv_cache_dtype={self.kv_cache_dtype}, "
+                    f"is_quantized={is_quantized_kv_cache(self.kv_cache_dtype)}, "
+                    f"key_cache.dtype={key_cache.dtype}, "
+                    f"fp8_dtype={self.fp8_dtype}"
+                )
             descale_shape = (
                 attn_metadata.query_start_loc.shape[0] - 1,
                 key_cache.shape[2],
@@ -643,6 +672,20 @@ class TritonAttentionImpl(AttentionImpl):
         softmax_segm_expsum = attn_metadata.softmax_segm_expsum
 
         mm_prefix_range_tensor = attn_metadata.mm_prefix_range_tensor
+
+        # DIAGNOSTIC LOGGING: Log kernel call parameters
+        logger.info(
+            f"[GEMMA4_FP8_DEBUG] Calling unified_attention: "
+            f"kv_quant_mode={self._kv_quant_mode.name}({self._kv_quant_mode.value}), "
+            f"has_mm_prefix_range={mm_prefix_range_tensor is not None}, "
+            f"k_descale={k_descale is not None}, "
+            f"v_descale={v_descale is not None}, "
+            f"k_scale_cache={k_scale_cache is not None}, "
+            f"v_scale_cache={v_scale_cache is not None}, "
+            f"query.dtype={query.dtype}, "
+            f"key_cache.dtype={key_cache.dtype}, "
+            f"value_cache.dtype={value_cache.dtype}"
+        )
 
         unified_attention(
             q=query[:num_actual_tokens],

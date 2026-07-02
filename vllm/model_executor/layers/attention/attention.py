@@ -316,18 +316,65 @@ class Attention(nn.Module, AttentionLayerBase):
         # weight and activation dtype.
         dtype = torch.get_default_dtype()
         if attn_backend is None:
-            self.attn_backend = get_attn_backend(
-                head_size,
-                dtype,
-                kv_cache_dtype,
-                use_mla=False,
-                has_sink=self.has_sink,
-                use_mm_prefix=self.use_mm_prefix,
-                use_per_head_quant_scales=use_per_head_quant_scales,
-                attn_type=attn_type,
-            )
+            # GEMMA4_FP8: Dual backend support for multimodal models
+            # Create both FlashInfer (text-only) and Triton (multimodal) backends
+            # to enable FP8 KV cache on both paths
+            if self.use_mm_prefix:
+                # Multimodal model: create dual backends for runtime selection
+                logger.info(
+                    "[GEMMA4_FP8] Creating dual backends for multimodal model: "
+                    "FlashInfer (text-only) + Triton (multimodal)"
+                )
+
+                # Backend for text-only requests (FlashInfer - faster on B200)
+                self.attn_backend_text = get_attn_backend(
+                    head_size,
+                    dtype,
+                    kv_cache_dtype,
+                    use_mla=False,
+                    has_sink=self.has_sink,
+                    use_mm_prefix=False,  # Disable mm_prefix for FlashInfer
+                    use_per_head_quant_scales=use_per_head_quant_scales,
+                    attn_type=attn_type,
+                )
+
+                # Backend for multimodal requests (Triton - supports mm_prefix)
+                self.attn_backend_multimodal = get_attn_backend(
+                    head_size,
+                    dtype,
+                    kv_cache_dtype,
+                    use_mla=False,
+                    has_sink=self.has_sink,
+                    use_mm_prefix=True,  # Enable mm_prefix for Triton
+                    use_per_head_quant_scales=use_per_head_quant_scales,
+                    attn_type=attn_type,
+                )
+
+                # Default to multimodal backend for compatibility
+                self.attn_backend = self.attn_backend_multimodal
+
+                logger.info(
+                    f"[GEMMA4_FP8] Text backend: {self.attn_backend_text.get_name()}, "
+                    f"Multimodal backend: {self.attn_backend_multimodal.get_name()}"
+                )
+            else:
+                # Standard model: single backend
+                self.attn_backend = get_attn_backend(
+                    head_size,
+                    dtype,
+                    kv_cache_dtype,
+                    use_mla=False,
+                    has_sink=self.has_sink,
+                    use_mm_prefix=self.use_mm_prefix,
+                    use_per_head_quant_scales=use_per_head_quant_scales,
+                    attn_type=attn_type,
+                )
+                self.attn_backend_text = None
+                self.attn_backend_multimodal = None
         else:
             self.attn_backend = attn_backend
+            self.attn_backend_text = None
+            self.attn_backend_multimodal = None
         backend_supports_alibi_sqrt = self.attn_backend.supports_alibi_sqrt()
         use_alibi_sqrt = use_alibi_sqrt if use_alibi_sqrt else False
         if use_alibi_sqrt and not backend_supports_alibi_sqrt:
@@ -384,20 +431,71 @@ class Attention(nn.Module, AttentionLayerBase):
             if block_n is not None:
                 extra_impl_args.setdefault("block_n", block_n)
 
-        impl_cls = self.attn_backend.get_impl_cls()
-        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
-            num_heads,
-            head_size,
-            scale,
-            num_kv_heads,
-            alibi_slopes,
-            sliding_window,
-            kv_cache_dtype,
-            logits_soft_cap,
-            attn_type,
-            kv_sharing_target_layer_name,
-            **extra_impl_args,
-        )
+        # GEMMA4_FP8: Create dual impl instances for dual backend models
+        if self.use_mm_prefix and self.attn_backend_text is not None:
+            # Filter extra_impl_args for FlashInfer (doesn't accept some params)
+            # FlashInfer only accepts: sinks (no use_alibi_sqrt, chunk_lookback, block_m, block_n)
+            flashinfer_extra_args = {
+                k: v for k, v in extra_impl_args.items()
+                if k == 'sinks'
+            }
+
+            # Triton accepts all extra_impl_args
+            triton_extra_args = extra_impl_args
+
+            # Create impl for text backend (FlashInfer)
+            impl_cls_text = self.attn_backend_text.get_impl_cls()
+            self.impl_text = impl_cls_text(
+                num_heads,
+                head_size,
+                scale,
+                num_kv_heads,
+                alibi_slopes,
+                sliding_window,
+                kv_cache_dtype,
+                logits_soft_cap,
+                attn_type,
+                kv_sharing_target_layer_name,
+                **flashinfer_extra_args,
+            )
+
+            # Create impl for multimodal backend (Triton)
+            impl_cls_multimodal = self.attn_backend_multimodal.get_impl_cls()
+            self.impl_multimodal = impl_cls_multimodal(
+                num_heads,
+                head_size,
+                scale,
+                num_kv_heads,
+                alibi_slopes,
+                sliding_window,
+                kv_cache_dtype,
+                logits_soft_cap,
+                attn_type,
+                kv_sharing_target_layer_name,
+                **triton_extra_args,
+            )
+
+            # Default to multimodal impl
+            self.impl = self.impl_multimodal
+        else:
+            # Single backend mode
+            impl_cls = self.attn_backend.get_impl_cls()
+            self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
+                num_heads,
+                head_size,
+                scale,
+                num_kv_heads,
+                alibi_slopes,
+                sliding_window,
+                kv_cache_dtype,
+                logits_soft_cap,
+                attn_type,
+                kv_sharing_target_layer_name,
+                **extra_impl_args,
+            )
+            self.impl_text = None
+            self.impl_multimodal = None
+
         self.backend = AttentionBackendEnum[self.attn_backend.get_name()]
         self.dtype = dtype
 
@@ -449,6 +547,44 @@ class Attention(nn.Module, AttentionLayerBase):
                 else GroupShape.PER_TENSOR,
             )
 
+    def select_backend(self, attn_metadata):
+        """Select appropriate attention backend based on batch composition.
+
+        For multimodal models with dual backends:
+        - Use FlashInfer for text-only batches (faster on B200 + FP8)
+        - Use Triton for multimodal batches (supports mm_prefix + FP8)
+
+        Args:
+            attn_metadata: Attention metadata containing batch information
+
+        Returns:
+            Selected attention backend instance
+        """
+        # Single backend mode (standard models)
+        if self.attn_backend_text is None:
+            return self.attn_backend
+
+        # Dual backend mode (multimodal models)
+        # Check if batch contains multimodal inputs via mm_prefix_range_tensor
+        has_multimodal = (
+            hasattr(attn_metadata, 'mm_prefix_range_tensor')
+            and attn_metadata.mm_prefix_range_tensor is not None
+        )
+
+        # DIAGNOSTIC LOGGING
+        logger.info(
+            f"[GEMMA4_FP8] Backend selection: has_multimodal={has_multimodal}, "
+            f"selected={'Triton' if has_multimodal else 'FlashInfer'}"
+        )
+
+        # Select backend based on batch composition
+        if has_multimodal:
+            # Batch contains images/audio/video - use Triton
+            return self.attn_backend_multimodal
+        else:
+            # Text-only batch - use FlashInfer (faster)
+            return self.attn_backend_text
+
     def forward(
         self,
         query: torch.Tensor,
@@ -469,6 +605,35 @@ class Attention(nn.Module, AttentionLayerBase):
         context using
         `vllm.forward_context.get_forward_context().attn_metadata`.
         """
+        # GEMMA4_FP8: Dynamic backend selection for dual backend models
+        if self.impl_text is not None and self.impl_multimodal is not None:
+            # Get attention metadata from forward context
+            try:
+                from vllm.forward_context import get_forward_context
+                forward_ctx = get_forward_context()
+                if forward_ctx and hasattr(forward_ctx, 'attn_metadata'):
+                    attn_metadata = forward_ctx.attn_metadata
+
+                    # Check if batch contains multimodal inputs
+                    has_multimodal = (
+                        hasattr(attn_metadata, 'mm_prefix_range_tensor')
+                        and attn_metadata.mm_prefix_range_tensor is not None
+                    )
+
+                    # Switch impl based on batch composition
+                    # NOTE: No logging here - torch.compile doesn't support it
+                    if has_multimodal:
+                        # Use Triton for multimodal (supports mm_prefix)
+                        self.impl = self.impl_multimodal
+                        self.attn_backend = self.attn_backend_multimodal
+                    else:
+                        # Use FlashInfer for text-only (faster on B200)
+                        self.impl = self.impl_text
+                        self.attn_backend = self.attn_backend_text
+            except Exception:
+                # If we can't get forward context, default to multimodal backend
+                pass
+
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(
                 query, key, value, _encode_layer_name(self.layer_name)
@@ -578,6 +743,27 @@ class Attention(nn.Module, AttentionLayerBase):
             set_default_quant_scales(self, register_buffer=False)
 
     def get_attn_backend(self) -> type[AttentionBackend]:
+        """Get the active attention backend.
+
+        For dual-backend models, this returns the currently selected backend
+        based on the forward context's attention metadata.
+        """
+        # Single backend mode
+        if self.attn_backend_text is None:
+            return self.attn_backend
+
+        # Dual backend mode - select based on current batch
+        try:
+            from vllm.forward_context import get_forward_context
+            forward_ctx = get_forward_context()
+            if forward_ctx and hasattr(forward_ctx, 'attn_metadata'):
+                attn_metadata = forward_ctx.attn_metadata
+                return self.select_backend(attn_metadata)
+        except Exception:
+            # Fallback to default if context not available
+            pass
+
+        # Default to multimodal backend (safer)
         return self.attn_backend
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:

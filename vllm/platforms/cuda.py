@@ -480,6 +480,15 @@ class CudaPlatformBase(Platform):
                     selected_backend.name,
                 )
 
+        # DIAGNOSTIC LOGGING: Track backend selection for Gemma4 FP8 debugging
+        logger.info(
+            f"[GEMMA4_FP8_DEBUG] Backend selection: "
+            f"selected={selected_backend.name}, "
+            f"kv_cache_dtype={attn_selector_config.kv_cache_dtype}, "
+            f"use_mm_prefix={attn_selector_config.use_mm_prefix}, "
+            f"valid_backends={[c.backend.name for c in valid_backends_priorities]}"
+        )
+
         logger.info_once(
             "Using %s attention backend out of potential backends: %s.",
             selected_backend.name,
