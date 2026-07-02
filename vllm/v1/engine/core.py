@@ -317,8 +317,14 @@ class EngineCore:
 
         vllm_config.validate_block_size()
 
-        # Initialize kv cache and warmup the execution
         self.model_executor.initialize_from_config(kv_cache_configs)
+        # For elastic-EP scale-up, defer warmup: new-engine workers must not
+        # enter coordinate_batch_across_dp during init or they deadlock
+        # against existing workers (which haven't joined the new DP group
+        # yet). warm_and_capture in _eplb_reshuffle runs warmup later in
+        # lockstep across all DP ranks.
+        if not envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
+            self.model_executor.compile_or_warm_up_model()
 
         elapsed = time.time() - start
         compile_time = vllm_config.compilation_config.compilation_time
