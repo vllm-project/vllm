@@ -86,18 +86,20 @@ pub(crate) struct StatsLogger {
 
 impl StatsLogger {
     /// Start the background stats logging task.
-    pub(crate) fn start(model_name: String, engine_count: usize) -> Self {
+    pub(crate) fn start(model_name: String, engine_indices: Vec<u32>) -> Self {
         let task = AbortOnDropHandle::new(tokio::spawn(async move {
-            run_stats_logger(model_name, engine_count).await;
+            run_stats_logger(model_name, engine_indices).await;
         }));
         Self { _task: task }
     }
 }
 
 /// Resolve and clone all metric handles once so the hot path is lock-free.
-fn resolve_engine_metrics(model_name: &str, engine_count: usize) -> Vec<EngineMetrics> {
+fn resolve_engine_metrics(model_name: &str, engine_indices: &[u32]) -> Vec<EngineMetrics> {
     let m = &METRICS;
-    (0..engine_count as u32)
+    engine_indices
+        .iter()
+        .copied()
         .map(|engine| {
             let el = EngineLabels {
                 model_name: model_name.to_string(),
@@ -164,8 +166,8 @@ fn resolve_engine_metrics(model_name: &str, engine_count: usize) -> Vec<EngineMe
         .collect()
 }
 
-async fn run_stats_logger(model_name: String, engine_count: usize) {
-    let engines = resolve_engine_metrics(&model_name, engine_count);
+async fn run_stats_logger(model_name: String, engine_indices: Vec<u32>) {
+    let engines = resolve_engine_metrics(&model_name, &engine_indices);
 
     let mut interval = tokio::time::interval(LOG_STATS_INTERVAL);
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
