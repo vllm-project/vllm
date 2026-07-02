@@ -364,7 +364,10 @@ class QuarkOCP_MX(QuarkScheme):
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.emulate:
-            dq_w = self.dequant_func(layer.weight, layer.weight_scale, x.dtype)
+            float_dtype = x.dtype if x.dtype.is_floating_point else torch.bfloat16
+            if not x.dtype.is_floating_point:
+                x = x.to(float_dtype)
+            dq_w = self.dequant_func(layer.weight, layer.weight_scale, float_dtype)
             qdq_x = self.quant_dequant_func(x)
             return F.linear(qdq_x, dq_w, bias)
         y = torch.ops.vllm.gemm_with_dynamic_quant(
