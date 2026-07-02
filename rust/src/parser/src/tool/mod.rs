@@ -12,6 +12,7 @@ mod minimax_m2;
 mod minimax_m3;
 mod parameters;
 mod qwen_coder;
+mod step3;
 #[cfg(any(test, feature = "test-util"))]
 pub mod test_utils;
 use std::collections::{BTreeMap, btree_map};
@@ -31,6 +32,7 @@ pub use minimax_m3::MinimaxM3ToolParser;
 pub use qwen_coder::Qwen3CoderToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+pub use step3::Step3ToolParser;
 pub use xgrammar_structural_tag::Model as StructuralTagModel;
 
 use crate::utils;
