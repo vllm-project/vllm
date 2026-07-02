@@ -270,7 +270,10 @@ from vllm.v1.attention.backends.utils import (
     split_decodes_and_prefills,
 )
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp_alltoall import (
+    dcp_a2a_lse_reduce,
+    dcp_a2a_reserve_workspace,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
@@ -668,6 +671,25 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 device=k_c_normed.device,
                 dtype=k_c_normed.dtype,
             )
+            if self.dcp_a2a:
+                dcp_world_size = get_dcp_group().world_size
+                local_heads = self.q_pad_num_heads or self.num_heads
+                speculative_config = self._vllm_config.speculative_config
+                num_spec_tokens = (
+                    speculative_config.num_speculative_tokens
+                    if speculative_config is not None
+                    else 0
+                )
+                dcp_a2a_reserve_workspace(
+                    num_tokens=(
+                        self._vllm_config.scheduler_config.max_num_seqs
+                        * (1 + num_spec_tokens)
+                    ),
+                    num_heads_per_rank=local_heads,
+                    head_dim=self.kv_lora_rank,
+                    dcp_world_size=dcp_world_size,
+                    output_dtype=q.dtype,
+                )
 
             # The zero fill is required when used with DP + EP
             # to ensure all ranks within a DP group compute the

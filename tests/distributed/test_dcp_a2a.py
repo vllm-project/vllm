@@ -420,6 +420,18 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
             dtype=torch.float32,
             generator=generator,
         )
+        if env.get("RESERVE_WORKSPACE") == "1":
+            from vllm.v1.attention.ops.dcp_alltoall import (
+                dcp_a2a_reserve_decode_workspace,
+            )
+
+            dcp_a2a_reserve_decode_workspace(
+                num_tokens=B + 3,
+                num_heads_per_rank=h_per_rank,
+                head_dim=D,
+                dcp_world_size=world_size,
+                output_dtype=dtype,
+            )
         actual = dcp_a2a_lse_reduce(
             cp_attn_out,
             cp_attn_lse,
@@ -496,6 +508,84 @@ def test_distributed_packed_a2a_with_workspace_matches_reference():
             "USE_WORKSPACE": "1",
         },
     )
+
+
+@pytest.mark.skipif(
+    torch.accelerator.device_count() < 4, reason="Need at least 4 GPUs."
+)
+@pytest.mark.parametrize("dtype_name", ["float16", "bfloat16", "float32"])
+def test_distributed_packed_a2a_with_reserved_workspace(dtype_name: str):
+    _distributed_run(
+        _distributed_packed_a2a_worker,
+        world_size=4,
+        extra_env={
+            "TEST_DTYPE": dtype_name,
+            "RETURN_LSE": "1",
+            "LSE_BASE_E": "1",
+            "USE_WORKSPACE": "1",
+            "RESERVE_WORKSPACE": "1",
+        },
+    )
+
+
+@pytest.mark.parametrize("dtype_name", ["float16", "bfloat16", "float32"])
+def test_packed_workspace_specs(dtype_name: str):
+    from vllm.v1.attention.ops.dcp_alltoall import (
+        _dcp_a2a_lse_pack_dim,
+        dcp_a2a_packed_workspace_specs,
+    )
+
+    dtype = _dtype_from_name(dtype_name)
+    world_size, num_tokens, h_per_rank, D = 4, 16, 2, 32
+    specs = dcp_a2a_packed_workspace_specs(
+        num_tokens=num_tokens,
+        num_heads_per_rank=h_per_rank,
+        head_dim=D,
+        dcp_world_size=world_size,
+        output_dtype=dtype,
+    )
+    lse_pack_dim = _dcp_a2a_lse_pack_dim(dtype)
+    expected_shape = (world_size, num_tokens, h_per_rank, D + lse_pack_dim)
+    assert len(specs) == 2  # send + recv
+    for shape, spec_dtype in specs:
+        assert shape == expected_shape
+        assert spec_dtype == dtype
+
+
+@pytest.mark.parametrize("dtype_name", ["float16", "bfloat16", "float32"])
+def test_reserve_decode_workspace(dtype_name: str):
+    from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_reserve_decode_workspace
+    from vllm.v1.worker.workspace import (
+        current_workspace_manager,
+        init_workspace_manager,
+        reset_workspace_manager,
+    )
+
+    dtype = _dtype_from_name(dtype_name)
+    world_size, num_tokens, h_per_rank, D = 4, 16, 2, 32
+    init_workspace_manager(torch.device("cpu"))
+    try:
+        dcp_a2a_reserve_decode_workspace(
+            num_tokens=num_tokens,
+            num_heads_per_rank=h_per_rank,
+            head_dim=D,
+            dcp_world_size=world_size,
+            output_dtype=dtype,
+        )
+        reserved = current_workspace_manager().get_simultaneous(
+            (
+                (
+                    world_size,
+                    num_tokens,
+                    h_per_rank,
+                    D + (2 if dtype != torch.float32 else 1),
+                ),
+                dtype,
+            ),
+        )[0]
+        assert reserved.shape[1] == num_tokens
+    finally:
+        reset_workspace_manager()
 
 
 if __name__ == "__main__":

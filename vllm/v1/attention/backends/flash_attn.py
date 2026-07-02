@@ -29,7 +29,10 @@ from vllm.v1.attention.backends.fa_utils import (
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
-from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
+from vllm.v1.attention.ops.dcp_alltoall import (
+    dcp_a2a_lse_reduce,
+    dcp_a2a_reserve_workspace,
+)
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.worker.workspace import current_workspace_manager
 
@@ -740,11 +743,22 @@ class FlashAttentionImpl(AttentionImpl):
             and vllm_config.parallel_config.decode_context_parallel_size > 1
             and vllm_config.parallel_config.dcp_comm_backend == "a2a"
         )
+        self.dcp_a2a = dcp_a2a
         self.dcp_combine = dcp_a2a_lse_reduce if dcp_a2a else cp_lse_ag_out_rs
 
         self._dcp_dtype: torch.dtype | None = None
+        self._dcp_decode_workspace_tokens = 0
         if vllm_config is not None and self.dcp_world_size > 1:
             self._dcp_dtype = vllm_config.model_config.dtype
+            speculative_config = vllm_config.speculative_config
+            num_spec_tokens = (
+                speculative_config.num_speculative_tokens
+                if speculative_config is not None
+                else 0
+            )
+            self._dcp_decode_workspace_tokens = (
+                vllm_config.scheduler_config.max_num_seqs * (1 + num_spec_tokens)
+            )
 
     def forward(
         self,
@@ -784,6 +798,14 @@ class FlashAttentionImpl(AttentionImpl):
 
         if attn_metadata is None:
             # Profiling run.
+            if self.dcp_a2a:
+                dcp_a2a_reserve_workspace(
+                    num_tokens=self._dcp_decode_workspace_tokens,
+                    num_heads_per_rank=self.num_heads,
+                    head_dim=self.head_size,
+                    dcp_world_size=get_dcp_group().world_size,
+                    output_dtype=self._dcp_dtype or query.dtype,
+                )
             return output.fill_(0)
 
         attn_type = self.attn_type
