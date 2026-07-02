@@ -167,6 +167,9 @@ class Request:
         # True if this request is scheduled as a non-final prefill chunk.
         self.is_prefill_chunk = False
 
+        self.deferred_wait_status: RequestStatus | None = None
+        self.deferred_wait_start_time: float | None = None
+
         # The number of NaNs in logits. A value greater than 0
         # indicates that the output is corrupted
         self.num_nans_in_logits = 0
@@ -292,6 +295,29 @@ class Request:
         timestamp: float | None = None,
     ) -> None:
         self.events.append(EngineCoreEvent.new_event(event_type, timestamp))
+
+    def start_deferred_wait(
+        self,
+        timestamp: float | None = None,
+        status: "RequestStatus | None" = None,
+    ) -> None:
+        if self.deferred_wait_start_time is not None:
+            return
+        self.deferred_wait_start_time = (
+            time.monotonic() if timestamp is None else timestamp
+        )
+        self.deferred_wait_status = status
+
+    def take_deferred_wait_time(self, timestamp: float | None = None) -> float | None:
+        start_time = self.deferred_wait_start_time
+        if start_time is None:
+            self.deferred_wait_status = None
+            return None
+        self.deferred_wait_start_time = None
+        self.deferred_wait_status = None
+        end_time = time.monotonic() if timestamp is None else timestamp
+        wait_time = end_time - start_time
+        return wait_time if wait_time > 0 else None
 
     def take_events(self) -> list[EngineCoreEvent] | None:
         if not self.events:
