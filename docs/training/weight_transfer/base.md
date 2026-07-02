@@ -20,13 +20,53 @@ Subclasses must implement these methods:
 | `finish_weight_update()` | Inference | Finalize the update (e.g. finalize layerwise reload); no-op for in-place engines |
 | `receive_weights(update_info)` | Inference | Receive weights and load them into `self.model` |
 | `shutdown()` | Inference | Clean up resources |
-| `trainer_send_weights(iterator, trainer_args)` | Trainer | Static method to send weights from the trainer process |
 
 The base class provides two methods:
 
 1. `__init__` : Engines receive `config` (`WeightTransferConfig`),  `vllm_config` (`VllmConfig`), `device` (`torch.device`) and  `model` (`nn.Module`)  
 2. `update_weights(update_info_dict)`:  Thin wrapper for `receive_weights`: parses
 the dict into user-specified data type, calls `receive_weights`, and synchronizes the device. Subclasses implement `receive_weights`.
+
+`WeightTransferEngine` is purely worker-side. The trainer side is a separate
+`TrainerWeightTransferEngine` ABC (see below).
+
+## TrainerWeightTransferEngine (trainer side)
+
+The trainer-side engine is symmetric to the worker side: it is stateful,
+constructed via a `trainer_init` factory classmethod, and driven by a
+parameter-free `send_weights()`. It talks to the inference side through a
+`VLLMWeightSyncClient` and is created via `WeightTransferTrainerFactory`
+(a separate registry from the worker-side factory).
+
+| Method | Description |
+| ------ | ----------- |
+| `trainer_init(config, init_info, *, client, weight_iterator=None)` | Classmethod factory: rendezvous with the inference side (driving `client.init_weight_transfer_engine`) and return a ready instance |
+| `send_weights(weight_iterator=None)` | Push weights and drive `start_weight_update` / `update_weights` / `finish_weight_update` via the client |
+| `shutdown()` | Tear down communicators / process groups (default no-op) |
+
+`weight_iterator` is a **factory** (`Callable[[], Iterator[tuple[str, Tensor]]]`),
+not a bare iterator, because `model.named_parameters()` is single-use and each
+send round must re-iterate. `materialize_full_tensor(tensor)` (in `base.py`) is
+the shared helper that gathers FSDP shards (`full_tensor()`) at send time.
+
+### VLLMWeightSyncClient (control plane)
+
+`VLLMWeightSyncClient` is a structural `Protocol` abstracting the inference-side
+weight-sync RPCs. Implementations adapt it to a transport; built-ins are
+`HTTPVLLMWeightSyncClient` and `RayVLLMWeightSyncClient`. Any object with the four
+methods works — no import or subclassing required.
+
+```python
+class VLLMWeightSyncClient(Protocol):
+    def init_weight_transfer_engine(self, init_info: dict) -> None: ...
+    def start_weight_update(self) -> None: ...
+    def update_weights(self, update_info: dict) -> None: ...
+    def finish_weight_update(self) -> None: ...
+```
+
+All methods are synchronous; backend-specific concurrency (e.g. NCCL running
+`update_weights` concurrently with the trainer broadcast) lives inside the engine,
+not the client.
 
 ### Request Classes
 
@@ -124,16 +164,37 @@ class MyWeightTransferEngine(WeightTransferEngine[MyInitInfo, MyUpdateInfo]):
     def shutdown(self) -> None:
         # Clean up resources
         ...
+```
 
-    @staticmethod
-    def trainer_send_weights(
-        iterator: Iterator[tuple[str, torch.Tensor]],
-        trainer_args: dict[str, Any],
-    ) -> None:
-        # Send weights from the trainer process
-        for name, tensor in iterator:
-            # Send tensor via custom transport
-            ...
+The trainer side is a separate `TrainerWeightTransferEngine`, registered with
+`WeightTransferTrainerFactory`:
+
+```python
+from typing import Self
+from vllm.distributed.weight_transfer.base import (
+    TrainerWeightTransferEngine,
+    VLLMWeightSyncClient,
+    WeightIterator,
+)
+
+class MyTrainerEngine(TrainerWeightTransferEngine[MyConfig, MyTrainerInitInfo]):
+    init_info_cls = MyTrainerInitInfo
+    config_cls = MyConfig
+
+    @classmethod
+    def trainer_init(cls, config, init_info, *, client, weight_iterator=None) -> Self:
+        engine = cls(config, client=client, weight_iterator=weight_iterator)
+        # Build the worker-side init info and hand it to the inference side; open
+        # the trainer endpoint (concurrently if the backend rendezvous blocks).
+        client.init_weight_transfer_engine(worker_init_info_dict)
+        return engine
+
+    def send_weights(self, weight_iterator: WeightIterator | None = None) -> None:
+        factory = self._resolve_iterator(weight_iterator)
+        update_info = build_update_info(factory())  # per-round metadata
+        self.client.start_weight_update()
+        self.client.update_weights(update_info)      # + data-plane transfer
+        self.client.finish_weight_update()
 ```
 
 ### 3. Register with the Factory

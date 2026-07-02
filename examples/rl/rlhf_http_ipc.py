@@ -46,10 +46,12 @@ import torch
 from openai import OpenAI
 from transformers import AutoModelForCausalLM
 
-from vllm.distributed.weight_transfer.ipc_engine import (
-    IPCTrainerSendWeightsArgs,
-    IPCWeightTransferEngine,
+from vllm.config import IPCWeightTransferConfig
+from vllm.distributed.weight_transfer import (
+    HTTPVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
 )
+from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 
 BASE_URL = "http://localhost:8000"
 MODEL_NAME = "facebook/opt-125m"
@@ -70,28 +72,6 @@ def generate_completions(client: OpenAI, model: str, prompts: list[str]) -> list
         )
         results.append(response.choices[0].text)
     return results
-
-
-def init_weight_transfer_engine(base_url: str) -> None:
-    """Initialize weight transfer via HTTP endpoint (no-op for IPC)."""
-    url = f"{base_url}/init_weight_transfer_engine"
-    payload = {"init_info": dict()}
-    response = requests.post(url, json=payload, timeout=60)
-    response.raise_for_status()
-
-
-def start_weight_update(base_url: str) -> None:
-    """Start a weight update via HTTP endpoint."""
-    url = f"{base_url}/start_weight_update"
-    response = requests.post(url, json={}, timeout=60)
-    response.raise_for_status()
-
-
-def finish_weight_update(base_url: str) -> None:
-    """Finish a weight update via HTTP endpoint."""
-    url = f"{base_url}/finish_weight_update"
-    response = requests.post(url, json={}, timeout=60)
-    response.raise_for_status()
 
 
 def pause_generation(base_url: str) -> None:
@@ -159,23 +139,22 @@ def main():
 
     print("Initializing weight transfer (IPC backend)...")
 
-    # Initialize weight transfer on vLLM server (no-op for IPC, but still required)
-    init_weight_transfer_engine(BASE_URL)
+    # The trainer engine drives the inference side over HTTP. init for IPC is a
+    # no-op rendezvous; the same client carries start/update/finish.
+    engine = WeightTransferTrainerFactory.trainer_init(
+        backend="ipc",
+        config=IPCWeightTransferConfig(packed=False),
+        init_info=IPCTrainerInitInfo(),
+        client=HTTPVLLMWeightSyncClient(BASE_URL),
+        weight_iterator=train_model.named_parameters,
+    )
 
     # Pause generation before weight sync
     pause_generation(BASE_URL)
 
-    # Start weight update, broadcast via IPC, then finish
-    start_weight_update(BASE_URL)
-
     print("Broadcasting weights via CUDA IPC (HTTP)...")
-    trainer_args = IPCTrainerSendWeightsArgs(send_mode="http", url=BASE_URL)
-    IPCWeightTransferEngine.trainer_send_weights(
-        iterator=train_model.named_parameters(),
-        trainer_args=trainer_args,
-    )
-
-    finish_weight_update(BASE_URL)
+    # One call drives start_weight_update / update_weights / finish_weight_update.
+    engine.send_weights()
 
     # Resume generation after weight sync
     resume_generation(BASE_URL)

@@ -38,49 +38,53 @@ llm.init_weight_transfer_engine(
 
 ### Trainer Side
 
-```python
-from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLWeightTransferEngine,
-)
+The trainer builds a `NCCLTrainerWeightTransferEngine` via the factory. `trainer_init` opens
+the trainer's rank-0 endpoint *and* drives the inference side's
+`init_weight_transfer_engine` (the inference-side init shown above is performed for you by the
+engine's `VLLMWeightSyncClient`).
 
-group = NCCLWeightTransferEngine.trainer_init(
-    dict(
+```python
+from vllm.config import NCCLWeightTransferConfig
+from vllm.distributed.weight_transfer import (
+    RayVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
+)
+from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
+
+engine = WeightTransferTrainerFactory.trainer_init(
+    backend="nccl",
+    config=NCCLWeightTransferConfig(packed=True),  # packed broadcasting on
+    init_info=NCCLTrainerInitInfo(
         master_address=master_address,
         master_port=master_port,
-        world_size=world_size,
-    )
+        world_size=world_size,  # trainer + all inference workers
+    ),
+    client=RayVLLMWeightSyncClient(llm_handle),  # or HTTPVLLMWeightSyncClient(url)
+    weight_iterator=model.named_parameters,
 )
 ```
 
 !!! note
-    `trainer_init` always assigns the trainer to rank 0. Inference workers start at `rank_offset` (typically 1).
+    The trainer is always rank 0; inference workers start at `rank_offset` (1). The trainer
+    engine derives the worker-side `rank_offset` for you.
 
 ## Sending Weights
 
 ```python
-from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLTrainerSendWeightsArgs,
-    NCCLWeightTransferEngine,
-)
-
-trainer_args = NCCLTrainerSendWeightsArgs(
-    group=group,
-    packed=True,  # use packed broadcasting for efficiency
-)
-
-NCCLWeightTransferEngine.trainer_send_weights(
-    iterator=model.named_parameters(),
-    trainer_args=trainer_args,
-)
+engine.send_weights()
 ```
 
-See [`NCCLTrainerSendWeightsArgs`](https://github.com/vllm-project/vllm/blob/main/vllm/distributed/weight_transfer/nccl_engine.py) for the full list of configurable fields.
+This single call drives `start_weight_update`, `update_weights` (run concurrently with the
+trainer-side NCCL broadcast — both rendezvous inside the same NCCL calls), and
+`finish_weight_update` on the inference side.
 
 ### Packed Tensor Broadcasting
 
 When `packed=True`, multiple weight tensors are packed into large contiguous buffers before broadcasting. This reduces the number of NCCL operations and uses double/triple buffering with dedicated CUDA streams for overlap between packing, broadcasting, and unpacking.
 
-Both the trainer (`NCCLTrainerSendWeightsArgs`) and inference side (`NCCLWeightTransferUpdateInfo`) must use matching `packed_buffer_size_bytes` and `packed_num_buffers` values.
+`packed` and the buffer sizes (`packed_buffer_size_bytes`, `packed_num_buffers`) are static
+wire params on `NCCLWeightTransferConfig`. The **same config object** is constructed at both
+the trainer and inference sides, so these values cannot drift.
 
 ## Receiving Weights (Inference Side)
 
@@ -102,7 +106,6 @@ llm.update_weights(
             names=names,
             dtype_names=dtype_names,
             shapes=shapes,
-            packed=True,
         )
     )
 )

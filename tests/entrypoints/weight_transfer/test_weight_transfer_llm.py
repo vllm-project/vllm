@@ -92,11 +92,6 @@ class MockWeightTransferEngine(WeightTransferEngine[MockInitInfo, MockUpdateInfo
     def shutdown(self) -> None:
         MockWeightTransferEngine.shutdown_called = True
 
-    @staticmethod
-    def trainer_send_weights(*args, **kwargs):
-        """Mock method to simulate trainer sending weights."""
-        pass
-
 
 def mock_create_engine(config, vllm_config, device, model):
     """Mock factory function that returns our mock engine."""

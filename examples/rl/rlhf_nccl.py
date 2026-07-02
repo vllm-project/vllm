@@ -35,11 +35,12 @@ from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
-from vllm.config import WeightTransferConfig
-from vllm.distributed.weight_transfer.nccl_engine import (
-    NCCLTrainerSendWeightsArgs,
-    NCCLWeightTransferEngine,
+from vllm.config import NCCLWeightTransferConfig
+from vllm.distributed.weight_transfer import (
+    RayVLLMWeightSyncClient,
+    WeightTransferTrainerFactory,
 )
+from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
 from vllm.platforms import current_platform
 from vllm.utils.network_utils import get_ip, get_open_port
 
@@ -83,37 +84,33 @@ class TrainModel:
     def get_master_address_and_port(self):
         return self.master_address, self.port
 
-    def get_weight_metadata(self):
-        """Return weight names, dtypes, and shapes for weight transfer."""
-        names = []
-        dtype_names = []
-        shapes = []
-        for name, p in self.model.named_parameters():
-            names.append(name)
-            dtype_names.append(str(p.dtype).split(".")[-1])
-            shapes.append(list(p.shape))
-        return names, dtype_names, shapes
+    def init_weight_transfer(self, world_size, llm_handle):
+        """Build the trainer-side weight-transfer engine.
 
-    def init_weight_transfer_group(self, world_size):
-        """Initialize the NCCL process group for weight transfer."""
-        self.model_update_group = NCCLWeightTransferEngine.trainer_init(
-            dict(
+        `trainer_init` drives the full handshake: it kicks off the inference
+        side's `init_weight_transfer_engine` (via the Ray client) on a worker
+        thread while opening the trainer's NCCL endpoint, so both ends
+        rendezvous together. After this returns, `send_weights()` is callable.
+        """
+        self.engine = WeightTransferTrainerFactory.trainer_init(
+            backend="nccl",
+            config=NCCLWeightTransferConfig(packed=True),
+            init_info=NCCLTrainerInitInfo(
                 master_address=self.master_address,
                 master_port=self.port,
                 world_size=world_size,
             ),
+            client=RayVLLMWeightSyncClient(llm_handle),
+            weight_iterator=self.model.named_parameters,  # bound method = factory
         )
 
-    def broadcast_weights(self, packed: bool = True):
-        """Broadcast weights to the inference engine."""
-        trainer_args = NCCLTrainerSendWeightsArgs(
-            group=self.model_update_group,
-            packed=packed,
-        )
-        NCCLWeightTransferEngine.trainer_send_weights(
-            iterator=self.model.named_parameters(),
-            trainer_args=trainer_args,
-        )
+    def broadcast_weights(self):
+        """Push the current weights to the inference engine.
+
+        Drives start/update/finish on the inference side and the NCCL
+        broadcast internally — one call.
+        """
+        self.engine.send_weights()
 
 
 # Initialize Ray and set the visible devices. The vLLM engine will
@@ -149,7 +146,7 @@ llm = ray.remote(
     tensor_parallel_size=2,
     data_parallel_size=1,
     distributed_executor_backend="ray",
-    weight_transfer_config=WeightTransferConfig(backend="nccl"),
+    weight_transfer_config=NCCLWeightTransferConfig(packed=True),
     load_format="dummy",
     quantization="fp8",
 )
@@ -178,51 +175,15 @@ for output in outputs:
 ray.get(llm.sleep.remote(level=0))
 
 # Set up the communication channel between the training process and the
-# inference engine.
-master_address, master_port = ray.get(train_model.get_master_address_and_port.remote())
-
+# inference engine. The trainer engine now owns the full handshake — the
+# driver only has to hand it the vLLM actor handle and the world size.
 world_size = ray.get(llm.get_world_size.remote()) + 1  # +1 for the trainer
-inference_handle = llm.init_weight_transfer_engine.remote(
-    dict(
-        init_info=dict(
-            master_address=master_address,
-            master_port=master_port,
-            rank_offset=1,
-            world_size=world_size,
-        )
-    )
-)
+ray.get(train_model.init_weight_transfer.remote(world_size, llm))
 
-# Initialize weight transfer group on both the training actor and inference engine
-train_handle = train_model.init_weight_transfer_group.remote(world_size)
-ray.get([train_handle, inference_handle])
-
-# Synchronize the updated weights to the inference engine using batched API.
-# Collect all weight metadata from the training actor
-names, dtype_names, shapes = ray.get(train_model.get_weight_metadata.remote())
-
-# Start weight update
-ray.get(llm.start_weight_update.remote())
-
-# Issue update_weights call with NCCL-specific update info
-# packed=True enables efficient batched tensor broadcasting
-inference_handle = llm.update_weights.remote(
-    dict(
-        update_info=dict(
-            names=names,
-            dtype_names=dtype_names,
-            shapes=shapes,
-            packed=True,
-        )
-    )
-)
-
-# Broadcast all weights from trainer using the weight transfer API
-train_handle = train_model.broadcast_weights.remote(packed=True)
-ray.get([train_handle, inference_handle])
-
-# Finish weight update
-ray.get(llm.finish_weight_update.remote())
+# Synchronize the updated weights to the inference engine. The engine drives
+# start_weight_update / update_weights / finish_weight_update on the inference
+# side internally, concurrent with the NCCL broadcast.
+ray.get(train_model.broadcast_weights.remote())
 
 ray.get(llm.wake_up.remote(tags=["scheduling"]))
 
