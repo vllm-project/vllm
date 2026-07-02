@@ -23,6 +23,9 @@ struct EngineMetrics {
     external_prefix_cache_queries: U64Counter,
     external_prefix_cache_hits: U64Counter,
     num_preemptions: U64Counter,
+    spec_decode_num_drafts: U64Counter,
+    spec_decode_num_draft_tokens: U64Counter,
+    spec_decode_num_accepted_tokens: U64Counter,
 
     // Gauges for instantaneous scheduler state.
     scheduler_running: U64Gauge,
@@ -42,6 +45,19 @@ struct CounterSnapshot {
     external_prefix_cache_queries: u64,
     external_prefix_cache_hits: u64,
     num_preemptions: u64,
+    spec_decode_num_drafts: u64,
+    spec_decode_num_draft_tokens: u64,
+    spec_decode_num_accepted_tokens: u64,
+}
+
+/// Derived spec-decoding values for one logging interval.
+struct SpecDecodingLogStats {
+    mean_acceptance_length: f64,
+    accepted_throughput: f64,
+    draft_throughput: f64,
+    accepted_tokens: u64,
+    draft_tokens: u64,
+    draft_acceptance_rate: f64,
 }
 
 /// Periodic stats logger that mirrors Python vLLM's `LoggingStatLogger`.
@@ -100,6 +116,15 @@ fn resolve_engine_metrics(model_name: &str, engine_count: usize) -> Vec<EngineMe
                     .external_prefix_cache_hits
                     .get_or_create_owned(&el),
                 num_preemptions: m.request.num_preemptions.get_or_create_owned(&el),
+                spec_decode_num_drafts: m.scheduler.spec_decode_num_drafts.get_or_create_owned(&el),
+                spec_decode_num_draft_tokens: m
+                    .scheduler
+                    .spec_decode_num_draft_tokens
+                    .get_or_create_owned(&el),
+                spec_decode_num_accepted_tokens: m
+                    .scheduler
+                    .spec_decode_num_accepted_tokens
+                    .get_or_create_owned(&el),
                 scheduler_running: m.scheduler.scheduler_running.get_or_create_owned(&el),
                 scheduler_waiting: m.scheduler.scheduler_waiting.get_or_create_owned(&el),
                 scheduler_deferred: m
@@ -149,6 +174,17 @@ async fn run_stats_logger(model_name: String, engine_count: usize) {
             && last_prompt_throughput == 0.0
             && last_generation_throughput == 0.0;
 
+        /// Emit one stats line at DEBUG while idle and INFO while active.
+        macro_rules! log_stats_line {
+            ($($arg:tt)*) => {
+                if is_idle {
+                    debug!($($arg)*);
+                } else {
+                    info!($($arg)*);
+                }
+            };
+        }
+
         // Read scheduler gauges (aggregate across engines).
         let (num_running, num_waiting, kv_cache_usage) = read_scheduler_gauges(&engines);
         let num_deferred = read_deferred_waiting(&engines);
@@ -166,6 +202,7 @@ async fn run_stats_logger(model_name: String, engine_count: usize) {
             curr.external_prefix_cache_hits.wrapping_sub(prev.external_prefix_cache_hits);
         let external_prefix_cache_hit_rate =
             cache_hit_rate(delta_external_hits, delta_external_queries);
+        let spec_decoding_log_stats = spec_decoding_log_stats(&curr, &prev, elapsed);
 
         // Build the log line.
         msg.clear();
@@ -198,10 +235,28 @@ async fn run_stats_logger(model_name: String, engine_count: usize) {
             .unwrap();
         }
 
-        if is_idle {
-            debug!("{msg}");
-        } else {
-            info!("{msg}");
+        log_stats_line!("{msg}");
+
+        if let Some(spec_stats) = spec_decoding_log_stats {
+            msg.clear();
+            write!(
+                msg,
+                "SpecDecoding metrics: \
+                 Mean acceptance length: {:.2}, \
+                 Accepted throughput: {:.2} tokens/s, \
+                 Drafted throughput: {:.2} tokens/s, \
+                 Accepted: {} tokens, \
+                 Drafted: {} tokens, \
+                 Avg Draft acceptance rate: {:.1}%",
+                spec_stats.mean_acceptance_length,
+                spec_stats.accepted_throughput,
+                spec_stats.draft_throughput,
+                spec_stats.accepted_tokens,
+                spec_stats.draft_tokens,
+                spec_stats.draft_acceptance_rate,
+            )
+            .unwrap();
+            log_stats_line!("{msg}");
         }
 
         last_prompt_throughput = prompt_throughput;
@@ -222,6 +277,9 @@ fn read_counters(engines: &[EngineMetrics]) -> CounterSnapshot {
         snap.external_prefix_cache_queries += e.external_prefix_cache_queries.get();
         snap.external_prefix_cache_hits += e.external_prefix_cache_hits.get();
         snap.num_preemptions += e.num_preemptions.get();
+        snap.spec_decode_num_drafts += e.spec_decode_num_drafts.get();
+        snap.spec_decode_num_draft_tokens += e.spec_decode_num_draft_tokens.get();
+        snap.spec_decode_num_accepted_tokens += e.spec_decode_num_accepted_tokens.get();
     }
     snap
 }
@@ -261,6 +319,48 @@ fn cache_hit_rate(hits: u64, queries: u64) -> f64 {
     }
 }
 
+/// Compute aggregate spec-decoding stats for one logging interval.
+fn spec_decoding_log_stats(
+    curr: &CounterSnapshot,
+    prev: &CounterSnapshot,
+    elapsed: f64,
+) -> Option<SpecDecodingLogStats> {
+    let num_drafts = curr.spec_decode_num_drafts.wrapping_sub(prev.spec_decode_num_drafts);
+    if num_drafts == 0 {
+        return None;
+    }
+
+    let draft_tokens = curr
+        .spec_decode_num_draft_tokens
+        .wrapping_sub(prev.spec_decode_num_draft_tokens);
+    let accepted_tokens = curr
+        .spec_decode_num_accepted_tokens
+        .wrapping_sub(prev.spec_decode_num_accepted_tokens);
+
+    let (accepted_throughput, draft_throughput) = if elapsed > 0.0 {
+        (
+            accepted_tokens as f64 / elapsed,
+            draft_tokens as f64 / elapsed,
+        )
+    } else {
+        (0.0, 0.0)
+    };
+    let draft_acceptance_rate = if draft_tokens > 0 {
+        accepted_tokens as f64 / draft_tokens as f64 * 100.0
+    } else {
+        f64::NAN
+    };
+
+    Some(SpecDecodingLogStats {
+        mean_acceptance_length: 1.0 + accepted_tokens as f64 / num_drafts as f64,
+        accepted_throughput,
+        draft_throughput,
+        accepted_tokens,
+        draft_tokens,
+        draft_acceptance_rate,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -269,5 +369,30 @@ mod tests {
     fn cache_hit_rate_returns_percent_for_non_empty_queries() {
         assert_eq!(cache_hit_rate(25, 100), 25.0);
         assert_eq!(cache_hit_rate(0, 0), 0.0);
+    }
+
+    #[test]
+    fn spec_decoding_log_stats_uses_interval_deltas() {
+        let prev = CounterSnapshot {
+            spec_decode_num_drafts: 10,
+            spec_decode_num_draft_tokens: 100,
+            spec_decode_num_accepted_tokens: 40,
+            ..Default::default()
+        };
+        let curr = CounterSnapshot {
+            spec_decode_num_drafts: 14,
+            spec_decode_num_draft_tokens: 120,
+            spec_decode_num_accepted_tokens: 52,
+            ..Default::default()
+        };
+
+        let stats = spec_decoding_log_stats(&curr, &prev, 2.0).unwrap();
+
+        assert_eq!(stats.mean_acceptance_length, 4.0);
+        assert_eq!(stats.accepted_throughput, 6.0);
+        assert_eq!(stats.draft_throughput, 10.0);
+        assert_eq!(stats.accepted_tokens, 12);
+        assert_eq!(stats.draft_tokens, 20);
+        assert_eq!(stats.draft_acceptance_rate, 60.0);
     }
 }
