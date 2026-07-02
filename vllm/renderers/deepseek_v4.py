@@ -50,7 +50,6 @@ class DeepseekV4Renderer(BaseRenderer[DeepseekV4Tokenizer]):
 
         prompt_raw = self._apply_chat_template(
             conversation=conversation,
-            messages=messages,
             **params.get_apply_chat_template_kwargs(),
         )
 
