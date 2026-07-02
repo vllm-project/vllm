@@ -77,11 +77,17 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
 
         self.mtp_start_layer_idx = config.num_hidden_layers
         self.num_mtp_layers = getattr(config, "mtp_num_hidden_layers", 1)
-
-        self.embed_tokens = VocabParallelEmbedding(
-            self.vocab_size,
-            config.hidden_size,
+        self.share_backbone_input_output = (
+            not getattr(config, "mtp_use_dedicated_embeddings", True)
+            and get_pp_group().world_size == 1
         )
+        if self.share_backbone_input_output:
+            self.embed_tokens = PPMissingLayer()
+        else:
+            self.embed_tokens = VocabParallelEmbedding(
+                self.vocab_size,
+                config.hidden_size,
+            )
 
         # Workaround: mtp.fc is stored as BF16 in NVFP4 checkpoints but is
         # missing from hf_quant_config.json exclude_modules. Force unquantized.
@@ -218,7 +224,9 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
         )
 
         if get_pp_group().is_last_rank:
-            if config.tie_word_embeddings:
+            if self.model.share_backbone_input_output:
+                self.lm_head = PPMissingLayer()
+            elif config.tie_word_embeddings:
                 self.lm_head = self.model.embed_tokens
             else:
                 self.lm_head = ParallelLMHead(
@@ -285,6 +293,8 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
                 if name.startswith("mtp."):
                     name = name.replace("mtp.", "model.")
                 elif any(key in name for key in ["embed_tokens", "lm_head"]):
+                    if self.model.share_backbone_input_output:
+                        continue
                     if "embed_tokens" in name:
                         name = name.replace("language_model.", "")
                 else:
