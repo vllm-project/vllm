@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import threading
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,12 +11,17 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOTransferAck,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_connector import (
+    MoRIIOConnectorScheduler,
     MoRIIOConnectorWorker,
     get_moriio_expected_ack_count,
     get_moriio_remote_tp_rank,
     resolve_moriio_transfer_ack,
     validate_moriio_heterogeneous_tp_kv_heads,
 )
+from vllm.v1.outputs import KVConnectorOutput
+from vllm.v1.request import RequestStatus
+
+pytestmark = pytest.mark.skip_global_cleanup
 
 
 def test_remote_tp_rank_same_tp_maps_to_self():
@@ -229,6 +235,126 @@ def test_ack_for_non_live_transfer_is_ignored():
     )
     assert notification_counts == {}
     assert completed_transfer_ids == set()
+
+
+def _bare_scheduler(is_producer: bool = True) -> MoRIIOConnectorScheduler:
+    scheduler = object.__new__(MoRIIOConnectorScheduler)
+    scheduler.is_producer = is_producer
+    scheduler.transfer_id_to_request_id = {}
+    scheduler.request_id_to_transfer_id = {}
+    scheduler._reqs_need_recv = {}
+    scheduler._reqs_need_send = {}
+    scheduler._deferred_send_deadlines = {}
+    scheduler._defer_timeout = 60.0
+    scheduler.engine_id = "127.0.0.1:6301"
+    scheduler.host_ip = "127.0.0.1"
+    scheduler.handshake_port = 6301
+    scheduler.side_notify_port = 61005
+    scheduler.vllm_config = SimpleNamespace(
+        parallel_config=SimpleNamespace(
+            data_parallel_size=1,
+            tensor_parallel_size=1,
+        )
+    )
+    return scheduler
+
+
+def test_transfer_id_remap_does_not_let_stale_unmap_delete_new_mapping():
+    scheduler = _bare_scheduler()
+
+    scheduler.map_request_id("old-req", "tx0")
+    scheduler.map_request_id("new-req", "tx0")
+    scheduler.unmap_request_id("old-req")
+
+    assert scheduler.transfer_id_to_request_id == {"tx0": "new-req"}
+    assert scheduler.request_id_to_transfer_id == {"new-req": "tx0"}
+
+
+def test_request_remap_removes_stale_transfer_mapping():
+    scheduler = _bare_scheduler()
+
+    scheduler.map_request_id("req0", "tx0")
+    scheduler.map_request_id("req0", "tx1")
+
+    assert scheduler.transfer_id_to_request_id == {"tx1": "req0"}
+    assert scheduler.request_id_to_transfer_id == {"req0": "tx1"}
+
+
+def test_producer_request_finished_unmaps_when_blocks_not_deferred():
+    scheduler = _bare_scheduler(is_producer=True)
+    scheduler.map_request_id("req0", "tx0")
+    request = SimpleNamespace(
+        request_id="req0",
+        kv_transfer_params={"transfer_id": "tx0", "do_remote_decode": False},
+        status=RequestStatus.FINISHED_STOPPED,
+    )
+
+    delay_free, new_params = scheduler.request_finished(request, block_ids=[])
+
+    assert delay_free is False
+    assert new_params is None
+    assert scheduler.transfer_id_to_request_id == {}
+    assert scheduler.request_id_to_transfer_id == {}
+
+
+def test_producer_request_finished_keeps_mapping_when_blocks_deferred():
+    scheduler = _bare_scheduler(is_producer=True)
+    scheduler.map_request_id("req0", "tx0")
+    request = SimpleNamespace(
+        request_id="req0",
+        kv_transfer_params={"transfer_id": "tx0", "do_remote_decode": True},
+        status=RequestStatus.FINISHED_LENGTH_CAPPED,
+    )
+
+    delay_free, new_params = scheduler.request_finished(request, block_ids=[1])
+
+    assert delay_free is True
+    assert new_params is not None
+    assert scheduler.transfer_id_to_request_id == {"tx0": "req0"}
+    assert scheduler.request_id_to_transfer_id == {"req0": "tx0"}
+    assert scheduler._reqs_need_send.keys() == {"req0"}
+    assert scheduler._deferred_send_deadlines.keys() == {"req0"}
+
+
+def test_deferred_send_timeout_marks_finished_and_clears_mapping():
+    scheduler = _bare_scheduler(is_producer=True)
+    scheduler.map_request_id("req0", "tx0")
+    scheduler._deferred_send_deadlines["req0"] = 0.0
+    connector_output = KVConnectorOutput()
+
+    scheduler.update_connector_output(connector_output)
+
+    assert connector_output.finished_sending == {"req0"}
+    assert scheduler._deferred_send_deadlines == {}
+    assert scheduler.transfer_id_to_request_id == {}
+    assert scheduler.request_id_to_transfer_id == {}
+
+
+def test_write_completion_before_transfer_mapping_is_retried():
+    class FakeWrapper:
+        def __init__(self):
+            self.batches = [{"tx-early"}, set()]
+
+        def pop_finished_write_req_ids(self):
+            return self.batches.pop(0)
+
+        def shutdown(self):
+            pass
+
+    worker = object.__new__(MoRIIOConnectorWorker)
+    worker.is_producer = False
+    worker.mode = MoRIIOMode.WRITE
+    worker.moriio_wrapper = FakeWrapper()
+    worker.transfer_id_to_request_id = {}
+    worker._unmatched_write_completions = set()
+
+    assert worker.get_finished() == (set(), set())
+    assert worker._unmatched_write_completions == {"tx-early"}
+
+    worker.transfer_id_to_request_id = {"tx-early": "req0"}
+
+    assert worker.get_finished() == (set(), {"req0"})
+    assert worker._unmatched_write_completions == set()
 
 
 def test_worker_get_finished_counts_structured_release_fan_in():
