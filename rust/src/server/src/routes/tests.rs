@@ -3668,6 +3668,264 @@ async fn non_stream_raw_generate_returns_token_output_envelope() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[serial]
+async fn generative_scoring_scores_string_items_with_requested_label_logprobs() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-generative-scoring".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            boxed_test_future(async move {
+                let expected_prompts = [
+                    vec![FAKE_BOS_TOKEN_ID, b'Q' as u32, b'A' as u32],
+                    vec![FAKE_BOS_TOKEN_ID, b'Q' as u32, b'B' as u32],
+                ];
+                let label_logprobs = [(-0.5_f32, -2.0_f32), (-2.0_f32, -0.5_f32)];
+
+                for (index, expected_prompt) in expected_prompts.into_iter().enumerate() {
+                    let add = recv_engine_message(dealer).await;
+                    let request: EngineCoreRequest =
+                        rmp_serde::from_slice(&add[1]).expect("decode request");
+                    assert_eq!(
+                        request.prompt_token_ids.as_deref(),
+                        Some(expected_prompt.as_slice())
+                    );
+                    assert_eq!(
+                        request.external_req_id.as_deref(),
+                        Some(format!("generative-scoring-score-req-{index}").as_str())
+                    );
+                    let sampling_params =
+                        request.sampling_params.as_ref().expect("sampling params");
+                    assert_eq!(sampling_params.max_tokens, 1);
+                    assert_eq!(sampling_params.logprobs, Some(2));
+                    assert_eq!(sampling_params.logprob_token_ids, Some(vec![10, 20]));
+
+                    let (first, second) = label_logprobs[index];
+                    send_outputs(
+                        push,
+                        EngineCoreOutputs {
+                            engine_index: 0,
+                            outputs: vec![request_output_with_logprobs(
+                                &request.request_id,
+                                vec![99],
+                                Some(EngineCoreFinishReason::Stop),
+                                None,
+                                Some(Logprobs {
+                                    positions: vec![PositionLogprobs {
+                                        entries: vec![
+                                            TokenLogprob {
+                                                token_id: 10,
+                                                logprob: first,
+                                                rank: 1,
+                                            },
+                                            TokenLogprob {
+                                                token_id: 20,
+                                                logprob: second,
+                                                rank: 2,
+                                            },
+                                        ],
+                                    }],
+                                }),
+                                None,
+                            )],
+                            ..Default::default()
+                        },
+                    )
+                    .await;
+                }
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/generative_scoring")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "score-req",
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "query": "Q",
+                        "items": ["A", "B"],
+                        "label_token_ids": [10, 20]
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    assert_eq!(json["id"], "generative-scoring-score-req");
+    assert_eq!(json["object"], "list");
+    assert_eq!(json["model"], "Qwen/Qwen1.5-0.5B-Chat");
+    assert_eq!(json["data"][0]["index"], 0);
+    assert_eq!(json["data"][0]["object"], "score");
+    assert_eq!(json["data"][1]["index"], 1);
+    let first_score = json["data"][0]["score"].as_f64().expect("first score");
+    let second_score = json["data"][1]["score"].as_f64().expect("second score");
+    let expected_first = (-0.5_f64).exp() / ((-0.5_f64).exp() + (-2.0_f64).exp());
+    let expected_second = (-2.0_f64).exp() / ((-2.0_f64).exp() + (-0.5_f64).exp());
+    assert!((first_score - expected_first).abs() < 1e-6);
+    assert!((second_score - expected_second).abs() < 1e-6);
+    assert_eq!(json["usage"]["prompt_tokens"], 6);
+    assert_eq!(json["usage"]["completion_tokens"], 2);
+    assert_eq!(json["usage"]["total_tokens"], 8);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generative_scoring_supports_token_id_item_first_and_true_probabilities() {
+    let ipc = IpcNamespace::new().expect("create ipc namespace");
+    let handshake_address = ipc.handshake_endpoint();
+    let engine_id = b"engine-generative-scoring-token-ids".to_vec();
+
+    let engine_task = MockEngineTask::new(spawn_mock_engine_task(
+        handshake_address.clone(),
+        engine_id.clone(),
+        |dealer, push| {
+            boxed_test_future(async move {
+                let add = recv_engine_message(dealer).await;
+                let request: EngineCoreRequest =
+                    rmp_serde::from_slice(&add[1]).expect("decode request");
+                assert_eq!(request.prompt_token_ids.as_deref(), Some(&[3, 4, 1, 2][..]));
+                let sampling_params = request.sampling_params.as_ref().expect("sampling params");
+                assert_eq!(sampling_params.logprob_token_ids, Some(vec![10, 20]));
+
+                send_outputs(
+                    push,
+                    EngineCoreOutputs {
+                        engine_index: 0,
+                        outputs: vec![request_output_with_logprobs(
+                            &request.request_id,
+                            vec![99],
+                            Some(EngineCoreFinishReason::Stop),
+                            None,
+                            Some(Logprobs {
+                                positions: vec![PositionLogprobs {
+                                    entries: vec![
+                                        TokenLogprob {
+                                            token_id: 10,
+                                            logprob: -0.5,
+                                            rank: 1,
+                                        },
+                                        TokenLogprob {
+                                            token_id: 20,
+                                            logprob: -2.0,
+                                            rank: 2,
+                                        },
+                                    ],
+                                }],
+                            }),
+                            None,
+                        )],
+                        ..Default::default()
+                    },
+                )
+                .await;
+            })
+        },
+    ));
+
+    let client = EngineCoreClient::connect(
+        EngineCoreClientConfig::new_single(handshake_address)
+            .with_model_name("test-model")
+            .with_local_input_output_addresses(
+                Some(ipc.input_endpoint()),
+                Some(ipc.output_endpoint()),
+            ),
+    )
+    .await
+    .expect("connect client");
+    let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
+    let mut app = build_router(Arc::new(AppState::new(
+        vec!["Qwen/Qwen1.5-0.5B-Chat".to_string()],
+        chat,
+    )));
+
+    let response = app
+        .call(
+            Request::builder()
+                .method("POST")
+                .uri("/generative_scoring")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    json!({
+                        "request_id": "score-token-ids",
+                        "model": "Qwen/Qwen1.5-0.5B-Chat",
+                        "query": [1, 2],
+                        "items": [[3, 4]],
+                        "label_token_ids": [10, 20],
+                        "item_first": true,
+                        "apply_softmax": false
+                    })
+                    .to_string(),
+                ))
+                .expect("build request"),
+        )
+        .await
+        .expect("call app");
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.expect("read body");
+    engine_task.await.expect("mock engine task");
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("decode json");
+
+    let score = json["data"][0]["score"].as_f64().expect("score");
+    assert!((score - (-0.5_f64).exp()).abs() < 1e-6);
+    assert_eq!(json["usage"]["prompt_tokens"], 4);
+    assert_eq!(json["usage"]["completion_tokens"], 1);
+    assert_eq!(json["usage"]["total_tokens"], 5);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
+async fn generative_scoring_empty_items_returns_400() {
+    let mut app = test_app().await;
+
+    let (status, json) = post_json(
+        &mut app,
+        "/generative_scoring",
+        json!({
+            "model": "Qwen/Qwen1.5-0.5B-Chat",
+            "query": "Q",
+            "items": [],
+            "label_token_ids": [10, 20]
+        }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(json["error"]["message"].as_str().expect("message").contains("items"));
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[serial]
 async fn stream_raw_generate_returns_sse_chunks_and_usage() {
     let ipc = IpcNamespace::new().expect("create ipc namespace");
     let handshake_address = ipc.handshake_endpoint();

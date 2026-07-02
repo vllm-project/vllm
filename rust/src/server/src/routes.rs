@@ -83,7 +83,8 @@ fn build_router_with_options(
         // vLLM specific endpoints
         .route("/tokenize", post(tokenize::tokenize))
         .route("/detokenize", post(tokenize::detokenize))
-        .route("/inference/v1/generate", post(inference::generate));
+        .route("/inference/v1/generate", post(inference::generate))
+        .route("/generative_scoring", post(inference::generative_scoring));
 
     if runtime_lora_updating_enabled {
         router = router
