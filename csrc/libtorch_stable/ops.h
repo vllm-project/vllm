@@ -43,6 +43,47 @@ void per_token_group_quant_int8(const torch::stable::Tensor& input,
                                 int64_t group_size, double eps, double int8_min,
                                 double int8_max);
 
+#ifndef USE_ROCM
+void diffusion_gemma_flashdenoise(
+    torch::stable::Tensor& entropy, torch::stable::Tensor& sample_values,
+    torch::stable::Tensor& sample_indices, torch::stable::Tensor& clean_values,
+    torch::stable::Tensor& clean_indices, torch::stable::Tensor& soft_embed,
+    torch::stable::Tensor const& hidden,
+    torch::stable::Tensor const& lm_head_weight, double normalizer,
+    int64_t mode_flags, int64_t rng_seed, int64_t rng_offset);
+
+void diffusion_gemma_flashdenoise_scaled(
+    torch::stable::Tensor& entropy, torch::stable::Tensor& sample_values,
+    torch::stable::Tensor& sample_indices, torch::stable::Tensor& clean_values,
+    torch::stable::Tensor& clean_indices, torch::stable::Tensor& soft_embed,
+    torch::stable::Tensor const& hidden,
+    torch::stable::Tensor const& lm_head_weight,
+    torch::stable::Tensor const& logit_scale, double normalizer,
+    double final_logit_softcapping, int64_t mode_flags, int64_t rng_seed,
+    int64_t rng_offset, int64_t rng_row_offset);
+
+void diffusion_gemma_flashdenoise_local_state_scaled(
+    torch::stable::Tensor& local_max,
+    torch::stable::Tensor& local_sum_exp,
+    torch::stable::Tensor& local_weighted_logits,
+    torch::stable::Tensor& local_soft_part,
+    torch::stable::Tensor& clean_values,
+    torch::stable::Tensor& clean_indices,
+    torch::stable::Tensor& sample_values,
+    torch::stable::Tensor& sample_indices,
+    torch::stable::Tensor const& hidden,
+    torch::stable::Tensor const& lm_head_weight,
+    torch::stable::Tensor const& logit_scale, int64_t vocab_start_index,
+    double final_logit_softcapping, int64_t rng_seed, int64_t rng_offset);
+
+void diffusion_gemma_flashdenoise_pack_local_state(
+    torch::stable::Tensor& packed, torch::stable::Tensor const& local_max,
+    torch::stable::Tensor const& global_max,
+    torch::stable::Tensor const& local_sum_exp,
+    torch::stable::Tensor const& local_weighted_logits,
+    torch::stable::Tensor const& local_soft_part);
+#endif
+
 torch::stable::Tensor permute_cols(torch::stable::Tensor const& A,
                                    torch::stable::Tensor const& perm);
 
