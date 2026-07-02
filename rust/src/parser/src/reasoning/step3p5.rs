@@ -127,10 +127,8 @@ mod tests {
     use std::sync::Arc;
 
     use super::Step3p5ReasoningParser;
-    use crate::reasoning::{
-        ReasoningParser,
-        tests::{THINK_START_ID, fake_tokenizer},
-    };
+    use crate::reasoning::ReasoningParser;
+    use crate::reasoning::tests::{THINK_START_ID, fake_tokenizer};
 
     #[test]
     fn picks_up_prompt_start_boundary() {
