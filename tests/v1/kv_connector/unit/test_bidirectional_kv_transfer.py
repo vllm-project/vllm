@@ -912,3 +912,168 @@ def test_remote_blocks_processed_flag_persists():
     mro.kv_connector_output = KVConnectorOutput(finished_sending={req_id})
     scheduler.update_from_output(so, mro)
     assert_scheduler_empty(scheduler)
+
+
+# 6. Turn-2 deadline expiry check (P declines reading expired D blocks)
+
+_REMOTE = FakeNixlConnectorWorker.REMOTE_ENGINE_ID
+
+
+@pytest.mark.parametrize(
+    ("offset", "expiry_delta", "expect_declined"),
+    [
+        # offset known + deadline expired/near-expiry -> decline & recompute.
+        pytest.param(0.0, -10.0, True, id="expired"),
+        # offset applied before comparison: +50s in D's clock is expired locally
+        # when D is 100s ahead.
+        pytest.param(100.0, 50.0, True, id="offset_makes_expired"),
+        # within the default 5s safety margin -> treated as expired.
+        pytest.param(0.0, 2.0, True, id="near_expiry_within_margin"),
+        # far-future deadline -> read proceeds.
+        pytest.param(0.0, 1000.0, False, id="valid_far_deadline"),
+        # no deadline field (older peer) -> check skipped.
+        pytest.param(0.0, None, False, id="missing_expiry_field"),
+        # no handshake offset -> check skipped even though deadline passed.
+        pytest.param(None, -10.0, False, id="missing_offset"),
+    ],
+)
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_turn2_deadline_gate(dist_init, offset, expiry_delta, expect_declined):
+    """P declines on the turn-2 readback if the deadline is known,
+    near-expiry and a handshake clock offset is known"""
+    connector, worker = _make_connector_with_fake_worker()
+    assert worker._kv_blocks_expiry_safety_margin == 5
+    if offset is not None:
+        worker._engine_clock_offset[_REMOTE] = offset
+    expiry_time = None if expiry_delta is None else time.perf_counter() + expiry_delta
+    meta = NixlConnectorMetadata()
+    params = {
+        "do_remote_prefill": False,
+        "do_remote_decode": True,
+        "remote_block_ids": ([20, 21],),
+        "remote_engine_id": FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+        "remote_request_id": "decode-req",
+        "remote_host": "localhost",
+        "remote_port": 1234,
+        "remote_tp_size": 1,
+    }
+    if expiry_time is not None:
+        params["remote_blocks_expiry_time"] = expiry_time
+    meta.add_new_req_to_recv(
+        request_id="req",
+        local_block_ids=([10, 11],),
+        kv_transfer_params=params,
+    )
+    _do_load_kv(connector, meta)
+    assert worker.xfer_stats.data["num_kv_expired_reqs"] == (
+        [1] if expect_declined else []
+    )
+    _, done_recving = connector.get_finished(finished_req_ids=set())
+    assert "req" in done_recving
+
+
+@patch(
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+    FakeNixlWrapper,
+)
+def test_turn2_full_prefix_hit_with_expired_deadline_skips_gate(dist_init):
+    """A full local prefix hit issues no READ. The expiry gate must be skipped
+    even when D's deadline is expired."""
+    connector, worker = _make_connector_with_fake_worker()
+    worker._engine_clock_offset[_REMOTE] = 0.0
+
+    meta = NixlConnectorMetadata()
+    meta.add_new_req_to_recv(
+        request_id="req",
+        local_block_ids=(),  # full prefix hit -> zero local block groups
+        kv_transfer_params={
+            "do_remote_prefill": False,
+            "do_remote_decode": True,
+            "remote_block_ids": ([20, 21],),
+            "remote_engine_id": _REMOTE,
+            "remote_request_id": "decode-req",
+            "remote_host": "localhost",
+            "remote_port": 1234,
+            "remote_tp_size": 1,
+            # Expired on D's clock; with offset 0 it is expired locally too.
+            "remote_blocks_expiry_time": time.perf_counter() - 10.0,
+        },
+    )
+    # Must not raise, and the gate must not fire for a no-read prefix hit.
+    _do_load_kv(connector, meta)
+    assert worker.xfer_stats.data["num_kv_expired_reqs"] == []
+    assert worker.xfer_stats.data["num_failed_transfers"] == []
+
+
+def test_d_node_request_finished_exports_blocks_expiry_time():
+    """D-node (do_remote_prefill request) exports a future float expiry time."""
+    vllm_config = create_vllm_config(kv_connector_extra_config=BIDIR_KV_EXTRA_CONFIG)
+    scheduler = create_scheduler(vllm_config)
+    BS = vllm_config.cache_config.block_size
+    req = create_request(
+        request_id=600, block_size=BS, num_tokens=int(BS * 2.5), do_remote_prefill=True
+    )
+    scheduler.add_request(req)
+    req_id = req.request_id
+    so = scheduler.schedule()
+    scheduler.update_from_output(
+        so, create_model_runner_output(reqs=[], finished_recving={req_id})
+    )
+    so = scheduler.schedule()
+    eco = scheduler.update_from_output(
+        so, create_model_runner_output(reqs=[req], use_eos=True)
+    )
+    kv = eco[0].outputs[0].kv_transfer_params
+    assert kv["do_remote_decode"] is True
+    assert isinstance(kv["remote_blocks_expiry_time"], float)
+    assert kv["remote_blocks_expiry_time"] > time.perf_counter()
+
+
+def test_handshake_listener_appends_perf_counter_frame():
+    """The handshake reply carries a 2nd frame with the listener's live
+    perf_counter."""
+    import threading
+
+    import msgspec
+    import zmq
+
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_scheduler import (
+        NixlBaseConnectorScheduler,
+    )
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import GET_META_MSG
+    from vllm.distributed.kv_transfer.kv_connector.v1.nixl.utils import zmq_ctx
+    from vllm.utils.network_utils import get_open_port, make_zmq_path
+
+    encoded_data = {0: b"payload-rank-0"}
+    ready_event = threading.Event()
+    stop_event = threading.Event()
+    host = "127.0.0.1"
+    port = get_open_port()
+    listener = threading.Thread(
+        target=NixlBaseConnectorScheduler._nixl_handshake_listener,
+        args=(encoded_data, ready_event, stop_event, host, port),
+        daemon=True,
+    )
+    listener.start()
+    try:
+        assert ready_event.wait(timeout=5)
+        path = make_zmq_path("tcp", host, port)
+        with zmq_ctx(zmq.REQ, path) as sock:  # type: ignore[attr-defined]
+            sock.setsockopt(zmq.RCVTIMEO, 5000)  # type: ignore[attr-defined]
+            t0 = time.perf_counter()
+            sock.send(msgspec.msgpack.encode((GET_META_MSG, 0)))
+            parts = sock.recv_multipart()
+            t1 = time.perf_counter()
+        assert len(parts) == 2
+        assert parts[0] == b"payload-rank-0"
+        remote_perf = msgspec.msgpack.decode(parts[1])
+        assert isinstance(remote_perf, float)
+        # same-clock => offset is near zero.
+        offset = remote_perf - (t0 + t1) / 2
+        assert abs(offset) < 1.0
+    finally:
+        stop_event.set()
+        listener.join(timeout=5)

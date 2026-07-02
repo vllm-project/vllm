@@ -101,7 +101,7 @@ The heartbeat is deferred to the next step once the handshake completes --- the 
 
 ## Bidirectional KV Transfer
 
-For multi-turn conversations, [bidirectional KV transfer](../features/disagg_prefill.md) allows D to cache KV blocks that P can pull from on subsequent turns. Since the timing of the next conversational turn is **client-dependent** (not controlled by the system), the heartbeat-based lease mechanism does not apply here. Instead, a separate `decoder_kv_blocks_ttl` (default 480s) provides a simple fixed timeout for blocks cached on D. If the client takes too long to continue the conversation, the blocks expire and P recomputes. Future work may extend a symmetric heartbeat mechanism to this case.
+For multi-turn conversations, [bidirectional KV transfer](../features/disagg_prefill.md) allows D to cache KV blocks that P can pull from on subsequent turns. Since the timing of the next conversational turn is **client-dependent** (not controlled by the system), the heartbeat-based lease mechanism does not apply here. Instead, a separate `decoder_kv_blocks_ttl` (default 480s) provides a simple fixed timeout for blocks cached on D. If the client takes too long to continue the conversation, the blocks expire. D communicates back the expiry time so P can know when blocks are expired and recompute. Future work may extend a symmetric heartbeat mechanism to this case.
 
 ## Key Design Decisions
 
@@ -119,10 +119,11 @@ For multi-turn conversations, [bidirectional KV transfer](../features/disagg_pre
 
 The lease mechanism is controlled through `kv_connector_extra_config` in `--kv-transfer-config`:
 
-| Parameter               | Default | Description                                                                                                                                                   |
-|-------------------------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `kv_lease_duration`     | 30s     | Initial lease duration on P. Heartbeat interval and extension amount are derived automatically (`interval = duration // 6`, `extension = duration * 2 // 3`). |
-| `decoder_kv_blocks_ttl` | 480s    | TTL for KV blocks cached on D in bidirectional transfer mode. Simple fixed timeout, not renewed via heartbeats.                                               |
+| Parameter                        | Default | Description                                                                                                                                                   |
+|----------------------------------|---------|---------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `kv_lease_duration`              | 30s     | Initial lease duration on P. Heartbeat interval and extension amount are derived automatically (`interval = duration // 6`, `extension = duration * 2 // 3`). |
+| `decoder_kv_blocks_ttl`          | 480s    | TTL for KV blocks cached on D in bidirectional transfer mode. Simple fixed timeout, not renewed via heartbeats.                                               |
+| `kv_blocks_expiry_safety_margin` | 5s      | Margin subtracted from D's exported block expiry time when P decides whether to read or recompute on the bidirectional transfer.                              |
 
 ```bash
 vllm serve <MODEL> \

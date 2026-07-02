@@ -318,7 +318,8 @@ class NixlBaseConnectorScheduler:
                 )
                 if msg != GET_META_MSG:
                     logger.warning("Connection listener got unexpected message %s", msg)
-                sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
+                ts = msgspec.msgpack.encode(time.perf_counter())
+                sock.send_multipart((identity, b"", encoded_data[target_tp_rank], ts))
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
