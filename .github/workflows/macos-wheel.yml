@@ -1,0 +1,57 @@
+name: Build macOS arm64 CPU wheel
+run-name: "macos-wheel ${{ inputs.bk_id }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: "Commit SHA to build"
+        required: true
+      bk_id:
+        description: "Buildkite correlation id (used for run-name lookup)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-latest  # native Apple Silicon, free for public repos
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6.0.1
+        with:
+          ref: "${{ inputs.sha }}"
+
+      - uses: astral-sh/setup-uv@v7
+        with:
+          python-version: '3.12'
+
+      - name: Install protoc
+        # Required by the Rust frontend's vllm-server build script (prost/tonic).
+        run: brew install protobuf
+
+      - name: Build wheel
+        env:
+          VLLM_TARGET_DEVICE: cpu
+          # Fail loudly if the Rust frontend can't build, rather than shipping
+          # a wheel that silently dropped it.
+          VLLM_REQUIRE_RUST_FRONTEND: "1"
+          MACOSX_DEPLOYMENT_TARGET: "11.0"
+          # Force an arm64-only build and matching wheel tag. uv's CPython is a
+          # universal2 build, so without these the wheel is tagged universal2
+          # while the binaries are arm64-only, and pip would install it on
+          # Intel Macs where import fails.
+          ARCHFLAGS: "-arch arm64"
+          _PYTHON_HOST_PLATFORM: "macosx-11.0-arm64"
+          CMAKE_BUILD_PARALLEL_LEVEL: "4"
+        run: |
+          uv venv
+          uv pip install -r requirements/build/cpu.txt --index-strategy unsafe-best-match
+          uv build --wheel --no-build-isolation -o dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos-wheel
+          path: dist/*.whl
+          if-no-files-found: error

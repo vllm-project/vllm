@@ -76,6 +76,23 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+      - label: "Build wheel - macOS arm64 - CPU"
+        depends_on: ~
+        id: build-wheel-macos-arm64-cpu
+        agents:
+          queue: cpu_queue_release
+        timeout_in_minutes: 90
+        commands:
+          # Built on a GitHub-hosted Apple Silicon runner (no macOS BK agent);
+          # the wheel is downloaded into artifacts/dist for the normal upload.
+          - "bash .buildkite/scripts/build-macos-wheel-via-gha.sh"
+          - "VLLM_WHEEL_PLATFORM=macos bash .buildkite/scripts/upload-nightly-wheels.sh"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "s3://vllm-wheels/$$BUILDKITE_COMMIT/$(cd artifacts/dist && echo *.whl)"'
+        env:
+          # GitHub token with actions:read+write, provisioned to release agents
+          # via ci-infra (AWS Secrets Manager). Adjust to the real secret name.
+          GH_TOKEN: "$${GITHUB_WHEEL_DISPATCH_TOKEN}"
+
       - label: "Build wheel - x86_64 - CUDA 12.9"
         depends_on: ~
         id: build-wheel-x86-cuda-12-9
