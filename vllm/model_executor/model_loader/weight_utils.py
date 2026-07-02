@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utilities for downloading and initializing model weights."""
 
-import asyncio
 import concurrent.futures
 import fnmatch
 import glob
@@ -63,6 +62,11 @@ except ImportError:
 from vllm.model_executor.layers.quantization.torchao import torchao_version_at_least
 
 logger = init_logger(__name__)
+
+_EXECUTOR_SHUTDOWN_MSGS = (
+    "cannot schedule new futures after shutdown",
+    "cannot schedule new futures after interpreter shutdown",
+)
 
 # use system-level temp directory for file locks, so that multiple users
 # can share the same lock without error.
@@ -746,7 +750,7 @@ def _prefetch_all_checkpoints(
     sorted_files: list[str],
     num_prefetch_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
-) -> None:
+) -> threading.Thread:
     """Start prefetching checkpoint files into page cache in a background thread."""
     if num_prefetch_threads < 1:
         raise ValueError("safetensors prefetch num threads must be >= 1")
@@ -762,51 +766,77 @@ def _prefetch_all_checkpoints(
     paths_to_prefetch = sorted_files[rank::world_size]
     total_for_rank = len(paths_to_prefetch)
 
-    async def _prefetch_all() -> None:
-        loop = asyncio.get_running_loop()
+    def _prefetch_all() -> bool:
         completed = 0
         next_log_pct = 10
+        aborted = False
 
-        async def prefetch_one(
-            path: str,
-            executor: concurrent.futures.ThreadPoolExecutor,
-        ) -> None:
+        def handle_done(path: str) -> None:
             nonlocal completed, next_log_pct
-            try:
-                await loop.run_in_executor(
-                    executor, _prefetch_checkpoint, path, block_size
-                )
-                completed += 1
-                if total_for_rank > 0 and next_log_pct <= 100:
-                    pct = 100 * completed / total_for_rank
-                    if pct >= next_log_pct:
-                        logger.info(
-                            "Prefetching checkpoint files: %d%% (%d/%d)",
-                            next_log_pct,
-                            completed,
-                            total_for_rank,
-                        )
-                        next_log_pct += 10
-            except Exception:
-                logger.warning(
-                    "Failed to prefetch checkpoint file %r.", path, exc_info=True
-                )
+            completed += 1
+            if total_for_rank > 0 and next_log_pct <= 100:
+                pct = 100 * completed / total_for_rank
+                if pct >= next_log_pct:
+                    logger.info(
+                        "Prefetching checkpoint files: %d%% (%d/%d)",
+                        next_log_pct,
+                        completed,
+                        total_for_rank,
+                    )
+                    next_log_pct += 10
 
         with concurrent.futures.ThreadPoolExecutor(
             max_workers=num_prefetch_threads
         ) as executor:
-            await asyncio.gather(
-                *(prefetch_one(p, executor) for p in paths_to_prefetch)
-            )
+            future_to_path: dict[concurrent.futures.Future[None], str] = {}
+            for path in paths_to_prefetch:
+                try:
+                    future_to_path[
+                        executor.submit(_prefetch_checkpoint, path, block_size)
+                    ] = path
+                except RuntimeError as e:
+                    if any(msg in str(e) for msg in _EXECUTOR_SHUTDOWN_MSGS):
+                        aborted = True
+                        logger.debug(
+                            "Aborting checkpoint prefetch because the executor "
+                            "is shutting down."
+                        )
+                        break
+                    logger.warning(
+                        "Failed to submit checkpoint prefetch for %r.",
+                        path,
+                        exc_info=True,
+                    )
+
+            for future in concurrent.futures.as_completed(future_to_path):
+                path = future_to_path[future]
+                try:
+                    future.result()
+                except Exception:
+                    logger.warning(
+                        "Failed to prefetch checkpoint file %r.",
+                        path,
+                        exc_info=True,
+                    )
+                else:
+                    handle_done(path)
+
+        return aborted
 
     def _run_prefetch() -> None:
         start = time.perf_counter()
-        asyncio.run(_prefetch_all())
+        aborted = _prefetch_all()
         elapsed = time.perf_counter() - start
-        logger.info(
-            "Prefetching checkpoint files into page cache finished in %.2fs",
-            elapsed,
-        )
+        if aborted:
+            logger.info(
+                "Prefetching checkpoint files interrupted by shutdown after %.2fs",
+                elapsed,
+            )
+        else:
+            logger.info(
+                "Prefetching checkpoint files into page cache finished in %.2fs",
+                elapsed,
+            )
 
     logger.info(
         "Prefetching checkpoint files into page cache started "
@@ -814,7 +844,9 @@ def _prefetch_all_checkpoints(
         num_prefetch_threads,
         block_size,
     )
-    threading.Thread(target=_run_prefetch, daemon=True).start()
+    thread = threading.Thread(target=_run_prefetch, daemon=True)
+    thread.start()
+    return thread
 
 
 def safetensors_weights_iterator(
