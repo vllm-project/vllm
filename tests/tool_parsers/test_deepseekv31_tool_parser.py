@@ -3,12 +3,19 @@
 
 import pytest
 
+from tests.tool_parsers.utils import run_tool_extraction_streaming
 from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.deepseekv31_tool_parser import (
     DeepSeekV31ToolParser,
 )
 
 MODEL = "deepseek-ai/DeepSeek-V3.1"
+
+TOOL_CALLS_START = "<｜tool▁calls▁begin｜>"
+TOOL_CALLS_END = "<｜tool▁calls▁end｜>"
+TOOL_CALL_START = "<｜tool▁call▁begin｜>"
+TOOL_CALL_END = "<｜tool▁call▁end｜>"
+TOOL_SEP = "<｜tool▁sep｜>"
 
 
 @pytest.fixture(scope="module")
@@ -59,3 +66,46 @@ def test_extract_tool_calls_with_multiple_tools(parser):
 
     # prefix is content
     assert result.content == "some prefix text"
+
+
+def test_streaming_close_brace_with_end_token_but_quote_in_prior_delta(parser):
+    deltas = [
+        TOOL_CALLS_START,
+        TOOL_CALL_START,
+        "get_weather",
+        TOOL_SEP,
+        '{"city": "NYC',
+        '"',  # quote arrives alone
+        "}" + TOOL_CALL_END,  # brace + end token in same delta
+        TOOL_CALLS_END,
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser, deltas, assert_one_tool_per_delta=True
+    )
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function.name == "get_weather"
+    args = reconstructor.tool_calls[0].function.arguments
+    # The closing "}" must not be dropped
+    assert args.endswith("}")
+    assert "city" in args
+    assert "NYC" in args
+
+
+def test_streaming_close_brace_alone_with_end_token(parser):
+    deltas = [
+        TOOL_CALLS_START,
+        TOOL_CALL_START,
+        "get_weather",
+        TOOL_SEP,
+        '{"x": 1',
+        "}" + TOOL_CALL_END,  # closing brace + end token
+        TOOL_CALLS_END,
+    ]
+    reconstructor = run_tool_extraction_streaming(
+        parser, deltas, assert_one_tool_per_delta=True
+    )
+    assert len(reconstructor.tool_calls) == 1
+    assert reconstructor.tool_calls[0].function.name == "get_weather"
+    args = reconstructor.tool_calls[0].function.arguments
+    assert args.endswith("}")
+    assert "x" in args
