@@ -124,6 +124,7 @@ class LogitBiasState:
         expanded_idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
+        preserve_when_all_masked: bool = False,
     ) -> None:
         if not np.any(self.use_logit_bias[idx_mapping_np]):
             # No request uses logit bias. Skip the kernel launch.
@@ -141,6 +142,7 @@ class LogitBiasState:
             self.min_lens.gpu,
             self.num_stop_token_ids.gpu,
             self.stop_token_ids.gpu,
+            preserve_when_all_masked,
         )
 
 
@@ -168,6 +170,7 @@ def _bias_kernel(
     stop_token_ids_stride,
     BLOCK_SIZE: tl.constexpr,
     LOGITS_BLOCK_SIZE: tl.constexpr,
+    PRESERVE_WHEN_ALL_MASKED: tl.constexpr,
 ):
     token_idx = tl.program_id(0).to(tl.int64)
     req_state_idx = tl.load(expanded_idx_mapping_ptr + token_idx)
@@ -232,11 +235,33 @@ def _bias_kernel(
             stop_token_ids_ptr + req_state_idx * stop_token_ids_stride + block,
             mask=mask,
         )
+        stop_logits = tl.load(
+            logits_ptr + token_idx * logits_stride + stop_token_ids,
+            mask=mask,
+            other=-float("inf"),
+        )
         tl.store(
             logits_ptr + token_idx * logits_stride + stop_token_ids,
             -float("inf"),
             mask=mask,
         )
+        if PRESERVE_WHEN_ALL_MASKED:
+            row_max = tl.full((), -float("inf"), tl.float32)
+            for i in range(0, vocab_size, LOGITS_BLOCK_SIZE):
+                offset = i + tl.arange(0, LOGITS_BLOCK_SIZE)
+                logits = tl.load(
+                    logits_ptr + token_idx * logits_stride + offset,
+                    mask=offset < vocab_size,
+                    other=-float("inf"),
+                )
+                row_max = tl.maximum(row_max, tl.max(logits, axis=0))
+
+            if row_max == -float("inf"):
+                tl.store(
+                    logits_ptr + token_idx * logits_stride + stop_token_ids,
+                    stop_logits,
+                    mask=mask,
+                )
 
 
 def apply_logit_bias(
@@ -251,6 +276,7 @@ def apply_logit_bias(
     min_lens: torch.Tensor,
     num_stop_token_ids: torch.Tensor,
     stop_token_ids: torch.Tensor,
+    preserve_when_all_masked: bool = False,
 ) -> None:
     num_tokens, vocab_size = logits.shape
     BLOCK_SIZE = triton.next_power_of_2(
@@ -281,4 +307,5 @@ def apply_logit_bias(
         stop_token_ids.stride(0),
         BLOCK_SIZE=BLOCK_SIZE,
         LOGITS_BLOCK_SIZE=LOGITS_BLOCK_SIZE,
+        PRESERVE_WHEN_ALL_MASKED=preserve_when_all_masked,
     )

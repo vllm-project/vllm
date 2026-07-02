@@ -226,10 +226,26 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
         return async_tensor_h2d(data, device=self.device, dtype=dtype)
 
+    def _mask_stop_token_logits(
+        self,
+        logits: torch.Tensor,
+        logits_slice: tuple[torch.Tensor, torch.Tensor],
+    ) -> None:
+        stop_logits = logits[logits_slice].clone()
+        logits.index_put_(logits_slice, self.neg_inf_tensor)
+
+        empty_rows = torch.isneginf(logits).all(dim=-1)
+        restore_mask = empty_rows[logits_slice[0]]
+        restore_slice = (
+            logits_slice[0][restore_mask],
+            logits_slice[1][restore_mask],
+        )
+        logits.index_put_(restore_slice, stop_logits[restore_mask])
+
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.min_toks:
-            # Inhibit EOS token for requests which have not reached min length
-            logits.index_put_(self.logits_slice, self.neg_inf_tensor)
+            # Inhibit EOS token for requests which have not reached min length.
+            self._mask_stop_token_logits(logits, self.logits_slice)
         return logits
 
     def apply_with_spec_decode(
@@ -238,7 +254,8 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         num_draft_tokens: list[int],
     ) -> torch.Tensor:
         """Spec-decode version of apply().
-        Priority: ``min_tokens`` > ``stop_token_ids`` / EOS.
+        Stop tokens stay masked unless masking them would leave no legal token
+        in a row.
         Example: ``num_draft_tokens = [2, 3, 1]``
           → ``logits`` shape ``[6, V]``, ``cumsum = [0, 2, 5, 6]``
           → request 0 owns rows 0‑1, request 1 rows 2‑4, request 2 row 5.
@@ -281,7 +298,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                 async_tensor_h2d(rows_arr, device=self.device),
                 async_tensor_h2d(toks_arr, device=self.device),
             )
-            logits.index_put_(logits_slice, self.neg_inf_tensor)
+            self._mask_stop_token_logits(logits, logits_slice)
 
         return logits
 

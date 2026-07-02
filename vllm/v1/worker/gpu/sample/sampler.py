@@ -98,6 +98,7 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
+            has_structured_output_reqs=input_batch.has_structured_output_reqs,
             return_logprobs=return_logprobs,
         )
 
@@ -151,6 +152,7 @@ class Sampler:
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        has_structured_output_reqs: bool = False,
         skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
         # Copy logits to a new FP32 tensor.
@@ -158,7 +160,11 @@ class Sampler:
 
         # Apply logit bias (e.g., allowed_token_ids, min_tokens) in place.
         self.logit_bias_state.apply_logit_bias(
-            logits, expanded_idx_mapping, idx_mapping_np, pos
+            logits,
+            expanded_idx_mapping,
+            idx_mapping_np,
+            pos,
+            preserve_when_all_masked=has_structured_output_reqs,
         )
 
         # Apply penalties in place.
@@ -203,6 +209,7 @@ class Sampler:
         pos: torch.Tensor,
         input_ids: torch.Tensor,
         expanded_local_pos: torch.Tensor,
+        has_structured_output_reqs: bool = False,
         return_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         processed_logits = self.apply_sampling_params(
@@ -212,6 +219,7 @@ class Sampler:
             pos,
             input_ids,
             expanded_local_pos,
+            has_structured_output_reqs=has_structured_output_reqs,
             skip_top_k_top_p=True,
         )
         top_k, top_p = self.sampling_states.get_top_k_top_p(

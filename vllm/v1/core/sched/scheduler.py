@@ -1637,9 +1637,8 @@ class Scheduler(SchedulerInterface):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 assert struct_output_request.grammar is not None
-                if not struct_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
-                    req_id, new_token_ids
-                ):
+                grammar = struct_output_request.grammar
+                if not grammar.accept_tokens(req_id, new_token_ids):
                     logger.error(
                         "Unexpected: grammar rejected tokens %s for request %s. "
                         "Terminating request.",
@@ -1648,6 +1647,9 @@ class Scheduler(SchedulerInterface):
                     )
                     request.status = RequestStatus.FINISHED_ERROR
                     request.resumable = False
+                    stopped = True
+                elif not stopped and grammar.is_terminated():
+                    request.status = RequestStatus.FINISHED_STOPPED
                     stopped = True
 
             routed_experts = None
