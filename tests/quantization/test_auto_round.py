@@ -772,3 +772,39 @@ class TestGetLayerConfigFusedQKV:
             DummyLayer(), "model.layers.0.self_attn.qkv_proj"
         )
         assert bits == 8
+
+
+def test_inc_get_quant_method_xpu_routed_experts_uses_moe_wna16(
+    monkeypatch,
+) -> None:
+    captured = {}
+    config = make_config()
+    layer = object.__new__(RoutedExperts)
+    layer.moe_config = object()
+    sentinel = object()
+
+    class DummyMoeWNA16Config:
+        def get_quant_method(self, routed_layer, routed_prefix):
+            captured["layer"] = routed_layer
+            captured["prefix"] = routed_prefix
+            return sentinel
+
+    monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
+    monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.quantization.moe_wna16.MoeWNA16Config.from_config",
+        lambda cfg: captured.update({"from_config": cfg}) or DummyMoeWNA16Config(),
+    )
+
+    method = config.get_quant_method(layer, "layer")
+
+    assert method is sentinel
+    assert captured["from_config"] == {
+        "quant_method": "gptq",
+        "bits": 4,
+        "group_size": 128,
+        "sym": True,
+        "lm_head": False,
+    }
+    assert captured["layer"] is layer
+    assert captured["prefix"] == "layer"

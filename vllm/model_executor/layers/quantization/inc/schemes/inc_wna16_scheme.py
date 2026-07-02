@@ -87,14 +87,38 @@ class INCWna16Scheme(INCScheme):
         prefix: str,
         layer_config: "INCLayerConfig",
     ):
-        del config, prefix
-        # XPU and CPU do not support MoE quantization yet
-        if current_platform.is_xpu() or current_platform.is_cpu():
+        del config
+
+        if current_platform.is_xpu():
+            if layer_config.is_gptq and layer_config.bits == 4 and layer_config.sym:
+                from vllm.model_executor.layers.quantization.moe_wna16 import (
+                    MoeWNA16Config,
+                )
+
+                moe_config = MoeWNA16Config.from_config(
+                    {
+                        "quant_method": "gptq",
+                        "bits": layer_config.bits,
+                        "group_size": layer_config.group_size,
+                        "sym": layer_config.sym,
+                        "lm_head": False,
+                    }
+                )
+                return moe_config.get_quant_method(layer, prefix)
+
             from vllm.model_executor.layers.fused_moe import (
                 UnquantizedFusedMoEMethod,
             )
 
             return UnquantizedFusedMoEMethod(layer.moe_config)
+
+        if current_platform.is_cpu():
+            from vllm.model_executor.layers.fused_moe import (
+                UnquantizedFusedMoEMethod,
+            )
+
+            return UnquantizedFusedMoEMethod(layer.moe_config)
+
         if layer_config.is_gptq:
             return _resolve_gptq_moe(layer, layer_config)
         if layer_config.is_awq:
