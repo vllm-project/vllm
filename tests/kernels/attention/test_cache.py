@@ -196,8 +196,6 @@ def test_reshape_and_cache_flash(
     torch.set_default_device(device)
     torch.accelerator.set_device_index(device)
     assert implementation in ["cuda", "triton"]
-    if implementation == "triton" and kv_cache_layout == "HND":
-        pytest.skip("Triton implementation only supports NHD layout.")
 
     if kv_scale_type == "attn_head" and implementation != "cuda":
         pytest.skip("Only CUDA implementation supports attn_head scaling.")
