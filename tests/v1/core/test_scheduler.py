@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -1429,13 +1429,34 @@ def _make_hybrid_scheduler(
 ) -> Scheduler:
     scheduler_block_size = 256
     hash_block_size = 4
-    model_config = ModelConfig(
-        model="facebook/opt-125m",
-        trust_remote_code=True,
-        dtype="float16",
-        seed=42,
-        skip_tokenizer_init=True,
+    from transformers import OPTConfig
+
+    hf_config = OPTConfig(
+        vocab_size=50272,
+        hidden_size=768,
+        ffn_dim=3072,
+        num_hidden_layers=12,
+        num_attention_heads=12,
+        max_position_embeddings=4096,
+        architectures=["OPTForCausalLM"],
     )
+    with (
+        patch("vllm.config.model.get_config", return_value=hf_config),
+        patch("vllm.config.model.get_hf_image_processor_config", return_value=None),
+        patch("vllm.config.model.get_pooling_config", return_value=None),
+        patch(
+            "vllm.transformers_utils.model_arch_config_convertor."
+            "get_safetensors_params_metadata",
+            return_value={},
+        ),
+    ):
+        model_config = ModelConfig(
+            model="facebook/opt-125m",
+            trust_remote_code=True,
+            dtype="float16",
+            seed=42,
+            skip_tokenizer_init=True,
+        )
     scheduler_config = SchedulerConfig(
         max_num_seqs=4,
         max_num_batched_tokens=4096,
@@ -1585,22 +1606,89 @@ def _evict_cached_groups(scheduler: Scheduler, group_ids_to_evict: set[int]) -> 
 
 
 @pytest.mark.parametrize(
+    "kv_cache_groups,group_ids_to_evict,expected_target_block_counts",
+    [
+        pytest.param(
+            _dsv4_like_kv_cache_groups(),
+            {1, 2, 3},
+            [1, 2, 2, 16],
+            id="dsv4-like",
+        ),
+        pytest.param(
+            _mamba_like_kv_cache_groups(),
+            {1},
+            [1, 1],
+            id="mamba-like",
+        ),
+    ],
+)
+def test_kv_connector_remote_prefill_hybrid_uses_dense_local_prefix_hit(
+    kv_cache_groups: list[KVCacheGroupSpec],
+    group_ids_to_evict: set[int],
+    expected_target_block_counts: list[int],
+):
+    """Remote-prefill hybrid KVConnector hits use dense local prefix tokens.
+
+    Non-dense/state groups are not reported as local prefix-hit blocks. They
+    get receive target blocks through external-token allocation instead.
+    """
+    scheduler = _make_hybrid_scheduler(kv_cache_groups)
+    _seed_local_prefix_cache(scheduler)
+    _evict_cached_groups(scheduler, group_ids_to_evict)
+
+    queried_local_hits: list[int] = []
+    allocated_targets: list[list[list[int]]] = []
+    external_hits: list[int] = []
+
+    def record_connector_query(request: Request, num_computed_tokens: int):
+        queried_local_hits.append(num_computed_tokens)
+        return request.num_tokens - num_computed_tokens, True
+
+    def record_after_alloc(
+        _request: Request,
+        blocks,
+        num_external_tokens: int,
+    ) -> None:
+        external_hits.append(num_external_tokens)
+        allocated_targets.append(blocks.get_unhashed_block_ids_all_groups())
+
+    assert scheduler.connector is not None
+    scheduler.connector.get_num_new_matched_tokens = record_connector_query
+    scheduler.connector.update_state_after_alloc = record_after_alloc
+
+    [replay_req] = create_requests(
+        num_requests=1,
+        num_tokens=1280,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=4,
+        req_ids=["replay"],
+    )
+    replay_req.kv_transfer_params = {"do_remote_prefill": True}
+    scheduler.add_request(replay_req)
+    scheduler_output = scheduler.schedule()
+
+    assert queried_local_hits == [1024]
+    assert external_hits == [256]
+    assert [len(group) for group in allocated_targets[0]] == (
+        expected_target_block_counts
+    )
+    assert scheduler_output.scheduled_new_reqs == []
+    assert replay_req.status == RequestStatus.WAITING_FOR_REMOTE_KVS
+
+
+@pytest.mark.parametrize(
     "kv_cache_groups,group_ids_to_evict",
     [
         pytest.param(_dsv4_like_kv_cache_groups(), {1, 2, 3}, id="dsv4-like"),
         pytest.param(_mamba_like_kv_cache_groups(), {1}, id="mamba-like"),
     ],
 )
-def test_kv_connector_hybrid_uses_dense_local_prefix_hit(
+def test_kv_connector_remote_prefill_hybrid_falls_back_without_external_hit(
     kv_cache_groups: list[KVCacheGroupSpec],
     group_ids_to_evict: set[int],
 ):
-    """Hybrid KVConnector hits should report reusable dense prefix tokens.
-
-    The non-dense/state groups may miss while the dense attention group is
-    locally cached. In that case the connector scalar should still receive the
-    dense local prefix hit instead of the minimum hit across all groups.
-    """
+    """Dense-only local hits are unsafe when the connector loads no blocks."""
     scheduler = _make_hybrid_scheduler(kv_cache_groups)
     _seed_local_prefix_cache(scheduler)
     _evict_cached_groups(scheduler, group_ids_to_evict)
@@ -1627,7 +1715,49 @@ def test_kv_connector_hybrid_uses_dense_local_prefix_hit(
     scheduler_output = scheduler.schedule()
 
     assert queried_local_hits == [1024]
-    assert scheduler_output.num_scheduled_tokens[replay_req.request_id] == 256
+    assert scheduler_output.num_scheduled_tokens[replay_req.request_id] == 1280
+    assert scheduler_output.scheduled_new_reqs[0].num_computed_tokens == 0
+
+
+@pytest.mark.parametrize(
+    "kv_cache_groups,group_ids_to_evict",
+    [
+        pytest.param(_dsv4_like_kv_cache_groups(), {1, 2, 3}, id="dsv4-like"),
+        pytest.param(_mamba_like_kv_cache_groups(), {1}, id="mamba-like"),
+    ],
+)
+def test_kv_connector_hybrid_non_remote_prefill_uses_convergent_hit(
+    kv_cache_groups: list[KVCacheGroupSpec],
+    group_ids_to_evict: set[int],
+):
+    """Store/offload-like connector paths keep the all-group hit semantics."""
+    scheduler = _make_hybrid_scheduler(kv_cache_groups)
+    _seed_local_prefix_cache(scheduler)
+    _evict_cached_groups(scheduler, group_ids_to_evict)
+
+    queried_local_hits: list[int] = []
+
+    def record_connector_query(request: Request, num_computed_tokens: int):
+        queried_local_hits.append(num_computed_tokens)
+        return 0, False
+
+    assert scheduler.connector is not None
+    scheduler.connector.get_num_new_matched_tokens = record_connector_query
+
+    [replay_req] = create_requests(
+        num_requests=1,
+        num_tokens=1280,
+        max_tokens=1,
+        same_prompt=True,
+        block_size=4,
+        req_ids=["replay"],
+    )
+    scheduler.add_request(replay_req)
+    scheduler_output = scheduler.schedule()
+
+    assert queried_local_hits == [0]
+    assert scheduler_output.num_scheduled_tokens[replay_req.request_id] == 1280
+    assert scheduler_output.scheduled_new_reqs[0].num_computed_tokens == 0
 
 
 @pytest.mark.parametrize("is_async", [False, True])

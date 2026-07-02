@@ -677,12 +677,25 @@ class Scheduler(SchedulerInterface):
                     # Get locally-cached tokens.
                     coordinator = self.kv_cache_manager.coordinator
                     computed_per_group: tuple[list[KVCacheBlock], ...] | None = None
-                    if (
+                    kv_transfer_config = self.vllm_config.kv_transfer_config
+                    request_kv_params = request.kv_transfer_params or {}
+                    is_pd_remote_prefill_consumer = (
+                        kv_transfer_config is not None
+                        and kv_transfer_config.is_kv_consumer
+                        and bool(request_kv_params.get("do_remote_prefill"))
+                    )
+                    is_hybrid_per_group_cache_hit = (
                         self.connector is not None
                         and self.kv_cache_manager.enable_caching
                         and not request.skip_reading_prefix_cache
                         and isinstance(coordinator, HybridKVCacheCoordinator)
-                    ):
+                    )
+                    use_hybrid_remote_prefill_hit = (
+                        is_pd_remote_prefill_consumer
+                        and is_hybrid_per_group_cache_hit
+                    )
+                    if use_hybrid_remote_prefill_hit:
+                        assert isinstance(coordinator, HybridKVCacheCoordinator)
                         computed, per_group_hits = (
                             coordinator.find_longest_cache_hit_per_group(
                                 request.block_hashes,
@@ -690,8 +703,9 @@ class Scheduler(SchedulerInterface):
                             )
                         )
                         # The connector scalar represents reusable dense
-                        # prefix tokens; tail/state groups still flow through
-                        # the per-group computed block lists.
+                        # prefix tokens. Non-dense/state/tail groups are left
+                        # empty so external-token allocation creates receive
+                        # target blocks according to each manager's semantics.
                         dense_kinds = (
                             KVCacheSpecKind.FULL_ATTENTION,
                             KVCacheSpecKind.MLA_ATTENTION,
@@ -704,6 +718,9 @@ class Scheduler(SchedulerInterface):
                                     per_group_hits[group_id]
                                     for group_id in group.group_ids
                                 )
+                            else:
+                                for group_id in group.group_ids:
+                                    computed[group_id].clear()
                         num_new_local_computed_tokens = (
                             min(dense_hits) if dense_hits else 0
                         )
@@ -716,13 +733,6 @@ class Scheduler(SchedulerInterface):
                                 for group_id in group.group_ids:
                                     del computed[group_id][num_dense_blocks:]
                         computed_per_group = computed
-                        if self.kv_cache_manager.log_stats:
-                            assert self.kv_cache_manager.prefix_cache_stats is not None
-                            self.kv_cache_manager.prefix_cache_stats.record(
-                                num_tokens=request.num_tokens,
-                                num_hits=num_new_local_computed_tokens,
-                                preempted=request.num_preemptions > 0,
-                            )
                     else:
                         new_computed_blocks, num_new_local_computed_tokens = (
                             self.kv_cache_manager.get_computed_blocks(request)
@@ -759,18 +769,35 @@ class Scheduler(SchedulerInterface):
                         )
                         connector_prefix_cache_hits = num_external_computed_tokens
 
+                    if (
+                        computed_per_group is not None
+                        and num_external_computed_tokens == 0
+                    ):
+                        # TODO: When dense groups are fully cached on D but
+                        # state/tail groups are not, we would like to reuse
+                        # dense KV and fetch only the missing state/tail
+                        # groups from P. That requires connector-level
+                        # per-group transfer planning; until that contract is
+                        # verified, fall back to the convergent all-group hit.
+                        new_computed_blocks, num_new_local_computed_tokens = (
+                            self.kv_cache_manager.get_computed_blocks(request)
+                        )
+                        computed_per_group = None
+                        num_external_computed_tokens = 0
+
                     # Total computed tokens (local + external).
                     num_computed_tokens = (
                         num_new_local_computed_tokens + num_external_computed_tokens
                     )
                     assert num_computed_tokens <= request.num_tokens
                     if computed_per_group is not None:
-                        for group in coordinator.attention_groups:
-                            num_computed_blocks = (
-                                num_computed_tokens // group.spec.block_size
+                        if self.kv_cache_manager.log_stats:
+                            assert self.kv_cache_manager.prefix_cache_stats is not None
+                            self.kv_cache_manager.prefix_cache_stats.record(
+                                num_tokens=request.num_tokens,
+                                num_hits=num_new_local_computed_tokens,
+                                preempted=request.num_preemptions > 0,
                             )
-                            for group_id in group.group_ids:
-                                del computed_per_group[group_id][num_computed_blocks:]
                         new_computed_blocks = (
                             self.kv_cache_manager.create_kv_cache_blocks(
                                 computed_per_group
