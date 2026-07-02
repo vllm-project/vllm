@@ -199,6 +199,11 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+    # Multi-modal hashes missing from the P1 receiver cache (P0/P1 drift; see
+    # `MultiModalCacheMissError`). Non-empty => retryable: the frontend drops these
+    # from its sender cache and the request is resent with the data. Appended last
+    # so `array_like` positional serialization stays backward compatible.
+    mm_cache_miss_hashes: list[str] | None = None
 
     @property
     def finished(self) -> bool:

@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.logging_utils.dump_input import dump_engine_exception
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.cache import MultiModalCacheMissError
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tracing import instrument, maybe_init_worker_tracer
 from vllm.transformers_utils.config import maybe_register_config_serialize_by_value
@@ -1570,6 +1571,11 @@ class EngineCoreProc(EngineCore):
                         req: EngineCoreRequest = add_request_decoder.decode(data_frames)
                         try:
                             request = self.preprocess_add_request(req)
+                        except MultiModalCacheMissError as e:
+                            # P0/P1 shadow drift -- return a retryable signal (P0
+                            # drops the stale entry, client resends with data).
+                            self._handle_mm_cache_miss(req, e)
+                            continue
                         except Exception:
                             self._handle_request_preproc_error(req)
                             continue
@@ -1652,6 +1658,40 @@ class EngineCoreProc(EngineCore):
                 elif len(reuse_buffers) < max_reuse_bufs:
                     # Limit the number of buffers to reuse.
                     reuse_buffers.append(buffer)
+
+    def _handle_mm_cache_miss(
+        self, request: EngineCoreRequest, err: MultiModalCacheMissError
+    ) -> None:
+        """Return a retryable response for a P0/P1 cache-drift miss.
+
+        Surfaces every drifted hash via ``EngineCoreOutput.mm_cache_miss_hashes`` so
+        the frontend drops them from its sender cache and the client resends with
+        data (see ``MultiModalCacheMissError``). Logged at warning, not exception,
+        because it is expected and self-healing.
+        """
+        logger.warning(
+            "Multi-modal cache miss for request %s (mm_hashes=%s): P0/P1 cache "
+            "drift; returning a retryable response so the items are resent with data.",
+            request.request_id,
+            err.mm_hashes,
+        )
+        self.output_queue.put_nowait(
+            (
+                request.client_index,
+                EngineCoreOutputs(
+                    engine_index=self.engine_index,
+                    finished_requests={request.request_id},
+                    outputs=[
+                        EngineCoreOutput(
+                            request_id=request.request_id,
+                            new_token_ids=[],
+                            finish_reason=FinishReason.ERROR,
+                            mm_cache_miss_hashes=err.mm_hashes,
+                        )
+                    ],
+                ),
+            )
+        )
 
     def _handle_request_preproc_error(self, request: EngineCoreRequest) -> None:
         """Log and return a request-scoped error response for exceptions raised
