@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
@@ -23,6 +23,7 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     MultipleOf,
 )
+from vllm.v1.core.kv_cache_utils import KVCacheBlockCopy
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     EncoderOnlyAttentionSpec,
@@ -516,6 +517,42 @@ def bind_kv_cache(
     # Bind kv_caches to forward context
     for layer_name, kv_cache in kv_caches.items():
         forward_context[layer_name].kv_cache = kv_cache
+
+
+def copy_kv_cache_blocks_inplace(
+    kv_caches: Iterable[torch.Tensor | list[torch.Tensor]],
+    num_blocks: int,
+    kv_cache_block_copies: Sequence[KVCacheBlockCopy],
+) -> None:
+    if not kv_cache_block_copies:
+        return
+
+    storage_tensors: list[torch.Tensor] = []
+    seen_storage: set[int] = set()
+    for entry in kv_caches:
+        # Mamba layers hold a list of state tensors; attention layers a single
+        # tensor. Both alias the shared block-major backing storage.
+        tensors = entry if isinstance(entry, (list, tuple)) else (entry,)
+        for tensor in tensors:
+            ptr = tensor.untyped_storage().data_ptr()
+            if ptr in seen_storage:
+                continue
+            seen_storage.add(ptr)
+            storage_tensors.append(tensor)
+
+    if not storage_tensors:
+        return
+    src_block_ids, dst_block_ids = zip(*kv_cache_block_copies)
+    device = storage_tensors[0].device
+    src_indices = torch.tensor(src_block_ids, dtype=torch.long, device=device)
+    dst_indices = torch.tensor(dst_block_ids, dtype=torch.long, device=device)
+
+    for tensor in storage_tensors:
+        assert tensor.device == device
+        blocks = torch.empty(0, dtype=torch.uint8, device=device)
+        blocks.set_(tensor.untyped_storage())
+        blocks = blocks.view(num_blocks, -1)
+        blocks[dst_indices] = blocks[src_indices]
 
 
 def is_residual_scattered_for_sp(

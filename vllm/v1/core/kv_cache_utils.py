@@ -10,7 +10,7 @@ from collections import defaultdict
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import Any, NewType, TypeAlias, cast, overload
+from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -126,7 +126,7 @@ class KVCacheBlock:
     # when the block is full and cached.
     _block_hash: BlockHashWithGroupId | None = None
     # Number of prefix tokens covered by _block_hash. For full blocks this is
-    # the full block boundary; partial aliases can end inside a cache block.
+    # the full block boundary; partial entries can end inside a cache block.
     _block_hash_num_tokens: int | None = None
 
     # Used to construct a doubly linked list for free blocks.
@@ -174,6 +174,11 @@ class KVCacheBlock:
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
+
+
+class KVCacheBlockCopy(NamedTuple):
+    src_block_id: int
+    dst_block_id: int
 
 
 class FreeKVCacheBlockQueue:
@@ -2227,3 +2232,36 @@ class BlockHashListWithBlockSize:
 
 
 BlockHashList = list[BlockHash] | BlockHashListWithBlockSize
+
+
+def resolve_block_hashes(
+    block_hashes: BlockHashList,
+    hash_block_size: int,
+    block_size: int,
+    *,
+    supports_fine_grained_hash_lookup: bool = False,
+    alignment_tokens: int | None = None,
+) -> BlockHashList:
+    """Resolve the block-hash view at ``block_size``.
+
+    When ``block_size`` equals ``hash_block_size``, reuse the precomputed block
+    hashes directly; otherwise view them at ``block_size`` granularity.
+    Fine-grained lookup keeps the original hashes for partial cache hits.
+    """
+    if block_size == hash_block_size:
+        return block_hashes
+    if isinstance(block_hashes, BlockHashListWithBlockSize):
+        # Already a block-size view
+        assert block_hashes.scale_factor == block_size // hash_block_size
+        return block_hashes
+    # Fine-grained partial hits keep the raw hashes. The caller passes
+    # alignment_tokens = hash_block_size to enable them, else >= block_size.
+    if (
+        supports_fine_grained_hash_lookup
+        and alignment_tokens is not None
+        and alignment_tokens < block_size
+        and block_size % alignment_tokens == 0
+    ):
+        return block_hashes
+    assert block_size % hash_block_size == 0
+    return BlockHashListWithBlockSize(block_hashes, hash_block_size, block_size)
