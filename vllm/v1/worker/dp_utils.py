@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import numpy as np
 import torch
 import torch.distributed as dist
 
@@ -168,6 +169,7 @@ def coordinate_batch_across_dp(
     num_tokens_padded: int | None = None,
     uniform_decode: bool | None = None,
     cudagraph_mode: int = 0,
+    num_scheduled_tokens_per_request: "np.ndarray | None" = None,
 ) -> tuple[bool, torch.Tensor | None, int]:
     """
     Coordinates amongst all DP ranks to determine if and how the full batch
@@ -194,9 +196,40 @@ def coordinate_batch_across_dp(
     ]
 
     """
+    if (
+        num_scheduled_tokens_per_request is not None
+        and len(num_scheduled_tokens_per_request) > 0
+    ):
+        max_pl = int(np.max(num_scheduled_tokens_per_request))
+        num_reqs_local = int(len(num_scheduled_tokens_per_request))
+    else:
+        max_pl = 0
+        num_reqs_local = 0
+
     if parallel_config.data_parallel_size == 1:
-        # Early exit.
-        return False, None, cudagraph_mode
+        # DP=1 fast path: skip cross-rank AR; run local thresholds only.
+        if not allow_microbatching:
+            return False, None, cudagraph_mode
+        assert uniform_decode is not None
+        should_ubatch_local = check_ubatch_thresholds(
+            parallel_config,
+            num_tokens_unpadded,
+            uniform_decode=uniform_decode,
+            max_prompt_len=max_pl,
+            num_reqs=num_reqs_local,
+        )
+        if not should_ubatch_local:
+            return False, None, cudagraph_mode
+        if num_tokens_padded is None:
+            num_tokens_padded = num_tokens_unpadded
+        if is_last_ubatch_empty(
+            num_tokens_unpadded, num_tokens_padded, parallel_config.num_ubatches
+        ):
+            return False, None, cudagraph_mode
+        num_tokens_after_padding = torch.tensor(
+            [num_tokens_padded], dtype=torch.int32, device="cpu"
+        )
+        return True, num_tokens_after_padding, cudagraph_mode
 
     # If the caller has explicitly enabled microbatching.
     should_attempt_ubatching = False
@@ -207,6 +240,8 @@ def coordinate_batch_across_dp(
             parallel_config,
             num_tokens_unpadded,
             uniform_decode=uniform_decode,
+            max_prompt_len=max_pl,
+            num_reqs=num_reqs_local,
         )
 
     if num_tokens_padded is None:

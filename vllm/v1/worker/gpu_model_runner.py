@@ -458,6 +458,12 @@ class GPUModelRunner(
         self.device = device
         self.dtype = self.model_config.dtype
 
+        # Resolve the DBO all-reduce routing now, while the engine config is in
+        # scope. The config global is unset at forward/compile time, so this
+        # cannot be deferred to the first tensor_model_parallel_all_reduce call.
+        from vllm.distributed.communication_op import configure_dbo_all_reduce
+
+        configure_dbo_all_reduce(parallel_config.use_ubatching)
         self.check_ep_fault = False
         if parallel_config.data_parallel_size > 1 and self.model_config.is_moe:
             self.check_ep_fault = get_ep_all2all_manager().support_fault_tolerance
@@ -2406,7 +2412,8 @@ class GPUModelRunner(
         # can cache the attention metadata builds and just update the block table using
         # `builder.update_block_table` if the builder supports it.
         cached_attn_metadata: dict[
-            tuple[KVCacheSpec, type[AttentionMetadataBuilder]], AttentionMetadata
+            tuple[KVCacheSpec, type[AttentionMetadataBuilder], int | None],
+            AttentionMetadata,
         ] = {}
 
         def _build_attn_group_metadata(
@@ -2420,7 +2427,8 @@ class GPUModelRunner(
             kv_cache_spec = kv_cache_groups[kv_cache_gid].kv_cache_spec
             if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
                 kv_cache_spec = kv_cache_spec.kv_cache_specs[attn_group.layer_names[0]]
-            cache_key = (kv_cache_spec, type(builder))
+            # ubid in key: each ubatch gets its own FlashAttentionMetadata.
+            cache_key = (kv_cache_spec, type(builder), ubid)
 
             cascade_attn_prefix_len = (
                 cascade_attn_prefix_lens[kv_cache_gid][attn_gid]
@@ -3879,10 +3887,11 @@ class GPUModelRunner(
                 "a multiple of tensor parallel size"
             )
 
-        # Extra coordination when running data-parallel since we need to coordinate
-        # across ranks
         should_ubatch, num_tokens_across_dp = False, None
-        if self.vllm_config.parallel_config.data_parallel_size > 1:
+        if (
+            self.vllm_config.parallel_config.num_ubatches > 1
+            or self.vllm_config.parallel_config.data_parallel_size > 1
+        ):
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
                 coordinate_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
@@ -3891,6 +3900,7 @@ class GPUModelRunner(
                     num_tokens_padded=num_tokens_padded,
                     uniform_decode=uniform_decode,
                     cudagraph_mode=cudagraph_mode.value,
+                    num_scheduled_tokens_per_request=num_scheduled_tokens_np,
                 )
             )
 
