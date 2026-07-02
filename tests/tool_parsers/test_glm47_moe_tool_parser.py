@@ -4,6 +4,9 @@
 """Tests for the GLM-4.7 tool call parser."""
 
 import json
+import os
+import subprocess
+import sys
 from unittest.mock import Mock
 
 import pytest
@@ -17,6 +20,26 @@ from vllm.tokenizers import get_tokenizer
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
 MODEL = "zai-org/GLM-4.7"
+
+
+def test_supports_required_and_named_when_strict_tool_calling_disabled():
+    env = os.environ.copy()
+    env["VLLM_ENFORCE_STRICT_TOOL_CALLING"] = "0"
+    out = subprocess.check_output(
+        [
+            sys.executable,
+            "-c",
+            (
+                "from vllm.tool_parsers.glm47_moe_tool_parser "
+                "import Glm47MoeModelToolParser; "
+                "print(Glm47MoeModelToolParser.supports_required_and_named)"
+            ),
+        ],
+        env=env,
+        text=True,
+    )
+
+    assert out.strip() == "True"
 
 
 @pytest.fixture(scope="module")
