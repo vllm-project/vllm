@@ -231,10 +231,13 @@ def _construct_message_from_response_item(
     )
 
     if isinstance(item, ResponseFunctionToolCall):
+        tool_name = item.name
+        if item.namespace:
+            tool_name = flat_namespace_tool_name(item.namespace, item.name)
         tool_call = ChatCompletionMessageToolCallParam(
             id=item.call_id,
             function=FunctionCallTool(
-                name=item.name,
+                name=tool_name,
                 arguments=item.arguments,
             ),
             type="function",
