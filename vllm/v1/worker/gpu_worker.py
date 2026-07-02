@@ -479,6 +479,7 @@ class Worker(WorkerBase):
                 current_platform.is_cuda()
                 and self.vllm_config.compilation_config.cudagraph_mode
                 != CUDAGraphMode.NONE
+                and not self.cache_config.enable_extensible_kv_cache
             ):
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
@@ -692,7 +693,11 @@ class Worker(WorkerBase):
         logger.debug("Updated max_model_len to %d", max_model_len)
 
     @instrument(span_name="Allocate KV cache")
-    def initialize_from_config(self, kv_cache_config: KVCacheConfig) -> None:
+    def initialize_from_config(
+        self,
+        kv_cache_config: KVCacheConfig,
+        extensible: bool = False,
+    ) -> None:
         """Allocate GPU KV cache with the specified kv_cache_config."""
 
         # Update local config with adjusted num blocks after profiling,
@@ -707,7 +712,10 @@ class Worker(WorkerBase):
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
         with self._maybe_get_memory_pool_context(tag="kv_cache"):
-            self.model_runner.initialize_kv_cache(kv_cache_config)
+            self.model_runner.initialize_kv_cache(
+                kv_cache_config,
+                extensible=extensible,
+            )
 
         if self.model_config.enable_return_routed_experts:
             self.model_runner.init_routed_experts_capturer()
@@ -719,6 +727,14 @@ class Worker(WorkerBase):
             self.model_runner, "_init_kv_zero_meta"
         ):
             self.model_runner._init_kv_zero_meta()
+
+    def supports_extensible_kv_cache(self) -> bool:
+        supports_fn = getattr(self.model_runner, "supports_extensible_kv_cache", None)
+        return bool(supports_fn is not None and supports_fn())
+
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        self.cache_config.num_gpu_blocks = num_blocks
+        self.model_runner.extend_kv_cache(num_blocks)
 
     @instrument(span_name="Warmup (GPU)")
     def compile_or_warm_up_model(self) -> CompilationTimes:
@@ -894,6 +910,7 @@ class Worker(WorkerBase):
         return CompilationTimes(
             language_model=self.compilation_config.compilation_time,
             encoder=self.compilation_config.encoder_compilation_time,
+            cuda_graph=cuda_graph_memory_bytes,
         )
 
     def reset_mm_cache(self) -> None:

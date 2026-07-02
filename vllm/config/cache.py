@@ -174,6 +174,14 @@ class CacheConfig:
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
+    enable_extensible_kv_cache: bool = False
+    """Use CUDA virtual memory to reserve the KV cache address range before
+    CUDA graph capture and commit the final size after capture.
+
+    This makes automatic KV sizing account for the actual CUDA graph pool. It
+    is only supported for CUDA, V1, and block-major attention backends.
+    """
+
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
     the total buffer size summed across all TP ranks. By default, this is set
@@ -217,6 +225,8 @@ class CacheConfig:
             "kv_cache_max_concurrency",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
+            # Runtime memory allocation strategy, not graph structure.
+            "enable_extensible_kv_cache",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors
