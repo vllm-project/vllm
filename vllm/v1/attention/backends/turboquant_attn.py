@@ -18,6 +18,7 @@ Per-head per-position slot layout:
 
 import functools
 import math
+import os
 from dataclasses import dataclass
 from typing import Any, ClassVar
 
@@ -68,6 +69,40 @@ if _HAS_FLASH_ATTN:
 # kernel can read them efficiently. This avoids O(cached_len) dequant work
 # per continuation, eliminating the O(N²/chunk_size) collapse at long context.
 _CONTINUATION_DECODE_THRESHOLD = 128
+
+# Sparse V: skip the per-tile V load + dequant when the tile's softmax
+# probability is entirely below threshold. The kernel-side branch costs a
+# tl.max + comparison; the savings come from avoiding the V-load and
+# dequant arithmetic on tiles that contribute negligibly. Only worthwhile
+# at long context where many tiles are far from the query.
+#
+# Off by default. Per-platform validation is needed before flipping the
+# default-on (current bench is AMD MI300X only). Users can opt in:
+#
+# Env-var overrides per-process:
+#   VLLM_TQ_SPARSE_V              "1" | "0" | "auto"  (default "0")
+#                                 "auto" turns on at seq_len >= ctx threshold
+#   VLLM_TQ_SPARSE_V_THRESHOLD    softmax-prob cutoff (default 0.001)
+#   VLLM_TQ_SPARSE_V_CTX_THRESHOLD min seq_len for "auto" mode (default 8192)
+_TQ_SPARSE_V_MODE = os.environ.get("VLLM_TQ_SPARSE_V", "0").lower()
+_TQ_SPARSE_V_THRESHOLD = float(os.environ.get("VLLM_TQ_SPARSE_V_THRESHOLD", "0.001"))
+_TQ_SPARSE_V_CTX_THRESHOLD = int(
+    os.environ.get("VLLM_TQ_SPARSE_V_CTX_THRESHOLD", "8192")
+)
+
+
+def _tq_sparse_v_enabled(max_seq_len: int) -> bool:
+    """Whether sparse V is engaged for this forward pass.
+
+    Off by default ('0'). '1' forces on, 'auto' gates on context length
+    so the per-tile branch overhead only kicks in when the cache is large
+    enough for the savings to pay for it.
+    """
+    if _TQ_SPARSE_V_MODE == "1":
+        return True
+    if _TQ_SPARSE_V_MODE == "auto":
+        return max_seq_len >= _TQ_SPARSE_V_CTX_THRESHOLD
+    return False
 
 
 def _build_hadamard(d: int, device_str: str) -> torch.Tensor:
@@ -728,6 +763,8 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                         key_fp8=self.tq_config.key_fp8,
                         norm_correction=self.tq_config.norm_correction,
                         PiT=PiT,
+                        sparse_v=_tq_sparse_v_enabled(seq_len),
+                        sparse_v_threshold=_TQ_SPARSE_V_THRESHOLD,
                     )
                 else:
                     # Large continuation: dequant cached K/V and use
@@ -941,5 +978,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             lse_buf=lse_buf,
             buf_holder=layer,
             max_num_kv_splits=self.max_num_kv_splits,
+            sparse_v=_tq_sparse_v_enabled(int(attn_metadata.max_seq_len)),
+            sparse_v_threshold=_TQ_SPARSE_V_THRESHOLD,
         )
         return result

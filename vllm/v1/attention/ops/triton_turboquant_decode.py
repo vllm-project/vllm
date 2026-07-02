@@ -83,6 +83,8 @@ def _tq_decode_stage1(
     KEY_FP8: tl.constexpr,  # 1 if K is stored as FP8
     NORM_CORRECTION: tl.constexpr = 0,  # 1 = re-normalize centroids
     FP8_E4B15: tl.constexpr = 0,  # 1 = use e4b15 (Ampere/Ada), 0 = e4nv (Hopper+)
+    SPARSE_V: tl.constexpr = 0,  # 1 = skip V load+accum on tiles below softmax threshold
+    SPARSE_V_THRESHOLD: tl.constexpr = 0.001,
 ):
     bid = tl.program_id(0)  # batch index
     hid = tl.program_id(1)  # q_head index
@@ -231,77 +233,95 @@ def _tq_decode_stage1(
         p = tl.exp(scores - n_e_max)
 
         # ============================================================
-        # VALUE LOAD + DEQUANTIZE: [BLOCK_KV, BLOCK_D]
+        # SPARSE V (opt-in): skip the V load + dequant + weighted-sum
+        # for tiles whose softmax probability is entirely below
+        # SPARSE_V_THRESHOLD. The skip path still decays the running
+        # accumulator and updates l_prev / m_prev so the online softmax
+        # totals stay exact. The per-tile branch costs a tl.max + a
+        # comparison; the win comes from avoiding ~10 tl.load calls and
+        # the dequant arithmetic on tiles that contribute negligibly.
         # ============================================================
-        val_bases = slot_bases + KPS
+        skip_v_tile = False
+        if SPARSE_V:
+            skip_v_tile = tl.max(p) < SPARSE_V_THRESHOLD
 
-        if VQB == 3:
-            val_addrs0 = val_bases[:, None] + val_byte_idx[None, :]
-            val_raw0 = tl.load(
-                KV_cache_ptr + val_addrs0,
-                mask=kv_mask[:, None] & d_mask[None, :],
-                other=0,
-            ).to(tl.int32)
-            val_raw1 = tl.load(
-                KV_cache_ptr + val_addrs0 + 1,
-                mask=kv_mask[:, None] & d_mask[None, :],
-                other=0,
-            ).to(tl.int32)
-            raw16 = val_raw0 | (val_raw1 << 8)
-            v_idx = ((raw16 >> val_bit_shift[None, :]) & 0x7).to(tl.float32)
+        if skip_v_tile:
+            acc = acc * re_scale
+        else:
+            # ========================================================
+            # VALUE LOAD + DEQUANTIZE: [BLOCK_KV, BLOCK_D]
+            # ========================================================
+            val_bases = slot_bases + KPS
 
-            sc_bases = val_bases + VAL_DATA_BYTES
-            sc_lo = tl.load(KV_cache_ptr + sc_bases, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            sc_hi = tl.load(KV_cache_ptr + sc_bases + 1, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            v_scales = (
-                (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
-            )
-            zr_lo = tl.load(KV_cache_ptr + sc_bases + 2, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            zr_hi = tl.load(KV_cache_ptr + sc_bases + 3, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            v_zeros = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
-            values = v_idx * v_scales[:, None] + v_zeros[:, None]
-        else:  # VQB == 4
-            vb_idx = d_offs // 2
-            vb_shift = (d_offs % 2) * 4
-            val_addrs = val_bases[:, None] + vb_idx[None, :]
-            val_raw = tl.load(
-                KV_cache_ptr + val_addrs,
-                mask=kv_mask[:, None] & d_mask[None, :],
-                other=0,
-            ).to(tl.int32)
-            v_idx = ((val_raw >> vb_shift[None, :]) & 0xF).to(tl.float32)
+            if VQB == 3:
+                val_addrs0 = val_bases[:, None] + val_byte_idx[None, :]
+                val_raw0 = tl.load(
+                    KV_cache_ptr + val_addrs0,
+                    mask=kv_mask[:, None] & d_mask[None, :],
+                    other=0,
+                ).to(tl.int32)
+                val_raw1 = tl.load(
+                    KV_cache_ptr + val_addrs0 + 1,
+                    mask=kv_mask[:, None] & d_mask[None, :],
+                    other=0,
+                ).to(tl.int32)
+                raw16 = val_raw0 | (val_raw1 << 8)
+                v_idx = ((raw16 >> val_bit_shift[None, :]) & 0x7).to(tl.float32)
 
-            sc_bases = val_bases + VAL_DATA_BYTES
-            sc_lo = tl.load(KV_cache_ptr + sc_bases, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            sc_hi = tl.load(KV_cache_ptr + sc_bases + 1, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            v_scales = (
-                (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
-            )
-            zr_lo = tl.load(KV_cache_ptr + sc_bases + 2, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            zr_hi = tl.load(KV_cache_ptr + sc_bases + 3, mask=kv_mask, other=0).to(
-                tl.uint16
-            )
-            v_zeros = (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
-            values = v_idx * v_scales[:, None] + v_zeros[:, None]
+                sc_bases = val_bases + VAL_DATA_BYTES
+                sc_lo = tl.load(KV_cache_ptr + sc_bases, mask=kv_mask, other=0).to(
+                    tl.uint16
+                )
+                sc_hi = tl.load(KV_cache_ptr + sc_bases + 1, mask=kv_mask, other=0).to(
+                    tl.uint16
+                )
+                v_scales = (
+                    (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+                )
+                zr_lo = tl.load(KV_cache_ptr + sc_bases + 2, mask=kv_mask, other=0).to(
+                    tl.uint16
+                )
+                zr_hi = tl.load(KV_cache_ptr + sc_bases + 3, mask=kv_mask, other=0).to(
+                    tl.uint16
+                )
+                v_zeros = (
+                    (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+                )
+                values = v_idx * v_scales[:, None] + v_zeros[:, None]
+            else:  # VQB == 4
+                vb_idx = d_offs // 2
+                vb_shift = (d_offs % 2) * 4
+                val_addrs = val_bases[:, None] + vb_idx[None, :]
+                val_raw = tl.load(
+                    KV_cache_ptr + val_addrs,
+                    mask=kv_mask[:, None] & d_mask[None, :],
+                    other=0,
+                ).to(tl.int32)
+                v_idx = ((val_raw >> vb_shift[None, :]) & 0xF).to(tl.float32)
 
-        # ============================================================
-        # WEIGHTED VALUE ACCUMULATION
-        # ============================================================
-        acc = acc * re_scale + tl.sum(p[:, None] * values, 0)
+                sc_bases = val_bases + VAL_DATA_BYTES
+                sc_lo = tl.load(KV_cache_ptr + sc_bases, mask=kv_mask, other=0).to(
+                    tl.uint16
+                )
+                sc_hi = tl.load(KV_cache_ptr + sc_bases + 1, mask=kv_mask, other=0).to(
+                    tl.uint16
+                )
+                v_scales = (
+                    (sc_lo | (sc_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+                )
+                zr_lo = tl.load(KV_cache_ptr + sc_bases + 2, mask=kv_mask, other=0).to(
+                    tl.uint16
+                )
+                zr_hi = tl.load(KV_cache_ptr + sc_bases + 3, mask=kv_mask, other=0).to(
+                    tl.uint16
+                )
+                v_zeros = (
+                    (zr_lo | (zr_hi << 8)).to(tl.float16, bitcast=True).to(tl.float32)
+                )
+                values = v_idx * v_scales[:, None] + v_zeros[:, None]
+
+            acc = acc * re_scale + tl.sum(p[:, None] * values, 0)
+
         l_prev = l_prev * re_scale + tl.sum(p, 0)
         m_prev = n_e_max
 
@@ -503,6 +523,8 @@ def triton_turboquant_decode_attention(
     lse_buf: torch.Tensor | None = None,
     buf_holder: Any = None,
     max_num_kv_splits: int = 32,  # fixed split count (must be constant for cudagraph)
+    sparse_v: bool = False,
+    sparse_v_threshold: float = 0.001,
 ) -> torch.Tensor:
     """Launch fused TQ decode attention (Triton stage1 + stage2).
 
@@ -583,6 +605,8 @@ def triton_turboquant_decode_attention(
         KEY_FP8=1 if key_fp8 else 0,
         NORM_CORRECTION=1 if norm_correction else 0,
         FP8_E4B15=fp8_e4b15,
+        SPARSE_V=1 if sparse_v else 0,
+        SPARSE_V_THRESHOLD=sparse_v_threshold,
         num_warps=1,
         num_stages=1,
     )

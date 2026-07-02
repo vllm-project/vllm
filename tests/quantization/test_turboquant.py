@@ -747,3 +747,72 @@ class TestStoreDecodeRoundTrip:
             assert cos_sim > threshold, (
                 f"Preset {preset} head {h}: cosine_sim={cos_sim:.4f} < {threshold}"
             )
+
+    @pytest.mark.parametrize(
+        "preset",
+        ["turboquant_k8v4", "turboquant_4bit_nc"],
+    )
+    def test_sparse_v_threshold_zero_matches_baseline(self, preset):
+        """Sparse V with threshold=0 must produce the same output as off.
+
+        When the threshold is below any softmax probability, no tile is
+        skipped, so the sparse-V path must be byte-equivalent to the
+        non-sparse path. Any divergence indicates the wrapping logic
+        re-orders or skips an arithmetic op.
+        """
+        from vllm.model_executor.layers.quantization.turboquant.centroids import (
+            solve_lloyd_max,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_decode import (
+            triton_turboquant_decode_attention,
+        )
+        from vllm.v1.attention.ops.triton_turboquant_store import (
+            triton_turboquant_store,
+        )
+
+        cfg = TurboQuantConfig.from_cache_dtype(preset, head_dim=128)
+        D, Hk, Hq, B = 128, 4, 4, 1
+        block_size, num_blocks = 16, 1
+        device = torch.device(DEVICE_TYPE)
+
+        H = _build_hadamard(D, DEVICE_TYPE)
+        centroids, _ = solve_lloyd_max(D, cfg.centroid_bits)
+        centroids = centroids.float().to(device)
+        c_sorted, _ = centroids.sort()
+        midpoints = ((c_sorted[:-1] + c_sorted[1:]) / 2).to(device)
+
+        torch.manual_seed(7)
+        key = torch.randn(B, Hk, D, device=device, dtype=torch.float16)
+        value = torch.randn(B, Hk, D, device=device, dtype=torch.float16)
+        kv_cache = torch.zeros(
+            num_blocks, block_size, Hk, cfg.slot_size_aligned,
+            device=device, dtype=torch.uint8,
+        )
+        slot_mapping = torch.tensor([0], device=device, dtype=torch.int32)
+        triton_turboquant_store(
+            key, value, kv_cache, slot_mapping, H, midpoints,
+            mse_bits=cfg.key_mse_bits, key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            key_fp8=cfg.key_fp8,
+        )
+
+        query = key.expand(B, Hq, D).contiguous().to(torch.float16)
+        block_table = torch.tensor([[0]], device=device, dtype=torch.int32)
+        seq_lens = torch.tensor([1], device=device, dtype=torch.int32)
+        common = dict(
+            kv_cache=kv_cache, block_table=block_table, seq_lens=seq_lens,
+            Pi=H, centroids=centroids, scale=1.0 / math.sqrt(D),
+            mse_bits=cfg.key_mse_bits, key_packed_size=cfg.key_packed_size,
+            value_quant_bits=cfg.effective_value_quant_bits,
+            key_fp8=cfg.key_fp8, norm_correction=cfg.norm_correction,
+            PiT=H, max_num_kv_splits=4,
+        )
+        out_off = triton_turboquant_decode_attention(query=query, **common)
+        out_on_zero_thresh = triton_turboquant_decode_attention(
+            query=query, sparse_v=True, sparse_v_threshold=0.0, **common,
+        )
+        # threshold=0 means tl.max(p) < 0 is never true, so no tile skipped
+        assert torch.allclose(out_off, out_on_zero_thresh, atol=1e-6, rtol=1e-6), (
+            f"Preset {preset}: sparse_v=True, threshold=0 diverges from "
+            f"sparse_v=False. max|Δ|={(out_off - out_on_zero_thresh).abs().max():.3e}"
+        )
