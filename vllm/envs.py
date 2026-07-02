@@ -78,6 +78,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
+    VLLM_REALTIME_IDLE_TIMEOUT_S: int = 30
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
     VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
@@ -945,6 +946,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # allocated.  Default is 600s (10 minutes).
     "VLLM_MAX_AUDIO_DECODE_DURATION_S": lambda: int(
         os.getenv("VLLM_MAX_AUDIO_DECODE_DURATION_S", "600")
+    ),
+    # Idle timeout in seconds for `/v1/realtime` audio WebSocket sessions.
+    # If no new audio arrives (and no `final` commit is sent) within this
+    # window, the session is finalized and closed so the engine request
+    # releases its KV cache instead of being pinned by a stale client.
+    # Set to 0 to disable. Default is 30s.
+    "VLLM_REALTIME_IDLE_TIMEOUT_S": lambda: int(
+        os.getenv("VLLM_REALTIME_IDLE_TIMEOUT_S", "30")
     ),
     # Maximum number of worker threads used for STT preprocessing. The default
     # intentionally caps at 2 because that performed best in profiling.
