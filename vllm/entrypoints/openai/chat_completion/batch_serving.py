@@ -181,7 +181,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                     sub_request_id,
                     lora_request=lora_request,
                     trace_headers=trace_headers,
-                    priority=request.priority if hasattr(request, "priority") else 0,
+                    priority=request.priority,
                     data_parallel_rank=data_parallel_rank,
                     reasoning_ended=None,
                 )
