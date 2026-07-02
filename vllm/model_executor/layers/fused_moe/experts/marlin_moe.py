@@ -7,6 +7,7 @@ from collections.abc import Callable
 import torch
 
 import vllm._custom_ops as ops
+import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import (
     MoEActivation,
@@ -312,11 +313,15 @@ def fused_marlin_moe(
     assert num_bits in [4, 8]
     assert topk_weights.dtype == torch.float32
 
-    # M block size selection logic
-    # TODO: tune this further for specific models
-    for block_size_m in [8, 16, 32, 48, 64]:
-        if M * topk / E / block_size_m < 0.9:
-            break
+    if envs.VLLM_BATCH_INVARIANT:
+        # Pin block_size_m so token alignment is independent of M.
+        block_size_m = 64
+    else:
+        # M block size selection logic
+        # TODO: tune this further for specific models
+        for block_size_m in [8, 16, 32, 48, 64]:
+            if M * topk / E / block_size_m < 0.9:
+                break
 
     if input_dtype is not None and input_dtype.itemsize == 1:
         block_size_m = max(block_size_m, 16)
@@ -484,13 +489,17 @@ def batched_fused_marlin_moe(
     # [B * MAX_TOKENS, K] and top_k can be interpreted as just 1.
     topk = 1
 
-    # TODO(varun) : Choose a decent block size like in fused_marlin_moe
-    # Tune block_size_m based on expert capacity to reduce padding overhead.
-    block_size_m = 64
-    for b_m in [8, 16, 32, 48, 64]:
-        if BATCH_TOKENS_MAX / b_m < 0.9:
-            block_size_m = b_m
-            break
+    if envs.VLLM_BATCH_INVARIANT:
+        # Pin block_size_m so token alignment is independent of M.
+        block_size_m = 64
+    else:
+        # TODO(varun) : Choose a decent block size like in fused_marlin_moe
+        # Tune block_size_m based on expert capacity to reduce padding overhead.
+        block_size_m = 64
+        for b_m in [8, 16, 32, 48, 64]:
+            if BATCH_TOKENS_MAX / b_m < 0.9:
+                block_size_m = b_m
+                break
 
     if input_dtype is not None and input_dtype.itemsize == 1:
         block_size_m = max(block_size_m, 16)
@@ -601,6 +610,10 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
     def _supports_current_device() -> bool:
         p = current_platform
         return p.is_cuda() and p.has_device_capability((7, 5))
+
+    @staticmethod
+    def _supports_batch_invariance() -> bool:
+        return True
 
     @staticmethod
     def _supports_no_act_and_mul() -> bool:
