@@ -219,7 +219,17 @@ def get_outlines_cache():
 
     cache_dir = get_outlines_cache_path()
     if envs.VLLM_V1_USE_OUTLINES_CACHE:
-        from diskcache import Cache
+        try:
+            from diskcache import Cache
+        except ImportError as err:
+            raise ImportError(
+                "VLLM_V1_USE_OUTLINES_CACHE=1 requires the optional "
+                "`diskcache` package. Install vLLM with the `outlines-cache` "
+                "extra, for example `uv pip install 'vllm[outlines-cache]'`, "
+                "or unset VLLM_V1_USE_OUTLINES_CACHE to use the in-memory "
+                "outlines cache. Only enable the disk cache when its cache "
+                "directory is writable only by trusted users."
+            ) from err
 
         logger.warning(
             "Enabling outlines cache. This is an unbounded on-disk "
