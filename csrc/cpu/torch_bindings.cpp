@@ -43,6 +43,22 @@ std::string join_shm_manager(int64_t handle, const std::string& name);
 
 void shm_allreduce(int64_t handle, torch::Tensor& data);
 
+#ifdef VLLM_CPU_RDMA_HAR
+int64_t ibv_ar_create(const std::string& dev_name, int64_t port,
+                      int64_t gid_index, int64_t buf_size_bytes);
+std::string ibv_ar_get_local_info(int64_t handle, int64_t port,
+                                  int64_t gid_index);
+void ibv_ar_connect(int64_t handle, const std::string& remote_info,
+                    int64_t port, int64_t gid_index);
+
+int64_t init_hier_ar(int64_t shm_handle,
+                     const std::string& cross_group_name,
+                     bool is_leader,
+                     int64_t ibv_handle);
+
+void hier_allreduce(int64_t handle, torch::Tensor& data);
+#endif
+
 void shm_gather(int64_t handle, torch::Tensor& data,
                 const std::optional<std::vector<torch::Tensor>>& outputs,
                 int64_t dst);
@@ -405,6 +421,25 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("join_shm_manager(int handle, str name) -> str", &join_shm_manager);
   ops.def("shm_allreduce(int handle, Tensor! data) -> ()");
   ops.impl("shm_allreduce", torch::kCPU, &shm_allreduce);
+#ifdef VLLM_CPU_RDMA_HAR
+  ops.def(
+      "init_hier_ar(int shm_handle, str cross_group_name, bool is_leader, "
+      "int ibv_handle) -> int",
+      &init_hier_ar);
+  ops.def("hier_allreduce(int handle, Tensor! data) -> ()");
+  ops.impl("hier_allreduce", torch::kCPU, &hier_allreduce);
+  // IBVerbs direct RDMA all-reduce
+  ops.def(
+      "ibv_ar_create(str dev_name, int port, int gid_index, int buf_size_bytes) -> int",
+      &ibv_ar_create);
+  ops.def(
+      "ibv_ar_get_local_info(int handle, int port, int gid_index) -> str",
+      &ibv_ar_get_local_info);
+  ops.def(
+      "ibv_ar_connect(int handle, str remote_info, int port, "
+      "int gid_index) -> ()",
+      &ibv_ar_connect);
+#endif
   ops.def(
       "shm_gather(int handle, Tensor data, Tensor[](a!)? outputs, int dst) -> "
       "()");

@@ -515,7 +515,8 @@ class GroupCoordinator:
         return sibling
 
     def create_mq_broadcaster(
-        self, writer_rank=0, external_writer_handle=None, blocking=True
+        self, writer_rank=0, external_writer_handle=None, blocking=True,
+        local_world_size=None,
     ):
         from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 
@@ -526,10 +527,12 @@ class GroupCoordinator:
             writer_rank=writer_rank,
             external_writer_handle=external_writer_handle,
             blocking=blocking,
+            local_world_size=local_world_size,
         )
 
     def create_single_reader_mq_broadcasters(
-        self, reader_rank_in_group=0, blocking=False
+        self, reader_rank_in_group=0, blocking=False,
+        local_world_size=None,
     ):
         from vllm.distributed.device_communicators.shm_broadcast import MessageQueue
 
@@ -539,6 +542,7 @@ class GroupCoordinator:
             6,
             reader_rank=self.ranks[reader_rank_in_group],
             blocking=blocking,
+            local_world_size=local_world_size,
         )
 
     @property

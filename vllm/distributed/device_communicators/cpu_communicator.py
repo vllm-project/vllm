@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import os
+from collections import defaultdict
 from typing import Any
 
 import torch
@@ -28,18 +29,36 @@ class CpuCommunicator(DeviceCommunicatorBase):
         super().__init__(cpu_group, device, device_group, unique_name)
         self.dist_module = torch.distributed
 
-        if (
-            (
-                current_platform.get_cpu_architecture() == CpuArchEnum.X86
-                or current_platform.get_cpu_architecture() == CpuArchEnum.ARM
-                or current_platform.get_cpu_architecture() == CpuArchEnum.POWERPC
-            )
+        # Detect multi-node topology
+        from vllm.config import get_current_vllm_config_or_none
+        config = get_current_vllm_config_or_none()
+        nnodes = 1
+        if config is not None:
+            nnodes = config.parallel_config.nnodes
+        total_world_size = torch.distributed.get_world_size()
+        local_world_size = total_world_size // max(nnodes, 1)
+        self._is_internode = False
+        if nnodes > 1 and self.world_size > 1:
+            node_ids = set(r // local_world_size for r in self.ranks)
+            self._is_internode = len(node_ids) > 1
+
+        can_use_shm = (
+            current_platform.get_cpu_architecture()
+            in (CpuArchEnum.X86, CpuArchEnum.ARM, CpuArchEnum.POWERPC)
             and hasattr(torch.ops._C, "init_shm_manager")
             and (unique_name.startswith("tp") or unique_name.startswith("pp"))
+        )
+
+        if (
+            can_use_shm
+            and not self._is_internode
             and self._all_group_ranks_share_shm_group_name()
         ):
             self.dist_module = _CPUSHMDistributed(self)
-        elif unique_name.startswith("tp") or unique_name.startswith("pp"):
+        elif (
+            (unique_name.startswith("tp") or unique_name.startswith("pp"))
+            and not self._is_internode
+        ):
             logger.info(
                 "CPU SHM communicator disabled for group %s: ranks do not share "
                 "the same SHM group name, falling back to torch.distributed.",
@@ -48,6 +67,14 @@ class CpuCommunicator(DeviceCommunicatorBase):
 
         # send/recv tensor_dict is only supported through the SHM communicator backend
         self.supports_tensor_dict = isinstance(self.dist_module, _CPUSHMDistributed)
+
+        # Hierarchical all-reduce: SHM (intra-node) + RDMA IBV (cross-node)
+        # Enabled automatically when built with VLLM_CPU_RDMA_HAR=ON
+        self._use_hierarchical_ar = False
+        if (hasattr(torch.ops._C, 'ibv_ar_create')
+                and self._is_internode and can_use_shm
+                and self.world_size > 1):
+            self._setup_hierarchical_ar(local_world_size)
 
         if self.use_all2all:
             if self.all2all_backend not in (
@@ -64,6 +91,190 @@ class CpuCommunicator(DeviceCommunicatorBase):
             self.all2all_manager = AgRsAll2AllManager(self.cpu_group)
             logger.info("Using allgather_reducescatter all2all manager.")
 
+    def _setup_hierarchical_ar(self, local_world_size: int) -> None:
+        """Set up hierarchical all-reduce for inter-node TP groups.
+
+        Uses SHM for intra-node reduction and IBVerbs RDMA for cross-node.
+        Only available when built with VLLM_CPU_RDMA_HAR=ON.
+        """
+        node_to_ranks: dict[int, list[int]] = defaultdict(list)
+        for r in self.ranks:
+            node_to_ranks[r // local_world_size].append(r)
+
+        my_node = self.global_rank // local_world_size
+        my_node_ranks = sorted(node_to_ranks[my_node])
+
+        # Create intra-node Gloo subgroups (collective: all ranks must call)
+        local_gloo_group = None
+        for nid in sorted(node_to_ranks.keys()):
+            g = torch.distributed.new_group(sorted(node_to_ranks[nid]))
+            if nid == my_node:
+                local_gloo_group = g
+
+        self._is_leader = (self.global_rank == min(my_node_ranks))
+        leader_ranks = sorted(
+            min(ranks) for ranks in node_to_ranks.values())
+
+        # Initialize SHM for intra-node all-reduce.
+        self._local_shm_handle = None
+        if len(my_node_ranks) > 1 and local_gloo_group is not None:
+            _sub_comm = CpuCommunicator(
+                cpu_group=local_gloo_group,
+                device=self.device,
+                device_group=local_gloo_group,
+                unique_name=f"{self.unique_name}_hier",
+            )
+            if isinstance(_sub_comm.dist_module, _CPUSHMDistributed):
+                self._local_shm_handle = _sub_comm.dist_module.handle
+                logger.info(
+                    "RDMA HAR: SHM active for local subgroup "
+                    "rank=%d local_ranks=%s",
+                    self.global_rank, my_node_ranks,
+                )
+            else:
+                logger.warning(
+                    "RDMA HAR: SHM NOT active for local subgroup "
+                    "rank=%d, performance may be degraded",
+                    self.global_rank,
+                )
+
+        # Set up IBVerbs RDMA for cross-node
+        ibv_handle = self._setup_ibv_all_workers(local_world_size)
+        if ibv_handle < 0:
+            logger.warning(
+                "RDMA HAR: IBV setup failed, rank=%d. "
+                "Falling back to standard Gloo all-reduce.",
+                self.global_rank,
+            )
+            return
+
+        # Register with C++ hierarchical AR manager
+        shm_h = (self._local_shm_handle
+                 if self._local_shm_handle is not None else -1)
+        self._hier_ar_handle = torch.ops._C.init_hier_ar(
+            shm_h, "", self._is_leader, ibv_handle)
+        logger.info(
+            "RDMA HAR: rank=%d node=%d "
+            "local_ranks=%s is_leader=%s leaders=%s",
+            self.global_rank, my_node, my_node_ranks,
+            self._is_leader, leader_ranks,
+        )
+
+        self._use_hierarchical_ar = True
+
+    def _get_ibv_config(self, local_world_size: int = 2) -> tuple[str, int, int]:
+        """Get IBV device name, port, and GID index for this rank.
+
+        Supports per-NUMA NIC selection via VLLM_IBV_DEVICE_{local_rank}
+        and VLLM_IBV_GID_INDEX_{local_rank} env vars.
+        Falls back to VLLM_IBV_DEVICE, then GLOO_SOCKET_IFNAME (if it
+        looks like an IB device), then mlx5_0.
+        """
+        local_rank = self.global_rank % local_world_size
+        # Default IBV device: prefer VLLM_IBV_DEVICE, then check if
+        # GLOO_SOCKET_IFNAME is an IB device (mlx5_*), then mlx5_0
+        gloo_ifname = os.environ.get("GLOO_SOCKET_IFNAME", "")
+        default_dev = os.environ.get("VLLM_IBV_DEVICE", "")
+        if not default_dev:
+            default_dev = gloo_ifname if gloo_ifname.startswith("mlx5") else "mlx5_0"
+        dev_name = os.environ.get(
+            f"VLLM_IBV_DEVICE_{local_rank}",
+            default_dev,
+        )
+        gid_index = int(os.environ.get(
+            f"VLLM_IBV_GID_INDEX_{local_rank}",
+            os.environ.get("TORCH_GLOO_IBV_INDEX", "0"),
+        ))
+        port = 1
+        return dev_name, port, gid_index
+
+    def _setup_ibv_all_workers(self, local_world_size: int) -> int:
+        """Set up IBVerbs RDMA for ALL workers (4-way direct exchange).
+
+        Each worker pairs with its cross-node partner (same local_rank
+        on the other node) and creates a direct RDMA connection.
+        """
+        dev_name, port, gid_index = self._get_ibv_config(local_world_size)
+
+        # Compute buffer size from model config.
+        # Two tensor categories go through hier_allreduce (IBV):
+        #   1. Row-parallel outputs (attention/MLP): (batch_tokens, hidden_size)
+        #   2. Logits allreduce (_gather_logits_allreduce): (num_reqs, vocab_full)
+        # num_reqs = min(max_num_batched_tokens, max_num_seqs) since logits
+        # are computed for one token per request (the last position).
+        buf_size_bytes = 0  # 0 = use C++ default (256 MB)
+        from vllm.config import get_current_vllm_config_or_none
+        cfg = get_current_vllm_config_or_none()
+        if cfg is not None:
+            hf_cfg = cfg.model_config.hf_config
+            hidden = getattr(hf_cfg, 'hidden_size', 0)
+            vocab = getattr(hf_cfg, 'vocab_size', 0)
+            tp = cfg.parallel_config.tensor_parallel_size
+            max_tokens = getattr(cfg.scheduler_config,
+                                 'max_num_batched_tokens', 2048)
+            max_num_seqs = getattr(cfg.scheduler_config,
+                                   'max_num_seqs', 128)
+            dtype_bytes = 2  # bf16
+            # Vocab is padded to (padding_size * tp) alignment
+            vocab_padded = (
+                ((vocab + 63) // 64 * 64 + tp - 1) // tp * tp
+            )
+            # Row-parallel allreduce: max_tokens * hidden_size
+            buf_rowparallel = max_tokens * hidden * dtype_bytes
+            # Logits allreduce: num_reqs * vocab_padded (full, not per-TP)
+            max_logit_tokens = min(max_tokens, max_num_seqs)
+            buf_logits = max_logit_tokens * vocab_padded * dtype_bytes
+            buf_size_bytes = max(buf_rowparallel, buf_logits)
+            if buf_size_bytes > 0:
+                logger.info(
+                    "IBV buf_size auto: rowparallel=%d MB "
+                    "(max_tokens=%d hidden=%d), logits=%d MB "
+                    "(max_logit_tokens=%d vocab_padded=%d) -> %d MB",
+                    buf_rowparallel // (1024 * 1024),
+                    max_tokens, hidden,
+                    buf_logits // (1024 * 1024),
+                    max_logit_tokens, vocab_padded,
+                    buf_size_bytes // (1024 * 1024),
+                )
+
+        try:
+            ibv_handle = torch.ops._C.ibv_ar_create(
+                dev_name, port, gid_index, buf_size_bytes)
+            local_info = torch.ops._C.ibv_ar_get_local_info(
+                ibv_handle, port, gid_index)
+
+            # Exchange connection info across ALL workers in TP group
+            all_info: list[str] = [""] * self.world_size
+            torch.distributed.all_gather_object(
+                all_info, local_info, group=self.device_group)
+
+            # Partner: same local_rank on other node
+            # For 2 nodes: partner = (rank + local_world_size) % world_size
+            partner_rank = (
+                (self.global_rank + local_world_size) % self.world_size
+            )
+            # Map from global rank to index in self.ranks
+            rank_to_idx = {r: i for i, r in enumerate(self.ranks)}
+            partner_idx = rank_to_idx[partner_rank]
+            remote_info = all_info[partner_idx]
+
+            torch.ops._C.ibv_ar_connect(
+                ibv_handle, remote_info, port, gid_index)
+
+            logger.info(
+                "4-way IBV RDMA: rank=%d partner=%d dev=%s "
+                "port=%d gid_index=%d",
+                self.global_rank, partner_rank, dev_name, port, gid_index,
+            )
+            return ibv_handle
+        except Exception as e:
+            logger.warning(
+                "IBVerbs setup failed (rank=%d): %s. "
+                "Falling back to no cross-node exchange.",
+                self.global_rank, e,
+            )
+            return -1
+
     def _all_group_ranks_share_shm_group_name(self) -> bool:
         """
         CPUSHM requires all ranks in this group to agree on one SHM group name.
@@ -79,6 +290,10 @@ class CpuCommunicator(DeviceCommunicatorBase):
         return len(set(names)) == 1
 
     def all_reduce(self, input_):
+        if self._use_hierarchical_ar:
+            torch.ops._C.hier_allreduce(
+                self._hier_ar_handle, input_)
+            return input_
         self.dist_module.all_reduce(input_, group=self.device_group)
         return input_
 

@@ -388,6 +388,20 @@ if (NOT ENABLE_X86_ISA)
     endif()
 endif()
 
+# RDMA Hierarchical All-Reduce (opt-in via -DVLLM_CPU_RDMA_HAR=ON)
+if(VLLM_CPU_RDMA_HAR)
+    find_library(IBVERBS_LIB ibverbs)
+    if(IBVERBS_LIB)
+        list(APPEND LIBS ibverbs)
+        add_definitions(-DVLLM_CPU_RDMA_HAR)
+        message(STATUS "RDMA HAR enabled: found libibverbs at ${IBVERBS_LIB}")
+    else()
+        message(FATAL_ERROR "VLLM_CPU_RDMA_HAR=ON but libibverbs not found")
+    endif()
+else()
+    message(STATUS "RDMA HAR disabled (set -DVLLM_CPU_RDMA_HAR=ON to enable)")
+endif()
+
 #
 # Generate CPU attention dispatch header
 #
