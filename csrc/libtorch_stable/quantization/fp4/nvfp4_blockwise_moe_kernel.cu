@@ -270,6 +270,15 @@ void run_fp4_blockwise_scaled_group_mm_sm100(
 
   using Gemm1SM = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
   using Gemm = Gemm1SM;
+  static_assert(
+      cute::is_same_v<
+          typename Gemm::GemmKernel::TileScheduler,
+          cutlass::gemm::kernel::detail::PersistentTileSchedulerSm100Group<
+              ProblemShape, Gemm::GemmKernel::SchedulerPipelineStageCount>>,
+      "SM100 NVFP4 grouped GEMM must use PersistentTileSchedulerSm100Group "
+      "for batch invariance (VLLM_BATCH_INVARIANT=1). "
+      "If you want to change this, add a dedicated config/code path "
+      "for batch invariant mode, instead of relaxing this check.");
   using StrideA = typename Gemm::GemmKernel::InternalStrideA;
   using StrideB = typename Gemm::GemmKernel::InternalStrideB;
   using StrideC = typename Gemm::GemmKernel::InternalStrideC;
@@ -467,6 +476,15 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
                                            CollectiveEpilogue>;
 
   using Gemm = cutlass::gemm::device::GemmUniversalAdapter<GemmKernel>;
+  static_assert(
+      cute::is_base_of_v<
+          cutlass::gemm::KernelPtrArrayTmaWarpSpecializedCooperative,
+          typename Gemm::GemmKernel::CollectiveMainloop::DispatchPolicy::
+              Schedule>,
+      "SM120 NVFP4 grouped GEMM must use a cooperative ptr-array mainloop "
+      "schedule for batch invariance (VLLM_BATCH_INVARIANT=1). "
+      "If you want to change this, add a dedicated config/code path "
+      "for batch invariant mode, instead of relaxing this check.");
   using StrideA = typename Gemm::GemmKernel::InternalStrideA;
   using StrideB = typename Gemm::GemmKernel::InternalStrideB;
   using StrideC = typename Gemm::GemmKernel::InternalStrideC;
