@@ -2450,17 +2450,6 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 if key.startswith(parent_dot):
                     return info["quant_algo"].upper()
 
-        # 4. Parent-prefix fallback for fused projections (qkv_proj, gate_up_proj).
-        for candidate in self._quantized_layer_prefix_candidates(prefix):
-            parent_dot = candidate.rsplit(".", 1)[0] + "."
-            algos = {
-                info["quant_algo"].upper()
-                for key, info in self.quantized_layers.items()
-                if key.startswith(parent_dot) and "." not in key[len(parent_dot) :]
-            }
-            if len(algos) == 1:
-                return algos.pop()
-
         return None
 
     @staticmethod
