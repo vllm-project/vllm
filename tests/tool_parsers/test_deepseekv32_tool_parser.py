@@ -7,6 +7,7 @@ These tests use a minimal mock tokenizer so no real model weights are required.
 """
 
 import json
+import logging
 from unittest.mock import MagicMock
 
 import pytest
@@ -590,6 +591,71 @@ class TestExtractToolCallsStreaming:
                     if tc.index == tool_index and tc.function and tc.function.arguments:
                         fragments.append(tc.function.arguments)
         return "".join(fragments)
+
+    def test_malformed_args_close_warns_with_payload_and_still_streams(
+        self, parser, caplog
+    ):
+        # A model can emit non-JSON inside an array/object-typed parameter —
+        # observed in production: shell syntax appended after a JSON array in
+        # `run_git` arguments. Such parameters stream RAW (their value is
+        # already on the wire before close, so no coercion is possible), so
+        # closing the call hits json.loads on an invalid accumulated string.
+        # The close must not raise, the raw arguments must still reach the
+        # client (which validates them, per the OpenAI contract), and the
+        # failure must be logged at WARNING with the offending payload rather
+        # than an ERROR traceback (it is model misbehavior, not a server bug).
+        tool = ChatCompletionToolsParam(
+            type="function",
+            function=FunctionDefinition(
+                name="run_git",
+                parameters={
+                    "type": "object",
+                    "properties": {"args": {"type": "array"}},
+                },
+            ),
+        )
+        parser = make_parser(tools=[tool])
+        request = make_request([tool])
+        # The value must span several deltas to take the raw-streaming path.
+        chunks = [
+            f"{FC_START}\n",
+            f'{INV_START}run_git">\n',
+            f'{PARAM_START}args" string="false">',
+            '["show", ',
+            '"a.rs"] 2>/dev/null; ',
+            'echo "x"',
+            f"{PARAM_END}\n",
+            f"{INV_END}\n{FC_END}",
+        ]
+        deltas = []
+        prev = ""
+        with caplog.at_level(logging.WARNING):
+            for chunk in chunks:
+                curr = prev + chunk
+                result = parser.extract_tool_calls_streaming(
+                    previous_text=prev,
+                    current_text=curr,
+                    delta_text=chunk,
+                    previous_token_ids=[],
+                    current_token_ids=[],
+                    delta_token_ids=[1],
+                    request=request,
+                )
+                prev = curr
+                if result is not None:
+                    deltas.append(result)
+        args_str = self._reconstruct_args(deltas)
+        assert "2>/dev/null" in args_str, "raw arguments still stream to the client"
+        # The finalize fallback keeps the `{}` initialized at call start.
+        assert parser.prev_tool_call_arr[0]["arguments"] == {}
+        assert [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and "non-JSON" in r.getMessage()
+        ], "the malformed close is logged at WARNING with the payload"
+        assert not [r for r in caplog.records if r.levelno >= logging.ERROR], (
+            "no ERROR traceback for model-generated malformed arguments"
+        )
 
     def test_plain_content_no_tool(self, parser):
         full_text = "Hello, world!"

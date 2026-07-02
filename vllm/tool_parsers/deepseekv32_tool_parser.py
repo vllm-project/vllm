@@ -382,7 +382,24 @@ class DeepSeekV32ToolParser(ToolParser):
                 "name": self._active_tool_name,
                 "arguments": json.loads(self.streamed_args_for_tool[index]),
             }
-        except (json.JSONDecodeError, IndexError):
+        except json.JSONDecodeError:
+            # Model-generated arguments are not guaranteed to be valid JSON
+            # (e.g. shell syntax written inside a typed parameter). The raw
+            # arguments have already been streamed to the client, which per the
+            # OpenAI contract must validate them — so this is expected model
+            # misbehavior, not a server error: log it at WARNING with the
+            # offending payload (an ERROR traceback here carries no payload and
+            # reads as a server fault), and keep the `{}` arguments initialized
+            # when the call started.
+            logger.warning(
+                "DeepSeek DSML streaming tool call %r closed with non-JSON "
+                "arguments: %.500r",
+                self._active_tool_name,
+                self.streamed_args_for_tool[index],
+            )
+        except IndexError:
+            # No bookkeeping slot for the active tool index — a parser-state
+            # bug (not model output), so keep the traceback.
             logger.exception("Failed to finalize DeepSeek DSML streaming tool call")
 
         self._active_tool_index = None
