@@ -15,6 +15,7 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
+    DecodeStepMetadata,
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
@@ -493,6 +494,38 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             tile_sched_c128a=tile_sched[_LAYER_TYPE_C128A],
             **deepseek_v4_fields,  # type: ignore[arg-type]
         )
+
+    def refresh_for_decode_step(
+        self,
+        metadata: DeepseekSparseSWAMetadata,
+        decode_step_metadata: DecodeStepMetadata,
+    ) -> None:
+        if metadata.num_decode_tokens == 0:
+            return
+        assert metadata.token_to_req_indices is not None
+        assert metadata.is_valid_token is not None
+        assert metadata.decode_swa_indices is not None
+        assert metadata.decode_swa_lens is not None
+
+        _compute_swa_indices_and_lens_kernel[(metadata.num_decode_tokens,)](
+            metadata.decode_swa_indices,
+            metadata.decode_swa_indices.stride(0),
+            metadata.decode_swa_lens,
+            metadata.decode_swa_indices.shape[-1],
+            decode_step_metadata.query_start_loc,
+            decode_step_metadata.seq_lens,
+            metadata.token_to_req_indices,
+            metadata.is_valid_token,
+            decode_step_metadata.block_table_tensor,
+            decode_step_metadata.block_table_tensor.stride(0),
+            self.block_size,
+            token_offset=0,
+            TRITON_BLOCK_SIZE=1024,
+        )
+        tile_sched = self.build_tile_scheduler(metadata.num_decode_tokens)
+        metadata.tile_sched_swaonly = tile_sched[_LAYER_TYPE_SWAONLY]
+        metadata.tile_sched_c4a = tile_sched[_LAYER_TYPE_C4A]
+        metadata.tile_sched_c128a = tile_sched[_LAYER_TYPE_C128A]
 
     def build_tile_scheduler(
         self, num_decode_tokens: int

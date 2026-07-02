@@ -10,6 +10,7 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.backend import DecodeStepMetadata
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import (
     AttentionStatePair,
@@ -119,9 +120,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         if self.num_speculative_steps == 1:
             return
 
-        # Capture the decode draft generation routine (model forward +
-        # sample + update_draft_inputs) for a single
-        # step.
+        # Capture the decode draft generation loop (model forward + sample +
+        # update_draft_inputs for each remaining draft step).
         assert self.decode_cudagraph_manager is not None
         self.decode_cudagraph_manager.capture(
             self._generate_draft,
@@ -384,41 +384,35 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
 
         attn_metadata = None
         slot_mappings_by_layer = None
-        for step in range(1, self.num_speculative_steps):
-            # Rebuild every step when positions advance, or just once
-            # on the first step when positions are constant (Gemma4 MTP).
-            if not skip_attn and (self.advance_draft_positions or step == 1):
-                slot_mappings = self.block_tables.compute_slot_mappings(
-                    idx_mapping,
-                    query_start_loc,
-                    positions,
-                    batch_desc.num_tokens,
-                )
-                slot_mappings_by_layer = build_slot_mappings_by_layer(
-                    slot_mappings, self.kv_cache_config
-                )
-                attn_metadata = self._build_draft_attn_metadata(
-                    num_reqs=num_reqs,
-                    num_reqs_padded=batch_desc.num_reqs or num_reqs,
-                    num_tokens_padded=batch_desc.num_tokens,
-                )
+        if not skip_attn:
+            slot_mappings = self.block_tables.compute_slot_mappings(
+                idx_mapping,
+                query_start_loc,
+                positions,
+                batch_desc.num_tokens,
+            )
+            slot_mappings_by_layer = build_slot_mappings_by_layer(
+                slot_mappings, self.kv_cache_config
+            )
+            attn_metadata = self._build_draft_attn_metadata(
+                num_reqs=num_reqs,
+                num_reqs_padded=batch_desc.num_reqs or num_reqs,
+                num_tokens_padded=batch_desc.num_tokens,
+            )
 
-            # Update the current draft step.
-            self.current_draft_step.fill_(step)
-
-            # Generate draft tokens for the current step.
-            if batch_desc.cg_mode == CUDAGraphMode.FULL:
-                assert self.decode_cudagraph_manager is not None
-                self.decode_cudagraph_manager.run_fullgraph(batch_desc)
-            else:
-                self._generate_draft(
-                    num_reqs,
-                    batch_desc.num_tokens,
-                    attn_metadata,
-                    slot_mappings_by_layer,
-                    num_tokens_across_dp=num_tokens_across_dp,
-                    cudagraph_runtime_mode=batch_desc.cg_mode,
-                )
+        # Generate draft tokens for the current step.
+        if batch_desc.cg_mode == CUDAGraphMode.FULL:
+            assert self.decode_cudagraph_manager is not None
+            self.decode_cudagraph_manager.run_fullgraph(batch_desc)
+        else:
+            self._generate_draft(
+                num_reqs,
+                batch_desc.num_tokens,
+                attn_metadata,
+                slot_mappings_by_layer,
+                num_tokens_across_dp=num_tokens_across_dp,
+                cudagraph_runtime_mode=batch_desc.cg_mode,
+            )
 
     def _generate_draft(
         self,
@@ -431,40 +425,73 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
     ) -> None:
         idx_mapping = self.idx_mapping[:num_reqs]
         positions = self.input_buffers.positions[:num_reqs]
-        # Run the draft model forward pass.
-        last_hidden_states, hidden_states = self._run_model(
-            num_tokens_padded,
-            attn_metadata,
-            slot_mappings,
-            num_tokens_across_dp,
-            cudagraph_runtime_mode,
-        )
-        last_hidden_states = last_hidden_states[:num_reqs]
+        query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
 
-        # Sample the draft tokens.
-        draft_tokens = self.sample_draft(
-            last_hidden_states,
-            positions,
-            idx_mapping,
-            self.temperature,
-            self.seeds,
-            self.current_draft_step,
-            self.draft_logits,
-        )
+        for step in range(1, self.num_speculative_steps):
+            self.current_draft_step.fill_(step)
+            # Run the draft model forward pass.
+            last_hidden_states, hidden_states = self._run_model(
+                num_tokens_padded,
+                attn_metadata,
+                slot_mappings,
+                num_tokens_across_dp,
+                cudagraph_runtime_mode,
+            )
+            last_hidden_states = last_hidden_states[:num_reqs]
 
-        # Update the inputs for the next step.
-        update_draft_inputs(
-            draft_tokens,
-            self.current_draft_step,
-            hidden_states,
-            self.draft_tokens,
-            self.hidden_states,
-            self.input_buffers,
-            num_reqs,
-            self.max_model_len,
-            self.num_speculative_steps,
-            advance_draft_positions=self.advance_draft_positions,
-        )
+            # Sample the draft tokens.
+            draft_tokens = self.sample_draft(
+                last_hidden_states,
+                positions,
+                idx_mapping,
+                self.temperature,
+                self.seeds,
+                self.current_draft_step,
+                self.draft_logits,
+            )
+
+            # Update the inputs for the next step.
+            update_draft_inputs(
+                draft_tokens,
+                self.current_draft_step,
+                hidden_states,
+                self.draft_tokens,
+                self.hidden_states,
+                self.input_buffers,
+                num_reqs,
+                self.max_model_len,
+                self.num_speculative_steps,
+                advance_draft_positions=self.advance_draft_positions,
+            )
+            if step < self.num_speculative_steps - 1 and attn_metadata is not None:
+                # Rebuild every step when positions advance, or just once
+                # on the first step when positions are constant (Gemma4 MTP).
+                if self.advance_draft_positions:
+                    self.block_tables.compute_slot_mappings(
+                        idx_mapping,
+                        query_start_loc,
+                        positions,
+                        num_tokens_padded,
+                    )
+
+                # refresh position-dependent metadata (DeepSeek V4 MTP)
+                num_reqs_padded = num_tokens_padded
+                for group_idx, attn_groups in enumerate(self.attn_groups):
+                    decode_step_metadata = DecodeStepMetadata(
+                        query_start_loc=self.input_buffers.query_start_loc[
+                            : num_reqs_padded + 1
+                        ],
+                        seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
+                        block_table_tensor=self.block_tables.input_block_tables[
+                            group_idx
+                        ][:num_reqs_padded],
+                    )
+                    for attn_group in attn_groups:
+                        metadata = attn_metadata[attn_group.layer_names[0]]
+                        attn_group.get_metadata_builder(0).refresh_for_decode_step(
+                            metadata,
+                            decode_step_metadata,
+                        )
 
 
 @triton.jit
