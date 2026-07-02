@@ -4,10 +4,56 @@ from dataclasses import dataclass
 
 import torch
 
-from vllm.config import CacheConfig
+from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.attention import MLAAttention
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.rotary_embedding import (
+    DeepseekScalingRotaryEmbedding,
+    RotaryEmbedding,
+)
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import _encode_layer_name
+
+
+def _mla_rope_kvcache_fusion_enabled(
+    rotary_emb: torch.nn.Module | None,
+    qk_rope_head_dim: int,
+    kv_cache_dtype: str,
+    is_sparse: bool,
+    model_dtype: torch.dtype,
+    fuse_rope_kvcache_cat_mla: bool,
+    calculate_kv_scales: bool,
+) -> bool:
+    """Decide whether the manual RoPE + MLA KV-cache-write fusion
+    can be used.
+    """
+    if not fuse_rope_kvcache_cat_mla:
+        return False
+    if not current_platform.is_cuda_alike():
+        return False
+    if rotary_emb is None:
+        return False
+    # Exact-type allowlist: subclasses (Llama3/MRoPE/...) implement different
+    # rotation math than the fused kernel.
+    if type(rotary_emb) not in (RotaryEmbedding, DeepseekScalingRotaryEmbedding):
+        return False
+    # The fused kernel rotates the full rope head width.
+    if not (rotary_emb.rotary_dim == rotary_emb.head_size == qk_rope_head_dim):
+        return False
+    # Kernel enforces cos_sin_cache dtype == activation dtype.
+    if rotary_emb.cos_sin_cache.dtype != model_dtype:
+        return False
+    # Dynamic KV-scale calibration updates _k_scale inside
+    # MLAAttention.forward (maybe_calc_kv_scales), i.e. *after* the fused
+    # producer would have already quantized and written this layer's cache
+    # row with the stale scale. Keep the unfused order in that case.
+    if calculate_kv_scales:
+        return False
+    # fp8_ds_mla / sparse use cache layouts only the unfused path supports.
+    if (kv_cache_dtype == "fp8_ds_mla" or is_sparse):
+        return False
+    return True
 
 
 @dataclass
@@ -117,6 +163,19 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
 
         self.prefix = prefix
 
+        vllm_config = get_current_vllm_config()
+        self._use_fused_rope_kv_cache = _mla_rope_kvcache_fusion_enabled(
+            rotary_emb=self.rotary_emb,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            kv_cache_dtype=self.mla_attn.kv_cache_dtype,
+            is_sparse=self.is_sparse,
+            model_dtype=vllm_config.model_config.dtype,
+            fuse_rope_kvcache_cat_mla=(
+                vllm_config.compilation_config.pass_config.fuse_rope_kvcache_cat_mla
+            ),
+            calculate_kv_scales=self.mla_attn.calculate_kv_scales,
+        )
+
     def forward(
         self,
         positions: torch.Tensor,
@@ -158,13 +217,36 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
         kv_c_normed = self.kv_a_layernorm(kv_c)
 
         q = q.view(-1, self.num_heads, self.qk_head_dim)
-        # Add head dim of 1 to k_pe
-        k_pe = k_pe.unsqueeze(1)
 
-        if self.rotary_emb is not None:
-            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
-                positions, q[..., self.qk_nope_head_dim :], k_pe
+        kv_cache_dummy_dep: torch.Tensor | None = None
+        if self._use_fused_rope_kv_cache:
+            # Manual RoPE + KV-cache-write fusion: rotates
+            # q_pe/k_pe in place and writes this layer's (kv_c, k_pe) row to
+            # the KV cache in one kernel. The fused kernel takes 2-D k_pe, so
+            # this runs before the unsqueeze; the dummy output is threaded
+            # into the attention op to preserve write -> attend ordering
+            # under torch.compile.
+            kv_cache_dummy_dep = torch.ops.vllm.fused_rope_unified_mla_kv_cache_update(
+                positions,
+                q[..., self.qk_nope_head_dim :],
+                k_pe,
+                kv_c_normed,
+                self.rotary_emb.cos_sin_cache,
+                self.rotary_emb.is_neox_style,
+                self.mla_attn.kv_cache_dtype,
+                self.mla_attn._k_scale,
+                _encode_layer_name(self.mla_attn.layer_name),
             )
+            # Add head dim of 1 to k_pe
+            k_pe = k_pe.unsqueeze(1)
+        else:
+            # Add head dim of 1 to k_pe
+            k_pe = k_pe.unsqueeze(1)
+
+            if self.rotary_emb is not None:
+                q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                    positions, q[..., self.qk_nope_head_dim :], k_pe
+                )
 
         if self.indexer and self.is_sparse and not self.skip_topk:
             self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
@@ -177,6 +259,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+            kv_cache_dummy_dep=kv_cache_dummy_dep,
         )
 
         return self.o_proj(attn_out)[0]
