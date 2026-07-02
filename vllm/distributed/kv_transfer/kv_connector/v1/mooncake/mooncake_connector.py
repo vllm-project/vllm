@@ -873,9 +873,30 @@ class MooncakeConnectorScheduler:
 
         assert not self.is_kv_consumer
 
-        if request.status != RequestStatus.FINISHED_LENGTH_CAPPED:
-            # Also include the case of a P/D Prefill request with immediate
-            # block free (eg abort). Stop tracking this request.
+        # The proxy forces the prefill (P) request to max_tokens=1, so a
+        # successful prefill normally ends as FINISHED_LENGTH_CAPPED. If the
+        # single sampled token happens to be an EOS / stop token, vLLM resolves
+        # stop before length and the request ends as FINISHED_STOPPED instead.
+        # Both states mean prefill succeeded and the KV must still be sent to D
+        # (the user-facing first token is produced by D from this KV). Only
+        # genuinely interrupted requests (abort / preemption) stop being tracked.
+        prefill_done_statuses = (
+            RequestStatus.FINISHED_LENGTH_CAPPED,
+            RequestStatus.FINISHED_STOPPED,
+        )
+        if request.status not in prefill_done_statuses:
+            # Aborted / interrupted P/D prefill request: free blocks now and
+            # stop tracking. If a D worker is already waiting to pull this
+            # transfer_id, it will be released via reqs_not_processed.
+            logger.warning(
+                "MooncakeConnector request_finished: P/D prefill req_id=%s "
+                "transfer_id=%s finished with unexpected status=%s (expected "
+                "FINISHED_LENGTH_CAPPED or FINISHED_STOPPED); KV will not be "
+                "sent to D and the request is dropped from the producer.",
+                request.request_id,
+                params["transfer_id"],
+                request.status.name,
+            )
             self._reqs_not_processed.add(params["transfer_id"])
             return False, None
 
@@ -2021,9 +2042,14 @@ class MooncakeConnectorWorker:
                         ready=asyncio.Event(),
                     )
         for transfer_id in metadata.reqs_not_processed:
-            send_meta = self.reqs_need_send.pop(transfer_id)
-            if send_meta:
-                assert not send_meta.ready.is_set()
+            send_meta = self.reqs_need_send.pop(transfer_id, None)
+            if send_meta is not None and not send_meta.ready.is_set():
+                # Wake up any D-side coroutine already waiting on this event in
+                # send_kv_to_decode(). It will find transfer_id is no longer in
+                # reqs_need_send (just popped) and take the "expired" branch,
+                # returning err_reqs immediately instead of hanging until the
+                # VLLM_MOONCAKE_ABORT_REQUEST_TIMEOUT.
+                send_meta.ready.set()
 
     def start_load_kv(self, metadata: MooncakeConnectorMetadata):
         if not self.is_kv_producer and metadata.reqs_to_recv:
