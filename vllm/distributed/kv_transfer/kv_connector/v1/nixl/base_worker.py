@@ -915,6 +915,7 @@ class NixlBaseConnectorWorker:
             ),
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
+            block_strides=self.block_len_per_layer,
             kv_cache_layout=self.kv_cache_layout,
             block_size=self.block_size,
             ssm_sizes=self._mamba_ssm_size,
@@ -1169,6 +1170,7 @@ class NixlBaseConnectorWorker:
             kv_caches_base_addr=self.kv_caches_base_addr[self.engine_id][self.tp_rank],
             num_blocks=self.num_blocks,
             block_lens=self.block_len_per_layer,
+            block_strides=self.block_len_per_layer,
             kv_cache_layout=self.kv_cache_layout
             if not self.use_host_buffer
             else self.host_buffer_kv_cache_layout,

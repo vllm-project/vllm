@@ -20,10 +20,13 @@ from vllm.v1.attention.backends.registry import MambaAttentionBackendEnum
 from vllm.v1.kv_cache_spec_registry import KVCacheSpecRegistry
 
 if TYPE_CHECKING:
-    from vllm.config import VllmConfig
+    from vllm.config import ModelConfig, VllmConfig
 
 logger = init_logger(__name__)
 
+# Dimension indices for (B, H, N, C) descriptor meta tensors.
+DIM_H = 1
+DIM_C = 3
 
 # ---------------------------------------------------------------------------
 # KV cache quantization mode
@@ -119,6 +122,70 @@ class KVCacheSpec:
     def storage_block_size(self) -> int:
         return self.block_size
 
+    @property
+    def tokens_per_state(self) -> int:
+        """Tokens consumed per state slot.
+
+        -1 = infinite/recurrent (Mamba), 1 = standard, N = compressed (MLA).
+        """
+        raise NotImplementedError
+
+    def compute_transfer_shape(
+        self,
+        region_content_bytes: int,
+        block_size: int,
+        virtually_split: bool,
+    ) -> tuple[int, int, int]:
+        """Compute (num_heads, N, C) per-block shape for a descriptor meta tensor.
+
+        The full meta tensor shape is (B, num_heads, N, C) where B = num_blocks
+        is provided by the caller.
+        Subclasses must override.
+        """
+        raise NotImplementedError
+
+    def slice_for_tp_transfer(
+        self,
+        tensor: torch.Tensor,
+        my_tp: int,
+        my_rank: int,
+        other_tp: int,
+        other_rank: int,
+        model_config: ModelConfig,
+        virtually_split: bool = False,
+    ) -> list[torch.Tensor]:
+        """Decompose and narrow a region meta tensor for transfer.
+
+        This is the single dispatch point for all descriptor construction.
+        It handles both:
+          1. Component decomposition (K/V split, Mamba sub-projections)
+          2. TP head/channel narrowing
+
+        For local descriptors, call with my_tp==other_tp, my_rank==other_rank.
+        For remote descriptors, call with the remote's TP params.
+
+        Args:
+            tensor: (B, H, N, C) meta tensor for the full region.
+            virtually_split: True when K/V are co-located in same region
+                (FlashInfer layout) and need separate descriptor streams.
+
+        Returns:
+            List of narrowed/decomposed meta tensors. Each becomes one
+            descriptor stream in the NIXL transfer.
+        """
+        if virtually_split:
+            B, H, N, C = tensor.shape
+            v_offset = H * N * C
+            k_view = tensor
+            v_view = torch.as_strided(
+                tensor,
+                (B, H, N, C),
+                stride=tensor.stride(),
+                storage_offset=tensor.storage_offset() + v_offset,
+            )
+            return [k_view, v_view]
+        return [tensor]
+
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         """
         The maximum possible memory usage of this KV cache in bytes.
@@ -168,6 +235,93 @@ class AttentionSpec(KVCacheSpec):
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE
     page_size_padded: int | None = None
     indexes_kv_by_block_stride: bool = False
+
+    @property
+    def tokens_per_state(self) -> int:
+        return 1
+
+    def compute_transfer_shape(
+        self,
+        region_content_bytes: int,
+        block_size: int,
+        virtually_split: bool,
+    ) -> tuple[int, int, int]:
+        elem = get_dtype_size(self.dtype)
+        N = block_size
+        if self.kv_quant_mode.is_nvfp4:
+            head_dim = nvfp4_kv_cache_full_dim(self.head_size)
+        elif self.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD:
+            head_dim = self.head_size // 2
+        else:
+            head_dim = self.head_size
+
+        if virtually_split:
+            H = region_content_bytes // (2 * N * head_dim * elem)
+        else:
+            H = region_content_bytes // (N * head_dim * elem)
+        return (H, N, head_dim)
+
+    def slice_for_tp_transfer(
+        self,
+        tensor: torch.Tensor,
+        my_tp: int,
+        my_rank: int,
+        other_tp: int,
+        other_rank: int,
+        model_config: ModelConfig,
+        virtually_split: bool = False,
+    ) -> list[torch.Tensor]:
+        # tensor shape: (B, H, N, C) where H = heads, C = head_size
+
+        # Split K/V if virtually_split. FlashInfer layout stores K and V
+        # as two contiguous blocks [K_all | V_all], so V starts at offset
+        # H * N * C from the block base.
+        if virtually_split:
+            B, H, N, C = tensor.shape
+            v_offset = H * N * C
+            k_view = tensor
+            v_view = torch.as_strided(
+                tensor,
+                (B, H, N, C),
+                stride=tensor.stride(),
+                storage_offset=tensor.storage_offset() + v_offset,
+            )
+            parts = [k_view, v_view]
+        else:
+            parts = [tensor]
+
+        if my_tp == other_tp and my_rank == other_rank:
+            return parts
+
+        # Narrow heads for TP overlap.
+        total_kv = model_config.get_total_num_kv_heads()
+
+        if total_kv >= my_tp:
+            my_start = my_rank * total_kv // my_tp
+            my_end = (my_rank + 1) * total_kv // my_tp
+        else:
+            my_start = my_rank * total_kv // my_tp
+            my_end = my_start + 1
+
+        if total_kv >= other_tp:
+            other_start = other_rank * total_kv // other_tp
+            other_end = (other_rank + 1) * total_kv // other_tp
+        else:
+            other_start = other_rank * total_kv // other_tp
+            other_end = other_start + 1
+
+        overlap_start = max(my_start, other_start)
+        overlap_end = min(my_end, other_end)
+        assert overlap_start < overlap_end, (
+            f"No head overlap between local rank {my_rank}/{my_tp} "
+            f"[{my_start},{my_end}) and remote rank {other_rank}/{other_tp} "
+            f"[{other_start},{other_end}) with total_kv={total_kv}."
+        )
+
+        h_start = overlap_start - other_start
+        h_len = overlap_end - overlap_start
+
+        return [part.narrow(DIM_H, h_start, h_len) for part in parts]
 
     @property
     def page_size_bytes(self) -> int:
@@ -371,6 +525,22 @@ class MLAAttentionSpec(FullAttentionSpec):
     def __post_init__(self):
         super().__post_init__()
         _apply_alignment_padding(self)
+
+    @property
+    def tokens_per_state(self) -> int:
+        return self.compress_ratio
+
+    def slice_for_tp_transfer(
+        self,
+        tensor: torch.Tensor,
+        my_tp: int,
+        my_rank: int,
+        other_tp: int,
+        other_rank: int,
+        model_config: ModelConfig,
+        virtually_split: bool = False,
+    ) -> list[torch.Tensor]:
+        return [tensor]
 
     @property
     def storage_block_size(self) -> int:
@@ -600,6 +770,22 @@ class SlidingWindowMLASpec(SlidingWindowSpec):
         _apply_alignment_padding(self)
 
     @property
+    def tokens_per_state(self) -> int:
+        return self.compress_ratio
+
+    def slice_for_tp_transfer(
+        self,
+        tensor: torch.Tensor,
+        my_tp: int,
+        my_rank: int,
+        other_tp: int,
+        other_rank: int,
+        model_config: ModelConfig,
+        virtually_split: bool = False,
+    ) -> list[torch.Tensor]:
+        return [tensor]
+
+    @property
     def storage_block_size(self) -> int:
         return self.block_size // self.compress_ratio
 
@@ -673,6 +859,158 @@ class MambaSpec(KVCacheSpec):
     mamba_type: MambaAttentionBackendEnum = MambaAttentionBackendEnum.MAMBA2
     mamba_cache_mode: str = "none"
     num_speculative_blocks: int = 0
+
+    @property
+    def tokens_per_state(self) -> int:
+        return -1
+
+    @property
+    def conv_rows(self) -> int:
+        """Number of conv kernel rows (DS layout: shapes[0] = (dim, rows))."""
+        return self.shapes[0][1]
+
+    @property
+    def conv_dtype_size(self) -> int:
+        return get_dtype_size(self.dtypes[0])
+
+    @property
+    def conv_proj_dims(self) -> tuple[int, int, int]:
+        """Per-rank column counts for the 3 conv sub-projections."""
+        local_conv_dim = self.shapes[0][0]
+        if self.mamba_type == MambaAttentionBackendEnum.MAMBA2:
+            x_local = self.shapes[1][0] * self.shapes[1][1]
+            remainder = local_conv_dim - x_local
+            b_local = remainder // 2
+            return (x_local, b_local, b_local)
+        elif self.mamba_type == MambaAttentionBackendEnum.GDN_ATTN:
+            value_dim_local = self.shapes[1][0] * self.shapes[1][1]
+            key_dim_local = (local_conv_dim - value_dim_local) // 2
+            return (key_dim_local, key_dim_local, value_dim_local)
+        raise NotImplementedError(
+            f"Conv proj dims not supported for {self.mamba_type!r}"
+        )
+
+    @property
+    def conv_proj_bytes(self) -> tuple[int, int, int]:
+        """Byte sizes of the 3 sub-projections for one rank."""
+        row_bytes = self.conv_rows * self.conv_dtype_size
+        d0, d1, d2 = self.conv_proj_dims
+        return (d0 * row_bytes, d1 * row_bytes, d2 * row_bytes)
+
+    @property
+    def conv_state_bytes(self) -> int:
+        return prod(self.shapes[0]) * self.conv_dtype_size
+
+    @property
+    def content_bytes(self) -> int:
+        """Total content bytes per block (conv + SSM), excluding padding."""
+        return sum(
+            prod(s) * get_dtype_size(d) for s, d in zip(self.shapes, self.dtypes)
+        )
+
+    @property
+    def ssm_num_heads(self) -> int:
+        """Local SSM head count (already divided by TP)."""
+        return self.shapes[1][0]
+
+    @property
+    def ssm_head_bytes(self) -> int:
+        """Bytes per SSM head = head_dim * d_state * dtype_size."""
+        return prod(self.shapes[1][1:]) * get_dtype_size(self.dtypes[-1])
+
+    def compute_transfer_shape(
+        self,
+        region_content_bytes: int,
+        block_size: int,
+        virtually_split: bool,
+    ) -> tuple[int, int, int]:
+        return (1, 1, region_content_bytes)
+
+    def slice_for_tp_transfer(
+        self,
+        tensor: torch.Tensor,
+        my_tp: int,
+        my_rank: int,
+        other_tp: int,
+        other_rank: int,
+        model_config: ModelConfig,
+        virtually_split: bool = False,
+    ) -> list[torch.Tensor]:
+        B, H_in, N, flat_C = tensor.shape
+        assert H_in == 1 and N == 1, (
+            f"Mamba meta tensor must be (B, 1, 1, flat_C), got {tensor.shape}"
+        )
+
+        # Always decompose into conv sub-projections + SSM to maintain a
+        # fixed descriptor count (required by _compute_desc_ids indexing).
+        total = self.content_bytes
+        proj_bytes = self.conv_proj_bytes
+
+        conv_sizes = [pb * flat_C // total for pb in proj_bytes]
+        ssm_size = flat_C - sum(conv_sizes)
+
+        block_stride = tensor.stride()[0]
+        offset = tensor.storage_offset()
+
+        # Conv parts: (B, 1, 1, proj_bytes) — sharded on DIM_C.
+        conv_parts: list[torch.Tensor] = []
+        for c_size in conv_sizes:
+            part = torch.as_strided(
+                tensor,
+                (B, 1, 1, c_size),
+                stride=(block_stride, c_size, c_size, 1),
+                storage_offset=offset,
+            )
+            conv_parts.append(part)
+            offset += c_size
+
+        # SSM: (B, ssm_heads, 1, head_bytes) — sharded on DIM_H.
+        ssm_heads = ssm_size // self.ssm_head_bytes
+        head_bytes = self.ssm_head_bytes
+        ssm_view = torch.as_strided(
+            tensor,
+            (B, ssm_heads, 1, head_bytes),
+            stride=(block_stride, head_bytes, head_bytes, 1),
+            storage_offset=offset,
+        )
+
+        # Same-TP: no narrowing needed, return full decomposition.
+        if my_tp == other_tp and my_rank == other_rank:
+            return conv_parts + [ssm_view]
+
+        # TP narrowing for conv: simple ratio on DIM_C.
+        if my_tp > other_tp:
+            tp_ratio = my_tp // other_tp
+            local_idx = my_rank % tp_ratio
+            conv_parts = [
+                part.narrow(
+                    DIM_C,
+                    local_idx * (part.shape[DIM_C] // tp_ratio),
+                    part.shape[DIM_C] // tp_ratio,
+                )
+                for part in conv_parts
+            ]
+
+        # TP narrowing for SSM: head-overlap on DIM_H (like attention).
+        total_heads = self.ssm_num_heads * my_tp
+        my_start = my_rank * total_heads // my_tp
+        my_end = (my_rank + 1) * total_heads // my_tp
+        other_start = other_rank * total_heads // other_tp
+        other_end = (other_rank + 1) * total_heads // other_tp
+
+        overlap_start = max(my_start, other_start)
+        overlap_end = min(my_end, other_end)
+        assert overlap_start < overlap_end, (
+            f"No SSM head overlap between local rank {my_rank}/{my_tp} "
+            f"[{my_start},{my_end}) and remote rank {other_rank}/{other_tp} "
+            f"[{other_start},{other_end}) with total_heads={total_heads}."
+        )
+
+        h_start = overlap_start - other_start
+        h_len = overlap_end - overlap_start
+        ssm_narrowed = ssm_view.narrow(DIM_H, h_start, h_len)
+
+        return conv_parts + [ssm_narrowed]
 
     @property
     def page_size_bytes(self) -> int:
