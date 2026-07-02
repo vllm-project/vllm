@@ -4,7 +4,7 @@ import contextlib
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
@@ -203,6 +203,65 @@ def resolve_host_ip(extra_config: dict) -> str:
     return extra_config.get("host_ip") or get_ip()
 
 
+def _normalize_node_hosts(value: Any, config_key: str) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [host.strip() for host in value.split(",") if host.strip()]
+    try:
+        return [str(host).strip() for host in value if str(host).strip()]
+    except TypeError as exc:
+        raise ValueError(
+            f"{config_key} must be a comma-separated string or iterable of hosts"
+        ) from exc
+
+
+def get_moriio_node_hosts(
+    kv_transfer_config: KVTransferConfig, default_host: str
+) -> list[str]:
+    extra_config = kv_transfer_config.kv_connector_extra_config
+    node_hosts = _normalize_node_hosts(
+        extra_config.get("node_hosts"),
+        "kv_connector_extra_config['node_hosts']",
+    )
+    if node_hosts:
+        return node_hosts
+
+    return [default_host]
+
+
+def get_moriio_trusted_remote_hosts(
+    kv_transfer_config: KVTransferConfig,
+    node_hosts: Collection[str],
+) -> frozenset[str]:
+    extra_config = kv_transfer_config.kv_connector_extra_config
+    trusted_remote_hosts = _normalize_node_hosts(
+        extra_config.get("trusted_remote_hosts"),
+        "kv_connector_extra_config['trusted_remote_hosts']",
+    )
+    return frozenset(trusted_remote_hosts or node_hosts)
+
+
+def validate_moriio_remote_hosts(
+    value: Any,
+    trusted_remote_hosts: Collection[str],
+    config_key: str,
+) -> list[str]:
+    remote_hosts = _normalize_node_hosts(value, config_key)
+    if not remote_hosts:
+        return []
+    if not trusted_remote_hosts:
+        raise ValueError(
+            f"{config_key} requires kv_connector_extra_config['trusted_remote_hosts']"
+        )
+    untrusted_hosts = sorted(set(remote_hosts).difference(trusted_remote_hosts))
+    if untrusted_hosts:
+        raise ValueError(
+            f"{config_key} contains untrusted remote_hosts: {untrusted_hosts}"
+        )
+    return remote_hosts
+
+
 _DEPRECATED_ENV_VARS: dict[str, str] = {
     "VLLM_MORIIO_CONNECTOR_READ_MODE": "read_mode",
     "VLLM_MORIIO_QP_PER_TRANSFER": "qp_per_transfer",
@@ -244,6 +303,7 @@ class MoRIIOConfig:
     post_batch_size: int = -1
     num_workers: int = 1
     backend: str = "rdma"
+    node_hosts: list[str] = field(default_factory=list)
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
@@ -301,8 +361,10 @@ class MoRIIOConfig:
             extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT)
         )
 
+        local_ip = resolve_host_ip(extra_config)
+
         return cls(
-            local_ip=resolve_host_ip(extra_config),
+            local_ip=local_ip,
             local_kv_port=get_open_port(),
             proxy_ip=extra_config["proxy_ip"],
             local_ping_port=get_open_port(),
@@ -319,6 +381,7 @@ class MoRIIOConfig:
             post_batch_size=int(extra_config.get("post_batch_size", -1)),
             num_workers=int(extra_config.get("num_workers", 1)),
             backend=backend,
+            node_hosts=get_moriio_node_hosts(kv_transfer_config, local_ip),
             transfer_timeout=transfer_timeout,
             defer_timeout=defer_timeout,
         )
@@ -422,14 +485,24 @@ class ReqMeta:
     remote_engine_id: str
     tp_size: int
     remote_dp_size: int
+    remote_dp_rank: int = 0
+    # Ordered list of all prefill-instance host IPs for multi-node TP.
+    # Each decode worker picks remote_hosts[tp_rank // ranks_per_node] as its
+    # actual peer host for handshake + post-transfer notify. None or len<=1
+    # falls back to single-host behaviour (remote_host).
+    remote_hosts: list[str] | None = None
 
 
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
-    def __init__(self):
+    def __init__(
+        self,
+        trusted_remote_hosts: Collection[str] = (),
+    ):
         self.reqs_to_recv: dict[ReqId, ReqMeta] = {}
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.trusted_remote_hosts = frozenset(trusted_remote_hosts)
 
     def __repr__(self):
         return (
@@ -451,30 +524,63 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         remote_host = kv_transfer_params.get("remote_host")
         remote_handshake_port = kv_transfer_params.get("remote_handshake_port")
         remote_notify_port = kv_transfer_params.get("remote_notify_port")
+        # Parse host/ports from request_id. The router normally embeds both
+        # zmq_addresses there. If the embedded address is absent, fall back to
+        # `kv_transfer_params.remote_hosts` (forwarded for multi-node TP) and
+        # MoRIIO's default well-known ports. Once a valid host/port triple is
+        # available, the rest of the path is unchanged.
+        remote_hosts = validate_moriio_remote_hosts(
+            kv_transfer_params.get("remote_hosts"),
+            self.trusted_remote_hosts,
+            "kv_transfer_params['remote_hosts']",
+        )
         if (
             remote_host is None
             or remote_handshake_port is None
             or remote_notify_port is None
         ):
-            # Parse host/ports from the request_id. The router embeds both
-            # zmq_addresses in PD request IDs, but WRITE decode requests may carry
-            # a plain request ID and get the remote address via kv_transfer_params.
-            peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=write_mode)
-            remote_host, remote_handshake_port, remote_notify_port = (
-                parse_moriio_zmq_address(peer_zmq)
-            )
+            try:
+                peer_zmq = get_peer_zmq_from_request_id(
+                    request_id, is_producer=write_mode
+                )
+                remote_host, remote_handshake_port, remote_notify_port = (
+                    parse_moriio_zmq_address(peer_zmq)
+                )
+            except ValueError:
+                # Normalize remote_hosts: callers may pass a list (per-rank
+                # host vector from the proxy) or a single host string from
+                # older proxy versions. A bare string would silently slice
+                # into "1." for "172.30.0.1" if we just did remote_hosts[0].
+                if not remote_hosts:
+                    raise ValueError(
+                        f"MoRIIO add_new_req: could not resolve peer host/ports "
+                        f"for {request_id!r}; neither request_id parse nor "
+                        f"kv_transfer_params.remote_hosts provided them"
+                    ) from None
+                remote_host = remote_hosts[0]
+                remote_handshake_port = int(MoRIIOConstants.DEFAULT_HANDSHAKE_PORT)
+                remote_notify_port = int(MoRIIOConstants.DEFAULT_NOTIFY_PORT)
 
+        # If remote block metadata is absent, use empty defaults so the request
+        # remains a no-op.
         _req = ReqMeta(
             transfer_id=transfer_id,
             local_block_ids=local_block_ids,
-            remote_block_ids=kv_transfer_params["remote_block_ids"],
-            remote_engine_id=kv_transfer_params["remote_engine_id"],
+            remote_block_ids=kv_transfer_params.get("remote_block_ids", []),
+            remote_engine_id=kv_transfer_params.get("remote_engine_id", ""),
             remote_host=remote_host,
             remote_port=int(remote_handshake_port),
             remote_handshake_port=int(remote_handshake_port),
             remote_notify_port=int(remote_notify_port),
-            tp_size=kv_transfer_params.get("tp_size", 1),
+            # Callers may forward `remote_tp_size` without `tp_size`.
+            # Prefer `tp_size`, then fall back to `remote_tp_size`, then 1.
+            tp_size=kv_transfer_params.get(
+                "tp_size",
+                kv_transfer_params.get("remote_tp_size", 1),
+            ),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
+            remote_dp_rank=int(kv_transfer_params.get("remote_dp_rank", 0) or 0),
+            remote_hosts=remote_hosts or None,
         )
         if write_mode:
             self.reqs_to_save[request_id] = _req
