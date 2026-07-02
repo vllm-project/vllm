@@ -856,15 +856,23 @@ class EplbState:
                         eplb_model_state.physical_to_logical_map, _gl, _ep
                     )
                     _new_imb = _rank_imbalance(new_physical_to_logical_map, _gl, _ep)
-                    if _old_imb <= 1e-6 or (_old_imb - _new_imb) / _old_imb < 0.05:
-                        skip_rearrange = True
-                        if is_main_rank:
-                            logger.info(
-                                "[EPLB] Skip rearrange: imbalance %.4f -> "
-                                "%.4f (no material gain)",
-                                _old_imb,
-                                _new_imb,
-                            )
+                    local_skip = (
+                        _old_imb <= 1e-6 or (_old_imb - _new_imb) / _old_imb < 0.05
+                    )
+                    _vote = torch.tensor(
+                        [1 if local_skip else 0],
+                        device=_gl.device,
+                        dtype=torch.int32,
+                    )
+                    all_reduce(_vote, group=ep_group)
+                    skip_rearrange = int(_vote.item()) == _ep
+                    if skip_rearrange and is_main_rank:
+                        logger.info(
+                            "[EPLB] Skip rearrange: imbalance %.4f -> "
+                            "%.4f (no material gain)",
+                            _old_imb,
+                            _new_imb,
+                        )
 
                 if not skip_rearrange:
                     # Update expert weights
