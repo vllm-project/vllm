@@ -7,7 +7,6 @@ import torch
 
 from vllm.model_executor.layers.quantization.online.int4 import (
     Int4PerChannelEmbeddingMethod,
-    Int4VocabParallelEmbedding,
 )
 
 
@@ -84,7 +83,7 @@ def test_int4_embedding_method():
             self.params_dtype = torch.float32
 
     layer = MockLayer()
-    method = Int4PerChannelEmbeddingMethod(layer)
+    method = Int4PerChannelEmbeddingMethod()
 
     # Process weights
     method.process_weights_after_loading(layer)
@@ -101,37 +100,6 @@ def test_int4_embedding_method():
 
     assert embeddings.shape == (10, 256)
     assert embeddings.dtype == torch.float32
-
-
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA")
-def test_int4_vocab_parallel_embedding():
-    """Test Int4VocabParallelEmbedding with tensor parallelism."""
-    torch.manual_seed(42)
-
-    num_embeddings = 1000
-    embedding_dim = 256
-
-    # Create embedding layer
-    embedding = Int4VocabParallelEmbedding(
-        num_embeddings=num_embeddings,
-        embedding_dim=embedding_dim,
-        params_dtype=torch.float32,
-    )
-
-    # Check initial shape
-    assert embedding.weight.dtype == torch.uint8
-    assert embedding.weight.shape[1] == embedding_dim // 2
-
-    # Simulate weight loading
-    loaded_weight = torch.randn(num_embeddings, embedding_dim, dtype=torch.float32)
-    embedding._int4_weight_loader(embedding.weight, loaded_weight)
-
-    # Test forward pass
-    indices = torch.randint(0, num_embeddings, (10,), dtype=torch.long)
-    output = embedding(indices)
-
-    assert output.shape == (10, embedding_dim)
-    assert output.dtype == torch.float32
 
 
 if __name__ == "__main__":
