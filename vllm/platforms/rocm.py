@@ -761,6 +761,25 @@ class RocmPlatform(Platform):
         return torch.cuda.get_device_properties(device_id).total_memory
 
     @classmethod
+    @cache
+    def is_integrated_gpu(cls, device_id: int = 0) -> bool:
+        # Heuristic: an APU's VRAM carve-out (per amdsmi) is much smaller
+        # than the host's physical RAM. Discrete cards report VRAM in the
+        # same order of magnitude as system memory. Used to trigger the
+        # UMA path in MemorySnapshot.measure() so gpu_memory_utilization
+        # is computed against the narrow VRAM total rather than the
+        # inflated unified-memory total hipMemGetInfo returns.
+        try:
+            import psutil
+
+            vram = cls.get_device_total_memory(device_id)
+            sys_ram = psutil.virtual_memory().total
+            return 0 < vram < sys_ram // 2
+        except Exception as e:
+            logger.debug("is_integrated_gpu detection failed: %s", e)
+            return False
+
+    @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
         from vllm._aiter_ops import rocm_aiter_ops
 

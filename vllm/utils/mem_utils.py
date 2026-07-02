@@ -146,12 +146,19 @@ class MemorySnapshot:
         self.free_memory, self.total_memory = torch.accelerator.get_memory_info(device)
         if current_platform.is_integrated_gpu(device.index):
             # On UMA (Unified Memory Architecture) platforms where CPU and
-            # GPU share physical memory (e.g. GH200, DGX Spark, Jetson Orin),
-            # cudaMemGetInfo underreports free memory because it does not
-            # account for reclaimable OS memory (page cache, buffers).
-            # Use psutil to get the true available memory.
+            # GPU share physical memory (e.g. GH200, DGX Spark, Jetson Orin,
+            # AMD Strix Point/Strix Halo APUs), cudaMemGetInfo underreports
+            # free memory because it does not account for reclaimable OS
+            # memory (page cache, buffers). Use psutil to get the true
+            # available memory. On AMD APUs hipMemGetInfo additionally
+            # over-reports total memory (returns the UMA view rather than
+            # the VRAM carve-out), so prefer the platform's per-device
+            # total when narrower; Tegra/Jetson totals are left unchanged.
             # https://docs.nvidia.com/cuda/cuda-for-tegra-appnote/#estimating-total-allocatable-device-memory-on-an-integrated-gpu-device
             self.free_memory = psutil.virtual_memory().available
+            plat_total = current_platform.get_device_total_memory(device.index)
+            if 0 < plat_total < self.total_memory:
+                self.total_memory = plat_total
 
         self.cuda_memory = self.total_memory - self.free_memory
 
