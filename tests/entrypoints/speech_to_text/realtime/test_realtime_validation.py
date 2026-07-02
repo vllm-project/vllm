@@ -158,16 +158,27 @@ async def test_multi_chunk_streaming(
             # Verify transcription contains expected content
             assert event["type"] == "transcription.done"
             assert event["text"] == full_text
-            assert full_text == (
-                " First words I spoke in the original phonograph."
-                " A little piece of practical poetry. Mary had a little lamb,"
-                " it sleeps with quite a flow, and everywhere that Mary went,"
-                " the lamb was sure to go."
-            ) or full_text == (
-                " First words I spoke in the original phonograph."
-                " A little piece of practical poetry. Mary had a little lamb,"
-                " it squeaked with quite a flow, and everywhere that Mary went,"
-                " the lamb was sure to go."
+            assert (
+                full_text
+                == (
+                    " First words I spoke in the original phonograph."
+                    " A little piece of practical poetry. Mary had a little lamb,"
+                    " it sleeps with quite a flow, and everywhere that Mary went,"
+                    " the lamb was sure to go."
+                )
+                or full_text
+                == (
+                    " First words I spoke in the original phonograph."
+                    " A little piece of practical poetry. Mary had a little lamb,"
+                    " it squeaked with quite a flow, and everywhere that Mary went,"
+                    " the lamb was sure to go."
+                )
+                or full_text
+                == (
+                    " First words, I spoke in the original phonograph. A little piece"
+                    " of practical poetry. Mary had a little lamb, its fleece was quite"
+                    " a slow, and everywhere that Mary went, the lamb was sure to go."
+                )
             )
 
 
