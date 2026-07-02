@@ -114,6 +114,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
         )
+        self.mla_attn.indexer_rope_emb = self.indexer_rope_emb
 
         self.prefix = prefix
 
@@ -166,17 +167,22 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
 
-        if self.indexer and self.is_sparse and not self.skip_topk:
-            self.indexer(hidden_states, q_c, positions, self.indexer_rope_emb)
-
         if llama_4_scaling is not None:
             q *= llama_4_scaling
+
+        run_indexer = self.indexer and self.is_sparse and not self.skip_topk
+        indexer_dummy_dep = None
+        if run_indexer:
+            indexer_dummy_dep = self.mla_attn.run_indexer_on_side_stream(
+                self.indexer, hidden_states, q_c, positions, self.indexer_rope_emb
+            )
 
         attn_out = self.mla_attn(
             q,
             kv_c_normed,
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+            indexer_dummy_dep=indexer_dummy_dep,
         )
 
         return self.o_proj(attn_out)[0]

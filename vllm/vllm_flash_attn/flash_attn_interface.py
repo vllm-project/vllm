@@ -445,7 +445,7 @@ def compile_flash_attn_varlen_func_from_specs(
         raise NotImplementedError("FA4 compile-only wrapper does not support dropout")
     del deterministic
 
-    from vllm.vllm_flash_attn.cute.interface import (
+    from vllm.vllm_flash_attn.cute.interface import (  # type: ignore[attr-defined]
         compile_flash_attn_varlen_func_from_specs as _fa4_compile_flash_attn_varlen_func_from_specs,
     )
 

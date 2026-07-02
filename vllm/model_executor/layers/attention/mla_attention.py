@@ -281,6 +281,35 @@ from vllm.v1.kv_cache_interface import (
 
 logger = init_logger(__name__)
 
+_dcp_indexer_stream: torch.cuda.Stream | None = None
+
+
+def _get_dcp_indexer_stream(
+    device: torch.device,
+    *,
+    create: bool = True,
+) -> torch.cuda.Stream | None:
+    if not current_platform.is_cuda():
+        return None
+
+    global _dcp_indexer_stream
+    if _dcp_indexer_stream is None and create:
+        _dcp_indexer_stream = torch.cuda.Stream(device=device)
+    return _dcp_indexer_stream
+
+
+def _wait_dcp_indexer_stream(indexer_dummy_dep: torch.Tensor | None) -> None:
+    if indexer_dummy_dep is None or not current_platform.is_cuda():
+        return
+
+    stream = _get_dcp_indexer_stream(
+        indexer_dummy_dep.device,
+        create=False,
+    )
+    if stream is not None:
+        torch.cuda.current_stream(indexer_dummy_dep.device).wait_stream(stream)
+
+
 _FP8_DTYPE = current_platform.fp8_dtype()
 
 
@@ -381,6 +410,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.indexer = indexer
+        self.indexer_rope_emb: nn.Module | None = None
 
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
@@ -540,6 +570,61 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             compile_native=True,
         )
 
+    def _run_indexer_on_side_stream_impl(
+        self,
+        indexer: nn.Module,
+        hidden_states: torch.Tensor,
+        q_c: torch.Tensor | None,
+        positions: torch.Tensor,
+        indexer_rope_emb: nn.Module | None,
+    ) -> torch.Tensor | None:
+        if not current_platform.is_cuda():
+            return indexer(hidden_states, q_c, positions, indexer_rope_emb)
+
+        stream = _get_dcp_indexer_stream(
+            hidden_states.device,
+        )
+        if stream is None:
+            return indexer(hidden_states, q_c, positions, indexer_rope_emb)
+
+        main_stream = torch.cuda.current_stream(hidden_states.device)
+        stream.wait_stream(main_stream)
+        with torch.cuda.stream(stream):
+            indexer_dummy_dep = indexer(hidden_states, q_c, positions, indexer_rope_emb)
+        return indexer_dummy_dep
+
+    def run_indexer_on_side_stream(
+        self,
+        indexer: nn.Module,
+        hidden_states: torch.Tensor,
+        q_c: torch.Tensor | None,
+        positions: torch.Tensor,
+        indexer_rope_emb: nn.Module | None,
+    ) -> torch.Tensor | None:
+        if not current_platform.is_cuda():
+            return indexer(hidden_states, q_c, positions, indexer_rope_emb)
+
+        dcp_world_size = self.impl.dcp_world_size
+        if dcp_world_size == -1:
+            dcp_world_size = get_dcp_group().world_size
+            self.impl.dcp_world_size = dcp_world_size
+        if dcp_world_size <= 1:
+            return indexer(hidden_states, q_c, positions, indexer_rope_emb)
+
+        topk_indices_buffer = getattr(indexer, "topk_indices_buffer", None)
+        if topk_indices_buffer is None:
+            return self._run_indexer_on_side_stream_impl(
+                indexer, hidden_states, q_c, positions, indexer_rope_emb
+            )
+
+        return torch.ops.vllm.unified_mla_indexer_side_stream(
+            hidden_states,
+            q_c,
+            positions,
+            topk_indices_buffer,
+            _encode_layer_name(self.layer_name),
+        )
+
     @property
     def chunked_prefill_workspace_size(self) -> int:
         if self._chunked_prefill_workspace_size is None:
@@ -556,6 +641,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
+        indexer_dummy_dep: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.calculate_kv_scales:
             torch.ops.vllm.maybe_calc_kv_scales(
@@ -599,6 +685,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self_kv_cache,
                 attn_metadata,
                 output=output,
+                indexer_dummy_dep=indexer_dummy_dep,
             )
             return output
         else:
@@ -618,6 +705,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 output,
                 encoded,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
+                indexer_dummy_dep=indexer_dummy_dep,
             )
             return output
 
@@ -635,6 +723,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_scale_ue8m0: bool | None = None,
         quant_col_major: bool | None = None,
         quant_tma_aligned: bool | None = None,
+        indexer_dummy_dep: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -809,6 +898,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # call decode attn
             if not is_sparse_impl:
                 assert attn_metadata.decode is not None
+            _wait_dcp_indexer_stream(indexer_dummy_dep)
             attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
 
             # correct dcp attn_out with lse.
@@ -1034,6 +1124,47 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
 
 
+@eager_break_during_capture
+def unified_mla_indexer_side_stream(
+    hidden_states: torch.Tensor,
+    q_c: torch.Tensor | None,
+    positions: torch.Tensor,
+    topk_indices_buffer: torch.Tensor,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    layer_name = _resolve_layer_name(layer_name)
+    _, layer, _, _ = get_attention_context(layer_name)
+    indexer = layer.indexer
+    assert indexer is not None
+    indexer_rope_emb = getattr(layer, "indexer_rope_emb", None)
+    indexer_dummy_dep = layer._run_indexer_on_side_stream_impl(
+        indexer, hidden_states, q_c, positions, indexer_rope_emb
+    )
+    if indexer_dummy_dep is None:
+        return topk_indices_buffer
+    return indexer_dummy_dep
+
+
+def unified_mla_indexer_side_stream_fake(
+    hidden_states: torch.Tensor,
+    q_c: torch.Tensor | None,
+    positions: torch.Tensor,
+    topk_indices_buffer: torch.Tensor,
+    layer_name: LayerNameType,
+) -> torch.Tensor:
+    del hidden_states, q_c, positions, layer_name
+    return topk_indices_buffer
+
+
+direct_register_custom_op(
+    op_name="unified_mla_indexer_side_stream",
+    op_func=unified_mla_indexer_side_stream,
+    mutates_args=["topk_indices_buffer"],
+    fake_impl=unified_mla_indexer_side_stream_fake,
+    dispatch_key=current_platform.dispatch_key,
+)
+
+
 def unified_mla_kv_cache_update(
     kv_c_normed: torch.Tensor,
     k_pe: torch.Tensor,
@@ -1092,6 +1223,7 @@ def unified_mla_attention_with_output(
     quant_scale_ue8m0: bool | None = None,
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
+    indexer_dummy_dep: torch.Tensor | None = None,
 ) -> None:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
@@ -1112,6 +1244,7 @@ def unified_mla_attention_with_output(
         quant_scale_ue8m0=quant_scale_ue8m0,
         quant_col_major=quant_col_major,
         quant_tma_aligned=quant_tma_aligned,
+        indexer_dummy_dep=indexer_dummy_dep,
     )
 
 
@@ -1128,7 +1261,9 @@ def unified_mla_attention_with_output_fake(
     quant_scale_ue8m0: bool | None = None,
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
+    indexer_dummy_dep: torch.Tensor | None = None,
 ) -> None:
+    del indexer_dummy_dep
     return
 
 
