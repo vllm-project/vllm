@@ -1282,6 +1282,9 @@ class Qwen2_5_VLForConditionalGeneration(
                     second_per_grid_ts = mm_feature.data[
                         "second_per_grid_ts"
                     ].data.item()
+                if not np.isfinite(second_per_grid_ts):
+                    second_per_grid_ts = 1.0
+                second_per_grid_ts = max(second_per_grid_ts, 1e-3)
                 t_factor = second_per_grid_ts * tokens_per_second
                 yield (
                     offset,
@@ -1298,6 +1301,8 @@ class Qwen2_5_VLForConditionalGeneration(
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
+        max_mrope_pos = getattr(self.config, "max_position_embeddings", 32768) * 4
+
         llm_pos_ids_list: list = []
         st = 0
 
@@ -1316,7 +1321,10 @@ class Qwen2_5_VLForConditionalGeneration(
 
             grid_indices = np.indices((llm_grid_t, llm_grid_h, llm_grid_w))
             if t_factor != 1.0:
-                grid_indices[0] = (grid_indices[0] * t_factor).astype(np.int64)
+                grid_indices[0] = np.minimum(
+                    grid_indices[0] * t_factor,
+                    max_mrope_pos - 1,
+                ).astype(np.int64)
             llm_pos_ids_list.append(grid_indices.reshape(3, -1) + text_len + st_idx)
             st = offset + llm_grid_t * llm_grid_h * llm_grid_w
 
@@ -1328,6 +1336,14 @@ class Qwen2_5_VLForConditionalGeneration(
             )
 
         llm_positions = np.concatenate(llm_pos_ids_list, axis=1).reshape(3, -1)
+        if llm_positions.max() >= max_mrope_pos:
+            logger.warning(
+                "MRoPE positions exceed cache bounds (max=%d, limit=%d). "
+                "Clamping to prevent out-of-bounds access.",
+                llm_positions.max(),
+                max_mrope_pos,
+            )
+            np.clip(llm_positions, 0, max_mrope_pos - 1, out=llm_positions)
         mrope_position_delta = (llm_positions.max() + 1 - len(input_tokens)).item()
 
         return torch.from_numpy(llm_positions), mrope_position_delta
