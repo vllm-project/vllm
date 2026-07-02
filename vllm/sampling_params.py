@@ -352,6 +352,17 @@ class SamplingParams(
     '\\emoji \\emoji \\emoji ...'). This feature can detect such behavior
     and terminate early, saving time and tokens."""
 
+    monolingual_drift_mask: bool = False
+    """Whether to mask out non-monolingual tokens during thinking block."""
+    chinese_token_ids_path: str | None = None
+    """Path to json file containing the token IDs to suppress."""
+    think_token_id: int | None = None
+    """Token ID for the start-of-thought marker (<think>)."""
+    end_think_token_id: int | None = None
+    """Token ID for the end-of-thought marker (</think>)."""
+    monolingual_drift_bias: float = -100.0
+    """Additive logit bias to apply to non-monolingual tokens during thinking block."""
+
     @staticmethod
     def from_optional(
         n: int | None = 1,
@@ -383,6 +394,10 @@ class SamplingParams(
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
+        monolingual_drift_mask: bool | None = False,
+        chinese_token_ids_path: str | None = None,
+        think_token_id: int | None = None,
+        end_think_token_id: int | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -443,6 +458,12 @@ class SamplingParams(
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
+            monolingual_drift_mask=False
+            if monolingual_drift_mask is None
+            else monolingual_drift_mask,
+            chinese_token_ids_path=chinese_token_ids_path,
+            think_token_id=think_token_id,
+            end_think_token_id=end_think_token_id,
         )
 
     def __post_init__(self) -> None:
@@ -619,6 +640,28 @@ class SamplingParams(
                 f"bad_words cannot contain an empty string. "
                 f"Got bad_words={self.bad_words}"
             )
+
+        if self.chinese_token_ids_path is not None:
+            import os
+
+            path = self.chinese_token_ids_path
+            resolved = os.path.realpath(path)
+            allowed_dir = os.environ.get("VLLM_CHINESE_TOKEN_IDS_DIR")
+            if allowed_dir:
+                allowed_dir = os.path.realpath(allowed_dir)
+            else:
+                allowed_dir = os.path.realpath(os.getcwd())
+            try:
+                common = os.path.commonpath([allowed_dir, resolved])
+                is_inside = os.path.normcase(common) == os.path.normcase(allowed_dir)
+            except ValueError:
+                is_inside = False
+            if not is_inside or not resolved.endswith(".json"):
+                raise ValueError(f"Unsafe or unauthorized JSON file path: {path}.")
+            if not os.path.isfile(resolved):
+                raise ValueError(
+                    f"chinese_token_ids_path does not exist or is not a file: {path}"
+                )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:

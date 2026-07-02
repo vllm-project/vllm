@@ -138,7 +138,7 @@ class InputBatch:
         self.is_token_ids_tensor = torch.zeros(
             (max_num_reqs, max_model_len),
             device="cpu",
-            dtype=bool,
+            dtype=torch.bool,
             pin_memory=False,
         )
         self.is_token_ids = self.is_token_ids_tensor.numpy()
@@ -281,6 +281,15 @@ class InputBatch:
         # data structure
         self.logitsprocs = logitsprocs or LogitsProcessors()
         self.logitsprocs_need_output_token_ids = logitsprocs_need_output_token_ids
+
+        # Monolingual reasoning constraints
+        self.monolingual_drift_mask_cpu = np.zeros(max_num_reqs, dtype=bool)
+        self.think_token_id_cpu = np.full(max_num_reqs, 151648, dtype=np.int32)
+        self.end_think_token_id_cpu = np.full(max_num_reqs, 151649, dtype=np.int32)
+        self.chinese_token_ids_path_cpu = np.full(max_num_reqs, None, dtype=object)
+        self.monolingual_drift_bias_cpu = np.full(
+            max_num_reqs, -100.0, dtype=np.float32
+        )
 
         # Store last speculative tokens for sampler.
         self.spec_token_ids: list[list[int]] = [[] for _ in range(max_num_reqs)]
@@ -451,6 +460,21 @@ class InputBatch:
                 self.bad_words_token_ids[req_index] = (
                     sampling_params.bad_words_token_ids
                 )
+            self.monolingual_drift_mask_cpu[req_index] = getattr(
+                sampling_params, "monolingual_drift_mask", False
+            )
+            self.think_token_id_cpu[req_index] = (
+                getattr(sampling_params, "think_token_id", None) or 151648
+            )
+            self.end_think_token_id_cpu[req_index] = (
+                getattr(sampling_params, "end_think_token_id", None) or 151649
+            )
+            self.chinese_token_ids_path_cpu[req_index] = getattr(
+                sampling_params, "chinese_token_ids_path", None
+            )
+            self.monolingual_drift_bias_cpu[req_index] = getattr(
+                sampling_params, "monolingual_drift_bias", -100.0
+            )
         elif pooling_params := request.pooling_params:
             pooling_states = request.pooling_states
             assert pooling_states is not None
@@ -562,6 +586,11 @@ class InputBatch:
             self.allowed_token_ids_mask_cpu_tensor[req_index].fill_(False)
         self.bad_words_token_ids.pop(req_index, None)
         self.thinking_token_budget_reqs.discard(req_id)
+        self.monolingual_drift_mask_cpu[req_index] = False
+        self.think_token_id_cpu[req_index] = 151648
+        self.end_think_token_id_cpu[req_index] = 151649
+        self.chinese_token_ids_path_cpu[req_index] = None
+        self.monolingual_drift_bias_cpu[req_index] = -100.0
         return req_index
 
     def swap_states(self, i1: int, i2: int) -> None:
@@ -666,6 +695,27 @@ class InputBatch:
 
         swap_dict_values(self.generators, i1, i2)
         swap_dict_values(self.bad_words_token_ids, i1, i2)
+
+        self.monolingual_drift_mask_cpu[i1], self.monolingual_drift_mask_cpu[i2] = (
+            self.monolingual_drift_mask_cpu[i2],
+            self.monolingual_drift_mask_cpu[i1],
+        )
+        self.think_token_id_cpu[i1], self.think_token_id_cpu[i2] = (
+            self.think_token_id_cpu[i2],
+            self.think_token_id_cpu[i1],
+        )
+        self.end_think_token_id_cpu[i1], self.end_think_token_id_cpu[i2] = (
+            self.end_think_token_id_cpu[i2],
+            self.end_think_token_id_cpu[i1],
+        )
+        self.chinese_token_ids_path_cpu[i1], self.chinese_token_ids_path_cpu[i2] = (
+            self.chinese_token_ids_path_cpu[i2],
+            self.chinese_token_ids_path_cpu[i1],
+        )
+        self.monolingual_drift_bias_cpu[i1], self.monolingual_drift_bias_cpu[i2] = (
+            self.monolingual_drift_bias_cpu[i2],
+            self.monolingual_drift_bias_cpu[i1],
+        )
 
         if self.allowed_token_ids_mask_cpu_tensor is not None:
             (
@@ -801,6 +851,22 @@ class InputBatch:
             if bad_words_token_ids is not None:
                 self.bad_words_token_ids[empty_index] = bad_words_token_ids
 
+            self.monolingual_drift_mask_cpu[empty_index] = (
+                self.monolingual_drift_mask_cpu[last_req_index]
+            )
+            self.think_token_id_cpu[empty_index] = self.think_token_id_cpu[
+                last_req_index
+            ]
+            self.end_think_token_id_cpu[empty_index] = self.end_think_token_id_cpu[
+                last_req_index
+            ]
+            self.chinese_token_ids_path_cpu[empty_index] = (
+                self.chinese_token_ids_path_cpu[last_req_index]
+            )
+            self.monolingual_drift_bias_cpu[empty_index] = (
+                self.monolingual_drift_bias_cpu[last_req_index]
+            )
+
             # Decrement last_req_index since it is now empty.
             last_req_index -= 1
 
@@ -896,6 +962,7 @@ class InputBatch:
         allowed_token_ids_mask: torch.Tensor | None = None
         if not self.no_allowed_token_ids:
             assert self.allowed_token_ids_mask is not None
+            assert self.allowed_token_ids_mask_cpu_tensor is not None
             copy_slice(
                 self.allowed_token_ids_mask_cpu_tensor,
                 self.allowed_token_ids_mask,
@@ -932,6 +999,13 @@ class InputBatch:
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
             thinking_budget_state_holder=self.thinking_budget_state_holder,
+            monolingual_drift_mask=self.monolingual_drift_mask_cpu[:num_reqs].tolist(),
+            think_token_ids=self.think_token_id_cpu[:num_reqs].tolist(),
+            end_think_token_ids=self.end_think_token_id_cpu[:num_reqs].tolist(),
+            chinese_token_ids_paths=self.chinese_token_ids_path_cpu[:num_reqs].tolist(),
+            monolingual_drift_biases=self.monolingual_drift_bias_cpu[
+                :num_reqs
+            ].tolist(),
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:

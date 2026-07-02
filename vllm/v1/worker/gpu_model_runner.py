@@ -706,6 +706,56 @@ class GPUModelRunner(
             reasoning_config=self.vllm_config.reasoning_config,
         )
 
+        # Initialize monolingual CJK token mask on the sampler.
+        self.sampler.chinese_mask = None
+        self.sampler.custom_chinese_masks = {}
+        try:
+            from vllm.tokenizers import cached_tokenizer_from_config
+
+            tokenizer = cached_tokenizer_from_config(model_config=self.model_config)
+            vocab_size = self.model_config.get_vocab_size()
+
+            chinese_mask_list = [False] * vocab_size
+
+            def is_chinese_char(c: str) -> bool:
+                val = ord(c)
+                if 0x4E00 <= val <= 0x9FFF:
+                    return True
+                if 0x3400 <= val <= 0x4DBF:
+                    return True
+                if (
+                    0x20000 <= val <= 0x2A6DF
+                    or 0x2A700 <= val <= 0x2B73F
+                    or 0x2B740 <= val <= 0x2B81F
+                    or 0x2B820 <= val <= 0x2CEAF
+                    or 0x2F800 <= val <= 0x2FA1F
+                ):
+                    return True
+                if 0x3000 <= val <= 0x303F:
+                    return True
+                return 0xFF00 <= val <= 0xFFEF
+
+            def contains_chinese(text: str) -> bool:
+                return any(is_chinese_char(c) for c in text)
+
+            for idx in range(vocab_size):
+                try:
+                    decoded = tokenizer.decode([idx], errors="ignore")
+                except Exception:
+                    decoded = ""
+                if contains_chinese(decoded):
+                    chinese_mask_list[idx] = True
+
+            self.sampler.chinese_mask = torch.tensor(
+                chinese_mask_list, dtype=torch.bool, device=self.device
+            )
+            logger.info(
+                "Initialized monolingual CJK mask with %d Chinese tokens.",
+                sum(chinese_mask_list),
+            )
+        except Exception as e:
+            logger.warning("Failed to automatically compile CJK mask: %s", e)
+
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
         self.async_output_copy_stream: torch.cuda.Stream | None = None

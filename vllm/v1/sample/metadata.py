@@ -53,3 +53,10 @@ class SamplingMetadata:
     # When non-None, use ``holder.has_tracked_requests()`` to see if this batch applies
     # thinking-token-budget logits (holder may exist with an empty tracking set).
     thinking_budget_state_holder: ThinkingBudgetStateHolder | None = None
+
+    # Monolingual reasoning configuration per request
+    monolingual_drift_mask: list[bool] | None = None
+    think_token_ids: list[int] | None = None
+    end_think_token_ids: list[int] | None = None
+    chinese_token_ids_paths: list[str | None] | None = None
+    monolingual_drift_biases: list[float] | None = None
