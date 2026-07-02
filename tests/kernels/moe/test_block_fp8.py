@@ -36,6 +36,7 @@ from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import (
+    calc_diff,
     get_mk_alignment_for_contiguous_layout,
     is_deep_gemm_e8m0_used,
 )
@@ -204,10 +205,31 @@ def test_w8a8_block_fp8_fused_moe(
             global_num_experts=w1.shape[0],
         )
 
-    # 0.039 only needed for M >= 8192
-    tol = 0.035 if M < 8192 else 0.039
-    torch.testing.assert_close(out, ref_out, atol=tol, rtol=tol)
-    torch.testing.assert_close(m_out, ref_out, atol=tol, rtol=tol)
+    # The kernel and the reference quantize the intermediate activations
+    # independently, so few-ulp differences in the gemm1 output perturb the
+    # per-group amax and flip ~11% of the fp8 activation codes — an inherent
+    # ~1.5%-of-output-RMS noise floor whose extreme tail grows with the
+    # M*N sample count, while output RMS grows with K. On SM120 (Blackwell
+    # workstation) this pushes a fixed atol=0.035 past failure at large K
+    # (0.066 observed at K=7168, with the underlying triton GEMM matching
+    # float64 to 1e-6). Other architectures keep the strict tolerance so they
+    # retain full regression sensitivity. See issue #45332.
+    base_tol = 0.035 if M < 8192 else 0.039
+    if current_platform.has_device_capability(120):
+        # Two-leg check on SM120:
+        #  * calc_diff (the DeepGEMM block-fp8 similarity check) bounds broad
+        #    numeric drift: ~1.2e-4 at the worst K=7168 case, vs well above
+        #    1e-3 for structural errors hitting whole experts.
+        #  * assert_close with a 4x atol cap bounds localized errors (a zeroed
+        #    row sails through a norm check but its elements blow past 0.14);
+        #    the quant-noise tail (0.066 max) stays below it.
+        assert calc_diff(out, ref_out) < 1e-3
+        assert calc_diff(m_out, ref_out) < 1e-3
+        torch.testing.assert_close(out, ref_out, atol=4 * base_tol, rtol=base_tol)
+        torch.testing.assert_close(m_out, ref_out, atol=4 * base_tol, rtol=base_tol)
+    else:
+        torch.testing.assert_close(out, ref_out, atol=base_tol, rtol=base_tol)
+        torch.testing.assert_close(m_out, ref_out, atol=base_tol, rtol=base_tol)
 
 
 @pytest.mark.parametrize(("M", "N", "K"), MNK_FACTORS_DG)
