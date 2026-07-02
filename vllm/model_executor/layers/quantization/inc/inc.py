@@ -35,8 +35,11 @@ class INCConfig(QuantizationConfig):
     """
 
     SUPPORTED_BITS = {2, 3, 4, 8}
-    SUPPORTED_DTYPES = {"int"}
-    SUPPORTED_FORMATS = {"auto_round:auto_gptq", "auto_round:auto_awq"}
+    SUPPORTED_DTYPES = {"int", "mx_fp"}
+    SUPPORTED_FORMATS = {
+        "auto_round:auto_gptq",
+        "auto_round:auto_awq",
+    }
     SUPPORTED_BACKENDS = {
         "auto",
         "gptq",
@@ -63,12 +66,15 @@ class INCConfig(QuantizationConfig):
                 f"Unsupported weight_bits: {weight_bits}, "
                 f"currently only support {self.SUPPORTED_BITS}."
             )
-        if data_type not in self.SUPPORTED_DTYPES:
+        # auto-round mxfp data_type is e.g. "mx_fp4" / "mx_fp4e2m1"; match the
+        # "mx_fp" family by substring like auto_round.compressors.is_mx_fp.
+        is_mxfp = "mx_fp" in data_type
+        if data_type not in self.SUPPORTED_DTYPES and not is_mxfp:
             raise ValueError(
                 f"Unsupported data_type: {data_type},"
                 f" currently only support  {self.SUPPORTED_DTYPES}."
             )
-        if packing_format not in self.SUPPORTED_FORMATS:
+        if packing_format not in self.SUPPORTED_FORMATS and not is_mxfp:
             raise ValueError(
                 f"Unsupported packing_format: {packing_format}, "
                 f"currently only support {self.SUPPORTED_FORMATS}."
@@ -121,7 +127,7 @@ class INCConfig(QuantizationConfig):
         return cls(
             weight_bits=cls.get_from_keys(config, ["bits"]),
             group_size=cls.get_from_keys(config, ["group_size"]),
-            sym=cls.get_from_keys(config, ["sym"]),
+            sym=cls.get_from_keys_or(config, ["sym"], True),
             packing_format=cls.get_from_keys_or(
                 config, ["packing_format"], "auto_round:auto_gptq"
             ),
