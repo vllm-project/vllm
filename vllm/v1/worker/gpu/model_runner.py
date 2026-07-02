@@ -750,6 +750,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self._remove_request(req_id)
 
     def free_states(self, scheduler_output: SchedulerOutput) -> None:
+        # For multimodal models, encoder cache eviction is suppressed:
+        # the scheduler's _get_freed_encoder_hashes() returns [] so
+        # free_encoder_mm_hashes is always empty. Entries remain in the
+        # encoder cache until the request finishes, preventing misses
+        # from preemption or hash reuse across sequential requests.
+        # For encoder-decoder models (e.g. Whisper), eviction is
+        # unchanged.
+        # https://github.com/vllm-project/vllm/issues/38551
         if self.encoder_cache is not None:
             for mm_hash in scheduler_output.free_encoder_mm_hashes:
                 self.encoder_cache.free_encoder_cache(mm_hash)
