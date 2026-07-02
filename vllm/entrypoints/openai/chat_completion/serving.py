@@ -430,7 +430,17 @@ class OpenAIServingChat(OpenAIServing):
         else:
             tool_choice_function_name = None
 
+        # Whether tools are in use with "auto" tool choice
+        tool_choice_auto = (
+            not tool_choice_function_name
+            and bool(request.tools)
+            and self.parser_cls is not None
+            and self.enable_auto_tools
+            and request.tool_choice in ("auto", None)
+        )
+
         previous_texts = [""] * num_choices
+        streamed_content_lengths = [0] * num_choices
 
         try:
             if self.parser_cls is not None:
@@ -559,6 +569,7 @@ class OpenAIServingChat(OpenAIServing):
                 for output in res.outputs:
                     i = output.index
                     parser = parsers[i]
+                    tool_parser = parser.tool_parser if parser is not None else None
                     if finish_reason_sent[i]:
                         continue
 
@@ -632,6 +643,27 @@ class OpenAIServingChat(OpenAIServing):
                             continue
                         delta_message = DeltaMessage()
 
+                    # If generation ends while auto tool parsing is still
+                    # holding raw text, and the client has not seen a tool-call
+                    # delta, flush the buffered suffix as normal content. This
+                    # keeps streaming aligned with non-streaming for malformed
+                    # or incomplete tool-looking output while preserving the
+                    # engine's finish_reason, such as stop or length.
+                    flush_buffered_content = (
+                        output.finish_reason is not None
+                        and tool_choice_auto
+                        and tool_parser
+                        and not tools_streamed[i]
+                        and self._has_unstreamed_tool_parser_state(tool_parser)
+                        and not delta_message.content
+                        and not delta_message.reasoning
+                        and not delta_message.tool_calls
+                    )
+                    if flush_buffered_content:
+                        delta_message = DeltaMessage(
+                            content=previous_texts[i][streamed_content_lengths[i] :]
+                        )
+
                     # Log streaming delta if output logging is enabled
                     if self.enable_log_outputs and self.request_logger:
                         delta_content_parts = []
@@ -685,7 +717,9 @@ class OpenAIServingChat(OpenAIServing):
                         # finish_reason is:
                         # "tool_calls" for "auto" or "required" tool calls,
                         # and "stop" for named tool calls.
-                        if tools_streamed[i] and not tool_choice_function_name:
+                        if not flush_buffered_content and (
+                            tools_streamed[i] and not tool_choice_function_name
+                        ):
                             finish_reason_ = "tool_calls"
                         else:
                             finish_reason_ = (
@@ -707,6 +741,8 @@ class OpenAIServingChat(OpenAIServing):
                         finish_reason_sent[i] = True
 
                     choice_data = maybe_filter_parallel_tool_calls(choice_data, request)
+                    if choice_data.delta.content:
+                        streamed_content_lengths[i] += len(choice_data.delta.content)
                     chunk = ChatCompletionStreamResponse(
                         id=request_id,
                         object=chunk_object_type,
@@ -1142,3 +1178,29 @@ class OpenAIServingChat(OpenAIServing):
                 )
 
         return ChatCompletionLogProbs(content=logprobs_content)
+
+    @staticmethod
+    def _has_unstreamed_tool_parser_state(tool_parser: Any) -> bool:
+        """Return whether a tool parser may be buffering unstreamed text.
+
+        Some streaming tool parsers suppress raw text while they decide whether
+        it is a tool call. If generation terminates before a tool-call delta is
+        emitted, the serving layer can flush the buffered text as normal content
+        to match non-streaming behavior.
+
+        This helper recognizes the parser state fields used by the built-in
+        streaming tool parsers. Parsers that buffer unstreamed text in another
+        shape need to expose equivalent state here, or provide a generic flush
+        hook, so terminal handling can preserve their buffered text.
+        """
+        current_tool_id = getattr(tool_parser, "current_tool_id", None)
+        has_current_tool = (
+            isinstance(current_tool_id, int)
+            and not isinstance(current_tool_id, bool)
+            and current_tool_id >= 0
+        ) or (isinstance(current_tool_id, str) and bool(current_tool_id))
+        return bool(
+            getattr(tool_parser, "prev_tool_call_arr", None)
+            or getattr(tool_parser, "streamed_args_for_tool", None)
+            or has_current_tool
+        )
