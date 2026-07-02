@@ -166,17 +166,15 @@ def construct_input_messages(
         # The current request's instructions (if any) were already added above.
         messages.extend(m for m in prev_msg if m.get("role") != "system")
     if prev_response_output is not None:
-        # Add the previous output.
-        for output_item in prev_response_output:
-            # NOTE: We skip the reasoning output.
-            if isinstance(output_item, ResponseOutputMessage):
-                for content in output_item.content:
-                    messages.append(
-                        {
-                            "role": "assistant",
-                            "content": content.text,
-                        }
-                    )
+        # Filter reasoning items: most models do not expect reasoning from
+        # previous turns to appear in the conversation context.
+        filtered_output = [
+            item
+            for item in prev_response_output
+            if not isinstance(item, ResponseReasoningItem)
+        ]
+        output_messages = construct_chat_messages_with_tool_call(filtered_output)
+        messages.extend(output_messages)
 
     # Append the new input.
     # Responses API supports simple text inputs without chat format.
@@ -277,6 +275,8 @@ def _construct_message_from_response_item(
             "reasoning": reasoning,
         }
     elif isinstance(item, ResponseOutputMessage):
+        if not item.content:
+            return None
         output_text = item.content[0].text
         if prev_assistant_msg:
             previous_content = prev_assistant_msg.get("content")

@@ -855,6 +855,156 @@ class TestConstructChatMessagesCombinePolicy:
         assert len(messages) == num_expected_messages
 
 
+class TestConstructInputMessagesPrevResponseToolCalls:
+    """Regression tests for #43244: previous_response_id must carry forward
+    function_call and function_call_output items from prior turns."""
+
+    def test_prev_response_with_function_call(self):
+        """Function calls in prev_response_output must be included as
+        assistant messages with tool_calls."""
+        prev_output = [
+            make_function_call(
+                call_id="call_abc", name="get_weather", arguments='{"city": "SF"}'
+            ),
+        ]
+        msgs = construct_input_messages(
+            request_instructions=None,
+            request_input=[
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_abc",
+                    "output": '{"temp": "65F"}',
+                },
+            ],
+            prev_msg=[{"role": "user", "content": "What is the weather?"}],
+            prev_response_output=prev_output,
+        )
+        roles = [m["role"] for m in msgs]
+        assert "assistant" in roles
+        assistant_msg = next(m for m in msgs if m.get("role") == "assistant")
+        assert "tool_calls" in assistant_msg
+        assert assistant_msg["tool_calls"][0]["id"] == "call_abc"
+        assert assistant_msg["tool_calls"][0]["function"]["name"] == "get_weather"
+
+    def test_prev_response_with_message_and_function_call(self):
+        """Mixed output: ResponseOutputMessage + ResponseFunctionToolCall
+        should both be preserved in conversation history."""
+        prev_output = [
+            make_output_message("Let me check the weather for you."),
+            make_function_call(
+                call_id="call_xyz", name="get_weather", arguments='{"city": "NYC"}'
+            ),
+        ]
+        msgs = construct_input_messages(
+            request_instructions=None,
+            request_input="What did you find?",
+            prev_msg=[{"role": "user", "content": "Weather in NYC?"}],
+            prev_response_output=prev_output,
+        )
+        roles = [m["role"] for m in msgs]
+        assert roles.count("assistant") >= 1
+        assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
+        has_content = any(m.get("content") for m in assistant_msgs)
+        has_tool_calls = any(m.get("tool_calls") for m in assistant_msgs)
+        assert has_content
+        assert has_tool_calls
+
+    def test_prev_response_with_reasoning_and_tool_call(self):
+        """Reasoning in prev_response_output should be filtered out (most
+        models don't expect prior reasoning in context), but tool calls
+        should be preserved."""
+        prev_output = [
+            make_reasoning_item(content_text="I should look up the weather"),
+            make_function_call(
+                call_id="call_r1", name="get_weather", arguments='{"city": "LA"}'
+            ),
+        ]
+        msgs = construct_input_messages(
+            request_instructions=None,
+            request_input="Tell me the result.",
+            prev_msg=[{"role": "user", "content": "Weather in LA?"}],
+            prev_response_output=prev_output,
+        )
+        assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
+        assert len(assistant_msgs) == 1
+        # Reasoning should be filtered out
+        assert "reasoning" not in assistant_msgs[0]
+        # Tool call should be preserved
+        assert assistant_msgs[0]["tool_calls"][0]["id"] == "call_r1"
+
+    def test_prev_response_output_message_only(self):
+        """Plain text output in prev_response_output still works (no
+        regression from the fix)."""
+        prev_output = [
+            make_output_message("The answer is 42."),
+        ]
+        msgs = construct_input_messages(
+            request_instructions=None,
+            request_input="Are you sure?",
+            prev_msg=[{"role": "user", "content": "What is the answer?"}],
+            prev_response_output=prev_output,
+        )
+        roles = [m["role"] for m in msgs]
+        assert roles == ["user", "assistant", "user"]
+        assert msgs[1]["content"] == "The answer is 42."
+
+    def test_prev_response_output_message_empty_content(self):
+        """ResponseOutputMessage with empty content should not crash."""
+        empty_msg = ResponseOutputMessage(
+            id="msg_empty",
+            content=[],
+            role="assistant",
+            status="in_progress",
+            type="message",
+        )
+        prev_output = [empty_msg]
+        msgs = construct_input_messages(
+            request_instructions=None,
+            request_input="Hello",
+            prev_msg=[{"role": "user", "content": "Hi"}],
+            prev_response_output=prev_output,
+        )
+        roles = [m["role"] for m in msgs]
+        assert "user" in roles
+        # Empty content message should be skipped
+        assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
+        assert len(assistant_msgs) == 0
+
+    def test_prev_response_output_message_multi_content(self):
+        """ResponseOutputMessage with multiple content parts uses the first
+        part (matching request_input path behavior)."""
+        multi_msg = ResponseOutputMessage(
+            id="msg_multi",
+            content=[
+                ResponseOutputText(
+                    annotations=[],
+                    text="Step 1: Analyze",
+                    type="output_text",
+                    logprobs=None,
+                ),
+                ResponseOutputText(
+                    annotations=[],
+                    text="Step 2: Execute",
+                    type="output_text",
+                    logprobs=None,
+                ),
+            ],
+            role="assistant",
+            status="completed",
+            type="message",
+        )
+        prev_output = [multi_msg]
+        msgs = construct_input_messages(
+            request_instructions=None,
+            request_input="What next?",
+            prev_msg=[{"role": "user", "content": "Plan this"}],
+            prev_response_output=prev_output,
+        )
+        assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
+        assert len(assistant_msgs) == 1
+        assert assistant_msgs[0]["content"] == "Step 1: Analyze"
+
+
 class TestConstructInputMessagesInstructionsLeak:
     """Regression tests for #37697: instructions from a prior response
     should NOT leak through previous_response_id."""
