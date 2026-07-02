@@ -167,6 +167,10 @@ class Worker(WorkerBase):
             raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        # In-process LLM keeps the worker in the same object graph as LLM.
+        # Freezing that graph prevents gc.collect() from reaching LLM.__del__.
+        self._freeze_gc_heap_on_init = envs.VLLM_ENABLE_V1_MULTIPROCESSING
+
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
@@ -884,7 +888,8 @@ class Worker(WorkerBase):
 
         # Freeze the worker heap so the GC won't scan static objects
         # (model weights, KV caches, CUDA graphs) during inference.
-        freeze_gc_heap()
+        if self._freeze_gc_heap_on_init:
+            freeze_gc_heap()
         maybe_attach_gc_debug_callback()
 
         # Warmup / first-compile is done — activate the `VLLM_GPU_SYNC_CHECK`
@@ -1219,7 +1224,8 @@ class Worker(WorkerBase):
         self._weight_update_active = False
 
     def shutdown(self) -> None:
-        gc.unfreeze()
+        if self._freeze_gc_heap_on_init:
+            gc.unfreeze()
 
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:

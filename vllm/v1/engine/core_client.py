@@ -283,8 +283,17 @@ class InprocClient(EngineCoreClient):
         * pulls EngineCoreOutputs by stepping the EngineCore
     """
 
-    def __init__(self, *args, **kwargs):
-        self.engine_core = EngineCore(*args, **kwargs)
+    def __init__(
+        self,
+        vllm_config: VllmConfig,
+        executor_class: type[Executor],
+        log_stats: bool,
+    ):
+        # In-process LLM keeps EngineCore in the same object graph as LLM.
+        # Freezing that graph prevents gc.collect() from reaching LLM.__del__.
+        self.engine_core = EngineCore(
+            vllm_config, executor_class, log_stats, freeze_gc_heap_on_init=False
+        )
 
     def get_output(self) -> EngineCoreOutputs:
         outputs, model_executed = self.engine_core.step_fn()

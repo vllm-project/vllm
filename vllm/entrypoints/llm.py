@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -387,6 +388,20 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
     def from_engine_args(cls, engine_args: EngineArgs) -> "LLM":
         """Create an LLM instance from EngineArgs."""
         return cls(**vars(engine_args))
+
+    def shutdown(self, timeout: float | None = None) -> None:
+        """Shutdown the engine and release resources held by this LLM."""
+        if llm_engine := getattr(self, "llm_engine", None):
+            llm_engine.shutdown(timeout=timeout)
+            self.llm_engine = None  # type: ignore[assignment]
+
+    def __del__(self):
+        # Skip teardown during interpreter shutdown: module globals
+        # (logger, etc.) may already be cleared, and the OS reclaims GPU
+        # memory on process exit. Explicit del mid-process still runs it.
+        if sys is None or sys.is_finalizing():
+            return
+        self.shutdown()
 
     def get_tokenizer(self) -> TokenizerLike:
         return self.llm_engine.get_tokenizer()
