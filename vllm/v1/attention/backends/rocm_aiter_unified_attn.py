@@ -53,9 +53,7 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
     def supports_head_size(cls, head_size: int) -> bool:
         return head_size >= 32
 
-    @classmethod
-    def supports_mm_prefix(cls) -> bool:
-        return True
+    # removed "supports_mm_prefix(cls) -> True" as ROCM AITER backend doesn't support this -> defer to Triton unified attention (default behaviour is False)
 
     @classmethod
     def supports_sink(cls) -> bool:
