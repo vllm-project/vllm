@@ -692,7 +692,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 drop_eagle_block = use_eagle and idx not in eagle_verified
 
                 _max_length = curr_hit_length
-                if drop_eagle_block:
+                if drop_eagle_block and not isinstance(spec, MambaSpec):
                     # Eagle needs to match one more block and then pop the last.
                     _max_length = min(
                         curr_hit_length + spec.block_size, max_cache_hit_length

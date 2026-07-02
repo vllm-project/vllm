@@ -2778,6 +2778,95 @@ def test_eagle_grouped_swa_siblings_use_same_cache_mask():
     assert num_computed_tokens == 8 * block_size
 
 
+def test_hybrid_model_full_attn_missing_block_on_eagle():
+    """
+    Bug is reported as https://github.com/vllm-project/vllm/issues/43559.
+
+    When using MTP/EAGLE with a hybrid model (Full Attention + Mamba, such as the
+    Qwen 3.5 family),the FullAttentionManager and MambaManager will return different
+    hit_blocks lengths because the FullAttentionManager drops the last hit block. In
+    this case, the final hit blocks and their length should be aligned to the shortest
+    one among multiple attention groups. Otherwise, the misaligned blocks will skip
+    the computation of certain layers (such as the full attn layers in Qwen 3.5),
+    leading to a loss of information contained within those blocks andresulting in
+    precision errors.
+    """
+    block_size = 16
+    # kv_cache_config = make_kv_cache_config_hybrid_model(block_size, 100, 0, 'mamba')
+    kv_cache_config = KVCacheConfig(
+        num_blocks=100,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                ["full"],
+                FullAttentionSpec(
+                    block_size=block_size,
+                    num_kv_heads=1,
+                    head_size=1,
+                    dtype=torch.float16,
+                ),
+            ),
+            KVCacheGroupSpec(
+                ["mamba"],
+                MambaSpec(
+                    block_size=block_size,
+                    shapes=(1, 1),
+                    dtypes=(torch.float32,),
+                    mamba_cache_mode="align",
+                    num_speculative_blocks=1,
+                ),
+            ),
+        ],
+    )
+    manager = make_kv_cache_manager(
+        kv_cache_config=kv_cache_config,
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    # Prime the cache with a prompt of 1 blocks
+    token_ids = [i for i in range(1) for _ in range(block_size)]
+    req0 = make_request("req0", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    blocks = manager.allocate_slots(
+        req0, len(token_ids), num_computed_tokens, computed_blocks
+    )
+    manager.free(req0)
+    assert num_computed_tokens == 0
+    assert len(computed_blocks.blocks[0]) == 0
+    assert len(computed_blocks.blocks[1]) == 0
+    assert blocks is not None
+
+    # Prime the cache with a prompt of 2 blocks
+    # Prompt of 2 blocks tokens should get num_computed_tokens = 0,
+    # because full attn manager drop it's only hit block.
+    token_ids = [i for i in range(2) for _ in range(block_size)]
+    req1 = make_request("req1", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    blocks = manager.allocate_slots(
+        req1, len(token_ids), num_computed_tokens, computed_blocks
+    )
+    manager.free(req1)
+    assert num_computed_tokens == 0
+    assert len(computed_blocks.blocks[0]) == 0
+    assert len(computed_blocks.blocks[1]) == 0
+
+    # Prompt of 3 blocks tokens should get num_computed_tokens = 0,
+    # because full attn manager drop it's last hit block and remain one.
+    token_ids = [i for i in range(3) for _ in range(block_size)]
+    req2 = make_request("req2", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    blocks = manager.allocate_slots(
+        req2, len(token_ids), num_computed_tokens, computed_blocks
+    )
+    manager.free(req2)
+    assert num_computed_tokens == block_size
+    assert len(computed_blocks.blocks[0]) == 1
+    assert len(computed_blocks.blocks[1]) == 1
+
+
 def test_different_block_size():
     block_size = 16
     # full attention and sliding window attention layers have the same page size:
