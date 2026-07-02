@@ -40,6 +40,7 @@ from vllm.v1.kv_offload.tiering.base import (
     RequestOffloadingContext,
     ScheduleEndContext,
     SecondaryTierManager,
+    TieringManagerReverseAPI,
 )
 from vllm.v1.kv_offload.tiering.fs.io import load_block, store_block
 from vllm.v1.kv_offload.tiering.fs.thread_pool import DualQueueThreadPool
@@ -202,7 +203,11 @@ class FileSystemTierManager(SecondaryTierManager):
         self._lookup_manager.cleanup(req_context.req_id)
 
     @override
-    def on_schedule_end(self, context: ScheduleEndContext) -> None:
+    def on_schedule_end(
+        self,
+        context: ScheduleEndContext,
+        reverse_api: TieringManagerReverseAPI | None = None,
+    ) -> None:
         self._lookup_manager.flush()
 
     @override

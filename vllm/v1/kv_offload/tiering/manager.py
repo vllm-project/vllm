@@ -478,20 +478,7 @@ class TieringOffloadingManager(OffloadingManager):
             return
 
         for tier in request_level_tiers:
-            primary_blocks_spec = self.primary_tier.prepare_read(
-                ready_keys, req_context
-            )
-
-            job_id = self._next_job_id()
-            assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
-            job_metadata = JobMetadata(
-                job_id=job_id,
-                keys=ready_keys,
-                block_ids=primary_blocks_spec.block_ids,
-                is_promotion=False,
-                req_context=req_context,
-            )
-            self._transfer_jobs[job_id] = job_metadata
+            job_metadata = self.create_store_job(ready_keys, req_context)
             tier.submit_store(job_metadata)
 
     @override
@@ -529,22 +516,7 @@ class TieringOffloadingManager(OffloadingManager):
             # eviction during the async transfer). One prepare_read() call per
             # secondary tier.
             for tier in self.secondary_tiers:
-                primary_blocks_spec = self.primary_tier.prepare_read(keys, req_context)
-
-                # Submit async store job: primary→secondary
-                job_id = self._next_job_id()
-
-                # Track this store job
-                assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
-                job_metadata = JobMetadata(
-                    job_id=job_id,
-                    keys=keys,
-                    block_ids=primary_blocks_spec.block_ids,
-                    is_promotion=False,
-                    req_context=req_context,
-                )
-                self._transfer_jobs[job_id] = job_metadata
-
+                job_metadata = self.create_store_job(keys, req_context)
                 tier.submit_store(job_metadata)
 
         # Note: The async transfers are now in flight. Their completion is
@@ -554,6 +526,33 @@ class TieringOffloadingManager(OffloadingManager):
         assert state.pending_primary_stores > 0
         state.pending_primary_stores -= 1
         self._maybe_finalize_request(req_id)
+
+    def create_store_job(
+        self,
+        keys: Collection[OffloadKey],
+        req_context: ReqContext,
+    ) -> JobMetadata:
+        """Pin blocks in the primary tier and create a tracked store job.
+
+        Calls prepare_read() to increment ref_cnt (protecting blocks
+        from eviction during the async transfer), allocates a job ID,
+        and registers the job in _transfer_jobs.
+
+        The caller is responsible for the actual data transfer and
+        reporting completion via get_finished_jobs().
+        """
+        primary_blocks_spec = self.primary_tier.prepare_read(keys, req_context)
+        assert isinstance(primary_blocks_spec, CPULoadStoreSpec)
+        job_id = self._next_job_id()
+        job_metadata = JobMetadata(
+            job_id=job_id,
+            keys=keys,
+            block_ids=primary_blocks_spec.block_ids,
+            is_promotion=False,
+            req_context=req_context,
+        )
+        self._transfer_jobs[job_id] = job_metadata
+        return job_metadata
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -615,7 +614,7 @@ class TieringOffloadingManager(OffloadingManager):
         self._processed_jobs_this_step = False
         self._flush_pending_promotions()
         for tier in self.secondary_tiers:
-            tier.on_schedule_end(context)
+            tier.on_schedule_end(context, reverse_api=self)
 
     @override
     def has_pending_work(self) -> bool:
