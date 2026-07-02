@@ -1279,23 +1279,49 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             layer.ffn.finalize_mega_moe_weights()
 
 
-def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
+def _make_deepseek_v4_weights_mapper(
+    expert_dtype: str, quant_config: QuantizationConfig | None = None
+) -> WeightsMapper:
+    # Check if using compressed tensors quantization
+    is_compressed_tensors = False
+    if quant_config is not None:
+        try:
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (
+                CompressedTensorsConfig,
+            )
+
+            is_compressed_tensors = isinstance(quant_config, CompressedTensorsConfig)
+        except ImportError:
+            pass
+
     if expert_dtype == "fp4":
         # MXFP4 experts use Mxfp4MoEMethod, which registers scales as
         # ``w{1,2,3}_weight_scale`` (no _inv suffix). FP8 linear and
         # shared experts use Fp8LinearMethod's block scales, which
         # register as ``weight_scale_inv``.
-        scale_regex = {
-            re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
-            re.compile(r"\.scale$"): ".weight_scale_inv",
-        }
+        # Compressed tensors also uses ``weight_scale`` (no _inv suffix).
+        if is_compressed_tensors:
+            scale_regex = {
+                re.compile(r"\.scale$"): ".weight_scale",
+            }
+        else:
+            scale_regex = {
+                re.compile(r"(\.experts\.\d+\.w[123])\.scale$"): r"\1.weight_scale",
+                re.compile(r"\.scale$"): ".weight_scale_inv",
+            }
     else:
         # FP8 experts use Fp8MoEMethod (block_quant=True), which registers
         # scales as ``w{13,2}_weight_scale_inv``. Map all ``.scale`` keys
         # there.
-        scale_regex = {
-            re.compile(r"\.scale$"): ".weight_scale_inv",
-        }
+        # Compressed tensors uses ``weight_scale`` (no _inv suffix).
+        if is_compressed_tensors:
+            scale_regex = {
+                re.compile(r"\.scale$"): ".weight_scale",
+            }
+        else:
+            scale_regex = {
+                re.compile(r"\.scale$"): ".weight_scale_inv",
+            }
     return WeightsMapper(
         orig_to_new_prefix={
             "layers.": "model.layers.",
@@ -1359,7 +1385,8 @@ class DeepseekV4ForCausalLM(
     model_cls = DeepseekV4Model
 
     # Default mapper assumes the original FP4-expert checkpoint layout.
-    # Overridden per-instance in __init__ when expert_dtype != "fp4".
+    # Overridden per-instance in __init__ when expert_dtype != "fp4" or
+    # when using compressed tensors quantization.
     hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper("fp4")
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -1368,8 +1395,11 @@ class DeepseekV4ForCausalLM(
         config = vllm_config.model_config.hf_config
         self.config = config
         expert_dtype = getattr(config, "expert_dtype", "fp4")
-        if expert_dtype != "fp4":
-            self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(expert_dtype)
+        quant_config = vllm_config.quant_config
+        if expert_dtype != "fp4" or quant_config is not None:
+            self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(
+                expert_dtype, quant_config
+            )
 
         self.model = self.model_cls(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
