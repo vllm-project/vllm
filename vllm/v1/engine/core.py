@@ -90,6 +90,12 @@ logger = init_logger(__name__)
 
 HANDSHAKE_TIMEOUT_MINS = 5
 
+# Number of consecutive DP state-sync all-reduces (each spanning 32 steps) for
+# which this rank may sit in a pending pause without reaching consensus before
+# we warn. A partial pause this persistent usually means another DP rank never
+# received its pause request, so all ranks keep spinning dummy batches.
+PARTIAL_PAUSE_WARN_SYNCS = 32
+
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
@@ -1776,6 +1782,10 @@ class DPEngineCoreProc(EngineCoreProc):
         # START_DP_WAVE messages cannot re-wake the engines.
         self.pending_pause = False
         self.ignore_start_dp_wave = False
+        # Counts consecutive state-sync all-reduces spent in a pending pause
+        # without reaching consensus, so we can warn about a stuck partial
+        # pause (see PARTIAL_PAUSE_WARN_SYNCS).
+        self.pending_pause_syncs = 0
 
         from vllm.distributed.elastic_ep.elastic_state import ElasticEPScalingState
 
@@ -1997,7 +2007,26 @@ class DPEngineCoreProc(EngineCoreProc):
         if pause_consensus:
             self.ignore_start_dp_wave = True
             self.pending_pause = False
+            self.pending_pause_syncs = 0
             logger.debug("DP pause consensus reached, ignoring START_DP_WAVE.")
+        elif self.pending_pause:
+            # This rank is pause-pending but consensus has not been reached,
+            # i.e. one or more other DP ranks have not (yet) received a pause
+            # request. Warn if this partial pause persists, since all ranks
+            # keep stepping dummy batches until consensus.
+            self.pending_pause_syncs += 1
+            if self.pending_pause_syncs == PARTIAL_PAUSE_WARN_SYNCS:
+                logger.warning(
+                    "DP rank %d has been pause-pending without consensus for "
+                    "%d state syncs (~%d steps); some other DP rank likely "
+                    "never received a pause request. All ranks keep stepping "
+                    "dummy batches until every rank is pause-pending.",
+                    self.dp_rank,
+                    self.pending_pause_syncs,
+                    self.pending_pause_syncs * 32,
+                )
+        else:
+            self.pending_pause_syncs = 0
 
         return has_unfinished
 
