@@ -139,12 +139,6 @@ class SpeculativeConfig:
     O(2 * tp_size) per token. Only applies to greedy draft selection in
     non-tree speculation."""
 
-    use_heterogeneous_vocab: bool = False
-    """Allow draft and target models to use different vocabularies.
-    When enabled, builds a token-level intersection at init and constrains
-    draft logits to shared tokens only (TLI algorithm). Requires
-    method='draft_model'."""
-
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
     """Maximum size of ngram token window when using Ngram proposer, required
@@ -740,11 +734,7 @@ class SpeculativeConfig:
                 self.draft_model_config = ModelConfig(
                     model=self.model,
                     runner="draft",
-                    tokenizer=(
-                        self.model
-                        if self.use_heterogeneous_vocab
-                        else self.target_model_config.tokenizer
-                    ),
+                    tokenizer=self.target_model_config.tokenizer,
                     tokenizer_mode=self.target_model_config.tokenizer_mode,
                     trust_remote_code=self.target_model_config.trust_remote_code,
                     allowed_local_media_path=self.target_model_config.allowed_local_media_path,
@@ -882,6 +872,31 @@ class SpeculativeConfig:
                         "A speculative model was provided, but "
                         "`num_speculative_tokens` was not provided"
                     )
+
+                if self.method == "dspark":
+                    # DSpark is a semi-autoregressive *block* drafter. A
+                    # speculative length smaller than the checkpoint's block
+                    # feeds the block / Markov-head machinery an unsupported
+                    # layout and yields incorrect (garbled) output rather than
+                    # merely lower acceptance. Require num_speculative_tokens to
+                    # be at least the block size (e.g. 5 or 7 for DeepSeek-V4).
+                    dspark_block_size = getattr(
+                        self.draft_model_config.hf_config,
+                        "dspark_block_size",
+                        None,
+                    )
+                    if (
+                        dspark_block_size is not None
+                        and self.num_speculative_tokens < dspark_block_size
+                    ):
+                        raise ValueError(
+                            "DSpark requires num_speculative_tokens >= "
+                            f"dspark_block_size ({dspark_block_size}); got "
+                            f"{self.num_speculative_tokens}. Smaller values "
+                            "produce incorrect output. Use "
+                            f"num_speculative_tokens={dspark_block_size} or "
+                            "larger (e.g. 7)."
+                        )
 
                 self.draft_tensor_parallel_size = (
                     SpeculativeConfig._verify_and_get_draft_tp(
@@ -1113,20 +1128,7 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        if self.use_heterogeneous_vocab and not self.uses_draft_model():
-            raise ValueError(
-                "use_heterogeneous_vocab only works with method='draft_model'"
-            )
-
-        if self.use_heterogeneous_vocab and self.draft_sample_method != "greedy":
-            raise ValueError(
-                "use_heterogeneous_vocab currently only supports greedy draft "
-                "sampling. Set draft_sample_method='greedy' (the default) or "
-                "omit it."
-            )
-
-        if not self.use_heterogeneous_vocab:
-            self.verify_equal_vocab_size_if_draft_model()
+        self.verify_equal_vocab_size_if_draft_model()
         return self
 
     def verify_equal_vocab_size_if_draft_model(self):
