@@ -534,6 +534,21 @@ class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
         model_config.pooler_config.seq_pooling_type = pooling_type
 
 
+class Lfm2ForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        from vllm.platforms import current_platform
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        if current_platform.is_rocm() and vllm_config.attention_config.backend is None:
+            vllm_config.attention_config.backend = AttentionBackendEnum.TRITON_ATTN
+            logger.info(
+                "Forcing TRITON_ATTN backend for LFM2 on ROCm to avoid "
+                "decode-time output corruption with the default ROCm attention "
+                "backend."
+            )
+
+
 class MambaModelConfig(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -820,6 +835,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "JambaForSequenceClassification": JambaForSequenceClassificationConfig,
     "JinaForRanking": JinaForRankingConfig,
     "JinaVLForRanking": JinaVLForSequenceClassificationConfig,
+    "Lfm2ForCausalLM": Lfm2ForCausalLMConfig,
+    "Lfm2MoeForCausalLM": Lfm2ForCausalLMConfig,
     "LlamaBidirectionalForSequenceClassification": LlamaBidirectionalConfig,
     "LlamaBidirectionalModel": LlamaBidirectionalConfig,
     "LlamaNemotronVLForSequenceClassification": LlamaNemotronVLConfig,
