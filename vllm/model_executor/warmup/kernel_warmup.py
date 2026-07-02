@@ -83,6 +83,12 @@ def kernel_warmup(worker: "Worker"):
         max_tokens = worker.scheduler_config.max_num_batched_tokens
         deep_gemm_warmup(model, max_tokens)
 
+    kv_block_zeroer = getattr(worker.model_runner, "_kv_block_zeroer", None)
+    if kv_block_zeroer is None:
+        kv_block_zeroer = getattr(worker.model_runner, "kv_block_zeroer", None)
+    if kv_block_zeroer is not None:
+        kv_block_zeroer.warmup()
+
     minimax_m3_msa_warmup(worker)
 
     enable_flashinfer_autotune = (
