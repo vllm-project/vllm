@@ -69,6 +69,22 @@ class OpenVLAImageProcessor:
     def __init__(self, *, image_size: int) -> None:
         self.image_size = image_size
 
+    # Copied from Transformers (Apache-2.0):
+    # https://github.com/huggingface/transformers/blob/main/src/transformers/image_processing_base.py
+    def fetch_images(self, image_url_or_urls):
+        from transformers.image_utils import is_valid_image, load_image
+
+        if isinstance(image_url_or_urls, (list, tuple)):
+            return [self.fetch_images(x) for x in image_url_or_urls]
+        if isinstance(image_url_or_urls, str):
+            return load_image(image_url_or_urls)
+        if is_valid_image(image_url_or_urls):
+            return image_url_or_urls
+        raise TypeError(
+            "only a single or a list of entries is supported but got "
+            f"type={type(image_url_or_urls)}"
+        )
+
     def __call__(
         self,
         images: Any | None = None,
