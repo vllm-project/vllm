@@ -103,7 +103,9 @@ class INCConfigParser:
                     continue
             return False
 
-        def get_config(name: str, quantized: bool = True) -> tuple[int, int | tuple[int, int], bool]:
+        def get_config(
+            name: str, quantized: bool = True
+        ) -> tuple[int, int | tuple[int, int], bool]:
             if not self._config.extra_config:
                 return (
                     self._config.weight_bits if quantized else 16,
@@ -203,7 +205,7 @@ class INCConfigParser:
 
         return get_config(layer_name, quantized)
 
-   @staticmethod
+    @staticmethod
     def _normalize_group_size(
         group_size: int | list[int] | tuple[int, int],
     ) -> int | tuple[int, int]:
