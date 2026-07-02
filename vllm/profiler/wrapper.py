@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Callable
 from contextlib import nullcontext
@@ -195,6 +196,31 @@ class TorchProfilerWrapper(WorkerProfiler):
                 use_gzip=profiler_config.torch_profiler_use_gzip,
             )
 
+        # Optionally collect a PyTorch execution trace (ET) alongside the
+        # Kineto trace. ET is written to a local file, so it is skipped for
+        # URI trace dirs (gs://, s3://, etc.).
+        self.execution_trace_observer = None
+        if profiler_config.torch_profiler_execution_trace:
+            if _is_uri_path(torch_profiler_trace_dir):
+                logger.warning_once(
+                    "torch_profiler_execution_trace is not supported for URI "
+                    "trace dirs (%s); skipping execution trace capture.",
+                    torch_profiler_trace_dir,
+                )
+            else:
+                et_file = os.path.join(
+                    torch_profiler_trace_dir,
+                    f"execution_trace_{worker_name}.json",
+                )
+                self.execution_trace_observer = (
+                    torch.profiler.ExecutionTraceObserver().register_callback(et_file)
+                )
+                if local_rank in (None, 0):
+                    logger.info_once(
+                        "Execution trace capture enabled. ET will be saved to: %s",
+                        et_file,
+                    )
+
         self.dump_cpu_time_total = "CPU" in activities and len(activities) == 1
 
         # Create profiler schedule if warmup or wait iterations are configured
@@ -223,6 +249,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             with_stack=profiler_config.torch_profiler_with_stack,
             with_flops=profiler_config.torch_profiler_with_flops,
             on_trace_ready=trace_handler,
+            execution_trace_observer=self.execution_trace_observer,
         )
 
         # Track if we're using a schedule (need to call step())
@@ -259,12 +286,25 @@ class TorchProfilerWrapper(WorkerProfiler):
                 print(table, file=f)
 
     @override
+    def shutdown(self) -> None:
+        super().shutdown()
+        # Clean up an observer that was registered but never started (cleanup()
+        # is idempotent, so this is safe after a normal stop too).
+        if self.execution_trace_observer is not None:
+            self.execution_trace_observer.cleanup()
+
+    @override
     def _start(self) -> None:
         self.profiler.start()
 
     @override
     def _stop(self) -> None:
         self.profiler.stop()
+
+        # The profiler stops the observer; cleanup() unregisters its callback
+        # and flushes the ET file.
+        if self.execution_trace_observer is not None:
+            self.execution_trace_observer.cleanup()
 
         profiler_config = self.profiler_config
         rank = self.local_rank

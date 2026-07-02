@@ -66,6 +66,12 @@ class ProfilerConfig:
     """If `True`, enables memory profiling in the torch profiler.
     Disabled by default."""
 
+    torch_profiler_execution_trace: bool = False
+    """If `True`, also captures a PyTorch execution trace (ET) alongside the
+    Kineto trace. The ET is collected via an `ExecutionTraceObserver` and saved
+    as `execution_trace_<worker_name>.json` under `torch_profiler_dir`, one file
+    per worker. Disabled by default."""
+
     ignore_frontend: bool = False
     """If `True`, disables the front-end profiling of AsyncLLM when using the
     'torch' profiler. This is needed to reduce overhead when using delay/limit options,
@@ -129,6 +135,12 @@ class ProfilerConfig:
             logger.warning_once(
                 "Using 'torch' profiler with delay_iterations or max_iterations "
                 "while ignore_frontend is False may result in high overhead."
+            )
+
+        if self.torch_profiler_execution_trace and self.profiler != "torch":
+            raise ValueError(
+                "torch_profiler_execution_trace is only applicable when profiler "
+                "is set to 'torch'"
             )
 
         profiler_dir = self.torch_profiler_dir
