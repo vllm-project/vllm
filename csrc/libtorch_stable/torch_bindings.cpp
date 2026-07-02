@@ -420,6 +420,15 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "                 Tensor cos_sin_cache, bool is_neox, int "
       "rope_dim_offset=0, bool inverse=False) -> ()");
 
+  // Fused K RoPE + static FP8 per-tensor KV cache write (CUDA/HIP)
+  ops.def(
+      "fused_rope_fp8_kvcache(Tensor key, Tensor value,"
+      "                       Tensor! key_cache, Tensor! value_cache,"
+      "                       Tensor slot_mapping, Tensor positions,"
+      "                       Tensor cos_sin_cache,"
+      "                       Tensor k_scale, Tensor v_scale,"
+      "                       bool is_neox, bool flash_layout) -> ()");
+
   // Function for fused QK Norm and RoPE
   ops.def(
       "fused_qk_norm_rope(Tensor! qkv, int num_heads_q, "
@@ -691,6 +700,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
 
   // Positional encoding kernels (shared CUDA/ROCm)
   ops.impl("rotary_embedding", TORCH_BOX(&rotary_embedding));
+  ops.impl("fused_rope_fp8_kvcache", TORCH_BOX(&fused_rope_fp8_kvcache));
   ops.impl("fused_qk_norm_rope", TORCH_BOX(&fused_qk_norm_rope));
   ops.impl("fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert",
            TORCH_BOX(&fused_deepseek_v4_qnorm_rope_kv_rope_quant_insert));
