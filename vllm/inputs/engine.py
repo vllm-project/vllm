@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Mapping, Sequence
-from typing import TYPE_CHECKING, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, Literal, TypeAlias, cast
 
 from typing_extensions import NotRequired, TypedDict, assert_never
 
@@ -11,6 +11,9 @@ if TYPE_CHECKING:
     import torch
 
     from vllm.multimodal.inputs import MultiModalKwargsOptionalItems, PlaceholderRange
+
+
+MM_CACHE_TXN_FIELD = "_mm_cache_txn"
 
 
 class _InputOptions(TypedDict):
@@ -225,6 +228,10 @@ def mm_enc_dec_input(
         inputs["encoder_prompt"] = encoder_inputs["prompt"]
     if "cache_salt" in encoder_inputs:
         inputs["cache_salt"] = encoder_inputs["cache_salt"]
+    if MM_CACHE_TXN_FIELD in encoder_inputs:
+        cast(dict[str, Any], inputs)[MM_CACHE_TXN_FIELD] = cast(
+            dict[str, Any], encoder_inputs
+        )[MM_CACHE_TXN_FIELD]
 
     return inputs
 
@@ -354,6 +361,10 @@ def build_enc_dec_input(
             mm_hashes=enc_input["mm_hashes"],
             mm_placeholders=enc_input["mm_placeholders"],
         )
+        if MM_CACHE_TXN_FIELD in enc_input:
+            cast(dict[str, Any], dec_input_new)[MM_CACHE_TXN_FIELD] = cast(
+                dict[str, Any], enc_input
+            )[MM_CACHE_TXN_FIELD]
     elif enc_input["type"] == "token":
         enc_input_new = tokens_input(prompt_token_ids=[])
         dec_input_new = dec_input

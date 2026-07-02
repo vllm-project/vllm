@@ -541,10 +541,10 @@ class SingleWriterShmObjectStorage:
         )
         # update the metadata after freeing up space
         for freed_id in freed_ids:
-            key_to_free = self.id_index[freed_id]
-            del self.key_index[key_to_free]
-            del self.id_index[freed_id]
-            del self.writer_flag[freed_id]
+            key_to_free = self.id_index.pop(freed_id, None)
+            if key_to_free is not None:
+                self.key_index.pop(key_to_free, None)
+            self.writer_flag.pop(freed_id, None)
 
     def is_cached(self, key: str) -> bool:
         """
@@ -705,5 +705,5 @@ class SingleWriterShmObjectStorage:
         This indicates that the buffer is free.
         """
         reader_count = int.from_bytes(buf[0:4], "little", signed=True)
-        writer_count = self.writer_flag[id]
+        writer_count = self.writer_flag.get(id, 0)
         return reader_count >= writer_count * self.n_readers

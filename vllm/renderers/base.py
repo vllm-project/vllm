@@ -6,7 +6,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from concurrent.futures import Executor, ThreadPoolExecutor
 from functools import cached_property
-from typing import TYPE_CHECKING, Any, Generic, overload
+from typing import TYPE_CHECKING, Any, Generic, cast, overload
 
 from typing_extensions import TypeVar
 
@@ -26,6 +26,7 @@ from vllm.inputs import (
     embeds_input,
     tokens_input,
 )
+from vllm.inputs.engine import MM_CACHE_TXN_FIELD
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY as mm_registry
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
@@ -758,10 +759,27 @@ class BaseRenderer(ABC, Generic[_T]):
         )
         mm_timing_ctx = self._mm_timing_registry.get(mm_req_id)
 
-        with set_default_torch_num_threads():
-            mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
+        cache_txn = (
+            None
+            if skip_mm_cache or mm_processor.cache is None
+            else mm_processor.cache.begin_transaction()
+        )
+        try:
+            if cache_txn is None:
+                with set_default_torch_num_threads():
+                    mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
+            else:
+                with cache_txn, set_default_torch_num_threads():
+                    mm_inputs = mm_processor.apply(mm_processor_inputs, mm_timing_ctx)
 
-        self.update_mm_cache_stats()
+            self.update_mm_cache_stats()
+        except Exception:
+            if cache_txn is not None:
+                cache_txn.rollback()
+            raise
+
+        if cache_txn is not None:
+            cast(dict[str, Any], mm_inputs)[MM_CACHE_TXN_FIELD] = cache_txn
 
         return mm_inputs
 
