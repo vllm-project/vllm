@@ -249,7 +249,7 @@ __global__ void __launch_bounds__(1024)
   LamportComm<NRanks> comm(params.workspace, params.rank);
   int clear_access = comm.clear_size / kElemsPerAccess<DType>;
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.wait;");
+  cudaGridDependencySynchronize();
 #endif
   for (int idx = access_id; idx < tot_access;
        idx += access_stride, token_id += token_stride) {
@@ -313,7 +313,7 @@ __global__ void __launch_bounds__(1024)
   }
   comm.update(params.size_q * NRanks);
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.launch_dependents;");
+  cudaTriggerProgrammaticLaunchCompletion();
 #endif
 }
 
@@ -384,7 +384,7 @@ __global__ void __launch_bounds__(1024)
 
   DType norm_weight[kElemsPerAccess<DType>]{};
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.wait;");
+  cudaGridDependencySynchronize();
 #endif
   if (is_q) {
     if (is_valid_q) {
@@ -596,7 +596,7 @@ __global__ void __launch_bounds__(1024)
     }
   }  // end group loop
 #if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
-  asm volatile("griddepcontrol.launch_dependents;");
+  cudaTriggerProgrammaticLaunchCompletion();
 #endif
 
   int clear_access = static_cast<int>(comm.clear_size / kElemsPerAccess<DType>);
