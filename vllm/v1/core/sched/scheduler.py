@@ -393,6 +393,39 @@ class Scheduler(SchedulerInterface):
                 num_new_tokens = num_new_tokens // block_size * block_size
         return num_new_tokens
 
+    def prefetch_waiting_requests(self) -> None:
+        """Eagerly initiate KV cache prefetch for waiting queue requests.
+
+        Called BEFORE schedule() so KV cache I/O overlaps with GPU
+        computation. Even when the running queue fills the batch and
+        schedule() skips the waiting queue, prefetch is already in flight.
+
+        This prevents GPU idle time (up to 350ms per stall observed in
+        production with LMCache) caused by deferring KV cache reads until
+        the scheduler finally picks up waiting requests.
+
+        Fixes: https://github.com/vllm-project/vllm/issues/41784
+        """
+        if not self.waiting:
+            return
+        connector = getattr(self, 'connector', None)
+        if connector is None:
+            return
+        kv_cache_manager = self.kv_cache_manager
+        for request in self.waiting:
+            if request.num_computed_tokens > 0:
+                continue
+            if getattr(request, '_prefetch_started', False):
+                continue
+            try:
+                new_computed_blocks, num_local = (
+                    kv_cache_manager.get_computed_blocks(request))
+                if num_local > 0:
+                    connector.get_num_new_matched_tokens(request, num_local)
+                request._prefetch_started = True
+            except Exception:
+                pass
+
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
         # NOTE(woosuk) on the scheduling algorithm:
