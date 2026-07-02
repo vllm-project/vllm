@@ -142,6 +142,10 @@ class StructuredOutputsParams:
         )
 
 
+_MAX_ABSOLUTE_PATTERN_SIZE = 65536
+_MAX_ABSOLUTE_MIN_COUNT = 1000
+
+
 @dataclass
 class RepetitionDetectionParams:
     """Parameters for detecting repetitive N-gram patterns in output tokens."""
@@ -170,6 +174,18 @@ class RepetitionDetectionParams:
                 "max_pattern_size, min_pattern_size must be >=0, "
                 "with min_pattern_size <= max_pattern_size. "
                 "Set both to 0 to disable repetitive pattern detection."
+            )
+        if self.max_pattern_size > _MAX_ABSOLUTE_PATTERN_SIZE:
+            raise ValueError(
+                f"max_pattern_size must be at most "
+                f"{_MAX_ABSOLUTE_PATTERN_SIZE}, "
+                f"got {self.max_pattern_size}."
+            )
+        if self.min_count > _MAX_ABSOLUTE_MIN_COUNT:
+            raise ValueError(
+                f"min_count must be at most "
+                f"{_MAX_ABSOLUTE_MIN_COUNT}, "
+                f"got {self.min_count}."
             )
         if self.max_pattern_size > 0 and self.min_count < 2:
             raise ValueError(
@@ -748,6 +764,7 @@ class SamplingParams(
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
+        self._validate_repetition_detection(model_config)
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
         max_logprobs = model_config.max_logprobs
@@ -863,6 +880,47 @@ class SamplingParams(
                     parameter="allowed_token_ids",
                     value=invalid_token_ids,
                 )
+
+    def _validate_repetition_detection(self, model_config: ModelConfig) -> None:
+        rd = self.repetition_detection
+        if rd is None or rd.max_pattern_size == 0:
+            return
+
+        cap = model_config.max_repetition_detection_pattern_size
+        if cap == 0:
+            raise VLLMValidationError(
+                "The server has disabled repetition detection "
+                "(--max-repetition-detection-pattern-size 0). "
+                "Set max_pattern_size to 0 or remove "
+                "repetition_detection from the request.",
+                parameter="repetition_detection.max_pattern_size",
+                value=rd.max_pattern_size,
+            )
+
+        if cap > 0 and rd.max_pattern_size > cap:
+            raise VLLMValidationError(
+                f"Requested max_pattern_size of "
+                f"{rd.max_pattern_size}, which exceeds the server "
+                f"limit of {cap}. Reduce max_pattern_size or ask "
+                f"the operator to raise "
+                f"--max-repetition-detection-pattern-size.",
+                parameter="repetition_detection.max_pattern_size",
+                value=rd.max_pattern_size,
+            )
+
+        effective_cap = cap if cap > 0 else _MAX_ABSOLUTE_PATTERN_SIZE
+        work_budget = effective_cap * 10
+        scan_work = rd.max_pattern_size * rd.min_count
+        if scan_work > work_budget:
+            raise VLLMValidationError(
+                f"Repetition detection scan work "
+                f"(max_pattern_size={rd.max_pattern_size} * "
+                f"min_count={rd.min_count} = {scan_work}) exceeds "
+                f"the budget of {work_budget}. Reduce "
+                f"max_pattern_size or min_count.",
+                parameter="repetition_detection",
+                value=scan_work,
+            )
 
     def _validate_spec_decode(
         self,
