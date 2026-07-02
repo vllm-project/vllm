@@ -32,7 +32,6 @@ from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
-from vllm.entrypoints.serve.render.serving import ServingRender
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -208,12 +207,6 @@ def build_app(
 
         register_generate_api_routers(app)
 
-        from vllm.entrypoints.serve.disagg.api_router import (
-            attach_router as attach_disagg_router,
-        )
-
-        attach_disagg_router(app)
-
         from vllm.entrypoints.serve.elastic_ep.api_router import (
             attach_router as elastic_ep_attach_router,
         )
@@ -221,11 +214,9 @@ def build_app(
         elastic_ep_attach_router(app)
 
     if "generate" in supported_tasks or "render" in supported_tasks:
-        from vllm.entrypoints.serve.render.api_router import (
-            attach_router as attach_render_router,
-        )
+        from vllm.entrypoints.scale_out.factories import register_scale_out_api_routers
 
-        attach_render_router(app)
+        register_scale_out_api_routers(app, supported_tasks)
 
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import (
@@ -401,12 +392,6 @@ async def init_app_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
-    state.serving_render = ServingRender(
-        state.openai_serving_models,
-        state.online_renderer,
-        state.online_derenderer,
-        request_logger=request_logger,
-    )
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.generate.api_router import init_generate_state
@@ -414,6 +399,10 @@ async def init_app_state(
         await init_generate_state(
             engine_client, state, args, request_logger, supported_tasks
         )
+
+        from vllm.entrypoints.scale_out.factories import init_scale_out_state
+
+        init_scale_out_state(state, args, engine_client, request_logger)
 
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import init_speech_to_text_state
@@ -505,12 +494,10 @@ async def init_render_app_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
-    state.serving_render = ServingRender(
-        model_registry,
-        state.online_renderer,
-        state.online_derenderer,
-        request_logger=request_logger,
-    )
+
+    from vllm.entrypoints.scale_out.factories import init_render_state
+
+    init_render_state(state, request_logger)
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.

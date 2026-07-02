@@ -1033,7 +1033,8 @@ class SupportsQuant:
         if self.quant_config is None:
             return
         if (hf_to_vllm_mapper := self.hf_to_vllm_mapper) is not None:
-            self.quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
+            unstacked_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
+            self.quant_config.apply_vllm_mapper(unstacked_mapper)
         if self.packed_modules_mapping is not None:
             self.quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
 

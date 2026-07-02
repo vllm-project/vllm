@@ -1,0 +1,14 @@
+{
+  "add_generation_prompt": false,
+  "messages": [
+    {
+      "role": "user",
+      "content": "What is 2 + 2?"
+    },
+    {
+      "role": "assistant",
+      "reasoning_content": "Need simple arithmetic.",
+      "content": "4"
+    }
+  ]
+}
