@@ -472,6 +472,9 @@ class FIDecode:
     """Metadata for the native FlashInfer decode pathway (non-TRTLLM)."""
 
     wrapper: BatchDecodeWithPagedKVCacheWrapper
+    block_tables: torch.Tensor
+    seq_lens: torch.Tensor
+    max_seq_len: int
 
 
 @dataclass
@@ -1326,7 +1329,12 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     fixed_split_size=self.decode_fixed_split_size,
                     disable_split_kv=self.disable_split_kv,
                 )
-                attn_metadata.decode = FIDecode(wrapper=decode_wrapper)
+                attn_metadata.decode = FIDecode(
+                    wrapper=decode_wrapper,
+                    block_tables=block_table_tensor[:num_decodes],
+                    seq_lens=seq_lens[:num_decodes],
+                    max_seq_len=max_seq_len,
+                )
         return attn_metadata
 
     def use_cascade_attention(self, *args, **kwargs) -> bool:
@@ -1819,14 +1827,76 @@ class FlashInferImpl(AttentionImpl):
                         get_dcp_group(),
                     )
                 else:
-                    decode_wrapper.run(
-                        decode_query,
-                        kv_cache_permute,
-                        k_scale=layer._k_scale_float,
-                        v_scale=layer._v_scale_float,
-                        out=out_decode,
-                        kv_cache_sf=kv_cache_sf,
+                    l20_batch = decode_query.shape[0]
+                    l20_max_seq = attn_metadata.decode.max_seq_len
+                    l20_enabled = (
+                        envs.VLLM_ENABLE_L20_PAGED_DECODE
+                        and current_platform.get_device_capability()
+                        == DeviceCapability(8, 9)
+                        and not torch.cuda.is_current_stream_capturing()
+                        and decode_query.dtype == torch.float16
+                        and decode_query.shape[-1] == 128
+                        and decode_query.shape[1] in (12, 16)
+                        and kv_cache_permute.shape[1] == 2
+                        and kv_cache_permute.shape[2] == 16
+                        and kv_cache_permute.shape[4] == 128
+                        and (
+                            (
+                                decode_query.shape[1] == 16
+                                and kv_cache_permute.shape[3] == 8
+                            )
+                            or (
+                                decode_query.shape[1] == 12
+                                and kv_cache_permute.shape[3] == 2
+                            )
+                        )
+                        and (
+                            (l20_batch == 1 and l20_max_seq <= 2304)
+                            or (l20_batch <= 4 and l20_max_seq <= 640)
+                        )
                     )
+                    if l20_enabled:
+                        from vllm import _custom_ops as ops
+
+                        l20_shape = (4, decode_query.shape[1], 64)
+                        if getattr(self, "_l20_workspace_shape", None) != l20_shape:
+                            self._l20_partial_output = torch.empty(
+                                (*l20_shape, 128),
+                                dtype=decode_query.dtype,
+                                device=decode_query.device,
+                            )
+                            self._l20_partial_max = torch.empty(
+                                l20_shape,
+                                dtype=torch.float32,
+                                device=decode_query.device,
+                            )
+                            self._l20_partial_sum = torch.empty_like(
+                                self._l20_partial_max
+                            )
+                            self._l20_workspace_shape = l20_shape
+                        key_cache, value_cache = kv_cache_permute.unbind(1)
+                        ops.l20_paged_decode_split_out(
+                            decode_query,
+                            key_cache,
+                            value_cache,
+                            attn_metadata.decode.block_tables,
+                            attn_metadata.decode.seq_lens,
+                            self._l20_partial_output,
+                            self._l20_partial_max,
+                            self._l20_partial_sum,
+                            out_decode.view_as(decode_query),
+                            l20_max_seq,
+                            64,
+                        )
+                    else:
+                        decode_wrapper.run(
+                            decode_query,
+                            kv_cache_permute,
+                            k_scale=layer._k_scale_float,
+                            v_scale=layer._v_scale_float,
+                            out=out_decode,
+                            kv_cache_sf=kv_cache_sf,
+                        )
 
                 if needs_fp8_out:
                     output[:num_decode_tokens].copy_(out_decode.to(output.dtype))
