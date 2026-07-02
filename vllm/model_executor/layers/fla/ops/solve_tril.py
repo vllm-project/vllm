@@ -24,13 +24,16 @@ assert FLA_TRIL_PRECISION in ALLOWED_TRIL_PRECISIONS, (
     f"FLA_TRIL_PRECISION must be one of {ALLOWED_TRIL_PRECISIONS}, but got {FLA_TRIL_PRECISION}"
 )
 
+# num_stages>=4 causes "LLVM ERROR: operation destroyed but still has uses" on ROCm.
+_num_stages = [2, 3] if is_amd else [2, 3, 4, 5]
+
 
 @triton.heuristics({"IS_VARLEN": lambda args: args["cu_seqlens"] is not None})
 @triton.autotune(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
-        for num_stages in [2, 3, 4, 5]
+        for num_stages in _num_stages
     ],
     key=["BT"],
 )
@@ -105,7 +108,7 @@ def solve_tril_16x16_kernel(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [1, 2, 4, 8]
-        for num_stages in [2, 3, 4, 5]
+        for num_stages in _num_stages
     ],
     key=["H", "BT", "IS_VARLEN"],
 )
@@ -230,7 +233,7 @@ def merge_16x16_to_32x32_inverse_kernel(
     configs=[
         triton.Config({}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4, 5]
+        for num_stages in _num_stages
     ],
     key=["H", "BT", "IS_VARLEN"],
 )
