@@ -360,12 +360,24 @@ class Base(
         if self.pp_group.world_size <= 1:
             return
 
-        if not self.model.supports_pp_plan:
+        if self.model.supports_pp_plan:
+            module = self.model
+            names = list(module._pp_plan.keys())
+        else:
+            module = self.model.get_decoder()
+            has_parameters = lambda m: next(m.parameters(), None) is not None
+            names = [n for n, c in module.named_children() if has_parameters(c)]
             tip = get_feature_request_tip(
                 self.model_config.model, self.model_config.trust_remote_code
             )
-            raise ValueError(
-                f"{type(self.model)} does not support pipeline parallel. {tip}"
+            logger.warning(
+                "%s does not define a pipeline parallel plan. The Transformers "
+                "modeling backend will infer the split from the layers of %s in order "
+                "of declaration and keep parameter-free modules on every rank. This "
+                "may fail if the model's structure is non-standard. %s",
+                type(self.model),
+                type(module),
+                tip,
             )
 
         def attrsetter(attr: str) -> Callable[[object, object], None]:
@@ -380,10 +392,9 @@ class Base(
 
         module_lists = []
         module_list_idx = None
-        pp_plan = list(self.model._pp_plan.keys())
-        for i, name in enumerate(pp_plan):
+        for i, name in enumerate(names):
             # attrgetter in case the module is nested (e.g. "text_model.layers")
-            if isinstance(attrgetter(name)(self.model), nn.ModuleList):
+            if isinstance(attrgetter(name)(module), nn.ModuleList):
                 module_lists.append(name)
                 module_list_idx = i
 
@@ -393,16 +404,16 @@ class Base(
                 "in the base model are not supported yet!"
             )
         if module_list_idx is None:
-            raise ValueError(f"Could not find `ModuleList` in {type(self.model)}")
+            raise ValueError(f"Could not find `ModuleList` in {type(module)}")
 
         # Layers before module list
-        for name in pp_plan[:module_list_idx]:
+        for name in names[:module_list_idx]:
             if self.pp_group.is_first_rank or (
                 self._get_tie_word_embeddings() and self.pp_group.is_last_rank
             ):
                 continue
             # attrsetter in case the module is nested (e.g. "text_model.embed_tokens")
-            attrsetter(name)(self.model, PPMissingLayer())
+            attrsetter(name)(module, PPMissingLayer())
 
         # Module list
         start_layer, end_layer = get_pp_indices(
@@ -410,20 +421,20 @@ class Base(
             self.pp_group.rank_in_group,
             self.pp_group.world_size,
         )
-        layers_name = pp_plan[module_list_idx]
+        layers_name = names[module_list_idx]
         # attrgetter in case the module is nested (e.g. "text_model.layers")
-        layers = attrgetter(layers_name)(self.model)
+        layers = attrgetter(layers_name)(module)
         for i in range(len(layers)):
             if start_layer <= i and i < end_layer:
                 continue
             layers[i] = PPMissingLayer()
 
         # Layers after module list
-        for name in pp_plan[module_list_idx + 1 :]:
+        for name in names[module_list_idx + 1 :]:
             # Modules that should be on last rank
             if not self.pp_group.is_last_rank:
                 # attrsetter in case the module is nested (e.g. "text_model.norm")
-                attrsetter(name)(self.model, PPMissingLayer())
+                attrsetter(name)(module, PPMissingLayer())
 
     def recursive_replace(self):
         """Recursively replace modules in the model as needed.
@@ -436,14 +447,19 @@ class Base(
         - `nn.Conv2d` / `nn.Conv3d` with vLLM's `Conv2d` / `Conv3d`
         - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
         """
-        tp_plan = self.model.tp_plan
+        tp_plan = self.model.tp_plan or {}
 
         if not tp_plan and self.tp_group.world_size > 1:
             tip = get_feature_request_tip(
                 self.model_config.model, self.model_config.trust_remote_code
             )
-            raise ValueError(
-                f"{type(self.model)} does not support tensor parallel. {tip}"
+            logger.warning_once(
+                "%s does not define a tensor parallel plan. The Transformers modeling "
+                "backend will shard the model the best it can during graph fusion and "
+                "replicate the rest. This may be suboptimal or fail if the model does "
+                "not fuse cleanly. %s",
+                type(self.model),
+                tip,
             )
 
         # Prefix the patterns because we always start from `self.model`
