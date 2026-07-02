@@ -10,10 +10,10 @@ from tests.v1.attention.utils import (
 )
 from vllm.config import CUDAGraphMode, SpeculativeConfig
 from vllm.v1.attention.backend import AttentionCGSupport
-from vllm.v1.attention.backends.bailing_linear_attn import (
+from vllm.v1.attention.backends.linear_attn import (
     BailingLinearAttentionMetadataBuilder,
+    LinearAttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import MambaSpec
 

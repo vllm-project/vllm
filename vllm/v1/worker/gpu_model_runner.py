@@ -131,7 +131,7 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
 )
-from vllm.v1.attention.backends.bailing_linear_attn import (
+from vllm.v1.attention.backends.linear_attn import (
     BailingLinearAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
@@ -2452,7 +2452,7 @@ class GPUModelRunner(
                 ),
             ):
                 assert ubid is None, (
-                    "UBatching not supported with hybrid model metadata yet"
+                    "UBatching not supported with GDN or linear attn yet"
                 )
                 extra_attn_metadata_args = dict(
                     num_accepted_tokens=self.num_accepted_tokens.gpu[:num_reqs_padded],
