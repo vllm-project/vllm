@@ -250,6 +250,27 @@ steps:
     - uv pip install --system 'gpt-oss[eval]==0.0.5'
     - pytest -s -v evals/gpt_oss/test_gpqa_correctness.py --config-list-file=configs/models-spark.txt
 
+- label: LM Eval KV-Offload (1xH200)
+  key: kv-offload-small
+  timeout_in_minutes: 30
+  device: h200_35gb
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - tests/evals/gsm8k/test_gsm8k_offloading.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "nemotron-h-8b or gemma-4-e4b-it or qwen3.5-35b"
+
+- label: LM Eval KV-Offload (2xH100)
+  key: kv-offload-large
+  timeout_in_minutes: 60
+  device: h100
+  num_devices: 2
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - tests/evals/gsm8k/test_gsm8k_offloading.py
+  commands:
+  - pytest -s -v evals/gsm8k/test_gsm8k_offloading.py -k "deepseek-v4-flash"
+
 - label: MRCR Eval Small Models
   device: h200_35gb
   timeout_in_minutes: 30
