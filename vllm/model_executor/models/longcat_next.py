@@ -24,7 +24,7 @@ from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict, PromptType
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.int4_embedding import (
+from vllm.model_executor.layers.quantization.online.int4 import (
     Int4VocabParallelEmbedding,
 )
 from vllm.model_executor.layers.vocab_parallel_embedding import (
