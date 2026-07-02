@@ -143,6 +143,7 @@ def test_tiering_manager_aggregates_secondary_stats():
         offloading_spec=_MOCK_OFFLOADING_SPEC,
         primary_kv_view=mock_region.create_kv_memoryview(),
         tier_type="test_metrics",
+        tier_idx=0,
     )
     secondary_stats = OffloadingConnectorStats()
     secondary_stats.increase_counter(
@@ -182,6 +183,7 @@ class TestExampleSecondaryTierManager:
             offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="example",
+            tier_idx=0,
             custom_param=67,
         )
 
@@ -219,11 +221,13 @@ class TestTieringOffloadingManager:
             offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="example",
+            tier_idx=0,
         )
         self.secondary_tier2 = ExampleSecondaryTierManager(
             offloading_spec=_MOCK_OFFLOADING_SPEC,
             primary_kv_view=mock_view,
             tier_type="example",
+            tier_idx=1,
         )
 
         # Create tiered manager

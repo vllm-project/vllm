@@ -97,6 +97,7 @@ class FileSystemTierManager(SecondaryTierManager):
         offloading_spec: "OffloadingSpec",
         primary_kv_view: memoryview,
         tier_type: str,
+        tier_idx: int,
         root_dir: str,
         n_read_threads: int = 16,
         n_write_threads: int = 16,
@@ -107,11 +108,12 @@ class FileSystemTierManager(SecondaryTierManager):
                 and block_size_factor.
             primary_kv_view: Memoryview of the primary tier's CPU KV cache.
             tier_type: Tier type identifier, set by SecondaryTierFactory.
+            tier_idx: Index of this secondary tier in the configuration list.
             root_dir: Root directory for block files.
             n_read_threads: Number of read-priority I/O threads.
             n_write_threads: Number of write-priority I/O threads.
         """
-        super().__init__(offloading_spec, primary_kv_view, tier_type)
+        super().__init__(offloading_spec, primary_kv_view, tier_type, tier_idx)
 
         # Extract block size from primary view
         assert primary_kv_view.strides is not None, (

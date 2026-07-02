@@ -146,7 +146,7 @@ class TieringOffloadingSpec(CPUOffloadingSpec):
             for i, tier_config in enumerate(self.secondary_tier_configs):
                 try:
                     tier = SecondaryTierFactory.create_secondary_tier(
-                        tier_config, primary_kv_view, self
+                        tier_config, primary_kv_view, self, i
                     )
                     secondary_tiers.append(tier)
                     logger.info(

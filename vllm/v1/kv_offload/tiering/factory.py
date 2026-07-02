@@ -30,6 +30,7 @@ class SecondaryTierFactory:
         tier_config: dict,
         primary_kv_view: memoryview,
         offloading_spec: "OffloadingSpec",
+        tier_idx: int,
     ) -> SecondaryTierManager:
         tier_cls = cls.get_tier_class(tier_config)
         config = tier_config.copy()
@@ -38,6 +39,7 @@ class SecondaryTierFactory:
             offloading_spec=offloading_spec,
             primary_kv_view=primary_kv_view,
             tier_type=tier_type,
+            tier_idx=tier_idx,
             **config,
         )
 
