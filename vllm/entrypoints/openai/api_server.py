@@ -335,6 +335,7 @@ async def init_app_state(
     state.engine_client = engine_client
     state.log_stats = not args.disable_log_stats
     state.vllm_config = vllm_config
+    state.kv_cache_config = await engine_client.get_kv_cache_config()
     state.args = args
     resolved_chat_template = load_chat_template(args.chat_template)
 
@@ -500,6 +501,7 @@ async def init_render_app_state(
     init_render_state(state, request_logger)
 
     state.vllm_config = vllm_config
+    state.kv_cache_config = None
     # Disable stats logging — there is no engine to poll.
     state.log_stats = False
     state.engine_client = None
