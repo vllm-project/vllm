@@ -1023,6 +1023,9 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     include_stop_str_in_output: bool = False
     guided_decoding_backend: str | None = None
     echo: bool = False
+    # None falls back to the server-level --return-tokens-as-token-ids default,
+    # matching ChatCompletionRequest.return_tokens_as_token_ids.
+    return_tokens_as_token_ids: bool | None = None
     return_token_ids: bool = False
 
     @model_validator(mode="before")
