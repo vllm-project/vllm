@@ -46,6 +46,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.nixl.metadata import (
     PUSH_REG_NOTIF_PREFIX,
     NixlConnectorMetadata,
     RemoteMeta,
+    RemoteWorkerKey,
     ReqId,
     ReqMeta,
     TransferHandle,
@@ -286,7 +287,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             return
 
         def _on_handshake(
-            f: Future[dict[int, str]],
+            f: Future[dict[RemoteWorkerKey, str]],
             rid: str = req_id,
             rd: dict[str, Any] = reg_data,
         ) -> None:
@@ -540,8 +541,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                     remote_block_size
                 ]
 
+            remote_worker_key: RemoteWorkerKey = (spec.remote_rank, 0)
             remote_xfer_side_handle = self.dst_xfer_side_handles[meta.remote.engine_id][
-                spec.remote_rank
+                remote_worker_key
             ]
 
             self._xfer_blocks(
@@ -557,7 +559,7 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             notif_id = f"{meta.remote.request_id}:{self.world_size}".encode()
             remote_agents = self._remote_agents[meta.remote.engine_id]
             for rank_to_notify, agent in remote_agents.items():
-                if rank_to_notify != read_specs[0].remote_rank:
+                if rank_to_notify[0] != read_specs[0].remote_rank:
                     self.nixl_wrapper.send_notif(agent, notif_msg=notif_id)
 
     def _xfer_blocks(

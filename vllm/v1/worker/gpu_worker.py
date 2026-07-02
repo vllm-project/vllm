@@ -41,6 +41,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
 )
 from vllm.distributed.parallel_state import (
     Handle,
+    get_pcp_group,
     get_pp_group,
     get_tp_group,
 )
@@ -674,7 +675,14 @@ class Worker(WorkerBase):
 
         pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
-        return {(pp_rank, tp_rank): metadata}
+        try:
+            pcp_size = get_pcp_group().world_size
+            pcp_rank = get_pcp_group().rank_in_group
+        except AssertionError:
+            pcp_size = 1
+            pcp_rank = 0
+        flat_idx = tp_rank * pcp_size + pcp_rank
+        return {(pp_rank, flat_idx): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()

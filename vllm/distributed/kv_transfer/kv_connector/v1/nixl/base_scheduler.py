@@ -104,7 +104,7 @@ class NixlBaseConnectorScheduler:
         # Requests that need to start recv/send.
         # New requests are added by update_state_after_alloc in
         # the scheduler. Used to make metadata passed to Worker.
-        self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds]] = {}
+        self._reqs_need_recv: dict[ReqId, tuple[Request, BlockIds, int]] = {}
         self._reqs_need_save: dict[ReqId, Request] = {}
         # Reqs to send and their expiration time
         self._reqs_need_send: dict[ReqId, float] = {}
@@ -185,6 +185,8 @@ class NixlBaseConnectorScheduler:
         host = params.get("remote_host")
         port = params.get("remote_port")
         tp_size = params.get("tp_size")
+        dcp_size = params.get("dcp_size", 1)
+        pcp_size = params.get("pcp_size", 1)
         if (
             remote_engine_id is None
             or remote_request_id is None
@@ -199,6 +201,8 @@ class NixlBaseConnectorScheduler:
                 host=host,
                 port=port,
                 tp_size=tp_size,
+                dcp_size=dcp_size,
+                pcp_size=pcp_size,
             )
         self._heartbeat_by_engine[remote_engine_id].req_ids.add(remote_request_id)
         self._heartbeat_req_engine[request.request_id] = (
@@ -254,17 +258,17 @@ class NixlBaseConnectorScheduler:
         """
         encoded_data: dict[int, bytes] = {}
         encoder = msgspec.msgpack.Encoder()
-        for tp_rank, rank_metadata in metadata.items():
+        for flat_idx, rank_metadata in metadata.items():
             if not isinstance(rank_metadata, NixlHandshakePayload):
                 raise ValueError(
                     "NixlConnectorScheduler expects NixlHandshakePayload for "
                     "handshake metadata."
                 )
-            encoded_data[tp_rank] = encoder.encode(rank_metadata)
+            encoded_data[flat_idx] = encoder.encode(rank_metadata)
             logger.debug(
-                "Tp rank %d: encoded NixlHandshakePayload size: %s bytes",
-                tp_rank,
-                str(len(encoded_data[tp_rank])),
+                "Flat rank %d: encoded NixlHandshakePayload size: %s bytes",
+                flat_idx,
+                str(len(encoded_data[flat_idx])),
             )
 
         # Only start the listener when we have metadata to serve.
@@ -310,15 +314,15 @@ class NixlBaseConnectorScheduler:
                     if stop_event.is_set():
                         break
                     continue
-                # Decode the message which contains (GET_META_MSG, rank)
-                msg, target_tp_rank = msgspec.msgpack.decode(msg)
+                # Decode the message which contains (GET_META_MSG, flat_idx)
+                msg, target_flat_idx = msgspec.msgpack.decode(msg)
                 logger.debug(
-                    "Received message for tp rank %s",
-                    target_tp_rank,
+                    "Received message for flat rank %s",
+                    target_flat_idx,
                 )
                 if msg != GET_META_MSG:
                     logger.warning("Connection listener got unexpected message %s", msg)
-                sock.send_multipart((identity, b"", encoded_data[target_tp_rank]))
+                sock.send_multipart((identity, b"", encoded_data[target_flat_idx]))
 
     def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
@@ -395,12 +399,16 @@ class NixlBaseConnectorScheduler:
         meta = NixlConnectorMetadata()
 
         # Loop through scheduled reqs and convert to ReqMeta.
-        for req_id, (req, block_ids) in self._reqs_need_recv.items():
+        for (
+            req_id,
+            (req, block_ids, local_num_computed_tokens),
+        ) in self._reqs_need_recv.items():
             assert req.kv_transfer_params is not None
             meta.add_new_req_to_recv(
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
+                local_num_computed_tokens=local_num_computed_tokens,
             )
 
         if self.use_host_buffer:
