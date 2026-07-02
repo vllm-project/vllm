@@ -1,16 +1,17 @@
 from multiprocessing import shared_memory
 from unittest.mock import patch
 
-
 import numpy as np
 import torch
 
-from vllm.utils.torch_utils import PIN_MEMORY
 from vllm import _custom_ops as ops
+from vllm.utils.torch_utils import PIN_MEMORY
 
 
 class PagedSHMStorage:
-    def __init__(self, size: int, block_size: int, name: str | None = None, pin: bool = False):
+    def __init__(
+        self, size: int, block_size: int, *, name: str | None = None, pin: bool = False
+    ):
         self.name = name
         self.pin = pin
         self.block_size = block_size
@@ -21,7 +22,10 @@ class PagedSHMStorage:
         if name is None:
             self.shm = shared_memory.SharedMemory(create=True, size=self.size)
         else:
-            with patch("multiprocessing.resource_tracker.register",lambda *args, **kwargs: None,):
+            with patch(
+                "multiprocessing.resource_tracker.register",
+                lambda *args, **kwargs: None,
+            ):
                 try:
                     self.shm = shared_memory.SharedMemory(name=name)
                     assert self.shm.size >= self.size
@@ -37,6 +41,7 @@ class PagedSHMStorage:
 
         if pin and PIN_MEMORY:
             from vllm.v1.simple_kv_offload.cuda_mem_ops import pin_tensor
+
             pin_tensor(self.shm_tensor)
 
     def write(self, data: bytes | np.ndarray | torch.Tensor, blocks: list[int]):
@@ -63,14 +68,16 @@ class PagedSHMStorage:
         for i in range(full_blocks):
             blk = blocks[i]
             start = blk * self.block_size
-            self.shm_np[start:start + self.block_size] = \
-                data_np[i * self.block_size:(i + 1) * self.block_size]
+            self.shm_np[start : start + self.block_size] = data_np[
+                i * self.block_size : (i + 1) * self.block_size
+            ]
 
         if remainder > 0:
             blk = blocks[full_blocks]
             start = blk * self.block_size
-            self.shm_np[start:start + remainder] = \
-                data_np[full_blocks * self.block_size:]
+            self.shm_np[start : start + remainder] = data_np[
+                full_blocks * self.block_size :
+            ]
 
     def _write_gpu_tensor_to_shm(self, data: torch.Tensor, blocks: list[int]):
         # GPU → CPU using cuMemcpyBatchAsync
@@ -117,8 +124,12 @@ class PagedSHMStorage:
             )
         torch.cuda.current_stream().wait_stream(stream)
 
-    def read(self, nelement: int, blocks: list[int],
-             output: np.ndarray | torch.Tensor | None = None) -> np.ndarray | torch.Tensor:
+    def read(
+        self,
+        nelement: int,
+        blocks: list[int],
+        output: np.ndarray | torch.Tensor | None = None,
+    ) -> np.ndarray | torch.Tensor:
         if nelement > len(blocks) * self.block_size:
             raise ValueError("Requested data too large for provided blocks")
 
@@ -144,18 +155,22 @@ class PagedSHMStorage:
         for i in range(full_blocks):
             blk = blocks[i]
             start = blk * self.block_size
-            output_np[i * self.block_size:(i + 1) * self.block_size] = \
-                self.shm_np[start:start + self.block_size]
+            output_np[i * self.block_size : (i + 1) * self.block_size] = self.shm_np[
+                start : start + self.block_size
+            ]
 
         if remainder > 0:
             blk = blocks[full_blocks]
             start = blk * self.block_size
-            output_np[full_blocks * self.block_size:] = \
-                self.shm_np[start:start + remainder]
+            output_np[full_blocks * self.block_size :] = self.shm_np[
+                start : start + remainder
+            ]
 
         return output_np if not out_is_tensor else output
 
-    def read_to_device(self, nelement: int, blocks: list[int], output: torch.Tensor | None = None):
+    def read_to_device(
+        self, nelement: int, blocks: list[int], output: torch.Tensor | None = None
+    ):
         # CPU → GPU using cuMemcpyBatchAsync
 
         if output is None:
@@ -210,16 +225,16 @@ class PagedSHMStorage:
 
     def close(self):
         print("close")
-        if hasattr(self, 'shm'):
+        if hasattr(self, "shm"):
             self.shm.close()
 
     def unlink(self):
         print("unlink")
-        if hasattr(self, 'shm'):
+        if hasattr(self, "shm"):
             self.shm.unlink()
 
     def __del__(self):
-        print("=" *80)
+        print("=" * 80)
         print("__del__")
         self.close()
         self.unlink()

@@ -210,3 +210,6 @@ class LRUCache(cachetools.LRUCache[_K, _V]):
         self._hits = 0
         self._total = 0
         self._last_info = CacheInfo(hits=0, total=0)
+
+    def can_evict(self):
+        return len(self) - len(self.pinned_items)
