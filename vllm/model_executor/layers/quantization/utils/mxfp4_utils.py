@@ -103,6 +103,47 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     return quant_tensor, InFlexData(), scale
 
 
+def dequant_mxfp4_to_bf16(x: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Dequantize MXFP4 tensor to BF16 (compressed-tensors format).
+
+    Args:
+        x: packed uint8 tensor of shape (M, K/2), two FP4 values per byte.
+        scales: uint8 E8M0 scale tensor of shape (M, K/group).
+
+    Returns:
+        Dequantized bfloat16 tensor of shape (M, K).
+    """
+    from vllm.model_executor.layers.quantization.utils.nvfp4_emulation_utils import (  # noqa: E501
+        break_fp4_bytes,
+        kE2M1ToFloat_handle,
+    )
+
+    device = x.device
+
+    # Decode E8M0 uint8 → float32 scales.
+    scale_i32 = scales.to(torch.int32)
+    scale_f32 = torch.where(
+        scale_i32 == 0,
+        torch.zeros_like(scale_i32, dtype=torch.float32),
+        torch.exp2((scale_i32 - 127).to(torch.float32)),
+    )
+
+    if kE2M1ToFloat_handle.val.device != device:
+        kE2M1ToFloat_handle.val = kE2M1ToFloat_handle.val.to(device)
+
+    w_fp32 = break_fp4_bytes(x, torch.float32)
+    M, K = w_fp32.shape
+    groups = scale_f32.shape[-1]
+    block = K // groups
+    if block * groups != K:
+        raise ValueError(
+            f"MXFP4 scale shape {tuple(scales.shape)} incompatible with "
+            f"weight shape {tuple(w_fp32.shape)} (need K % groups == 0)."
+        )
+    w_fp32 = (w_fp32.view(M, groups, block) * scale_f32.unsqueeze(-1)).view(M, K)
+    return w_fp32.to(torch.bfloat16).contiguous()
+
+
 def _dequant_mxfp4(
     x: torch.Tensor, scale: torch.Tensor, float_dtype: torch.dtype
 ) -> torch.Tensor:
