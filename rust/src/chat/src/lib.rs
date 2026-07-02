@@ -50,7 +50,8 @@ mod request;
 mod stream;
 
 use vllm_engine_core_client::EngineCoreClient;
-use vllm_engine_core_client::protocol::{ModelDtype, ReasoningParserKwargs};
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
 
