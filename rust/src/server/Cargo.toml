@@ -48,6 +48,7 @@ vllm-engine-core-client.workspace = true
 vllm-llm.workspace = true
 vllm-metrics.workspace = true
 vllm-text.workspace = true
+xgrammar-structural-tag.workspace = true
 
 [build-dependencies]
 tonic-prost-build.workspace = true
@@ -58,6 +59,7 @@ async-openai = { workspace = true, features = ["full"] }
 bytes.workspace = true
 clap.workspace = true
 expect-test.workspace = true
+proptest.workspace = true
 rmp-serde.workspace = true
 serial_test.workspace = true
 tempfile.workspace = true

@@ -105,6 +105,23 @@ pub(super) fn prepare_chat_request(
         &request.structured_outputs,
     )?;
 
+    // Mirror Python: an explicit structured-output constraint and a specific
+    // tool choice are mutually exclusive. Python only counts the `json`, `regex`
+    // and `choice` constraints here (not `json_object`/`structural_tag`, and not
+    // a `response_format` that lowered into those), so a `json_object`
+    // response_format with a named tool stays accepted. Keyword tool choices
+    // (none/auto/required) are always allowed; naming a function is not.
+    // https://github.com/vllm-project/vllm/blob/f22d6e026/vllm/entrypoints/openai/chat_completion/protocol.py#L800-L809
+    let has_explicit_constraint = structured_outputs
+        .as_ref()
+        .is_some_and(|so| so.json.is_some() || so.regex.is_some() || so.choice.is_some());
+    if has_explicit_constraint && matches!(request.tool_choice, Some(ToolChoice::Function { .. })) {
+        bail_invalid_request!(
+            "You can only either use constraints for structured outputs or \
+             tools, not both."
+        );
+    }
+
     let chat_request = ChatRequest {
         request_id: request_id.clone(),
         messages,
@@ -392,6 +409,7 @@ mod tests {
     use crate::routes::openai::chat_completions::types::{
         AssistantRole, ChatCompletionMessage, ChatCompletionRequest,
     };
+    use crate::routes::openai::utils::structured_outputs::ResponseFormat;
     use crate::routes::openai::utils::types::{
         ChatMessage, ContentPart, Function, FunctionCallResponse, ImageUrl, MessageContent,
         StreamOptions, Tool, ToolCall, ToolChoice, ToolChoiceValue, VideoUrl,
@@ -1205,5 +1223,80 @@ mod tests {
             prepared.chat_request.chat_options.generation_prompt_mode,
             GenerationPromptMode::StartNewAssistant
         );
+    }
+
+    fn named_tool_choice() -> ToolChoice {
+        ToolChoice::Function {
+            tool_type: "function".to_string(),
+            function: crate::routes::openai::utils::types::FunctionChoice {
+                name: "get_weather".to_string(),
+            },
+        }
+    }
+
+    fn json_schema_response_format() -> ResponseFormat {
+        ResponseFormat::JsonSchema {
+            json_schema: crate::routes::openai::utils::structured_outputs::JsonSchemaFormat {
+                name: "schema".to_string(),
+                description: None,
+                schema: serde_json::json!({ "type": "object" }),
+                strict: None,
+            },
+        }
+    }
+
+    #[test]
+    fn prepare_chat_request_rejects_explicit_constraint_with_named_tool() {
+        // A `json` schema constraint (Python counts json/regex/choice) with a
+        // named tool is the mutually-exclusive case Python rejects.
+        let request = ChatCompletionRequest {
+            response_format: Some(json_schema_response_format()),
+            tool_choice: Some(named_tool_choice()),
+            ..base_request()
+        };
+
+        let err = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect_err("a json-schema constraint and a named tool are mutually exclusive");
+
+        assert!(err.to_error_response().error.message.contains("not both"));
+    }
+
+    #[test]
+    fn prepare_chat_request_allows_json_object_response_format_with_named_tool() {
+        // A `json_object` response_format is NOT one of the constraints Python
+        // counts (json/regex/choice), so pairing it with a named tool stays
+        // accepted, matching Python.
+        let request = ChatCompletionRequest {
+            response_format: Some(ResponseFormat::JsonObject),
+            tool_choice: Some(named_tool_choice()),
+            ..base_request()
+        };
+
+        prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("json_object response_format with a named tool is valid");
+    }
+
+    #[test]
+    fn prepare_chat_request_allows_structured_outputs_with_keyword_tool_choice() {
+        let request = ChatCompletionRequest {
+            response_format: Some(json_schema_response_format()),
+            tool_choice: Some(ToolChoice::Value(ToolChoiceValue::Auto)),
+            ..base_request()
+        };
+
+        prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("structured outputs with auto tool choice is valid");
     }
 }
