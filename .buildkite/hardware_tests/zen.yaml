@@ -1,0 +1,99 @@
+group: Zen CPU
+depends_on: []
+steps:
+- label: Zen-CPU-Kernel Tests
+  depends_on: []
+  soft_fail: false
+  device: zen5
+  no_plugin: true
+  source_file_dependencies:
+  - setup.py
+  - docker/Dockerfile.cpu
+  - docker/Dockerfile.zen
+  - requirements/cpu.txt
+  - requirements/build/cpu.txt
+  - csrc/cpu/
+  - cmake/cpu_extension.cmake
+  - CMakeLists.txt
+  - vllm/model_executor/layers/utils.py
+  - vllm/platforms/cpu.py
+  - vllm/platforms/zen_cpu.py
+  - vllm/platforms/__init__.py
+  - tests/model_executor/test_cpu_unquantized_gemm_dispatch.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh 20m "
+      pytest -x -v -s tests/model_executor/test_cpu_unquantized_gemm_dispatch.py"
+
+- label: Zen-CPU-Compatibility Tests
+  depends_on: []
+  soft_fail: false
+  device: zen5
+  no_plugin: true
+  source_file_dependencies:
+  - setup.py
+  - docker/Dockerfile.cpu
+  - docker/Dockerfile.zen
+  - requirements/cpu.txt
+  - requirements/build/cpu.txt
+  - vllm/platforms/cpu.py
+  - vllm/platforms/zen_cpu.py
+  - vllm/platforms/interface.py
+  - vllm/platforms/__init__.py
+  - tests/test_zen_cpu_platform_detection.py
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh 20m "
+      pytest -x -v -s tests/test_zen_cpu_platform_detection.py"
+
+- label: Zen-CPU-Language Generation and Pooling Model Tests
+  depends_on: []
+  soft_fail: false
+  device: zen5
+  no_plugin: true
+  source_file_dependencies:
+  - setup.py
+  - docker/Dockerfile.cpu
+  - docker/Dockerfile.zen
+  - requirements/cpu.txt
+  - requirements/build/cpu.txt
+  - csrc/cpu/
+  - vllm/model_executor/layers/utils.py
+  - vllm/platforms/cpu.py
+  - vllm/platforms/zen_cpu.py
+  - vllm/platforms/interface.py
+  - vllm/platforms/__init__.py
+  - vllm/v1/worker/cpu_model_runner.py
+  - tests/models/language/generation/
+  - tests/models/language/pooling/
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh 30m "
+      pytest -x -v -s tests/models/language/generation -m cpu_model
+      pytest -x -v -s tests/models/language/pooling -m cpu_model"
+
+- label: Zen-CPU-Distributed Tests
+  depends_on: []
+  soft_fail: false
+  device: zen5
+  no_plugin: true
+  source_file_dependencies:
+  - setup.py
+  - docker/Dockerfile.cpu
+  - docker/Dockerfile.zen
+  - requirements/cpu.txt
+  - requirements/build/cpu.txt
+  - csrc/cpu/shm.cpp
+  - vllm/v1/worker/cpu_worker.py
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/v1/worker/cpu_model_runner.py
+  - vllm/v1/worker/gpu_model_runner.py
+  - vllm/platforms/cpu.py
+  - vllm/platforms/zen_cpu.py
+  - vllm/distributed/parallel_state.py
+  - vllm/distributed/device_communicators/cpu_communicator.py
+  - .buildkite/scripts/hardware_ci/run-cpu-distributed-smoke-test.sh
+  commands:
+    - |
+      bash .buildkite/scripts/hardware_ci/run-zen-cpu-test.sh 10m "
+      bash .buildkite/scripts/hardware_ci/run-cpu-distributed-smoke-test.sh"
