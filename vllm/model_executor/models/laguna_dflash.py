@@ -10,9 +10,9 @@ weights with the target model through the generic spec-decode proposer.
 from collections.abc import Iterable
 
 import torch
-import torch.nn.functional as F
 from torch import nn
 
+from vllm import _custom_ops as ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
@@ -155,13 +155,21 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
         layers_attn: list[nn.Module],
         has_bias: bool,
     ) -> None:
-        self._kv_weights = [a.qkv_proj.weight[a.q_size :] for a in layers_attn]
+        self._kv_weights = torch.stack(
+            [a.qkv_proj.weight[a.q_size :] for a in layers_attn], dim=0
+        ).contiguous()
         if has_bias:
-            self._kv_biases: list[torch.Tensor | None] = [
-                a.qkv_proj.bias[a.q_size :] for a in layers_attn
-            ]
+            self._kv_biases: torch.Tensor | None = torch.stack(
+                [a.qkv_proj.bias[a.q_size :] for a in layers_attn], dim=0
+            ).contiguous()
         else:
-            self._kv_biases = [None for _ in layers_attn]
+            self._kv_biases = None
+        self._input_layernorm_weights = torch.stack(
+            [layer.input_layernorm.weight.data for layer in self.layers], dim=0
+        ).contiguous()
+        self._k_norm_weights = torch.stack(
+            [a.k_norm.weight.data for a in layers_attn], dim=0
+        ).contiguous()
 
     def _project_context_kv(
         self,
@@ -171,27 +179,40 @@ class DFlashLagunaModel(DFlashQwen3Model, EagleModelMixin):
         num_kv_heads: int,
         head_dim: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        all_k = torch.empty(
-            (num_layers, num_ctx, num_kv_heads, head_dim),
+        normed_context_states = torch.empty(
+            (num_layers, num_ctx, context_states.shape[-1]),
             dtype=context_states.dtype,
             device=context_states.device,
         )
-        all_v = torch.empty_like(all_k)
-        for i in range(num_layers):
-            normed_context_states = self.layers[i].input_layernorm(context_states)
-            kv_i = F.linear(
-                normed_context_states,
-                self._kv_weights[i],
-                self._kv_biases[i],
-            ).view(num_ctx, 2, num_kv_heads, head_dim)
-            all_k[i] = kv_i[:, 0]
-            all_v[i] = kv_i[:, 1]
+        ops.rms_norm(
+            normed_context_states,
+            context_states.unsqueeze(0).expand(num_layers, -1, -1),
+            self._input_layernorm_weights,
+            self._rms_norm_eps,
+        )
+        all_kv_flat = torch.bmm(
+            normed_context_states,
+            self._kv_weights.transpose(1, 2),
+        )
+        if self._kv_biases is not None:
+            all_kv_flat += self._kv_biases[:, None, :]
+        all_kv = (
+            all_kv_flat.view(num_layers, num_ctx, 2, num_kv_heads, head_dim)
+            .permute(2, 0, 1, 3, 4)
+            .contiguous()
+        )
+        all_k = all_kv[0]
+        all_v = all_kv[1]
         return all_k, all_v
 
     def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
         all_k_normed = torch.empty_like(all_k)
-        for i in range(self._num_attn_layers):
-            all_k_normed[i] = self.layers[i].self_attn.k_norm(all_k[i])
+        ops.rms_norm(
+            all_k_normed,
+            all_k,
+            self._k_norm_weights,
+            self._rms_norm_eps,
+        )
         return all_k_normed
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
