@@ -41,6 +41,7 @@ ROCM_AVAILABLE = current_platform.is_rocm()
 ROCM_TRITON_KERNELS_AVAILABLE = False
 ROCM_AITER_AVAILABLE = is_aiter_found()
 ROCM_GFX950 = False
+_ROCM_QUANT_UTILS_AVAILABLE = False
 
 if ROCM_AVAILABLE:
     from vllm.platforms.rocm import on_gfx950
@@ -52,6 +53,7 @@ if ROCM_AVAILABLE:
     if ROCM_AITER_AVAILABLE:
         from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
         from aiter.ops.triton.quant import dynamic_mxfp4_quant
+        _ROCM_QUANT_UTILS_AVAILABLE = True
 
 if TRTLLM_GEN_MXFP4_AVAILABLE:
     from flashinfer import (
@@ -1193,6 +1195,38 @@ def test_trtllm_gen_mxfp8_block_scale_moe(
     check_accuracy(ref, out, atol=0.1, rtol=0.85, percent=0.8)
 
 
+@pytest.fixture(scope="session")
+def dist_init_single_rank():
+    import os
+    from unittest.mock import patch
+    import torch.distributed as dist
+    from vllm.config import VllmConfig, set_current_vllm_config
+    from vllm.distributed.parallel_state import (
+        init_distributed_environment,
+        initialize_model_parallel,
+    )
+
+    config_ctx = set_current_vllm_config(VllmConfig())
+    config_ctx.__enter__()
+
+    mock_ctx = patch(
+        "vllm.model_executor.layers.fused_moe.oracle.mxfp4.get_current_vllm_config"
+    )
+    mock_cfg = mock_ctx.__enter__()
+    mock_cfg.return_value.model_config.quantization_config = None
+
+    if not dist.is_initialized():
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", "29501")
+        dist.init_process_group(backend="nccl", world_size=1, rank=0)
+        init_distributed_environment(world_size=1, rank=0, local_rank=0)
+        initialize_model_parallel(tensor_model_parallel_size=1)
+
+    yield
+
+    mock_ctx.__exit__(None, None, None)
+    config_ctx.__exit__(None, None, None)
+
 # -----------------------------------------------------------------------------
 # ROCm Oracle-based kernel execution tests
 # -----------------------------------------------------------------------------
@@ -1231,6 +1265,7 @@ ROCM_BACKEND_CONFIGS = {
 }
 
 
+@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("backend_name", list(ROCM_BACKEND_CONFIGS.keys()))
 @pytest.mark.parametrize("topk", [4])
 @pytest.mark.parametrize("num_experts", [8])
@@ -1241,6 +1276,7 @@ ROCM_BACKEND_CONFIGS = {
 )
 @torch.inference_mode()
 def test_rocm_mxfp4_moe_oracle(
+    dist_init_single_rank,
     backend_name: str,
     topk: int,
     num_experts: int,
@@ -1263,6 +1299,11 @@ def test_rocm_mxfp4_moe_oracle(
     # Check platform requirements
     if not ROCM_TRITON_KERNELS_AVAILABLE:
         pytest.skip("triton_kernels required for quantization")
+    if not _ROCM_QUANT_UTILS_AVAILABLE:
+        pytest.skip(
+            "dynamic_mxfp4_quant / upcast_from_mxfp require AITER; "
+            "these are test-only weight-generation utilities, not the kernel under test"
+        )
     if config["requires_aiter"] and not ROCM_AITER_AVAILABLE:
         pytest.skip(f"Backend {backend_name} requires AITER")
     if config["requires_gfx950"] and not ROCM_GFX950:
