@@ -24,11 +24,9 @@ from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionImpl,
-    AttentionLayer,
     AttentionMetadata,
     AttentionMetadataBuilder,
     AttentionType,
-    CommonAttentionMetadata,
     MultipleOf,
 )
 from vllm.v1.attention.backends.fa_utils import (
@@ -302,7 +300,7 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
         else:
             # Mixed decode+prefill: split and handle each part
             res = self._mixed(q, key, value, N, kv_cache, attn_metadata,
-                              layer._oscar_R, layer)
+                              layer._oscar_R)
 
         if output.ndim == 3:
             output[:N] = res.to(output.dtype)
@@ -327,15 +325,14 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
 
     def _prefill_sdpa(self, q, k, v, meta):
         qsl = (meta.query_start_loc if meta.query_start_loc_cpu is None else meta.query_start_loc_cpu).tolist()
-        sl = (meta.seq_lens if meta.seq_lens_cpu is None else meta.seq_lens_cpu).tolist()
         out = torch.zeros_like(q)
         for i in range(len(qsl) - 1):
             s, e = qsl[i], qsl[i + 1]
             if e <= s:
                 continue
             qt = q[s:e].transpose(0, 1).unsqueeze(0)
-            kt = k[s:e].transpose(0, 1).repeat_interleave(self.kv_group, 0).unsqueeze(0)
-            vt = v[s:e].transpose(0, 1).repeat_interleave(self.kv_group, 0).unsqueeze(0)
+            kt = k[s:e].transpose(0, 1).unsqueeze(0)
+            vt = v[s:e].transpose(0, 1).unsqueeze(0)
             out[s:e] = F.scaled_dot_product_attention(
                 qt, kt, vt, is_causal=True, scale=self.scale,
                 enable_gqa=(self.num_kv_heads < self.num_heads),
@@ -371,7 +368,7 @@ class OscarAttentionImpl(AttentionImpl["OscarMetadata"]):
 
     # -- Mixed batch ----------------------------------------------------- #
 
-    def _mixed(self, q, key, value, N, kv_cache, meta, R, layer):
+    def _mixed(self, q, key, value, N, kv_cache, meta, R):
         nd, ndt = meta.num_decodes, meta.num_decode_tokens
         out = torch.empty(N, self.num_heads, self.head_size,
                           device=q.device, dtype=q.dtype)
