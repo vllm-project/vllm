@@ -217,8 +217,14 @@ class Worker(WorkerBase):
     def wake_up(self, tags: list[str] | None = None) -> None:
         self._get_sleep_mode_backend().resume(tags)
 
-        # Restore the buffers after level 2 sleep
-        if len(self._sleep_saved_buffers):
+        # Restore the buffers saved before a level 2 sleep. Model buffers are
+        # allocated under the "weights" tag (see load_model), so their CUDA
+        # virtual addresses are only re-mapped once the allocator has woken the
+        # "weights" tag. On a partial wake that does not include "weights"
+        # (e.g. wake_up(["kv_cache"])), copying into those still-unmapped VAs
+        # raises CUDA_ERROR_ILLEGAL_ADDRESS. Gate the restore on the "weights"
+        # tag, symmetric with the post_kv_cache_wake_up gating below.
+        if (tags is None or "weights" in tags) and len(self._sleep_saved_buffers):
             model = self.model_runner.model
             for name, buffer in model.named_buffers():
                 if name in self._sleep_saved_buffers:
