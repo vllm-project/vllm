@@ -550,6 +550,16 @@ class ElasticEPScalingExecutor:
         # in setup_eplb_from_mapping() but don't start the thread there because
         # groups aren't ready yet.
         eplb_state.start_async_loop()
+
+        if rank_mapping is None:  # scale-up
+            model = self.worker.model_runner.get_model()
+            if hasattr(model, "update_physical_experts_metadata"):
+                ep_size = get_ep_group().world_size
+                num_physical_experts = eplb_model_state.physical_to_logical_map.shape[1]
+                model.update_physical_experts_metadata(
+                    num_physical_experts=num_physical_experts,
+                    num_local_physical_experts=num_physical_experts // ep_size,
+                )
         if get_ep_group().rank == 0:
             logger.info("[Elastic EP] Expert resharding completed")
 
