@@ -52,7 +52,7 @@ from vllm.v1.core.sched.request_queue import (
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -82,6 +82,16 @@ class Scheduler(SchedulerInterface):
         self.cache_config = vllm_config.cache_config
         self.lora_config = vllm_config.lora_config
         self.kv_cache_config = kv_cache_config
+        # "Spine" groups: the full-attention backbone of a hybrid (e.g. FA +
+        # Mamba) model. They bound the GPU-resident reusable prefix (the Mamba
+        # state is transferred separately by the connector), so the connector's
+        # local hit length is taken from them, not the (possibly diverging)
+        # Mamba hit.
+        self._kv_spine_group_ids = [
+            gid
+            for gid, g in enumerate(kv_cache_config.kv_cache_groups)
+            if isinstance(g.kv_cache_spec, FullAttentionSpec)
+        ]
         self.kv_events_config = vllm_config.kv_events_config
         self.parallel_config = vllm_config.parallel_config
         self.log_stats = log_stats
@@ -676,6 +686,7 @@ class Scheduler(SchedulerInterface):
                 load_kv_async = False
                 connector_prefix_cache_queries, connector_prefix_cache_hits = 0, 0
                 num_uncached_common_prefix_tokens = 0
+                hybrid_hits_diverged = False
 
                 # Get already-cached tokens.
                 if request.num_computed_tokens == 0:
@@ -687,6 +698,7 @@ class Scheduler(SchedulerInterface):
                             self.kv_cache_manager.coordinator,
                             HybridKVCacheCoordinator,
                         )
+                        and self._kv_spine_group_ids
                     ):
                         computed, per_group_hits = (
                             self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
@@ -698,15 +710,18 @@ class Scheduler(SchedulerInterface):
                             self.kv_cache_manager.create_kv_cache_blocks(computed)
                         )
                         # NOTE(ZhanqiuHu): For Mamba hybrid models,
-                        # num_new_local_computed_tokens should be the FA hit
-                        # length. This value is passed to the connector's
-                        # get_num_new_matched_tokens which computes:
-                        # external = total - local_computed.
-                        # Using the FA hit skips re-transferring FA blocks
-                        # already cached on D-side. The Mamba state (always
-                        # the last block) is transferred unconditionally by
+                        # num_new_local_computed_tokens should be the spine
+                        # (full-attention) hit length, passed to the connector's
+                        # get_num_new_matched_tokens (external = total - local).
+                        # Using the spine hit skips re-transferring spine blocks
+                        # already cached on the D-side. The Mamba state (the last
+                        # block) is transferred unconditionally by
                         # _apply_prefix_caching in nixl/worker.py.
-                        num_new_local_computed_tokens = max(per_group_hits)
+                        num_new_local_computed_tokens = min(
+                            per_group_hits[gid] for gid in self._kv_spine_group_ids
+                        )
+                        # Record the divergence; reconciled after the ext query.
+                        hybrid_hits_diverged = min(per_group_hits) < max(per_group_hits)
                         if self.kv_cache_manager.log_stats:
                             assert self.kv_cache_manager.prefix_cache_stats is not None
                             self.kv_cache_manager.prefix_cache_stats.record(
@@ -744,6 +759,54 @@ class Scheduler(SchedulerInterface):
                             continue
 
                         num_external_computed_tokens = ext_tokens
+
+                        # Reconcile the divergence now that ext_tokens is known.
+                        if hybrid_hits_diverged:
+                            num_computed = (
+                                num_new_local_computed_tokens
+                                + num_external_computed_tokens
+                            )
+                            if num_external_computed_tokens:
+                                # ext > 0: the connector supplies the prefix
+                                # (incl. the Mamba state) up to num_computed.
+                                # Trim each group's hit to that depth so a
+                                # surviving deeper state block can't drive
+                                # external allocation negative.
+                                coordinator = self.kv_cache_manager.coordinator
+                                groups = coordinator.kv_cache_config.kv_cache_groups
+                                for gid, group in enumerate(groups):
+                                    keep = (
+                                        num_computed // group.kv_cache_spec.block_size
+                                    )
+                                    del computed[gid][keep:]
+                                new_computed_blocks = (
+                                    self.kv_cache_manager.create_kv_cache_blocks(
+                                        computed
+                                    )
+                                )
+                            else:
+                                # ext == 0: nothing external backs the deeper
+                                # hits. Re-query the convergent hit (a boundary
+                                # all groups agree on); a plain trim would drop
+                                # the sparse Mamba state instead of re-finding it.
+                                computed, hit_len = (
+                                    self.kv_cache_manager.coordinator.find_longest_cache_hit(
+                                        request.block_hashes,
+                                        request.num_tokens - 1,
+                                    )
+                                )
+                                new_computed_blocks = (
+                                    self.kv_cache_manager.create_kv_cache_blocks(
+                                        computed
+                                    )
+                                )
+                                num_new_local_computed_tokens = hit_len
+                                if self.has_mamba_layers:
+                                    num_uncached_common_prefix_tokens = getattr(
+                                        self.kv_cache_manager.coordinator,
+                                        "num_uncached_common_prefix_tokens",
+                                        0,
+                                    )
 
                         connector_prefix_cache_queries = (
                             request.num_tokens - num_new_local_computed_tokens
