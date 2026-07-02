@@ -491,7 +491,7 @@ class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
             "last": "LAST",
         }
 
-        pooling_type = pooling_type_map.get(hf_config.pooling, None)
+        pooling_type = pooling_type_map.get(hf_config.pooling)
         if pooling_type is None:
             raise ValueError(f"pool_type {hf_config.pooling!r} not supported")
 
@@ -689,6 +689,37 @@ class NomicBertModelConfig(VerifyAndUpdateConfig):
         }
 
 
+class ParakeetForTDTConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        model_config = vllm_config.model_config
+        scheduler_config = vllm_config.scheduler_config
+        # The V2 model runner uses ParakeetTDTModelState, which keeps the TDT
+        # transcript per request id, so concurrency is safe there. Only the V1
+        # runner needs the single-request cap (state lives on the model).
+        uses_v2_runner = vllm_config.use_v2_model_runner
+        if (
+            not uses_v2_runner
+            and scheduler_config is not None
+            and scheduler_config.max_num_seqs != 1
+        ):
+            logger.warning_once(
+                "Parakeet TDT stores decoder state inside the model under the "
+                "V1 model runner and supports one active request; limiting "
+                "max_num_seqs to 1 to keep decoding state correct. Enable the "
+                "V2 model runner (VLLM_USE_V2_MODEL_RUNNER=1) for concurrency."
+            )
+            scheduler_config.max_num_seqs = 1
+
+        if not model_config.enforce_eager:
+            logger.warning_once(
+                "Parakeet TDT uses stateful decoder outputs; enforcing "
+                "eager execution to avoid CUDA graph replaying stale forced "
+                "tokens."
+            )
+        model_config.enforce_eager = True
+
+
 class Qwen2ForProcessRewardModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -830,6 +861,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "NemotronHPuzzleForCausalLM": NemotronHForCausalLMConfig,
     "NemotronH_Nano_VL_V2": NemotronHNanoVLV2Config,
     "NomicBertModel": NomicBertModelConfig,
+    "ParakeetForTDT": ParakeetForTDTConfig,
     "Qwen2ForProcessRewardModel": Qwen2ForProcessRewardModelConfig,
     "Qwen2ForRewardModel": Qwen2ForRewardModelConfig,
     "Qwen3ForSequenceClassification": Qwen3ForSequenceClassificationConfig,

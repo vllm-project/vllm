@@ -1382,6 +1382,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "NemotronParseForConditionalGeneration": _HfExamplesInfo(
         "nvidia/NVIDIA-Nemotron-Parse-v1.2", trust_remote_code=True
     ),
+    "ParakeetForTDT": _HfExamplesInfo(
+        "nvidia/parakeet-tdt-0.6b-v3",
+        enforce_eager=True,
+        max_model_len=256,
+    ),
     "WhisperForConditionalGeneration": _HfExamplesInfo(
         "openai/whisper-large-v3-turbo",
         extras={"v3": "openai/whisper-large-v3"},

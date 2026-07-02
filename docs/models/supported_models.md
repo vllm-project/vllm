@@ -695,12 +695,18 @@ Speech2Text models trained specifically for Automatic Speech Recognition.
 | `GlmAsrForConditionalGeneration` | GLM-ASR | `zai-org/GLM-ASR-Nano-2512` | ✅︎ | ✅︎ |
 | `GraniteSpeechForConditionalGeneration` | Granite Speech | `ibm-granite/granite-4.0-1b-speech`, `ibm-granite/granite-speech-3.3-2b`, etc. | ✅︎ | ✅︎ |
 | `GraniteSpeechPlusForConditionalGeneration` | Granite Speech Plus | `ibm-granite/granite-speech-4.1-2b-plus` | ✅︎ | ✅︎ |
+| `ParakeetForTDT` | NVIDIA Parakeet TDT<sup>†</sup> | `nvidia/parakeet-tdt-0.6b-v3` | | |
 | `Qwen3ASRForConditionalGeneration` | Qwen3-ASR | `Qwen/Qwen3-ASR-1.7B`, etc. | ✅︎ | ✅︎ |
 | `Qwen3OmniMoeThinkerForConditionalGeneration` | Qwen3-Omni | `Qwen/Qwen3-Omni-30B-A3B-Instruct`, etc. | | ✅︎ |
 | `VoxtralForConditionalGeneration` | Voxtral (Mistral format) | `mistralai/Voxtral-Mini-3B-2507`, `mistralai/Voxtral-Small-24B-2507`, etc. | ✅︎ | ✅︎ |
 | `WhisperForConditionalGeneration` | Whisper | `openai/whisper-small`, `openai/whisper-large-v3-turbo`, etc. | | |
 
 !!! note
+    `ParakeetForTDT` runs its forced-decoder path in eager mode, so CUDA graph
+    capture and speculative decoding are not supported. It serves one request at
+    a time under the default model runner; the V2 model runner
+    (`VLLM_USE_V2_MODEL_RUNNER=1`) enables concurrent transcription.
+
     `VoxtralForConditionalGeneration` requires `mistral-common[audio]` to be installed.
 
 #### Realtime Transcription
