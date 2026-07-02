@@ -107,6 +107,7 @@ class TrtLlmBf16ExpertsModular(TrtLlmBf16ExpertsBase, mk.FusedMoEExpertsModular)
         return (
             moe_parallel_config.use_all2all_kernels
             and not moe_parallel_config.use_ag_rs_all2all_kernels
+            and not moe_parallel_config.use_deepep_ht_kernels
             and not moe_parallel_config.enable_eplb
         )
 

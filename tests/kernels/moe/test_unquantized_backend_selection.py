@@ -198,7 +198,6 @@ def test_select_cuda_flashinfer_trtllm_modular_backend(
 @pytest.mark.parametrize(
     "all2all_backend",
     [
-        "deepep_high_throughput",
         "mori_high_throughput",
         "mori_low_latency",
         "flashinfer_nvlink_two_sided",
@@ -235,6 +234,41 @@ def test_select_cuda_flashinfer_trtllm_modular_for_standard_all2all(
         assert selected_backend == UnquantizedMoeBackend.FLASHINFER_TRTLLM
         assert experts_cls is not None
         assert experts_cls.__name__ == "TrtLlmBf16ExpertsModular"
+
+
+@patch(
+    "vllm.model_executor.layers.fused_moe.experts.trtllm_bf16_moe.TrtLlmBf16ExpertsBase._supports_current_device",
+    return_value=True,
+)
+def test_select_cuda_deepep_ht_falls_back_from_trtllm(
+    mock_supports_current_device,
+):
+    """Test DeepEP HT avoids the unsupported BF16 TRTLLM modular path."""
+    with (
+        patch.object(current_platform, "is_cuda", return_value=True),
+        patch.object(current_platform, "is_rocm", return_value=False),
+        patch.object(current_platform, "is_cpu", return_value=False),
+        patch.object(current_platform, "is_xpu", return_value=False),
+        patch.object(current_platform, "is_tpu", return_value=False),
+        patch.object(current_platform, "is_out_of_tree", return_value=False),
+        patch.object(
+            current_platform, "is_device_capability_family", return_value=False
+        ),
+    ):
+        moe_config = make_dummy_moe_config(num_experts=4, num_local_experts=2)
+        moe_config.moe_backend = "auto"
+        moe_config.moe_parallel_config.use_ep = True
+        moe_config.moe_parallel_config.dp_size = 2
+        moe_config.moe_parallel_config.ep_size = 2
+        moe_config.moe_parallel_config.all2all_backend = "deepep_high_throughput"
+
+        selected_backend, experts_cls = select_unquantized_moe_backend(
+            moe_config=moe_config
+        )
+
+        assert selected_backend == UnquantizedMoeBackend.TRITON
+        assert experts_cls is not None
+        assert experts_cls.__name__ == "TritonExperts"
 
 
 @patch(
