@@ -675,19 +675,24 @@ class GPUModelRunner(
         placeholder_block_size = (
             self.cache_config.block_size or CacheConfig.DEFAULT_BLOCK_SIZE
         )
+        placeholder_max_num_blocks = None
+        placeholder_max_model_len = max(self.max_model_len, self.max_encoder_len)
         self._init_block_sizes = [placeholder_block_size]
         self._init_kernel_block_sizes = [placeholder_block_size]
+        self._init_max_num_blocks: list[int] | None = placeholder_max_num_blocks
+        self._init_max_model_len = placeholder_max_model_len
         self.input_batch = InputBatch(
             max_num_reqs=self.max_num_reqs,
             # We need to use the encoder length for encoder-decoder
             # because of KV cache for cross-attention.
-            max_model_len=max(self.max_model_len, self.max_encoder_len),
+            max_model_len=placeholder_max_model_len,
             max_num_batched_tokens=self.max_num_tokens,
             device=self.device,
             vocab_size=self.model_config.get_vocab_size(),
             block_sizes=[placeholder_block_size],
             kernel_block_sizes=[placeholder_block_size],
             num_spec_tokens=self.num_spec_tokens,
+            max_num_blocks_per_req=placeholder_max_num_blocks,
             logitsprocs=build_logitsprocs(
                 self.vllm_config,
                 self.device,
@@ -6999,9 +7004,13 @@ class GPUModelRunner(
         if (
             block_sizes != self._init_block_sizes
             or kernel_block_sizes != self._init_kernel_block_sizes
+            or max_num_blocks != self._init_max_num_blocks
+            or max_model_len != self._init_max_model_len
         ):
             self._init_block_sizes = block_sizes
             self._init_kernel_block_sizes = kernel_block_sizes
+            self._init_max_num_blocks = max_num_blocks
+            self._init_max_model_len = max_model_len
             self.input_batch = InputBatch(
                 max_num_reqs=self.max_num_reqs,
                 max_model_len=max_model_len,
@@ -7016,6 +7025,7 @@ class GPUModelRunner(
                 logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
                 is_pooling_model=self.is_pooling_model,
                 reasoning_config=self.vllm_config.reasoning_config,
+                cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             )
 
         assert self._init_block_sizes == block_sizes, (
