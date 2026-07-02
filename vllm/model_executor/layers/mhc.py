@@ -175,7 +175,7 @@ class MHCPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.forward_native(
+        return torch.ops._xpu_C.mhc_pre(
             residual,
             fn,
             hc_scale,
@@ -185,9 +185,6 @@ class MHCPreOp(CustomOp):
             hc_sinkhorn_eps,
             hc_post_mult_value,
             sinkhorn_repeat,
-            n_splits,
-            norm_weight,
-            norm_eps,
         )
 
 
@@ -260,7 +257,7 @@ class MHCPostOp(CustomOp):
         post_layer_mix: torch.Tensor,
         comb_res_mix: torch.Tensor,
     ) -> torch.Tensor:
-        return self.forward_native(
+        return torch.ops._xpu_C.mhc_post(
             x,
             residual,
             post_layer_mix,
@@ -369,16 +366,8 @@ class HCHeadOp(CustomOp):
         out = torch.empty(
             num_tokens, hidden_size, dtype=torch.bfloat16, device=hidden_states.device
         )
-        torch.ops.vllm.hc_head_triton(
-            hs_flat,
-            hc_fn,
-            hc_scale,
-            hc_base,
-            out,
-            hidden_size,
-            rms_norm_eps,
-            hc_eps,
-            hc_mult,
+        torch.ops._xpu_C.hc_head_fused(
+            hs_flat, hc_fn, hc_scale, hc_base, out, rms_norm_eps, hc_eps
         )
         return out.view(*outer_shape, hidden_size)
 
@@ -548,7 +537,7 @@ class MHCFusedPostPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        return self.forward_native(
+        return torch.ops._xpu_C.mhc_fused_post_pre(
             x,
             residual,
             post_layer_mix,
@@ -561,8 +550,4 @@ class MHCFusedPostPreOp(CustomOp):
             hc_sinkhorn_eps,
             hc_post_mult_value,
             sinkhorn_repeat,
-            n_splits,
-            tile_n,
-            norm_weight,
-            norm_eps,
         )
