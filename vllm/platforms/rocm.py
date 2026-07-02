@@ -187,18 +187,34 @@ def _query_total_memory_from_amdsmi(physical_device_id: int) -> int:
 
 def _get_gcn_arch() -> str:
     """
-    Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
-    Called once at module level; result stored in _GCN_ARCH.
+    Get GCN arch via amdsmi (no CUDA init), fallback to env var, then
+    torch.cuda.  Called once at module level; result stored in _GCN_ARCH.
+
+    The env-var fallback is intentionally checked *before* calling any logging
+    helper that might trigger an import of vllm.distributed during module
+    initialisation (which would cause a circular-import error in container
+    environments where amdsmi fails).
     """
     try:
         return _query_gcn_arch_from_amdsmi()
     except Exception as e:
         logger.debug("Failed to get GCN arch via amdsmi: %s", e)
-        logger.warning_once(
-            "Failed to get GCN arch via amdsmi, falling back to torch.cuda. "
-            "This will initialize CUDA and may cause "
-            "issues if CUDA_VISIBLE_DEVICES is not set yet."
-        )
+
+    # Check env var before falling back to torch.cuda to (a) avoid
+    # unnecessary CUDA initialisation and (b) prevent a potential circular
+    # import triggered by logger.warning_once() during module init when the
+    # call chain goes through vllm.distributed.parallel_state.
+    arch_env = os.environ.get("PYTORCH_ROCM_ARCH", "").split(":")[0].strip()
+    if arch_env:
+        logger.debug("Using PYTORCH_ROCM_ARCH=%r for GCN arch.", arch_env)
+        return arch_env
+
+    logger.warning(
+        "Failed to get GCN arch via amdsmi, falling back to torch.cuda. "
+        "This will initialize CUDA and may cause "
+        "issues if CUDA_VISIBLE_DEVICES is not set yet. "
+        "Set PYTORCH_ROCM_ARCH (e.g. 'gfx942') to avoid this."
+    )
     # Ultimate fallback: use torch.cuda (will initialize CUDA)
     return torch.cuda.get_device_properties("cuda").gcnArchName
 
