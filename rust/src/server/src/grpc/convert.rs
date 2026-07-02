@@ -231,32 +231,18 @@ fn convert_structured_output(
         StructuredOutput::Json(schema) => {
             let json: serde_json::Value = serde_json::from_str(schema)
                 .map_err(|e| Status::invalid_argument(format!("invalid json schema: {e}")))?;
-            StructuredOutputsParams {
-                json: Some(json),
-                ..Default::default()
-            }
+            StructuredOutputsParams::json(json)
         }
-        StructuredOutput::Regex(regex) => StructuredOutputsParams {
-            regex: Some(regex.clone()),
-            ..Default::default()
-        },
-        StructuredOutput::Choice(choices) => StructuredOutputsParams {
-            choice: Some(choices.choices.clone()),
-            ..Default::default()
-        },
-        StructuredOutput::Grammar(grammar) => StructuredOutputsParams {
-            grammar: Some(grammar.clone()),
-            ..Default::default()
-        },
-        StructuredOutput::JsonObject(true) => StructuredOutputsParams {
-            json_object: Some(true),
-            ..Default::default()
-        },
+        StructuredOutput::Regex(regex) => StructuredOutputsParams::regex(regex.clone()),
+        StructuredOutput::Choice(choices) => {
+            StructuredOutputsParams::choice(choices.choices.clone())
+        }
+        StructuredOutput::Grammar(grammar) => StructuredOutputsParams::grammar(grammar.clone()),
+        StructuredOutput::JsonObject(true) => StructuredOutputsParams::json_object(),
         StructuredOutput::JsonObject(false) => return Ok(None),
-        StructuredOutput::StructuralTag(tag) => StructuredOutputsParams {
-            structural_tag: Some(tag.clone()),
-            ..Default::default()
-        },
+        StructuredOutput::StructuralTag(tag) => {
+            StructuredOutputsParams::structural_tag(tag.clone())
+        }
     };
     Ok(Some(params))
 }
