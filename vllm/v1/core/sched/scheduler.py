@@ -189,6 +189,9 @@ class Scheduler(SchedulerInterface):
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
 
+        # IDs of requests preempted since the last call to schedule().
+        self.reset_preempted_req_ids: set[str] = set()
+
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
         self.num_waiting_for_streaming_input: int = 0
@@ -247,6 +250,11 @@ class Scheduler(SchedulerInterface):
                 # decoding instead of standard next-token sampling, so it has a query
                 # for the last sampled token plus queries for each draft token.
                 self.num_lookahead_tokens = self.num_spec_tokens + 1
+            if speculative_config.use_dspark():
+                # DSpark drafts a block of num_spec_tokens query tokens in which the
+                # anchor itself is the first prediction position (no separate bonus
+                # query), so it needs exactly num_spec_tokens lookahead slots.
+                self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -630,7 +638,10 @@ class Scheduler(SchedulerInterface):
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+                # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
+                # in `running` but still hold a model-runner request slot.
+                num_running = len(self.running) + self.num_waiting_for_streaming_input
+                if num_running >= self.max_num_running_reqs:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
@@ -1088,7 +1099,7 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
-            preempted_req_ids={req.request_id for req in preempted_reqs},
+            preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
             # It contains the request IDs that are finished in between
@@ -1150,6 +1161,7 @@ class Scheduler(SchedulerInterface):
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
+        self.reset_preempted_req_ids.add(request.request_id)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -1194,10 +1206,11 @@ class Scheduler(SchedulerInterface):
                 }
             )
 
-        # Clear the finished request IDs.
-        # NOTE: We shouldn't do self.finished_req_ids.clear() here because
-        # it will also affect the scheduler output.
+        # Clear the finished and preempted request IDs.
+        # NOTE: We shouldn't just clear() here because it will also affect
+        # the scheduler output.
         self.finished_req_ids = set()
+        self.reset_preempted_req_ids = set()
 
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
