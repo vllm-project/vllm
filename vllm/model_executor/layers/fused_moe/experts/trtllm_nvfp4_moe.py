@@ -16,7 +16,6 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceNoOP,
 )
-from vllm.model_executor.layers.fused_moe.utils import trtllm_moe_pack_topk_ids_weights
 from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
     activation_to_flashinfer_int,
 )
@@ -283,13 +282,11 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
         assert self.quant_config.w1_scale is not None
         assert self.quant_config.w2_scale is not None
 
-        # Pack topk ids and weights into format expected by the kernel.
-        packed_tensor = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
         output1_scale_gate_scalar = self.quant_config.g1_alphas
 
         # Invoke kernel.
         flashinfer.fused_moe.trtllm_fp4_block_scale_routed_moe(
-            topk_ids=packed_tensor,
+            topk_ids=(topk_ids, topk_weights),
             routing_bias=None,
             hidden_states=hidden_states,
             hidden_states_scale=a1q_scale.view(torch.float8_e4m3fn).reshape(
