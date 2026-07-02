@@ -214,11 +214,18 @@ struct BF16Vec32 : public Vec<BF16Vec32> {
 
   explicit BF16Vec32(const BF16Vec8& v) {
     fixed_u16x8_t u16_val = bf16_to_u16(v.reg);
-    fixed_u16x32_t u16_combined =
-        RVVI4(__riscv_vcreate_v_u16, LMUL_128, _u16, LMUL_512)(
-            u16_val, u16_val, u16_val, u16_val);
-    reg = RVVI4(__riscv_vreinterpret_v_u16, LMUL_512, _bf16,
-                LMUL_512)(u16_combined);
+    // Widen LMUL_128 → LMUL_256 so vslideup operands share a type.
+    // At VLEN=256 this is mf2→m1 (both integer); at VLEN=128 it is m1→m2.
+    fixed_u16x16_t ext =
+        RVVI4(__riscv_vlmul_ext_v_u16, LMUL_128, _u16, LMUL_256)(u16_val);
+    // Build 16-element half: place the 8 elements at offsets 0 and 8.
+    fixed_u16x16_t half = RVVI(__riscv_vmv_v_x_u16, LMUL_256)(0, 16);
+    half = RVVI(__riscv_vslideup_vx_u16, LMUL_256)(half, ext, 0, 8);
+    half = RVVI(__riscv_vslideup_vx_u16, LMUL_256)(half, ext, 8, 16);
+    // Double to LMUL_512 (m1→m2 at VLEN=256, m2→m4 at VLEN=128).
+    fixed_u16x32_t dst =
+        RVVI4(__riscv_vcreate_v_u16, LMUL_256, _u16, LMUL_512)(half, half);
+    reg = RVVI4(__riscv_vreinterpret_v_u16, LMUL_512, _bf16, LMUL_512)(dst);
   };
 
   void save(void* ptr) const {
