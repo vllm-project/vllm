@@ -558,6 +558,9 @@ class ROCMAiterMLASparseMetadataBuilder(
                 uni_seqlen_qo=1,
                 fast_mode=True,
             )
+            # The persistent metadata buffers are read by graph replay. Order
+            # the async metadata write before the graph-captured decode kernel.
+            torch.cuda.current_stream(self.device).synchronize()
             self._prev_metadata_key = metadata_key
 
         metadata = ROCMAiterMLASparseMetadata(
