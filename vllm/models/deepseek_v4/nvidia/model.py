@@ -1190,6 +1190,8 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         and loaded_weight.dtype == torch.float8_e8m0fnu
                     ):
                         loaded_weight = loaded_weight.view(torch.uint8)
+                    name_mapped = None
+                    success = False
                     for mapping in expert_mapping:
                         param_name, weight_name, expert_id, expert_shard_id = mapping
                         if weight_name not in name:
@@ -1215,7 +1217,16 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                         if success:
                             name = name_mapped
                             break
-                    loaded_params.add(name_mapped)
+                    if not success:
+                        # No expert mapping matched, or the loader did not
+                        # load this weight for the current rank (e.g. a
+                        # non-canonical checkpoint, or this rank holds no
+                        # replica). Skip it instead of marking it loaded or
+                        # raising UnboundLocalError.
+                        continue
+                    # On the success path the loop sets name = name_mapped
+                    # before breaking, so name is the resolved (non-None) str.
+                    loaded_params.add(name)
                     continue
                 elif "attn_sink" in name:
                     if is_pp_missing_parameter(name, self):
