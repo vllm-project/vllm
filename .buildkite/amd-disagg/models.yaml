@@ -1,0 +1,48 @@
+# =============================================================================
+# Model catalog for the vLLM disaggregated (P/D) inference CI.
+# -----------------------------------------------------------------------------
+# Loaded by vllm_disagg.sh for the selected MODEL_NAME. WIDE_EP_MODE selects the
+# flag set (0 -> tp keys, 1 -> ep keys):
+#   tp -> base_flags + prefill.tp / decode.tp
+#   ep -> base_flags + prefill.ep / decode.ep
+#
+# Keep ONLY model-specific perf flags here. The launcher owns everything
+# topological / mode-structural:
+#   - tp: --host/--port, --tensor-parallel-size, --kv-transfer-config
+#   - ep: --tp 1, --data-parallel-size[-local], --data-parallel-address/-rpc-port,
+#         --data-parallel-start-rank/--headless (children), --enable-expert-parallel,
+#         --all2all-backend mori, --no-enable-prefix-caching,
+#         --api-server-count + --kv-transfer-config (masters only)
+# Do NOT put any of those in this file.
+#
+# Format: a top-level `models:` list. The launcher selects the entry whose
+# `model:` matches MODEL_NAME. Each entry:
+#   model              : name (must match MODEL_NAME; also the dir under MODEL_DIR)
+#   env                : model/arch-specific environment variables. The launcher
+#                        exports these BEFORE `vllm serve`, but only if they are
+#                        not already set, so precedence is:
+#                            caller/inline env  >  models.yaml env:
+#                        (Transport/fabric/engine env stays in cluster.sh,
+#                         e.g. VLLM_MORIIO_CONNECTOR_READ_MODE, VLLM_USE_V1.)
+#   base_flags         : always applied (both roles, both modes)
+#   prefill/decode.<tp|ep> : role + mode specific perf flags
+#   experimental_flags : optional extra flags (omit if empty)
+# =============================================================================
+
+models:
+  - model: DeepSeek-V3
+    env:
+      VLLM_ROCM_USE_AITER: "1"
+      VLLM_ROCM_USE_AITER_MLA: "0"
+      VLLM_ROCM_USE_AITER_MOE: "1"
+      VLLM_ROCM_USE_AITER_RMSNORM: "1"
+      VLLM_ROCM_USE_AITER_PAGED_ATTN: "0"
+      VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: "0"
+      VLLM_USE_AITER_TRITON_SILU_MUL: "0"
+    base_flags: "--trust-remote-code --kv-cache-dtype fp8"
+    prefill:
+      tp: "--gpu-memory-utilization 0.85"
+      ep: "--gpu-memory-utilization 0.85 --enforce-eager"
+    decode:
+      tp: "--gpu-memory-utilization 0.85"
+      ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"PIECEWISE","custom_ops":["+quant_fp8"]}'
