@@ -1,7 +1,9 @@
 //! Applies xgrammar structural-tag constraints for strict tool calling.
 
 use thiserror_ext::AsReport;
-use vllm_engine_core_client::protocol::{StructuredOutputBackend, StructuredOutputsParams};
+use vllm_engine_core_client::protocol::structured_outputs::{
+    StructuredOutputBackend, StructuredOutputsParams,
+};
 use vllm_parser::tool::StructuralTagModel;
 use xgrammar_structural_tag::{
     FunctionDefinition, FunctionToolParam, ToolChoice as StructuralTagToolChoice, ToolParam,
@@ -76,7 +78,9 @@ fn structural_tag_tool_choice(request: &ChatRequest) -> Option<StructuralTagTool
 #[cfg(test)]
 mod tests {
     use serde_json::{Value, json};
-    use vllm_engine_core_client::protocol::{StructuredOutputBackend, StructuredOutputsParams};
+    use vllm_engine_core_client::protocol::structured_outputs::{
+        StructuredOutputBackend, StructuredOutputsParams,
+    };
     use vllm_parser::tool::{Qwen3CoderToolParser, Tool, ToolParser};
 
     use super::*;

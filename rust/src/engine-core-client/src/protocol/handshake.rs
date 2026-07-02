@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::protocol::{ModelDtype, OpaqueValue};
+use crate::protocol::OpaqueValue;
+use crate::protocol::dtype::ModelDtype;
 
 /// Decoded engine startup-handshake payload sent on the handshake socket.
 ///

@@ -369,6 +369,14 @@ class BertModel(nn.Module, SupportsQuant):
 
     packed_modules_mapping = {"qkv_proj": ["query", "key", "value"]}
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".self.query": (".self.qkv_proj", "q"),
+            ".self.key": (".self.qkv_proj", "k"),
+            ".self.value": (".self.qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         *,
@@ -400,43 +408,9 @@ class BertModel(nn.Module, SupportsQuant):
 
         return self.encoder(hidden_states)
 
-    def _load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]):
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "query", "q"),
-            ("qkv_proj", "key", "k"),
-            ("qkv_proj", "value", "v"),
-        ]
-
-        loaded_stacked_params = []
-        other_weights = []
-        params_dict = dict(self.named_parameters())
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-
-                name = name.replace(weight_name, param_name)
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                loaded_stacked_params.append(name)
-                break
-            else:
-                if name in params_dict:
-                    other_weights.append((name, loaded_weight))
-
-        return other_weights, loaded_stacked_params
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        other_weights, loaded_stacked_params = self._load_weights(weights)
-
         loader = AutoWeightsLoader(self, skip_prefixes=["pooler."])
-        loaded_params = loader.load_weights(other_weights)
-        loaded_params.update(loaded_stacked_params)
-        return loaded_params
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class BertPoolingModel(BertModel):
@@ -458,12 +432,8 @@ class BertPoolingModel(BertModel):
         self.pooler = BertPooler(vllm_config.model_config)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        other_weights, loaded_stacked_params = self._load_weights(weights)
-
         loader = AutoWeightsLoader(self)
-        loaded_params = loader.load_weights(other_weights)
-        loaded_params.update(loaded_stacked_params)
-        return loaded_params
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 @default_pooling_type(seq_pooling_type="CLS")

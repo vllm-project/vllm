@@ -84,8 +84,8 @@ class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
             vllm serve baidu/Unlimited-OCR \\
                 --attention-config '{"backend": "FLEX_ATTENTION"}'
         """
+        from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
         from vllm.v1.attention.backends.registry import AttentionBackendEnum
-        from vllm.vllm_flash_attn import is_fa_version_supported
 
         attn_config = vllm_config.attention_config
         fa4_available = is_fa_version_supported(4)

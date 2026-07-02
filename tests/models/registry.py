@@ -780,14 +780,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
             "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
         },
     ),
-    "MusicFlamingoForConditionalGeneration": _HfExamplesInfo(
-        "nvidia/music-flamingo-2601-hf",
-        min_transformers_version="5.5.0",
-        transformers_version_reason={
-            "vllm": "Needs https://github.com/huggingface/transformers/pull/43538"
-        },
-    ),
-    "AyaVisionForConditionalGeneration": _HfExamplesInfo("CohereLabs/aya-vision-8b"),
     "BagelForConditionalGeneration": _HfExamplesInfo("ByteDance-Seed/BAGEL-7B-MoT"),
     "BeeForConditionalGeneration": _HfExamplesInfo(
         "Open-Bee/Bee-8B-RL",
@@ -1056,14 +1048,19 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaNextVideoForConditionalGeneration": _HfExamplesInfo(
         "llava-hf/LLaVA-NeXT-Video-7B-hf"
     ),
+    "LlavaOnevision2ForConditionalGeneration": _HfExamplesInfo(
+        "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct",
+        trust_remote_code=True,
+        # Keep the init/schema harness eager (these tests never run forward).
+        # NOTE: a separate H200-only hang exists in the core FA3 attention
+        # construction (after `FlashAttentionImpl.__init__` logs the FA3
+        # version, while building the Qwen3 backbone). enforce_eager does NOT
+        # gate that path, so this flag is hygiene, not the fix -- tracked with
+        # the maintainer.
+        enforce_eager=True,
+    ),
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo(
         "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
-    ),
-    "MantisForConditionalGeneration": _HfExamplesInfo(
-        "TIGER-Lab/Mantis-8B-siglip-llama3",
-        max_transformers_version="4.48",
-        transformers_version_reason={"hf": "HF model is not compatible."},
-        hf_overrides={"architectures": ["MantisForConditionalGeneration"]},
     ),
     "MiDashengLMModel": _HfExamplesInfo(
         "mispeech/midashenglm-7b", trust_remote_code=True
@@ -1369,22 +1366,6 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         "fixie-ai/ultravox-v0_5-llama-3_2-1b",
         trust_remote_code=True,
     ),
-    "TarsierForConditionalGeneration": _HfExamplesInfo("omni-research/Tarsier-7b"),
-    "Tarsier2ForConditionalGeneration": _HfExamplesInfo(
-        "omni-research/Tarsier2-Recap-7b",
-        hf_overrides={
-            "architectures": ["Tarsier2ForConditionalGeneration"],
-            "model_type": "tarsier2",
-        },
-        max_transformers_version="5.3",
-        transformers_version_reason={
-            "vllm": (
-                "Qwen2VLConfig was split into Qwen2VLConfig + "
-                "Qwen2VLTextConfig in transformers v5, breaking "
-                "attribute access (num_attention_heads, hidden_size, etc.)"
-            )
-        },
-    ),
     "VoxtralForConditionalGeneration": _HfExamplesInfo(
         "mistralai/Voxtral-Mini-3B-2507",
         tokenizer_mode="mistral",
@@ -1424,7 +1405,7 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     # [DFlash]
     "DFlashDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3.5-4B",
-        speculative_model="z-lab/Qwen3.5-4B-DFlash",
+        speculative_model="z-lab/Qwen3-4B-DFlash-b16",
         use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
@@ -1436,6 +1417,19 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce for CI
         max_num_seqs=32,
         min_transformers_version="4.56.3",  # Required for Qwen3Next
+    ),
+    # [DSpark]
+    "DSparkDraftModel": _HfExamplesInfo(
+        "deepseek-ai/DeepSeek-V4-Pro-DSpark",
+        speculative_model="deepseek-ai/DeepSeek-V4-Pro-DSpark",  # draft in mtp.*
+        is_available_online=False,
+        use_original_num_layers=True,  # DSpark has >1 draft block
+    ),
+    "Qwen3DSparkModel": _HfExamplesInfo(
+        "Qwen/Qwen3-8B",
+        speculative_model="deepseek-ai/dspark_qwen3_8b_block7",
+        is_available_online=False,
+        use_original_num_layers=True,  # DSpark backbone requires all layers
     ),
     # [Eagle]
     "EagleCohereForCausalLM": _HfExamplesInfo(
