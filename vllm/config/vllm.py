@@ -131,11 +131,11 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
     from vllm.utils.flashinfer import has_flashinfer
 
     if current_platform.is_rocm():
-        from vllm._aiter_ops import rocm_aiter_ops
-
-        return (
-            rocm_aiter_ops.is_enabled() and cfg.parallel_config.tensor_parallel_size > 1
-        )
+        # The AITER AllReduce+RMSNorm fusion (#37646) miscomputes at TP>1 and
+        # garbles models with large hidden sizes (e.g. DeepSeek-V3.2 hidden
+        # 7168, GLM-5). Keep it off by default on ROCm until the fused kernel is
+        # fixed; users can still opt in via -O.pass_config.fuse_allreduce_rms=1.
+        return False
 
     return (
         cfg.parallel_config.tensor_parallel_size > 1

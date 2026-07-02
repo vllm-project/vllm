@@ -455,6 +455,27 @@ class MHCFusedPostPreOp(CustomOp):
         norm_weight: torch.Tensor | None = None,
         norm_eps: float = 0.0,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # No fused aiter kernel exists for the combined post+pre op (V4's decode
+        # residual path), so run the aiter post then pre ops (mirrors
+        # forward_native). Requires hidden_size % 256 == 0.
+        if HAS_AITER_MHC and residual.shape[-1] % 256 == 0:
+            residual_cur = torch.ops.vllm.mhc_post_aiter(
+                x, residual, post_layer_mix, comb_res_mix
+            )
+            post_mix_cur, comb_mix_cur, layer_input_cur = (
+                torch.ops.vllm.mhc_pre_aiter(
+                    residual_cur,
+                    fn,
+                    hc_scale,
+                    hc_base,
+                    rms_eps,
+                    hc_pre_eps,
+                    hc_sinkhorn_eps,
+                    hc_post_mult_value,
+                    sinkhorn_repeat,
+                )
+            )
+            return residual_cur, post_mix_cur, comb_mix_cur, layer_input_cur
         if HAS_TILELANG_MHC:
             return torch.ops.vllm.mhc_fused_post_pre_tilelang(
                 x,

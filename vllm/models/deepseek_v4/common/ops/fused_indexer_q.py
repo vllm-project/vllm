@@ -27,7 +27,7 @@ def _get_cos_sin(
 
 
 @triton.jit
-def _fp32x2_to_fp4x2(x_lo, x_hi):
+def _fp32x2_to_fp4x2_ptx(x_lo, x_hi):
     # NOTE: $1 is high nibble, $2 is low nibble
     return tl.inline_asm_elementwise(
         """
@@ -43,6 +43,50 @@ def _fp32x2_to_fp4x2(x_lo, x_hi):
         is_pure=True,
         pack=1,
     ).to(tl.uint8)
+
+
+@triton.jit
+def _fp32_to_e2m1_code(x):
+    # E2M1 magnitudes {0, 0.5, 1, 1.5, 2, 3, 4, 6}, codes 0..7. RNE tie-
+    # breaking: `>` picks the lower code on a tie, `>=` picks the upper —
+    # chosen per adjacent pair so ties land on the even mantissa bit.
+    # Saturates above 6.0 to code 7 (no NaN/Inf in E2M1).
+    ax = tl.abs(x)
+    code = tl.where(
+        ax > 5.0,
+        7,
+        tl.where(
+            ax >= 3.5,
+            6,
+            tl.where(
+                ax > 2.5,
+                5,
+                tl.where(
+                    ax >= 1.75,
+                    4,
+                    tl.where(
+                        ax > 1.25,
+                        3,
+                        tl.where(ax >= 0.75, 2, tl.where(ax > 0.25, 1, 0)),
+                    ),
+                ),
+            ),
+        ),
+    )
+    sign = tl.where(x < 0, 8, 0)
+    return (sign | code).to(tl.uint8)
+
+
+@triton.jit
+def _fp32x2_to_fp4x2_sw(x_lo, x_hi):
+    return (_fp32_to_e2m1_code(x_hi) << 4) | _fp32_to_e2m1_code(x_lo)
+
+
+# NVIDIA SM 10.0+ has `cvt.rn.satfinite.e2m1x2.f32`; HIP/ROCm doesn't.
+# Resolved at module load — both callsites pick this up via name lookup.
+_fp32x2_to_fp4x2 = (
+    _fp32x2_to_fp4x2_sw if current_platform.is_rocm() else _fp32x2_to_fp4x2_ptx
+)
 
 
 @triton.jit

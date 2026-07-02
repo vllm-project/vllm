@@ -55,6 +55,16 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
         return [256]
 
+    @classmethod
+    def get_preferred_block_size(cls, default_block_size: int) -> int:
+        # DeepSeek-V4 sparse-MLA only supports a block size of 256 (see
+        # get_supported_kernel_block_sizes), and its sliding-window layers
+        # additionally require block_size > window (128), so the SWA/full-MLA
+        # page-size grouping only balances at >= 256. Prefer 256 so the model
+        # loads with default settings (block size is picked from the first
+        # non-SSM backend, which for DeepSeek-V4 is this full-MLA backend).
+        return 256
+
     @staticmethod
     def get_name() -> str:
         return "FLASHMLA_SPARSE_DSV4"
