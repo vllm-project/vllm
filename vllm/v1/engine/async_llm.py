@@ -199,6 +199,34 @@ class AsyncLLM(EngineClient):
         else:
             self.profiler = None
 
+        # Setup snapshot manager if enabled
+        additional_config = self.vllm_config.additional_config
+        enable_snapshot = False
+        snapshot_provider = None
+        if isinstance(additional_config, dict):
+            enable_snapshot = additional_config.get(
+                "enable_snapshot_post_startup", False
+            )
+            snapshot_provider = additional_config.get("snapshot_provider", None)
+
+        api_process_rank = getattr(
+            self.vllm_config.parallel_config, "_api_process_rank", 0
+        )
+        dp_rank_local = getattr(
+            self.vllm_config.parallel_config, "data_parallel_rank_local", None
+        )
+        is_primary_dp = dp_rank_local <= 0 if dp_rank_local is not None else True
+        self.snapshot_manager = None
+        if (
+            enable_snapshot
+            and client_index <= 0
+            and api_process_rank <= 0
+            and is_primary_dp
+        ):
+            from vllm.engine.snapshot.manager import SnapshotManager
+
+            self.snapshot_manager = SnapshotManager(snapshot_provider)
+
     @classmethod
     def from_vllm_config(
         cls,

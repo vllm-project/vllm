@@ -20,7 +20,6 @@ from starlette.datastructures import Headers, MutableHeaders
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from vllm import envs
-from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.launcher import terminate_if_errored
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorInfo,
@@ -534,8 +533,34 @@ _running_tasks: set[asyncio.Task] = set()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
+        # Trigger snapshot post-startup if enabled (only on primary API worker)
+        engine_client = getattr(app.state, "engine_client", None)
+        vllm_config = getattr(engine_client, "vllm_config", None)
+        parallel_config = getattr(vllm_config, "parallel_config", None)
+        api_process_rank = getattr(parallel_config, "_api_process_rank", 0)
+        dp_rank_local = getattr(parallel_config, "data_parallel_rank_local", None)
+        is_primary_dp = dp_rank_local <= 0 if dp_rank_local is not None else True
+
+        client_config = getattr(app.state, "client_config", {})
+        snapshot_barrier = client_config.get("snapshot_barrier")
+
+        if (
+            engine_client is not None
+            and getattr(engine_client, "snapshot_manager", None) is not None
+            and api_process_rank <= 0
+            and is_primary_dp
+        ):
+            logger.info("Running post-startup snapshot before server readiness...")
+            await asyncio.to_thread(engine_client.snapshot_manager.run_snapshot)
+            logger.info("Post-startup snapshot completed successfully.")
+
+        if snapshot_barrier is not None:
+            logger.info("Waiting on snapshot readiness barrier...")
+            await asyncio.to_thread(snapshot_barrier.wait)
+            logger.info("Snapshot readiness barrier passed.")
+
         if app.state.log_stats:
-            engine_client: EngineClient = app.state.engine_client
+            engine_client = app.state.engine_client
 
             async def _force_log():
                 while True:

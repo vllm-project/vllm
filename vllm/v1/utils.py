@@ -209,6 +209,12 @@ class APIServerProcessManager:
         self.processes: list[BaseProcess] = []
         self._address_pipes: list[connection.Connection] = []
 
+        snapshot_barrier = (
+            spawn_context.Barrier(num_servers)
+            if num_servers > 1 and getattr(args, "enable_snapshot_post_startup", False)
+            else None
+        )
+
         for i, in_addr, out_addr in zip(
             range(num_servers), input_addresses, output_addresses
         ):
@@ -222,6 +228,8 @@ class APIServerProcessManager:
                 client_config["stats_update_address"] = stats_update_address
             if tensor_queue is not None:
                 client_config["tensor_queue"] = tensor_queue
+            if snapshot_barrier is not None:
+                client_config["snapshot_barrier"] = snapshot_barrier
 
             parent_recv, child_send = spawn_context.Pipe(duplex=False)
             self._address_pipes.append(parent_recv)
