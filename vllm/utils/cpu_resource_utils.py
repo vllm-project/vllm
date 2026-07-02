@@ -186,6 +186,19 @@ def get_visible_memory_node() -> list[int]:
 
     allowed_memory_node_list = get_memory_affinity()
 
+    # Prefer the in-process logical-to-physical mapping populated for DP
+    # sharding (see set_assigned_physical_gpu_ids()). This is the CPU
+    # platform's analogue of how device_id_to_physical_device_id() resolves
+    # GPU/ROCm device ids, and takes precedence over the env var below
+    # since it reflects the per-DP-rank shard even when that shard was
+    # never actually written to the process environment (e.g. the local,
+    # non-Ray multiprocessing DP launch path).
+    from vllm.platforms.interface import get_assigned_physical_gpu_ids
+
+    assigned_nodes = get_assigned_physical_gpu_ids()
+    if assigned_nodes is not None:
+        return [node for node in assigned_nodes if node in allowed_memory_node_list]
+
     env_key = DEVICE_CONTROL_ENV_VAR
     if (
         ("VLLM_CPU_SIM_MULTI_NUMA" not in os.environ)

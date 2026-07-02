@@ -171,6 +171,19 @@ class MultiprocExecutor(Executor):
                 [] if context.get_start_method() == "fork" else None
             )
 
+            # Publish the logical-to-physical mapping in this (EngineCore)
+            # process too, not just in the worker subprocesses spawned
+            # below via WorkerProc.worker_main(). OMPProcessManager reads
+            # NUMA visibility via get_visible_memory_node() before any
+            # worker process exists, so without this the mapping computed
+            # per-DP-rank by CoreEngineProcManager is never seen here and
+            # every DP rank's CPU autobind collapses to the same NUMA node.
+            assigned_physical_gpu_ids = self.parallel_config.assigned_physical_gpu_ids
+            if assigned_physical_gpu_ids is not None:
+                from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+                set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+
             # For CPU backend only, to setup OpenMP threads affinity
             cpu_omp_manager = OMPProcessManager(self.vllm_config)
             for local_rank in range(self.local_world_size):
