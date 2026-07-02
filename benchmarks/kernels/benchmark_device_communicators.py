@@ -85,6 +85,7 @@ class CommunicatorBenchmark:
         self.symm_mem_comm_multimem = None
         self.symm_mem_comm_two_shot = None
         self.fi_ar_comm = None
+        self.quantized_comm = None
 
         self._init_communicators()
 
@@ -180,6 +181,16 @@ class CommunicatorBenchmark:
                 "Rank %s: Failed to initialize FlashInferAllReduce: %s", self.rank, e
             )
             self.fi_ar_comm = None
+
+        try:
+            from vllm.distributed.device_communicators.quantized_allreduce import (
+                two_shot_quantized_allreduce,
+            )
+
+            self.quantized_comm = two_shot_quantized_allreduce
+            logger.info("Rank %s: Quantized allreduce available", self.rank)
+        except ImportError:
+            logger.info("Rank %s: Quantized allreduce not available", self.rank)
 
     def benchmark_allreduce(
         self, sequence_length: int, num_warmup: int, num_trials: int
@@ -287,6 +298,26 @@ class CommunicatorBenchmark:
                     lambda c=comm: c.destroy(),
                 )
             )
+
+        if self.quantized_comm is not None:
+            from functools import partial
+
+            for name, use_fp8 in [("quantized_int8", False), ("quantized_fp8", True)]:
+                communicators.append(
+                    (
+                        name,
+                        partial(self.quantized_comm, use_fp8=use_fp8),
+                        lambda t: (
+                            t.dtype == torch.bfloat16
+                            and t.numel() % 8 == 0
+                            and t.numel() >= 1024 * self.world_size
+                            and t.numel() % 256 == 0
+                        ),
+                        nullcontext(),
+                        {},
+                        None,
+                    )
+                )
 
         # Benchmark each communicator
         for (

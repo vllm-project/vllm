@@ -952,6 +952,7 @@ def enable_batch_invariant_mode():
 
 def override_envs_for_invariance():
     os.environ["VLLM_ALLREDUCE_USE_SYMM_MEM"] = "0"
+    os.environ["VLLM_ALLREDUCE_QUANTIZATION"] = "NONE"
 
     os.environ["CUBLAS_WORKSPACE_CONFIG"] = ":4096:8"
 
