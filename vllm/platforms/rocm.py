@@ -113,38 +113,6 @@ def _rocm_device_count_stateless(cuda_visible_devices: str | None = None) -> int
     return r
 
 
-def _sync_hip_cuda_env_vars():
-    """Ensure HIP_VISIBLE_DEVICES and CUDA_VISIBLE_DEVICES are consistent.
-    Treats empty string as unset. Raises on genuine conflicts."""
-    hip_val = os.environ.get("HIP_VISIBLE_DEVICES") or None
-    cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES") or None
-
-    if cuda_val is not None:
-        logger.warning_once(
-            "Using CUDA_VISIBLE_DEVICES on ROCm is deprecated and support "
-            "will be removed in vLLM v0.26.0. Please use HIP_VISIBLE_DEVICES "
-            "instead.",
-            scope="process",
-        )
-
-    if hip_val is not None and cuda_val is not None:
-        if hip_val != cuda_val:
-            raise ValueError(
-                f"Inconsistent GPU visibility env vars: "
-                f"HIP_VISIBLE_DEVICES='{hip_val}' vs "
-                f"CUDA_VISIBLE_DEVICES='{cuda_val}'. "
-                f"Please set only one, or ensure they match."
-            )
-    elif hip_val is not None:
-        os.environ["CUDA_VISIBLE_DEVICES"] = hip_val
-    elif cuda_val is not None:
-        os.environ["HIP_VISIBLE_DEVICES"] = cuda_val
-
-
-# Sync at import time - catches misconfigurations from process start.
-_sync_hip_cuda_env_vars()
-
-
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
 # all the related functions work on real physical device ids.
@@ -448,8 +416,7 @@ class RocmPlatform(Platform):
     dispatch_key: str = "CUDA"
     ray_device_key: str = "GPU"
     dist_backend: str = "nccl"
-    # rocm shares the same device control env var as CUDA
-    device_control_env_var: str = "CUDA_VISIBLE_DEVICES"
+    device_control_env_var: str = "HIP_VISIBLE_DEVICES"
     ray_noset_device_env_vars: list[str] = [
         "RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES",
         "RAY_EXPERIMENTAL_NOSET_CUDA_VISIBLE_DEVICES",

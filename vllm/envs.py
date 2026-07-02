@@ -23,6 +23,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_SLEEP_MEM_CHUNK_SIZE: int = 256
     LOCAL_RANK: int = 0
     CUDA_VISIBLE_DEVICES: str | None = None
+    HIP_VISIBLE_DEVICES: str | None = None
     VLLM_ENGINE_ITERATION_TIMEOUT_S: int = 60
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_API_KEY: str | None = None
@@ -738,6 +739,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "LOCAL_RANK": lambda: int(os.environ.get("LOCAL_RANK", "0")),
     # used to control the visible devices in the distributed setting
     "CUDA_VISIBLE_DEVICES": lambda: os.environ.get("CUDA_VISIBLE_DEVICES", None),
+    "HIP_VISIBLE_DEVICES": lambda: os.environ.get("HIP_VISIBLE_DEVICES", None),
     # timeout for each iteration in the engine
     "VLLM_ENGINE_ITERATION_TIMEOUT_S": lambda: int(
         os.environ.get("VLLM_ENGINE_ITERATION_TIMEOUT_S", "60")
@@ -2109,6 +2111,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_SKIP_MODEL_NAME_VALIDATION",
         "LOCAL_RANK",
         "CUDA_VISIBLE_DEVICES",
+        "HIP_VISIBLE_DEVICES",
         "NO_COLOR",
     }
 
