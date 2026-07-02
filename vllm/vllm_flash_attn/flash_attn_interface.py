@@ -200,12 +200,18 @@ def flash_attn_varlen_func(
     k_descale=None,
     v_descale=None,
     num_splits: int = 0,
+    # FA4 Only
+    output_scale=None,
     # Version selector
     fa_version: int = DEFAULT_FA_VERSION,
     s_aux=None,
     cp_world_size=1,
     cp_rank=0,
     cp_tot_seqused_k=None,
+    # FA4 only
+    mask_mod=None,
+    aux_tensors=None,
+    dynamic_causal: "torch.Tensor | None" = None,
 ):
     """dropout_p should be set to 0.0 during evaluation
     Supports multi-query and grouped-query attention (MQA/GQA) by passing in K, V with fewer heads
@@ -269,6 +275,11 @@ def flash_attn_varlen_func(
         "seqused_k must be provided if block_table is provided"
     )
 
+    assert output_scale is None or fa_version == 4, (
+        f"Fused FP8 output (output_scale) is only supported by FA4, "
+        f"got fa_version={fa_version}"
+    )
+
     if softmax_scale is None:
         softmax_scale = q.shape[-1] ** (-0.5)
     # custom op does not support non-tuple input
@@ -297,6 +308,10 @@ def flash_attn_varlen_func(
             raise NotImplementedError("FA2 does not support s_aux")
         if num_splits > 1:
             raise NotImplementedError("FA2 does not support num_splits > 1")
+        if mask_mod is not None:
+            raise NotImplementedError("FA2 does not support mask_mod")
+        if aux_tensors is not None:
+            raise NotImplementedError("FA2 does not support aux_tensors")
         out, softmax_lse = torch.ops._vllm_fa2_C.varlen_fwd(
             q,
             k,
@@ -325,6 +340,10 @@ def flash_attn_varlen_func(
         )
     elif fa_version == 3:
         assert alibi_slopes is None, "Alibi is not supported in FA3"
+        if mask_mod is not None:
+            raise NotImplementedError("FA3 does not support mask_mod")
+        if aux_tensors is not None:
+            raise NotImplementedError("FA3 does not support aux_tensors")
         out, softmax_lse, _, _ = torch.ops._vllm_fa3_C.fwd(
             q,
             k,
@@ -381,6 +400,7 @@ def flash_attn_varlen_func(
             page_table=block_table,
             softmax_scale=softmax_scale,
             causal=causal,
+            dynamic_causal=dynamic_causal,
             softcap=softcap,
             window_size_left=real_window_size[0] if real_window_size[0] >= 0 else None,
             window_size_right=real_window_size[1] if real_window_size[1] >= 0 else None,
@@ -388,6 +408,9 @@ def flash_attn_varlen_func(
             return_lse=return_softmax_lse,
             out=out,
             learnable_sink=s_aux,
+            mask_mod=mask_mod,
+            aux_tensors=aux_tensors,
+            output_scale=output_scale,
         )
     else:
         raise ValueError(f"Unsupported FA version: {fa_version}")
