@@ -50,7 +50,11 @@ from vllm.benchmarks.lib.endpoint_request_func import (
     RequestFuncOutput,
 )
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
-from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
+from vllm.benchmarks.lib.utils import (
+    append_jsonl_record,
+    convert_to_pytorch_benchmark_format,
+    write_to_json,
+)
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
@@ -2272,13 +2276,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         assert file_name is not None, (
             "file_name must be set when save_result or append_result is enabled"
         )
-        with open(
-            file_name, mode="a+" if args.append_result else "w", encoding="utf-8"
-        ) as outfile:
-            # Append a newline.
-            if args.append_result and outfile.tell() != 0:
-                outfile.write("\n")
-            json.dump(result_json, outfile)
+        if args.append_result:
+            append_jsonl_record(file_name, result_json)
+        else:
+            with open(file_name, mode="w", encoding="utf-8") as outfile:
+                json.dump(result_json, outfile)
         save_to_pytorch_benchmark_format(args, result_json, file_name)
 
     return result_json
