@@ -71,6 +71,9 @@ class LoRAConfig:
     for variable LoRA usage patterns at the cost of increased startup time and
     memory usage. Only takes effect when cudagraph_specialize_lora is True.
     """
+    enable_lora_overlap_loading: bool = False
+    """Run LoRA H2D weight copies on a side CUDA stream to overlap with
+    compute. Synchronises via a CUDA event before the next forward pass."""
     enable_mixed_moe_lora_format: bool = False
     """If True, force the engine to use the universal 2D MoE LoRA wrapper
     (`FusedMoEWithLoRA`) regardless of the model's `is_3d_moe_weight` flag, so
