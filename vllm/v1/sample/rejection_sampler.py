@@ -12,6 +12,8 @@ import torch.nn as nn
 
 from vllm.logger import init_logger
 from vllm.triton_utils import tl, triton
+from vllm.utils.multi_stream_utils import maybe_execute_in_parallel
+from vllm.utils.torch_utils import aux_stream
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -84,6 +86,14 @@ class RejectionSampler(nn.Module):
                 device=device,
             )
         self.synthetic_mode = self.synthetic_conditional_rates is not None
+        # Overlap bonus-token sampling with target verification via vLLM's
+        # event-synchronized multi-stream helper (shared aux_stream singleton).
+        self._sampler_aux_stream = aux_stream()
+        self._sampler_ms_events = (
+            (torch.cuda.Event(), torch.cuda.Event())
+            if self._sampler_aux_stream is not None
+            else (None, None)
+        )
 
     def forward(
         self,
@@ -126,45 +136,47 @@ class RejectionSampler(nn.Module):
         # logits tensor. This means any in-place operations on bonus_logits
         # won't affect the original logits tensor.
         assert logits is not None
-        bonus_logits = logits[bonus_logits_indices]
-        bonus_sampler_output = self.sampler(
-            logits=bonus_logits,
-            sampling_metadata=replace(
-                sampling_metadata,
-                max_num_logprobs=-1,
-            ),
-            predict_bonus_token=True,
-            # Override the logprobs mode to return logits because they are
-            # needed later to compute the accepted token logprobs.
-            logprobs_mode_override="processed_logits"
-            if self.is_processed_logprobs_mode
-            else "raw_logits",
+
+        def _verify_target():
+            # Shape the target distribution at the draft positions (logits
+            # processors + temperature/top-k/top-p). Runs on the default
+            # stream (fn0). Returns (shaped, raw) since both are needed.
+            raw = logits[target_logits_indices].to(torch.float32)
+            shaped = raw if self.is_processed_logprobs_mode else raw.clone()
+            shaped = self.apply_logits_processors(shaped, sampling_metadata, metadata)
+            shaped = apply_sampling_constraints(
+                shaped, metadata.cu_num_draft_tokens, sampling_metadata
+            )
+            return shaped, raw
+
+        def _sample_bonus():
+            # Sample the bonus token. Runs on the aux stream (fn1),
+            # overlapping the target verification above.
+            bonus_logits = logits[bonus_logits_indices]
+            return self.sampler(
+                logits=bonus_logits,
+                sampling_metadata=replace(sampling_metadata, max_num_logprobs=-1),
+                predict_bonus_token=True,
+                logprobs_mode_override="processed_logits"
+                if self.is_processed_logprobs_mode
+                else "raw_logits",
+            )
+
+        # fn0 runs to completion on the CPU before fn1 in
+        # maybe_execute_in_parallel, so run bonus sampling as fn0 to preserve
+        # the original CPU ordering of stateful logits processors
+        # (thinking_budget update_state before the verification's read), while
+        # the heavier verification kernels overlap on the aux stream.
+        bonus_sampler_output, (target_logits, raw_target_logits) = (
+            maybe_execute_in_parallel(
+                _sample_bonus,
+                _verify_target,
+                self._sampler_ms_events[0],
+                self._sampler_ms_events[1],
+                self._sampler_aux_stream,
+            )
         )
         bonus_token_ids = bonus_sampler_output.sampled_token_ids
-
-        # Just like `bonus_logits`, `target_logits` is a new tensor with
-        # separate storage from the original `logits` tensor. Therefore,
-        # it is safe to update `target_logits` in place.
-        raw_target_logits = logits[target_logits_indices]
-        # Use float32 for the target_logits.
-        raw_target_logits = raw_target_logits.to(torch.float32)
-        target_logits = raw_target_logits
-        if not self.is_processed_logprobs_mode:
-            # Clone raw_target_logits before applying processors to preserve
-            # the original raw logits for logprobs computation, since
-            # apply_logits_processors modifies the tensor in-place.
-            target_logits = target_logits.clone()
-        target_logits = self.apply_logits_processors(
-            target_logits, sampling_metadata, metadata
-        )
-        # [num_tokens, vocab_size]
-        # NOTE(woosuk): `target_logits` can be updated in place inside the
-        # `apply_sampling_constraints` function.
-        target_logits = apply_sampling_constraints(
-            target_logits,
-            metadata.cu_num_draft_tokens,
-            sampling_metadata,
-        )
 
         output_token_ids = rejection_sample(
             metadata.draft_token_ids,
