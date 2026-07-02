@@ -31,6 +31,27 @@ llm = LLM(
 )
 ```
 
+## INT8 throughput caveat at small batch sizes
+
+:::{warning}
+BitsAndBytes INT8 (`load_in_8bit=True`) can cause significant throughput regression at
+small batch sizes on memory-bandwidth-bound GPUs. In benchmarks on an NVIDIA L4 GPU
+across 317,486 real prompts, INT8 at `batch_size=1` was **4× slower than FP16**
+(see [#43700](https://github.com/vllm-project/vllm/issues/43700)).
+
+**Root cause:** BitsAndBytes dequantizes weights from INT8 to FP16 before each matrix
+multiplication. At small batch sizes, this dequantization overhead dominates inference
+time — CUDA profiling confirms it consumes ~34% of total CUDA time, while attention
+kernels consume less than 1%.
+
+The regression disappears at larger batch sizes (≥8) where compute becomes the
+bottleneck rather than memory bandwidth.
+
+**Recommendation:** For latency-sensitive or low-concurrency serving scenarios, prefer
+GPTQ, AWQ, or FP8 quantization instead. Use INT8 only when batch sizes are consistently
+large enough to amortize the dequantization cost.
+:::
+
 ## Inflight quantization: load as 4bit quantization
 
 For inflight 4bit quantization with BitsAndBytes, you need to explicitly specify the quantization argument.
