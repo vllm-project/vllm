@@ -471,6 +471,92 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         num_decodes = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
 
+        # ════════════════════════════════════════════════════════════════════
+        # Spec-decode K+1 verify path (fixes #40880).
+        #
+        # When speculative decoding is active (MTP num_speculative_tokens=K>0),
+        # the verify pass produces uniform-query batches with
+        # max_query_len = K+1 (e.g., K=3 → q_len=4 per request) where
+        # max_seq_len > max_query_len (each request has prior cached KV).
+        #
+        # The default `_prefill_attention` continuation branch reads
+        # `query_start_loc.tolist()` which (1) forces a GPU→CPU sync
+        # incompatible with active CUDA stream capture, and (2) was the
+        # root cause for #40880 (degenerate token cascades on Qwen3.6-MoE
+        # under MTP=3 + FULL_AND_PIECEWISE cudagraph).
+        #
+        # Fix: route uniform K+1 spec-verify batches through the
+        # `triton_turboquant_decode_attention` kernel via the same
+        # synth_seq_lens trick that `_continuation_prefill` uses internally.
+        # The decode kernel handles compressed K+V cache lookup natively
+        # and is cudagraph-safe (no CPU sync), so this restores
+        # FULL_AND_PIECEWISE capture for spec-decode workloads.
+        #
+        # Empirical: +32% wall-clock TPS on Qwen3.6-35B-A3B-FP8 + MTP=3
+        # + 2× RTX A5000 + TurboQuant k8v4 vs PIECEWISE-downgraded baseline.
+        # Cross-rig validation pending; tested ONLY on Ampere SM 8.6 so far.
+        # See `tests/v1/attention/test_turboquant_spec_verify.py`.
+        # ════════════════════════════════════════════════════════════════════
+        _spec_verify_eligible = (
+            attn_metadata.is_prefill
+            and num_decodes == 0
+            and 1 < attn_metadata.max_query_len <= 16
+            and attn_metadata.max_seq_len > attn_metadata.max_query_len
+            and N > 0
+            and (N % attn_metadata.max_query_len) == 0
+            and attn_metadata.query_start_loc is not None
+        )
+        if _spec_verify_eligible:
+            K_PLUS_1 = attn_metadata.max_query_len
+            B = N // K_PLUS_1
+            if attn_metadata.query_start_loc.shape[0] == B + 1:
+                from vllm.v1.attention.ops.triton_turboquant_decode import (
+                    triton_turboquant_decode_attention,
+                )
+                # Build synth args mirroring _continuation_prefill's pattern:
+                # synth_seq_lens[req*K1+i] = base_seq_lens[req] - K1 + 1 + i
+                # synth_block_table[req*K1+i] = block_table[req]
+                # All GPU ops — cudagraph-safe.
+                _q_flat = q[:N].view(N, self.num_heads, self.head_size)
+                _offs = torch.arange(
+                    K_PLUS_1, device=q.device,
+                    dtype=attn_metadata.seq_lens.dtype,
+                )
+                _synth_seq_lens = (
+                    attn_metadata.seq_lens[:B, None] - K_PLUS_1 + 1 + _offs[None, :]
+                ).reshape(-1)
+                _synth_block_table = attn_metadata.block_table[:B].repeat_interleave(
+                    K_PLUS_1, dim=0,
+                )
+                # Reuse cached decode buffers from the layer to avoid
+                # per-call torch.empty allocations — these would break
+                # CUDA graph replay (the very thing this PR restores).
+                # Per gemini-code-assist review on this PR.
+                _mid_o_buf = getattr(layer, "_tq_mid_o_buf", None)
+                _output_buf = getattr(layer, "_tq_output_buf", None)
+                _lse_buf = getattr(layer, "_tq_lse_buf", None)
+                attn_out = triton_turboquant_decode_attention(
+                    query=_q_flat,
+                    kv_cache=kv_cache,
+                    block_table=_synth_block_table,
+                    seq_lens=_synth_seq_lens,
+                    Pi=Pi,
+                    centroids=centroids,
+                    scale=self.scale,
+                    mse_bits=self.tq_config.key_mse_bits,
+                    key_packed_size=self.tq_config.key_packed_size,
+                    value_quant_bits=self.tq_config.effective_value_quant_bits,
+                    key_fp8=self.tq_config.key_fp8,
+                    norm_correction=self.tq_config.norm_correction,
+                    PiT=PiT,
+                    mid_o_buf=_mid_o_buf,
+                    output_buf=_output_buf,
+                    lse_buf=_lse_buf,
+                    buf_holder=layer,
+                    max_num_kv_splits=self.max_num_kv_splits,
+                )
+                return attn_out
+
         if not attn_metadata.is_prefill:
             # Pure decode batch — fast path
             attn_out = self._decode_attention(
