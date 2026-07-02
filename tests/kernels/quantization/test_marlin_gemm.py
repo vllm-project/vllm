@@ -619,3 +619,99 @@ def test_marlin_gemm_with_bias(size_m):
     max_diff = compute_max_diff(output, output_ref)
 
     assert max_diff < 0.04
+
+
+@pytest.mark.skipif(
+    not is_quant_method_supported("gptq_marlin"),
+    reason="Marlin is not supported on this GPU type.",
+)
+@pytest.mark.parametrize("size_m, size_n, size_k", [(16, 256, 4096), (32, 512, 8192)])
+def test_marlin_gemm_output_buffer_zero_init(size_m, size_n, size_k):
+    """Regression: marlin_gemm must zero-init the buffers it allocates so CUDA
+    graph replay does not read stale device memory.
+
+    On the ``use_atomic_add`` path marlin_gemm atomic-accumulates partial
+    products into the output ``c`` it allocates when ``c is None``. That is only
+    correct if ``c`` starts at the additive identity (0). Allocating it with
+    ``torch::empty`` leaves it uninitialized, so the caching allocator can hand
+    back a dirty block; the atomic-add then accumulates onto stale data and the
+    result is wrong / NaN. This is silent when the pages happen to be zero but
+    deterministic under CUDA graph replay, where the same dirty device memory is
+    reused on every replay -- it surfaced in production as intermittent
+    ``<pad>``/garbage tokens on an NVFP4 W4A16 model. The fp32 global-reduce temp
+    ``c_tmp`` (use_fp32_reduce path) has the same defect; both are zero-init'd by
+    the fix.
+
+    We make the failure deterministic by poisoning the caching allocator with
+    NaN and freeing it, so the next internally allocated output reuses a dirty
+    block. With the zero-init fix the output equals the eager reference; without
+    it the output is non-finite / diverges.
+    """
+    if torch.cuda.get_device_capability()[0] < 10:
+        pytest.skip("NVFP4 marlin GEMM requires Blackwell (sm_100+).")
+
+    dtype = torch.bfloat16
+    group_size = 16  # NVFP4
+    b_type = scalar_types.float4_e2m1f
+
+    a_input = rand_data((size_m, size_k), dtype=dtype)
+    b_weight = rand_data((size_k, size_n), dtype=dtype)
+    w_ref, marlin_q_w, marlin_s, marlin_s2 = rand_marlin_weight_nvfp4_like(
+        b_weight.T, group_size, input_dtype=dtype
+    )
+    workspace = marlin_make_workspace_new(a_input.device)
+
+    def run():
+        # c=None -> marlin allocates the output internally; with use_atomic_add
+        # it accumulates partial products into it, so it must start zeroed.
+        return ops.marlin_gemm(
+            a_input,
+            None,
+            marlin_q_w,
+            None,
+            marlin_s,
+            None,
+            marlin_s2,
+            None,
+            None,
+            None,
+            workspace,
+            b_type,
+            size_m,
+            size_n,
+            size_k,
+            is_k_full=True,
+            use_atomic_add=True,
+            use_fp32_reduce=False,
+            is_zp_float=False,
+        )
+
+    reference = run().clone()
+    assert torch.isfinite(reference).all()
+
+    for _ in range(5):
+        # Poison both caching-allocator pools (small + large) with NaN and free
+        # them, so the next internal output allocation is carved from dirty
+        # memory -- the same condition CUDA graph replay creates.
+        junk = [
+            torch.full(
+                (size_m * size_n,), float("nan"), dtype=dtype, device=a_input.device
+            )
+            for _ in range(32)
+        ]
+        junk += [
+            torch.full(
+                (4 * 1024 * 1024,),
+                float("nan"),
+                dtype=torch.float32,
+                device=a_input.device,
+            )
+            for _ in range(4)
+        ]
+        del junk
+        out = run()
+        assert torch.isfinite(out).all(), (
+            "marlin_gemm accumulated into an uninitialized output buffer "
+            "(NaN leaked through the use_atomic_add path under a dirty allocator)"
+        )
+        torch.testing.assert_close(out, reference, rtol=1e-2, atol=1e-2)
