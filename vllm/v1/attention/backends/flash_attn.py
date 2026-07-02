@@ -26,6 +26,7 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     is_fa_version_supported,
     is_flash_attn_varlen_func_available,
+    should_pack_gqa,
 )
 from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
@@ -1312,7 +1313,7 @@ def use_cascade_attention(
     # Too few queries. Probably not worth using cascade attention.
     # We use an arbitrary threshold of 8 queries. TODO: Tune this threshold.
     num_reqs = len(query_lens)
-    if num_reqs < 8:
+    if num_reqs <= 32:
         return False
     # disable cascade attention for DCP
     if dcp_world_size > 1:
@@ -1347,16 +1348,35 @@ def use_cascade_attention(
     kv_tile_size = 128
     num_prefix_tiles = cdiv(common_prefix_len, kv_tile_size)
 
-    cascade_ctas = num_query_heads * cdiv(num_tokens, q_tile_size)
-    cascade_waves = cdiv(cascade_ctas, num_sms)
-    cascade_time = cascade_waves * num_prefix_tiles
-
-    flash_decoding_ctas = (
-        num_reqs * num_kv_heads * cdiv(num_queries_per_kv, q_tile_size)
+    fa_version = get_flash_attn_version()
+    pack_gqa = should_pack_gqa(
+        seqlen_q=1, qhead_per_khead=num_queries_per_kv, blockM=q_tile_size
     )
-    flash_decoding_ctas *= num_prefix_tiles
-    flash_decoding_time = cdiv(flash_decoding_ctas, num_sms)
 
+    if fa_version == 3 and pack_gqa:
+        # By using PackGQA
+        # [Q_0, Q_1,...., Q_n] are packed together and is processed by one CTA
+        cascade_ctas = num_kv_heads * cdiv(num_tokens * num_queries_per_kv, q_tile_size)
+        cascade_waves = cdiv(cascade_ctas, num_sms)
+        cascade_time = cascade_waves * num_prefix_tiles
+
+        flash_decoding_ctas = (
+            num_prefix_tiles
+            * num_kv_heads
+            * cdiv(num_queries_per_kv * num_reqs, q_tile_size)
+        )
+
+    else:
+        cascade_ctas = num_query_heads * cdiv(num_tokens, q_tile_size)
+        cascade_waves = cdiv(cascade_ctas, num_sms)
+        cascade_time = cascade_waves * num_prefix_tiles
+
+        flash_decoding_ctas = (
+            num_reqs * num_kv_heads * cdiv(num_queries_per_kv, q_tile_size)
+        )
+        flash_decoding_ctas *= num_prefix_tiles
+
+    flash_decoding_time = cdiv(flash_decoding_ctas, num_sms)
     # Use cascade attention if it is faster than FlashDecoding.
     return cascade_time < flash_decoding_time
 
