@@ -83,6 +83,42 @@ fn factory_resolves_minimax_m3_before_generic_minimax() {
 }
 
 #[test]
+fn factory_routes_ernie45_models() {
+    let factory = ReasoningParserFactory::new();
+
+    // Positive: only the *-Thinking variants route to the ERNIE 4.5
+    // reasoning parser.
+    assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-21B-A3B-Thinking"),
+        Some(names::ERNIE45)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-VL-28B-A3B-Thinking"),
+        Some(names::ERNIE45)
+    );
+
+    // Negative: the matching PT base models do NOT emit `</think>` and must
+    // not auto-route here, otherwise their plain content would be silently
+    // captured as reasoning (the parser starts with `in_reasoning = true`).
+    assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-21B-A3B-PT"),
+        None
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-VL-28B-A3B-PT"),
+        None
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-0.3B-PT"),
+        None
+    );
+
+    // Negative: non-4.5 ERNIE model IDs must NOT route here either.
+    assert_eq!(factory.resolve_name_for_model("baidu/ERNIE-Bot-4"), None);
+    assert_eq!(factory.resolve_name_for_model("baidu/ernie-3.5-8k"), None);
+}
+
+#[test]
 fn factory_rejects_unknown_parser_names() {
     let tokenizer = Arc::new(TestTokenizer::new());
     let factory = ReasoningParserFactory::new();
