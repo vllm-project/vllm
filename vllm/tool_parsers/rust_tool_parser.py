@@ -212,18 +212,30 @@ class RustToolParser(ToolParser):
         output = _rust_tool_parser_module().ToolParserOutput()
         try:
             parser.parse_into(model_output, output)
-            # finish() clears parser state, so snapshot model-emitted IDs first.
-            tool_call_ids = {
-                call.tool_index: tool_call_id
-                for call in output.calls
-                if (tool_call_id := parser.tool_call_id(call.tool_index)) is not None
-            }
-            output.append(parser.finish())
         except Exception:
             logger.exception(
                 "Error parsing %s tool call output.", self.rust_parser_name
             )
             return None
+
+        # finish() clears parser state, so snapshot model-emitted IDs first.
+        tool_call_ids = {
+            call.tool_index: tool_call_id
+            for call in output.calls
+            if (tool_call_id := parser.tool_call_id(call.tool_index)) is not None
+        }
+        try:
+            output.append(parser.finish())
+        except Exception:
+            # finish() raises when the generation was cut off before the
+            # closing tag (e.g. max_tokens truncation mid tool-call).  The
+            # calls already accumulated by parse_into are still valid — use
+            # them rather than discarding the entire parse result.
+            logger.debug(
+                "%s finish() raised on truncated output; using partial parse.",
+                self.rust_parser_name,
+            )
+
         return output.coalesce(), tool_call_ids
 
     def extract_tool_calls(

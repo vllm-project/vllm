@@ -83,10 +83,10 @@ class TrtLlmNvFp4ExpertsBase:
         clamp = quant_config.gemm1_clamp_limit
         if clamp is None:
             clamp = getattr(moe_config, "swiglu_limit", None)
-        alpha = quant_config.gemm1_alpha
+        alpha = getattr(quant_config, "gemm1_alpha", None)
         if alpha is None:
             alpha = getattr(moe_config, "swiglu_alpha", None)
-        beta = quant_config.gemm1_beta
+        beta = getattr(quant_config, "gemm1_beta", None)
         if beta is None:
             beta = getattr(moe_config, "swiglu_beta", None)
 
@@ -164,7 +164,7 @@ class TrtLlmNvFp4ExpertsBase:
         p = current_platform
         return (
             p.is_cuda()
-            and p.is_device_capability_family(100)
+            and (p.is_device_capability_family(100) or p.is_device_capability_family(120))
             and has_flashinfer_trtllm_fused_moe()
         )
 
@@ -192,6 +192,7 @@ class TrtLlmNvFp4ExpertsBase:
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.GELU,
             MoEActivation.GELU_TANH,
+            MoEActivation.SWIGLUOAI,
             MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 

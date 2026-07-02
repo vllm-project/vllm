@@ -174,6 +174,7 @@ def select_nvfp4_moe_backend(
 
     NVFP4_BACKENDS_WITH_CLAMP = {
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
+        NvFp4MoeBackend.FLASHINFER_B12X,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.MARLIN,
     }
