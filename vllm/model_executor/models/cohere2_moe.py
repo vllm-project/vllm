@@ -285,11 +285,26 @@ class Cohere2Moe(nn.Module):
             prefix=f"{prefix}.gate",
         )
 
+        # Routed FusedMoE only; shared experts run separately in forward().
+        self.experts = FusedMoE(
+            num_experts=config.num_experts,
+            top_k=config.num_experts_per_tok,
+            hidden_size=config.hidden_size,
+            intermediate_size=config.intermediate_size,
+            params_dtype=params_dtype,
+            renormalize=getattr(config, "norm_topk_prob", True),
+            quant_config=quant_config,
+            tp_size=tp_size,
+            prefix=f"{prefix}.experts",
+            custom_routing_function=self.custom_routing_function,
+        )
+
         if hasattr(config, "num_shared_experts") and config.num_shared_experts > 0:
             self.shared_experts = Cohere2MoeMLP(
                 config=config,
                 intermediate_size=config.intermediate_size * config.num_shared_experts,
                 quant_config=quant_config,
+                reduce_results=self.experts.runner._fused_output_is_reduced,
                 prefix=f"{prefix}.shared_experts",
             )
             self.shared_expert_combination_strategy = getattr(
@@ -302,29 +317,19 @@ class Cohere2Moe(nn.Module):
             self.shared_experts = None
             self.shared_expert_combination_strategy = None
 
-        self.experts = FusedMoE(
-            num_experts=config.num_experts,
-            top_k=config.num_experts_per_tok,
-            hidden_size=config.hidden_size,
-            intermediate_size=config.intermediate_size,
-            params_dtype=params_dtype,
-            renormalize=getattr(config, "norm_topk_prob", True),
-            quant_config=quant_config,
-            tp_size=tp_size,
-            prefix=f"{prefix}.experts",
-            custom_routing_function=self.custom_routing_function,
-            shared_experts=self.shared_experts,
-        )
-
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
         orig_shape = hidden_states.shape
         hidden_states = hidden_states.view(-1, self.hidden_size)
+        # FusedMoE may modify hidden_states, so run shared experts first.
+        if self.shared_experts is not None:
+            shared_output = self.shared_experts(hidden_states)
         router_logits, _ = self.gate(hidden_states)
-        # FusedMoE handles shared expert overlap internally and returns
-        # shared_output + routed_output when shared_experts is set.
         final_hidden_states = self.experts(hidden_states, router_logits)
-        if self.shared_expert_combination_strategy == "average":
-            final_hidden_states = final_hidden_states / 2
+        if self.shared_experts is not None:
+            if self.shared_expert_combination_strategy == "average":
+                final_hidden_states = (final_hidden_states + shared_output) / 2
+            else:
+                final_hidden_states = final_hidden_states + shared_output
         return final_hidden_states.view(orig_shape)
 
 
