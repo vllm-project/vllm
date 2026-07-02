@@ -612,17 +612,16 @@ class ParserEngine(Parser):
         end_id = self._reasoning_end_token_id
         if start_id is None or end_id is None:
             return 0
+        # Output may begin mid-reasoning when <think> is pre-filled in the
+        # prompt (Qwen3.5 / *-Thinking), so seed from the initial state.
+        in_reasoning = self.parser_engine_config.initial_state == ParserState.REASONING
         count = 0
-        depth = 0
         for token_id in token_ids:
             if token_id == start_id:
-                depth += 1
-                continue
-            if token_id == end_id:
-                if depth > 0:
-                    depth -= 1
-                continue
-            if depth > 0:
+                in_reasoning = True
+            elif token_id == end_id:
+                in_reasoning = False
+            elif in_reasoning:
                 count += 1
         return count
 

@@ -581,3 +581,23 @@ class TestThinkingDisabled:
         reasoning, content = p.extract_reasoning("The answer is 42.", None)
         assert reasoning is None
         assert content == "The answer is 42."
+
+
+class TestCountReasoningTokens:
+    def test_span_between_think_tags(self, parser):
+        ids = [_THINK_START_ID, _TEXT_ID, _TEXT_ID, _THINK_END_ID, _TEXT_ID]
+        assert parser.count_reasoning_tokens(ids) == 2
+
+    def test_think_start_in_prompt(self, parser):
+        """Qwen3.5 / *-Thinking pre-fill ``<think>`` in the prompt, so the
+        output is reasoning then ``</think>`` then content, with no ``<think>``
+        token. The reasoning tokens before ``</think>`` must still be counted."""
+        ids = [_TEXT_ID, _TEXT_ID, _TEXT_ID, _THINK_END_ID, _TEXT_ID, _TEXT_ID]
+        assert parser.count_reasoning_tokens(ids) == 3
+
+    def test_thinking_disabled_counts_zero(self, mock_tokenizer):
+        p = Qwen3Parser(
+            mock_tokenizer,
+            chat_template_kwargs={"enable_thinking": False},
+        )
+        assert p.count_reasoning_tokens([_TEXT_ID, _TEXT_ID]) == 0
