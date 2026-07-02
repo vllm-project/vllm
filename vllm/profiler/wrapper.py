@@ -215,7 +215,12 @@ class TorchProfilerWrapper(WorkerProfiler):
                     profiler_config.active_iterations,
                 )
 
-        self.profiler = torch.profiler.profile(
+        # torch.profiler.profile is a one-shot object: its schedule and
+        # internal step counter are consumed after a single start()/stop()
+        # cycle and never reset. Caching it here would make every profiling
+        # round after the first a silent no-op, so keep the constructor kwargs
+        # and build a fresh profiler in _start() each round (see issue #45987).
+        self._profiler_kwargs = dict(
             activities=[TorchProfilerActivityMap[activity] for activity in activities],
             schedule=profiler_schedule,
             record_shapes=profiler_config.torch_profiler_record_shapes,
@@ -224,6 +229,7 @@ class TorchProfilerWrapper(WorkerProfiler):
             with_flops=profiler_config.torch_profiler_with_flops,
             on_trace_ready=trace_handler,
         )
+        self.profiler: torch.profiler.profile | None = None
 
         # Track if we're using a schedule (need to call step())
         self._uses_schedule = profiler_schedule is not None
@@ -231,10 +237,11 @@ class TorchProfilerWrapper(WorkerProfiler):
         # Subtract 1 because profiler.start() already consumes step 0
         # (WAIT or WARMUP), so only wait + warmup - 1 non-active steps
         # remain to be advanced through via profiler.step() calls.
-        self._warmup_steps_remaining = max(
+        self._initial_warmup_steps_remaining = max(
             profiler_config.wait_iterations + profiler_config.warmup_iterations - 1,
             0,
         )
+        self._warmup_steps_remaining = self._initial_warmup_steps_remaining
 
     def _build_profiler_table(
         self,
@@ -260,6 +267,10 @@ class TorchProfilerWrapper(WorkerProfiler):
 
     @override
     def _start(self) -> None:
+        # Rebuild the one-shot torch profiler each round so that repeated
+        # start_profile/stop_profile cycles keep writing traces (#45987).
+        self.profiler = torch.profiler.profile(**self._profiler_kwargs)
+        self._warmup_steps_remaining = self._initial_warmup_steps_remaining
         self.profiler.start()
 
     @override
