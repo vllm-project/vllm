@@ -1035,6 +1035,54 @@ class TestExtractToolCallsStreaming:
         content = "".join(d.content for d in deltas if d.content is not None)
         assert content == full_text
 
+    def test_no_whitespace_content_before_tool_call(self, parser):
+        """Whitespace immediately preceding the start token must be
+        suppressed (regression for downstream routers that reject
+        ``content`` deltas in a tool-calls response)."""
+        full_text = "\n\n" + build_tool_call("fn", {"k": "v"})
+        deltas = self._stream(parser, full_text)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert content == ""
+        # The tool-call payload itself must still parse correctly.
+        assert json.loads(self._reconstruct_args(deltas)) == {"k": "v"}
+
+    def test_no_whitespace_content_after_tool_call(self, parser):
+        """Whitespace following the end token must not be emitted as a
+        bare ``content`` delta after a tool call has been streamed."""
+        full_text = build_tool_call("fn", {"k": "v"}) + "\n"
+        deltas = self._stream(parser, full_text)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert content == ""
+        assert json.loads(self._reconstruct_args(deltas)) == {"k": "v"}
+
+    def test_no_whitespace_content_around_tool_call_chunked(self, parser):
+        """Same suppression must hold when the start/end tokens are
+        split across chunks."""
+        full_text = "\n\n" + build_tool_call("fn", {"k": "v"}) + "\n"
+        deltas = self._stream_chunked(parser, full_text, chunk_size=5)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert content == ""
+        assert json.loads(self._reconstruct_args(deltas)) == {"k": "v"}
+
+    def test_tool_calls_chunk_has_no_content(self, parser):
+        """No DeltaMessage may contain both ``tool_calls`` and a
+        whitespace-only ``content``; the OpenAI streaming contract
+        requires ``content`` to be ``None`` in tool-calls chunks."""
+        full_text = "\n\n" + build_tool_call("fn", {"k": "v"}) + "\n"
+        deltas = self._stream(parser, full_text)
+        for d in deltas:
+            if d.tool_calls:
+                assert d.content is None or d.content.strip() != ""
+
+    def test_real_text_before_tool_call_still_streamed(self, parser):
+        """Whitespace suppression must not swallow legitimate text
+        content with surrounding whitespace before a tool call."""
+        full_text = "Sure! \n" + build_tool_call("fn", {"k": "v"})
+        deltas = self._stream(parser, full_text)
+        content = "".join(d.content for d in deltas if d.content is not None)
+        assert content == "Sure! \n"
+        assert json.loads(self._reconstruct_args(deltas)) == {"k": "v"}
+
     def test_object_and_array_params_streaming(self):
         """Streaming: object/array params must be JSON-parsed."""
         tool = ChatCompletionToolsParam(

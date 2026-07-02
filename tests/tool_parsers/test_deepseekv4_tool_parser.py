@@ -171,6 +171,31 @@ def test_streaming_extracts_complete_invokes():
     assert json.loads(reconstruct_args(deltas)) == {"query": "deepseek v4"}
 
 
+def test_streaming_no_whitespace_content_around_tool_call():
+    """Whitespace surrounding the tool-calls block must not be emitted
+    as ``content`` deltas. Regression for downstream routers (e.g.
+    claude-code-router) that reject mixed text/tool_use blocks with
+    "Content block is not a text block".
+
+    DeepSeek V4 inherits its streaming logic from V3.2; this test
+    asserts the inherited fix applies to V4 as well.
+    """
+    parser = make_parser()
+    full_text = "\n\n" + build_tool_call("fn", {"k": "v"}) + "\n"
+
+    deltas = stream(parser, full_text, chunk_size=5)
+    content = "".join(d.content for d in deltas if d.content is not None)
+
+    assert content == ""
+    assert json.loads(reconstruct_args(deltas)) == {"k": "v"}
+    # No chunk may carry tool_calls together with a whitespace-only
+    # ``content`` field — OpenAI's streaming contract requires
+    # ``content=None`` in tool-calls chunks.
+    for delta in deltas:
+        if delta.tool_calls:
+            assert delta.content is None or delta.content.strip() != ""
+
+
 def test_streaming_emits_incremental_argument_chunks():
     tool = ChatCompletionToolsParam(
         function=FunctionDefinition(
