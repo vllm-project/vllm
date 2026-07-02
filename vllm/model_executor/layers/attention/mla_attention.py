@@ -1251,6 +1251,7 @@ class MLACommonPrefillMetadata:
         # New for MLA (compared to FlashAttention)
         # For handling chunked prefill
         cu_seq_lens: torch.Tensor
+        cu_seq_lens_cpu: torch.Tensor
         starts: torch.Tensor
         seq_tot: list[int]
         max_seq_lens: list[int]
@@ -1270,6 +1271,7 @@ class MLACommonPrefillMetadata:
 
     block_table: torch.Tensor
     query_start_loc: torch.Tensor
+    query_start_loc_cpu: torch.Tensor
     max_query_len: int
     chunked_context: ChunkedContextMetadata | None = None
     q_data_type: torch.dtype | None = None
@@ -1370,27 +1372,29 @@ def get_mla_dims(model_config: ModelConfig) -> MLADims:
 
 
 @functools.cache
-def backend_supports_prefill_query_quantization() -> bool:
-    """Check if the selected MLA prefill backend supports query quantization.
+def backend_supports_prefill_query_quantization(
+    backend_cls: type[MLAPrefillBackend],
+) -> bool:
+    """Check if the given MLA prefill backend supports query quantization.
 
     Currently supported backends:
-    - FlashInfer
-    - TRT-LLM Ragged
+    - FlashInfer (GB200)
+    - TRT-LLM Ragged (GB200)
+    - Tokenspeed MLA (GB200)
+    - AITER ASM (gfx950, kernel requires FP8 Q)
 
     Not supported:
     - FlashAttention (FA3/FA4)
     - Non-GB200 devices (FP8 prefill requires device capability 100)
     """
-    # FP8 prefill query quantization requires GB200 (device capability 100)
+    if backend_cls.requires_fp8_query_quantization:
+        return True
+
+    # FP8 prefill query quantization on CUDA requires GB200 (device capability 100)
     # for the necessary FP8 kernels at the moment.
     if not current_platform.is_device_capability_family(100):
         return False
 
-    from vllm.config import get_current_vllm_config
-    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
-
-    vllm_config = get_current_vllm_config()
-    backend_cls = get_mla_prefill_backend(vllm_config)
     return backend_cls.get_name() in (
         "FLASHINFER",
         "TRTLLM_RAGGED",
@@ -1457,14 +1461,46 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
     ) -> torch.dtype:
         """
         Determine the query data type for prefill queries.
-        Return FP8 dtype if cache is FP8 and prefill query quantization
-        is enabled, else model dtype.
+        Return FP8 dtype if either
+        1. cache is FP8 and prefill query quantization is enabled, or
+        2. the backend requires FP8 Q.
+        Otherwise return model dtype.
         """
-        use_fp8 = (
-            is_quantized_kv_cache(vllm_config.cache_config.cache_dtype)
-            and vllm_config.attention_config.use_prefill_query_quantization
-            and backend_supports_prefill_query_quantization()
+        is_fp8_kv = is_quantized_kv_cache(vllm_config.cache_config.cache_dtype)
+        backend_cls = None
+        if is_fp8_kv:
+            from vllm.v1.attention.backends.mla.prefill import (
+                get_mla_prefill_backend,
+            )
+
+            backend_cls = get_mla_prefill_backend(vllm_config)
+
+        backend_supports_fp8_q = (
+            backend_cls is not None
+            and backend_supports_prefill_query_quantization(backend_cls)
         )
+
+        # 1. fp8 if user opts in
+        use_fp8 = (
+            vllm_config.attention_config.use_prefill_query_quantization
+            and backend_supports_fp8_q
+        )
+
+        # 2. fp8 if backend requires it
+        if (
+            not use_fp8
+            and backend_cls is not None
+            and backend_cls.requires_fp8_query_quantization
+        ):
+            use_fp8 = True
+            logger.info_once(
+                "FP8 prefill attention auto-enabled: %s backend "
+                "requires FP8 Q (use_prefill_query_quantization=%s, "
+                "cache_dtype=%s).",
+                backend_cls.get_name(),
+                vllm_config.attention_config.use_prefill_query_quantization,
+                vllm_config.cache_config.cache_dtype,
+            )
 
         if use_fp8:
             fp8_dtype = current_platform.fp8_dtype()
@@ -1478,10 +1514,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 " backend is compatible with FP8 attention.",
             )
             return model_dtype
-        elif (
-            is_quantized_kv_cache(vllm_config.cache_config.cache_dtype)
-            and backend_supports_prefill_query_quantization()
-        ):
+        elif backend_supports_fp8_q:
             logger.warning_once(
                 "FP8 KV cache is enabled but prefill queries are not "
                 "quantized to FP8. For long-context workloads (ISL >= 4K), "
@@ -1813,6 +1846,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 if self.dcp_world_size > 1:
                     chunked_context_metadata = _ChunkedMetadata(
                         cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
+                        cu_seq_lens_cpu=cu_seq_lens_cpu,
                         starts=local_chunk_starts.to(device, non_blocking=True),
                         seq_tot=padded_local_chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
@@ -1837,6 +1871,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
                 else:
                     chunked_context_metadata = _ChunkedMetadata(
                         cu_seq_lens=cu_seq_lens_cpu.to(device, non_blocking=True),
+                        cu_seq_lens_cpu=cu_seq_lens_cpu,
                         starts=chunk_starts.to(device, non_blocking=True),
                         seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
                         max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
@@ -1857,6 +1892,7 @@ class MLACommonMetadataBuilder(AttentionMetadataBuilder[M]):
             prefill_metadata = MLACommonPrefillMetadata(
                 block_table=block_table_tensor[reqs_start:, ...],
                 query_start_loc=prefill_query_start_loc,
+                query_start_loc_cpu=prefill_query_start_loc_cpu,
                 max_query_len=max_query_len,
                 chunked_context=chunked_context_metadata,
                 output_dtype=self.model_config.dtype,
@@ -2154,7 +2190,15 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             if (
                 use_fp8_prefill or _kv_b_proj_w_dtype != current_platform.fp8_dtype()
             ) and _kv_b_proj_w_dtype != torch.uint8:
-                kv_c_normed = kv_c_normed.to(self.kv_b_proj.weight.dtype)
+                input_dtype = _kv_b_proj_w_dtype
+                # ROCm BlockScaledMM quantizes input internally, so cast to model dtype
+                if (
+                    current_platform.is_rocm()
+                    and input_dtype == current_platform.fp8_dtype()
+                ):
+                    assert prefill_metadata.output_dtype is not None
+                    input_dtype = prefill_metadata.output_dtype
+                kv_c_normed = kv_c_normed.to(input_dtype)
 
             k_pe = workspace[:toks][..., self.kv_lora_rank :].unsqueeze(1)
             kv_nope = self.kv_b_proj(kv_c_normed)[0].view(

@@ -79,7 +79,15 @@ PREFILL_BACKENDS_TO_TEST = [
     MLAPrefillBackendEnum.FLASHINFER,
     MLAPrefillBackendEnum.TRTLLM_RAGGED,
     MLAPrefillBackendEnum.TOKENSPEED_MLA,
+    MLAPrefillBackendEnum.AITER_ASM,
 ]
+
+# Remove AITER_ASM if backend not available (e.g. not on gfx950)
+try:
+    if not MLAPrefillBackendEnum.AITER_ASM.get_class().is_available():
+        PREFILL_BACKENDS_TO_TEST.remove(MLAPrefillBackendEnum.AITER_ASM)
+except ImportError:
+    PREFILL_BACKENDS_TO_TEST.remove(MLAPrefillBackendEnum.AITER_ASM)
 
 
 SPEC_DECODE_BACKENDS = []
@@ -996,6 +1004,7 @@ def test_backend_correctness(
                     qk_rope_head_dim=64,
                     v_head_dim=128,
                 ),
+                cache_dtype=kv_cache_dtype,
             ),
         )
     except ImportError:
@@ -1005,6 +1014,13 @@ def test_backend_correctness(
             f"Prefill backend {prefill_backend.name} unavailable: "
             f"{prefill_invalid_reasons}"
         )
+
+    # AITER_ASM MLA prefill backend currently hardcodes q/k/v dequant scales
+    # to 1.0.
+    if prefill_backend == MLAPrefillBackendEnum.AITER_ASM and (
+        q_scale != 1.0 or k_scale != 1.0
+    ):
+        pytest.skip("AITER_ASM MLA prefill backend only supports q_scale==k_scale==1.0")
 
     batch_spec = BATCH_SPECS[batch_spec_name]
     is_spec_decode_test = batch_spec_name.startswith("spec_decode")

@@ -25,6 +25,29 @@ def clear_cache():
     _auto_select_mla_prefill_backend.cache_clear()
 
 
+GFX950 = DeviceCapability(major=9, minor=5)
+HOPPER = DeviceCapability(major=9, minor=0)
+
+# DeepSeek-R1 MLA head dimensions, which AITER_ASM supports.
+_R1_DIMS = MLADimensions(qk_nope_head_dim=128, qk_rope_head_dim=64, v_head_dim=128)
+_NON_R1_DIMS = MLADimensions(qk_nope_head_dim=192, qk_rope_head_dim=64, v_head_dim=128)
+
+
+def _aiter_asm_class():
+    try:
+        return MLAPrefillBackendEnum.AITER_ASM.get_class()
+    except ImportError:
+        return None
+
+
+@pytest.fixture
+def aiter_asm_cls():
+    cls = _aiter_asm_class()
+    if cls is None:
+        pytest.skip("AITER_ASM backend not importable")
+    return cls
+
+
 def _make_mock_model_config(
     qk_nope_head_dim: int = 128,
     qk_rope_head_dim: int = 64,
@@ -425,3 +448,181 @@ class TestMLAPrefillBackendConfig:
             mla_prefill_backend=MLAPrefillBackendEnum.TRTLLM_RAGGED,
         )
         assert config.mla_prefill_backend == MLAPrefillBackendEnum.TRTLLM_RAGGED
+
+
+class TestAiterAsmValidation:
+    """AITER_ASM-specific validate_configuration contract (gfx950 FP8 only)."""
+
+    @pytest.mark.parametrize(
+        ("capability", "cache_dtype", "is_r1_compatible", "expect_valid", "reason"),
+        [
+            (GFX950, "fp8", True, True, None),
+            (GFX950, "auto", True, False, "fp8"),
+            (HOPPER, "fp8", True, False, "compute capability"),
+            (GFX950, "fp8", False, False, "MLA dimensions"),
+        ],
+    )
+    def test_validate_configuration(
+        self,
+        aiter_asm_cls,
+        capability,
+        cache_dtype,
+        is_r1_compatible,
+        expect_valid,
+        reason,
+    ):
+        cls = aiter_asm_cls
+        with patch.object(cls, "is_available", return_value=True):
+            reasons = cls.validate_configuration(
+                capability,
+                MLAPrefillSelectorConfig(
+                    dtype=torch.bfloat16,
+                    mla_dimensions=_R1_DIMS if is_r1_compatible else _NON_R1_DIMS,
+                    cache_dtype=cache_dtype,
+                ),
+            )
+        if expect_valid:
+            assert reasons == []
+        else:
+            assert any(reason.lower() in r.lower() for r in reasons)
+
+
+class TestAiterAsmIsAvailable:
+    """is_available gates on the aiter#3606 chunked-prefill final_lse fix.
+
+    The fix shipped the `max_kvlen` kwarg on get_ps_metadata_info_v1 alongside
+    the kernel-side LSE correction, so the kwarg's presence is the marker that a
+    fixed aiter is installed.
+    """
+
+    def _patch_aiter(self, monkeypatch, info_fn):
+        """Install a fake `aiter` module exposing the four required symbols."""
+        import sys
+
+        fake_aiter = MagicMock()
+        fake_aiter.get_ps_metadata_info_v1 = info_fn
+        monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
+
+    def test_available_when_max_kvlen_present(self, aiter_asm_cls, monkeypatch):
+        def info_fn(
+            batch_size,
+            num_head_k,
+            max_qlen,
+            qlen_granularity=256,
+            max_kvlen=None,
+            kvlen_granularity=128,
+        ):
+            return None
+
+        self._patch_aiter(monkeypatch, info_fn)
+        with patch("vllm.platforms.rocm.on_gfx950", return_value=True):
+            assert aiter_asm_cls.is_available()
+
+    def test_unavailable_when_max_kvlen_absent(self, aiter_asm_cls, monkeypatch):
+        # Pre-fix aiter: no max_kvlen kwarg.
+        def info_fn(batch_size, num_head_k, max_qlen, qlen_granularity=256):
+            return None
+
+        self._patch_aiter(monkeypatch, info_fn)
+        with patch("vllm.platforms.rocm.on_gfx950", return_value=True):
+            assert not aiter_asm_cls.is_available()
+
+    def test_unavailable_when_not_gfx950(self, aiter_asm_cls, monkeypatch):
+        def info_fn(
+            batch_size,
+            num_head_k,
+            max_qlen,
+            qlen_granularity=256,
+            max_kvlen=None,
+            kvlen_granularity=128,
+        ):
+            return None
+
+        self._patch_aiter(monkeypatch, info_fn)
+        with patch("vllm.platforms.rocm.on_gfx950", return_value=False):
+            assert not aiter_asm_cls.is_available()
+
+
+class TestAsmPrefillBackendActiveGate:
+    """`_asm_prefill_backend_active` gates the in-impl FP8 PS path.
+
+    The AITER MLA builder/impl keep their exact main-branch FP8 PS behavior
+    until the AITER ASM prefill backend is the active prefill backend (which
+    only happens once aiter is upgraded past ROCm/aiter#3606). When it is
+    active, the in-impl path is dead and must be disabled to avoid its
+    multi-TB workspace reservation OOM at startup.
+    """
+
+    def _gate_fn(self):
+        try:
+            from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
+                _asm_prefill_backend_active,
+            )
+        except ImportError:
+            pytest.skip("rocm_aiter_mla not importable")
+        return _asm_prefill_backend_active
+
+    def test_active_when_asm_is_selected(self, aiter_asm_cls):
+        gate = self._gate_fn()
+        vllm_config = _make_vllm_config()
+        with patch(
+            "vllm.v1.attention.backends.mla.prefill.selector.get_mla_prefill_backend",
+            return_value=aiter_asm_cls,
+        ):
+            assert gate(vllm_config) is True
+
+    def test_inactive_when_other_backend_selected(self):
+        gate = self._gate_fn()
+        try:
+            fa_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
+        except ImportError:
+            pytest.skip("FLASH_ATTN backend not importable")
+        vllm_config = _make_vllm_config()
+        with patch(
+            "vllm.v1.attention.backends.mla.prefill.selector.get_mla_prefill_backend",
+            return_value=fa_cls,
+        ):
+            assert gate(vllm_config) is False
+
+    def test_inactive_when_selection_raises(self):
+        gate = self._gate_fn()
+        vllm_config = _make_vllm_config()
+        with patch(
+            "vllm.v1.attention.backends.mla.prefill.selector.get_mla_prefill_backend",
+            side_effect=ValueError("no valid backend"),
+        ):
+            # Any resolution failure must fall back to main-branch behavior.
+            assert gate(vllm_config) is False
+
+
+class TestAiterAsmSelectorPriority:
+    """On gfx950, AITER_ASM should win over FLASH_ATTN when FP8 KV is on."""
+
+    def test_aiter_asm_wins_on_gfx950_fp8(self, aiter_asm_cls):
+        cls = aiter_asm_cls
+        cfg = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=_R1_DIMS,
+            cache_dtype="fp8",
+        )
+        with patch.object(cls, "is_available", return_value=True):
+            selected = _auto_select_mla_prefill_backend(GFX950, cfg)
+            assert selected.get_name() == "AITER_ASM"
+
+    def test_falls_through_to_flash_attn_when_not_fp8(self, aiter_asm_cls):
+        cls = aiter_asm_cls
+        try:
+            fa_cls = MLAPrefillBackendEnum.FLASH_ATTN.get_class()
+        except ImportError:
+            pytest.skip("FLASH_ATTN backend not importable")
+        cfg = MLAPrefillSelectorConfig(
+            dtype=torch.bfloat16,
+            mla_dimensions=_R1_DIMS,
+            cache_dtype="auto",
+        )
+        with (
+            patch.object(cls, "is_available", return_value=True),
+            patch.object(fa_cls, "validate_configuration", return_value=[]),
+        ):
+            selected = _auto_select_mla_prefill_backend(GFX950, cfg)
+            assert selected.get_name() == "FLASH_ATTN"
