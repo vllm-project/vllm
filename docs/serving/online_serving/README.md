@@ -84,7 +84,8 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - `/version` - Version information
 - `/load` - Server load metrics
 - `/v1/models` - List available models
-- `/health` - Health check
+- `/health` - Liveness check
+- `/health/ready` - Readiness check
 
 ### Metrics APIs
 

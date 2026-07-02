@@ -27,13 +27,12 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
-from vllm.v1.engine import EngineCoreReadyResponse, EngineCoreRequest
+from vllm.v1.engine import EngineCoreRequest
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (
     AsyncMPClient,
     DPLBAsyncMPClient,
     EngineCoreClient,
-    MPClient,
     SyncMPClient,
 )
 from vllm.v1.engine.utils import CoreEngineProcManager
@@ -261,6 +260,24 @@ def test_apply_ready_response_syncs_block_size():
     )
     client._apply_ready_response(payload)
     assert client.vllm_config.cache_config.block_size == 1056
+
+
+@pytest.mark.asyncio
+async def test_async_mp_client_check_health_timeout(monkeypatch: pytest.MonkeyPatch):
+    from vllm.v1.engine.exceptions import EngineDeadError
+
+    client = object.__new__(AsyncMPClient)
+
+    async def never_returns(*_args, **_kwargs):
+        await asyncio.Future()
+
+    client.call_utility_async = never_returns  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        "vllm.v1.engine.core_client.envs.VLLM_HEALTH_CHECK_TIMEOUT", 1
+    )
+
+    with pytest.raises(EngineDeadError, match="did not respond to health ping"):
+        await client.check_health_async()
 
 
 def loop_until_done(client: EngineCoreClient, outputs: dict):

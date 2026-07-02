@@ -150,7 +150,7 @@ readinessProbe:
    # -- Configuration of the Kubelet http request on the server
   httpGet:
     # -- Path to access on the HTTP server
-    path: /health
+    path: /health/ready
     # -- Name or number of the port to access on the container, on which the server is listening
     port: 8000
 
