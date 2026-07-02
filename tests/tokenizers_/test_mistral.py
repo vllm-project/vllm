@@ -188,6 +188,40 @@ class TestMistralTokenizer:
         ):
             mistral_tokenizer("Hello world !", "invalid pair")
 
+    def test_transformers_tokenizer_with_special_tokens(
+        self, mistral_tokenizer: MistralTokenizer
+    ):
+        backend = mistral_tokenizer.transformers_tokenizer_with_special_tokens
+        plain_backend = mistral_tokenizer.transformers_tokenizer
+
+        hello_ids = plain_backend.encode("Hello world !", add_special_tokens=False)
+
+        # Plain text is tokenized identically
+        assert backend.encode("Hello world !", add_special_tokens=False) == hello_ids
+
+        # Special tokens in text are encoded to their token ids,
+        # which `MistralCommonBackend` deliberately never does
+        assert backend.encode("[INST]", add_special_tokens=False) == [3]
+        assert plain_backend.encode("[INST]", add_special_tokens=False) != [3]
+
+        # Mixed text and special tokens
+        assert backend.encode(
+            "[INST]Hello world ![/INST]", add_special_tokens=False
+        ) == [3, *hello_ids, 4]
+        assert backend.encode("[INST]Hello world ![/INST]") == [1, 3, *hello_ids, 4]
+        assert backend("[INST]Hello world ![/INST]", add_special_tokens=False)[
+            "input_ids"
+        ] == [3, *hello_ids, 4]
+        assert backend.tokenize("[INST]Hello world !") == [
+            "[INST]",
+            *plain_backend.tokenize("Hello world !"),
+        ]
+
+        # The user-facing tokenizer is unaffected
+        assert mistral_tokenizer.encode(
+            "[INST]", add_special_tokens=False
+        ) == plain_backend.encode("[INST]", add_special_tokens=False)
+
     @pytest.mark.parametrize(
         "openai_request,add_generation_prompt,continue_final_message,expected_output,decoded_expected_output",
         [
