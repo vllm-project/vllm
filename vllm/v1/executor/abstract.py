@@ -115,12 +115,20 @@ class Executor(ABC):
     def _init_executor(self) -> None:
         raise NotImplementedError
 
-    def initialize_from_config(self, kv_cache_configs: list[KVCacheConfig]) -> None:
+    def initialize_from_config(
+        self,
+        kv_cache_configs: list[KVCacheConfig],
+        extensible: bool = False,
+    ) -> list[CompilationTimes]:
         """
         Initialize the KV caches and begin the model execution loop of the
         underlying workers.
         """
-        self.collective_rpc("initialize_from_config", args=(kv_cache_configs,))
+        self.collective_rpc(
+            "initialize_from_config",
+            args=(kv_cache_configs,),
+            kwargs={"extensible": extensible} if extensible else None,
+        )
         compilation_times: list[CompilationTimes] = self.collective_rpc(
             "compile_or_warm_up_model"
         )
@@ -135,6 +143,7 @@ class Executor(ABC):
             self.vllm_config.compilation_config.encoder_compilation_time = max(
                 t.encoder for t in compilation_times
             )
+        return compilation_times
 
     def register_failure_callback(self, callback: FailureCallback):  # noqa: B027
         """
@@ -148,6 +157,12 @@ class Executor(ABC):
 
     def get_kv_cache_specs(self) -> list[dict[str, KVCacheSpec]]:
         return self.collective_rpc("get_kv_cache_spec")
+
+    def supports_extensible_kv_cache(self) -> list[bool]:
+        return self.collective_rpc("supports_extensible_kv_cache")
+
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        self.collective_rpc("extend_kv_cache", args=(num_blocks,))
 
     @overload
     def collective_rpc(

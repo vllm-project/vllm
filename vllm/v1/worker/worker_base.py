@@ -34,6 +34,7 @@ _R = TypeVar("_R")
 class CompilationTimes(NamedTuple):
     language_model: float
     encoder: float
+    cuda_graph: int = 0
 
 
 class WorkerBase:
@@ -99,11 +100,19 @@ class WorkerBase:
         """Get specifications for KV cache implementation."""
         raise NotImplementedError
 
+    def supports_extensible_kv_cache(self) -> bool:
+        return False
+
+    def extend_kv_cache(self, num_blocks: int) -> None:
+        raise RuntimeError(
+            f"{self.__class__.__name__} does not support extensible KV cache."
+        )
+
     def compile_or_warm_up_model(self) -> CompilationTimes:
         """Prepare model for execution through compilation/warmup.
 
         Returns:
-            Compilation times (language_model, encoder) in seconds.
+            Compilation times in seconds and CUDA graph memory in bytes.
         """
         raise NotImplementedError
 
@@ -318,11 +327,20 @@ class WorkerWrapperBase:
             # To make vLLM config available during worker initialization
             self.worker = worker_class(**kwargs)
 
-    def initialize_from_config(self, kv_cache_configs: list[Any]) -> None:
+    def initialize_from_config(
+        self,
+        kv_cache_configs: list[Any],
+        extensible: bool = False,
+    ) -> None:
         kv_cache_config = kv_cache_configs[self.global_rank]
         assert self.vllm_config is not None
         with set_current_vllm_config(self.vllm_config):
-            self.worker.initialize_from_config(kv_cache_config)  # type: ignore
+            if extensible:
+                self.worker.initialize_from_config(  # type: ignore
+                    kv_cache_config, extensible=True
+                )
+            else:
+                self.worker.initialize_from_config(kv_cache_config)  # type: ignore
 
     def init_device(self):
         assert self.vllm_config is not None
