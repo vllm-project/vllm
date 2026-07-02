@@ -668,9 +668,13 @@ __global__ void cp_gather_indexer_k_quant_cache_kernel(
   const int64_t src_inblock_offset = src_block_offset + cache_inblock_offset;
   const int64_t dst_inblock_offset = token_idx * token_stride + head_idx;
 
-  reinterpret_cast<float4*>(dst_k)[dst_inblock_offset / VEC_SIZE] =
-      reinterpret_cast<const float4*>(kv_cache)[src_inblock_offset / VEC_SIZE];
-  ;
+  // FIX(gfx942 >2^18 cliff): scalar byte copy instead of float4. The indexer
+  // cache block stride (132B) is not 16-byte aligned, so float4 vectorized
+  // loads corrupt the gathered K past ~262144 tokens. The correct Triton
+  // kernel reads element-wise; mirror that here.
+  for (int _b = 0; _b < VEC_SIZE; _b++) {
+    dst_k[dst_inblock_offset + _b] = kv_cache[src_inblock_offset + _b];
+  }
   if (threadIdx.x == 0) {
     const int64_t src_scale_offset =
         src_block_offset + cache_block_size * head_dim +
