@@ -65,6 +65,7 @@ from vllm.entrypoints.openai.responses.protocol import (
     OutputTokensDetails,
     ResponseCompletedEvent,
     ResponseCreatedEvent,
+    ResponseIncompleteEvent,
     ResponseInProgressEvent,
     ResponseInputOutputItem,
     ResponseInputOutputMessage,
@@ -1259,7 +1260,10 @@ class OpenAIServingResponses(OpenAIServing):
             while current_index < len(event_deque):
                 event = event_deque[current_index]
                 yield event
-                if getattr(event, "type", "unknown") == "response.completed":
+                if getattr(event, "type", "unknown") in (
+                    "response.completed",
+                    "response.incomplete",
+                ):
                     return
                 current_index += 1
 
@@ -1534,10 +1538,20 @@ class OpenAIServingResponses(OpenAIServing):
                 request_metadata,
                 created_time=created_time,
             )
-            yield _increment_sequence_number_and_return(
-                ResponseCompletedEvent(
-                    type="response.completed",
-                    sequence_number=-1,
-                    response=final_response,
+            assert isinstance(final_response, ResponsesResponse)
+            if final_response.status == "incomplete":
+                yield _increment_sequence_number_and_return(
+                    ResponseIncompleteEvent(
+                        type="response.incomplete",
+                        sequence_number=-1,
+                        response=final_response,
+                    )
                 )
-            )
+            else:
+                yield _increment_sequence_number_and_return(
+                    ResponseCompletedEvent(
+                        type="response.completed",
+                        sequence_number=-1,
+                        response=final_response,
+                    )
+                )

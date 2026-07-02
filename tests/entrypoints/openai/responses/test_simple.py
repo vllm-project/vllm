@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import asyncio
+
 import pytest
 import pytest_asyncio
 from openai import OpenAI
@@ -250,6 +252,72 @@ async def test_max_tokens(client: OpenAI, model_name: str):
     assert response is not None
     assert response.status == "incomplete"
     assert response.incomplete_details.reason == "max_output_tokens"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_streaming_max_tokens_terminal_event(
+    pairs_of_event_types: dict[str, str], client: OpenAI, model_name: str
+):
+    stream = await client.responses.create(
+        model=model_name,
+        input="What is the first paragraph of Moby Dick?",
+        reasoning={"effort": "low"},
+        max_output_tokens=30,
+        temperature=0.0,
+        stream=True,
+    )
+    events = [event async for event in stream]
+
+    validate_streaming_event_stack(events, pairs_of_event_types)
+
+    terminal_event = events[-1]
+    assert terminal_event.type == "response.incomplete"
+    assert terminal_event.response.status == "incomplete"
+    assert terminal_event.response.incomplete_details.reason == "max_output_tokens"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_name", [MODEL_NAME])
+async def test_background_streaming_max_tokens_terminal_event(
+    pairs_of_event_types: dict[str, str], client: OpenAI, model_name: str
+):
+    stream = await client.responses.create(
+        model=model_name,
+        input="What is the first paragraph of Moby Dick?",
+        reasoning={"effort": "low"},
+        max_output_tokens=30,
+        temperature=0.0,
+        stream=True,
+        background=True,
+    )
+    events = [event async for event in stream]
+
+    validate_streaming_event_stack(events, pairs_of_event_types)
+
+    terminal_event = events[-1]
+    assert terminal_event.type == "response.incomplete"
+    assert terminal_event.response.status == "incomplete"
+    assert terminal_event.response.incomplete_details.reason == "max_output_tokens"
+
+    response_id = events[0].response.id
+
+    async def collect_replay_events():
+        async with await client.responses.retrieve(
+            response_id=response_id,
+            stream=True,
+        ) as replay_stream:
+            return [event async for event in replay_stream]
+
+    replay_events = await asyncio.wait_for(collect_replay_events(), timeout=30)
+
+    assert replay_events == events
+    replay_terminal_event = replay_events[-1]
+    assert replay_terminal_event.type == "response.incomplete"
+    assert replay_terminal_event.response.status == "incomplete"
+    assert (
+        replay_terminal_event.response.incomplete_details.reason == "max_output_tokens"
+    )
 
 
 @pytest.mark.asyncio
