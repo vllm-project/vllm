@@ -957,9 +957,19 @@ class GPUModelRunner(
         """
         Re-initialize the KV cache and FP8 scales after waking from sleep.
         1. Zero out the KV cache tensors to remove garbage data from re-allocation.
-        2. Reset Attention layer scaling factors (_k_scale, _v_scale) to 1.0.
-          If these are left at 0.0 (default after wake_up), all KV cache values
+        2. Restore Attention layer scaling factors (_k_scale, _v_scale) to the
+          values they held before sleep.
+          The device-resident scale tensors are zeroed when the KV-cache memory
+          pool is re-allocated on wake_up; if left at 0.0, all KV cache values
           become effectively zero, causing gibberish output.
+
+          For on-the-fly fp8 KV quant the calibrated scale is simply 1.0, but
+          compression frameworks like llm-compressor bake tuned per-tensor
+          scales into the checkpoint. Those calibrated values are preserved on
+          the host in ``_k_scale_float`` / ``_v_scale_float`` (set once at weight
+          load time and never freed by the sleep allocator), so we restore from
+          them rather than hard-coding 1.0. For models with no calibrated scales
+          these host floats are already 1.0, so behaviour is unchanged.
         """
         if not is_quantized_kv_cache(self.cache_config.cache_dtype):
             return
@@ -969,32 +979,26 @@ class GPUModelRunner(
             if cache_tensor is not None:
                 cache_tensor.zero_()
 
-        k_attr_names = ("_k_scale", "k_scale")
-        v_attr_names = ("_v_scale", "v_scale")
+        # (device-tensor attr, host-float attr, default) tuples. The host float
+        # holds the calibrated value across sleep/wake; the device tensor was
+        # zeroed by the re-allocated memory pool and must be restored from it.
+        scale_specs = (
+            (("_k_scale", "k_scale"), "_k_scale_float"),
+            (("_v_scale", "v_scale"), "_v_scale_float"),
+        )
 
         attn_layers = self.compilation_config.static_forward_context
         for name, module in attn_layers.items():
             if isinstance(module, (Attention, MLAAttention)):
-                # TODO: Generally, scale is 1.0 if user uses on-the-fly fp8
-                # kvcache quant. However, to get better accuracy, compression
-                # frameworks like llm-compressors allow users to tune the
-                # scale. We may need to restore the specific calibrated scales
-                # here in the future.
-                k_scale_val, v_scale_val = 1.0, 1.0
-
-                # Processing K Scale
-                for attr in k_attr_names:
-                    if hasattr(module, attr):
-                        param = getattr(module, attr)
-                        if isinstance(param, torch.Tensor):
-                            param.fill_(k_scale_val)
-
-                # Processing V Scale
-                for attr in v_attr_names:
-                    if hasattr(module, attr):
-                        param = getattr(module, attr)
-                        if isinstance(param, torch.Tensor):
-                            param.fill_(v_scale_val)
+                for tensor_attrs, host_attr in scale_specs:
+                    # Calibrated scale preserved on the host across wake; falls
+                    # back to 1.0 for uncalibrated / on-the-fly fp8 quant.
+                    scale_val = float(getattr(module, host_attr, 1.0))
+                    for attr in tensor_attrs:
+                        if hasattr(module, attr):
+                            param = getattr(module, attr)
+                            if isinstance(param, torch.Tensor):
+                                param.fill_(scale_val)
 
     def _get_positions(self, num_tokens: Any):
         if isinstance(num_tokens, int):
