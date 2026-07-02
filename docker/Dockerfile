@@ -97,7 +97,7 @@ ARG INSTALL_KV_CONNECTORS=false
 
 #################### BASE BUILD IMAGE ####################
 # prepare basic build environment
-FROM ${BUILD_BASE_IMAGE} AS base
+FROM ${BUILD_BASE_IMAGE} AS build-base
 
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
@@ -110,7 +110,7 @@ ENV DEBIAN_FRONTEND=noninteractive
 # binary, managed Python, download cache, and /opt/venv all land under
 # /opt/uv instead of /root/.local/. Without this, the venv created at
 # build time hardlinks back to /root/.local/share/uv/python and
-# descendants of this stage (`build`, `dev`, `csrc-build`,
+# descendants of this stage (`wheel-build`, `dev`, `csrc-build`,
 # `extensions-build`) inherit a root-owned, non-root-unreadable layout.
 # See #15174, #15359, #31959. Child stages inherit these via Dockerfile
 # `ENV` unless they override them explicitly.
@@ -270,10 +270,10 @@ ENV TORCH_CUDA_ARCH_LIST=${torch_cuda_arch_list}
 
 #################### RUST BUILD IMAGE ####################
 # Build the Rust frontend (`vllm-rs`) in a dedicated stage so the main wheel
-# build stage doesn't need the rust toolchain, protoc, or the rust source.
-# This stage reuses the Python environment from base and runs in parallel with
+# wheel-build stage does not need the rust toolchain, protoc, or the rust source.
+# This stage reuses the Python environment from build-base and runs in parallel with
 # csrc-build/extensions-build.
-FROM base AS rust-build
+FROM build-base AS rust-build
 ARG BUILD_OS
 
 # Install native tools needed only for Rust/protoc builds.
@@ -298,7 +298,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --python /opt/venv/bin/python3 -r requirements/build/rust.txt
 
 # Copy only the Rust build inputs; build_rust.sh publishes artifacts needed
-# by the wheel build stage.
+# by the wheel-build stage.
 COPY rust rust
 COPY rust-toolchain.toml rust-toolchain.toml
 COPY tools/build_rust.py tools/build_rust.py
@@ -318,7 +318,7 @@ RUN --mount=type=cache,target=/root/.cargo/registry,sharing=locked \
 #################### RUST BUILD IMAGE ####################
 
 #################### CSRC BUILD IMAGE ####################
-FROM base AS csrc-build
+FROM build-base AS csrc-build
 ARG TARGETPLATFORM
 
 ARG PIP_INDEX_URL UV_INDEX_URL
@@ -331,7 +331,7 @@ ARG PYTORCH_NIGHTLY
 # Install build dependencies
 COPY requirements/build/cuda.txt requirements/build/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
-COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+COPY --from=build-base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -453,7 +453,7 @@ RUN --mount=type=cache,target=/root/.cache/ccache \
 #################### EXTENSIONS BUILD IMAGE ####################
 # Build DeepEP - runs in PARALLEL with csrc-build
 # This stage is independent and doesn't affect csrc cache
-FROM base AS extensions-build
+FROM build-base AS extensions-build
 ARG CUDA_VERSION
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
@@ -480,7 +480,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 #################### EXTENSIONS BUILD IMAGE ####################
 
 #################### WHEEL BUILD IMAGE ####################
-FROM base AS build
+FROM build-base AS wheel-build
 ARG TARGETPLATFORM
 
 ARG PIP_INDEX_URL UV_INDEX_URL
@@ -493,7 +493,7 @@ ARG PYTORCH_NIGHTLY
 # Install build dependencies
 COPY requirements/build/cuda.txt requirements/build/cuda.txt
 COPY use_existing_torch.py use_existing_torch.py
-COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+COPY --from=build-base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 
 # This timeout (in seconds) is necessary when installing some dependencies via uv since it's likely to time out
 # Reference: https://github.com/astral-sh/uv/pull/1694
@@ -578,7 +578,7 @@ RUN if [ "$RUN_WHEEL_CHECK" = "true" ]; then \
 #################### WHEEL BUILD IMAGE ####################
 
 #################### DEV IMAGE ####################
-FROM base AS dev
+FROM build-base AS dev
 
 ARG PIP_INDEX_URL UV_INDEX_URL
 ARG PIP_EXTRA_INDEX_URL UV_EXTRA_INDEX_URL
@@ -609,7 +609,7 @@ COPY requirements/test/cuda.in requirements/test/cuda.in
 COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
 COPY use_existing_torch.py use_existing_torch.py
-COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+COPY --from=build-base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing dev requirements plus torch nightly..." \
@@ -629,7 +629,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 #################### DEV IMAGE ####################
 #################### vLLM installation IMAGE ####################
 # image with vLLM installed
-FROM ${FINAL_BASE_IMAGE} AS vllm-base
+FROM ${FINAL_BASE_IMAGE} AS runtime-base
 
 ARG CUDA_VERSION
 ARG PYTHON_VERSION
@@ -836,7 +836,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         "bitsandbytes>=${BITSANDBYTES_VERSION}" "timm${TIMM_VERSION}" "runai-model-streamer[s3,gcs,azure]${RUNAI_MODEL_STREAMER_VERSION}"
 
 # ============================================================
-# VLLM INSTALLATION (depends on build stage)
+# VLLM INSTALLATION (depends on wheel-build stage)
 # ============================================================
 
 ARG PIP_INDEX_URL UV_INDEX_URL
@@ -849,13 +849,13 @@ ARG PYTORCH_NIGHTLY
 
 # Install vLLM wheel first, so that torch etc will be installed.
 # Check whether to install torch nightly instead of release for this build.
-COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+COPY --from=build-base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 # Copy only the wheel checksum (a few bytes) so a wheel change invalidates this
 # install layer. The wheel itself is bind-mounted below and never enters the
 # image. Without this the bind mount is not part of the layer cache key, so a
 # warm BuildKit agent can skip the install and ship a stale wheel.
-COPY --from=build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
-RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist \
+COPY --from=wheel-build /workspace/dist/wheel.sha256 /tmp/vllm-wheel.sha256
+RUN --mount=type=bind,from=wheel-build,src=/workspace/dist,target=/vllm-workspace/dist \
     --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
@@ -877,11 +877,11 @@ uv pip list
 # Pytorch now installs NVSHMEM, setting LD_LIBRARY_PATH
 ENV LD_LIBRARY_PATH=/usr/local/cuda/lib64:$LD_LIBRARY_PATH
 
-# Install EP kernels wheels (DeepEP) that have been built in the `build` stage.
+# Install EP kernels wheels (DeepEP) that have been built in the `wheel-build` stage.
 # As with the vLLM wheel above, copy only the checksum to bust the layer cache
 # and bind-mount the wheel for the actual install to keep it out of the image.
-COPY --from=build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
-RUN --mount=type=bind,from=build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
+COPY --from=wheel-build /tmp/ep_kernels_workspace/dist/wheels.sha256 /tmp/ep-kernels-wheels.sha256
+RUN --mount=type=bind,from=wheel-build,src=/tmp/ep_kernels_workspace/dist,target=/vllm-workspace/ep_kernels/dist \
     --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system ep_kernels/dist/*.whl --verbose \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
@@ -913,7 +913,7 @@ COPY ./vllm/collect_env.py .
 #################### TEST IMAGE ####################
 # image to run unit testing suite
 # note that this uses vllm installed by `pip`
-FROM vllm-base AS test
+FROM runtime-base AS test
 
 ADD . /vllm-workspace/
 
@@ -943,7 +943,7 @@ COPY requirements/test/cuda.in requirements/test/cuda.in
 COPY requirements/test/cuda.txt requirements/test/cuda.txt
 COPY requirements/dev.txt requirements/dev.txt
 COPY use_existing_torch.py use_existing_torch.py
-COPY --from=base /workspace/torch_lib_versions.txt torch_lib_versions.txt
+COPY --from=build-base /workspace/torch_lib_versions.txt torch_lib_versions.txt
 RUN --mount=type=cache,target=/opt/uv/cache \
     CUDA_MAJOR="${CUDA_VERSION%%.*}"; \
     if [ "$CUDA_MAJOR" -ge 12 ]; then \
@@ -990,7 +990,7 @@ RUN mv vllm src/vllm
 
 #################### OPENAI API SERVER ####################
 # base openai image with additional requirements, for any subsequent openai-style images
-FROM vllm-base AS vllm-openai-base
+FROM runtime-base AS vllm-openai-base
 ARG TARGETPLATFORM
 ARG INSTALL_KV_CONNECTORS=false
 ARG CUDA_VERSION
@@ -1081,7 +1081,7 @@ FROM vllm-openai-base AS vllm-openai
 # To run the image as non-root, either build the `vllm-openai-nonroot` target
 # below, or in a derived Dockerfile uncomment the following line and ensure
 # any additional layers chgrp-0 / chmod-g+rwX paths they write to. The `vllm`
-# user (UID 2000, GID 0) is already created in the `vllm-base` stage.
+# user (UID 2000, GID 0) is already created in the `runtime-base` stage.
 # See docs/deployment/docker.md.
 # USER vllm
 ENTRYPOINT ["vllm", "serve"]
@@ -1093,7 +1093,7 @@ ENTRYPOINT ["vllm", "serve"]
 #       -f docker/Dockerfile .
 #
 # Runtime behavior:
-#   * Default USER is `vllm` (UID 2000, GID 0) created in `vllm-base`.
+#   * Default USER is `vllm` (UID 2000, GID 0) created in `runtime-base`.
 #   * HOME is /home/vllm, pre-created group-0-writable so arbitrary UIDs in
 #     group 0 (OpenShift / `--user <uid>:0`) can also use the image.
 #   * Entrypoint wrapper handles the "UID not in /etc/passwd" case for truly
