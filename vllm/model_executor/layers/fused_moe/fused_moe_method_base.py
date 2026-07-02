@@ -160,8 +160,7 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self,
         layer: "RoutedExperts",  # type: ignore[name-defined] # noqa: F821
     ) -> None:
-        """Refresh any quant-method state that depends on the per-expert
-        ordering after EPLB has rearranged the registered Parameters.
+        """Refresh derived quant-method state after EPLB rearranges Parameters.
 
         EPLB moves registered expert Parameters in-place via P2P, but
         quant methods often hold *derived* per-expert tensors (e.g. the
