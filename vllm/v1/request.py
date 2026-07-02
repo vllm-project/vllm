@@ -190,6 +190,18 @@ class Request:
         # None entry in the queue means finished.
         self.streaming_queue: deque[StreamingUpdate | None] | None = None
 
+        # [EXPERIMENTAL] Unbounded (re-anchored) streaming; set only for realtime
+        # sliding-window models under --enable-realtime-unbounded.
+        # reanchor_stream: the RoPE clock is periodically re-anchored down so the
+        #   session never reaches max_model_len. reanchor_offset: total tokens
+        #   folded by re-anchoring (log/diagnostic only). pending_reanchor_d:
+        #   tokens owed to the worker as an R(-D) key re-rotation, carried forward
+        #   if the rebased request fails to schedule a step so it is never lost.
+        #   See Scheduler._reanchor_session.
+        self.reanchor_stream = False
+        self.reanchor_offset = 0
+        self.pending_reanchor_d = 0
+
         # If True, request should be aborted immediately after being added to
         # the scheduler so the connector's request_finished hook runs.
         self.abort_immediately = abort_immediately
