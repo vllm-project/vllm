@@ -664,12 +664,17 @@ class CudaPlatformBase(Platform):
 
     @classmethod
     def support_deep_gemm(cls) -> bool:
-        """Currently, only Hopper and Blackwell GPUs are supported."""
-        return (
-            cls.is_device_capability(90)
-            or cls.is_device_capability_family(100)
-            or cls.is_device_capability_family(120)
-        )
+        """Currently, only Hopper and Blackwell SM90/SM100 GPUs are supported.
+
+        SM120 (family-120, consumer Blackwell) is intentionally excluded: the
+        DeepGEMM SM120 MXFP4 kernels require the still-unmerged DeepGEMM PR #324,
+        and the released/pinned DeepGEMM ref aborts on SM120 with a scale-factor
+        layout assertion (`sf.size(-2) == ceil_div(mn, gran_mn)`). DSv4 on SM120
+        runs the Marlin / cutlass + sm12x DeepGEMM-fallback path instead, which
+        serves on stock deps. (#43477 enabled family-120 here; re-enable once
+        DeepGEMM #324 lands.)
+        """
+        return cls.is_device_capability(90) or cls.is_device_capability_family(100)
 
     @classmethod
     def is_integrated_gpu(cls, device_id: int = 0) -> bool:

@@ -319,6 +319,20 @@ class TestEpFilterOnSyntheticMoeWeights:
         assert "model.layers.0.input_layernorm.weight" in loaded
         assert "model.layers.0.mlp.shared_experts.gate_proj.weight" in loaded
 
+    def test_weight_name_filter_skips_dense_weights(self, synthetic_moe_files):
+        files, _ = synthetic_moe_files
+        loaded = dict(
+            safetensors_weights_iterator(
+                files,
+                False,
+                weight_name_filter=lambda name: "self_attn.q_proj" in name,
+            )
+        )
+
+        assert "model.layers.0.self_attn.q_proj.weight" not in loaded
+        assert "model.embed_tokens.weight" in loaded
+        assert "model.layers.0.mlp.shared_experts.gate_proj.weight" in loaded
+
     def test_ep2_rank1_gets_other_half(self, synthetic_moe_files):
         files, expected = synthetic_moe_files
         local_ids = compute_local_expert_ids(8, ep_size=2, ep_rank=1)

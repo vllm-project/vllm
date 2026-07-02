@@ -927,6 +927,80 @@ def test_schedule_order(enable_chunked_prefill: bool):
         assert len(scheduler_output1.scheduled_new_reqs) == 1
 
 
+def _run_request_to_completion(scheduler: Scheduler, request: Request) -> None:
+    while request.request_id in scheduler.requests:
+        scheduler_output = scheduler.schedule()
+        assert scheduler_output.num_scheduled_tokens
+        req_ids = list(scheduler_output.num_scheduled_tokens)
+        sampled_token_ids = []
+        for req_id in req_ids:
+            if (
+                req_id == request.request_id
+                and request.num_computed_tokens >= request.num_prompt_tokens
+            ):
+                sampled_token_ids.append([0])
+            else:
+                sampled_token_ids.append([])
+        scheduler.update_from_output(
+            scheduler_output,
+            ModelRunnerOutput(
+                req_ids=req_ids,
+                req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+                sampled_token_ids=sampled_token_ids,
+                logprobs=None,
+                prompt_logprobs_dict={},
+                pooler_output=[],
+            ),
+        )
+
+
+def test_prefix_cache_peek_does_not_record_stats():
+    scheduler = create_scheduler(
+        max_num_batched_tokens=100,
+        max_model_len=2048,
+        max_num_seqs=2,
+        enable_chunked_prefill=True,
+        enable_prefix_caching=True,
+    )
+    warm_req = create_requests(
+        num_requests=1,
+        num_tokens=600,
+        max_tokens=1,
+        same_prompt=True,
+        req_ids=["warm_prefix"],
+    )[0]
+    replay_req = create_requests(
+        num_requests=1,
+        num_tokens=620,
+        same_prompt=True,
+        req_ids=["replay_prefix"],
+    )[0]
+
+    scheduler.add_request(warm_req)
+    _run_request_to_completion(scheduler, warm_req)
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert stats is not None
+
+    _, peeked_tokens = scheduler.kv_cache_manager.get_computed_blocks(
+        replay_req,
+        record_stats=False,
+    )
+    assert peeked_tokens > 0
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert stats is not None
+    assert stats.requests == 0
+    assert stats.queries == 0
+    assert stats.hits == 0
+
+    _, recorded_tokens = scheduler.kv_cache_manager.get_computed_blocks(replay_req)
+    assert recorded_tokens == peeked_tokens
+    stats = scheduler.kv_cache_manager.make_prefix_cache_stats()
+    assert stats is not None
+    assert stats.requests == 1
+    assert stats.queries == replay_req.num_tokens
+    assert stats.hits == peeked_tokens
+
+
 def test_preempt_during_execution():
     # NOTE(woosuk): The actual number of available blocks is 10 instead of 11
     # because block 0 is reserved as the null block.

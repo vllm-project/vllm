@@ -15,9 +15,11 @@ from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_reduce,
 )
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.forward_context import get_forward_context, is_forward_context_available
+from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_fused_post_pre_tilelang,
@@ -71,11 +73,24 @@ from vllm.models.deepseek_v4.nvidia.flashinfer_sparse import (
 )
 from vllm.models.deepseek_v4.nvidia.flashmla import DeepseekV4FlashMLAAttention
 from vllm.models.deepseek_v4.nvidia.ops.prepare_megamoe import prepare_megamoe_inputs
+from vllm.models.deepseek_v4.nvidia.ops.shared_experts import (
+    dspark_silu_mul_clamp_fp8_quant,
+)
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils import deep_gemm
 from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.worker.ubatching import dbo_current_ubatch_id
+
+logger = init_logger(__name__)
+
+
+def _dspark_linear_scale(layer: nn.Module) -> torch.Tensor | None:
+    scale = getattr(layer, "weight_scale_inv", None)
+    if scale is None:
+        scale = getattr(layer, "weight_scale", None)
+    return scale
 
 
 class DeepseekV4MLP(nn.Module):
@@ -88,9 +103,11 @@ class DeepseekV4MLP(nn.Module):
         quant_config: QuantizationConfig | None = None,
         reduce_results: bool = True,
         is_sequence_parallel: bool = False,
+        dspark_fused_shared_experts_quant: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
+        self.prefix = prefix
 
         # If is_sequence_parallel, the input and output tensors are sharded
         # across the ranks within the tp_group. In this case the weights are
@@ -130,12 +147,77 @@ class DeepseekV4MLP(nn.Module):
             self.act_fn = SiluAndMulWithClamp(swiglu_limit)
         else:
             self.act_fn = SiluAndMul()
+        self._dspark_fused_shared_experts_quant_enabled = (
+            dspark_fused_shared_experts_quant
+        )
+
+    def _forward_dspark_fused_shared_experts_quant(
+        self,
+        x: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """gate_up GEMM -> fused (clamp+silu+mul+FP8-quant) -> down GEMM.
+
+        Eliminates the standalone ``per_token_group_quant_fp8`` kernel that
+        down_proj's block-scaled-mm input quantization launches right after
+        ``self.act_fn`` writes its BF16 output (see
+        ``ops/shared_experts.py``). Returns ``None`` on any unsupported
+        config so the caller falls back to the default unfused path.
+        """
+        if not isinstance(self.act_fn, (SiluAndMul, SiluAndMulWithClamp)):
+            return None
+        quant_method = getattr(self.down_proj, "quant_method", None)
+        kernel = getattr(quant_method, "w8a8_block_fp8_linear", None) or getattr(
+            quant_method, "fp8_linear", None
+        )
+        if kernel is None or not hasattr(kernel, "apply_block_scaled_mm"):
+            return None
+        down_weight = getattr(self.down_proj, "weight", None)
+        down_scale = _dspark_linear_scale(self.down_proj)
+        if down_weight is None or down_scale is None:
+            return None
+
+        gate_up, _ = self.gate_up_proj(x)
+
+        num_tokens = gate_up.shape[0]
+        d = gate_up.shape[-1] // 2
+        if d % 128 != 0:
+            return None
+        out_fp8 = torch.empty(
+            (num_tokens, d), dtype=torch.float8_e4m3fn, device=gate_up.device
+        )
+        out_scale = torch.empty(
+            (num_tokens, d // 128), dtype=torch.float32, device=gate_up.device
+        )
+        swiglu_limit = getattr(self.act_fn, "swiglu_limit", None)
+        alpha = getattr(self.act_fn, "alpha", 1.0)
+        beta = getattr(self.act_fn, "beta", 0.0)
+
+        dspark_silu_mul_clamp_fp8_quant(
+            gate_up, swiglu_limit, alpha, beta, out_fp8, out_scale
+        )
+        output = kernel.apply_block_scaled_mm(
+            A=out_fp8, B=down_weight, As=out_scale, Bs=down_scale
+        )
+        if get_tensor_model_parallel_world_size() > 1 and self.down_proj.reduce_results:
+            output = tensor_model_parallel_all_reduce(output)
+        logger.info_once(
+            "DSpark fused shared-expert activation+quant engaged: "
+            "out_fp8 shape=%s scale shape=%s",
+            tuple(out_fp8.shape),
+            tuple(out_scale.shape),
+        )
+        return output
 
     def forward(self, x):
+        if self._dspark_fused_shared_experts_quant_enabled:
+            output = self._forward_dspark_fused_shared_experts_quant(x)
+            if output is not None:
+                return output
+
         gate_up, _ = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        x, _ = self.down_proj(x)
-        return x
+        activated = self.act_fn(gate_up)
+        output, _ = self.down_proj(activated)
+        return output
 
 
 def make_deepseek_v4_expert_params_mapping(
@@ -318,10 +400,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             return
 
         self._check_runtime_supported()
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-
         w13_scale = deep_gemm.transform_sf_into_required_layout(
             self._ue8m0_uint8_to_float(self.w13_weight_scale.data).contiguous(),
             2 * self.intermediate_size,
@@ -354,10 +432,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
         self.w2_weight_scale = None
 
     def get_symm_buffer(self):
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-
         group = get_ep_group().device_group
         device = torch.accelerator.current_device_index()
         key = (
@@ -444,10 +518,6 @@ class DeepseekV4MegaMoEExperts(nn.Module):
             )
         y = torch.empty_like(hidden_states, dtype=torch.bfloat16)
 
-        from vllm.utils.deep_gemm import _import_deep_gemm
-
-        deep_gemm = _import_deep_gemm()
-
         symm_buffer = self.get_symm_buffer()
         num_tokens = hidden_states.shape[0]
         is_padding = None
@@ -520,6 +590,22 @@ class DeepseekV4MoE(nn.Module):
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         self.prefix = prefix
+        self._layer_idx = extract_layer_index(prefix)
+        # An extra layer (layer_idx >= num_hidden_layers) is a DSpark runtime
+        # draft layer ONLY when the DSpark speculator is active. The MTP block is
+        # also built at layer_idx == num_hidden_layers, so gate on the method to
+        # keep the fused DSpark shared-experts kernel off production MTP numerics.
+        self._is_dspark_runtime_layer = (
+            self._layer_idx >= config.num_hidden_layers
+            and getattr(vllm_config.speculative_config, "method", None) == "dspark"
+        )
+        self._dspark_fused_shared_experts_quant = bool(
+            getattr(
+                vllm_config.speculative_config,
+                "dspark_fused_shared_experts_quant",
+                True,
+            )
+        )
         self.use_mega_moe = (
             vllm_config.kernel_config.moe_backend == "deep_gemm_mega_moe"
         )
@@ -593,9 +679,14 @@ class DeepseekV4MoE(nn.Module):
                 swiglu_limit=self.swiglu_limit,
                 quant_config=quant_config,
                 reduce_results=self.use_mega_moe,
+                dspark_fused_shared_experts_quant=(
+                    self._dspark_fused_shared_experts_quant
+                    and self._is_dspark_runtime_layer
+                ),
                 prefix=f"{prefix}.shared_experts",
             )
 
+        self.n_shared_experts = config.n_shared_experts or 0
         if self.use_mega_moe:
             self._init_mega_moe_experts(vllm_config, config, prefix)
         else:
@@ -614,7 +705,6 @@ class DeepseekV4MoE(nn.Module):
         eplb_config = vllm_config.parallel_config.eplb_config
         self.n_redundant_experts = eplb_config.num_redundant_experts
         self.n_routed_experts = config.n_routed_experts
-        self.n_shared_experts = config.n_shared_experts or 0
         self.n_logical_experts = self.n_routed_experts
         self.n_physical_experts = self.n_logical_experts + self.n_redundant_experts
         assert self.n_physical_experts % self.ep_size == 0, (
@@ -688,6 +778,43 @@ class DeepseekV4MoE(nn.Module):
             enable_eplb=parallel_config.enable_eplb,
             num_redundant_experts=eplb_config.num_redundant_experts,
         )
+        self._sync_fused_moe_metadata()
+
+    def _sync_fused_moe_metadata(self) -> None:
+        experts = self.experts
+        moe_config = getattr(experts, "moe_config", None)
+        routed_experts = getattr(experts, "routed_experts", experts)
+
+        def get_optional_attr(obj, name: str):
+            return None if obj is None else getattr(obj, name, None)
+
+        def first_defined(*values):
+            return next((value for value in values if value is not None), None)
+
+        self.n_logical_experts = first_defined(
+            get_optional_attr(experts, "logical_num_experts"),
+            get_optional_attr(moe_config, "num_logical_experts"),
+        )
+        self.n_physical_experts = first_defined(
+            get_optional_attr(routed_experts, "global_num_experts"),
+            get_optional_attr(experts, "global_num_experts"),
+            get_optional_attr(moe_config, "num_experts"),
+        )
+        self.n_local_physical_experts = first_defined(
+            get_optional_attr(routed_experts, "local_num_experts"),
+            get_optional_attr(experts, "local_num_experts"),
+            get_optional_attr(moe_config, "num_local_experts"),
+        )
+        if (
+            self.n_logical_experts is None
+            or self.n_physical_experts is None
+            or self.n_local_physical_experts is None
+        ):
+            raise AttributeError(
+                "DeepseekV4MoE FusedMoE metadata is incomplete after construction."
+            )
+        self.n_local_experts = self.n_local_physical_experts
+        self.n_redundant_experts = self.n_physical_experts - self.n_logical_experts
 
     def forward(
         self, hidden_states: torch.Tensor, input_ids: torch.Tensor | None = None
@@ -735,7 +862,6 @@ class DeepseekV4MoE(nn.Module):
     ) -> torch.Tensor:
         org_shape = hidden_states.shape
         if self.experts.is_internal_router:
-            # In this case, the gate/router runs inside the FusedMoE class
             final_hidden_states = self.experts(
                 hidden_states=hidden_states,
                 router_logits=hidden_states,
@@ -759,10 +885,20 @@ class DeepseekV4MoE(nn.Module):
 def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     """Pick the CUDA sparse-MLA attention class for the configured backend.
 
-    The generic CUDA backend selector does not instantiate DSv4 layers directly,
-    so map generic sparse-MLA choices to the DSv4-specialized attention class.
-    Without an explicit backend, SM12 defaults to FlashInfer while the other
-    CUDA arches keep the FlashMLA path.
+    An explicit ``--attention-backend FLASHINFER_MLA_SPARSE_DSV4`` selects the
+    FlashInfer TRTLLM-gen path; the generic ``FLASHMLA_SPARSE*`` choices map to
+    the DSv4-specialized FlashMLA class. Without an explicit backend the FlashMLA
+    class is used; on SM12x it runs through the stock Triton sparse-MLA route, so
+    it serves on released deps without FlashInfer's unmerged SM120 sparse-MLA
+    fork.
+
+    When ``VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE`` is set and the runtime is
+    SM12x with FlashInfer's packed sparse-MLA decode kernel available, decode is
+    routed through the official ``trtllm_batch_decode_sparse_mla_dsv4`` SM120
+    kernel (FlashInfer PR3395, released in flashinfer >= 0.6.13) instead of the
+    FlashMLA decode kernel; everything else (packed ``fp8_ds_mla`` cache,
+    metadata, prefill) is unchanged. Availability-gated (silent FlashMLA fallback
+    when the kernel is absent). Default off.
     """
     backend = vllm_config.attention_config.backend
     device_capability = current_platform.get_device_capability()
@@ -785,8 +921,29 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     ):
         return DeepseekV4FlashMLAAttention
 
-    if device_capability is not None and device_capability.major == 12:
-        return DeepseekV4FlashInferSM120Attention
+    # Opt-in: route SM12x decode through FlashInfer's official packed sparse-MLA
+    # decode kernel (PR3395, released in flashinfer >= 0.6.13) when present.
+    # Availability-gated, so stock installs without that kernel fall through to
+    # the FlashMLA/Triton-sparse default below instead of raising. We deliberately
+    # do NOT hard-default SM12 to the FlashInfer sparse-MLA class -- that path
+    # needs the unmerged FlashInfer SM120 sparse-MLA fork and raises on released
+    # deps (see #43477).
+    import vllm.envs as envs
+
+    if envs.VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE:
+        from vllm.utils.flashinfer import has_flashinfer_trtllm_sparse_mla_dsv4
+
+        if (
+            device_capability is not None
+            and device_capability.major == 12
+            and has_flashinfer_trtllm_sparse_mla_dsv4()
+        ):
+            from vllm.models.deepseek_v4.nvidia.flashinfer_sm120_decode import (
+                DeepseekV4FlashInferSM120DecodeAttention,
+            )
+
+            return DeepseekV4FlashInferSM120DecodeAttention
+
     return DeepseekV4FlashMLAAttention
 
 
@@ -1034,6 +1191,7 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
             )
         else:
             self._mtp_hidden_buffer = None
+        self.aux_hidden_state_layers: tuple[int, ...] = ()
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -1430,11 +1588,22 @@ class DeepseekV4ForCausalLM(
         )
         return hidden_states
 
+    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
+        self.model.aux_hidden_state_layers = layers
+
+    def get_eagle3_default_aux_hidden_state_layers(self) -> tuple[int, ...]:
+        num_layers = len(self.model.layers)
+        return (2, num_layers // 2, num_layers - 3)
+
     def get_mtp_target_hidden_states(self) -> torch.Tensor | None:
         """Pre-hc_head residual stream buffer (max_num_batched_tokens,
         hc_mult * hidden_size) for the MTP draft model. Populated by
         forward(); valid after each target step."""
         return getattr(self.model, "_mtp_hidden_buffer", None)
+
+    def skip_weight_name_before_load(self, name: str) -> bool:
+        mapped = self.hf_to_vllm_mapper._map_name(name)
+        return mapped is None or "mtp." in mapped
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])

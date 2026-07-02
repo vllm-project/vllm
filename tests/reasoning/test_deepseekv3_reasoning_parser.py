@@ -4,14 +4,33 @@
 import pytest
 from transformers import AutoTokenizer
 
+from vllm.config.reasoning import ReasoningConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
 from vllm.reasoning import ReasoningParserManager
 from vllm.reasoning.deepseek_r1_reasoning_parser import DeepSeekR1ReasoningParser
-from vllm.reasoning.deepseek_v3_reasoning_parser import DeepSeekV3ReasoningParser
+from vllm.reasoning.deepseek_v3_reasoning_parser import (
+    DeepSeekV3ReasoningParser,
+    DeepSeekV3ReasoningWithThinkingParser,
+)
 from vllm.reasoning.identity_reasoning_parser import IdentityReasoningParser
 
 REASONING_MODEL_NAME = "deepseek-ai/DeepSeek-V3.1"
+
+
+class FakeReasoningTokenizer:
+
+    def get_vocab(self) -> dict[str, int]:
+        return {"<think>": 100, "</think>": 101}
+
+    def encode(
+        self,
+        text: str,
+        add_special_tokens: bool = False,
+        **kwargs,
+    ) -> list[int]:
+        assert add_special_tokens is False
+        return [self.get_vocab()[text]]
 
 
 @pytest.fixture(scope="module")
@@ -34,10 +53,21 @@ def test_parser_selection(tokenizer, thinking, expected_parser_type):
     assert isinstance(parser._parser, expected_parser_type)
 
 
-def test_deepseek_v4_reasoning_parser_alias():
+def test_deepseek_v4_reasoning_parser_registration():
+    """``deepseek_v4`` now resolves to its own parser (a defensive
+    extension of ``DeepSeekV3ReasoningParser``) rather than reusing the
+    V3 parser directly. See ``tests/reasoning/test_deepseekv4_reasoning_parser.py``.
+    """
+    from vllm.reasoning.deepseek_v4_reasoning_parser import (
+        DeepSeekV4ReasoningParser,
+    )
+
     parser_cls = ReasoningParserManager.get_reasoning_parser("deepseek_v4")
 
-    assert parser_cls is DeepSeekV3ReasoningParser
+    assert parser_cls is DeepSeekV4ReasoningParser
+    # The V3 alias must remain pointed at V3.
+    v3_cls = ReasoningParserManager.get_reasoning_parser("deepseek_v3")
+    assert v3_cls is DeepSeekV3ReasoningParser
 
 
 def test_identity_reasoning_parser_basic(tokenizer):

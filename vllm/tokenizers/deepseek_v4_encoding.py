@@ -155,10 +155,15 @@ def encode_arguments_to_dsml(tool_call: Dict[str, Any]) -> str:
     p_dsml_template = '<{dsml_token}parameter name="{key}" string="{is_str}">{value}</{dsml_token}parameter>'
     P_dsml_strs = []
 
-    if isinstance(tool_call["arguments"], str):
-        arguments = json.loads(tool_call["arguments"])
+    raw_arguments = tool_call.get("arguments")
+    if raw_arguments is None or raw_arguments == "":
+        arguments = {}
+    elif isinstance(raw_arguments, str):
+        arguments = json.loads(raw_arguments)
+        if arguments is None:
+            arguments = {}
     else:
-        arguments = tool_call["arguments"]
+        arguments = raw_arguments
 
     for k, v in arguments.items():
         p_dsml_str = p_dsml_template.format(

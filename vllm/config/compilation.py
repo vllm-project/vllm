@@ -1492,6 +1492,16 @@ class CompilationConfig:
                 if round_up(size, multiple_of) <= self.max_cudagraph_capture_size
             )
         )
+        # Spec decode uniform decode graphs are shaped by request count
+        # (`num_reqs * (1 + num_speculative_tokens)`). Keep the small
+        # interactive request counts exact so FULL decode graphs do not replay
+        # against padded virtual requests.
+        small_decode_sizes = {
+            multiple_of * num_reqs
+            for num_reqs in range(1, 33)
+            if multiple_of * num_reqs <= self.max_cudagraph_capture_size
+        }
+        rounded_sizes = sorted(set(rounded_sizes) | small_decode_sizes)
 
         if len(rounded_sizes) == 0 and multiple_of <= self.max_cudagraph_capture_size:
             # if one valid but would be round_down use that

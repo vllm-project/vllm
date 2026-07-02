@@ -817,11 +817,22 @@ def _prefetch_all_checkpoints(
     threading.Thread(target=_run_prefetch, daemon=True).start()
 
 
+def _should_skip_safetensors_weight(
+    weight_name: str,
+    local_expert_ids: set[int] | None,
+    weight_name_filter: Callable[[str], bool] | None,
+) -> bool:
+    if should_skip_weight(weight_name, local_expert_ids):
+        return True
+    return weight_name_filter is not None and weight_name_filter(weight_name)
+
+
 def safetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
     safetensors_load_strategy: str | None = None,
     local_expert_ids: set[int] | None = None,
+    weight_name_filter: Callable[[str], bool] | None = None,
     *,
     safetensors_prefetch_num_threads: int = DEFAULT_SAFETENSORS_PREFETCH_NUM_THREADS,
     safetensors_prefetch_block_size: int = DEFAULT_SAFETENSORS_PREFETCH_BLOCK_SIZE,
@@ -831,6 +842,9 @@ def safetensors_weights_iterator(
     When *local_expert_ids* is provided, expert weights not belonging to
     this rank are skipped **before** reading from disk, which drastically
     reduces storage I/O for MoE models under EP.
+
+    When *weight_name_filter* is provided, names for which the callback returns
+    ``True`` are also skipped before tensor materialization.
     """
     loading_desc = "Loading safetensors checkpoint shards"
     if safetensors_load_strategy == "eager":
@@ -913,7 +927,9 @@ def safetensors_weights_iterator(
             with open(st_file, "rb") as f:
                 state_dict = load(f.read())
             for name, param in state_dict.items():
-                if not should_skip_weight(name, local_expert_ids):
+                if not _should_skip_safetensors_weight(
+                    name, local_expert_ids, weight_name_filter
+                ):
                     yield name, param
         elif safetensors_load_strategy == "torchao":
             # we can't load flattened torchao tensor subclasses directly into the model
@@ -930,7 +946,9 @@ def safetensors_weights_iterator(
             with safe_open(st_file, framework="pt") as f:
                 state_dict = {}
                 for name in f.keys():  # noqa: SIM118
-                    if should_skip_weight(name, local_expert_ids):
+                    if _should_skip_safetensors_weight(
+                        name, local_expert_ids, weight_name_filter
+                    ):
                         continue
                     state_dict[name] = f.get_tensor(name)
 
@@ -948,7 +966,9 @@ def safetensors_weights_iterator(
         else:
             with safe_open(st_file, framework="pt") as f:
                 for name in f.keys():  # noqa: SIM118
-                    if should_skip_weight(name, local_expert_ids):
+                    if _should_skip_safetensors_weight(
+                        name, local_expert_ids, weight_name_filter
+                    ):
                         continue
                     param = f.get_tensor(name)
                     yield name, param
@@ -1024,6 +1044,8 @@ def runai_safetensors_weights_iterator(
 def fastsafetensors_weights_iterator(
     hf_weights_files: list[str],
     use_tqdm_on_load: bool,
+    local_expert_ids: set[int] | None = None,
+    weight_name_filter: Callable[[str], bool] | None = None,
 ) -> Generator[tuple[str, torch.Tensor], None, None]:
     """Iterate over the weights in the model safetensor files
     using fastsafetensor library.
@@ -1071,6 +1093,15 @@ def fastsafetensors_weights_iterator(
         try:
             pl = _make_loader(nogds)
             for name, tensor in pl.iterate_weights():
+                if _should_skip_safetensors_weight(
+                    name,
+                    local_expert_ids,
+                    weight_name_filter,
+                ):
+                    continue
+                # Only mark `yielded` once a tensor is actually emitted to the
+                # caller: tensors skipped by the EP / name filter must not defeat
+                # the nogds fallback below (restarting is safe until a real yield).
                 yielded = True
                 yield name, tensor
         except RuntimeError as e:
@@ -1084,7 +1115,14 @@ def fastsafetensors_weights_iterator(
             if pl is not None:
                 pl.close()
             pl = _make_loader(nogds=True)
-            yield from pl.iterate_weights()
+            for name, tensor in pl.iterate_weights():
+                if _should_skip_safetensors_weight(
+                    name,
+                    local_expert_ids,
+                    weight_name_filter,
+                ):
+                    continue
+                yield name, tensor
     finally:
         if pl is not None:
             pl.close()

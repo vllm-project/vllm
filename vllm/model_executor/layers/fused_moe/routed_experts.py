@@ -283,9 +283,29 @@ class RoutedExperts(PluggableLayer):
 
     @staticmethod
     def _to_scalar(loaded_weight: torch.Tensor) -> torch.Tensor:
-        # Per-tensor scales arrive 0-D or as shape-(1,) (llm-compressor NVFP4);
-        # reduce to a 0-D scalar. numel > 1 raises instead of broadcasting.
+        # Per-tensor scales arrive 0-D or as shape-(1,) (e.g. llm-compressor /
+        # ModelOpt NVFP4 input scales); reduce to a 0-D scalar. numel > 1 raises
+        # (reshape to ()) instead of silently broadcasting/picking an element.
         return loaded_weight.reshape(())
+
+    @staticmethod
+    def _normalize_loaded_weight_for_copy(
+        expert_data: torch.Tensor, loaded_weight: torch.Tensor
+    ) -> torch.Tensor:
+        e8m0_dtype = getattr(torch, "float8_e8m0fnu", None)
+        if (
+            e8m0_dtype is not None
+            and expert_data.dtype == torch.uint8
+            and loaded_weight.dtype == e8m0_dtype
+        ):
+            # ue8m0 scales (DeepSeek-V4 mega-MoE) share the byte layout of
+            # uint8; reinterpret the bits instead of value-casting.
+            loaded_weight = loaded_weight.view(torch.uint8)
+        if loaded_weight.shape != expert_data.shape and loaded_weight.numel() == 1:
+            # Per-tensor scales arrive 0-D or as shape-(1,) (llm-compressor
+            # NVFP4); match the destination shape so copy_ won't broadcast.
+            loaded_weight = loaded_weight.reshape(expert_data.shape)
+        return loaded_weight
 
     def _load_per_tensor_weight_scale(
         self,
@@ -300,10 +320,12 @@ class RoutedExperts(PluggableLayer):
             # We have to keep the weight scales of w1 and w3 because
             # we need to re-quantize w1/w3 weights after weight loading.
             idx = 0 if shard_id == "w1" else 1
-            param_data[expert_id][idx] = self._to_scalar(loaded_weight)
+            target = param_data[expert_id][idx]
+            target.copy_(self._normalize_loaded_weight_for_copy(target, loaded_weight))
         # If we are in the row parallel case (down_proj)
         elif shard_id == "w2":
-            param_data[expert_id] = self._to_scalar(loaded_weight)
+            target = param_data[expert_id]
+            target.copy_(self._normalize_loaded_weight_for_copy(target, loaded_weight))
 
     def _load_combined_w13_weight_scale(
         self,
@@ -320,7 +342,7 @@ class RoutedExperts(PluggableLayer):
         loaded_weight = loaded_weight.narrow(
             shard_dim, shard_size * tp_rank, shard_size
         )
-        param.copy_(loaded_weight)
+        param.copy_(self._normalize_loaded_weight_for_copy(param, loaded_weight))
 
     def _load_model_weight_or_group_weight_scale(
         self,
@@ -378,7 +400,9 @@ class RoutedExperts(PluggableLayer):
                 hidden_dim=hidden_dim,
                 shard_dim=shard_dim,
             )
-            expert_data.copy_(loaded_weight)
+            expert_data.copy_(
+                self._normalize_loaded_weight_for_copy(expert_data, loaded_weight)
+            )
         elif shard_id in ("w1", "w3"):
             self._load_w13(
                 shard_id=shard_id,
@@ -494,7 +518,9 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
-        expert_data.copy_(loaded_weight)
+        expert_data.copy_(
+            self._normalize_loaded_weight_for_copy(expert_data, loaded_weight)
+        )
 
     def _load_w2(
         self,
@@ -529,7 +555,9 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
-        expert_data.copy_(loaded_weight)
+        expert_data.copy_(
+            self._normalize_loaded_weight_for_copy(expert_data, loaded_weight)
+        )
 
     def _load_single_value(
         self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int

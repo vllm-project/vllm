@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Sequence
+from dataclasses import replace
 from http import HTTPStatus
 from typing import Any
 
@@ -362,6 +363,19 @@ class OnlineRenderer:
             default_media_io_kwargs=(mm_config.media_io_kwargs if mm_config else None),
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
+        # DeepSeek-V4 API semantics: fold the request-level ``thinking`` knob
+        # into the chat-template kwargs the prompt is actually rendered with
+        # (mirrors the apply_chat_template_kwargs() call in
+        # ServingRender.render_chat_request that feeds the sampling params).
+        apply_chat_template_kwargs = getattr(request, "apply_chat_template_kwargs", None)
+        if apply_chat_template_kwargs is not None:
+            chat_params = replace(
+                chat_params,
+                chat_template_kwargs=apply_chat_template_kwargs(
+                    chat_params.chat_template_kwargs,
+                    model_config=self.model_config,
+                ),
+            )
 
         (conversation,), (engine_input,) = await renderer.render_chat_async(
             [messages],

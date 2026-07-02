@@ -149,6 +149,9 @@ _get_theoretical_mk_alignment_for_contiguous_layout_impl: Callable[..., Any] | N
     None
 )
 _transform_sf_into_required_layout_impl: Callable[..., Any] | None = None
+_transform_weights_for_mega_moe_impl: Callable[..., Any] | None = None
+_get_symm_buffer_for_mega_moe_impl: Callable[..., Any] | None = None
+_fp8_fp4_mega_moe_impl: Callable[..., Any] | None = None
 _pack_ue8m0_to_int_impl: Callable[..., Any] | None = None
 _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl: Callable[..., Any] | None = None
 _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl: (
@@ -220,6 +223,8 @@ def _lazy_init() -> None:
     global _get_mk_alignment_for_contiguous_layout_impl
     global _get_theoretical_mk_alignment_for_contiguous_layout_impl
     global _transform_sf_into_required_layout_impl
+    global _transform_weights_for_mega_moe_impl
+    global _get_symm_buffer_for_mega_moe_impl, _fp8_fp4_mega_moe_impl
     global _pack_ue8m0_to_int_impl
     global _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl
     global _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl
@@ -237,6 +242,9 @@ def _lazy_init() -> None:
         or _tf32_hc_prenorm_gemm_impl is not None
         or _get_mk_alignment_for_contiguous_layout_impl is not None
         or _transform_sf_into_required_layout_impl is not None
+        or _transform_weights_for_mega_moe_impl is not None
+        or _get_symm_buffer_for_mega_moe_impl is not None
+        or _fp8_fp4_mega_moe_impl is not None
         or _pack_ue8m0_to_int_impl is not None
         or _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl is not None
         or _get_k_grouped_mn_major_tma_aligned_packed_ue8m0_tensor_impl is not None
@@ -286,6 +294,13 @@ def _lazy_init() -> None:
     _transform_sf_into_required_layout_impl = getattr(
         _dg, "transform_sf_into_required_layout", None
     )
+    _transform_weights_for_mega_moe_impl = getattr(
+        _dg, "transform_weights_for_mega_moe", None
+    )
+    _get_symm_buffer_for_mega_moe_impl = getattr(
+        _dg, "get_symm_buffer_for_mega_moe", None
+    )
+    _fp8_fp4_mega_moe_impl = getattr(_dg, "fp8_fp4_mega_moe", None)
     _pack_ue8m0_to_int_impl = getattr(_dg, "pack_ue8m0_to_int", None)
     _get_mn_major_tma_aligned_packed_ue8m0_tensor_impl = getattr(
         _dg, "get_mn_major_tma_aligned_packed_ue8m0_tensor", None
@@ -496,6 +511,69 @@ def transform_sf_into_required_layout(*args, **kwargs):
     )
 
 
+def transform_weights_for_mega_moe(*args, **kwargs):
+    _lazy_init()
+    if _transform_weights_for_mega_moe_impl is None:
+        return _missing(*args, **kwargs)
+    return _transform_weights_for_mega_moe_impl(*args, **kwargs)
+
+
+def get_symm_buffer_for_mega_moe(*args, **kwargs):
+    _lazy_init()
+    if _get_symm_buffer_for_mega_moe_impl is None:
+        return _missing(*args, **kwargs)
+    return _get_symm_buffer_for_mega_moe_impl(*args, **kwargs)
+
+
+def fp8_fp4_mega_moe(*args, **kwargs):
+    _lazy_init()
+    if _fp8_fp4_mega_moe_impl is None:
+        return _missing(*args, **kwargs)
+    return _fp8_fp4_mega_moe_impl(*args, **kwargs)
+
+
+def fp8_fp4_mqa_topk_indices(
+    q: tuple[torch.Tensor, torch.Tensor | None],
+    kv: tuple[torch.Tensor, torch.Tensor],
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    topk_indices: torch.Tensor,
+) -> bool:
+    """Write SM120 FP8 MQA top-k indices without materializing full logits."""
+    if not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(120)
+        and q[1] is None
+    ):
+        return False
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
+
+    return sm12x_deep_gemm_fallbacks.fp8_fp4_mqa_topk_indices(
+        q,
+        kv,
+        weights,
+        cu_seqlen_ks,
+        cu_seqlen_ke,
+        topk_indices,
+    )
+
+
+def _fp8_mqa_logits_sm12x(
+    q: tuple[torch.Tensor, torch.Tensor | None],
+    kv: tuple[torch.Tensor, torch.Tensor],
+    weights: torch.Tensor,
+    cu_seqlen_ks: torch.Tensor,
+    cu_seqlen_ke: torch.Tensor,
+    clean_logits: bool,
+) -> torch.Tensor:
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
+
+    return sm12x_deep_gemm_fallbacks._fp8_mqa_logits_sm12x(
+        q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits
+    )
+
+
 def fp8_fp4_mqa_logits(
     q: tuple[torch.Tensor, torch.Tensor | None],
     kv: tuple[torch.Tensor, torch.Tensor],
@@ -528,6 +606,10 @@ def fp8_fp4_mqa_logits(
     Returns:
         Logits tensor of shape [M, N], dtype `torch.float32`.
     """
+    if current_platform.is_device_capability_family(120) and q[1] is None:
+        return _fp8_mqa_logits_sm12x(
+            q, kv, weights, cu_seqlen_ks, cu_seqlen_ke, clean_logits
+        )
     _lazy_init()
     if _fp8_fp4_mqa_logits_impl is None:
         return _missing()
@@ -562,6 +644,50 @@ def get_paged_mqa_logits_metadata(
     return _get_paged_mqa_logits_metadata_impl(context_lens, block_size, num_sms)
 
 
+def _fp8_paged_mqa_logits_sm12x(
+    q: tuple[torch.Tensor, torch.Tensor | None],
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
+
+    return sm12x_deep_gemm_fallbacks._fp8_paged_mqa_logits_sm12x(
+        q, kv_cache, weights, context_lens, block_tables, max_model_len
+    )
+
+
+def fp8_fp4_paged_mqa_topk_indices(
+    q: tuple[torch.Tensor, torch.Tensor | None],
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+    topk_indices: torch.Tensor,
+) -> bool:
+    """Write SM120 FP8 paged MQA top-k indices without full logits."""
+    if not (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(120)
+        and q[1] is None
+    ):
+        return False
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
+
+    return sm12x_deep_gemm_fallbacks.fp8_fp4_paged_mqa_topk_indices(
+        q,
+        kv_cache,
+        weights,
+        context_lens,
+        block_tables,
+        max_model_len,
+        topk_indices,
+    )
+
+
 def fp8_fp4_paged_mqa_logits(
     q: tuple[torch.Tensor, torch.Tensor | None],
     kv_cache: torch.Tensor,
@@ -583,9 +709,10 @@ def fp8_fp4_paged_mqa_logits(
             [B, next_n, H, D] float8_e4m3fn and q_scale is None. FP4 path:
             q_values is packed uint8 and q_scale is the companion
             block-scale tensor.
-        kv_cache: Paged KV-cache. FP8 layout is [num_blocks, block_size, 1,
-            D+4], dtype `torch.uint8`, with the last 4 bytes per (block, pos)
-            storing the float dequant scale.
+        kv_cache: Paged KV-cache. FP8 layout is [num_blocks, block_size, D+4]
+            or [num_blocks, block_size, 1, D+4], dtype `torch.uint8`. Within
+            each block, the D-byte FP8 values for every token are stored first,
+            followed by per-token fp32 scale bytes.
         weights: Tensor of shape [B * next_n, H], dtype `torch.float32`.
         context_lens: Tensor of shape [B], dtype int32; effective context length
             for each batch element.
@@ -600,6 +727,10 @@ def fp8_fp4_paged_mqa_logits(
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
     """
+    if current_platform.is_device_capability_family(120) and q[1] is None:
+        return _fp8_paged_mqa_logits_sm12x(
+            q, kv_cache, weights, context_lens, block_tables, max_model_len
+        )
     _lazy_init()
     if _fp8_fp4_paged_mqa_logits_impl is None:
         return _missing()
@@ -612,6 +743,20 @@ def fp8_fp4_paged_mqa_logits(
         schedule_metadata,
         max_model_len,
         clean_logits=clean_logits,
+    )
+
+
+def _tf32_hc_prenorm_gemm_sm12x(
+    x: torch.Tensor,
+    fn: torch.Tensor,
+    out: torch.Tensor,
+    sqrsum: torch.Tensor,
+    num_split: int,
+) -> torch.Tensor:
+    from vllm.models.deepseek_v4.nvidia.ops import sm12x_deep_gemm_fallbacks
+
+    return sm12x_deep_gemm_fallbacks._tf32_hc_prenorm_gemm_sm12x(
+        x, fn, out, sqrsum, num_split
     )
 
 
@@ -629,6 +774,8 @@ def tf32_hc_prenorm_gemm(
 
     See the caller function for shape requirement
     """
+    if current_platform.is_device_capability_family(120):
+        return _tf32_hc_prenorm_gemm_sm12x(x, fn, out, sqrsum, num_split)
     _lazy_init()
     if _tf32_hc_prenorm_gemm_impl is None:
         return _missing()
@@ -728,7 +875,9 @@ __all__ = [
     "m_grouped_fp8_fp4_gemm_nt_contiguous",
     "fp8_m_grouped_gemm_nt_masked",
     "fp8_fp4_mqa_logits",
+    "fp8_fp4_mqa_topk_indices",
     "fp8_fp4_paged_mqa_logits",
+    "fp8_fp4_paged_mqa_topk_indices",
     "get_paged_mqa_logits_metadata",
     "per_block_cast_to_fp8",
     "is_deep_gemm_e8m0_used",

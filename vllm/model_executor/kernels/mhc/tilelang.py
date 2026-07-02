@@ -2,7 +2,14 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
+
+
+def _use_tf32_hc_prenorm_gemm() -> bool:
+    from vllm.utils.deep_gemm import is_deep_gemm_supported
+
+    return current_platform.is_device_capability_family(120) or is_deep_gemm_supported()
 
 
 def _torch_hc_prenorm_gemm(
@@ -162,10 +169,8 @@ def mhc_pre_tilelang(
     residual_flat = residual.view(-1, hc_mult, hidden_size)
     num_tokens = residual_flat.shape[0]
 
-    from vllm.utils.deep_gemm import is_deep_gemm_supported
-
-    use_deep_gemm = is_deep_gemm_supported()
-    if use_deep_gemm:
+    use_tf32_hc_prenorm_gemm = _use_tf32_hc_prenorm_gemm()
+    if use_tf32_hc_prenorm_gemm:
         # these numbers are from deepgemm kernel impl
         block_k = 64
         block_m = 64
@@ -191,7 +196,7 @@ def mhc_pre_tilelang(
     )
 
     residual_2d = residual_flat.view(num_tokens, hc_mult * hidden_size)
-    if use_deep_gemm:
+    if use_tf32_hc_prenorm_gemm:
         tf32_hc_prenorm_gemm(
             residual_2d,
             fn,
@@ -405,16 +410,14 @@ def mhc_fused_post_pre_tilelang(
     post_layer_mix_flat = post_layer_mix.view(num_tokens, hc_mult)
     comb_res_mix_flat = comb_res_mix.view(num_tokens, hc_mult, hc_mult)
 
-    from vllm.utils.deep_gemm import is_deep_gemm_supported
-
-    use_deep_gemm = is_deep_gemm_supported()
+    use_tf32_hc_prenorm_gemm = _use_tf32_hc_prenorm_gemm()
     use_small_fma = num_tokens <= 16
     if use_small_fma:
         # TODO(gnovack): investigate autotuning these heuristics
         tile_n = 2 if num_tokens < 8 else 3
         n_splits = 8 if (num_tokens < 8 and hidden_size <= 4096) else 4
     else:
-        if use_deep_gemm:
+        if use_tf32_hc_prenorm_gemm:
             # these number are from deepgemm kernel impl
             block_k = 64
             block_m = 64
@@ -485,7 +488,7 @@ def mhc_fused_post_pre_tilelang(
         )
 
         residual_cur_2d = residual_cur.view(num_tokens, hc_mult * hidden_size)
-        if use_deep_gemm:
+        if use_tf32_hc_prenorm_gemm:
             from vllm.utils.deep_gemm import tf32_hc_prenorm_gemm
 
             tf32_hc_prenorm_gemm(

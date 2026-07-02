@@ -539,9 +539,14 @@ def has_fbgemm_gpu() -> bool:
     return _has_module("fbgemm_gpu")
 
 
+@cache
 def has_cutedsl() -> bool:
-    """Whether the optional `cutelass` package is available."""
-    return _has_module("cutlass")
+    """Whether the optional `cutlass` package is available and importable."""
+    try:
+        import cutlass  # noqa: F401
+    except Exception:
+        return False
+    return True
 
 
 def has_humming() -> bool:
