@@ -57,7 +57,7 @@
 #include "torch_utils.h"
 
 #include "../cuda_compat.h"
-#include "../type_convert.cuh"
+#include "type_convert.cuh"
 #include "../attention/dtype_fp8.cuh"
 #include "dispatch_utils.h"
 
