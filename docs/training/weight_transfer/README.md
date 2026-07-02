@@ -17,6 +17,7 @@ The weight transfer system follows a **four-phase protocol** with a pluggable ba
 | ------- | --------- | -------- |
 | [NCCL](nccl.md) | NCCL broadcast | Separate GPUs for training and inference |
 | [IPC](ipc.md) | CUDA IPC handles | Colocated training and inference on same GPU |
+| [sparse_nccl](nccl.md#sparse-nccl) | NCCL broadcast | Sparse flat-index weight patches (TP=1/PP=1) |
 
 ## Configuration
 
@@ -41,7 +42,7 @@ vllm serve my-model \
     --weight-transfer-config '{"backend": "nccl"}'
 ```
 
-The `backend` field accepts `"nccl"` (default) or `"ipc"`.
+The `backend` field accepts `"nccl"` (default), `"ipc"`, or `"sparse_nccl"`.
 
 ## API Endpoints
 
@@ -69,7 +70,7 @@ Both backends provide static methods that the trainer calls to send weights. The
 EngineClass.trainer_init(init_info)
 
 # 2. Start weight update on inference side
-llm.start_weight_update(is_checkpoint_format=True)
+llm.start_weight_update()
 
 # 3. Send weights to inference workers
 EngineClass.trainer_send_weights(
