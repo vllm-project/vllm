@@ -875,6 +875,51 @@ def test_allowed_token_ids(rejection_sampler):
     assert torch.equal(output.sampled_token_ids, expected)
 
 
+def test_allowed_token_ids_without_output_token_ids(rejection_sampler):
+    """Regression test for GHSA-8c65-hq7q-r7jm.
+
+    When only allowed_token_ids is set (no penalties/bad words), sampling
+    metadata may have output_token_ids=[] while allowed_token_ids_mask and
+    speculative draft-token counts are non-empty. The rejection sampler must
+    not use len(output_token_ids) as the request count for draft expansion.
+    """
+    spec_tokens = [[1, 2, 10], [10, 5, 3]]
+    output_tokens = [[1, 2, 10, 5], [10, 5, 10, 5]]
+    logits = create_logits_tensor(output_tokens, token_idx_to_override=15)
+    batch_size = len(output_tokens)
+    _, vocab_size = logits.size()
+    mask = create_allowed_token_ids(
+        batch_size=batch_size,
+        vocab_size=vocab_size,
+        num_allowed_token_ids=5,
+        device=logits.device,
+    )
+    assert mask is not None
+    sampling_metadata = create_sampling_metadata(
+        all_greedy=True,
+        output_token_ids=None,
+        spec_token_ids=spec_tokens,
+        allowed_token_ids_mask=mask,
+    )
+    assert sampling_metadata.output_token_ids == []
+
+    spec_decode_metadata = create_spec_decode_metadata(spec_tokens, logits)
+    assert len(spec_decode_metadata.num_draft_tokens) == batch_size
+
+    result_logits = rejection_sampler.apply_logits_processors(
+        logits.clone(),
+        sampling_metadata,
+        spec_decode_metadata,
+    )
+
+    num_draft_tokens = torch.tensor(spec_decode_metadata.num_draft_tokens)
+    repeat_indices = torch.arange(batch_size).repeat_interleave(num_draft_tokens)
+    for row_idx in range(result_logits.shape[0]):
+        req_idx = repeat_indices[row_idx].item()
+        disallowed = mask[req_idx]
+        assert torch.all(result_logits[row_idx, disallowed] == float("-inf"))
+
+
 @pytest.mark.parametrize("batch_size", [1, 100])
 @pytest.mark.parametrize("vocab_size", [100, 8192, 10000])
 @pytest.mark.parametrize("max_spec_len", [1, 3])
