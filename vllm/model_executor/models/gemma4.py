@@ -1609,6 +1609,20 @@ class Gemma4ForCausalLM(
     ) -> torch.Tensor | None:
         return self.logits_processor(self.lm_head, hidden_states)
 
+    def get_bnb_quant_state_aliases(self) -> dict[str, str]:
+        # See Gemma4ForConditionalGeneration.get_bnb_quant_state_aliases.
+        # Used when this class is loaded as the top-level model (text-only
+        # path); the checkpoint prefix is just `model.*` here.
+        if not getattr(self.config, "attention_k_eq_v", False):
+            return {}
+        aliases: dict[str, str] = {}
+        for idx, layer_type in enumerate(self.config.layer_types):
+            if layer_type != "full_attention":
+                continue
+            prefix = f"model.layers.{idx}.self_attn"
+            aliases[f"{prefix}.v_proj.weight"] = f"{prefix}.k_proj.weight"
+        return aliases
+
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         # Checkpoint weight names use "language_model." prefix (from the
         # Gemma4ForConditionalGeneration wrapper). Strip it to map to our
