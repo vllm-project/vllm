@@ -115,6 +115,115 @@ git_diff_changed_base() {
     [[ -n "$(git diff --name-only "${range}" -- "${DOCKERFILE}" 2>/dev/null)" ]]
 }
 
+short_git_ref() {
+    local ref="$1"
+
+    git rev-parse --short "${ref}" 2>/dev/null || printf '%s\n' "${ref}"
+}
+
+extract_arg_default_from_ref() {
+    local ref="$1"
+    local arg_name="$2"
+    local content=""
+
+    content="$(git show "${ref}:${DOCKERFILE}" 2>/dev/null || true)"
+    sed -n -E "s/^[[:space:]]*ARG[[:space:]]+${arg_name}=\"?([^\"[:space:]]+)\"?.*/\\1/p" \
+        <<<"${content}" | head -1
+}
+
+log_arg_default_changes() {
+    local old_ref="$1"
+    local new_ref="$2"
+    local content_args="${ROCM_BASE_CONTENT_ARGS:-${DEFAULT_ROCM_BASE_CONTENT_ARGS}}"
+    local arg_name=""
+    local old_value=""
+    local new_value=""
+    local changed=0
+
+    echo "Changed ROCm base ARG defaults:"
+    for arg_name in ${content_args}; do
+        old_value="$(extract_arg_default_from_ref "${old_ref}" "${arg_name}")"
+        new_value="$(extract_arg_default_from_ref "${new_ref}" "${arg_name}")"
+        if [[ "${old_value}" != "${new_value}" ]]; then
+            echo "  - ${arg_name}: ${old_value:-<unset>} -> ${new_value:-<unset>}"
+            changed=1
+        fi
+    done
+
+    if [[ "${changed}" == "0" ]]; then
+        echo "  - none detected; Dockerfile instructions changed outside tracked ARG defaults"
+    fi
+}
+
+log_arg_line_diff() {
+    local range="$1"
+    local arg_diff=""
+
+    arg_diff="$(
+        git diff --unified=0 "${range}" -- "${DOCKERFILE}" 2>/dev/null \
+            | awk '/^[+-][[:space:]]*ARG[[:space:]]/ && $0 !~ /^(---|\+\+\+)/ { print "  " $0 }' \
+            || true
+    )"
+
+    if [[ -n "${arg_diff}" ]]; then
+        echo "Changed Dockerfile ARG lines:"
+        printf '%s\n' "${arg_diff}"
+    fi
+}
+
+log_rocm_base_change_check() {
+    local context="$1"
+    local range="$2"
+    local old_ref="$3"
+    local old_short=""
+    local head_short=""
+
+    old_short="$(short_git_ref "${old_ref}")"
+    head_short="$(short_git_ref HEAD)"
+
+    echo "--- :mag: ROCm base refresh check"
+    echo "Context: ${context}"
+    echo "Dockerfile: ${DOCKERFILE}"
+    echo "Base revision: ${old_short}"
+    echo "Head revision: ${head_short}"
+    echo "Git diff range: ${range}"
+}
+
+log_rocm_base_rebuild_reason() {
+    local context="$1"
+    local range="$2"
+    local old_ref="$3"
+    local changed_files=""
+
+    log_rocm_base_change_check "${context}" "${range}" "${old_ref}"
+
+    changed_files="$(git diff --name-only "${range}" -- "${DOCKERFILE}" 2>/dev/null || true)"
+    echo "Changed files:"
+    if [[ -n "${changed_files}" ]]; then
+        sed 's/^/  - /' <<<"${changed_files}"
+    else
+        echo "  - ${DOCKERFILE}"
+    fi
+    log_arg_default_changes "${old_ref}" HEAD
+    log_arg_line_diff "${range}"
+    echo "Decision: rebuilding ROCm base image because ${DOCKERFILE} changed."
+}
+
+rocm_base_changed_in_range() {
+    local context="$1"
+    local range="$2"
+    local old_ref="$3"
+
+    if git_diff_changed_base "${range}"; then
+        log_rocm_base_rebuild_reason "${context}" "${range}" "${old_ref}"
+        return 0
+    fi
+
+    log_rocm_base_change_check "${context}" "${range}" "${old_ref}"
+    echo "Decision: ROCm base refresh not required; ${DOCKERFILE} is unchanged."
+    return 1
+}
+
 rocm_base_changed() {
     local base_branch="${BUILDKITE_PULL_REQUEST_BASE_BRANCH:-main}"
     local base_ref="refs/remotes/origin/${base_branch}"
@@ -139,22 +248,36 @@ rocm_base_changed() {
         git fetch --no-tags --depth=200 origin \
             "+refs/heads/${base_branch}:${base_ref}" >/dev/null 2>&1 || true
         merge_base=$(git merge-base HEAD "${base_ref}" 2>/dev/null || true)
-        echo "Checking ROCm base Dockerfile changes against PR base: ${base_ref}"
-        if [[ -n "${merge_base}" ]] && git_diff_changed_base "${merge_base}...HEAD"; then
+        if [[ -z "${merge_base}" ]]; then
+            echo "Unable to determine merge base with PR base ${base_ref}; skipping ROCm base refresh unless forced"
+            return 1
+        fi
+        if rocm_base_changed_in_range \
+            "pull request build against ${base_ref}" \
+            "${merge_base}...HEAD" \
+            "${merge_base}"; then
             return 0
         fi
     elif [[ "${BUILDKITE_BRANCH:-}" == "${ROCM_BASE_STABLE_BRANCH:-main}" ]] \
         && git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-        echo "Checking ROCm base Dockerfile changes against previous ${ROCM_BASE_STABLE_BRANCH:-main} commit"
-        if git_diff_changed_base "HEAD~1..HEAD"; then
+        if rocm_base_changed_in_range \
+            "stable branch build; comparing against previous ${ROCM_BASE_STABLE_BRANCH:-main} commit" \
+            "HEAD~1..HEAD" \
+            "HEAD~1"; then
             return 0
         fi
     else
         git fetch --no-tags --depth=200 origin \
             "+refs/heads/${base_branch}:${base_ref}" >/dev/null 2>&1 || true
         merge_base=$(git merge-base HEAD "${base_ref}" 2>/dev/null || true)
-        echo "Checking ROCm base Dockerfile changes against branch base: ${base_ref}"
-        if [[ -n "${merge_base}" ]] && git_diff_changed_base "${merge_base}...HEAD"; then
+        if [[ -z "${merge_base}" ]]; then
+            echo "Unable to determine merge base with branch base ${base_ref}; skipping ROCm base refresh unless forced"
+            return 1
+        fi
+        if rocm_base_changed_in_range \
+            "branch build against ${base_ref}" \
+            "${merge_base}...HEAD" \
+            "${merge_base}"; then
             return 0
         fi
     fi
