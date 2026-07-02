@@ -183,10 +183,12 @@ def compute_tile_loop_bounds(
         + 1
     )
     if USE_MM_PREFIX or USE_PER_SEQ_CAUSAL or (not USE_CAUSAL):
-        # Non-causal or mixed batches need the full sequence range.
-        # Per-element masking in compute_kv_seq_mask handles the
-        # actual causal/non-causal boundary per sequence.
-        max_seq_prefix_len = tl.maximum(max_seq_prefix_len, seq_len)
+        # Read the full sequence but never past seq_len: the causal-style
+        # formula above can overshoot for non-causal sequences, and slots
+        # >= seq_len are unwritten KV (last-block tail) that may hold NaN
+        # (0 * NaN poisons the output). Per-element masking in
+        # compute_kv_seq_mask handles the causal/non-causal boundary.
+        max_seq_prefix_len = seq_len
     else:
         max_seq_prefix_len = tl.minimum(max_seq_prefix_len, seq_len)
 
