@@ -110,6 +110,16 @@ class ParserEngineReasoningAdapter(ReasoningParser):
     def has_engine_confirmed_reasoning_end(self) -> bool:
         return self._parser_engine.reasoning_ended
 
+    @property
+    def thinking_enabled(self) -> bool:
+        """Whether thinking is enabled for this request.
+
+        Delegates to the wrapped parser engine, which derives it from the
+        request's ``chat_template_kwargs``. Defaults to ``True`` to match
+        xgrammar's default.
+        """
+        return bool(getattr(self._parser_engine, "thinking_enabled", True))
+
     def finish_streaming(self) -> DeltaMessage | None:
         return self._parser_engine.finish_streaming()
 

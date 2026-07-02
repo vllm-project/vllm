@@ -511,6 +511,18 @@ class DelegatingParser(Parser):
             request = self._tool_parser.adjust_request(request)
         return request
 
+    def _reasoning_enabled(self) -> bool:
+        """Whether thinking is enabled for this request.
+
+        The reasoning parser is built per request from its
+        ``chat_template_kwargs`` and already reflects the thinking state.
+        Defaults to ``True`` to match xgrammar's default.
+        """
+        reasoner = self._reasoning_parser
+        if reasoner is None:
+            return False
+        return bool(getattr(reasoner, "thinking_enabled", True))
+
     def _apply_structural_tag(
         self, request: ChatCompletionRequest | ResponsesRequest
     ) -> ChatCompletionRequest | ResponsesRequest:
@@ -532,9 +544,14 @@ class DelegatingParser(Parser):
         if not need_tool_calling:
             return request
 
+        reasoning_enabled = self._reasoning_enabled()
+
+        # The grammar must include the reasoning section when the model thinks,
+        # else the FSM rejects the reasoning tokens at the reasoning-to-tool
+        # boundary.
         structure_tag = self._tool_parser.get_structural_tag(
             request,
-            reasoning=False,
+            reasoning=reasoning_enabled,
         )
         if structure_tag is None:
             return request
@@ -547,6 +564,14 @@ class DelegatingParser(Parser):
             request.text = None
         else:
             request.response_format = None
+
+        # The tag models the reasoning prefix, so enforce the grammar from the
+        # first token rather than deferring past a reasoning section. Otherwise
+        # the tokens sampled right after the reasoning-end marker escape the
+        # bitmask and a forced tool call can be violated. The attr is a
+        # ChatCompletionRequest PrivateAttr, hence the guard.
+        if reasoning_enabled and hasattr(request, "_grammar_from_tool_parser"):
+            request._grammar_from_tool_parser = True
         return request
 
     def extract_reasoning_streaming(
