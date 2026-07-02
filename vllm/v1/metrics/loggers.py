@@ -437,6 +437,16 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         }
         per_engine_labelvalues = self.per_engine_labelvalues
 
+        gauge_last_iteration_ts = self._gauge_cls(
+            name="vllm:last_engine_iteration_timestamp_seconds",
+            documentation="Unix timestamp of the last engine iteration",
+            labelnames=labelnames,
+            multiprocess_mode="mostrecent",
+        )
+        self.gauge_last_iteration_ts = create_metric_per_engine(
+            gauge_last_iteration_ts, per_engine_labelvalues
+        )
+
         self.spec_decoding_prom = self._spec_decoding_cls(
             vllm_config.speculative_config,
             labelnames,
@@ -1147,6 +1157,10 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         if iteration_stats is None:
             return
+        self.gauge_last_iteration_ts[engine_idx].set(
+            iteration_stats.iteration_timestamp
+        )
+
         if envs.VLLM_COMPUTE_NANS_IN_LOGITS:
             self.counter_corrupted_requests[engine_idx].inc(
                 iteration_stats.num_corrupted_reqs
