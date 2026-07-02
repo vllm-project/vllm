@@ -6,6 +6,8 @@
 import json
 import math
 import os
+import random
+import time
 from dataclasses import MISSING, dataclass, field, fields
 from typing import Literal
 
@@ -14,6 +16,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
 
 logger = init_logger(__name__)
+
+_ADAPTER_CONFIG_LOAD_TIMEOUT_S = 1.0
+_ADAPTER_CONFIG_LOAD_INITIAL_BACKOFF_S = 0.05
+_ADAPTER_CONFIG_LOAD_MAX_BACKOFF_S = 1.0
 
 
 @dataclass
@@ -77,6 +83,26 @@ class PEFTHelper:
         filtered_dict = {k: v for k, v in config_dict.items() if k in class_fields}
         return cls(**filtered_dict)
 
+    @staticmethod
+    def _load_adapter_config(lora_config_path: str) -> dict:
+        deadline = time.monotonic() + _ADAPTER_CONFIG_LOAD_TIMEOUT_S
+        interval = _ADAPTER_CONFIG_LOAD_INITIAL_BACKOFF_S
+
+        while True:
+            try:
+                with open(lora_config_path) as f:
+                    return json.load(f)
+            except (FileNotFoundError, json.JSONDecodeError):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise
+                sleep_s = random.uniform(
+                    0.0,
+                    min(interval, _ADAPTER_CONFIG_LOAD_MAX_BACKOFF_S, remaining),
+                )
+                time.sleep(sleep_s)
+                interval *= 2
+
     @classmethod
     def from_local_dir(
         cls,
@@ -107,8 +133,7 @@ class PEFTHelper:
             )
 
         else:
-            with open(lora_config_path) as f:
-                config = json.load(f)
+            config = cls._load_adapter_config(lora_config_path)
 
         config["vllm_max_position_embeddings"] = max_position_embeddings
         return cls.from_dict(config)
