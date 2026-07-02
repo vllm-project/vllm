@@ -120,3 +120,47 @@ def update_dflash(config_dict: dict, pre_trained_config: dict) -> None:
         "mask_token_id": config_dict["mask_token_id"],
         "target_layer_ids": [i - 1 for i in aux_layer_ids],
     }
+
+
+@register_speculator("dspark")
+def update_dspark(config_dict: dict, pre_trained_config: dict) -> None:
+    """
+    Apply DSpark specific configuration transformations to the `dict` used to
+    construct the Transformers PreTrainedConfig.
+
+    DSpark extends DFlash with a Markov logit-bias head, reusing the same
+    Qwen3DSparkModel loader and DSparkSpeculator runtime as the dense DSpark
+    checkpoints (e.g. deepseek-ai/dspark_qwen3_8b_block7).
+
+    DSpark specific fields:
+    - draft_vocab_size: draft vocab size; when smaller than the target vocab the
+        checkpoint also ships d2t/t2d remap tables.
+    - mask_token_id (required): token id for parallel-drafting mask slots.
+    - markov_rank / markov_head_type: low-rank Markov logit-bias head.
+    - block_size: semi-autoregressive draft block size.
+    - enable_confidence_head / confidence_head_with_markov: confidence head.
+    - aux_hidden_state_layer_ids (required): target layer indices feeding the
+        drafter. Mapped to both eagle_aux_hidden_state_layer_ids and
+        target_layer_ids (DSpark's i-1 layer semantics).
+    """
+    pre_trained_config["architectures"] = ["Qwen3DSparkModel"]
+    # Speculators DSpark uses the 1+N fill-in block (anchor is a bonus token).
+    pre_trained_config["dspark_bonus_anchor"] = True
+
+    aux_layer_ids = config_dict["aux_hidden_state_layer_ids"]
+    pre_trained_config["eagle_aux_hidden_state_layer_ids"] = aux_layer_ids
+    # DSpark indexes target layers as aux_id - 1 (matches the dense configs).
+    pre_trained_config["target_layer_ids"] = [i - 1 for i in aux_layer_ids]
+
+    for key in (
+        "draft_vocab_size",
+        "target_hidden_size",
+        "mask_token_id",
+        "markov_rank",
+        "markov_head_type",
+        "block_size",
+        "enable_confidence_head",
+        "confidence_head_with_markov",
+    ):
+        if config_dict.get(key) is not None:
+            pre_trained_config[key] = config_dict[key]
