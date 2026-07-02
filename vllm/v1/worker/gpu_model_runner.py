@@ -1884,7 +1884,8 @@ class GPUModelRunner(
             # whether encoding is finished or not so that cross-attention knows how
             # many encoder tokens to attend to.
             encoder_input_tokens = sum(
-                feature.mm_position.length for feature in req_state.mm_features
+                feature.mm_position.get_num_embeds()
+                for feature in req_state.mm_features
             )
             self.encoder_seq_lens.np[req_index] = encoder_input_tokens
         if for_cudagraph_capture:

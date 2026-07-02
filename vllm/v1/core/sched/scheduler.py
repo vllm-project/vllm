@@ -213,9 +213,9 @@ class Scheduler(SchedulerInterface):
         # multi-modal models for convenience
         # Example: https://github.com/vllm-project/bart-plugin
         if self.is_encoder_decoder:
-            assert mm_budget and len(mm_budget.mm_max_toks_per_item) <= 1, (
+            assert mm_budget is not None, (
                 "Encoder-decoder models are expected to implement the "
-                "multimodal interface with at most one modality."
+                "multimodal interface."
             )
 
         self.max_num_encoder_input_tokens = (
@@ -1373,10 +1373,6 @@ class Scheduler(SchedulerInterface):
             item_identifier = mm_feature.identifier
 
             if self.is_encoder_decoder and num_computed_tokens > 0:
-                assert start_pos == 0, (
-                    "Encoder input should be processed at the beginning of "
-                    "the sequence when encoder-decoder models are used."
-                )
                 # Encoder input has already been computed
                 # The calculation here is a bit different. We don't turn encoder
                 # output into tokens that get processed by the decoder and
