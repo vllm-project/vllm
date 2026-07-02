@@ -116,7 +116,7 @@ class EngineCoreRequest(
     # belong to, to cover a race condition where the request is sent before
     # a wave finished notification is received.
     current_wave: int = 0
-    priority: int = 0
+    priority: float = 0.0
 
     trace_headers: Mapping[str, str] | None = None
     resumable: bool = False
