@@ -455,6 +455,19 @@ class SamplingParams(
         if self.bad_words is None:
             self.bad_words = []
 
+        if not isinstance(self.stop, list):
+            raise TypeError(
+                f"stop must be a list, got {type(self.stop).__name__}."
+            )
+        if not isinstance(self.stop_token_ids, list):
+            raise TypeError(
+                f"stop_token_ids must be a list, got {type(self.stop_token_ids).__name__}."
+            )
+        if not isinstance(self.bad_words, list):
+            raise TypeError(
+                f"bad_words must be a list, got {type(self.bad_words).__name__}."
+            )
+
         if self.logprobs is True:
             self.logprobs = 1
 
@@ -581,12 +594,18 @@ class SamplingParams(
                 parameter="prompt_logprobs",
                 value=self.prompt_logprobs,
             )
-        assert isinstance(self.stop_token_ids, list)
+        if not isinstance(self.stop_token_ids, list):
+            raise TypeError(
+                f"stop_token_ids must be a list, got {type(self.stop_token_ids).__name__}."
+            )
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
             raise ValueError(
                 f"stop_token_ids must contain only integers, got {self.stop_token_ids}."
             )
-        assert isinstance(self.stop, list)
+        if not isinstance(self.stop, list):
+            raise TypeError(
+                f"stop must be a list, got {type(self.stop).__name__}."
+            )
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")
         if self.stop and not self.detokenize:
@@ -594,7 +613,10 @@ class SamplingParams(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
-        assert isinstance(self.bad_words, list)
+        if not isinstance(self.bad_words, list):
+            raise TypeError(
+                f"bad_words must be a list, got {type(self.bad_words).__name__}."
+            )
         if any(not bad_word for bad_word in self.bad_words):
             raise ValueError(
                 f"bad_words cannot contain an empty string. "
@@ -631,7 +653,8 @@ class SamplingParams(
             if eos_ids:
                 self._all_stop_token_ids.update(eos_ids)
                 if not self.ignore_eos:
-                    assert self.stop_token_ids is not None
+                    if self.stop_token_ids is None:
+                        raise ValueError("stop_token_ids must not be None")
                     eos_ids.update(self.stop_token_ids)
                     self.stop_token_ids = list(eos_ids)
 
