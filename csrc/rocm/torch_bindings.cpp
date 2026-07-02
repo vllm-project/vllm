@@ -72,6 +72,7 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, rocm_ops) {
       "                float scale, Tensor block_tables,"
       "                Tensor seq_lens,"
       "                Tensor? query_start_loc,"
+      "                Tensor slot_mapping,"
       "                int block_size,"
       "                int max_seq_len,"
       "                Tensor? alibi_slopes,"

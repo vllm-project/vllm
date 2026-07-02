@@ -198,6 +198,20 @@ def test_paged_attention(
     # Using default kv_scale
     k_scale = v_scale = torch.tensor(1.0, dtype=torch.float32, device=device)
 
+    # Build a concatenated slot_mapping (int64) for the rocm custom kernel,
+    # one entry per *context* token across the batch. The kernel offsets into
+    # this with the cumulative sum of seq_lens computed inside the launcher,
+    # so this tensor must be packed (no per-sequence padding).
+    bt_int64 = block_tables.to(torch.int64)
+    slot_chunks = []
+    for s, slen in enumerate(seq_lens.tolist()):
+        tok_idx = torch.arange(slen, dtype=torch.int64)
+        slot_chunks.append(
+            bt_int64[s, tok_idx // block_size] * block_size
+            + (tok_idx % block_size)
+        )
+    slot_mapping = torch.cat(slot_chunks, dim=0).to(device)
+
     # Call the paged attention kernel.
     output = torch.empty_like(query)
     if version == "v1":
@@ -324,6 +338,7 @@ def test_paged_attention(
                 block_tables,
                 seq_lens,
                 None,
+                slot_mapping,
                 block_size,
                 max_seq_len,
                 alibi_slopes,
@@ -347,6 +362,7 @@ def test_paged_attention(
                     block_tables,
                     seq_lens,
                     None,
+                    slot_mapping,
                     block_size,
                     max_seq_len,
                     alibi_slopes,

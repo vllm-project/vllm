@@ -72,6 +72,14 @@ class RocmAttentionMetadata:
     # DFlash drafting sets this to False via CommonAttentionMetadata.
     causal: bool = True
 
+    # Optional per-context-token slot index (length = sum(seq_lens)) consumed
+    # by the ROCm custom paged-attention kernel. Distinct from `slot_mapping`,
+    # which is per *new* token. None by default — the kernel call site
+    # derives the standard contiguous-layout tensor from block_table +
+    # seq_lens. Models with a non-standard (mixed) KV cache layout can
+    # populate this field with their real per-context-token slot positions.
+    context_slot_mapping: torch.Tensor | None = None
+
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
@@ -456,6 +464,8 @@ class RocmAttentionImpl(AttentionImpl):
             max_query_len=max_seqlen_q,
             k_scale=layer._k_scale,
             v_scale=layer._v_scale,
+            slot_mapping=attn_metadata.slot_mapping,
+            context_slot_mapping=attn_metadata.context_slot_mapping,
             alibi_slopes=self.alibi_slopes,
             sliding_window=self.sliding_window[0],
             sm_scale=self.scale,

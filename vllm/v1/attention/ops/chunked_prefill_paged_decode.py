@@ -291,6 +291,14 @@ def chunked_prefill_paged_decode(
     sinks=None,
     is_block_table_ptr: bool = False,
     causal: bool = True,
+    # Per-new-token slot_mapping from attn_metadata. Unused here — the kernel
+    # below consumes the per-context-token tensor.
+    slot_mapping=None,
+    # Per-context-token slot_mapping (length = sum(seq_lens)) used by the
+    # custom ROCm paged-attention kernel. Built once per step by
+    # RocmAttentionMetadataBuilder; models with mixed KV layouts override the
+    # builder to express their real layout.
+    context_slot_mapping=None,
 ):
     if sm_scale is None:
         sm_scale = 1.0 / (query.shape[2] ** 0.5)
@@ -394,6 +402,36 @@ def chunked_prefill_paged_decode(
         )
         max_logits = torch.empty_like(exp_sums)
 
+        # The custom ROCm paged-attention kernel expects a *per-context-token*
+        # slot_mapping (length = sum(seq_lens)). For the standard contiguous
+        # KV cache layout we derive it from block_table + seq_lens. Models
+        # with a mixed layout pass `context_slot_mapping` through
+        # attn_metadata to override the derivation.
+        if context_slot_mapping is None:
+            device = block_table.device
+            total_ctx_tokens = int(seq_lens.sum().item())
+            seq_idx_per_tok = torch.repeat_interleave(
+                torch.arange(total_num_seq, device=device, dtype=torch.long),
+                seq_lens.to(torch.long),
+            )
+            cu_seqlens_kv = torch.cat(
+                [
+                    torch.zeros(1, device=device, dtype=torch.long),
+                    seq_lens.to(torch.long).cumsum(0),
+                ]
+            )
+            intra_tok_idx = (
+                torch.arange(total_ctx_tokens, device=device, dtype=torch.long)
+                - cu_seqlens_kv[seq_idx_per_tok]
+            )
+            context_slot_mapping = (
+                block_table[seq_idx_per_tok, intra_tok_idx // block_size].to(
+                    torch.long
+                )
+                * block_size
+                + (intra_tok_idx % block_size)
+            )
+
         ops.paged_attention_rocm(
             output,
             exp_sums,
@@ -407,6 +445,7 @@ def chunked_prefill_paged_decode(
             block_tables=block_table,
             seq_lens=seq_lens,
             query_start_loc=query_start_loc,
+            slot_mapping=context_slot_mapping,
             block_size=block_size,
             max_seq_len=max_seq_len,
             alibi_slopes=alibi_slopes,
