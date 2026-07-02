@@ -657,17 +657,32 @@ class SamplingParams(
     def update_from_tokenizer(self, tokenizer: TokenizerLike) -> None:
         if not self.bad_words:
             return
+        # Cache tokenized bad_words on the tokenizer to avoid redundant
+        # tokenizer.encode() calls.  When many concurrent requests share the
+        # same bad_words list (a common RL workload pattern) the repeated
+        # encode calls race with prompt tokenization on the same HF fast
+        # tokenizer pool and can cause "RuntimeError: Already borrowed"
+        # despite the thread-safe pool wrapper (#41181, #45445).
+        cache = getattr(tokenizer, '_bad_words_token_cache', None)
+        if cache is None:
+            cache = {}
+            tokenizer._bad_words_token_cache = cache
         self._bad_words_token_ids = []
         for bad_word in self.bad_words:
             # To prohibit words both at the beginning
             # and in the middle of text
             # (related to add_prefix_space tokenizer parameter)
             for add_prefix_space in [False, True]:
-                prefix = " " if add_prefix_space else ""
-                prompt = prefix + bad_word.lstrip()
-                prompt_token_ids = tokenizer.encode(
-                    text=prompt, add_special_tokens=False
-                )
+                cache_key = (bad_word, add_prefix_space)
+                if cache_key in cache:
+                    prompt_token_ids = cache[cache_key]
+                else:
+                    prefix = " " if add_prefix_space else ""
+                    prompt = prefix + bad_word.lstrip()
+                    prompt_token_ids = tokenizer.encode(
+                        text=prompt, add_special_tokens=False
+                    )
+                    cache[cache_key] = prompt_token_ids
 
                 # If no space at the beginning
                 # or if prefix space produces a new word token
