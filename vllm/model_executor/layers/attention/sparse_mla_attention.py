@@ -216,7 +216,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         (
             prefill_query_start_loc,
             prefill_max_query_len,
-            has_context,
             prefill_query_lens_cpu,
         ) = self._build_prefill_fields(common_attn_metadata, num_decodes, num_prefills)
         chunked_context = self._build_chunked_context_fields(
@@ -225,6 +224,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             num_prefills,
             prefill_query_lens_cpu,
         )
+        has_context = chunked_context is not None
 
         return self.metadata_cls(  # type: ignore[call-arg]
             num_reqs=common_attn_metadata.num_reqs,
@@ -256,11 +256,10 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
     ) -> tuple[
         torch.Tensor | None,  # prefill_query_start_loc
         int,  # prefill_max_query_len
-        bool,  # has_context
         torch.Tensor | None,  # prefill_query_lens_cpu
     ]:
         if num_prefills == 0:
-            return None, 0, False, None
+            return None, 0, None
 
         offset = common_attn_metadata.query_start_loc[num_decodes]
         prefill_query_start_loc = (
@@ -272,18 +271,9 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         prefill_query_lens = prefill_qsl_cpu[1:] - prefill_qsl_cpu[:-1]
         prefill_max_query_len = int(prefill_query_lens.max().item())
 
-        num_computed_tokens_cpu = (
-            common_attn_metadata.compute_num_computed_tokens().cpu()
-        )
-        context_lens_cpu = num_computed_tokens_cpu[
-            num_decodes : num_decodes + num_prefills
-        ]
-        has_context = bool(context_lens_cpu.max().item() > 0)
-
         return (
             prefill_query_start_loc,
             prefill_max_query_len,
-            has_context,
             prefill_query_lens,
         )
 
