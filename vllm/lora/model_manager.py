@@ -316,9 +316,20 @@ class LoRAModelManager:
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
         self.lora_index_to_id[index] = lora_model.id
+        chosen_modules: dict[
+            int, tuple[str, BaseLayerWithLoRA, LoRALayerWeights | None]
+        ] = {}
         for module_name, module in self.modules.items():
+            module_key = id(module)
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
-            if not module_lora:
+
+            if module_key not in chosen_modules:
+                chosen_modules[module_key] = (module_name, module, module_lora)
+            elif module_lora is not None and chosen_modules[module_key][2] is None:
+                chosen_modules[module_key] = (module_name, module, module_lora)
+
+        for module_name, module, module_lora in chosen_modules.values():
+            if module_lora is None:
                 module.reset_lora(index)
                 logger.debug(
                     "No LoRA weights found for module %s, skipping.", module_name
