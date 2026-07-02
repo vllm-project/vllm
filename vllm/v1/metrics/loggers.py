@@ -412,7 +412,12 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
     _perf_metrics_cls = PerfMetricsProm
 
     def __init__(
-        self, vllm_config: VllmConfig, engine_indexes: list[int] | None = None
+        self,
+        vllm_config: VllmConfig,
+        engine_indexes: list[int] | None = None,
+        *,
+        extra_labelnames: list[str] | None = None,
+        extra_labelvalues: dict[int, list[object]] | None = None,
     ):
         if engine_indexes is None:
             engine_indexes = [0]
@@ -429,12 +434,32 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         )
 
         labelnames = ["model_name", "engine"]
+        if extra_labelnames or extra_labelvalues:
+            if not (extra_labelnames and extra_labelvalues):
+                raise ValueError(
+                    "Both extra_labelnames and extra_labelvalues "
+                    "must be provided together"
+                )
+            labelnames = labelnames + extra_labelnames
         model_name = vllm_config.model_config.served_model_name
         max_model_len = vllm_config.model_config.max_model_len
 
         self.per_engine_labelvalues: dict[int, list[object]] = {
             idx: [model_name, str(idx)] for idx in engine_indexes
         }
+        if extra_labelvalues:
+            # guaranteed by guard above; narrows type for mypy
+            assert extra_labelnames is not None
+            for idx in engine_indexes:
+                extra_vals = extra_labelvalues.get(idx, [])
+                if len(extra_vals) != len(extra_labelnames):
+                    raise ValueError(
+                        f"extra_labelvalues for engine {idx} does not "
+                        f"match extra_labelnames length"
+                    )
+                self.per_engine_labelvalues[idx] = (
+                    self.per_engine_labelvalues[idx] + extra_vals
+                )
         per_engine_labelvalues = self.per_engine_labelvalues
 
         self.spec_decoding_prom = self._spec_decoding_cls(
@@ -512,9 +537,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
 
         for s in sleep_state:
             self.gauge_engine_sleep_state[s] = {
-                idx: gauge_engine_sleep_state.labels(
-                    engine=idx, model_name=model_name, sleep_state=s
-                )
+                idx: gauge_engine_sleep_state.labels(*per_engine_labelvalues[idx], s)
                 for idx in engine_indexes
             }
 
@@ -649,7 +672,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         for source in PromptTokenStats.ALL_SOURCES:
             self.counter_prompt_tokens_by_source[source] = {
                 idx: counter_prompt_tokens_by_source.labels(
-                    model_name, str(idx), source
+                    *per_engine_labelvalues[idx], source
                 )
                 for idx in engine_indexes
             }
@@ -682,7 +705,7 @@ class PrometheusStatLogger(AggregateStatLoggerBase):
         for reason in FinishReason:
             self.counter_request_success[reason] = {
                 idx: counter_request_success_base.labels(
-                    model_name, str(idx), str(reason)
+                    *per_engine_labelvalues[idx], str(reason)
                 )
                 for idx in engine_indexes
             }
