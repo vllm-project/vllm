@@ -81,6 +81,10 @@ def enable_pickle(monkeypatch):
         ModelCase("fxmarty/Llama-3.1-70B-Instruct-2-layers-mxfp6", tp=4),
     ],
 )
+@pytest.mark.skipif(
+    not ROCM_AVAILABLE,
+    reason="This test is only enabled on platforms that support amd-quark",
+)
 def test_mxfp4_loading_and_execution_moe(vllm_runner, model_case: ModelCase):
     if torch.accelerator.device_count() < model_case.tp:
         pytest.skip(
