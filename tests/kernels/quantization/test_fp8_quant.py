@@ -11,7 +11,10 @@ from tests.kernels.quant_utils import (
     ref_dynamic_per_token_quant,
 )
 from tests.kernels.utils import opcheck
+from vllm.config import VllmConfig, set_current_vllm_config
+from vllm.model_executor.layers.quantization.input_quant_fp8 import QuantFP8
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    GroupShape,
     scaled_quantize,
 )
 from vllm.platforms import current_platform
@@ -219,3 +222,46 @@ def test_static_fp8_quant_1d_scale(
     torch.testing.assert_close(ref_out.float(), ops_out.float(), rtol=0.12, atol=0.0)
 
     opcheck_fp8_quant(ops_out, x, scale=scale_1d, group_shape=group_shape)
+
+
+@pytest.mark.parametrize("dtype", DTYPES)
+@pytest.mark.parametrize("group_shape_name", ["PER_TOKEN", "PER_TENSOR"])
+@torch.inference_mode()
+def test_fp8_quant_nan_handling(
+    dtype: torch.dtype,
+    group_shape_name: str,
+) -> None:
+    """Test that forward_native handles NaN inputs identically to forward_cuda;
+    since the CUDA kernel treats NaN as 0 and produces valid scales and quantized
+    outputs, we need to do the same in forward_native.
+    """
+    num_tokens = 32
+    hidden_size = 1024
+    group_shape_name = getattr(GroupShape, group_shape_name)
+
+    with set_current_vllm_config(VllmConfig()):
+        quant = QuantFP8(
+            static=False,
+            group_shape=group_shape_name,
+        )
+
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device="cuda")
+
+    # Inject NaNs & run forward for both cuda and native
+    x[:, : hidden_size // 2] = float("nan")
+
+    out_cuda, scale_cuda = quant.forward_cuda(x)
+    out_native, scale_native = quant.forward_native(x)
+
+    # Neither path should produce NaN in scales or outputs
+    assert not torch.isnan(scale_cuda).any(), "CUDA scales contain NaN"
+    assert not torch.isnan(scale_native).any(), "Native scales contain NaN"
+    assert not torch.isnan(out_cuda.float()).any(), "CUDA output contains NaN"
+    assert not torch.isnan(out_native.float()).any(), "Native output contains NaN"
+
+    # Scales should match between CUDA and native
+    torch.testing.assert_close(scale_native, scale_cuda)
+
+    # Quantized outputs should match at non-NaN input positions.
+    valid = ~torch.isnan(x)
+    torch.testing.assert_close(out_native.float()[valid], out_cuda.float()[valid])
