@@ -839,14 +839,19 @@ def get_pooling_config(
 
         config: dict[str, Any] = {"use_activation": normalize}
         for key, val in pooling_dict.items():
-            if val is True:
+            if key == "pooling_mode" and isinstance(val, str):
+                pooling_type = parse_pooling_type(val)
+            elif val is True:
                 pooling_type = parse_pooling_type(key)
-                if pooling_type in SEQ_POOLING_TYPES:
-                    config["seq_pooling_type"] = pooling_type
-                elif pooling_type in TOK_POOLING_TYPES:
-                    config["tok_pooling_type"] = pooling_type
-                else:
-                    logger.debug("Skipping unrelated field: %r=%r", key, val)
+            else:
+                continue
+
+            if pooling_type in SEQ_POOLING_TYPES:
+                config["seq_pooling_type"] = pooling_type
+            elif pooling_type in TOK_POOLING_TYPES:
+                config["tok_pooling_type"] = pooling_type
+            else:
+                logger.debug("Skipping unrelated field: %r=%r", key, val)
 
         return config
 

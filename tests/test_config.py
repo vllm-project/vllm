@@ -13,6 +13,7 @@ from pydantic import ValidationError
 
 import vllm.config.vllm as vllm_config_module
 import vllm.envs as envs
+import vllm.transformers_utils.config as transformers_config
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
@@ -440,6 +441,48 @@ def test_get_pooling_config_from_args():
     model_config = ModelConfig(model_id, pooler_config=pooler_config)
 
     assert asdict(model_config.pooler_config) == asdict(pooler_config)
+
+
+def test_get_pooling_config_reads_compact_pooling_mode(monkeypatch):
+    files = {
+        "modules.json": [
+            {
+                "idx": 0,
+                "name": "0",
+                "path": "0_Transformer",
+                "type": "sentence_transformers.models.Transformer",
+            },
+            {
+                "idx": 1,
+                "name": "1",
+                "path": "1_Pooling",
+                "type": "sentence_transformers.models.Pooling",
+            },
+        ],
+        "1_Pooling/config.json": {"pooling_mode": "mean"},
+    }
+
+    def fake_file_or_path_exists(model, config_name, revision):
+        return config_name in files
+
+    def fake_get_hf_file_to_dict(config_name, model, revision):
+        return files.get(config_name)
+
+    monkeypatch.setattr(
+        transformers_config, "file_or_path_exists", fake_file_or_path_exists
+    )
+    monkeypatch.setattr(
+        transformers_config, "get_hf_file_to_dict", fake_get_hf_file_to_dict
+    )
+
+    transformers_config.get_pooling_config.cache_clear()
+    try:
+        assert transformers_config.get_pooling_config("compact-st-model") == {
+            "use_activation": False,
+            "seq_pooling_type": "MEAN",
+        }
+    finally:
+        transformers_config.get_pooling_config.cache_clear()
 
 
 @pytest.mark.parametrize(
