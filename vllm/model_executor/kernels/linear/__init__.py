@@ -30,6 +30,9 @@ from vllm.model_executor.kernels.linear.mixed_precision import (
 from vllm.model_executor.kernels.linear.mixed_precision.allspark import (
     AllSparkLinearKernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.cdna_hybrid_w4a16 import (
+    CDNAHybridW4A16LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mixed_precision.conch import (
     ConchLinearKernel,
 )
@@ -369,6 +372,9 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     ],
     PlatformEnum.ROCM: [
         RDNA3W4A16LinearKernel,
+        # CDNA (MI300) gates on on_mi3xx(); on non-CDNA ROCm this returns
+        # False from can_implement() and selection falls through to Triton.
+        CDNAHybridW4A16LinearKernel,
         TritonW4A16LinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
@@ -1021,6 +1027,7 @@ __all__ = [
     "MPLinearKernel",
     "MPLinearLayerConfig",
     "AllSparkLinearKernel",
+    "CDNAHybridW4A16LinearKernel",
     "ConchLinearKernel",
     "CPUWNA16LinearKernel",
     "CutlassW4A8LinearKernel",
