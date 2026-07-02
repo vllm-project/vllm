@@ -312,6 +312,59 @@ async def fetch_diffusion_metrics(
         return None
 
 
+@dataclass
+class PrefixCacheMetrics:
+    """Prefix cache (token-count) metrics from the server's Prometheus endpoint."""
+
+    queries: int
+    hits: int
+
+
+async def fetch_prefix_cache_metrics(
+    base_url: str, session: aiohttp.ClientSession
+) -> PrefixCacheMetrics | None:
+    """Fetch prefix cache metrics from the server's Prometheus endpoint.
+
+    Returns None if prefix caching is disabled or metrics are not available.
+    """
+    metrics_url = f"{base_url}/metrics"
+    try:
+        async with session.get(metrics_url) as response:
+            if response.status != 200:
+                return None
+            text = await response.text()
+
+            queries = 0
+            hits = 0
+            found_prefix_cache = False
+
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                if line.startswith("vllm:prefix_cache_"):
+                    # Extract metric name (before labels) to avoid matching
+                    # substrings inside label values, and to skip the
+                    # external (connector) prefix cache counters.
+                    parts = line.split(None, 1)
+                    metric_name = parts[0].split("{")[0]
+                    with contextlib.suppress(ValueError):
+                        if metric_name == "vllm:prefix_cache_queries_total":
+                            queries += int(float(parts[-1]))
+                            found_prefix_cache = True
+                        elif metric_name == "vllm:prefix_cache_hits_total":
+                            hits += int(float(parts[-1]))
+                            found_prefix_cache = True
+
+            if not found_prefix_cache:
+                return None
+
+            return PrefixCacheMetrics(queries=queries, hits=hits)
+    except (aiohttp.ClientError, asyncio.TimeoutError):
+        return None
+
+
 class TaskType(Enum):
     GENERATION = "generation"
     POOLING = "pooling"
@@ -956,6 +1009,7 @@ async def benchmark(
 
     spec_decode_metrics_before = await fetch_spec_decode_metrics(base_url, session)
     diffusion_metrics_before = await fetch_diffusion_metrics(base_url, session)
+    prefix_cache_metrics_before = await fetch_prefix_cache_metrics(base_url, session)
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
@@ -1117,6 +1171,25 @@ async def benchmark(
                 "committed_per_step": delta_committed / denoising_steps,
             }
 
+    prefix_cache_metrics_after = await fetch_prefix_cache_metrics(base_url, session)
+    prefix_cache_stats: dict[str, Any] | None = None
+    if (
+        prefix_cache_metrics_before is not None
+        and prefix_cache_metrics_after is not None
+    ):
+        delta_queries = (
+            prefix_cache_metrics_after.queries - prefix_cache_metrics_before.queries
+        )
+        delta_hits = prefix_cache_metrics_after.hits - prefix_cache_metrics_before.hits
+        # Counters are cumulative since server start, so use the per-run delta
+        # and skip runs that did not query the prefix cache.
+        if delta_queries > 0:
+            prefix_cache_stats = {
+                "queries": delta_queries,
+                "hits": delta_hits,
+                "hit_rate": delta_hits / delta_queries * 100,
+            }
+
     metrics: BenchmarkMetrics | EmbedBenchmarkMetrics
     actual_output_lens: list[int] | int
     if task_type == TaskType.GENERATION:
@@ -1188,6 +1261,12 @@ async def benchmark(
                 "Total token throughput (tok/s):", metrics.total_token_throughput
             )
         )
+    if prefix_cache_stats is not None:
+        print(
+            "{:<40} {:<10.2f}".format(
+                "Prefix cache hit rate (%):", prefix_cache_stats["hit_rate"]
+            )
+        )
 
     result: dict[str, Any]
     if isinstance(metrics, BenchmarkMetrics):
@@ -1247,6 +1326,11 @@ async def benchmark(
         result["diffusion_committed_tokens"] = int(diffusion_stats["committed_tokens"])
         result["diffusion_denoising_steps"] = int(diffusion_stats["denoising_steps"])
         result["diffusion_canvas_positions"] = int(diffusion_stats["canvas_positions"])
+
+    if prefix_cache_stats is not None:
+        result["prefix_cache_hit_rate"] = prefix_cache_stats["hit_rate"]
+        result["prefix_cache_queries"] = int(prefix_cache_stats["queries"])
+        result["prefix_cache_hits"] = int(prefix_cache_stats["hits"])
 
     def process_one_metric(
         # E.g., "ttft"
