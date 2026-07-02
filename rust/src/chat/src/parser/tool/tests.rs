@@ -130,6 +130,14 @@ fn factory_new_resolves_default_patterns() {
         Some(names::DEEPSEEK_V31)
     );
     assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-21B-A3B-PT"),
+        Some(names::ERNIE45)
+    );
+    assert_eq!(
+        factory.resolve_name_for_model("baidu/ERNIE-4.5-VL-28B-A3B-PT"),
+        Some(names::ERNIE45)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("zai-org/GLM-5-32B-Chat"),
         Some(names::GLM47)
     );
