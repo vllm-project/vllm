@@ -518,3 +518,21 @@ class TestVllmMaxNSequences:
 
         with pytest.raises(ValueError, match="n must be at most 128"):
             SamplingParams(n=129)
+
+
+class TestVllmUseSimpleKvOffload:
+    def test_default_value(self, monkeypatch: pytest.MonkeyPatch):
+        """Test that simple KV offload is disabled by default."""
+        monkeypatch.delenv("VLLM_USE_SIMPLE_KV_OFFLOAD", raising=False)
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        assert envs.VLLM_USE_SIMPLE_KV_OFFLOAD is False
+
+    def test_custom_value(self, monkeypatch: pytest.MonkeyPatch):
+        """Test that simple KV offload can be enabled."""
+        monkeypatch.setenv("VLLM_USE_SIMPLE_KV_OFFLOAD", "1")
+        if hasattr(envs.__getattr__, "cache_clear"):
+            envs.__getattr__.cache_clear()
+
+        assert envs.VLLM_USE_SIMPLE_KV_OFFLOAD is True

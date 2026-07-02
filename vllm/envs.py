@@ -1775,6 +1775,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS": lambda: bool(
         int(os.getenv("VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS", "0"))
     ),
+    # Select the simple in-process KV offload connector instead of the default
+    # offloading connector when --kv-offloading-size is enabled.
+    "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(
+        int(os.getenv("VLLM_USE_SIMPLE_KV_OFFLOAD") or "0")
+    ),
     # NIXL EP environment variables
     "VLLM_NIXL_EP_MAX_NUM_RANKS": lambda: int(
         os.getenv("VLLM_NIXL_EP_MAX_NUM_RANKS", "32")
