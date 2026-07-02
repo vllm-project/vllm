@@ -78,7 +78,9 @@ def assert_encoder_kv_cache_spec(engine: LLM) -> None:
     assert isinstance(spec, SlidingWindowSpec)
     assert spec.block_size == 16
     assert spec.num_kv_heads == 128
-    assert spec.sliding_window == cdiv(750, 4) == 188
+    # cdiv(750, 4) == 188 pooled tokens cover the model's window; the extra
+    # +1 is an eviction margin (see whisper_causal.py get_kv_cache_spec).
+    assert spec.sliding_window == cdiv(750, 4) + 1 == 189
     assert (
         spec.max_admission_blocks_per_request(
             max_num_batched_tokens=1,
