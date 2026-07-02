@@ -18,9 +18,10 @@ use vllm_chat::{
     ChatBackend, ChatLlm, ChatRenderer, ChatRequest, ChatTextBackend, DefaultChatOutputProcessor,
     DynChatOutputProcessor, DynChatRenderer, NewChatOutputProcessorOptions, RenderedPrompt,
 };
-use vllm_engine_core_client::protocol::{
-    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequest,
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreFinishReason, EngineCoreOutput, EngineCoreOutputs, RequestBatchOutputs,
 };
+use vllm_engine_core_client::protocol::request::EngineCoreRequest;
 use vllm_engine_core_client::test_utils::{IpcNamespace, spawn_mock_engine_task};
 use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig, EngineId};
 use vllm_llm::Llm;
@@ -114,19 +115,14 @@ fn engine_outputs_for_request(
     request_id: &str,
     output_specs: Vec<(Vec<u32>, Option<EngineCoreFinishReason>)>,
 ) -> EngineCoreOutputs {
-    EngineCoreOutputs {
-        engine_index: 0,
+    RequestBatchOutputs {
         outputs: output_specs
             .into_iter()
             .map(|(token_ids, finish_reason)| request_output(request_id, token_ids, finish_reason))
             .collect(),
-        scheduler_stats: None,
-        timestamp: 0.0,
-        utility_output: None,
-        finished_requests: None,
-        wave_complete: None,
-        start_wave: None,
+        ..Default::default()
     }
+    .into()
 }
 
 fn default_stream_output_specs() -> Vec<(Vec<u32>, Option<EngineCoreFinishReason>)> {
