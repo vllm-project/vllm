@@ -1,17 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
 import os
 import threading
 import time
-from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import msgspec
 import regex as re
 import torch
-import zmq
 
 from vllm.config import KVTransferConfig, VllmConfig
 from vllm.distributed.kv_transfer.kv_connector.v1.base import (
@@ -25,7 +22,6 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
-    make_zmq_socket,
 )
 
 if TYPE_CHECKING:
@@ -480,21 +476,3 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             self.reqs_to_save[request_id] = _req
         else:
             self.reqs_to_recv[request_id] = _req
-
-
-@contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
-    """Context manager for a ZMQ socket"""
-
-    if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
-        raise ValueError(f"Unexpected socket type: {socket_type}")
-
-    ctx: zmq.Context | None = None
-    try:
-        ctx = zmq.Context()  # type: ignore[attr-defined]
-        yield make_zmq_socket(
-            ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER
-        )
-    finally:
-        if ctx is not None:
-            ctx.destroy(linger=0)

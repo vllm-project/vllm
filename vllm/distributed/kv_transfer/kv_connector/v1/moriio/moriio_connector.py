@@ -43,7 +43,6 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     parse_moriio_zmq_address,
     resolve_host_ip,
     set_role,
-    zmq_ctx,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_engine import (
     MoRIIOWrapper,
@@ -67,6 +66,7 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     make_zmq_path,
     make_zmq_socket,
+    zmq_socket_ctx,
 )
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.core.sched.output import SchedulerOutput
@@ -1213,7 +1213,7 @@ class MoRIIOConnectorWorker:
         path = make_zmq_path("tcp", host, base_port)
         logger.debug("mori handshake starting listening on path: %s", path)
 
-        with zmq_ctx(zmq.ROUTER, path) as sock:
+        with zmq_socket_ctx(path, zmq.ROUTER) as sock:
             ready_event.set()
             while True:
                 identity, msg = sock.recv_multipart()
@@ -1261,7 +1261,7 @@ class MoRIIOConnectorWorker:
         logger.debug("handshake Querying metadata on path: %s", path)
 
         # Send query for the request.
-        with zmq_ctx(zmq.DEALER, path) as sock:
+        with zmq_socket_ctx(path, zmq.DEALER, bind=False) as sock:
             logger.debug("prepare send msg INSTAZNCE: %s", path)
             sock.send(MoRIIOConstants.GET_META_MSG)
             received_frame = sock.recv_multipart()
