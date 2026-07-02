@@ -260,6 +260,23 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
             return super()._compute_cos_sin_cache()
         return YaRNScalingRotaryEmbedding._compute_cos_sin_cache(self)
 
+    def _validate_positions(self, positions: torch.Tensor, cache_size: int) -> None:
+        """Raise ValueError if any position index exceeds the cache bounds."""
+        min_pos = positions.min().item()
+        if min_pos < 0:
+            raise ValueError(
+                f"MRoPE position index {min_pos} is negative. "
+                f"This likely indicates a video with an extreme or "
+                f"near-zero frame rate producing invalid positions."
+            )
+        max_pos = positions.max().item()
+        if max_pos >= cache_size:
+            raise ValueError(
+                f"MRoPE position index {max_pos} exceeds the rotary "
+                f"embedding cache size {cache_size}. This likely indicates "
+                f"a video with an extreme or near-zero frame rate."
+            )
+
     def forward_native(
         self,
         positions: torch.Tensor,
@@ -281,6 +298,7 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
 
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         num_tokens = positions.shape[-1]
+        self._validate_positions(positions, cos_sin_cache.shape[0])
         cos_sin = cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         if positions.ndim == 2:
@@ -333,6 +351,7 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
 
         cos_sin_cache = self._match_cos_sin_cache_dtype(query)
         num_tokens = positions.shape[-1]
+        self._validate_positions(positions, cos_sin_cache.shape[0])
         cos_sin = cos_sin_cache[positions]
         cos, sin = cos_sin.chunk(2, dim=-1)
         query_shape = query.shape
