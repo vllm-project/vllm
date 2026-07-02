@@ -687,8 +687,11 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # [b, sq, ng, np/ng * hn] -> [b, sq, np, hn]
         value = value.reshape(value.size(0), -1, self.head_v_dim)
         z = z.reshape(z.size(0), -1, self.head_v_dim)
-        b = b.reshape(b.size(0), self.num_v_heads // self.tp_size)
-        a = a.reshape(a.size(0), self.num_v_heads // self.tp_size)
+        # Force contiguity: when num_v_heads == num_k_heads the reshape
+        # returns a non-contiguous view, breaking kernels that assume
+        # head-dim stride 1 (e.g. fused_post_conv_prep).
+        b = b.reshape(b.size(0), self.num_v_heads // self.tp_size).contiguous()
+        a = a.reshape(a.size(0), self.num_v_heads // self.tp_size).contiguous()
 
         return query, key, value, z, b, a
 
