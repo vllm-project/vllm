@@ -591,7 +591,14 @@ class DeepseekV4MoE(nn.Module):
         quant_config = vllm_config.quant_config
         self.prefix = prefix
         self._layer_idx = extract_layer_index(prefix)
-        self._is_dspark_runtime_layer = self._layer_idx >= config.num_hidden_layers
+        # An extra layer (layer_idx >= num_hidden_layers) is a DSpark runtime
+        # draft layer ONLY when the DSpark speculator is active. The MTP block is
+        # also built at layer_idx == num_hidden_layers, so gate on the method to
+        # keep the fused DSpark shared-experts kernel off production MTP numerics.
+        self._is_dspark_runtime_layer = (
+            self._layer_idx >= config.num_hidden_layers
+            and getattr(vllm_config.speculative_config, "method", None) == "dspark"
+        )
         self._dspark_fused_shared_experts_quant = bool(
             getattr(
                 vllm_config.speculative_config,

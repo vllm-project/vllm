@@ -549,15 +549,12 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
-        # DSpark is implemented only by the V2 GPU model runner, and DeepSeek-V4
-        # is not otherwise a default-V2 architecture, so force V2 for it. If V2
-        # is unsupported for the rest of the config, _validate_v2_model_runner
-        # raises rather than silently falling back to V1 (which can't run dspark).
-        if (
-            self.speculative_config is not None
-            and self.speculative_config.method == "dspark"
-        ):
-            return True
+        # DSpark runs on BOTH the V1 and V2 GPU model runners. On our SM12x
+        # DeepSeek-V4 stack the V1 runner has correct long-context recall while
+        # V2 does not (V2 collapses under concurrency at long context), so DSpark
+        # is NOT force-routed to V2: it follows the normal runner selection (V1
+        # by default, since DeepSeek-V4 is not a default-V2 architecture). Opt
+        # into the V2 DSpark speculator explicitly with VLLM_USE_V2_MODEL_RUNNER=1.
 
         if self.model_config is not None and self.model_config.is_diffusion:
             return True

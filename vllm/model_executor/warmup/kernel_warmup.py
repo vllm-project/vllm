@@ -7,7 +7,7 @@ happen during model execution.
 """
 
 from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import torch
@@ -132,10 +132,22 @@ def _deepseek_v4_mtp_uniform_decode_warmup_requests(
 
 
 def _deepseek_v4_slot_mapping_warmup(runner: "GPUModelRunner") -> None:
-    max_tokens = getattr(runner, "max_num_tokens", 1)
+    # The DeepSeek-V4 slot-mapping warmup runs on BOTH GPU model runners. The V2
+    # runner exposes ``block_tables`` + ``input_buffers``; the V1 runner exposes
+    # ``input_batch.block_table`` + ``query_start_loc``/``positions``. Dispatch on
+    # whichever interface the runner provides (V1 is our production default) so
+    # the warmup never silently no-ops and reintroduces first-request JIT.
     block_tables = getattr(runner, "block_tables", None)
-    if block_tables is None:
-        return
+    if block_tables is not None:
+        _deepseek_v4_slot_mapping_warmup_v2(runner, block_tables)
+    elif getattr(runner, "input_batch", None) is not None:
+        _deepseek_v4_slot_mapping_warmup_v1(runner)
+
+
+def _deepseek_v4_slot_mapping_warmup_v2(
+    runner: "GPUModelRunner", block_tables: Any
+) -> None:
+    max_tokens = getattr(runner, "max_num_tokens", 1)
     input_buffers = getattr(runner, "input_buffers", None)
     idx_mapping = torch.zeros(1, dtype=torch.int32, device=runner.device)
 
@@ -194,6 +206,60 @@ def _deepseek_v4_slot_mapping_warmup(runner: "GPUModelRunner") -> None:
         if saved_query_start_loc_gpu is not None:
             assert query_start_loc_buf is not None
             query_start_loc_buf[:2].copy_(saved_query_start_loc_gpu)
+
+
+def _deepseek_v4_slot_mapping_warmup_v1(runner: "GPUModelRunner") -> None:
+    max_tokens = getattr(runner, "max_num_tokens", 1)
+    block_table = runner.input_batch.block_table
+
+    # Snapshot the runner buffers we mutate so warmup never leaks state into
+    # the first real request.
+    saved_query_start_loc_np: np.ndarray | None = None
+    saved_query_start_loc_gpu: torch.Tensor | None = None
+    if hasattr(runner, "query_start_loc"):
+        saved_query_start_loc_np = runner.query_start_loc.np[:2].copy()
+        saved_query_start_loc_gpu = runner.query_start_loc.gpu[:2].clone()
+
+    try:
+        for requested_tokens in _DEEPSEEK_V4_SLOT_MAPPING_WARMUP_TOKENS:
+            num_tokens = _clamp_warmup_tokens(requested_tokens, max_tokens)
+            if num_tokens <= 0:
+                continue
+
+            positions_source = torch.arange(
+                num_tokens, dtype=torch.int64, device=runner.device
+            )
+            if hasattr(runner, "query_start_loc"):
+                runner.query_start_loc.np[0] = 0
+                runner.query_start_loc.np[1] = num_tokens
+                runner.query_start_loc.copy_to_gpu(2)
+                query_start_loc = runner.query_start_loc.gpu[:2]
+            else:
+                query_start_loc = torch.tensor(
+                    [0, num_tokens], dtype=torch.int32, device=runner.device
+                )
+
+            if hasattr(runner, "positions"):
+                saved_positions: torch.Tensor | None = runner.positions[
+                    :num_tokens
+                ].clone()
+                runner.positions[:num_tokens].copy_(positions_source)
+                positions = runner.positions[:num_tokens]
+            else:
+                saved_positions = None
+                positions = positions_source
+
+            try:
+                block_table.commit_block_table(1)
+                block_table.compute_slot_mapping(1, query_start_loc, positions)
+            finally:
+                if saved_positions is not None:
+                    runner.positions[:num_tokens].copy_(saved_positions)
+    finally:
+        if saved_query_start_loc_np is not None:
+            runner.query_start_loc.np[:2] = saved_query_start_loc_np
+            assert saved_query_start_loc_gpu is not None
+            runner.query_start_loc.gpu[:2].copy_(saved_query_start_loc_gpu)
 
 
 def _deepseek_v4_structured_output_bitmask_warmup(
