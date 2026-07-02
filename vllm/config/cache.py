@@ -285,3 +285,18 @@ class CacheConfig:
                 str(cache_dtype),
             )
         return cache_dtype
+
+    @field_validator("prefix_caching_hash_algo", mode="after")
+    @classmethod
+    def _validate_prefix_caching_hash_algo(
+        cls, prefix_caching_hash_algo: PrefixCachingHashAlgo
+    ) -> PrefixCachingHashAlgo:
+        if prefix_caching_hash_algo in ("xxhash", "xxhash_cbor"):
+            from vllm.utils.hashing import _xxhash
+
+            if _xxhash is None:
+                raise ModuleNotFoundError(
+                    "xxhash is required for the 'xxhash' prefix caching hash "
+                    "algorithms. Install it via `pip install xxhash`."
+                )
+        return prefix_caching_hash_algo
