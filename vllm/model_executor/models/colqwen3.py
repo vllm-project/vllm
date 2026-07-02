@@ -271,8 +271,14 @@ class ColQwen3Model(Qwen3VLForConditionalGeneration, SupportsLateInteraction):
                     name = "model." + name
                 model_weights.append((name, weight))
 
-        loader = AutoWeightsLoader(self)
+        loader = AutoWeightsLoader(self, ignore_unexpected_prefixes=["lm_head."])
         loaded = loader.load_weights(model_weights, mapper=self.hf_to_vllm_mapper)
+
+        # ColQwen3 is a pooling model and does not need lm_head.
+        # Some checkpoints (e.g. TomoroAI) omit it entirely.
+        # Mark it as loaded so the weight validator doesn't complain.
+        if "language_model.lm_head.weight" not in loaded:
+            loaded.add("language_model.lm_head.weight")
 
         if proj_weights:
             model_dtype = next(self.language_model.parameters()).dtype
