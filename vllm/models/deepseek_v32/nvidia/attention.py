@@ -400,10 +400,12 @@ class DeepseekV32Attention(MLAAttention):
 
         if self.indexer is not None:
             has_indexer = True
+            indexer_rope_emb = self.indexer_rope_emb
+            assert indexer_rope_emb is not None
             indexer_k_norm_w = self.indexer.k_norm.weight
             indexer_k_norm_bias = self.indexer.k_norm.bias
             indexer_k_norm_eps = self.indexer.k_norm.eps
-            indexer_k_rope_cos_sin_cache = self.indexer_rope_emb.cos_sin_cache
+            indexer_k_rope_cos_sin_cache = indexer_rope_emb.cos_sin_cache
             indexer_k_cache = self.indexer.k_cache.kv_cache
             indexer_softmax_scale = self.indexer.softmax_scale
             indexer_n_head_scale = self.indexer.n_head**-0.5
@@ -467,7 +469,7 @@ class DeepseekV32Attention(MLAAttention):
             q_pe,
             self.rotary_emb.cos_sin_cache,
             index_q,
-            self.indexer_rope_emb.cos_sin_cache if has_indexer else None,
+            indexer_k_rope_cos_sin_cache if has_indexer else None,
             ql_nope,
             self._q_scale,
             index_weights,
