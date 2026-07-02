@@ -1450,6 +1450,19 @@ def num_gpus_available():
     return current_platform.device_count()
 
 
+@pytest.fixture(scope="session")
+def qwen25_05b_dora_files():
+    return snapshot_download(repo_id="Dhanushkumaramk/healthcare-qwen2.5-0.5B-dora")
+
+
+@pytest.fixture(scope="session")
+def qwen25_05b_lora_files(tmp_path_factory, qwen25_05b_dora_files):
+    from tests.lora.utils import convert_dora_checkpoint_to_lora
+
+    lora_dir = tmp_path_factory.mktemp("qwen25_05b_lora_from_dora")
+    return convert_dora_checkpoint_to_lora(qwen25_05b_dora_files, lora_dir)
+
+
 temp_dir = tempfile.gettempdir()
 _dummy_opt_path = os.path.join(temp_dir, "dummy_opt")
 _dummy_llava_path = os.path.join(temp_dir, "dummy_llava")

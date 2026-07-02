@@ -56,6 +56,9 @@ class BaseLayerWithLoRA(nn.Module):
         index: int,
         lora_a: torch.Tensor | list[torch.Tensor],
         lora_b: torch.Tensor | list[torch.Tensor],
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
     ):
         """Overwrites lora tensors at index."""
         ...

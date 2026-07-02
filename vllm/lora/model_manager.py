@@ -299,23 +299,32 @@ class LoRAModelManager:
         """Move LoRA into a GPU buffer to be used in the forward pass."""
         if lora_id in self._active_adapters:
             return False
-        first_free_slot = next(
+        index = next(
             (
-                (i, lora_id)
-                for i, lora_id in enumerate(self.lora_index_to_id)
-                if lora_id is None
+                i
+                for i, active_lora_id in enumerate(self.lora_index_to_id)
+                if active_lora_id is None
             ),
             None,
         )
-        if first_free_slot is None:
+        if index is None:
             raise ValueError("No free lora slots")
-        index, _ = first_free_slot
-        self._active_adapters[lora_id] = None
         lora_model = self._registered_adapters[lora_id]
         logger.debug(
             "Activating LoRA. int id: %d, slot index: %d", lora_model.id, index
         )
+
+        try:
+            self._load_adapter_into_slot(index, lora_model)
+        except Exception:
+            self._reset_lora_slot(index)
+            raise
+
         self.lora_index_to_id[index] = lora_model.id
+        self._active_adapters[lora_id] = None
+        return True
+
+    def _load_adapter_into_slot(self, index: int, lora_model: LoRAModel) -> None:
         for module_name, module in self.modules.items():
             module_lora = self._get_lora_layer_weights(lora_model, module_name)
             if not module_lora:
@@ -329,16 +338,23 @@ class LoRAModelManager:
                 index,
                 module_lora.lora_a,
                 module_lora.lora_b,
+                lora_magnitude_vector=module_lora.lora_magnitude_vector,
             )
-            logger.debug("Successfully loaded LoRA weights for module %s.", module_name)
-        return True
+            logger.debug(
+                "Successfully loaded LoRA weights for module %s.", module_name
+            )
+
+    def _reset_lora_slot(self, index: int) -> None:
+        for module in self.modules.values():
+            module.reset_lora(index)
 
     def _deactivate_adapter(self, lora_id: int):
         try:
             index = self.lora_index_to_id.index(lora_id)
             self.lora_index_to_id[index] = None
         except ValueError:
-            pass
+            return
+        self._reset_lora_slot(index)
 
     def _add_adapter(self, lora: LoRAModel):
         self._create_merged_loras_inplace(lora)
@@ -378,9 +394,15 @@ class LoRAModelManager:
 
     def remove_all_adapters(self):
         """Remove all LoRAModels from the manager."""
+        active_indices = [
+            index for index, lora_id in enumerate(self.lora_index_to_id)
+            if lora_id is not None
+        ]
         self._registered_adapters.clear()
         self.lora_index_to_id = [None] * self.lora_slots
         self._active_adapters.clear()
+        for index in active_indices:
+            self._reset_lora_slot(index)
 
     def _create_lora_modules(self):
         def _parent_module(module_name: str) -> str:

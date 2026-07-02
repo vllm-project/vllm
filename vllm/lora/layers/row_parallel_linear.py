@@ -39,6 +39,31 @@ class RowParallelLinearWithLoRA(BaseLinearLayerWithLoRA):
     def slice_lora_b(self, lora_b: torch.Tensor) -> torch.Tensor:
         return lora_b
 
+    def _set_dora_scale(
+        self,
+        index: int,
+        lora_a: torch.Tensor,
+        lora_b: torch.Tensor,
+        lora_magnitude_vector: torch.Tensor,
+    ) -> None:
+        if self.n_slices != 1:
+            raise NotImplementedError("DoRA is not supported for packed LoRA layers.")
+
+        base_weight = self._get_dora_base_weight()
+        if self.tp_size > 1:
+            lora_a = self.slice_lora_a(lora_a)
+
+        dora_scale = self._get_dora_scale(
+            base_weight,
+            lora_a,
+            lora_b,
+            lora_magnitude_vector,
+            norm_sq_reduce=(
+                tensor_model_parallel_all_reduce if self.tp_size > 1 else None
+            ),
+        )
+        self._store_dora_scale(index, dora_scale)
+
     def forward(
         self, input_: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
@@ -114,6 +139,20 @@ class RowParallelLinearWithShardedLoRA(RowParallelLinearWithLoRA):
         end_idx = (self.tp_rank + 1) * shard_size
         lora_b = lora_b[start_idx:end_idx, :]
         return lora_b
+
+    def set_lora(
+        self,
+        index: int,
+        lora_a: torch.Tensor | list[torch.Tensor],
+        lora_b: torch.Tensor | list[torch.Tensor],
+        lora_magnitude_vector: (
+            torch.Tensor | list[torch.Tensor | None] | None
+        ) = None,
+    ):
+        self._raise_if_dora_unsupported(
+            lora_magnitude_vector, "fully sharded LoRA"
+        )
+        super().set_lora(index, lora_a, lora_b)
 
     def apply(self, x: torch.Tensor, bias: torch.Tensor | None = None) -> torch.Tensor:
         output = self._get_quant_method().apply(self.base_layer, x, bias)

@@ -20,53 +20,58 @@ from vllm.model_executor.models.utils import WeightsMapper
 class LoRANameParserTestConfig(NamedTuple):
     name: str
     module_name: str
-    is_lora_a: bool
+    weight_type: str
     weights_mapper: WeightsMapper | None = None
 
 
 def test_parse_fine_tuned_lora_name_valid():
     fixture = [
         LoRANameParserTestConfig(
-            "base_model.model.lm_head.lora_A.weight", "lm_head", True, False
+            "base_model.model.lm_head.lora_A.weight", "lm_head", "lora_a"
         ),
         LoRANameParserTestConfig(
-            "base_model.model.lm_head.lora_B.weight", "lm_head", False, False
+            "base_model.model.lm_head.lora_B.weight", "lm_head", "lora_b"
         ),
         LoRANameParserTestConfig(
             "base_model.model.model.embed_tokens.lora_embedding_A",
             "model.embed_tokens",
-            True,
+            "lora_a",
         ),
         LoRANameParserTestConfig(
             "base_model.model.model.embed_tokens.lora_embedding_B",
             "model.embed_tokens",
-            False,
+            "lora_b",
         ),
         LoRANameParserTestConfig(
             "base_model.model.model.layers.9.mlp.down_proj.lora_A.weight",
             "model.layers.9.mlp.down_proj",
-            True,
+            "lora_a",
         ),
         LoRANameParserTestConfig(
             "base_model.model.model.layers.9.mlp.down_proj.lora_B.weight",
             "model.layers.9.mlp.down_proj",
-            False,
+            "lora_b",
+        ),
+        LoRANameParserTestConfig(
+            "base_model.model.model.layers.9.mlp.down_proj.lora_magnitude_vector",
+            "model.layers.9.mlp.down_proj",
+            "dora_magnitude",
         ),
         LoRANameParserTestConfig(
             "language_model.layers.9.mlp.down_proj.lora_A.weight",
             "language_model.layers.9.mlp.down_proj",
-            True,
+            "lora_a",
         ),
         LoRANameParserTestConfig(
             "language_model.layers.9.mlp.down_proj.lora_B.weight",
             "language_model.layers.9.mlp.down_proj",
-            False,
+            "lora_b",
         ),
         # Test with WeightsMapper
         LoRANameParserTestConfig(
             "base_model.model.model.layers.9.mlp.down_proj.lora_A.weight",
             "language_model.model.layers.9.mlp.down_proj",
-            True,
+            "lora_a",
             weights_mapper=WeightsMapper(
                 orig_to_new_prefix={"model.": "language_model.model."}
             ),
@@ -74,7 +79,15 @@ def test_parse_fine_tuned_lora_name_valid():
         LoRANameParserTestConfig(
             "base_model.model.model.layers.9.mlp.down_proj.lora_B.weight",
             "language_model.model.layers.9.mlp.down_proj",
-            False,
+            "lora_b",
+            weights_mapper=WeightsMapper(
+                orig_to_new_prefix={"model.": "language_model.model."}
+            ),
+        ),
+        LoRANameParserTestConfig(
+            "base_model.model.model.layers.9.mlp.down_proj.lora_magnitude_vector",
+            "language_model.model.layers.9.mlp.down_proj",
+            "dora_magnitude",
             weights_mapper=WeightsMapper(
                 orig_to_new_prefix={"model.": "language_model.model."}
             ),
@@ -82,7 +95,7 @@ def test_parse_fine_tuned_lora_name_valid():
         LoRANameParserTestConfig(
             "model.layers.9.mlp.down_proj.lora_A.weight",
             "language_model.model.layers.9.mlp.down_proj",
-            True,
+            "lora_a",
             weights_mapper=WeightsMapper(
                 orig_to_new_prefix={"model.": "language_model.model."}
             ),
@@ -90,14 +103,14 @@ def test_parse_fine_tuned_lora_name_valid():
         LoRANameParserTestConfig(
             "model.layers.9.mlp.down_proj.lora_B.weight",
             "language_model.model.layers.9.mlp.down_proj",
-            False,
+            "lora_b",
             weights_mapper=WeightsMapper(
                 orig_to_new_prefix={"model.": "language_model.model."}
             ),
         ),
     ]
-    for name, module_name, is_lora_a, weights_mapper in fixture:
-        assert (module_name, is_lora_a) == parse_fine_tuned_lora_name(
+    for name, module_name, weight_type, weights_mapper in fixture:
+        assert (module_name, weight_type) == parse_fine_tuned_lora_name(
             name, weights_mapper
         )
 

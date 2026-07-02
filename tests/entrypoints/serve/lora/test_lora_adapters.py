@@ -22,7 +22,11 @@ BADREQUEST_CASES = [
         {"r": 1024},
         "is greater than max_lora_rank",
     ),
-    ("test_dora", {"use_dora": True}, "does not yet support DoRA"),
+    (
+        "test_dora",
+        {"use_dora": True},
+        "DoRA adapter is missing lora_magnitude_vector",
+    ),
     (
         "test_modules_to_save",
         {"modules_to_save": ["lm_head"]},

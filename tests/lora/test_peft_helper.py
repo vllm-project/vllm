@@ -16,7 +16,6 @@ ERROR_CASES = [
         {"r": 1024},
         "is greater than max_lora_rank",
     ),
-    ("test_dora", {"use_dora": True}, "does not yet support DoRA"),
     (
         "test_modules_to_save",
         {"modules_to_save": ["lm_head"]},
@@ -68,6 +67,22 @@ def test_peft_helper_pass(llama32_lora_files, tmp_path):
     peft_helper.validate_legal(lora_config)
     scaling = peft_helper.lora_alpha / math.sqrt(peft_helper.r)
     assert abs(peft_helper.vllm_lora_scaling_factor - scaling) < 1e-3
+
+    dora_config = dict(use_dora=True)
+    test_dir = tmp_path / "test_dora"
+    shutil.copytree(llama32_lora_files, test_dir)
+
+    config_path = test_dir / "adapter_config.json"
+    with open(config_path) as f:
+        adapter_config = json.load(f)
+    adapter_config.update(dora_config)
+
+    with open(config_path, "w") as f:
+        json.dump(adapter_config, f)
+
+    peft_helper = PEFTHelper.from_local_dir(test_dir, max_position_embeddings=4096)
+    peft_helper.validate_legal(lora_config)
+    assert peft_helper.use_dora
 
 
 @pytest.mark.parametrize("test_name,config_change,expected_error", ERROR_CASES)
