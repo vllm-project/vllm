@@ -522,6 +522,11 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // Activation function used in GeGLU with `tanh` approximation.
   ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
 
+  ops.def("silu_only(Tensor! out, Tensor input) -> ()");
+  ops.def("gelu_only(Tensor! out, Tensor input) -> ()");
+  ops.def("gelu_tanh_only(Tensor! out, Tensor input) -> ()");
+  ops.def("relu2_only(Tensor! out, Tensor input) -> ()");
+
   // FATReLU implementation.
   ops.def("fatrelu_and_mul(Tensor! out, Tensor input, float threshold) -> ()");
 
@@ -724,6 +729,10 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("mul_and_silu", TORCH_BOX(&mul_and_silu));
   ops.impl("gelu_and_mul", TORCH_BOX(&gelu_and_mul));
   ops.impl("gelu_tanh_and_mul", TORCH_BOX(&gelu_tanh_and_mul));
+  ops.impl("silu_only", TORCH_BOX(&silu_only));
+  ops.impl("gelu_only", TORCH_BOX(&gelu_only));
+  ops.impl("gelu_tanh_only", TORCH_BOX(&gelu_tanh_only));
+  ops.impl("relu2_only", TORCH_BOX(&relu2_only));
   ops.impl("fatrelu_and_mul", TORCH_BOX(&fatrelu_and_mul));
   ops.impl("swigluoai_and_mul", TORCH_BOX(&swigluoai_and_mul));
   ops.impl("gelu_new", TORCH_BOX(&gelu_new));

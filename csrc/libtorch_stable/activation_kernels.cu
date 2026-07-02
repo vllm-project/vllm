@@ -669,6 +669,14 @@ __device__ __forceinline__ T gelu_quick_kernel(const T& x) {
   return (T)(((float)x) / (1.0f + expf(-1.702f * (float)x)));
 }
 
+template <typename T>
+__device__ __forceinline__ T relu2_kernel(const T& x) {
+  const float f = (float)x;
+  if (isnan(f)) return x;
+  const float r = f > 0.0f ? f : 0.0f;
+  return (T)(r * r);
+}
+
 }  // namespace vllm
 
 void gelu_new(torch::stable::Tensor& out,    // [..., d]
@@ -687,4 +695,28 @@ void gelu_quick(torch::stable::Tensor& out,    // [..., d]
                 torch::stable::Tensor& input)  // [..., d]
 {
   LAUNCH_ACTIVATION_KERNEL(vllm::gelu_quick_kernel);
+}
+
+void silu_only(torch::stable::Tensor& out,    // [..., d]
+               torch::stable::Tensor& input)  // [..., d]
+{
+  LAUNCH_ACTIVATION_KERNEL(vllm::silu_kernel);
+}
+
+void gelu_only(torch::stable::Tensor& out,    // [..., d]
+               torch::stable::Tensor& input)  // [..., d]
+{
+  LAUNCH_ACTIVATION_KERNEL(vllm::gelu_kernel);
+}
+
+void gelu_tanh_only(torch::stable::Tensor& out,    // [..., d]
+                    torch::stable::Tensor& input)  // [..., d]
+{
+  LAUNCH_ACTIVATION_KERNEL(vllm::gelu_tanh_kernel);
+}
+
+void relu2_only(torch::stable::Tensor& out,    // [..., d]
+                torch::stable::Tensor& input)  // [..., d]
+{
+  LAUNCH_ACTIVATION_KERNEL(vllm::relu2_kernel);
 }
