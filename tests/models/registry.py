@@ -384,6 +384,9 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "LongcatFlashForCausalLM": _HfExamplesInfo(
         "meituan-longcat/LongCat-Flash-Chat", trust_remote_code=True
     ),
+    "LongcatNextForCausalLM": _HfExamplesInfo(
+        "meituan-longcat/LongCat-Next", trust_remote_code=True
+    ),
     "MambaForCausalLM": _HfExamplesInfo("state-spaces/mamba-130m-hf"),
     "Mamba2ForCausalLM": _HfExamplesInfo(
         "mistralai/Mamba-Codestral-7B-v0.1",

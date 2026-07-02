@@ -628,8 +628,8 @@ class MoERunner(MoERunnerInterface):
         """
         if isinstance(self.router, ZeroExpertRouter):
             zero_expert_output = self.router.zero_expert_output
-            assert zero_expert_output is not None
-            result = result + zero_expert_output
+            if zero_expert_output is not None:
+                result = result + zero_expert_output
         return result
 
     def forward(
