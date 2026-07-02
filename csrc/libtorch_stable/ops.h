@@ -415,6 +415,8 @@ void gelu_new(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_fast(torch::stable::Tensor& out, torch::stable::Tensor& input);
 void gelu_quick(torch::stable::Tensor& out, torch::stable::Tensor& input);
 
+void relu_squared(torch::stable::Tensor& out, torch::stable::Tensor& input);
+
 // INT8 quantization kernels (shared CUDA/ROCm)
 void static_scaled_int8_quant(torch::stable::Tensor& out,
                               torch::stable::Tensor const& input,

@@ -540,6 +540,9 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
   // Quick GELU implementation.
   ops.def("gelu_quick(Tensor! out, Tensor input) -> ()");
 
+  // relu(x)^2 activation from https://arxiv.org/abs/2109.08668v2
+  ops.def("relu_squared(Tensor! out, Tensor input) -> ()");
+
   // Compute int8 quantized tensor for given scaling factor.
   ops.def(
       "static_scaled_int8_quant(Tensor! result, Tensor input, Tensor scale,"
@@ -730,6 +733,7 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
   ops.impl("gelu_new", TORCH_BOX(&gelu_new));
   ops.impl("gelu_fast", TORCH_BOX(&gelu_fast));
   ops.impl("gelu_quick", TORCH_BOX(&gelu_quick));
+  ops.impl("relu_squared", TORCH_BOX(&relu_squared));
   ops.impl("silu_and_mul_with_clamp", TORCH_BOX(&silu_and_mul_clamp));
 
   // INT8 quantization kernels
