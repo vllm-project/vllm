@@ -365,6 +365,88 @@ class EmbedBenchmarkMetrics:
     percentiles_e2el_ms: list[tuple[float, float]]
 
 
+def _request_workload_class(request: SampleRequest) -> str:
+    metadata = request.request_metadata or {}
+    workload_class = metadata.get("workload_class")
+    if isinstance(workload_class, str) and workload_class:
+        return workload_class
+    return "default"
+
+
+def _latency_percentiles_ms(
+    values_s: list[float], selected_percentiles: list[float]
+) -> dict[str, float]:
+    if not values_s:
+        return {}
+    return {
+        _percentile_key(p): float(np.percentile(values_s, p) * 1000)
+        for p in selected_percentiles
+    }
+
+
+def _percentile_key(percentile: float) -> str:
+    p_word = str(int(percentile)) if int(percentile) == percentile else str(percentile)
+    return f"p{p_word}"
+
+
+def calculate_request_class_metrics(
+    input_requests: list[SampleRequest],
+    outputs: list[RequestFuncOutput],
+    actual_output_lens: list[int],
+    selected_percentiles: list[float],
+) -> dict[str, dict[str, Any]]:
+    """Calculate latency and token summaries per synthetic workload class."""
+    grouped: dict[str, list[int]] = {}
+    for index, request in enumerate(input_requests):
+        grouped.setdefault(_request_workload_class(request), []).append(index)
+
+    class_metrics: dict[str, dict[str, Any]] = {}
+    for workload_class, indices in sorted(grouped.items()):
+        completed_indices = [i for i in indices if outputs[i].success]
+        failed = len(indices) - len(completed_indices)
+        ttfts = [outputs[i].ttft for i in completed_indices]
+        e2els = [outputs[i].latency for i in completed_indices]
+        itls = [
+            itl_value
+            for i in completed_indices
+            for itl_value in outputs[i].itl
+        ]
+        tpots = []
+        for i in completed_indices:
+            output_len = actual_output_lens[i]
+            if output_len > 1:
+                tpots.append(
+                    (outputs[i].latency - outputs[i].ttft) / (output_len - 1)
+                )
+
+        class_metrics[workload_class] = {
+            "requests": len(indices),
+            "completed": len(completed_indices),
+            "failed": failed,
+            "total_input_tokens": sum(input_requests[i].prompt_len for i in indices),
+            "total_output_tokens": sum(actual_output_lens[i] for i in indices),
+            "mean_ttft_ms": float(np.mean(ttfts or 0) * 1000),
+            "median_ttft_ms": float(np.median(ttfts or 0) * 1000),
+            "ttft_percentiles_ms": _latency_percentiles_ms(
+                ttfts, selected_percentiles
+            ),
+            "mean_tpot_ms": float(np.mean(tpots or 0) * 1000),
+            "median_tpot_ms": float(np.median(tpots or 0) * 1000),
+            "tpot_percentiles_ms": _latency_percentiles_ms(
+                tpots, selected_percentiles
+            ),
+            "mean_itl_ms": float(np.mean(itls or 0) * 1000),
+            "median_itl_ms": float(np.median(itls or 0) * 1000),
+            "itl_percentiles_ms": _latency_percentiles_ms(itls, selected_percentiles),
+            "mean_e2el_ms": float(np.mean(e2els or 0) * 1000),
+            "median_e2el_ms": float(np.median(e2els or 0) * 1000),
+            "e2el_percentiles_ms": _latency_percentiles_ms(
+                e2els, selected_percentiles
+            ),
+        }
+    return class_metrics
+
+
 def _get_current_request_rate(
     ramp_up_strategy: Literal["linear", "exponential"] | None,
     ramp_up_start_rps: int | None,
@@ -1191,6 +1273,15 @@ async def benchmark(
 
     result: dict[str, Any]
     if isinstance(metrics, BenchmarkMetrics):
+        request_classes = [
+            _request_workload_class(request) for request in input_requests
+        ]
+        request_class_metrics = calculate_request_class_metrics(
+            input_requests=input_requests,
+            outputs=outputs,
+            actual_output_lens=actual_output_lens,
+            selected_percentiles=selected_percentiles,
+        )
         result = {
             "duration": benchmark_duration,
             "completed": metrics.completed,
@@ -1208,6 +1299,8 @@ async def benchmark(
             "start_times": [output.start_time for output in outputs],
             "generated_texts": [output.generated_text for output in outputs],
             "errors": [output.error for output in outputs],
+            "request_classes": request_classes,
+            "request_class_metrics": request_class_metrics,
             "max_output_tokens_per_s": metrics.max_output_tokens_per_s,
             "max_concurrent_requests": metrics.max_concurrent_requests,
             "rtfx": metrics.rtfx,
@@ -1292,6 +1385,26 @@ async def benchmark(
         process_one_metric("tpot", "TPOT", "Time per Output Token (excl. 1st token)")
         process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
+
+    if isinstance(metrics, BenchmarkMetrics) and request_class_metrics:
+        print("{s:{c}^{n}}".format(s="Request Class Breakdown", n=50, c="-"))
+        percentile_label = _percentile_key(selected_percentiles[-1])
+        for workload_class, class_metric in request_class_metrics.items():
+            ttft_tail = class_metric["ttft_percentiles_ms"].get(percentile_label, 0.0)
+            e2el_tail = class_metric["e2el_percentiles_ms"].get(percentile_label, 0.0)
+            print(
+                "{:<18} reqs={:<5} ok={:<5} mean_ttft_ms={:<10.2f} "
+                "{}_ttft_ms={:<10.2f} {}_e2el_ms={:<10.2f}".format(
+                    workload_class,
+                    class_metric["requests"],
+                    class_metric["completed"],
+                    class_metric["mean_ttft_ms"],
+                    percentile_label,
+                    ttft_tail,
+                    percentile_label,
+                    e2el_tail,
+                )
+            )
 
     if diffusion_stats is not None:
         print("{s:{c}^{n}}".format(s="Diffusion Decoding", n=50, c="-"))
@@ -1985,7 +2098,13 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     if (
         args.dataset_name
-        in ["random", "random-mm", "random-rerank", "prefix_repetition"]
+        in [
+            "random",
+            "random-mm",
+            "random-rerank",
+            "mixed_serving_boundary",
+            "prefix_repetition",
+        ]
         and args.dataset_path is not None
     ):
         raise ValueError(
@@ -2261,6 +2380,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             "itls",
             "generated_texts",
             "errors",
+            "request_classes",
         ]:
             if field in result_json:
                 del result_json[field]

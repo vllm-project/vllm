@@ -94,6 +94,8 @@ class SampleRequest:
     # tool_choice, response_format). Shallow-merged with --extra-body at
     # dispatch time; per-request keys win.
     request_overrides: dict | None = None
+    # Optional benchmark metadata, used for workload-class breakdowns.
+    request_metadata: dict[str, Any] | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -768,6 +770,190 @@ class RandomDataset(BenchmarkDataset):
         )
         total_input_len = len(adjusted_token_sequence)
         return prompt, total_input_len, token_mismatch
+
+
+# -----------------------------------------------------------------------------
+# Mixed Serving Boundary Dataset Implementation
+# -----------------------------------------------------------------------------
+
+
+class MixedServingBoundaryDataset(RandomDataset):
+    """
+    Synthetic mixed workload for serving-boundary benchmarks.
+
+    The dataset combines three request classes in one run:
+    - repeated_prefix: shared-prefix prompts with short decode.
+    - long_prefill: unique long prompts with short decode.
+    - long_decode: short prompts with long decode.
+
+    This makes scheduler and prefix-cache regressions visible in a single
+    benchmark artifact instead of requiring several independent runs.
+    """
+
+    DEFAULT_REPEATED_PREFIX_FRACTION = 0.34
+    DEFAULT_LONG_PREFILL_FRACTION = 0.33
+    DEFAULT_REPEATED_PREFIX_LEN = 1024
+    DEFAULT_REPEATED_SUFFIX_LEN = 128
+    DEFAULT_REPEATED_OUTPUT_LEN = 128
+    DEFAULT_REPEATED_PREFIX_GROUPS = 4
+    DEFAULT_LONG_PREFILL_INPUT_LEN = 4096
+    DEFAULT_LONG_PREFILL_OUTPUT_LEN = 64
+    DEFAULT_LONG_DECODE_INPUT_LEN = 128
+    DEFAULT_LONG_DECODE_OUTPUT_LEN = 1024
+
+    def _allocate_counts(
+        self,
+        num_requests: int,
+        repeated_prefix_fraction: float,
+        long_prefill_fraction: float,
+    ) -> dict[str, int]:
+        if num_requests <= 0:
+            raise ValueError("num_requests must be positive.")
+        if repeated_prefix_fraction < 0 or long_prefill_fraction < 0:
+            raise ValueError("Mixed boundary fractions must be non-negative.")
+        if repeated_prefix_fraction + long_prefill_fraction > 1:
+            raise ValueError(
+                "The repeated-prefix and long-prefill fractions must sum to <= 1."
+            )
+
+        repeated = int(round(num_requests * repeated_prefix_fraction))
+        long_prefill = int(round(num_requests * long_prefill_fraction))
+        if repeated + long_prefill > num_requests:
+            overflow = repeated + long_prefill - num_requests
+            long_prefill = max(0, long_prefill - overflow)
+        long_decode = num_requests - repeated - long_prefill
+        return {
+            "repeated_prefix": repeated,
+            "long_prefill": long_prefill,
+            "long_decode": long_decode,
+        }
+
+    def sample(
+        self,
+        tokenizer: TokenizerLike,
+        num_requests: int,
+        request_id_prefix: str = "",
+        no_oversample: bool = False,
+        repeated_prefix_fraction: float = DEFAULT_REPEATED_PREFIX_FRACTION,
+        long_prefill_fraction: float = DEFAULT_LONG_PREFILL_FRACTION,
+        repeated_prefix_len: int = DEFAULT_REPEATED_PREFIX_LEN,
+        repeated_suffix_len: int = DEFAULT_REPEATED_SUFFIX_LEN,
+        repeated_output_len: int = DEFAULT_REPEATED_OUTPUT_LEN,
+        repeated_prefix_groups: int = DEFAULT_REPEATED_PREFIX_GROUPS,
+        long_prefill_input_len: int = DEFAULT_LONG_PREFILL_INPUT_LEN,
+        long_prefill_output_len: int = DEFAULT_LONG_PREFILL_OUTPUT_LEN,
+        long_decode_input_len: int = DEFAULT_LONG_DECODE_INPUT_LEN,
+        long_decode_output_len: int = DEFAULT_LONG_DECODE_OUTPUT_LEN,
+        **kwargs,
+    ) -> list[SampleRequest]:
+        del no_oversample
+
+        counts = self._allocate_counts(
+            num_requests, repeated_prefix_fraction, long_prefill_fraction
+        )
+        if counts["repeated_prefix"] and repeated_prefix_groups <= 0:
+            raise ValueError("repeated_prefix_groups must be positive.")
+
+        vocab_size = tokenizer.vocab_size
+        prohibited_tokens = tokenizer.all_special_ids
+        all_tokens = np.arange(vocab_size)
+        allowed_tokens = np.array(list(set(all_tokens) - set(prohibited_tokens)))
+
+        prefix_groups = max(1, repeated_prefix_groups)
+        shared_prefixes = [
+            self.get_prefix(tokenizer, allowed_tokens, repeated_prefix_len)
+            for _ in range(prefix_groups)
+        ]
+
+        requests: list[SampleRequest] = []
+        token_mismatch_total = 0
+
+        def add_request(
+            *,
+            workload_class: str,
+            input_len: int,
+            output_len: int,
+            index: int,
+            prefix_token_ids: list[int] | None = None,
+            prefix_len: int = 0,
+            prefix_group: int | None = None,
+        ) -> None:
+            nonlocal token_mismatch_total
+            prompt, total_input_len, token_mismatch = self.generate_token_sequence(
+                tokenizer=tokenizer,
+                prefix_token_ids=prefix_token_ids or [],
+                prefix_len=prefix_len,
+                vocab_size=vocab_size,
+                input_len=input_len,
+                offset=int(self._rng.integers(0, vocab_size)),
+                index=index,
+                allowed_tokens=allowed_tokens,
+            )
+            token_mismatch_total += token_mismatch
+            metadata: dict[str, Any] = {
+                "workload_class": workload_class,
+                "configured_input_len": prefix_len + input_len,
+                "configured_output_len": output_len,
+            }
+            if prefix_group is not None:
+                metadata["prefix_group"] = prefix_group
+
+            requests.append(
+                SampleRequest(
+                    prompt=prompt,
+                    prompt_len=total_input_len,
+                    expected_output_len=output_len,
+                    request_id=f"{request_id_prefix}{workload_class}-{index}",
+                    request_metadata=metadata,
+                )
+            )
+
+        request_index = 0
+        for i in range(counts["repeated_prefix"]):
+            prefix_group = i % prefix_groups
+            add_request(
+                workload_class="repeated_prefix",
+                input_len=repeated_suffix_len,
+                output_len=repeated_output_len,
+                index=request_index,
+                prefix_token_ids=shared_prefixes[prefix_group],
+                prefix_len=repeated_prefix_len,
+                prefix_group=prefix_group,
+            )
+            request_index += 1
+
+        for _ in range(counts["long_prefill"]):
+            add_request(
+                workload_class="long_prefill",
+                input_len=long_prefill_input_len,
+                output_len=long_prefill_output_len,
+                index=request_index,
+            )
+            request_index += 1
+
+        for _ in range(counts["long_decode"]):
+            add_request(
+                workload_class="long_decode",
+                input_len=long_decode_input_len,
+                output_len=long_decode_output_len,
+                index=request_index,
+            )
+            request_index += 1
+
+        if token_mismatch_total != 0:
+            sign = "more" if token_mismatch_total > 0 else "fewer"
+            logger.warning(
+                "Across all generated prompts, there were %d %s tokens "
+                "than expected after decoding and re-encoding. This is "
+                "expected due to the imperfect nature of the sampling "
+                "procedure.",
+                abs(token_mismatch_total),
+                sign,
+            )
+
+        if not getattr(self, "disable_shuffle", False):
+            self._rng.shuffle(requests)
+        return requests
 
 
 # -----------------------------------------------------------------------------
@@ -1622,6 +1808,7 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
             "random",
             "random-mm",
             "random-rerank",
+            "mixed_serving_boundary",
             "hf",
             "custom",
             "custom_audio",
@@ -1807,6 +1994,71 @@ def add_dataset_parser(parser: FlexibleArgumentParser):
 
     random_group = parser.add_argument_group("random dataset options")
     add_random_dataset_base_args(random_group)
+
+    mixed_boundary_group = parser.add_argument_group(
+        "mixed serving boundary dataset options"
+    )
+    mixed_boundary_group.add_argument(
+        "--mixed-boundary-repeated-prefix-fraction",
+        type=float,
+        default=MixedServingBoundaryDataset.DEFAULT_REPEATED_PREFIX_FRACTION,
+        help="Fraction of requests that reuse shared prefixes.",
+    )
+    mixed_boundary_group.add_argument(
+        "--mixed-boundary-long-prefill-fraction",
+        type=float,
+        default=MixedServingBoundaryDataset.DEFAULT_LONG_PREFILL_FRACTION,
+        help="Fraction of requests that use unique long prompts. The remainder "
+        "uses short prompts with long decode.",
+    )
+    mixed_boundary_group.add_argument(
+        "--mixed-boundary-repeated-prefix-len",
+        type=int,
+        default=MixedServingBoundaryDataset.DEFAULT_REPEATED_PREFIX_LEN,
+        help="Shared prefix token length for repeated-prefix requests.",
+    )
+    mixed_boundary_group.add_argument(
+        "--mixed-boundary-repeated-suffix-len",
+        type=int,
+        default=MixedServingBoundaryDataset.DEFAULT_REPEATED_SUFFIX_LEN,
+        help="Unique suffix token length for repeated-prefix requests.",
+    )
+    mixed_boundary_group.add_argument(
+        "--mixed-boundary-repeated-output-len",
+        type=int,
+        default=MixedServingBoundaryDataset.DEFAULT_REPEATED_OUTPUT_LEN,
+        help="Output token length for repeated-prefix requests.",
+    )
+    mixed_boundary_group.add_argument(
+        "--mixed-boundary-repeated-prefix-groups",
+        type=int,
+        default=MixedServingBoundaryDataset.DEFAULT_REPEATED_PREFIX_GROUPS,
+        help="Number of shared prefixes used by repeated-prefix requests.",
+    )
+    mixed_boundary_group.add_argument(
+        "--mixed-boundary-long-prefill-input-len",
+        type=int,
+        default=MixedServingBoundaryDataset.DEFAULT_LONG_PREFILL_INPUT_LEN,
+        help="Prompt token length for long-prefill requests.",
+    )
+    mixed_boundary_group.add_argument(
+        "--mixed-boundary-long-prefill-output-len",
+        type=int,
+        default=MixedServingBoundaryDataset.DEFAULT_LONG_PREFILL_OUTPUT_LEN,
+        help="Output token length for long-prefill requests.",
+    )
+    mixed_boundary_group.add_argument(
+        "--mixed-boundary-long-decode-input-len",
+        type=int,
+        default=MixedServingBoundaryDataset.DEFAULT_LONG_DECODE_INPUT_LEN,
+        help="Prompt token length for long-decode requests.",
+    )
+    mixed_boundary_group.add_argument(
+        "--mixed-boundary-long-decode-output-len",
+        type=int,
+        default=MixedServingBoundaryDataset.DEFAULT_LONG_DECODE_OUTPUT_LEN,
+        help="Output token length for long-decode requests.",
+    )
 
     random_mm_group = parser.add_argument_group(
         "random multimodal dataset options extended from random dataset"
@@ -2428,6 +2680,28 @@ def get_samples(args, tokenizer: TokenizerLike) -> list[SampleRequest]:
                 request_id_prefix=args.request_id_prefix,
                 batchsize=args.random_batch_size,
                 is_reranker=not args.no_reranker,
+            ),
+            "mixed_serving_boundary": lambda: MixedServingBoundaryDataset(
+                random_seed=args.seed,
+                dataset_path=args.dataset_path,
+                disable_shuffle=args.disable_shuffle,
+            ).sample(
+                tokenizer=tokenizer,
+                num_requests=args.num_prompts,
+                repeated_prefix_fraction=(
+                    args.mixed_boundary_repeated_prefix_fraction
+                ),
+                long_prefill_fraction=args.mixed_boundary_long_prefill_fraction,
+                repeated_prefix_len=args.mixed_boundary_repeated_prefix_len,
+                repeated_suffix_len=args.mixed_boundary_repeated_suffix_len,
+                repeated_output_len=args.mixed_boundary_repeated_output_len,
+                repeated_prefix_groups=args.mixed_boundary_repeated_prefix_groups,
+                long_prefill_input_len=args.mixed_boundary_long_prefill_input_len,
+                long_prefill_output_len=args.mixed_boundary_long_prefill_output_len,
+                long_decode_input_len=args.mixed_boundary_long_decode_input_len,
+                long_decode_output_len=args.mixed_boundary_long_decode_output_len,
+                request_id_prefix=args.request_id_prefix,
+                no_oversample=args.no_oversample,
             ),
             "prefix_repetition": lambda: PrefixRepetitionRandomDataset(
                 random_seed=args.seed,
