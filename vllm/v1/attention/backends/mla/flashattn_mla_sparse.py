@@ -224,6 +224,7 @@ class FlashAttnMLASparseImpl(SparseMLAAttentionImpl[FlashAttnMLASparseMetadata])
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
+        self._indexer = indexer
         self.topk_indices_buffer: torch.Tensor | None = (
             indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
         )
@@ -248,8 +249,13 @@ class FlashAttnMLASparseImpl(SparseMLAAttentionImpl[FlashAttnMLASparseMetadata])
         q_nope, q_rope = q
         num_actual_toks = q_rope.shape[0]
 
-        assert self.topk_indices_buffer is not None
-        topk_indices = self.topk_indices_buffer[:num_actual_toks]
+        buf = (
+            self._indexer.topk_indices_buffer
+            if self._indexer is not None
+            else self.topk_indices_buffer
+        )
+        assert buf is not None, "topk_indices_buffer required for sparse MLA"
+        topk_indices = buf[:num_actual_toks]
         topk_indices, valid_counts = triton_convert_req_index_to_global_index(
             attn_metadata.req_id_per_token[:num_actual_toks],
             attn_metadata.block_table,

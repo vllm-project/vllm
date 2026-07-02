@@ -760,7 +760,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.pp_handler is not None:
             outputs = self.pp_handler.get_prev_sampled_outputs()
             if outputs is not None:
+                # Spec decode: scatter the relayed proposed draft tokens into this
+                # rank's state so the next step's combine_sampled_and_draft_tokens
+                # reads real values. Pop before postprocess_sampled (which does not
+                # accept this kwarg). idx_mapping has -1 for excluded/freed reqs.
+                draft_tokens = outputs.pop("draft_tokens", None)
+                idx_mapping = outputs["idx_mapping"]
                 self.postprocess_sampled(**outputs)
+                if draft_tokens is not None:
+                    valid = idx_mapping >= 0
+                    self.req_states.draft_tokens[idx_mapping[valid]] = draft_tokens[
+                        valid
+                    ]
 
     def add_requests(self, scheduler_output: SchedulerOutput) -> None:
         for new_req_data in scheduler_output.scheduled_new_reqs:
@@ -1463,20 +1474,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
                 spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
             draft_tokens = self.speculator.propose(
-                input_batch,
-                attn_metadata,
-                slot_mappings_by_layer,
-                spec_hidden_states,
-                aux_hidden_states,
-                num_sampled,
-                num_rejected,
-                self.req_states.last_sampled_tokens,
-                self.req_states.next_prefill_tokens,
-                self.sampler.sampling_states.temperature.gpu,
-                self.sampler.sampling_states.seeds.gpu,
+                input_batch=input_batch,
+                attn_metadata=attn_metadata,
+                slot_mappings=slot_mappings_by_layer,
+                spec_hidden_states=spec_hidden_states,
+                aux_hidden_states=aux_hidden_states,
+                num_sampled=num_sampled,
+                num_rejected=num_rejected,
+                last_sampled=self.req_states.last_sampled_tokens,
+                next_prefill_tokens=self.req_states.next_prefill_tokens,
+                temperature=self.sampler.sampling_states.temperature.gpu,
+                seeds=self.sampler.sampling_states.seeds.gpu,
                 mm_inputs=mm_inputs,
+                intermediate_tensors=self.intermediate_tensors,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            if self.pp_handler is not None:
+                # Relay the proposed draft tokens to non-last PP ranks so their
+                # next-step combine_sampled_and_draft_tokens reads real values
+                # instead of zero-init (otherwise spec acceptance ~= 0 / garbage).
+                self.pp_handler.broadcast_draft(draft_tokens, input_batch)
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does

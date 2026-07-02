@@ -35,6 +35,7 @@ from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
 from .interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
+    SupportsPP,
     _require_is_multimodal,
 )
 from .utils import (
@@ -135,7 +136,8 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         inputs_embeds: torch.Tensor | None = None,
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
-        if get_pp_group().is_first_rank:
+        pp_group = get_pp_group()
+        if pp_group.is_first_rank:
             if inputs_embeds is None:
                 inputs_embeds = self.embed_input_ids(input_ids)
             assert hidden_states.shape[-1] == inputs_embeds.shape[-1]
@@ -144,7 +146,18 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
             hidden_states = self.fc(hidden_states)
             residual = None
+        elif pp_group.is_last_rank:
+            # Last PP rank: apply the same fc projection as first rank,
+            # using the target model's output on this rank.
+            if inputs_embeds is None:
+                inputs_embeds = self.embed_input_ids(input_ids)
+            inputs_embeds = self.pre_fc_norm_embedding(inputs_embeds)
+            hidden_states = self.pre_fc_norm_hidden(hidden_states)
+            hidden_states = torch.cat([inputs_embeds, hidden_states], dim=-1)
+            hidden_states = self.fc(hidden_states)
+            residual = None
         else:
+            # Middle PP rank: use intermediate tensors from previous rank.
             assert intermediate_tensors is not None
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
@@ -189,7 +202,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         "hidden_states": 0,
     }
 )
-class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
+class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal, SupportsPP):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -232,6 +245,10 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
 
         self.logits_processor = LogitsProcessor(config.vocab_size)
 
+        self.make_empty_intermediate_tensors = (
+            self.model.make_empty_intermediate_tensors
+        )
+
     def embed_input_ids(
         self,
         input_ids: torch.Tensor,
@@ -267,6 +284,12 @@ class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs: object,
     ):
+        if not get_pp_group().is_first_rank and intermediate_tensors is None:
+            intermediate_tensors = self.make_empty_intermediate_tensors(
+                batch_size=hidden_states.shape[0],
+                dtype=hidden_states.dtype,
+                device=hidden_states.device,
+            )
         hidden_states = self.model(
             input_ids, positions, hidden_states, intermediate_tensors, inputs_embeds
         )
