@@ -82,7 +82,7 @@ load_config() {
     esac
 
     # node-mode orchestration knobs
-    RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-bench}"     # bench | accuracy | none
+    RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-accuracy}"     # bench | accuracy | none
     HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-2400}"
 
     # MoRIIO KV transfer direction. 0 (default)

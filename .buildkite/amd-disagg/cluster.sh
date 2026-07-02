@@ -65,9 +65,8 @@ export PROXY_PING_PORT="${PROXY_PING_PORT:-36367}"
 export HANDSHAKE_PORT="${HANDSHAKE_PORT:-6301}"
 export NOTIFY_PORT="${NOTIFY_PORT:-61005}"
 
-# Path to the MoRIIO toy proxy (lives next to this file in the repo).
-# TODO: needs to be removed after PR #46482 is merged.
-export PROXY_SCRIPT="${PROXY_SCRIPT:-${_CLUSTER_SH_DIR}/moriio_toy_proxy_server.py}"
+# Path to the MoRIIO toy proxy. Uses the upstream example shipped in the image
+export PROXY_SCRIPT="${PROXY_SCRIPT:-/app/vllm/examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py}"
 
 # MoRIIO KV transfer direction (injected into --kv-transfer-config by the launcher):
 #   0 -> omit read_mode     (default; MoRIIO write mode: prefill pushes to decode)

@@ -19,7 +19,6 @@ single- and multi-node `xP`/`yD` topologies and two parallelism modes via
 | `cluster.sh` | **Single** config (sourced): `WIDE_EP_MODE`, topology, ports, RDMA/NIC, vLLM env, benchmark/accuracy defaults, plus the site defaults (model dir, fallback IPs, NIC list, log path, partition — tagged `[site]`). All `${VAR:-default}`; precedence is **env > built-in**. Edit the `[site]` defaults for a new cluster. |
 | `models.yaml` | **Per-model** perf flags (split by mode `tp`/`ep` and role) plus an `env:` block of model/arch-specific env (e.g. AITER kernel toggles). |
 | `apply_moriio_2pd_patches.sh` | Applies vLLM PR #39276 (MoRIIO multi-node DP). Auto-run when `WIDE_EP_MODE=1` and `xP>1`/`yD>1`. |
-| `moriio_toy_proxy_server.py` | MoRIIO toy proxy (self-contained copy of the in-repo example). Default front door. |
 
 ### toy proxy vs. vLLM router (`ROUTER_TYPE`)
 
@@ -27,7 +26,7 @@ The client-facing gateway is selectable via **`ROUTER_TYPE`** (default `toy`):
 
 | `ROUTER_TYPE` | What runs | Client port |
 |---------------|-----------|-------------|
-| `toy` (default) | `moriio_toy_proxy_server.py` as a background process **inside** the rank-0 container | `PROXY_PORT` (10001) |
+| `toy` (default) | the upstream `moriio_toy_proxy_server.py` example shipped in the image (`PROXY_SCRIPT`) as a background process **inside** the rank-0 container | `PROXY_PORT` (10001) |
 | `vllm-router` | a **separate** `vllm/vllm-router` container on the rank-0 node (started by the SLURM job) | `ROUTER_PORT` (30000) |
 
 Note: There are few existing issues while running vllm-router with DP mode, once that is fixed can be switched as default.
