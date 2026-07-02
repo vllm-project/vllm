@@ -112,6 +112,7 @@ class InputBatch:
             max_num_reqs,
             num_spec_tokens,
             device,
+            PIN_MEMORY,
         )
         self.thinking_token_budget_reqs: set[str] = set()
         self.is_pooling_model = is_pooling_model
