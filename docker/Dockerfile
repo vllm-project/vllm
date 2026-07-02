@@ -80,7 +80,7 @@ ARG UV_INDEX_URL=${PIP_INDEX_URL}
 ARG UV_EXTRA_INDEX_URL=${PIP_EXTRA_INDEX_URL}
 
 # PyTorch provides its own indexes for standard and nightly builds
-ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl
+ARG PYTORCH_CUDA_INDEX_BASE_URL=https://download.pytorch.org/whl/test
 
 # PIP supports multiple authentication schemes, including keyring
 # By parameterizing the PIP_KEYRING_PROVIDER variable and setting it to
@@ -119,6 +119,10 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
 ENV UV_CACHE_DIR=/opt/uv/cache
 ENV UV_INSTALL_DIR=/opt/uv/bin
+# Torch test-channel / nightly wheels can be re-published under the same version
+# (RC respins, CDN inconsistency), so the index-advertised hash may not match the
+# served file. Skip uv's hash verification so torch installs don't break on it.
+ENV UV_NO_VERIFY_HASHES=1
 ENV PATH="/opt/venv/bin:/opt/uv/bin:$PATH"
 ENV VIRTUAL_ENV="/opt/venv"
 
@@ -231,14 +235,14 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi \
     && if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
-        && uv pip install --python /opt/venv/bin/python3 torch torchaudio torchvision --pre \
+        && uv pip install --refresh-package torch --refresh-package torchvision --refresh-package torchaudio --python /opt/venv/bin/python3 torch torchaudio torchvision --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
         && echo "Installing other requirements..." \
         && /opt/venv/bin/python3 use_existing_torch.py --prefix \
-        && uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
+        && uv pip install --refresh-package torch --refresh-package torchvision --refresh-package torchaudio --python /opt/venv/bin/python3 -r requirements/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
-        uv pip install --python /opt/venv/bin/python3 -r requirements/cuda.txt \
+        uv pip install --refresh-package torch --refresh-package torchvision --refresh-package torchaudio --python /opt/venv/bin/python3 -r requirements/cuda.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     fi \
     && if [ "$(echo $CUDA_VERSION | cut -d. -f1)" = "13" ]; then \
@@ -252,10 +256,18 @@ RUN --mount=type=cache,target=/opt/uv/cache \
 # Track PyTorch lib versions used during build and match in downstream instances.
 # We do this for both nightly and release so we can strip dependencies/*.txt as needed.
 # Otherwise library dependencies can upgrade/downgrade torch incorrectly.
+COPY docker/verify_torch_wheel.py verify_torch_wheel.py
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip freeze | grep -i "^torch=\|^torchvision=\|^torchaudio=" > torch_lib_versions.txt \
     && TORCH_LIB_VERSIONS=$(cat torch_lib_versions.txt | xargs) \
-    && echo "Installed torch libs: ${TORCH_LIB_VERSIONS}"
+    && echo "Installed torch libs: ${TORCH_LIB_VERSIONS}" \
+    && CU_TAG=cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
+    && if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
+        TORCH_INDEX_URL="${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/${CU_TAG}"; \
+    else \
+        TORCH_INDEX_URL="${PYTORCH_CUDA_INDEX_BASE_URL}/${CU_TAG}"; \
+    fi \
+    && /opt/venv/bin/python3 verify_torch_wheel.py "${TORCH_INDEX_URL}"
 
 # CUDA arch list used by torch
 # Explicitly set the list to avoid issues with torch 2.2
@@ -346,7 +358,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && python3 use_existing_torch.py --prefix \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
         && echo "Installing torch nightly..." \
-        && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | grep -i "^torch=" | xargs) --pre \
+        && uv pip install --refresh-package torch --refresh-package torchvision --refresh-package torchaudio --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | grep -i "^torch=" | xargs) --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
         echo "Installing build requirements..." \
@@ -508,7 +520,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && python3 use_existing_torch.py --prefix \
         && uv pip install --python /opt/venv/bin/python3 -r requirements/build/cuda.txt \
         && echo "Installing torch nightly..." \
-        && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | grep -i "^torch=" | xargs) --pre \
+        && uv pip install --refresh-package torch --refresh-package torchvision --refresh-package torchaudio --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | grep -i "^torch=" | xargs) --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
         echo "Installing build requirements..." \
@@ -617,7 +629,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         && cat torch_lib_versions.txt >> requirements/test/cuda.in \
         && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-        && uv pip install --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | xargs) --pre \
+        && uv pip install --refresh-package torch --refresh-package torchvision --refresh-package torchaudio --python /opt/venv/bin/python3 $(cat torch_lib_versions.txt | xargs) --pre \
         -r requirements/dev.txt \
         --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
     else \
@@ -719,6 +731,8 @@ ENV UV_INDEX_STRATEGY="unsafe-best-match"
 ENV UV_LINK_MODE=copy
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
 ENV UV_CACHE_DIR=/opt/uv/cache
+# See base stage: skip uv hash verification so re-published torch wheels install.
+ENV UV_NO_VERIFY_HASHES=1
 RUN mkdir -p "${UV_PYTHON_INSTALL_DIR}" "${UV_CACHE_DIR}" \
     && chgrp -R 0 /opt/uv \
     && chmod -R g+rwX,a+rX /opt/uv
@@ -859,7 +873,7 @@ RUN --mount=type=bind,from=build,src=/workspace/dist,target=/vllm-workspace/dist
     --mount=type=cache,target=/opt/uv/cache \
     if [ "${PYTORCH_NIGHTLY}" = "1" ]; then \
         echo "Installing torch nightly..." \
-        && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
+        && uv pip install --refresh-package torch --refresh-package torchvision --refresh-package torchaudio --system $(cat torch_lib_versions.txt | xargs) --pre \
         --index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
         && echo "Installing vLLM..." \
         && uv pip install --system dist/*.whl --verbose \
@@ -953,7 +967,7 @@ RUN --mount=type=cache,target=/opt/uv/cache \
             && cat torch_lib_versions.txt >> requirements/test/cuda.in \
             && uv pip compile requirements/test/cuda.in -o requirements/test/cuda.txt --index-strategy unsafe-best-match \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.') \
-            && uv pip install --system $(cat torch_lib_versions.txt | xargs) --pre \
+            && uv pip install --refresh-package torch --refresh-package torchvision --refresh-package torchaudio --system $(cat torch_lib_versions.txt | xargs) --pre \
             -r requirements/dev.txt \
             --extra-index-url ${PYTORCH_CUDA_INDEX_BASE_URL}/nightly/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.'); \
         else \
