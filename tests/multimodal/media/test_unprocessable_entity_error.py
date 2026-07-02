@@ -17,6 +17,7 @@ import requests
 from vllm.exceptions import VLLMUnprocessableEntityError
 from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.multimodal.media import MediaConnector
+from vllm.multimodal.media.connector import _wrap_media_fetch_error
 
 
 class TestVLLMUnprocessableEntityError:
@@ -46,8 +47,6 @@ class TestWrapMediaFetchError:
 
     @pytest.fixture
     def wrap_error(self):
-        from vllm.multimodal.media.connector import _wrap_media_fetch_error
-
         return _wrap_media_fetch_error
 
     def test_aiohttp_404_converted(self, wrap_error):
@@ -351,7 +350,6 @@ class TestIntegration:
 
     def test_404_to_http_422(self):
         """Verify 404 error results in HTTP 422 response."""
-        from vllm.multimodal.media.connector import _wrap_media_fetch_error
 
         url = "https://example.com/missing.jpg"
         exc = aiohttp.ClientResponseError(
@@ -369,7 +367,6 @@ class TestIntegration:
 
     def test_dns_remains_retryable(self):
         """Verify DNS error remains as-is for retry (not converted to 422)."""
-        from vllm.multimodal.media.connector import _wrap_media_fetch_error
 
         url = "https://nonexistent.example/image.jpg"
         exc = aiohttp.ClientConnectorDNSError(
@@ -385,7 +382,6 @@ class TestIntegration:
 
     def test_500_remains_500(self):
         """Verify 500 error remains HTTP 500."""
-        from vllm.multimodal.media.connector import _wrap_media_fetch_error
 
         url = "https://example.com/image.jpg"
         exc = aiohttp.ClientResponseError(
