@@ -24,9 +24,6 @@ from vllm.distributed import get_pp_group
 from vllm.inputs import MultiModalDataDict, PromptType
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.quantization.online.int4 import (
-    Int4VocabParallelEmbedding,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -124,8 +121,10 @@ class NgramEmbedding(nn.Module):
             for index in range(num_embedders):
                 emb_vocab_dim = int(self.m + index * 2 + 1)
                 # Use VocabParallelEmbedding for TP sharding per embedder
+                # Int4 quantization is applied automatically when using
+                # --quantization int4_per_channel_weight_only
                 self.embedders.append(
-                    Int4VocabParallelEmbedding(
+                    VocabParallelEmbedding(
                         emb_vocab_dim,
                         emb_dim_per_embedder,
                     )
