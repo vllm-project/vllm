@@ -1347,10 +1347,13 @@ class FusedMoEConfig:
             )
 
         if not self.is_act_and_mul and not (
-            current_platform.is_cuda_alike() or current_platform.is_xpu()
+            current_platform.is_cuda_alike()
+            or current_platform.is_xpu()
+            or current_platform.is_tpu()
         ):
             raise NotImplementedError(
-                "is_act_and_mul=False is supported only for CUDA, XPU and ROCm for now"
+                "is_act_and_mul=False is supported only for "
+                "CUDA, XPU, ROCm and TPU for now"
             )
 
     @property
