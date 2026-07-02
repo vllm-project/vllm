@@ -111,9 +111,9 @@ fn build_router_with_options(
 
     if let Some(profiler) = &state.profiler {
         warn!(
-            "Profiler with mode '{}' is enabled in the API server. \
-             This should ONLY be used for local development!",
-            profiler
+            mode = profiler,
+            "profiler is enabled in the API server; \
+             this should only be used for local development",
         );
         router = router
             .route("/start_profile", post(profile::start_profile))
