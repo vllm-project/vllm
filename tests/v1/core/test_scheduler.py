@@ -1356,6 +1356,55 @@ def test_spec_decode_padding_first_decode_step():
     assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
 
 
+def test_spec_decode_padding_running_decode_without_drafts():
+    """A running decode without drafts is padded when another running request
+    verifies speculative tokens in the same batch, preserving a uniform decode
+    shape for the worker.
+    """
+    num_spec = 3
+    scheduler = create_scheduler(num_speculative_tokens=num_spec)
+    r_normal, r_spec = create_requests(num_requests=2, num_tokens=1, max_tokens=16)
+
+    scheduler.add_request(r_normal)
+    scheduler.add_request(r_spec)
+    out = scheduler.schedule()
+    _model_output(scheduler, out, [[100], [101]])
+
+    scheduler.update_draft_token_ids(DraftTokenIds([r_spec.request_id], [[1, 2, 3]]))
+    out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens[r_spec.request_id] == 1 + num_spec
+    assert out.scheduled_spec_decode_tokens[r_spec.request_id] == [1, 2, 3]
+    assert out.num_scheduled_tokens[r_normal.request_id] == 1 + num_spec
+    assert out.scheduled_spec_decode_tokens[r_normal.request_id] == [-1] * num_spec
+
+
+def test_spec_decode_padding_skips_running_decode_when_padding_exceeds_budget():
+    """A normal running decode is skipped rather than scheduled unpadded when
+    another running request uses spec decode and there is not enough remaining
+    token budget to keep the normal decode at the uniform spec-decode shape.
+    """
+    num_spec = 3
+    scheduler = create_scheduler(
+        max_num_batched_tokens=5,
+        num_speculative_tokens=num_spec,
+    )
+    r_spec, r_normal = create_requests(num_requests=2, num_tokens=1, max_tokens=16)
+
+    scheduler.add_request(r_spec)
+    scheduler.add_request(r_normal)
+    out = scheduler.schedule()
+    _model_output(scheduler, out, [[100], [101]])
+
+    scheduler.update_draft_token_ids(DraftTokenIds([r_spec.request_id], [[1, 2, 3]]))
+    out = scheduler.schedule()
+
+    assert out.num_scheduled_tokens[r_spec.request_id] == 1 + num_spec
+    assert out.scheduled_spec_decode_tokens[r_spec.request_id] == [1, 2, 3]
+    assert r_normal.request_id not in out.num_scheduled_tokens
+    assert r_normal.request_id not in out.scheduled_spec_decode_tokens
+
+
 def test_spec_decode_padding_skipped_with_prefill_in_batch():
     """Padding is skipped when the batch contains a prefill chunk: the batch is
     already mixed/non-uniform, so padding a new decode request buys nothing.
