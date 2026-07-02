@@ -114,6 +114,7 @@ pub(super) fn prepare_completion_request(
             logprobs,
             prompt_logprobs,
             min_p: request.min_p,
+            p_less: request.p_less,
             frequency_penalty: request.frequency_penalty,
             presence_penalty: request.presence_penalty,
             repetition_penalty: request.repetition_penalty,
@@ -284,6 +285,7 @@ mod tests {
             "top_p": 0.9,
             "top_k": 42,
             "min_p": 0.1,
+            "p_less": true,
             "frequency_penalty": 0.2,
             "presence_penalty": 0.3,
             "repetition_penalty": 1.1,
@@ -310,6 +312,7 @@ mod tests {
         assert_eq!(prepared.text_request.sampling_params.top_p, Some(0.9));
         assert_eq!(prepared.text_request.sampling_params.top_k, Some(42));
         assert_eq!(prepared.text_request.sampling_params.min_p, Some(0.1));
+        assert_eq!(prepared.text_request.sampling_params.p_less, Some(true));
         assert_eq!(
             prepared.text_request.sampling_params.frequency_penalty,
             Some(0.2)

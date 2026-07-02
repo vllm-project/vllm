@@ -109,6 +109,7 @@ pub(super) struct GenerationConfig {
     pub top_p: Option<f32>,
     pub top_k: Option<u32>,
     pub min_p: Option<f32>,
+    pub p_less: Option<bool>,
     pub repetition_penalty: Option<f32>,
     pub max_new_tokens: Option<u32>,
 }

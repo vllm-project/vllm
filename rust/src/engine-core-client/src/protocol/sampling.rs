@@ -21,6 +21,10 @@ fn default_max_tokens() -> u32 {
     16
 }
 
+fn default_p_less() -> bool {
+    false
+}
+
 /// Engine-core-facing sampling parameters for text generation.
 ///
 /// This is the normalized southbound subset used by the Rust frontend when it
@@ -69,6 +73,9 @@ pub struct EngineCoreSamplingParams {
     pub prompt_logprobs: Option<i32>,
     /// Minimum probability threshold for token sampling.
     pub min_p: f32,
+    /// Whether to use p-less sampling. p-less sampling is hyperparameter free.
+    #[serde(default = "default_p_less")]
+    pub p_less: bool,
     /// Frequency penalty applied by the sampler.
     pub frequency_penalty: f32,
     /// Presence penalty applied by the sampler.
@@ -131,6 +138,7 @@ impl EngineCoreSamplingParams {
             logprobs: None,
             prompt_logprobs: None,
             min_p: 0.0,
+            p_less: false,
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             repetition_penalty: 1.0,
@@ -200,6 +208,7 @@ mod tests {
         assert_eq!(sampling.max_tokens, 16);
         assert_eq!(sampling.min_tokens, 0);
         assert_eq!(sampling.min_p, 0.0);
+        assert_eq!(sampling.p_less, false);
         assert_eq!(sampling.frequency_penalty, 0.0);
         assert_eq!(sampling.presence_penalty, 0.0);
         assert_eq!(sampling.repetition_penalty, 1.0);

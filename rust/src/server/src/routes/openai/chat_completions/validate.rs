@@ -171,6 +171,7 @@ mod tests {
             frequency_penalty: Some(0.5),
             presence_penalty: Some(0.25),
             min_p: Some(0.2),
+            p_less: Some(true),
             repetition_penalty: Some(1.1),
             seed: Some(7),
             ..base_request()

@@ -74,6 +74,8 @@ pub struct SamplingParams {
     /// Minimum probability threshold for token sampling. `None` means no
     /// explicit user override.
     pub min_p: Option<f32>,
+    /// Whether to use p-less sampling. `None` means no explicit user override.
+    pub p_less: Option<bool>,
     /// Frequency penalty applied by the sampler. `None` means no explicit user
     /// override.
     pub frequency_penalty: Option<f32>,
@@ -127,6 +129,7 @@ impl Default for SamplingParams {
             logprobs: None,
             prompt_logprobs: None,
             min_p: None,
+            p_less: None,
             frequency_penalty: None,
             presence_penalty: None,
             repetition_penalty: None,

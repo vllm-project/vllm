@@ -120,6 +120,7 @@ impl TextBackend for HfTextBackend {
             default_top_p: self.generation_config.top_p,
             default_top_k: self.generation_config.top_k,
             default_min_p: self.generation_config.min_p,
+            default_p_less: self.generation_config.p_less,
             default_repetition_penalty: self.generation_config.repetition_penalty,
             default_max_tokens: self.generation_config.max_new_tokens,
         })
