@@ -41,7 +41,7 @@ def test_cuda_flashinfer_bf16_gemm_fake_matches_impl_signature():
     )
 
 
-def test_cuda_flashinfer_bf16_gemm_keeps_pdl_disabled_by_default():
+def test_flashinfer_bf16_gemm_keeps_pdl_disabled_by_default():
     functions = (
         cuda_flashinfer_bf16_gemm_impl,
         cuda_flashinfer_bf16_gemm_fake,
@@ -63,16 +63,12 @@ def test_flashinfer_bf16_gemm_backends_exclude_tinygemm():
                 and compute_capability == 100
             )
 
-    pdl_backends = _get_flashinfer_bf16_gemm_backends(
-        FakeMM(), 100, bias=None, pdl=True
-    )
-    assert pdl_backends == ["cutlass", "tgv", "cudnn", "cublaslt"]
-    assert "tinygemm" not in pdl_backends
+    backends = _get_flashinfer_bf16_gemm_backends(FakeMM(), 100, bias=None)
+    assert backends == ["cutlass", "tgv", "cudnn", "cublaslt"]
+    assert "tinygemm" not in backends
 
     bias = torch.empty(8, device="cuda", dtype=torch.bfloat16)
-    bias_backends = _get_flashinfer_bf16_gemm_backends(
-        FakeMM(), 100, bias=bias, pdl=True
-    )
+    bias_backends = _get_flashinfer_bf16_gemm_backends(FakeMM(), 100, bias=bias)
     assert bias_backends == ["tgv", "cudnn"]
 
 

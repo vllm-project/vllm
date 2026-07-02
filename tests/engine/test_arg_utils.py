@@ -588,6 +588,13 @@ def test_numa_bind_args():
     assert engine_args.numa_bind_cpus == ["0-3", "4-7", "8-11", "12-15"]
 
 
+def test_enable_bf16_pdl_arg():
+    parser = EngineArgs.add_cli_args(FlexibleArgumentParser())
+    args = parser.parse_args(["--enable-bf16-pdl"])
+    engine_args = EngineArgs.from_cli_args(args=args)
+    assert engine_args.enable_bf16_pdl is True
+
+
 def test_ir_op_priority():
     from vllm.config.kernel import IrOpPriorityConfig, KernelConfig
 

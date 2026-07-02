@@ -190,6 +190,9 @@ class KernelConfig:
     - "flashinfer": Use FlashInfer mm_bf16 with autotuned backend selection
     """
 
+    enable_bf16_pdl: bool = False
+    """Whether to enable Programmatic Dependent Launch for FlashInfer BF16 GEMMs."""
+
     moe_backend: MoEBackend = "auto"
     """Backend for MoE expert computation kernels. Available options:
 

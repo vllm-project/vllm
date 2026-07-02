@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 
-import os
+import functools
 from collections.abc import Callable
 
 import torch
@@ -145,8 +145,6 @@ def cuda_flashinfer_bf16_gemm_impl(
     if M == 0 or N == 0 or K == 0:
         return x.new_empty((*x.shape[:-1], N), dtype=torch.bfloat16)
 
-    pdl_default = "1" if pdl else "0"
-    pdl = os.environ.get("FLASHINFER_BF16_PDL", pdl_default) == "1"
     x_2d = x.contiguous().reshape(M, K)
     weight = weight.contiguous()
     if bias is not None:
@@ -412,11 +410,11 @@ def cpu_unquantized_gemm(
     return layer.cpu_linear(x, weight, bias)
 
 
-def _get_bf16_linear_backend() -> str:
-    """Read ``bf16_linear_backend`` from the active VllmConfig.
+def _get_bf16_linear_config() -> tuple[str, bool]:
+    """Read the BF16 linear settings from the active VllmConfig.
 
-    Returns ``"torch"`` (the default) when there is no active VllmConfig,
-    e.g. during unit tests that don't set up an engine.
+    Returns the Torch backend with PDL disabled when there is no active
+    VllmConfig, e.g. during unit tests that don't set up an engine.
     """
     try:
         from vllm.config import get_current_vllm_config
@@ -424,38 +422,46 @@ def _get_bf16_linear_backend() -> str:
         vllm_config = get_current_vllm_config()
 
     except (AssertionError, AttributeError, ImportError):
-        return "torch"
+        return "torch", False
 
     if vllm_config is None or vllm_config.kernel_config is None:
-        return "torch"
+        return "torch", False
 
-    backend = vllm_config.kernel_config.bf16_linear_backend
+    kernel_config = vllm_config.kernel_config
+    backend = kernel_config.bf16_linear_backend
     if backend == "torch":
-        return "torch"
+        return "torch", False
 
     if not is_flashinfer_bf16_gemm_supported():
         logger.warning_once(
             "FlashInfer mm_bf16 is unavailable or unsupported; falling back to torch."
         )
-        return "torch"
+        return "torch", False
 
-    return backend
+    return backend, kernel_config.enable_bf16_pdl
 
 
 def dispatch_unquantized_gemm() -> Callable[..., torch.Tensor]:
     if current_platform.is_rocm():
         gemm_impl = rocm_unquantized_gemm
+        gemm_name = gemm_impl.__name__
     elif current_platform.is_cpu():
         gemm_impl = cpu_unquantized_gemm
+        gemm_name = gemm_impl.__name__
     else:
-        bf16_linear_backend = _get_bf16_linear_backend()
+        bf16_linear_backend, enable_bf16_pdl = _get_bf16_linear_config()
         if bf16_linear_backend == "torch":
             gemm_impl = default_unquantized_gemm
+            gemm_name = gemm_impl.__name__
         else:
-            gemm_impl = cuda_flashinfer_bf16_gemm
+            gemm_impl = functools.partial(
+                cuda_flashinfer_bf16_gemm,
+                pdl=enable_bf16_pdl,
+            )
+            gemm_name = f"{cuda_flashinfer_bf16_gemm.__name__}(pdl={enable_bf16_pdl})"
 
     logger.info_once(
         "Bound %s for unquantized GEMMs.",
-        gemm_impl.__name__,
+        gemm_name,
     )
     return gemm_impl

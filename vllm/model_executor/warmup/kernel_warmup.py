@@ -130,41 +130,6 @@ def kernel_warmup(worker: "Worker"):
         cutedsl_warmup()
 
 
-def _run_flashinfer_autotune_dummy(runner: "GPUModelRunner") -> None:
-    _, sample_hidden_states = runner._dummy_run(
-        num_tokens=runner.scheduler_config.max_num_batched_tokens,
-        skip_eplb=True,
-        is_profile=True,
-    )
-
-    from vllm.distributed.parallel_state import get_pp_group
-
-    if not get_pp_group().is_last_rank or runner.is_pooling_model:
-        return
-    assert sample_hidden_states is not None
-    if sample_hidden_states.numel() == 0:
-        return
-
-    # The dummy run returns at most max_num_seqs rows for the LM head, while
-    # full CUDA-graph capture can request a larger padded batch. Tune logits
-    # through the largest captured M as well, otherwise graph capture silently
-    # uses an untuned fallback (for example M=256 when max_num_seqs=128).
-    compilation_config = getattr(
-        getattr(runner, "vllm_config", None), "compilation_config", None
-    )
-    capture_sizes = getattr(compilation_config, "cudagraph_capture_sizes", ()) or ()
-    if isinstance(sample_hidden_states, torch.Tensor) and capture_sizes:
-        target_rows = max(capture_sizes)
-        current_rows = sample_hidden_states.shape[0]
-        if 0 < current_rows < target_rows:
-            repeats = (target_rows + current_rows - 1) // current_rows
-            repeat_dims = (repeats,) + (1,) * (sample_hidden_states.ndim - 1)
-            sample_hidden_states = sample_hidden_states.repeat(repeat_dims)[
-                :target_rows
-            ]
-    runner.model.compute_logits(sample_hidden_states)
-
-
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     """
     Autotune FlashInfer operations.
@@ -196,7 +161,11 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
 
     if not use_persistent_cache:
         with torch.inference_mode(), fi_utils.autotune():
-            _run_flashinfer_autotune_dummy(runner)
+            runner._dummy_run(
+                num_tokens=runner.scheduler_config.max_num_batched_tokens,
+                skip_eplb=True,
+                is_profile=True,
+            )
         get_world_group().barrier()
         return
 
@@ -207,12 +176,18 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     if is_leader:
         logger.info("Using FlashInfer autotune cache file: %s", cache_path)
 
+    dummy_run_kwargs = dict(
+        num_tokens=runner.scheduler_config.max_num_batched_tokens,
+        skip_eplb=True,
+        is_profile=True,
+    )
+
     with torch.inference_mode():
         if is_leader:
             with fi_utils.autotune(tune_mode=True, cache=str(cache_path)):
-                _run_flashinfer_autotune_dummy(runner)
+                runner._dummy_run(**dummy_run_kwargs)
         else:
-            _run_flashinfer_autotune_dummy(runner)
+            runner._dummy_run(**dummy_run_kwargs)
 
     # Broadcast autotune cache from rank 0 to all other ranks so every
     # rank loads the same set of chosen tactics.

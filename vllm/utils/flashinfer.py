@@ -37,13 +37,8 @@ def _get_flashinfer_bf16_gemm_backends(
     mm_bf16: Any,
     compute_capability: int,
     bias: torch.Tensor | None,
-    pdl: bool,
 ) -> list[str]:
-    """Return supported BF16 GEMM backends, excluding TinyGEMM.
-
-    PDL is applied by runners that support it and ignored by the others. This
-    keeps CUTLASS and cuBLASLt eligible when TGV uses PDL.
-    """
+    """Return supported BF16 GEMM backends, excluding TinyGEMM."""
     candidates: tuple[str, ...]
     if bias is not None:
         candidates = ("tgv", "cudnn")
@@ -84,7 +79,6 @@ def flashinfer_bf16_mm_impl(
         mm_bf16,
         major * 10 + minor,
         bias,
-        pdl,
     )
     if not backends:
         raise RuntimeError("No supported FlashInfer BF16 GEMM backend found.")

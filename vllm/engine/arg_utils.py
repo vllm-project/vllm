@@ -493,6 +493,7 @@ class EngineArgs:
     moe_backend: MoEBackend = KernelConfig.moe_backend
     linear_backend: LinearBackend = KernelConfig.linear_backend
     bf16_linear_backend: BF16LinearBackend = KernelConfig.bf16_linear_backend
+    enable_bf16_pdl: bool = KernelConfig.enable_bf16_pdl
     all2all_backend: All2AllBackend = ParallelConfig.all2all_backend
     enable_elastic_ep: bool = ParallelConfig.enable_elastic_ep
     enable_dbo: bool = ParallelConfig.enable_dbo
@@ -1502,6 +1503,9 @@ class EngineArgs:
         bf16_linear_backend_kwargs = kernel_kwargs["bf16_linear_backend"]
         bf16_linear_backend_kwargs["type"] = lambda s: s.lower().replace("-", "_")
         kernel_group.add_argument("--bf16-linear-backend", **bf16_linear_backend_kwargs)
+        kernel_group.add_argument(
+            "--enable-bf16-pdl", **kernel_kwargs["enable_bf16_pdl"]
+        )
 
         # vLLM arguments
         vllm_kwargs = get_kwargs(VllmConfig)
@@ -2273,6 +2277,8 @@ class EngineArgs:
             kernel_config.linear_backend = self.linear_backend
         if self.bf16_linear_backend != "torch":
             kernel_config.bf16_linear_backend = self.bf16_linear_backend
+        if self.enable_bf16_pdl:
+            kernel_config.enable_bf16_pdl = True
 
         # Transfer top-level ir_op_priority into KernelConfig.ir_op_priority
         for op_name, op_priority in asdict(self.ir_op_priority).items():

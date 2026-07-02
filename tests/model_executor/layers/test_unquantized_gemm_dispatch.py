@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
 from types import SimpleNamespace
 from unittest.mock import MagicMock, call
 
@@ -12,7 +13,7 @@ from vllm.config import (
     get_current_vllm_config,
     set_current_vllm_config,
 )
-from vllm.model_executor.layers import linear, vocab_parallel_embedding
+from vllm.model_executor.layers import linear, utils, vocab_parallel_embedding
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -60,3 +61,25 @@ def test_unquantized_gemm_is_bound_during_initialization(
         call(layer, x, weight, bias),
         call(layer, x, weight, bias),
     ]
+
+
+def test_flashinfer_pdl_is_bound_from_config(monkeypatch):
+    config = VllmConfig(
+        kernel_config=KernelConfig(
+            bf16_linear_backend="flashinfer",
+            enable_bf16_pdl=True,
+        )
+    )
+    monkeypatch.setattr(
+        utils,
+        "current_platform",
+        SimpleNamespace(is_rocm=lambda: False, is_cpu=lambda: False),
+    )
+    monkeypatch.setattr(utils, "is_flashinfer_bf16_gemm_supported", lambda: True)
+
+    with set_current_vllm_config(config):
+        gemm_impl = utils.dispatch_unquantized_gemm()
+
+    assert isinstance(gemm_impl, functools.partial)
+    assert gemm_impl.func is utils.cuda_flashinfer_bf16_gemm
+    assert gemm_impl.keywords == {"pdl": True}
