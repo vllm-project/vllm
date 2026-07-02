@@ -228,6 +228,8 @@ class DFlashSpeculator(DraftModelSpeculator):
         num_reqs: int,
         num_reqs_padded: int,
         num_tokens_padded: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
         num_query_per_req: int | None = None,
         causal: bool = False,
     ) -> dict[str, Any] | None:
@@ -238,6 +240,8 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs,
             num_reqs_padded,
             num_tokens_padded,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
+            step=step,
             num_query_per_req=self.num_query_per_req,
             causal=causal,
         )
@@ -386,6 +390,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs=num_reqs,
             num_reqs_padded=num_reqs_padded,
             num_tokens_padded=num_tokens_padded,
+            # DFlash drafts num_query_per_req tokens in parallel, so the
+            # per-request seq_lens upper bound grows by that many positions.
+            seq_lens_cpu_upper_bound=input_batch.seq_lens_cpu_upper_bound,
+            step=self.num_query_per_req,
             causal=self.dflash_causal,
         )
         draft_slot_mappings_by_layer = build_slot_mappings_by_layer(

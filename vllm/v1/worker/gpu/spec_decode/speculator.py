@@ -201,6 +201,8 @@ class DraftModelSpeculator(BaseSpeculator):
         num_reqs: int,
         num_reqs_padded: int,
         num_tokens_padded: int,
+        seq_lens_cpu_upper_bound: torch.Tensor,
+        step: int,
         num_query_per_req: int = 1,
         causal: bool = True,
     ) -> dict[str, Any] | None:
@@ -215,6 +217,21 @@ class DraftModelSpeculator(BaseSpeculator):
             x[:num_reqs_padded] for x in self.block_tables.input_block_tables
         ]
         slot_mappings = self.block_tables.slot_mappings[:, :num_tokens_padded]
+        # Per-request CPU upper bound on seq_lens for this draft step: the
+        # target's upper bound grown by the `step` already-drafted tokens,
+        # clamped to the model length. Padded slots are zeroed to match the
+        # main runner. This field is required by
+        # split_decodes_prefills_and_extends and several backends
+        # (MLA / indexer / flex-attention), so it must be set.
+        draft_seq_lens_cpu_upper_bound = torch.zeros(
+            num_reqs_padded, dtype=torch.int32, device="cpu"
+        )
+        torch.add(
+            seq_lens_cpu_upper_bound[:num_reqs],
+            step,
+            out=draft_seq_lens_cpu_upper_bound[:num_reqs],
+        )
+        draft_seq_lens_cpu_upper_bound[:num_reqs].clamp_(max=self.max_model_len)
         attn_metadata = build_attn_metadata(
             attn_groups=self.attn_groups,
             num_reqs=num_reqs_padded,
@@ -230,6 +247,7 @@ class DraftModelSpeculator(BaseSpeculator):
             slot_mappings=slot_mappings,
             kv_cache_config=self.kv_cache_config,
             causal=causal,
+            seq_lens_cpu_upper_bound=draft_seq_lens_cpu_upper_bound,
         )
         return attn_metadata
 

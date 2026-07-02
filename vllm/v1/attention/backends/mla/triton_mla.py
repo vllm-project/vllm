@@ -48,7 +48,14 @@ def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
 
 
 class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
-    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    # Triton MLA only supports single-token (query_len==1) decodes, so it can
+    # only capture decode-only full CUDA graphs. Advertising UNIFORM_BATCH would
+    # wrongly claim multi-token (spec-decode) capture support and crash in
+    # build_for_cudagraph_capture; UNIFORM_SINGLE_TOKEN_DECODE lets the
+    # dispatcher downgrade FULL -> PIECEWISE under spec decode instead.
+    _cudagraph_support: ClassVar[AttentionCGSupport] = (
+        AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+    )
 
     def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
