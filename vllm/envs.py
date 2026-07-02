@@ -48,6 +48,7 @@ if TYPE_CHECKING:
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
     VLLM_PP_LAYER_PARTITION: str | None = None
+    VLLM_UNIPROC_OMP_THREADS: int | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
     VLLM_CPU_NUM_OF_RESERVED_CPU: int | None = None
@@ -890,6 +891,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # this path $VLLM_ASSETS_CACHE/model_streamer/$model_name
     "VLLM_ASSETS_CACHE_MODEL_CLEAN": lambda: bool(
         int(os.getenv("VLLM_ASSETS_CACHE_MODEL_CLEAN", "0"))
+    ),
+    # Cap on Torch intra-op threads for the single-process (uni) executor.
+    # None -> use the executor's conservative built-in default; 0 (or less)
+    # -> leave Torch's default untouched. An explicit OMP_NUM_THREADS always
+    # takes precedence over this value.
+    "VLLM_UNIPROC_OMP_THREADS": lambda: (
+        int(os.environ["VLLM_UNIPROC_OMP_THREADS"])
+        if "VLLM_UNIPROC_OMP_THREADS" in os.environ
+        else None
     ),
     # Timeout for fetching images when serving multimodal models
     # Default is 5 seconds
