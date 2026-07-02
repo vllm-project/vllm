@@ -109,7 +109,7 @@ class TopKTopPSampler(nn.Module):
                 self.forward = self.forward_native
         elif (
             logprobs_mode not in ("processed_logits", "processed_logprobs")
-            and rocm_aiter_ops.is_enabled()
+            and rocm_aiter_ops.is_sampler_enabled()
         ):
             self.aiter_ops = None
             self._aiter_ops_import_failed = False
