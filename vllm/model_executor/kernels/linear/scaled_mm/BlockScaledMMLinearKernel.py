@@ -20,6 +20,9 @@ from ..base import (
 )
 from .ScaledMMLinearKernel import FP8ScaledMMLinearLayerConfig
 
+# This enables torch.cond to be cached.
+torch.ops.higher_order.cond._cacheable = True
+
 
 @dataclass
 class FP8BlockParams(FP8Params):
@@ -207,3 +210,32 @@ class Fp8BlockScaledDynamicMMLinearKernel(Fp8BlockScaledMMLinearKernel, ABC):
         if not can_implement_base:
             return False, f"base cannot implement due to {reason_1}"
         return False, f"fallback cannot implement due to {reason_2}"
+
+    @abstractmethod
+    def predicate(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> bool:
+        raise NotImplementedError
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        # torch.cond registers both branches in the computation graph so
+        # torch.compile can capture dynamic dispatch without breaking tracing.
+        # All operands must be concrete Tensors — non-tensor state is accessed
+        # via self.config or captured by the branch method closures.
+
+        return torch.cond(
+            self.predicate(A, B, As, Bs),
+            self.base.apply_block_scaled_mm,
+            self.fallback.apply_block_scaled_mm,
+            [A, B, As, Bs],
+        )
