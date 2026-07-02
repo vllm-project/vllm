@@ -1503,8 +1503,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "EagleMiniCPMForCausalLM": _HfExamplesInfo(
         "openbmb/MiniCPM-1B-sft-bf16",
         trust_remote_code=True,
+        is_available_online=False,
         speculative_model="openbmb/MiniCPM-2B-sft-bf16",
-        speculative_method="eagle",
         tokenizer="openbmb/MiniCPM-2B-sft-bf16",
     ),
     "Eagle3Qwen2_5vlForCausalLM": _HfExamplesInfo(
