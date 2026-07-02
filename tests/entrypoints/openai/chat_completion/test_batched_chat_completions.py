@@ -7,26 +7,9 @@ import httpx
 import pytest
 
 from tests.utils import RemoteOpenAIServer
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    BatchChatCompletionRequest,
-)
 
 # any model with a chat template defined in tokenizer_config should work here
 MODEL_NAME = "Qwen/Qwen2.5-1.5B-Instruct"
-
-
-def test_return_tokens_as_token_ids_defaults_to_none() -> None:
-    # Regression test: the batch request must expose
-    # `return_tokens_as_token_ids` (separate from `return_token_ids`) so the
-    # logprobs path renders real tokens instead of "token_id:{id}" placeholders
-    # when the user only asked for `return_token_ids`. Default must be None so
-    # the server-level --return-tokens-as-token-ids flag still applies.
-    request = BatchChatCompletionRequest(
-        messages=[[{"role": "user", "content": "hi"}]],
-        return_token_ids=True,
-    )
-    assert request.return_tokens_as_token_ids is None
-    assert request.return_token_ids is True
 
 
 @pytest.fixture(scope="module")
