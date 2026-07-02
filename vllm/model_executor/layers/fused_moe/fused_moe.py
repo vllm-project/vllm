@@ -1127,6 +1127,10 @@ def _ensure_block_size_k_divisible(
     Returns:
         A valid BLOCK_SIZE_K that divides size_k and is divisible by group_size.
     """
+    # moe_wna16_gemm is only instantiated for block_size_k // group_size in
+    # {1, 2, 4, 8} (csrc/moe/moe_wna16.cu).
+    block_size_k = min(block_size_k, group_size * 8)
+
     # Fast path: already valid
     if size_k % block_size_k == 0 and block_size_k % group_size == 0:
         return block_size_k
@@ -1141,7 +1145,7 @@ def _ensure_block_size_k_divisible(
     max_search = min(block_size_k, size_k)
     start = (max_search // group_size) * group_size
     for candidate in range(start, group_size - 1, -group_size):
-        if size_k % candidate == 0:
+        if size_k % candidate == 0 and candidate // group_size in (1, 2, 4, 8):
             return candidate
 
     # Fallback: if group_size divides size_k, use it
