@@ -252,6 +252,8 @@ class Scheduler(SchedulerInterface):
                 # anchor itself is the first prediction position (no separate bonus
                 # query), so it needs exactly num_spec_tokens lookahead slots.
                 self.num_lookahead_tokens = self.num_spec_tokens
+        self._pending_dcut_kept_draft_tokens = 0
+        self._pending_dcut_total_draft_tokens = 0
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -1817,6 +1819,7 @@ class Scheduler(SchedulerInterface):
                     )
             finished_req_ids.clear()
 
+        spec_decoding_stats = self._make_or_update_dcut_stats(spec_decoding_stats)
         if (
             stats := self.make_stats(
                 spec_decoding_stats, kv_connector_stats, cudagraph_stats, perf_stats
@@ -1927,9 +1930,12 @@ class Scheduler(SchedulerInterface):
                 self.encoder_cache_manager.free_encoder_input(request, input_id)
 
     def update_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> None:
-        for req_id, spec_token_ids in zip(
-            draft_token_ids.req_ids,
-            draft_token_ids.draft_token_ids,
+        dcut_keep_lens = draft_token_ids.dcut_keep_lens
+        for i, (req_id, spec_token_ids) in enumerate(
+            zip(
+                draft_token_ids.req_ids,
+                draft_token_ids.draft_token_ids,
+            )
         ):
             request = self.requests.get(req_id)
             if request is None or request.is_finished():
@@ -1946,6 +1952,8 @@ class Scheduler(SchedulerInterface):
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
+            if dcut_keep_lens is not None:
+                spec_token_ids = self._dcut_truncate(spec_token_ids, dcut_keep_lens[i])
             request.spec_token_ids = spec_token_ids
 
     def update_draft_token_ids_in_output(
@@ -2310,6 +2318,28 @@ class Scheduler(SchedulerInterface):
             num_draft_tokens=num_draft_tokens, num_accepted_tokens=num_accepted_tokens
         )
         return spec_decoding_stats
+
+    def _make_or_update_dcut_stats(
+        self, spec_decoding_stats: SpecDecodingStats | None
+    ) -> SpecDecodingStats | None:
+        if (
+            not self.log_stats
+            or not self._pending_dcut_total_draft_tokens
+            or spec_decoding_stats is None
+        ):
+            return spec_decoding_stats
+        spec_decoding_stats.observe_dcut(
+            kept_draft_tokens=self._pending_dcut_kept_draft_tokens,
+            total_draft_tokens=self._pending_dcut_total_draft_tokens,
+        )
+        self._pending_dcut_kept_draft_tokens = 0
+        self._pending_dcut_total_draft_tokens = 0
+        return spec_decoding_stats
+
+    def _dcut_truncate(self, spec_token_ids: list[int], keep_len: int) -> list[int]:
+        self._pending_dcut_kept_draft_tokens += keep_len + 1
+        self._pending_dcut_total_draft_tokens += len(spec_token_ids) + 1
+        return spec_token_ids[:keep_len]
 
     def shutdown(self) -> None:
         logger.debug_once("[shutdown] Scheduler: start")

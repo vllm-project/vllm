@@ -71,6 +71,7 @@ SpeculativeMethod = Literal[
 ]
 RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
+DFlashDcutMode = Literal["off", "fixed_ratio", "selector"]
 
 
 @config
@@ -159,6 +160,28 @@ class SpeculativeConfig:
     in parallel rather than sequentially. This can improve performance but
     requires the speculative model be trained to support parallel drafting.
     Only compatible with EAGLE and draft model methods."""
+    dflash_dcut: float | Literal["auto"] = 0.0
+    """Dynamic draft pruning (D-Cut) policy. Currently DFlash-only.
+
+    Accepted values:
+
+    - ``0`` (default): disabled.
+    - a float in ``(0, 1]``: ``fixed_ratio`` policy. Interpreted as the
+      fraction of target-forward query tokens to keep across the batch,
+      counting the one bonus token reserved per request. The draft-token
+      budget is ``ceil(value * batch_size * (num_draft + 1)) - batch_size``,
+      and the highest-scoring drafts are kept via a batch-level (global)
+      top-K rather than a per-request truncation.
+    - ``"auto"``: ``selector`` policy; choose how many drafts to keep at
+      runtime from a warmup full-cost table.
+
+    D-Cut prunes the verification width based on draft confidence. The
+    transport (keep lengths on ``DraftTokenIds``), the scheduler-side
+    truncation, and the keep-ratio metrics are all method-agnostic; only
+    the selection policy and warmup profiling currently live in the DFlash
+    proposer, so the option is gated to ``method='dflash'`` for now. It can
+    be extended to other parallel-drafting methods (e.g. parallel-drafting
+    EAGLE) by adding their own keep-length selection."""
 
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
@@ -313,6 +336,7 @@ class SpeculativeConfig:
             if layer_ids is not None:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
+        factors.append(self.dflash_dcut)
 
         hash_str = safe_hash(str(factors).encode(), usedforsecurity=False).hexdigest()
         return hash_str
@@ -1091,6 +1115,24 @@ class SpeculativeConfig:
                 f"than zero ({self.num_speculative_tokens})."
             )
 
+        dflash_dcut_is_valid = (
+            self.dflash_dcut == "auto"
+            if isinstance(self.dflash_dcut, str)
+            else 0 <= self.dflash_dcut <= 1
+        )
+        if not dflash_dcut_is_valid:
+            raise ValueError(
+                'dflash_dcut must be a float in [0, 1] or "auto", '
+                f"got {self.dflash_dcut!r}."
+            )
+        if self.dflash_dcut != 0 and self.method != "dflash":
+            logger.warning(
+                "DFlash D-Cut is only supported with method='dflash'; "
+                "disabling dflash_dcut for method='%s'.",
+                self.method,
+            )
+            self.dflash_dcut = 0.0
+
         if self.rejection_sample_method == "synthetic":
             # Consolidate to per-position rates
             self.synthetic_acceptance_rates = self._resolve_synthetic_acceptance_rates(
@@ -1189,6 +1231,19 @@ class SpeculativeConfig:
 
     def use_dspark(self) -> bool:
         return self.method == "dspark"
+
+    @property
+    def dflash_dcut_mode(self) -> DFlashDcutMode:
+        """Normalized D-Cut policy derived from ``dflash_dcut``."""
+        if self.dflash_dcut == "auto":
+            return "selector"
+        if self.dflash_dcut == 0:
+            return "off"
+        return "fixed_ratio"
+
+    def uses_dflash_dcut(self) -> bool:
+        """Whether DFlash D-Cut draft pruning is enabled."""
+        return self.use_dflash() and self.dflash_dcut_mode != "off"
 
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
