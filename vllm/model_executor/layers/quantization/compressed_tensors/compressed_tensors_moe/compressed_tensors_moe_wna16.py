@@ -23,6 +23,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.utils import set_weight_attrs
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -196,6 +197,8 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         # Reconfigure packed weights and scales to match moe_wna16 format
+        # Transpose from [E, K//pack, N] int32 to [E, N, K//pack] then
+        # view as uint8 → [E, N, K//2] for int4
         layer.w13_weight_packed = torch.nn.Parameter(
             layer.w13_weight_packed.transpose(1, 2).contiguous().view(torch.uint8),
             requires_grad=False,
@@ -210,6 +213,42 @@ class CompressedTensorsWNA16MoEMethod(CompressedTensorsMoEMethod):
         layer.w2_weight_scale = torch.nn.Parameter(
             layer.w2_weight_scale.transpose(1, 2).contiguous(), requires_grad=False
         )
+
+        # AMD RDNA int4 only: further repack to N-packed int32 [E, K, N//8] for
+        # tl.interleave unpacking in the Triton kernel.
+        if not current_platform.is_rocm() or self.num_bits != 4:
+            return
+
+        from vllm.platforms.rocm import on_gfx1x
+
+        if not on_gfx1x():
+            return
+
+        from vllm.model_executor.layers.quantization.utils.moe_wna16_utils import (
+            repack_int4_to_int32,
+        )
+
+        # All known int4 MoE models have N divisible by 8; skip
+        # gracefully if not and fall back to the scalar-shift kernel.
+        for w_attr, s_attr in (
+            ("w13_weight_packed", "w13_weight_scale"),
+            ("w2_weight_packed", "w2_weight_scale"),
+        ):
+            w = getattr(layer, w_attr)
+            if w.data.shape[1] % 8 != 0:
+                continue
+
+            layer.register_parameter(
+                w_attr,
+                torch.nn.Parameter(repack_int4_to_int32(w.data), requires_grad=False),
+            )
+            sc = getattr(layer, s_attr)
+            layer.register_parameter(
+                s_attr,
+                torch.nn.Parameter(
+                    sc.data.permute(0, 2, 1).contiguous(), requires_grad=False
+                ),
+            )
 
     def get_fused_moe_quant_config(
         self, layer: torch.nn.Module
