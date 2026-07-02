@@ -4,11 +4,12 @@ import contextlib
 import os
 import threading
 import time
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 import msgspec
+import psutil
 import regex as re
 import torch
 import zmq
@@ -25,7 +26,8 @@ from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     get_ip,
     get_open_port,
-    make_zmq_socket,
+    is_valid_ipv6_address,
+    split_zmq_path,
 )
 
 if TYPE_CHECKING:
@@ -74,6 +76,7 @@ class LayerTransferPlan:
     transfer_local_offsets: list[int]
     transfer_remote_offsets: list[int]
     transfer_sizes: list[int]
+    session: Any | None = None
     use_batch: bool = True
 
 
@@ -176,10 +179,18 @@ class TransferError(MoRIIOError):
     pass
 
 
+def _as_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        return value.strip().lower() in ("1", "true", "yes", "on")
+    return bool(value)
+
+
 def get_moriio_mode(kv_transfer_config: KVTransferConfig) -> MoRIIOMode:
-    read_mode = str(
-        kv_transfer_config.kv_connector_extra_config.get("read_mode", "false")
-    ).lower().strip() in ("true", "1")
+    read_mode = _as_bool(
+        kv_transfer_config.kv_connector_extra_config.get("read_mode", False)
+    )
     logger.debug("MoRIIO Connector read_mode: %s", read_mode)
     if read_mode:
         return MoRIIOMode.READ
@@ -203,6 +214,62 @@ def resolve_host_ip(extra_config: dict) -> str:
     return extra_config.get("host_ip") or get_ip()
 
 
+def _normalize_node_hosts(value: Any, config_key: str) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [host.strip() for host in value.split(",") if host.strip()]
+    try:
+        return [str(host).strip() for host in value if str(host).strip()]
+    except TypeError as exc:
+        raise ValueError(
+            f"{config_key} must be a comma-separated string or iterable of hosts"
+        ) from exc
+
+
+def validate_moriio_trusted_host(
+    remote_host: str,
+    trusted_hosts: Collection[str] | None,
+    source: str,
+) -> None:
+    trusted_host_list = _normalize_node_hosts(trusted_hosts, "trusted_remote_hosts")
+    if not trusted_host_list:
+        raise ValueError(
+            f"MoRIIO {source} host {remote_host!r} is not trusted; configure "
+            "kv_connector_extra_config['trusted_remote_hosts'] with trusted peer "
+            "hosts"
+        )
+    if remote_host not in set(trusted_host_list):
+        raise ValueError(
+            f"MoRIIO {source} host {remote_host!r} is not in trusted peer hosts "
+            f"{trusted_host_list!r}"
+        )
+
+
+def get_moriio_node_hosts(
+    kv_transfer_config: KVTransferConfig, default_host: str
+) -> list[str]:
+    extra_config = kv_transfer_config.kv_connector_extra_config
+    node_hosts = _normalize_node_hosts(
+        extra_config.get("node_hosts"),
+        "kv_connector_extra_config['node_hosts']",
+    )
+    if node_hosts:
+        return node_hosts
+
+    return [default_host]
+
+
+def get_moriio_trusted_remote_hosts(
+    kv_transfer_config: KVTransferConfig,
+) -> list[str]:
+    extra_config = kv_transfer_config.kv_connector_extra_config
+    return _normalize_node_hosts(
+        extra_config.get("trusted_remote_hosts"),
+        "kv_connector_extra_config['trusted_remote_hosts']",
+    )
+
+
 _DEPRECATED_ENV_VARS: dict[str, str] = {
     "VLLM_MORIIO_CONNECTOR_READ_MODE": "read_mode",
     "VLLM_MORIIO_QP_PER_TRANSFER": "qp_per_transfer",
@@ -221,6 +288,19 @@ def _warn_deprecated_env_vars() -> None:
                 env_var,
                 new_key,
             )
+
+
+def _get_non_negative_int_extra_config(
+    extra_config: dict[str, Any],
+    key: str,
+    default: int,
+) -> int:
+    value = int(extra_config.get(key, default))
+    if value < 0:
+        raise ValueError(
+            f"Invalid MoRIIO {key}={value}; expected a non-negative integer."
+        )
+    return value
 
 
 @dataclass
@@ -244,6 +324,11 @@ class MoRIIOConfig:
     post_batch_size: int = -1
     num_workers: int = 1
     backend: str = "rdma"
+    node_hosts: list[str] = field(default_factory=list)
+    handshake_timeout: float = 10.0
+    max_inflight_global: int = 0
+    max_inflight_per_transfer: int = 0
+    max_dispatch_layers: int = 0
 
     @classmethod
     def from_vllm_config(cls, vllm_config: VllmConfig) -> "MoRIIOConfig":
@@ -270,7 +355,6 @@ class MoRIIOConfig:
         #                     (-1 lets the MoRI backend choose).
         # num_workers      -> Number of background worker threads the MoRI
         #                     engine uses for transfer processing.
-
         # TODO : merge notify_port and handshake_port to simplify port management
         #        supports non-contiguous ports
         assert vllm_config.kv_transfer_config is not None, (
@@ -284,7 +368,7 @@ class MoRIIOConfig:
         base_notify_port = int(extra_config["notify_port"])
         dp_size = vllm_config.parallel_config.data_parallel_size
         tp_size = get_tensor_model_parallel_world_size()
-        port_offset = get_port_offset(dp_rank, tp_rank)
+        port_offset = get_port_offset(dp_rank, tp_rank, tp_size)
         backend = str(extra_config.get("backend", "rdma")).lower()
         if backend not in ("rdma", "xgmi"):
             raise ValueError(
@@ -301,8 +385,10 @@ class MoRIIOConfig:
             extra_config.get("defer_timeout", MoRIIOConstants.DEFAULT_DEFER_TIMEOUT)
         )
 
+        local_ip = resolve_host_ip(extra_config)
+
         return cls(
-            local_ip=resolve_host_ip(extra_config),
+            local_ip=local_ip,
             local_kv_port=get_open_port(),
             proxy_ip=extra_config["proxy_ip"],
             local_ping_port=get_open_port(),
@@ -319,8 +405,29 @@ class MoRIIOConfig:
             post_batch_size=int(extra_config.get("post_batch_size", -1)),
             num_workers=int(extra_config.get("num_workers", 1)),
             backend=backend,
+            node_hosts=get_moriio_node_hosts(kv_transfer_config, local_ip),
             transfer_timeout=transfer_timeout,
             defer_timeout=defer_timeout,
+            handshake_timeout=float(
+                extra_config.get(
+                    "handshake_timeout", MoRIIOConstants.DEFAULT_HANDSHAKE_TIMEOUT
+                )
+            ),
+            max_inflight_global=_get_non_negative_int_extra_config(
+                extra_config,
+                "max_inflight_global",
+                0,
+            ),
+            max_inflight_per_transfer=_get_non_negative_int_extra_config(
+                extra_config,
+                "max_inflight_per_transfer",
+                0,
+            ),
+            max_dispatch_layers=_get_non_negative_int_extra_config(
+                extra_config,
+                "max_dispatch_layers",
+                0,
+            ),
         )
 
 
@@ -348,6 +455,10 @@ class MoRIIOConstants:
     # notification is reaped and its blocks force-freed.
     # Overridable via kv_connector_extra_config["defer_timeout"].
     DEFAULT_DEFER_TIMEOUT = 60.0
+    # Timeout (seconds) for a single MoRIIO handshake metadata exchange.
+    # Bounds an unresponsive remote listener so TP workers do not block in recv().
+    # Overridable via kv_connector_extra_config["handshake_timeout"].
+    DEFAULT_HANDSHAKE_TIMEOUT = 10.0
 
 
 # The router embeds both zmq_addresses in the request_id:
@@ -360,6 +471,18 @@ _PREFILL_ZMQ_RE = re.compile(r"___prefill_addr_(.+?)___decode_addr_")
 # vLLM wraps the router's X-Request-Id as "cmpl-<id>-<seq>-<hex>" so there may
 # be a trailing "-<seq>-<hex>" suffix after the 32-char UUID.  Allow it.
 _DECODE_ZMQ_RE = re.compile(r"___decode_addr_(.+)_[0-9a-f]{32}(?:-.*)?$")
+
+
+# vLLM appends a trailing "-<8hex>" engine-local suffix to the router
+# request_id; it differs between the prefill and decode engines for the same
+# logical request. The canonical (router) request_id is the stripped base,
+# which both sides agree on — use it as a stable cross-node map key.
+_VLLM_REQUEST_SUFFIX_RE = re.compile(r"(.+)-[0-9a-fA-F]{8}$")
+
+
+def _strip_vllm_request_suffix(request_id: str) -> str:
+    match = _VLLM_REQUEST_SUFFIX_RE.fullmatch(request_id)
+    return match.group(1) if match is not None else request_id
 
 
 def parse_moriio_zmq_address(
@@ -422,6 +545,17 @@ class ReqMeta:
     remote_engine_id: str
     tp_size: int
     remote_dp_size: int
+    # DP rank that handled the prefill on the remote side. Proxy sets this
+    # from `selected_prefill_dp_rank` in kv_transfer_params. Used by
+    # `_read_blocks` to pick the correct per-rank session/MR instead of
+    # always reading from remote DP0 (which mismatches num_blocks across
+    # ranks and overflows remote DP0's MR at high concurrency).
+    remote_dp_rank: int = 0
+    # Ordered list of all prefill-instance host IPs for multi-node TP.
+    # Each decode worker picks remote_hosts[tp_rank // ranks_per_node] as its
+    # actual peer host for handshake + post-transfer notify. None or len<=1
+    # falls back to single-host behaviour (remote_host).
+    remote_hosts: list[str] | None = None
 
 
 class MoRIIOConnectorMetadata(KVConnectorMetadata):
@@ -430,13 +564,17 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         self.reqs_to_save: dict[ReqId, ReqMeta] = {}
         self.reqs_to_send: dict[ReqId, float] = {}
         self.transfer_id_to_request_id: dict[TransferId, ReqId] = {}
+        self.transfer_id_to_remote_tp_size: dict[TransferId, int] = {}
+        self.freed_transfer_ids: set[TransferId] = set()
 
     def __repr__(self):
         return (
             f"MoRIIOConnectorMetadata: reqs_to_recv={self.reqs_to_recv}, "
             f"reqs_to_save={self.reqs_to_save}, "
             f"reqs_to_send={self.reqs_to_send}, "
-            f"transfer_id_to_request_id={self.transfer_id_to_request_id}"
+            f"transfer_id_to_request_id={self.transfer_id_to_request_id}, "
+            f"transfer_id_to_remote_tp_size={self.transfer_id_to_remote_tp_size}, "
+            f"freed_transfer_ids={self.freed_transfer_ids}"
         )
 
     def add_new_req(
@@ -445,36 +583,89 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
         local_block_ids: list[int],
         kv_transfer_params: dict[str, Any],
         write_mode=False,
+        trusted_remote_hosts: Collection[str] | None = None,
     ):
         transfer_id = kv_transfer_params["transfer_id"]
 
         remote_host = kv_transfer_params.get("remote_host")
         remote_handshake_port = kv_transfer_params.get("remote_handshake_port")
         remote_notify_port = kv_transfer_params.get("remote_notify_port")
+        remote_host_source = "kv_transfer_params.remote_host"
+        # Parse host/ports from request_id. The router normally embeds both
+        # zmq_addresses there. If the embedded address is absent, fall back to
+        # `kv_transfer_params.remote_zmq_address`, which carries the same
+        # host/handshake/notify tuple explicitly. A host list alone is not
+        # enough because deployments may use non-default ports.
+        remote_hosts = _normalize_node_hosts(
+            kv_transfer_params.get("remote_hosts"),
+            "kv_transfer_params['remote_hosts']",
+        )
         if (
             remote_host is None
             or remote_handshake_port is None
             or remote_notify_port is None
         ):
-            # Parse host/ports from the request_id. The router embeds both
-            # zmq_addresses in PD request IDs, but WRITE decode requests may carry
-            # a plain request ID and get the remote address via kv_transfer_params.
-            peer_zmq = get_peer_zmq_from_request_id(request_id, is_producer=write_mode)
-            remote_host, remote_handshake_port, remote_notify_port = (
-                parse_moriio_zmq_address(peer_zmq)
-            )
+            try:
+                peer_zmq = get_peer_zmq_from_request_id(
+                    request_id, is_producer=write_mode
+                )
+                remote_host, remote_handshake_port, remote_notify_port = (
+                    parse_moriio_zmq_address(peer_zmq)
+                )
+                remote_host_source = "request_id"
+            except ValueError:
+                peer_zmq = kv_transfer_params.get("remote_zmq_address")
+                if peer_zmq:
+                    remote_host, remote_handshake_port, remote_notify_port = (
+                        parse_moriio_zmq_address(peer_zmq)
+                    )
+                    remote_host_source = "kv_transfer_params.remote_zmq_address"
+                elif not remote_hosts:
+                    raise ValueError(
+                        f"MoRIIO add_new_req: could not resolve peer host/ports "
+                        f"for {request_id!r}; neither request_id parse nor "
+                        f"kv_transfer_params.remote_zmq_address provided them"
+                    ) from None
+                else:
+                    raise ValueError(
+                        f"MoRIIO add_new_req: kv_transfer_params.remote_hosts for "
+                        f"{request_id!r} does not include handshake/notify ports; "
+                        f"forward remote_zmq_address with the host list"
+                    ) from None
 
+        if trusted_remote_hosts is not None:
+            validate_moriio_trusted_host(
+                remote_host,
+                trusted_remote_hosts,
+                remote_host_source,
+            )
+            for remote_hosts_entry in remote_hosts:
+                validate_moriio_trusted_host(
+                    remote_hosts_entry,
+                    trusted_remote_hosts,
+                    "kv_transfer_params.remote_hosts",
+                )
+
+        # If remote block metadata is absent, use empty defaults so the request
+        # remains a no-op.
         _req = ReqMeta(
             transfer_id=transfer_id,
             local_block_ids=local_block_ids,
-            remote_block_ids=kv_transfer_params["remote_block_ids"],
-            remote_engine_id=kv_transfer_params["remote_engine_id"],
+            remote_block_ids=kv_transfer_params.get("remote_block_ids", []),
+            remote_engine_id=kv_transfer_params.get("remote_engine_id", ""),
             remote_host=remote_host,
             remote_port=int(remote_handshake_port),
             remote_handshake_port=int(remote_handshake_port),
             remote_notify_port=int(remote_notify_port),
-            tp_size=kv_transfer_params.get("tp_size", 1),
+            # Callers may forward `remote_tp_size` without `tp_size`.
+            # Prefer `tp_size`, then fall back to `remote_tp_size`, then 1.
+            tp_size=kv_transfer_params.get(
+                "tp_size",
+                kv_transfer_params.get("remote_tp_size", 1),
+            ),
             remote_dp_size=kv_transfer_params.get("remote_dp_size", 1),
+            remote_dp_rank=int(kv_transfer_params.get("remote_dp_rank", 0) or 0),
+            remote_hosts=remote_hosts or None,
         )
         if write_mode:
             self.reqs_to_save[request_id] = _req
@@ -482,8 +673,74 @@ class MoRIIOConnectorMetadata(KVConnectorMetadata):
             self.reqs_to_recv[request_id] = _req
 
 
+_MORIIO_ZMQ_KEEPALIVE_OPTS = (
+    (zmq.TCP_KEEPALIVE, 1),
+    (zmq.TCP_KEEPALIVE_IDLE, 30),
+    (zmq.TCP_KEEPALIVE_INTVL, 10),
+    (zmq.TCP_KEEPALIVE_CNT, 3),
+)
+
+
+def _make_moriio_zmq_socket(
+    ctx: zmq.Context,
+    path: str,
+    socket_type: Any,
+    *,
+    identity: bytes | None = None,
+    linger: int | None = None,
+    router_handover: bool = False,
+) -> zmq.Socket:
+    mem = psutil.virtual_memory()
+    total_mem = mem.total / 1024**3
+    available_mem = mem.available / 1024**3
+    buf_size = int(0.5 * 1024**3) if total_mem > 32 and available_mem > 16 else -1
+
+    sock = ctx.socket(socket_type)
+
+    if socket_type in (zmq.PULL, zmq.DEALER, zmq.ROUTER):
+        sock.setsockopt(zmq.RCVHWM, 0)
+        sock.setsockopt(zmq.RCVBUF, buf_size)
+
+    if socket_type in (zmq.PUSH, zmq.DEALER, zmq.ROUTER):
+        sock.setsockopt(zmq.SNDHWM, 0)
+        sock.setsockopt(zmq.SNDBUF, buf_size)
+
+    if socket_type == zmq.ROUTER and router_handover:
+        sock.setsockopt(zmq.ROUTER_HANDOVER, 1)
+
+    if identity is not None:
+        sock.setsockopt(zmq.IDENTITY, identity)
+
+    if linger is not None:
+        sock.setsockopt(zmq.LINGER, linger)
+
+    # Mgmt-rail notify/handshake streams are sparse; a silently dead TCP peer
+    # can park reads until the retransmit ladder expires. Keepalive applies to
+    # accepted connections too and must be set before bind/connect.
+    for option, value in _MORIIO_ZMQ_KEEPALIVE_OPTS:
+        sock.setsockopt(option, value)
+
+    scheme, host, _ = split_zmq_path(path)
+    if scheme == "tcp" and is_valid_ipv6_address(host):
+        sock.setsockopt(zmq.IPV6, 1)
+
+    if socket_type == zmq.ROUTER:
+        sock.bind(path)
+    else:
+        sock.connect(path)
+
+    return sock
+
+
 @contextlib.contextmanager
-def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
+def zmq_ctx(
+    socket_type: Any,
+    addr: str,
+    *,
+    identity: bytes | None = None,
+    linger: int | None = None,
+    router_handover: bool = False,
+) -> Iterator[zmq.Socket]:
     """Context manager for a ZMQ socket"""
 
     if socket_type not in (zmq.ROUTER, zmq.REQ, zmq.DEALER):
@@ -492,9 +749,15 @@ def zmq_ctx(socket_type: Any, addr: str) -> Iterator[zmq.Socket]:
     ctx: zmq.Context | None = None
     try:
         ctx = zmq.Context()  # type: ignore[attr-defined]
-        yield make_zmq_socket(
-            ctx=ctx, path=addr, socket_type=socket_type, bind=socket_type == zmq.ROUTER
+        sock = _make_moriio_zmq_socket(
+            ctx,
+            addr,
+            socket_type,
+            identity=identity,
+            linger=linger,
+            router_handover=router_handover,
         )
+        yield sock
     finally:
         if ctx is not None:
             ctx.destroy(linger=0)
