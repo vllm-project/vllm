@@ -39,7 +39,7 @@ steps:
   - label: "XPU V1 test"
     depends_on:
       - image-build-xpu
-    timeout_in_minutes: 30
+    timeout_in_minutes: 60
     optional: true
     device: intel_gpu
     agent_tags:
