@@ -197,6 +197,16 @@ impl ChatLlm {
         )
         .await?;
 
+        // Multimodal prompts encode image / audio placeholders whose offsets
+        // in `mm_features` are recorded against the full encoded prompt; if
+        // we let the text layer truncate the token IDs underneath them, the
+        // engine would receive token IDs and multimodal offsets that point
+        // at different positions. Reject the combination until we can route
+        // truncation through the multimodal pipeline as well.
+        if mm_features.is_some() && request.truncate_prompt_tokens.is_some() {
+            return Err(Error::TruncateUnsupportedWithMultimodal);
+        }
+
         let text_request = TextRequest {
             request_id: request.request_id.clone(),
             prompt,
@@ -210,6 +220,8 @@ impl ChatLlm {
             data_parallel_rank: request.data_parallel_rank,
             reasoning_parser_kwargs,
             lora_request: request.lora_request,
+            truncate_prompt_tokens: request.truncate_prompt_tokens,
+            truncation_side: request.truncation_side,
         };
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 

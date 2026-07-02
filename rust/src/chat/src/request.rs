@@ -438,6 +438,17 @@ pub struct ChatRequest {
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
+    /// Truncate the rendered prompt to this many tokens before submission.
+    ///
+    /// `None` disables truncation; `Some(-1)` resolves to the input-token
+    /// budget `max_model_len - max_tokens`. Forwarded to the text layer.
+    #[serde(default)]
+    pub truncate_prompt_tokens: Option<i64>,
+    /// Which side to truncate from when `truncate_prompt_tokens` is active.
+    /// Defaults to left when unset, matching the generate-tokenizer default.
+    /// Forwarded to the text layer.
+    #[serde(default)]
+    pub truncation_side: Option<vllm_text::TruncationSide>,
 }
 
 impl ChatRequest {
@@ -459,6 +470,8 @@ impl ChatRequest {
             add_special_tokens: false,
             data_parallel_rank: None,
             lora_request: None,
+            truncate_prompt_tokens: None,
+            truncation_side: None,
         }
     }
 
