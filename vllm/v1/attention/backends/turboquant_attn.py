@@ -70,6 +70,61 @@ if _HAS_FLASH_ATTN:
 _CONTINUATION_DECODE_THRESHOLD = 128
 
 
+# Shared, fixed-size scratch for the TQ decode kernels, keyed by
+# (max_batch, num_heads, num_kv_splits, head_size, dtype, device). Allocated
+# once at the maximum CUDA graph batch size and reused by every TQ layer (layers
+# run sequentially) and every captured decode graph.
+#
+# This deliberately does NOT use the growable WorkspaceManager. TQ decode runs
+# inside the FULL cudagraph, so the scratch addresses are baked into the captured
+# graphs at capture time. The WorkspaceManager frees and reallocates its buffer
+# when it grows (it even calls empty_cache(), unmapping the old address) -- which
+# happens across the ascending B=1..max decode-graph capture sweep, and again
+# later if a long continuation-prefill needs more. That frees the address an
+# earlier-captured (smaller-batch) graph still points at, so replaying it (e.g.
+# the very first decode) dereferences freed memory -> CUDA illegal memory access.
+# A dedicated buffer sized up front for the largest batch never moves, so the
+# addresses baked into the graphs stay valid.
+_DECODE_SCRATCH: dict[tuple, tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = {}
+
+
+def _get_decode_scratch(
+    max_batch: int,
+    num_heads: int,
+    num_kv_splits: int,
+    head_size: int,
+    dtype: torch.dtype,
+    device: torch.device,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Fixed decode scratch (mid_o, output, lse) sized for the largest batch.
+
+    Shared across all TQ layers and all captured decode graphs so the addresses
+    baked into FULL cudagraphs never become stale. Callers slice ``[:B]``.
+    """
+    key = (max_batch, num_heads, num_kv_splits, head_size, dtype, device)
+    bufs = _DECODE_SCRATCH.get(key)
+    if bufs is None:
+        bufs = (
+            torch.empty(
+                max_batch,
+                num_heads,
+                num_kv_splits,
+                head_size + 1,
+                dtype=torch.float32,
+                device=device,
+            ),
+            torch.empty(max_batch, num_heads, head_size, dtype=dtype, device=device),
+            torch.empty(max_batch, num_heads, dtype=torch.float32, device=device),
+        )
+        _DECODE_SCRATCH[key] = bufs
+    return bufs
+
+
+def reset_tq_decode_scratch() -> None:
+    """Release the shared decode scratch (called on model-runner teardown)."""
+    _DECODE_SCRATCH.clear()
+
+
 def _build_hadamard(d: int, device_str: str) -> torch.Tensor:
     """Orthonormal Hadamard matrix (Sylvester construction), cached per (d, device).
 
@@ -332,6 +387,15 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         vllm_config = get_current_vllm_config()
         self.max_num_kv_splits = (
             vllm_config.attention_config.tq_max_kv_splits_for_cuda_graph
+        )
+
+        # Largest CUDA-graph-captured decode batch. The decode scratch is sized
+        # to this once and reused, so the addresses baked into FULL cudagraphs
+        # never move. Resolves to 0 when cudagraphs are disabled (enforce_eager),
+        # so `max_batch >= B` is never true and the eager path falls back to the
+        # WorkspaceManager.
+        self.max_decode_cudagraph_batch = (
+            vllm_config.compilation_config.max_cudagraph_capture_size
         )
 
     def _flash_attn_varlen(
@@ -904,16 +968,27 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
         PiT: torch.Tensor | None = None,
         layer: torch.nn.Module | None = None,
     ) -> torch.Tensor:
-        # Acquire shared decode scratch buffers from WorkspaceManager.
-        # Layers execute sequentially so one set of buffers is sufficient.
-        # Falls back to kernel-internal allocation if workspace unavailable.
+        # Acquire shared decode scratch buffers. Layers execute sequentially so
+        # one set of buffers is sufficient.
         B = query.shape[0]
         D = self.head_size
         S = self.max_num_kv_splits
         Hq = self.num_heads
         mid_o_buf = output_buf = lse_buf = None
-        if is_workspace_manager_initialized():
-            # output_buf in query dtype — matches the in-kernel fp16 cast in stage2.
+        max_batch = self.max_decode_cudagraph_batch
+        if max_batch is not None and max_batch >= B:
+            # CUDA graph path: a fixed buffer sized for the largest captured
+            # batch, whose address never moves, so it is safe to bake into the
+            # FULL decode graphs. The growable WorkspaceManager is NOT safe here
+            # (see _get_decode_scratch). output_buf in query dtype matches the
+            # in-kernel fp16 cast in stage2.
+            mid_o_buf, output_buf, lse_buf = _get_decode_scratch(
+                max_batch, Hq, S, D, query.dtype, query.device
+            )
+        elif is_workspace_manager_initialized():
+            # Eager path (no cudagraphs, or batch beyond the captured sizes):
+            # nothing bakes these addresses into a graph, so the growable
+            # workspace is safe and avoids a per-step allocation.
             mid_o_buf, output_buf, lse_buf = (
                 current_workspace_manager().get_simultaneous(
                     ((B, Hq, S, D + 1), torch.float32),
