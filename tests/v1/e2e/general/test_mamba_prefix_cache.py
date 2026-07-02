@@ -403,6 +403,7 @@ def _run_ref_mamba_state_worker():
         GPUModelRunner._sample = fake_sample_fn
         engine = LLM(
             model=MODEL,
+            load_format="dummy",
             block_size=BLOCK_SIZE,
             hf_overrides={"num_hidden_layers": NUM_HIDDEN_LAYERS},
             seed=42,
@@ -750,6 +751,7 @@ def test_mamba_prefix_cache_mrv1(monkeypatch: pytest.MonkeyPatch):
 
     engine = LLM(
         model=MODEL,
+        load_format="dummy",
         enable_prefix_caching=True,
         block_size=BLOCK_SIZE,
         mamba_cache_mode="align",
