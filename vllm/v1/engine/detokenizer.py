@@ -89,8 +89,24 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             self.stop_buffer_length = 0
         self._last_output_text_offset: int = 0
 
+        self._reasoning_start: str | None = None
+        self._reasoning_end: str | None = None
+        self._in_reasoning: bool = False
+        if request.reasoning_markers is not None:
+            self._reasoning_start, self._reasoning_end = request.reasoning_markers
+
         # Generation data
         self.output_text = ""
+
+    def _update_reasoning_state(self) -> None:
+        if self._reasoning_start is None:
+            return
+        if not self._in_reasoning:
+            if self._reasoning_start in self.output_text:
+                self._in_reasoning = True
+        if self._in_reasoning:
+            if self._reasoning_end in self.output_text:
+                self._in_reasoning = False
 
     def update(self, new_token_ids: list[int], stop_terminated: bool) -> str | None:
         """
@@ -125,19 +141,21 @@ class BaseIncrementalDetokenizer(IncrementalDetokenizer, ABC):
             # Cleanup after skipping detokenization.
             self.token_ids.append(skipped_stop_token_id)
 
-        # 2) Evaluate stop strings.
+        # 2) Evaluate stop strings (skip while inside reasoning block).
+        self._update_reasoning_state()
         stop_string = None
         if self.stop and self.num_output_tokens() > self.min_tokens:
-            stop = check_stop_strings(
-                output_text=self.output_text,
-                new_char_count=len(self.output_text) - stop_check_offset,
-                stop=self.stop,
-                include_in_output=self.include_stop_str_in_output,
-            )
-            if stop is not None:
-                stop_string, truncate_to = stop
-                if truncate_to != -1:
-                    self.output_text = self.output_text[:truncate_to]
+            if not self._in_reasoning:
+                stop = check_stop_strings(
+                    output_text=self.output_text,
+                    new_char_count=len(self.output_text) - stop_check_offset,
+                    stop=self.stop,
+                    include_in_output=self.include_stop_str_in_output,
+                )
+                if stop is not None:
+                    stop_string, truncate_to = stop
+                    if truncate_to != -1:
+                        self.output_text = self.output_text[:truncate_to]
 
         return stop_string
 
