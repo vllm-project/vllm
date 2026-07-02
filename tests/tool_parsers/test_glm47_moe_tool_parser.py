@@ -85,6 +85,34 @@ class TestGlm47ExtractToolCalls:
         assert r.tools_called
         assert json.loads(r.tool_calls[0].function.arguments) == {"city": "Beijing"}
 
+    def test_missing_arg_key_start_same_line(self, glm47_tool_parser, mock_request):
+        out = "<tool_call>get_weathercity</arg_key><arg_value>Beijing</arg_value></tool_call>"
+        r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
+        assert r.tools_called
+        assert r.tool_calls[0].function.name == "get_weather"
+        assert json.loads(r.tool_calls[0].function.arguments) == {"city": "Beijing"}
+
+    def test_missing_arg_key_start_with_space(self, glm47_tool_parser, mock_request):
+        out = "<tool_call>get_weather city</arg_key><arg_value>Beijing</arg_value></tool_call>"
+        r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
+        assert r.tools_called
+        assert r.tool_calls[0].function.name == "get_weather"
+        assert json.loads(r.tool_calls[0].function.arguments) == {"city": "Beijing"}
+
+    def test_missing_arg_key_start_with_following_args(
+        self, glm47_tool_parser, mock_request
+    ):
+        out = (
+            "<tool_call>get_weathercity</arg_key><arg_value>Beijing</arg_value>"
+            "<arg_key>date</arg_key><arg_value>today</arg_value></tool_call>"
+        )
+        r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
+        assert r.tools_called
+        assert json.loads(r.tool_calls[0].function.arguments) == {
+            "city": "Beijing",
+            "date": "today",
+        }
+
     def test_args_with_newlines(self, glm47_tool_parser, mock_request):
         out = "<tool_call>get_weather\n<arg_key>city</arg_key>\n<arg_value>Beijing</arg_value>\n</tool_call>"
         r = glm47_tool_parser.extract_tool_calls(out, request=mock_request)
@@ -200,3 +228,47 @@ class TestGlm47Streaming:
         ]
         args = json.loads("".join(arguments))
         assert args["city"] == "Beijing"
+
+    def test_streaming_missing_arg_key_start(self, glm47_tool_parser, mock_request):
+        _reset(glm47_tool_parser)
+        chunks = [
+            "<tool_call>",
+            "get_weather",
+            "city</arg_key>",
+            "<arg_value>",
+            "Beijing",
+            "</arg_value>",
+            "</tool_call>",
+        ]
+        current_text = ""
+        deltas = []
+        for chunk in chunks:
+            current_text += chunk
+            delta = glm47_tool_parser.extract_tool_calls_streaming(
+                previous_text="",
+                current_text=current_text,
+                delta_text=chunk,
+                previous_token_ids=[],
+                current_token_ids=[],
+                delta_token_ids=[],
+                request=mock_request,
+            )
+            if delta:
+                deltas.append(delta)
+
+        tool_calls = [
+            tool_call for delta in deltas for tool_call in (delta.tool_calls or [])
+        ]
+        names = [
+            tool_call.function.name
+            for tool_call in tool_calls
+            if tool_call.function and tool_call.function.name
+        ]
+        arguments = [
+            tool_call.function.arguments
+            for tool_call in tool_calls
+            if tool_call.function and tool_call.function.arguments
+        ]
+        assert names == ["get_weather"]
+        assert all("</arg_key>" not in name for name in names)
+        assert json.loads("".join(arguments)) == {"city": "Beijing"}
