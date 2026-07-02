@@ -12,6 +12,7 @@ from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonWarmupTensor,
     assert_compile_key_matches_triton,
 )
 from vllm.platforms import current_platform
@@ -302,7 +303,14 @@ class ComputePrefillMetadataKernel(
         )
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
-        max_prefills = max(1, min(vllm_config.scheduler_config.max_num_seqs, 8))
+        scheduler_config = vllm_config.scheduler_config
+        max_prefills = max(
+            1,
+            min(
+                scheduler_config.max_num_seqs,
+                scheduler_config.max_num_batched_tokens,
+            ),
+        )
         return self._trace_dispatch(self.dispatch)(
             num_prefills=WarmupIntRange(1, max_prefills + 1),
         )
@@ -310,10 +318,11 @@ class ComputePrefillMetadataKernel(
     def compile(self, compile_key: CompileKey) -> None:
         warmup = getattr(_compute_prefill_metadata_kernel, "warmup", None)
         assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
         warmup(
-            torch.int32,
-            torch.int32,
-            torch.int32,
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
             compile_key.BLOCK_SIZE,
             0,
             1,

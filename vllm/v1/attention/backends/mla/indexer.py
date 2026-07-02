@@ -13,6 +13,8 @@ from vllm.model_executor.warmup.jit_warmup import (
     WarmupIntRange,
 )
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonPointerInputVariant,
+    TritonWarmupTensor,
     assert_compile_key_matches_triton,
 )
 from vllm.platforms import current_platform
@@ -193,6 +195,12 @@ class DeepseekV32IndexerPrefillChunkMetadata:
     max_local_total_seq_lens: int = 0
 
 
+_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS = (
+    TritonPointerInputVariant.from_offsets(uncompressed_seq_lens=False),
+    TritonPointerInputVariant.from_offsets(uncompressed_seq_lens=True),
+)
+
+
 class BuildPrefillChunkMetadataKernel(
     VllmJitKernel[
         "BuildPrefillChunkMetadataKernel.CompileKey"
@@ -207,6 +215,7 @@ class BuildPrefillChunkMetadataKernel(
         DCP_INTERLEAVE: int
         BLOCK_SIZE: int
         COMPRESS_RATIO: int
+        input_variant: TritonPointerInputVariant
 
     def dispatch(  # type: ignore[override]
         self,
@@ -218,6 +227,7 @@ class BuildPrefillChunkMetadataKernel(
         DCP_INTERLEAVE: int,
         BLOCK_SIZE: int,
         COMPRESS_RATIO: int,
+        input_variant: TritonPointerInputVariant,
     ) -> CompileKey:
         return self.CompileKey(
             query_slice_start=query_slice_start,
@@ -227,6 +237,7 @@ class BuildPrefillChunkMetadataKernel(
             DCP_INTERLEAVE=DCP_INTERLEAVE,
             BLOCK_SIZE=BLOCK_SIZE,
             COMPRESS_RATIO=COMPRESS_RATIO,
+            input_variant=input_variant,
         )
 
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
@@ -238,25 +249,27 @@ class BuildPrefillChunkMetadataKernel(
         )
         return self._trace_dispatch(self.dispatch)(
             query_slice_start=WarmupIntRange(0, 2),
-            query_slice_stop=WarmupIntRange(2 * max_tokens - 1, 2 * max_tokens + 1),
+            query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
             DCP_RANK=0,
             DCP_WORLD=1,
             DCP_INTERLEAVE=1,
             BLOCK_SIZE=1024,
             COMPRESS_RATIO=list(compress_ratios),
+            input_variant=_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
         warmup = getattr(_build_prefill_chunk_metadata_kernel, "warmup", None)
         assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
         warmup(
-            torch.int32,
-            torch.int32,
-            torch.int32,
-            torch.int32,
-            torch.int32,
-            torch.int32,
-            torch.int32,
+            int32_ptr,
+            compile_key.input_variant.pointer("uncompressed_seq_lens", torch.int32),
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
+            int32_ptr,
             compile_key.query_slice_start,
             compile_key.query_slice_stop,
             compile_key.DCP_RANK,
@@ -1030,4 +1043,5 @@ def _build_prefill_chunk_metadata_kernel(
 assert_compile_key_matches_triton(
     _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
     _build_prefill_chunk_metadata_kernel,
+    extra_compile_key_fields=("input_variant",),
 )

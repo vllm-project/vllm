@@ -3,13 +3,59 @@
 import ast
 import inspect
 from collections.abc import Callable
-from dataclasses import fields, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from typing import Any
 
 from vllm.model_executor.warmup.jit_warmup import (
     get_ast_full_name,
     get_function_source_node,
 )
+
+
+@dataclass(frozen=True)
+class TritonWarmupTensor:
+    # Compile-only tensor descriptor for Triton pointer specialization.
+    dtype: Any
+    aligned: bool = True
+    shape: tuple[int, ...] = (1,)
+
+    def data_ptr(self) -> int:
+        return 0 if self.aligned else 1
+
+    def ptr_range(self) -> int:
+        return 0
+
+    def stride(self) -> tuple[int, ...]:
+        strides: list[int] = []
+        stride = 1
+        for size in reversed(self.shape):
+            strides.append(stride)
+            stride *= size
+        return tuple(reversed(strides))
+
+
+@dataclass(frozen=True)
+class TritonPointerInputVariant:
+    # Named pointer offset variant for compile-only Triton warmup.
+    offsets: tuple[tuple[str, bool], ...]
+
+    @classmethod
+    def from_offsets(cls, **offsets: bool) -> "TritonPointerInputVariant":
+        return cls(tuple(offsets.items()))
+
+    def is_aligned(self, name: str) -> bool:
+        for offset_name, offset in self.offsets:
+            if offset_name == name:
+                return not offset
+        raise KeyError(f"Unknown Triton pointer input variant: {name}")
+
+    def pointer(
+        self,
+        name: str,
+        dtype: Any,
+        shape: tuple[int, ...] = (1,),
+    ) -> TritonWarmupTensor:
+        return TritonWarmupTensor(dtype, aligned=self.is_aligned(name), shape=shape)
 
 
 def _literal_str_refs(node: ast.AST) -> tuple[str | int, ...]:
@@ -140,8 +186,10 @@ def trace_triton_kernel_specialization_args(
 def assert_compile_key_matches_triton(
     jit_kernel: Any,
     triton_kernel: Callable[..., Any],
+    *,
+    extra_compile_key_fields: tuple[str, ...] = (),
 ) -> None:
-    """Check that a wrapper CompileKey matches Triton specialization args."""
+    """Check that a wrapper CompileKey matches Triton specialization fields."""
     compile_key_type = jit_kernel.CompileKey
     if not is_dataclass(compile_key_type):
         raise TypeError(
@@ -150,8 +198,9 @@ def assert_compile_key_matches_triton(
 
     compile_key_args = tuple(field.name for field in fields(compile_key_type))
     triton_args = trace_triton_kernel_specialization_args(triton_kernel)
-    if compile_key_args != triton_args:
+    expected_args = triton_args + extra_compile_key_fields
+    if compile_key_args != expected_args:
         raise ValueError(
             f"{type(jit_kernel).__name__}.CompileKey fields {compile_key_args} "
-            f"do not match Triton specialization args {triton_args}"
+            f"do not match Triton specialization fields {expected_args}"
         )

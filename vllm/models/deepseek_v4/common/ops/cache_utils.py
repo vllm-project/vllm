@@ -24,6 +24,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.model_executor.warmup.jit_warmup import VllmJitKernel
 from vllm.model_executor.warmup.jit_warmup_triton_helper import (
+    TritonPointerInputVariant,
+    TritonWarmupTensor,
     assert_compile_key_matches_triton,
 )
 from vllm.platforms import current_platform
@@ -654,6 +656,31 @@ class _CombineTopkSwaWarmupCase:
     n: int
 
 
+# Representative pointer offset variants for Triton pointer specialization.
+# These correspond to the old (offset_topk, offset_query_and_seq, offset_gather)
+# cases: (False, False, False), (False, True, False), and (True, True, True).
+_COMBINE_TOPK_SWA_INPUT_VARIANTS = (
+    TritonPointerInputVariant.from_offsets(
+        topk_indices=False,
+        query_start_loc=False,
+        seq_lens=False,
+        gather_lens=False,
+    ),
+    TritonPointerInputVariant.from_offsets(
+        topk_indices=False,
+        query_start_loc=True,
+        seq_lens=True,
+        gather_lens=False,
+    ),
+    TritonPointerInputVariant.from_offsets(
+        topk_indices=True,
+        query_start_loc=True,
+        seq_lens=True,
+        gather_lens=True,
+    ),
+)
+
+
 _DSV4_COMBINE_TOPK_SWA_WARMUP_CASES = (
     _CombineTopkSwaWarmupCase(1, 0, 512, 512),
     _CombineTopkSwaWarmupCase(4, 512, 512, 512 * 4),
@@ -694,11 +721,13 @@ class CombineTopkSwaIndicesKernel(
         COMPRESS_RATIO: int
         WINDOW_SIZE: int
         PADDED_TOP_K: int
+        input_variant: TritonPointerInputVariant
 
     def dispatch(  # type: ignore[override]
         self,
         *,
         warmup_case: _CombineTopkSwaWarmupCase,
+        input_variant: TritonPointerInputVariant,
         m_selector: int,
         n_delta: int,
         num_tokens: int,
@@ -730,6 +759,7 @@ class CombineTopkSwaIndicesKernel(
             COMPRESS_RATIO=warmup_case.compress_ratio,
             WINDOW_SIZE=WINDOW_SIZE,
             PADDED_TOP_K=_next_power_of_2(warmup_case.topk_width),
+            input_variant=input_variant,
         )
 
     def get_warmup_keys(self, vllm_config: Any) -> list[CompileKey]:
@@ -743,24 +773,27 @@ class CombineTopkSwaIndicesKernel(
         window_size = _hf_config_int(vllm_config, "sliding_window", 128)
         return self._trace_dispatch(self.dispatch)(
             warmup_case=_DSV4_COMBINE_TOPK_SWA_WARMUP_CASES,
+            input_variant=_COMBINE_TOPK_SWA_INPUT_VARIANTS,
             m_selector=(0, 1),
             n_delta=(0, 1),
-            num_tokens=num_tokens,
+            num_tokens=(1, num_tokens),
             WINDOW_SIZE=window_size,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
         warmup = getattr(_combine_topk_swa_indices_kernel, "warmup", None)
         assert warmup is not None
+        int32_ptr = TritonWarmupTensor(torch.int32)
+        input_variant = compile_key.input_variant
         warmup(
-            torch.int32,
+            int32_ptr,
             compile_key.combined_indices_stride,
-            torch.int32,
-            torch.int32,
+            int32_ptr,
+            input_variant.pointer("topk_indices", torch.int32),
             compile_key.topk_indices_stride,
-            torch.int32,
-            torch.int32,
-            torch.int32,
+            input_variant.pointer("query_start_loc", torch.int32),
+            input_variant.pointer("seq_lens", torch.int32),
+            input_variant.pointer("gather_lens", torch.int32),
             compile_key.M,
             compile_key.N,
             TOP_K=compile_key.TOP_K,
@@ -775,6 +808,7 @@ CombineTopkSwaIndicesKernelCompileKey = CombineTopkSwaIndicesKernel.CompileKey
 assert_compile_key_matches_triton(
     _COMBINE_TOPK_SWA_INDICES_KERNEL,
     _combine_topk_swa_indices_kernel,
+    extra_compile_key_fields=("input_variant",),
 )
 
 
