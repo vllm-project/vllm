@@ -5,7 +5,6 @@
 import copy
 import json as json_mod
 import math
-from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
 from typing import Annotated, Any
@@ -67,9 +66,7 @@ class SamplingType(IntEnum):
     RANDOM_SEED = 2
 
 
-# maybe make msgspec?
-@dataclass
-class StructuredOutputsParams:
+class StructuredOutputsParams(msgspec.Struct, omit_defaults=True):  # type: ignore[call-arg]
     # One of these fields will be used to build a logit processor.
     json: str | dict | None = None
     regex: str | None = None
@@ -82,13 +79,22 @@ class StructuredOutputsParams:
     whitespace_pattern: str | None = None
     structural_tag: str | None = None
 
-    _backend: str | None = field(default=None, init=False)
+    _backend: str | None = None
     """CAUTION: Should only be set by Processor._validate_structured_output"""
-    _backend_was_auto: bool = field(default=False, init=False)
+    _backend_was_auto: bool = False
     """CAUTION: Should only be set by Processor._validate_structured_output"""
 
     def __post_init__(self):
-        """Validate that some fields are mutually exclusive."""
+        if self._backend is not None or self._backend_was_auto:
+            raise TypeError(
+                "__init__() got unexpected internal fields: "
+                "'_backend' and '_backend_was_auto' must not be set at "
+                "construction time."
+            )
+        self._validate_constraints()
+
+    def _validate_constraints(self):
+        """Validate that constraint fields are mutually exclusive."""
         count = sum(
             [
                 self.json is not None,
@@ -110,6 +116,23 @@ class StructuredOutputsParams:
                 f"but none are specified: {self.__dict__}"
             )
 
+    def __repr__(self) -> str:
+        if self.json is not None:
+            constraint = f"json=<{len(str(self.json))} chars>"
+        elif self.regex is not None:
+            constraint = f"regex={self.regex!r}"
+        elif self.choice is not None:
+            constraint = f"choice={self.choice!r}"
+        elif self.grammar is not None:
+            constraint = f"grammar=<{len(self.grammar)} chars>"
+        elif self.json_object is not None:
+            constraint = "json_object=True"
+        elif self.structural_tag is not None:
+            constraint = f"structural_tag={self.structural_tag!r}"
+        else:
+            constraint = "<none>"
+        return f"StructuredOutputsParams({constraint}, backend={self._backend!r})"
+
     def all_constraints_none(self) -> bool:
         """
         Returns True if all structured-output constraint fields are None.
@@ -128,7 +151,8 @@ class StructuredOutputsParams:
 
     def all_non_structural_tag_constraints_none(self) -> bool:
         """
-        Returns True if all structured-output constraint fields are None.
+        Returns True if all structured-output constraint fields except
+        ``structural_tag`` are None.
         """
         return all(
             getattr(self, field) is None
@@ -345,7 +369,7 @@ class SamplingParams(
     """Maximum number of tokens allowed for thinking operations."""
 
     repetition_detection: RepetitionDetectionParams | None = None
-    """Parameters for detecting repetitive N-gram patterns in output tokens.
+    r"""Parameters for detecting repetitive N-gram patterns in output tokens.
     If such repetition is detected, generation will be ended early. LLMs can
     sometimes generate repetitive, unhelpful token patterns, stopping only
     when they hit the maximum output length (e.g. 'abcdabcdabcd...' or
@@ -557,14 +581,14 @@ class SamplingParams(
                 parameter="top_p",
                 value=self.top_p,
             )
+        if not isinstance(self.top_k, int):
+            raise TypeError(
+                f"top_k must be an integer, got {type(self.top_k).__name__}"
+            )
         # quietly accept -1 as disabled, but prefer 0
         if self.top_k < -1:
             raise ValueError(
                 f"top_k must be 0 (disable), or at least 1, got {self.top_k}."
-            )
-        if not isinstance(self.top_k, int):
-            raise TypeError(
-                f"top_k must be an integer, got {type(self.top_k).__name__}"
             )
         if not 0.0 <= self.min_p <= 1.0:
             raise ValueError(f"min_p must be in [0, 1], got {self.min_p}.")
@@ -1035,9 +1059,9 @@ class SamplingParams(
             # Remember that this backend was set automatically
             self.structured_outputs._backend_was_auto = True
 
-        # Run post-init validation. This is also important to ensure subsequent
+        # Run constraint validation. This is also important to ensure subsequent
         # roundtrip serialization/deserialization won't fail.
-        self.structured_outputs.__post_init__()
+        self.structured_outputs._validate_constraints()
 
     def __repr__(self) -> str:
         return (
@@ -1060,10 +1084,15 @@ class SamplingParams(
             f"min_tokens={self.min_tokens}, "
             f"logprobs={self.logprobs}, "
             f"prompt_logprobs={self.prompt_logprobs}, "
+            f"logprob_token_ids={self.logprob_token_ids}, "
+            f"flat_logprobs={self.flat_logprobs}, "
+            f"detokenize={self.detokenize}, "
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
+            f"allowed_token_ids={self.allowed_token_ids}, "
             f"structured_outputs={self.structured_outputs}, "
+            f"repetition_detection={self.repetition_detection}, "
             f"extra_args={self.extra_args})"
         )
 
