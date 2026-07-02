@@ -27,6 +27,8 @@ class StructuredOutputRequest:
     # Cached per request; do not share reasoning parsers across requests because
     # their behavior can depend on reasoning_parser_kwargs.
     reasoner: "ReasoningParser | None" = None
+    # Compile error message, set by _create_grammar.
+    grammar_error: str | None = None
 
     @staticmethod
     def from_sampling_params(
@@ -59,6 +61,8 @@ class StructuredOutputRequest:
     @property
     def grammar(self) -> StructuredOutputGrammar | None:
         completed = self._check_grammar_completion()
+        if self.grammar_error is not None:
+            return None
         return (
             cast(StructuredOutputGrammar | None, self._grammar) if completed else None
         )
