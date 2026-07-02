@@ -545,22 +545,28 @@ class MoRIIOConnectorScheduler:
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
 
         if params is not None and params.get("do_remote_prefill"):
+            # Gate loading on `num_external_tokens`, not on `blocks`: a
+            # non-chosen MultiConnector sub-connector receives the request's
+            # real blocks but must not load. `num_external_tokens == 0` (also a
+            # full prefix cache hit) still issues an empty notify so P frees the
+            # prefill blocks, without reading/writing any KV.
             if self.mode == MoRIIOMode.READ:
                 if remote_block_ids := params.get("remote_block_ids"):
                     # remote_engine_id is returned by the prefill's request_finished.
                     # host/ports come from the request_id (parsed in add_new_req).
                     if "remote_engine_id" in params:
-                        # If remote_blocks and num_external_tokens = 0, we have
-                        # a full prefix cache hit on the D worker. We need to call
-                        # send_notify in _read_blocks to free the memory on the P.
-
-                        # Get unhashed blocks to pull from remote.
-                        local_block_ids = blocks.get_block_ids()[0]
-                        assert len(local_block_ids) <= len(remote_block_ids)
-                        if len(local_block_ids) == len(remote_block_ids):
-                            pass
+                        if num_external_tokens > 0:
+                            # Get unhashed blocks to pull from remote.
+                            local_block_ids = blocks.get_block_ids()[0]
+                            assert len(local_block_ids) <= len(remote_block_ids)
+                            if len(local_block_ids) != len(remote_block_ids):
+                                local_block_ids = remote_block_ids[
+                                    -len(local_block_ids) :
+                                ]
                         else:
-                            local_block_ids = remote_block_ids[-len(local_block_ids) :]
+                            # No KV to load: empty recv still notifies P to
+                            # free the prefill blocks.
+                            local_block_ids = []
 
                         self._reqs_need_recv[request.request_id] = (
                             request,
@@ -593,7 +599,11 @@ class MoRIIOConnectorScheduler:
                     )
                 remote_notify_port = int(remote_notify_port)
 
-                block_ids = blocks.get_block_ids()[0]
+                # num_external_tokens == 0: nothing to push, so don't tell the
+                # producer to write into these blocks.
+                block_notify_list = (
+                    blocks.get_block_ids()[0] if num_external_tokens > 0 else []
+                )
 
                 for tp_index in range(self.tp_size):
                     target_port = remote_notify_port + get_port_offset(
@@ -603,7 +613,7 @@ class MoRIIOConnectorScheduler:
                     self.send_notify_block(
                         req_id=request.request_id,
                         transfer_id=request.kv_transfer_params["transfer_id"],
-                        block_notify_list=block_ids,
+                        block_notify_list=block_notify_list,
                         host=remote_host,
                         port=target_port,
                     )
