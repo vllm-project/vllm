@@ -269,7 +269,7 @@ frozenlist==1.5.0
     # via
     #   aiohttp
     #   aiosignal
-fsspec==2024.12.0
+fsspec==2026.4.0
     # via
     #   datasets
     #   evaluate
