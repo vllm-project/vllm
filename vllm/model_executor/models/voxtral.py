@@ -120,7 +120,15 @@ class VoxtralProcessingInfo(BaseProcessingInfo):
         return {"audio": self.get_max_audio_tokens()}
 
     def get_max_audio_tokens(self) -> int:
-        return self.ctx.model_config.max_model_len
+        # Cap audio tokens by the decoder sliding window when set: the encoder
+        # cache and profiling dummy are otherwise sized at max_model_len and OOM
+        # at boot on small GPUs. Standard Voxtral has sliding_window=None. #38233
+        max_model_len = self.ctx.model_config.max_model_len
+        text_config = getattr(self.ctx.model_config.hf_config, "text_config", None)
+        sliding_window = getattr(text_config, "sliding_window", None)
+        if sliding_window is not None:
+            return min(sliding_window, max_model_len)
+        return max_model_len
 
     def get_max_audio_array_len(self) -> int:
         feature_extractor = self.get_feature_extractor()
