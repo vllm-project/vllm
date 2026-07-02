@@ -105,6 +105,8 @@ def query_nccl_gin_type(
             logger.warning("PyTorch NCCL backend does not expose _comm_ptr")
             return None
         comm_ptr = backend._comm_ptr()
+        if comm_ptr == 0:
+            return None
     except Exception:
         logger.warning(
             "Failed to extract NCCL comm pointer from process group",
