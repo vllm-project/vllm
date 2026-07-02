@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-"""Unit tests for ResponsesRequest.to_sampling_params() parameter mapping."""
+"""Unit tests for ResponsesRequest.to_sampling_params() and
+ResponsesRequest.build_tok_params() parameter mapping."""
+
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -154,3 +157,52 @@ class TestResponsesRequestSamplingParams:
         assert "Cannot specify both structured_outputs and text.format" in str(
             exc_info.value
         )
+
+
+class TestResponsesRequestTokParams:
+    """Test that ResponsesRequest correctly builds TokenizeParams."""
+
+    def test_add_special_tokens_false(self):
+        """add_special_tokens must be False to avoid double BOS on models
+        whose chat template already includes a BOS token."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+        )
+        model_config = SimpleNamespace(max_model_len=4096)
+        tok_params = request.build_tok_params(model_config)
+        assert tok_params.add_special_tokens is False
+
+    def test_truncation_disabled(self):
+        """truncate_prompt_tokens should be None when truncation is disabled."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            truncation="disabled",
+        )
+        model_config = SimpleNamespace(max_model_len=4096)
+        tok_params = request.build_tok_params(model_config)
+        assert tok_params.truncate_prompt_tokens is None
+
+    def test_truncation_auto(self):
+        """truncate_prompt_tokens should be -1 when truncation is auto."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            truncation="auto",
+        )
+        model_config = SimpleNamespace(max_model_len=4096)
+        tok_params = request.build_tok_params(model_config)
+        assert tok_params.truncate_prompt_tokens == -1
+
+    def test_max_output_tokens(self):
+        """max_output_tokens is correctly passed through."""
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            max_output_tokens=512,
+        )
+        model_config = SimpleNamespace(max_model_len=4096)
+        tok_params = request.build_tok_params(model_config)
+        assert tok_params.max_total_tokens == 4096
+        assert tok_params.max_output_tokens == 512
