@@ -974,7 +974,11 @@ class GPUModelRunner(
 
         attn_layers = self.compilation_config.static_forward_context
         for name, module in attn_layers.items():
-            if isinstance(module, (Attention, MLAAttention)):
+            if isinstance(module, (Attention, MLAAttention)) or (
+                hasattr(module, "_k_scale")
+                and hasattr(module, "_v_scale")
+                and hasattr(module, "kv_cache_dtype")
+            ):
                 # TODO: Generally, scale is 1.0 if user uses on-the-fly fp8
                 # kvcache quant. However, to get better accuracy, compression
                 # frameworks like llm-compressors allow users to tune the
