@@ -23,9 +23,16 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingConnectorMetadata,
+)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
+    FullAttnBlockMap,
+    RoutedExpertsBlockLifecycleObserver,
     RoutedExpertsManager,
+    compute_full_attn_block_map,
+    require_full_attention_gid,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -53,6 +60,8 @@ from vllm.v1.core.sched.request_queue import (
 from vllm.v1.core.sched.utils import check_stop, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_offload.base import GPULoadStoreSpec
+from vllm.v1.kv_offload.cpu.common import CPULoadStoreSpec
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
@@ -315,15 +324,40 @@ class Scheduler(SchedulerInterface):
         )
 
         if self.enable_return_routed_experts:
+            # Context parallelism is unsupported: under DCP/PCP the attention
+            # slot space is interleaved across CP ranks, so the physical slot
+            # ``block*block_size + compacted_offset`` aliases distinct virtual
+            # tokens (owned by different ranks) onto the same slot. The
+            # rank-local routing slot buffer therefore cannot hold per-token
+            # routing; supporting CP needs a global-token-index addressing
+            # redesign (tracked separately).
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
-                "enable_return_routed_experts does not support context parallelism "
-                "(dcp_world_size > 1 or pcp_world_size > 1)"
+                "enable_return_routed_experts does not support context "
+                "parallelism (dcp_world_size > 1 or pcp_world_size > 1)"
             )
+
+            # With KV offload, the manager additionally stores/loads
+            # routed experts per transfer job, following the KV block
+            # lifecycle (any block_size_factor; disk-tiering supported).
+            num_offload_blocks = None
+            block_size_factor = 1
+            if self.connector is not None:
+                num_offload_blocks, block_size_factor = (
+                    self._validate_routed_experts_offload(kv_cache_config)
+                )
 
             self.routed_experts_mgr = RoutedExpertsManager(
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,
+                num_offload_blocks=num_offload_blocks,
+                block_size_factor=block_size_factor,
             )
+            # For disk / multi-tier offload, register the observer that makes
+            # routing follow the KV blocks' CPU<->secondary cascade/promotion.
+            if num_offload_blocks is not None:
+                self._maybe_register_routed_experts_secondary_store(vllm_config)
+            # Expected group count in every transfer spec's group_sizes.
+            self._re_num_kv_groups = len(kv_cache_config.kv_cache_groups)
             # Block-ID snapshot taken at schedule time (before forward),
             # so update_from_output can read slot data even if a later
             # schedule() frees the blocks (async scheduling race).
@@ -334,6 +368,225 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
+
+    def _validate_routed_experts_offload(
+        self, kv_cache_config: KVCacheConfig
+    ) -> tuple[int | None, int]:
+        """Validate the KV connector for offloaded routed experts.
+
+        Two supported connectors:
+
+        - **CPU ``OffloadingConnector``** (``CPUOffloadingSpec`` and its
+          multi-tier subclass ``TieringOffloadingSpec``), any
+          ``block_size_factor`` (>= 1): routing follows the KV blocks through a
+          scheduler-side offload buffer, so this returns the offloaded-block
+          count to size it.
+        - **``MooncakeStoreConnector``** (direct GPU<->Mooncake): routing rides
+          the same RDMA pool as the KV blocks, PUT/GET by the worker alongside
+          KV (see ``RoutedExpertsMooncakeBridge``). There is NO scheduler-side
+          offload buffer, so this returns ``(None, 1)`` — the slot buffer alone
+          backs ``get()``, and the worker fills it from Mooncake on a hit.
+
+        Returns:
+            ``(num_offload_blocks, block_size_factor)``. ``num_offload_blocks``
+            is ``None`` for the Mooncake path (no scheduler offload buffer).
+
+        Raises:
+            ValueError: On any unsupported connector / spec combination.
+        """
+        from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.connector import (  # noqa: E501
+            MooncakeStoreConnector,
+        )
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (  # noqa: E501
+            OffloadingConnector,
+        )
+        from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+        # Mooncake direct GPU<->Mooncake path: routing rides the RDMA pool with
+        # the KV blocks (worker-side bridge), so the scheduler keeps only the
+        # slot buffer (no offload buffer). Requires a full-attention group, same
+        # as every routed-experts path.
+        if isinstance(self.connector, MooncakeStoreConnector):
+            require_full_attention_gid(kv_cache_config)
+            return None, 1
+
+        if not isinstance(self.connector, OffloadingConnector):
+            raise ValueError(
+                "--enable-return-routed-experts only supports the CPU "
+                "OffloadingConnector or MooncakeStoreConnector; got "
+                f"{type(self.connector).__name__}"
+            )
+        cs = self.connector.connector_scheduler
+        assert cs is not None
+        # TieringOffloadingSpec subclasses CPUOffloadingSpec, so both the
+        # single-tier CPU offload and the disk/object multi-tier offload
+        # are accepted here.
+        if not isinstance(cs.spec, CPUOffloadingSpec):
+            raise ValueError(
+                "--enable-return-routed-experts only supports "
+                "CPUOffloadingSpec (or its TieringOffloadingSpec subclass); "
+                f"got {type(cs.spec).__name__}"
+            )
+        require_full_attention_gid(kv_cache_config)
+        if cs.spec.num_blocks <= 0:
+            raise ValueError(
+                "--enable-return-routed-experts with KV offload requires "
+                "a non-empty CPU offload block pool; increase "
+                "kv_offloading_size / cpu_bytes_to_use."
+            )
+        return cs.spec.num_blocks, cs.config.block_size_factor
+
+    def _maybe_register_routed_experts_secondary_store(
+        self, vllm_config: VllmConfig
+    ) -> None:
+        """Attach a routing-sidecar observer when the offload manager tiers.
+
+        For a ``TieringOffloadingManager``, build a store for the first
+        secondary tier whose ``type`` has a ``RoutedExpertsStoreFactory``
+        builder and install a ``RoutedExpertsBlockLifecycleObserver``, so
+        routing cascades / promotes in lockstep with the KV blocks. A tier
+        type with no registered builder is skipped with a warning (KV still
+        tiers). Single-tier CPU offload installs nothing (no callbacks fire).
+        """
+        from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
+            RoutedExpertsStoreContext,
+            RoutedExpertsStoreFactory,
+        )
+        from vllm.v1.kv_offload.tiering.manager import TieringOffloadingManager
+
+        assert self.connector is not None
+        cs = self.connector.connector_scheduler
+        assert cs is not None
+        manager = cs.manager
+        if not isinstance(manager, TieringOffloadingManager):
+            return
+
+        spec = cs.spec
+        mgr = self.routed_experts_mgr
+        row_shape = (
+            mgr.block_size_factor,
+            mgr.block_size,
+            mgr.num_layers,
+            mgr.num_experts_per_tok,
+        )
+        tier_configs = [
+            t
+            for t in (spec.extra_config.get("secondary_tiers") or [])
+            if isinstance(t, dict)
+        ]
+
+        store = None
+        for tier_config in tier_configs:
+            tier_type = tier_config.get("type")
+            if not tier_type or not RoutedExpertsStoreFactory.is_registered(tier_type):
+                continue
+            ctx = RoutedExpertsStoreContext(
+                tier_config=tier_config,
+                offloading_spec=spec,
+                row_shape=row_shape,
+                dtype=mgr.expert_id_dtype,
+            )
+            store = RoutedExpertsStoreFactory.create(tier_type, ctx)
+            if store is not None:
+                logger.info(
+                    "Registered routed-experts sidecar via '%s' tier (row_shape=%s)",
+                    tier_type,
+                    row_shape,
+                )
+                break
+
+        if store is None:
+            logger.warning(
+                "KV offload tiers to secondary storage but no routed-experts "
+                "store backend is registered for any configured tier type "
+                "(%s); routing will NOT survive CPU eviction. Register a "
+                "RoutedExpertsStoreFactory builder for your tier type.",
+                [t.get("type") for t in tier_configs],
+            )
+            return
+
+        observer = RoutedExpertsBlockLifecycleObserver(mgr, store)
+        manager.set_block_lifecycle_observer(observer)
+
+    def _full_attn_block_map(
+        self, gpu_spec: object, cpu_spec: object
+    ) -> FullAttnBlockMap:
+        """Map a transfer job's full-attention group to offloaded sub-blocks.
+
+        Sole adapter between the scheduler and KV offload transfer specs:
+        validates the spec types, then delegates to
+        ``compute_full_attn_block_map`` (which checks the layout contract and
+        resolves the sub-block arithmetic for any ``block_size_factor``).
+        """
+        if not isinstance(gpu_spec, GPULoadStoreSpec):
+            raise RuntimeError(
+                f"expected GPULoadStoreSpec, got {type(gpu_spec).__name__}"
+            )
+        if not isinstance(cpu_spec, CPULoadStoreSpec):
+            raise RuntimeError(
+                f"expected CPULoadStoreSpec, got {type(cpu_spec).__name__}"
+            )
+        return compute_full_attn_block_map(
+            gpu_block_ids=gpu_spec.block_ids,
+            cpu_block_ids=cpu_spec.block_ids,
+            group_sizes=gpu_spec.group_sizes,
+            block_indices=gpu_spec.block_indices,
+            attn_gid=self.routed_experts_mgr.attn_gid,
+            block_size_factor=self.routed_experts_mgr.block_size_factor,
+            expected_num_groups=self._re_num_kv_groups,
+        )
+
+    def _apply_routed_experts_offload_transfers(
+        self, scheduler_output: SchedulerOutput
+    ) -> None:
+        """Store/load offloaded routed experts along this step's KV jobs.
+
+        Must run after the worker has scattered this step's routing into the
+        shared slot buffer (store jobs built at schedule time cover tokens
+        whose routing was just written) and before the per-request
+        ``routed_experts_mgr.get()`` reads. Called even when the step captured
+        no routing data: pure-load steps schedule no tokens. CPU block rows are
+        written as soon as prepare_store assigned the block ids — loadability is
+        still gated by the KV manager's complete_store, and no load job exists
+        for an incomplete store, so early writes are never read.
+        """
+        meta = scheduler_output.kv_connector_metadata
+        if meta is None:
+            return
+        # Mooncake direct GPU<->Mooncake path keeps no scheduler-side offload
+        # buffer (routing rides the RDMA pool with the KV blocks, filled by the
+        # worker bridge), so there are no offload transfer jobs to replay here.
+        if self.routed_experts_mgr.routed_experts_by_cpu_block is None:
+            return
+        # Init-time validation guarantees the CPU OffloadingConnector.
+        if not isinstance(meta, OffloadingConnectorMetadata):
+            raise RuntimeError(
+                f"expected OffloadingConnectorMetadata, got {type(meta).__name__}"
+            )
+        # Batch all jobs into a single fancy-index per direction: under heavy
+        # offload the per-job numpy call overhead dominates the scheduler-thread
+        # cost, while the moved data volume is unchanged. Empty maps are dropped
+        # so concatenate() never sees a zero-length job.
+        load_maps = []
+        for job in meta.load_jobs.values():
+            src, dst = job.transfer_spec  # CPU -> GPU
+            block_map = self._full_attn_block_map(dst, src)
+            if len(block_map.gpu_block_ids):
+                load_maps.append(block_map)
+        if load_maps:
+            self.routed_experts_mgr.load_from_offload_blocks(
+                FullAttnBlockMap.concatenate(load_maps)
+            )
+        store_maps = []
+        for job in meta.store_jobs.values():
+            src, dst = job.transfer_spec  # GPU -> CPU
+            block_map = self._full_attn_block_map(src, dst)
+            if len(block_map.gpu_block_ids):
+                store_maps.append(block_map)
+        if store_maps:
+            self.routed_experts_mgr.store_to_offload_blocks(
+                FullAttnBlockMap.concatenate(store_maps)
+            )
 
     def _mamba_block_aligned_split(
         self,
@@ -1535,26 +1788,26 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
             )
 
-        # Persist per-step routed experts into the scheduler-side slot
-        # buffer (CPU->CPU fancy-index assign; ~few MB per step).
-        # MUST precede the per-request routing reads below: stopped
-        # requests may terminate on tokens generated in this very step,
-        # whose routing was just D2H'd into model_runner_output.
-        routing_data = None
+        # Per-step routing slot indices returned by the worker (output_rank).
+        # The worker scattered this step's routing into the shared slot buffer
+        # and returns only the slot index of each scheduled token (NOT the
+        # routing payload). These slots ride this step's ModelRunnerOutput, so
+        # they are correctly paired with the step under async scheduling (a
+        # scheduler-side snapshot keyed by req_id would be clobbered by the next
+        # pipelined schedule). Decode reads its tokens' routing from the shared
+        # buffer using these slots; the per-request offset map is in the model
+        # runner's request order (input_batch ordering), not scheduler dict order.
+        routing_slots = None
         routing_offsets: dict[str, int] = {}
-        if model_runner_output.routed_experts is not None:
-            re = model_runner_output.routed_experts
-            self.routed_experts_mgr.store_batch(re.routing_data, re.slot_mapping)
-            routing_data = re.routing_data.astype(
-                self.routed_experts_mgr.routed_experts_by_slot.dtype,
-                copy=False,
-            )
-            # Build offset map using model runner's request order
-            # (input_batch ordering), NOT scheduler dict order.
+        if model_runner_output.routed_experts_slots is not None:
+            routing_slots = model_runner_output.routed_experts_slots
             offset = 0
             for rid in model_runner_output.req_ids:
                 routing_offsets[rid] = offset
                 offset += num_scheduled_tokens[rid]
+
+        if self.enable_return_routed_experts and self.connector is not None:
+            self._apply_routed_experts_offload_transfers(scheduler_output)
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -1653,16 +1906,17 @@ class Scheduler(SchedulerInterface):
             routed_experts = None
             if (
                 self.enable_return_routed_experts
-                and routing_data is not None
+                and routing_slots is not None
                 and new_token_ids
             ):
                 req_offset = routing_offsets[req_id]
-                end = req_offset + num_tokens_scheduled
-                block_ids = self._re_block_ids.pop(req_id, [])
+                end = req_offset + num_scheduled_tokens[req_id]
                 if num_output_tokens_before == 0:
-                    # Prefill completed: read full prompt routing from
-                    # slot buffer using the block-ID snapshot taken at
-                    # schedule time (immune to async preemption).
+                    # Prefill completed: read full prompt routing from the shared
+                    # slot buffer using the block-ID snapshot taken at schedule
+                    # time (a sequence-prefix, so it survives async preemption /
+                    # later schedules).
+                    block_ids = self._re_block_ids.get(req_id, [])
                     if (
                         request.sampling_params is not None
                         and request.sampling_params.routed_experts_prompt_start
@@ -1671,7 +1925,12 @@ class Scheduler(SchedulerInterface):
                         prompt_start = (
                             request.sampling_params.routed_experts_prompt_start
                         )
-                        assert prompt_start < request.num_prompt_tokens
+                        if prompt_start >= request.num_prompt_tokens:
+                            raise ValueError(
+                                "routed_experts_prompt_start "
+                                f"({prompt_start}) must be < num_prompt_tokens "
+                                f"({request.num_prompt_tokens})"
+                            )
                     else:
                         prompt_start = 0
                     routed_experts = self.routed_experts_mgr.get(
@@ -1680,15 +1939,17 @@ class Scheduler(SchedulerInterface):
                         token_start=prompt_start,
                     )
                 else:
+                    # Decode: read this step's generated tokens' routing from the
+                    # shared slot buffer using the slots the worker returned for
+                    # this step (step-paired, so async-correct). Normal decode
+                    # returns the LAST ``len(new_token_ids)`` scheduled slots; spec
+                    # decode's accepted tokens are at the START of the range.
+                    n = len(new_token_ids)
                     if scheduled_spec_token_ids:
-                        # Spec decode: accepted tokens at the START of
-                        # the scheduled range, rejected at the end.
-                        routed_experts = routing_data[
-                            req_offset : req_offset + len(new_token_ids)
-                        ]
+                        slots = routing_slots[req_offset : req_offset + n]
                     else:
-                        # Normal decode / re-prefill: token(s) at the END.
-                        routed_experts = routing_data[end - len(new_token_ids) : end]
+                        slots = routing_slots[end - n : end]
+                    routed_experts = self.routed_experts_mgr.get_by_slots(slots)
 
             finish_reason = None
             if stopped:
@@ -2091,6 +2352,10 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)
+        if self.enable_return_routed_experts:
+            # Drop the routed-experts block-ID snapshot for this request
+            # (read non-destructively during the request's lifetime).
+            self._re_block_ids.pop(request.request_id, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
         self.encoder_cache_manager.free(request)
         request_id = request.request_id
@@ -2328,6 +2593,10 @@ class Scheduler(SchedulerInterface):
 
         if self.ec_connector is not None:
             self.ec_connector.shutdown()
+
+        # Release the shared routing slot mmap (creator unlinks /dev/shm file).
+        if getattr(self, "routed_experts_mgr", None) is not None:
+            self.routed_experts_mgr.shutdown()
 
         logger.debug_once("[shutdown] Scheduler: complete")
 

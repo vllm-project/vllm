@@ -117,7 +117,7 @@ class RoutedExpertsTensors(NamedTuple):
     step. The copy stream waits on the default stream, then issues
     non-blocking D2H via :meth:`to_cpu_nonblocking` into a pinned CPU
     buffer; :class:`AsyncGPUModelRunnerOutput.get_output` synchronizes
-    the copy before the scheduler reads it.
+    the copy before the worker scatters it into the shared slot buffer.
 
     Sliced to ``total_num_scheduled_tokens`` (step-level, across all
     requests — NOT per-request). Both ``routing_data`` and
@@ -149,7 +149,7 @@ class RoutedExpertsTensors(NamedTuple):
         )
 
     def tolists(self) -> "RoutedExpertsLists":
-        """Convert to the numpy-backed form consumed by the scheduler.
+        """Convert to the numpy-backed form the worker scatters into shm.
 
         ``.cpu()`` is a no-op when the tensor is already on CPU, so this
         is cheap for the post-D2H case; for raw device tensors it will
@@ -162,13 +162,13 @@ class RoutedExpertsTensors(NamedTuple):
 
 
 class RoutedExpertsLists(NamedTuple):
-    """CPU-side routed experts, the form :meth:`RoutedExpertsManager.store_batch`
-    consumes.
+    """CPU-side routed experts the worker (output_rank) scatters into the
+    shared /dev/shm slot buffer.
 
     Batched per scheduler step: the leading dim is the number of tokens
     scheduled across all requests in this step (``total_num_scheduled_tokens``),
-    not per-request tokens. ``slot_mapping[i]`` tells the scheduler which
-    physical KV-cache slot row ``i`` of ``routing_data`` belongs to.
+    not per-request tokens. ``slot_mapping[i]`` is the physical KV-cache slot
+    that row ``i`` of ``routing_data`` is scattered into.
     """
 
     # (num_scheduled_tokens, num_layers, num_experts_per_tok)
@@ -269,16 +269,14 @@ class ModelRunnerOutput:
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
 
-    # Per-step routed experts data captured by the worker.
-    # ``routing_data`` shape: (num_scheduled_tokens, num_layers,
-    #                         num_experts_per_tok); expert IDs as uint8/uint16.
-    # ``slot_mapping`` shape: (num_scheduled_tokens,); physical KV-cache
-    #                         slot for each row of routing_data.
-    # ``num_scheduled_tokens`` is step-level (total across all requests
-    # in this step), not per-request. The scheduler persists this into
-    # its slot buffer via ``slot_buffer[slot_mapping] = routing_data``.
-    # ``None`` when ``enable_return_routed_experts`` is off.
-    routed_experts: RoutedExpertsLists | None = None
+    # Per-step routing slot indices captured by the worker (output_rank).
+    # ``(num_scheduled_tokens,)`` int: the physical KV-cache slot each scheduled
+    # token's routing was scattered into the scheduler-shared slot buffer. The
+    # scheduler reads the routing back from that buffer by these slots for
+    # decode tokens. Only the slots are returned (not the routing payload),
+    # and they ride this step's output so they stay paired with the step under
+    # async scheduling. ``None`` when ``enable_return_routed_experts`` is off.
+    routed_experts_slots: np.ndarray | None = None
 
     @staticmethod
     def with_kv_conn_output_only(

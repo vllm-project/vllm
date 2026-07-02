@@ -821,6 +821,50 @@ class VllmConfig:
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
 
+    def _verify_return_routed_experts_kv_compat(self) -> None:
+        """Reject KV connectors unsupported by --enable-return-routed-experts.
+
+        Supported connectors:
+          * CPU offload connector (``OffloadingConnector`` with
+            ``CPUOffloadingSpec`` or its multi-tier ``TieringOffloadingSpec``),
+            whose transfer jobs the scheduler follows at block granularity.
+          * ``MooncakeStoreConnector`` (direct GPU<->Mooncake): routing rides
+            the same RDMA pool as the KV blocks, PUT/GET by the worker bridge.
+
+        Other connectors are rejected. Best-effort early check; must run after
+        _post_init_kv_transfer_config() so the connector synthesized from
+        --kv-offloading-size is also seen. Authoritative checks run at
+        scheduler init.
+        """
+        if self.model_config is None or not (
+            self.model_config.enable_return_routed_experts
+        ):
+            return
+        ktc = self.kv_transfer_config
+        if ktc is None or not ktc.is_kv_transfer_instance:
+            return
+        extra = ktc.kv_connector_extra_config or {}
+        spec_name = extra.get("spec_name", "CPUOffloadingSpec")
+        is_cpu_offload = (
+            ktc.kv_connector == "OffloadingConnector"
+            and ktc.kv_role == "kv_both"
+            and spec_name in ("CPUOffloadingSpec", "TieringOffloadingSpec")
+        )
+        is_mooncake_store = (
+            ktc.kv_connector == "MooncakeStoreConnector" and ktc.kv_role == "kv_both"
+        )
+        if not (is_cpu_offload or is_mooncake_store):
+            raise ValueError(
+                "--enable-return-routed-experts only supports the CPU KV "
+                "offload connector (OffloadingConnector + CPUOffloadingSpec "
+                "or its TieringOffloadingSpec subclass) or MooncakeStoreConnector, "
+                "with kv_role=kv_both; PD disaggregation and other KV "
+                "connectors are not supported."
+            )
+        # Any offloaded block size (block_size_factor >= 1) is fine here;
+        # the authoritative checks (full-attention group present, non-empty
+        # offload pool) run at scheduler init with the resolved spec.
+
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
         if (
@@ -884,26 +928,16 @@ class VllmConfig:
         if (
             self.model_config is not None
             and self.model_config.enable_return_routed_experts
+            and self.parallel_config.pipeline_parallel_size > 1
         ):
-            if self.parallel_config.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "--enable-return-routed-experts is incompatible with "
-                    "pipeline parallelism (PP > 1)."
-                )
-
-            # Incompatible with any KV connector — covers both PD disaggregation
-            # (kv_producer/kv_consumer: routing captured on P can't reach D) and
-            # single-instance KV offload/sharing (kv_both: slot_mapping semantics
-            # change when KV blocks live outside local GPU memory, breaking the
-            # slot-indexed routed_experts buffer).
-            if (
-                self.kv_transfer_config is not None
-                and self.kv_transfer_config.is_kv_transfer_instance
-            ):
-                raise ValueError(
-                    "--enable-return-routed-experts is incompatible with KV "
-                    "connectors (PD disaggregation, KV cache offload)."
-                )
+            raise ValueError(
+                "--enable-return-routed-experts is incompatible with "
+                "pipeline parallelism (PP > 1)."
+            )
+        # KV connector compatibility with enable_return_routed_experts is
+        # checked in _verify_return_routed_experts_kv_compat(), which must
+        # run after _post_init_kv_transfer_config() so it also sees the
+        # connector synthesized from --kv-offloading-size.
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
@@ -1490,6 +1524,8 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
+
+        self._verify_return_routed_experts_kv_compat()
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime

@@ -9,14 +9,14 @@ import torch
 
 from vllm.distributed.eplb.eplb_state import EplbLayerState
 from vllm.model_executor.layers.fused_moe.config import RoutingMethodType
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
     RoutedExpertsCapturer,
 )
 from vllm.model_executor.layers.fused_moe.router.base_router import BaseRouter
 
 pytestmark = pytest.mark.cpu_test
 
-_REC_MODULE = "vllm.model_executor.layers.fused_moe.routed_experts_capturer"
+_REC_MODULE = "vllm.model_executor.layers.fused_moe.routed_experts_capture.capturer"
 
 
 def _capturer_with_buffer(

@@ -319,10 +319,10 @@ def _create_req_context(req: Request) -> ReqContext:
 class OffloadingConnectorScheduler:
     """Implementation of Scheduler side methods"""
 
-    def __init__(
-        self,
-        spec: OffloadingSpec,
-    ):
+    def __init__(self, spec: OffloadingSpec):
+        # Kept for capability checks by the core scheduler
+        # (e.g. routed-experts offload buffer sizing).
+        self.spec = spec
         self.config = SchedulerOffloadConfig.from_spec(spec)
         self.manager: OffloadingManager = spec.get_manager()
         self._connector_stats: OffloadingConnectorStats | None = None

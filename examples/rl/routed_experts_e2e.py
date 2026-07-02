@@ -135,6 +135,7 @@ def run_inference(
     max_new_tokens: int = 50,
     tp: int = 1,
     max_model_len: int = 4096,
+    kv_offloading_size: float | None = None,
 ) -> InferenceResult:
     """Run inference with routed experts capture enabled via AsyncLLM."""
     engine_args = AsyncEngineArgs(
@@ -144,6 +145,7 @@ def run_inference(
         max_model_len=max_model_len,
         disable_log_stats=True,
         attention_backend="FLASH_ATTN",
+        kv_offloading_size=kv_offloading_size,
     )
 
     result = asyncio.run(_run_async_inference(engine_args, prompts, max_new_tokens))
@@ -314,6 +316,13 @@ def main():
         default=0.05,
         help="Maximum allowed mismatch ratio for determinism check",
     )
+    parser.add_argument(
+        "--kv-offloading-size",
+        type=float,
+        default=None,
+        help="Enable KV CPU offloading with the given size in GiB; "
+        "routed experts must stay correct across offload/reload",
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO)
@@ -332,6 +341,7 @@ def main():
         max_new_tokens=args.max_new_tokens,
         tp=args.tp,
         max_model_len=args.max_model_len,
+        kv_offloading_size=args.kv_offloading_size,
     )
     print(f"num_experts (from model config): {baseline.num_experts}")
 
@@ -354,6 +364,7 @@ def main():
             max_new_tokens=args.max_new_tokens,
             tp=args.tp,
             max_model_len=args.max_model_len,
+            kv_offloading_size=args.kv_offloading_size,
         )
 
         print("\n=== Determinism Check ===")

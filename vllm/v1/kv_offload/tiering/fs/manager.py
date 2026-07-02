@@ -143,6 +143,9 @@ class FileSystemTierManager(SecondaryTierManager):
         )
 
         self._lookup_manager = FsAsyncLookupManager(tier=self, tier_type=self.tier_type)
+        # Cumulative counters for observability of disk spill/load activity.
+        self._stored_blocks = 0
+        self._loaded_blocks = 0
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -157,6 +160,7 @@ class FileSystemTierManager(SecondaryTierManager):
 
     @override
     def submit_store(self, job_metadata: JobMetadata) -> None:
+        n = len(job_metadata.keys)
         tasks = (
             functools.partial(
                 store_block,
@@ -167,10 +171,12 @@ class FileSystemTierManager(SecondaryTierManager):
             )
             for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
         )
-        self._pool.enqueue_store(job_metadata.job_id, len(job_metadata.keys), tasks)
+        self._pool.enqueue_store(job_metadata.job_id, n, tasks)
+        self._record_io(stored=True, n=n)
 
     @override
     def submit_load(self, job_metadata: JobMetadata) -> None:
+        n = len(job_metadata.keys)
         tasks = (
             functools.partial(
                 load_block,
@@ -181,7 +187,31 @@ class FileSystemTierManager(SecondaryTierManager):
             )
             for key, bid in zip(job_metadata.keys, job_metadata.block_ids)
         )
-        self._pool.enqueue_load(job_metadata.job_id, len(job_metadata.keys), tasks)
+        self._pool.enqueue_load(job_metadata.job_id, n, tasks)
+        self._record_io(stored=False, n=n)
+
+    def _record_io(self, stored: bool, n: int) -> None:
+        """Bump the cumulative spill/load counter and debug-log the activity.
+
+        Observability only: a store means the CPU primary tier overflowed and
+        KV blocks spilled to the fs secondary tier; a load means a prefix-cache
+        hit was served back from disk. Debug level — this fires once per job on
+        the scheduler hot path.
+        """
+        if stored:
+            self._stored_blocks += n
+            verb, prep, total = "spilled", "to", self._stored_blocks
+        else:
+            self._loaded_blocks += n
+            verb, prep, total = "loaded", "from", self._loaded_blocks
+        logger.debug(
+            "FileSystemTier(%s): %s %d KV block(s) %s disk (%d total)",
+            self.tier_type,
+            verb,
+            n,
+            prep,
+            total,
+        )
 
     @override
     def get_finished_jobs(self) -> Iterable[JobResult]:
