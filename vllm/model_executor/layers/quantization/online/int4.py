@@ -58,7 +58,7 @@ class Int4PerChannelEmbeddingMethod(QuantizeMethodBase):
             ),
             requires_grad=False,
         )
-        from vllm.model_executor.parameter import set_weight_attrs
+        from vllm.model_executor.utils import set_weight_attrs
 
         set_weight_attrs(weight, {"input_dim": 1, "output_dim": 0})
         layer.register_parameter("weight", weight)
