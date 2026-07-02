@@ -2403,6 +2403,7 @@ MODELS_SUPPORT_VIT_CUDA_GRAPH = [
     "stepvl",
     "glm4_1v",
     "deepseek_ocr",
+    "ernie45_vl",
 ]
 
 
