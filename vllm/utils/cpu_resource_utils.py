@@ -11,6 +11,8 @@ from functools import cache
 import psutil
 import regex as re
 
+from vllm import envs
+
 DEVICE_CONTROL_ENV_VAR = "CPU_VISIBLE_MEMORY_NODES"
 
 
@@ -188,7 +190,7 @@ def get_visible_memory_node() -> list[int]:
 
     env_key = DEVICE_CONTROL_ENV_VAR
     if (
-        ("VLLM_CPU_SIM_MULTI_NUMA" not in os.environ)
+        not envs.VLLM_CPU_SIM_MULTI_NUMA
         and env_key in os.environ
         and os.environ[env_key] != ""
     ):
