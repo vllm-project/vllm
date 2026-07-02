@@ -76,6 +76,7 @@ from vllm.v1.kv_cache_interface import (
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.utils import CpuGpuBuffer
+from vllm.v1.worker.workspace import current_workspace_manager
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 
@@ -1406,6 +1407,11 @@ class FlashInferImpl(AttentionImpl):
         self.bmm1_scale: float | None = None
         self.bmm2_scale: float | None = None
         self.o_sf_scale: float | None = None
+        self.dcp_world_size = (
+            vllm_config.parallel_config.decode_context_parallel_size
+            if vllm_config is not None
+            else 1
+        )
 
         # Pre-allocated FP8 output buffer for NVFP4 without fused output quant.
         if self.is_kvcache_nvfp4 and vllm_config is not None:
@@ -1794,14 +1800,19 @@ class FlashInferImpl(AttentionImpl):
                     out_decode = output[:num_decode_tokens]
 
                 if use_dcp:
+                    num_heads_in_dcp = self.num_heads * self.dcp_world_size
+                    buffer_shape = (
+                        num_decode_tokens,
+                        num_heads_in_dcp,
+                        self.head_size,
+                    )
+                    lse_shape = (num_decode_tokens, num_heads_in_dcp)
+                    output_tmp, lse = current_workspace_manager().get_simultaneous(
+                        (buffer_shape, query.dtype),
+                        (lse_shape, torch.float32),
+                    )
                     decode_query = get_dcp_group().all_gather(
                         decode_query.contiguous(), dim=-2
-                    )
-                    output_tmp = torch.empty_like(decode_query)
-                    lse = torch.empty(
-                        (decode_query.size(0), decode_query.size(1)),
-                        dtype=torch.float32,
-                        device=decode_query.device,
                     )
                     decode_wrapper.run(
                         decode_query,
