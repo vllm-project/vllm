@@ -762,7 +762,7 @@ class MoETestData:
     w1: torch.Tensor
     w2: torch.Tensor
     hidden_states: torch.Tensor
-    router_logits: torch.Tensor
+    router_logits: torch.Tensor | None
     shared_experts_config: SharedExpertsConfig | None
     gate: torch.nn.Module | None
     routed_input_transform: torch.nn.Module | None
@@ -936,7 +936,11 @@ def setup_moe_test_data(
 
     # Create test inputs
     hidden_states = torch.randn((m, k), device=device, dtype=in_dtype) / 10
-    router_logits = torch.randn((m, num_experts), device=device, dtype=in_dtype)
+    router_logits = (
+        None
+        if use_gate
+        else torch.randn((m, num_experts), device=device, dtype=in_dtype)
+    )
 
     return MoETestData(
         w1=w1,
@@ -1124,7 +1128,7 @@ def make_fake_moe_layer(
 
     def _moe(
         hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
+        router_logits: torch.Tensor | None,
     ) -> torch.Tensor:
         # Save original hidden_states for shared experts (before transform)
         original_hidden_states = hidden_states
@@ -1137,7 +1141,9 @@ def make_fake_moe_layer(
         # Note: gate operates on transformed hidden_states (after
         # routed_input_transform)
         if gate is not None:
+            assert router_logits is None
             router_logits, _ = gate(hidden_states)
+        assert router_logits is not None
 
         topk_weights, topk_ids = router.select_experts(
             hidden_states=hidden_states,
@@ -1186,7 +1192,7 @@ def make_fake_moe_layer(
 def _test_body_regular(
     moe_layer: MoERunner,
     hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
+    router_logits: torch.Tensor | None,
     vllm_config: VllmConfig,
     num_tokens: int,
     num_tokens_across_dp: torch.Tensor,
@@ -1209,7 +1215,7 @@ def _test_body_regular(
 def _test_body_eplb(
     moe_layer: MoERunner,
     hidden_states: torch.Tensor,
-    router_logits: torch.Tensor,
+    router_logits: torch.Tensor | None,
     vllm_config: VllmConfig,
     num_tokens: int,
     num_tokens_across_dp: torch.Tensor,
