@@ -115,9 +115,8 @@ def cuda_flashinfer_bf16_gemm_impl(
     mixing model backends.
     """
     if x.dim() == 0 or weight.dim() != 2:
-        raise ValueError(
-            "FlashInfer BF16 GEMM requires x.ndim >= 1 and weight.ndim == 2."
-        )
+        return torch.nn.functional.linear(x, weight, bias)
+
     K = x.shape[-1]
     M = x.numel() // K if K > 0 else 0
     N = weight.shape[0]
@@ -134,10 +133,10 @@ def cuda_flashinfer_bf16_gemm_impl(
         or not x.is_cuda
         or not weight.is_cuda
         or weight.device != x.device
-        or not bias_ok
         or M == 0
         or N == 0
         or K == 0
+        or not bias_ok
     ):
         logger.warning_once("Using default unquantized gemm (torch).")
         return torch.nn.functional.linear(x, weight, bias)
