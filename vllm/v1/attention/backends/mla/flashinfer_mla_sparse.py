@@ -115,7 +115,12 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
 
         # FlashInfer MLA sparse SM10 kernel requires qk_nope_head_dim in [128, 192].
         if vllm_config.model_config is not None:
+            model_name = getattr(vllm_config.model_config, "model", "").lower()
             hf_text_config = vllm_config.model_config.hf_text_config
+            config_class_name = hf_text_config.__class__.__name__.lower()
+            if "kimi" in model_name or "kimi" in config_class_name:
+                return "FlashInfer MLA Sparse is disabled on Kimi models due to intermittent NaN outputs"
+
             qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 1)
             if qk_nope_head_dim not in [128, 192]:
                 return (

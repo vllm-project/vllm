@@ -30,6 +30,10 @@ from vllm.v1.attention.backends.mla.prefill.base import MLAPrefillBackend
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
     from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.mla.prefill.selector import (
+        MLAPrefillSelectorConfig,
+    )
 
 if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
@@ -47,6 +51,31 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
     @classmethod
     def is_available(cls) -> bool:
         return is_flash_attn_varlen_func_available()
+
+    @classmethod
+    def validate_configuration(
+        cls,
+        device_capability: "DeviceCapability",
+        selector_config: "MLAPrefillSelectorConfig",
+    ) -> list[str]:
+        invalid_reasons = super().validate_configuration(
+            device_capability, selector_config
+        )
+        from vllm.config import get_current_vllm_config
+        try:
+            vllm_config = get_current_vllm_config()
+            if vllm_config.model_config is not None:
+                model_name = getattr(vllm_config.model_config, "model", "").lower()
+                hf_text_config = vllm_config.model_config.hf_text_config
+                config_class_name = hf_text_config.__class__.__name__.lower()
+                if "kimi" in model_name or "kimi" in config_class_name:
+                    if device_capability.major == 10:
+                        invalid_reasons.append(
+                            "FA4 MLA prefill is disabled on Kimi models due to intermittent NaN outputs"
+                        )
+        except Exception:
+            pass
+        return invalid_reasons
 
     def __init__(
         self,
