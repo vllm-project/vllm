@@ -31,6 +31,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.base import (
     SupportsHMA,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
+from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
     MooncakeBootstrapServer,
     RegisterWorkerPayload,
@@ -925,8 +926,11 @@ class MooncakeConnectorWorker:
         # Tasks can await async events, so a surplus (2x is a robust heuristic)
         # prevents workers from idling.
         self.num_sender_tasks = self.num_sender_workers * 2
-        protocol = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
-            "mooncake_protocol", "rdma"
+        extra_config = kv_transfer_config.kv_connector_extra_config
+        protocol = extra_config.get("mooncake_protocol", "rdma")
+        device_name = rdma_utils.get_configured_worker_rnic(
+            protocol=protocol,
+            configured_device=extra_config.get("mooncake_device_name", ""),
         )
         device_name = kv_transfer_config.kv_connector_extra_config.get(  # type: ignore[union-attr]
             "device_name", ""
