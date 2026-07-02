@@ -36,14 +36,24 @@ __device__ __forceinline__ int32_t hash_slot(int32_t key, int32_t hash_size) {
 }
 
 // Copy one row of `row_bytes` bytes with a single warp (16B vectorized;
-// callers guarantee 16B-aligned rows).
+// callers guarantee 16B-aligned rows). Paired 64-bit loads with the .nc
+// (non-coherent, read-only path) hint and .cg (L2-only) stores keep the
+// one-shot KV rows out of L1, matching SGLang's transfer_item_warp.
 __device__ __forceinline__ void copy_row_warp(int lane_id, const char* src,
                                               char* dst, int64_t row_bytes) {
   const int64_t num_vec = row_bytes / 16;
-  const uint4* src4 = reinterpret_cast<const uint4*>(src);
-  uint4* dst4 = reinterpret_cast<uint4*>(dst);
+  const uint64_t* src8 = reinterpret_cast<const uint64_t*>(src);
+  uint64_t* dst8 = reinterpret_cast<uint64_t*>(dst);
   for (int64_t j = lane_id; j < num_vec; j += kWarpSize) {
-    dst4[j] = src4[j];
+    uint64_t lo, hi;
+    const uint64_t* s = src8 + j * 2;
+    asm volatile("ld.global.nc.v2.b64 {%0,%1},[%2];"
+                 : "=l"(lo), "=l"(hi)
+                 : "l"(s)
+                 : "memory");
+    uint64_t* d = dst8 + j * 2;
+    asm volatile("st.global.cg.v2.b64 [%0],{%1,%2};" ::"l"(d), "l"(lo), "l"(hi)
+                 : "memory");
   }
 }
 
