@@ -36,6 +36,39 @@ void moe_gptq_gemm_rdna3(torch::Tensor a, torch::Tensor c,
                          int64_t block_size_m, bool mul_topk_weight,
                          int64_t output_topk);
 
+// DeepSeek-V4 fused compressors (gfx950 / CDNA4 only). Impls in
+// csrc/rocm/dsv4_compress_ops.cpp + dsv4_{csa,hca,indexer}_compress.cu.
+void dsv4_csa_compress(torch::Tensor state_cache, int64_t num_actual,
+                       torch::Tensor ape, torch::Tensor token_to_req_indices,
+                       torch::Tensor positions, torch::Tensor slot_mapping,
+                       torch::Tensor block_table, int64_t block_size,
+                       torch::Tensor rms_norm_weight, double rms_norm_eps,
+                       torch::Tensor cos_sin_cache, torch::Tensor kv_cache,
+                       torch::Tensor kv_slot_mapping,
+                       int64_t kv_cache_block_size, int64_t scale_dim);
+
+void dsv4_hca_compress(torch::Tensor state_cache, int64_t num_actual,
+                       torch::Tensor ape, torch::Tensor token_to_req_indices,
+                       torch::Tensor positions, torch::Tensor slot_mapping,
+                       torch::Tensor block_table, int64_t block_size,
+                       torch::Tensor rms_norm_weight, double rms_norm_eps,
+                       torch::Tensor cos_sin_cache, torch::Tensor kv_cache,
+                       torch::Tensor kv_slot_mapping,
+                       int64_t kv_cache_block_size, int64_t scale_dim,
+                       torch::Tensor plan_scratch,
+                       torch::Tensor counter_scratch);
+
+void dsv4_indexer_compress(torch::Tensor state_cache, int64_t num_actual,
+                           torch::Tensor ape,
+                           torch::Tensor token_to_req_indices,
+                           torch::Tensor positions, torch::Tensor slot_mapping,
+                           torch::Tensor block_table, int64_t block_size,
+                           torch::Tensor rms_norm_weight, double rms_norm_eps,
+                           torch::Tensor cos_sin_cache, torch::Tensor kv_cache,
+                           torch::Tensor kv_slot_mapping,
+                           int64_t kv_cache_block_size, int64_t scale_dim,
+                           bool use_fp4_cache);
+
 void paged_attention(
     torch::Tensor& out, torch::Tensor& exp_sums, torch::Tensor& max_logits,
     torch::Tensor& tmp_out, torch::Tensor& query, torch::Tensor& key_cache,

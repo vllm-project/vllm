@@ -9,6 +9,7 @@ from torch import nn
 
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
@@ -32,6 +33,8 @@ from vllm.v1.kv_cache_interface import (
     MLAAttentionSpec,
     SlidingWindowMLASpec,
 )
+
+logger = init_logger(__name__)
 
 
 class CompressorBackend(AttentionBackend):
@@ -136,7 +139,7 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
             raise ValueError(f"Duplicate layer name: {prefix}")
         compilation_config.static_forward_context[prefix] = self
 
-        assert self.dtype == torch.float32
+        assert self.dtype in (torch.float32, torch.bfloat16)
         assert compress_ratio in [4, 128]
         coff = 1 + (compress_ratio == 4)
         self.sliding_window = coff * compress_ratio
@@ -211,20 +214,64 @@ class DeepseekCompressor(nn.Module):
         self.rms_norm_eps = config.rms_norm_eps
         self.device = current_platform.device_type
         self.max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+        self.max_num_batched_tokens = (
+            vllm_config.scheduler_config.max_num_batched_tokens
+        )
         self.max_model_len = vllm_config.model_config.max_model_len
 
         self.overlap = compress_ratio == 4
         self.coff = 1 + self.overlap
+        self.use_hip_compressor = False
+        self.use_bf16_state_cache = False
+        if current_platform.is_rocm():
+            from .amd.ops.hip_compress_dispatch import (
+                hip_compressor_runtime_available,
+                hip_compressor_selected,
+            )
 
-        state_dtype = torch.float32
+            selected_hip_compressor = hip_compressor_selected(
+                self.head_dim, self.compress_ratio
+            )
+            self.use_hip_compressor = (
+                selected_hip_compressor and hip_compressor_runtime_available()
+            )
+            self.use_bf16_state_cache = self.use_hip_compressor
+            if selected_hip_compressor and not self.use_hip_compressor:
+                logger.warning_once(
+                    "VLLM_ROCM_DSV4_HIP_COMPRESSOR selected this compressor, "
+                    "but the fused HIP path is only available on gfx950. "
+                    "Falling back to Triton."
+                )
+
+        state_dtype = torch.bfloat16 if self.use_bf16_state_cache else torch.float32
         self.ape = nn.Parameter(
             torch.empty(
                 (compress_ratio, self.coff * self.head_dim),
-                dtype=state_dtype,
+                dtype=torch.float32,
                 device=self.device,
             ),
             requires_grad=False,
         )
+        if (
+            self.use_hip_compressor
+            and self.head_dim == 512
+            and self.compress_ratio == 128
+        ):
+            hca_plan_capacity = (
+                self.max_num_batched_tokens // self.compress_ratio
+                + self.max_num_reqs
+                + 2
+            )
+            self.register_buffer(
+                "_hca_plan_scratch",
+                torch.empty(hca_plan_capacity, dtype=torch.int32, device=self.device),
+                persistent=False,
+            )
+            self.register_buffer(
+                "_hca_counter_scratch",
+                torch.empty(1, dtype=torch.int32, device=self.device),
+                persistent=False,
+            )
 
         self.fused_wkv_wgate = MergedColumnParallelLinear(
             self.hidden_size,
@@ -309,16 +356,19 @@ class DeepseekCompressor(nn.Module):
             else {"launch_pdl": False}
         )
 
-        # Store the KV and score (with fused APE addition) in the state.
+        # Store the KV and score in the state cache.
         # NOTE: PDL is disabled — both this kernel and the compress kernels
         # below depend on preceding kernel outputs (kv/score from the cublas
         # GEMM; state_cache from this kernel) but neither emits/waits on PDL
         # grid dependency primitives, so launch_pdl=True caused a
         # read-after-write race and non-deterministic output.
+        #
+        # When use_bf16_state_cache=True, store raw score without APE. The HIP
+        # compressor adds APE in-kernel while preserving fp32 precision.
         save_partial_states(
             kv=kv,
             score=score,
-            ape=self.ape,
+            ape=None if self.use_bf16_state_cache else self.ape,
             positions=positions,
             state_cache=state_cache,
             slot_mapping=slot_mapping,
@@ -353,6 +403,7 @@ class DeepseekCompressor(nn.Module):
         # cutedsl (head=512) accepts the full-cache flags; triton (indexer/AMD)
         # does not, so the two callables have different signatures.
         compress_norm_rope_store_fn: Any
+        using_hip_compressor = False
         if current_platform.is_cuda() and self.head_dim == 512:
             from .nvidia.ops.sparse_attn_compress_cutedsl import (
                 compress_norm_rope_store_cutedsl,
@@ -367,10 +418,43 @@ class DeepseekCompressor(nn.Module):
                 store_full_fp8=store_full_fp8,
                 fp8_scale=fp8_scale,
             )
+        elif current_platform.is_rocm() and self.use_hip_compressor:
+            from .amd.ops.hip_compress_dispatch import (
+                compress_norm_rope_store_hip,
+                hip_compressor_supported,
+                selected_hip_compressor_shapes,
+            )
+
+            if hip_compressor_supported(
+                self.head_dim,
+                self.compress_ratio,
+                kv_cache,
+                allowed_shapes=selected_hip_compressor_shapes(),
+            ):
+                compress_norm_rope_store_fn = compress_norm_rope_store_hip
+                using_hip_compressor = True
+            else:
+                raise RuntimeError(
+                    "VLLM_ROCM_DSV4_HIP_COMPRESSOR selected a fused HIP "
+                    "compressor, but it is unavailable for this configuration "
+                    "(requires gfx950, a registered _rocm_C op, a supported "
+                    "(head_dim, compress_ratio), and the uint8 paged cache "
+                    "layout). Triton cannot serve the bf16-state-cache path. "
+                    "Use a gfx950 build with the paged uint8 cache layout or "
+                    "disable VLLM_ROCM_DSV4_HIP_COMPRESSOR."
+                )
+            extra_kwargs = {}
         else:
             # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
             extra_kwargs = {}
+
+        if self.use_bf16_state_cache:
+            extra_kwargs["ape"] = self.ape
+            extra_kwargs["use_bf16_state_cache"] = True
+        if using_hip_compressor and self.head_dim == 512 and self.compress_ratio == 128:
+            extra_kwargs["hca_plan_scratch"] = self._hca_plan_scratch
+            extra_kwargs["hca_counter_scratch"] = self._hca_counter_scratch
 
         compress_norm_rope_store_fn(
             state_cache=state_cache,
