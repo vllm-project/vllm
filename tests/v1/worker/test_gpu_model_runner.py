@@ -257,19 +257,28 @@ def test_select_common_block_size_uses_largest_shared_int():
 
 @pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize(
-    ("world_size", "is_last_rank", "expected_calls"),
-    [(1, True, 0), (2, True, 0), (2, False, 1)],
+    ("world_size", "is_last_rank", "is_kv_producer", "expected_calls"),
+    [
+        (1, True, False, 0),
+        (2, True, False, 0),
+        (2, False, False, 1),
+        (2, False, True, 0),
+    ],
 )
 def test_sample_tokens_receives_pp_sampled_ids_only_on_non_last_rank(
     monkeypatch: pytest.MonkeyPatch,
     world_size: int,
     is_last_rank: bool,
+    is_kv_producer: bool,
     expected_calls: int,
 ):
     runner = GPUModelRunner.__new__(GPUModelRunner)
     runner.execute_model_state = None
     runner.kv_connector_output = None
     runner.use_async_scheduling = True
+    runner.vllm_config = SimpleNamespace(
+        kv_transfer_config=SimpleNamespace(is_kv_producer=is_kv_producer)
+    )
     receive_calls = 0
 
     def receive_prev_sampled_token_ids():

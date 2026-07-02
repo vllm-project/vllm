@@ -4433,11 +4433,21 @@ class GPUModelRunner(
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors:
+        pp = None
+        skip_pp_pd_broadcast = False
+        if self.use_async_scheduling:
+            pp = get_pp_group()
+            skip_pp_pd_broadcast = self._should_skip_pp_pd_broadcast(pp)
+
         if self.execute_model_state is None:
             kv_connector_output = self.kv_connector_output
             self.kv_connector_output = None
             # receive sampled token ids from the last PP rank.
-            if self.use_async_scheduling and not get_pp_group().is_last_rank:
+            if (
+                self.use_async_scheduling
+                and not pp.is_last_rank
+                and not skip_pp_pd_broadcast
+            ):
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
             # In case of PP with kv transfer, we need to pass through the
             # kv_connector_output
@@ -4472,11 +4482,15 @@ class GPUModelRunner(
             sampler_output.sampled_token_ids, scheduler_output
         )
         if self.use_async_scheduling:
-            pp = get_pp_group()
             # For torchrun external_launcher PP mode with broadcast_pp_output=True,
             # PP outputs have been broadcasted to all ranks at logits computation.
             # Therefore, here is no need to send sampled token ids again in this case.
-            if not self.broadcast_pp_output and pp.world_size > 1 and pp.is_last_rank:
+            if (
+                not self.broadcast_pp_output
+                and pp.world_size > 1
+                and pp.is_last_rank
+                and not skip_pp_pd_broadcast
+            ):
                 self._pp_broadcast_prev_sampled_token_ids(
                     sampler_output.sampled_token_ids
                 )
@@ -4691,6 +4705,16 @@ class GPUModelRunner(
             )
 
         return async_output
+
+    def _should_skip_pp_pd_broadcast(self, pp) -> bool:
+        kv_transfer_config = getattr(
+            getattr(self, "vllm_config", None), "kv_transfer_config", None
+        )
+        return (
+            pp.world_size > 1
+            and kv_transfer_config is not None
+            and kv_transfer_config.is_kv_producer
+        )
 
     def _pp_broadcast_prev_sampled_token_ids(
         self, sampled_token_ids: torch.Tensor
