@@ -36,6 +36,7 @@ CacheDType = Literal[
 ]
 MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
+ReplaySSMRoute = Literal["output_only", "state_and_output"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
 
@@ -140,6 +141,23 @@ class CacheConfig:
     - "align": only cache the mamba state of the last token of each scheduler step and
            when the token is at position i * block_size.
     """
+    use_replayssm: bool = False
+    """Use the ReplaySSM Mamba2 decode kernel (cache recent SSM inputs in a
+    per-layer ring buffer and replay them to recompute state on demand, instead
+    of writing the recurrent state back to HBM each step). Opt-in; only
+    supported for autoregressive decode with mamba_cache_mode='none' and the
+    triton Mamba backend. Default behavior is unchanged when off."""
+    replayssm_buffer_len: int = Field(default=16, gt=0)
+    """ReplaySSM input-buffer capacity: the maximum number of autoregressive
+    Mamba2 decode steps to accumulate in the ring buffer before flushing the
+    recomputed checkpoint state. Only meaningful when use_replayssm is True."""
+    replayssm_route: ReplaySSMRoute = "output_only"
+    """ReplaySSM compute route (only meaningful when use_replayssm is True):
+    - "output_only" (default): inner-product route. Reads the output from the
+       checkpoint state plus the cached inputs without materializing the
+       per-step state (the state is only rebuilt on flush steps).
+    - "state_and_output": outer-product route. Reconstructs the full SSM state
+       every step via tl.dot, then reads the output from it."""
 
     # Will be set after profiling.
     num_gpu_blocks: int | None = field(default=None, init=False)

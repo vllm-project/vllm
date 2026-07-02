@@ -71,6 +71,7 @@ from vllm.config.cache import (
     MambaCacheMode,
     MambaDType,
     PrefixCachingHashAlgo,
+    ReplaySSMRoute,
 )
 from vllm.config.device import Device
 from vllm.config.kernel import IrOpPriorityConfig, LinearBackend, MoEBackend
@@ -687,6 +688,9 @@ class EngineArgs:
     mamba_ssm_cache_dtype: MambaDType = CacheConfig.mamba_ssm_cache_dtype
     mamba_block_size: int | None = get_field(CacheConfig, "mamba_block_size")
     mamba_cache_mode: MambaCacheMode = CacheConfig.mamba_cache_mode
+    use_replayssm: bool = CacheConfig.use_replayssm
+    replayssm_buffer_len: int = CacheConfig.replayssm_buffer_len
+    replayssm_route: ReplaySSMRoute = CacheConfig.replayssm_route
 
     mamba_backend: MambaBackendEnum = MambaBackendEnum.TRITON
     enable_mamba_cache_stochastic_rounding: bool = (
@@ -1187,6 +1191,11 @@ class EngineArgs:
         cache_group.add_argument(
             "--mamba-cache-mode", **cache_kwargs["mamba_cache_mode"]
         )
+        cache_group.add_argument("--use-replayssm", **cache_kwargs["use_replayssm"])
+        cache_group.add_argument(
+            "--replayssm-buffer-len", **cache_kwargs["replayssm_buffer_len"]
+        )
+        cache_group.add_argument("--replayssm-route", **cache_kwargs["replayssm_route"])
         cache_group.add_argument(
             "--kv-offloading-size", **cache_kwargs["kv_offloading_size"]
         )
@@ -1882,6 +1891,9 @@ class EngineArgs:
             mamba_ssm_cache_dtype=self.mamba_ssm_cache_dtype,
             mamba_block_size=self.mamba_block_size,
             mamba_cache_mode=self.mamba_cache_mode,
+            use_replayssm=self.use_replayssm,
+            replayssm_buffer_len=self.replayssm_buffer_len,
+            replayssm_route=self.replayssm_route,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
         )
