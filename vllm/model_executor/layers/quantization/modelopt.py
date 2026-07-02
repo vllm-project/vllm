@@ -2451,6 +2451,13 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                     return info["quant_algo"].upper()
 
         # 4. Parent-prefix fallback for fused projections (qkv_proj, gate_up_proj).
+        # Only apply to genuine fused projections (same guard as step 2). Without
+        # this, unquantized siblings (e.g. Mamba conv1d/norm in a MIXED_PRECISION
+        # checkpoint) inherit their quantized siblings' algo and get corrupted.
+        if not (
+            self.packed_modules_mapping and proj_name in self.packed_modules_mapping
+        ):
+            return None
         for candidate in self._quantized_layer_prefix_candidates(prefix):
             parent_dot = candidate.rsplit(".", 1)[0] + "."
             algos = {
