@@ -745,6 +745,7 @@ class SamplingParams(
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
+        self._validate_stop(tokenizer)
         self._validate_structured_outputs(
             model_config, structured_outputs_config, tokenizer
         )
@@ -876,6 +877,13 @@ class SamplingParams(
             raise ValueError(
                 "The min_p and logit_bias sampling parameters "
                 "are not yet supported with speculative decoding."
+            )
+
+    def _validate_stop(self, tokenizer: TokenizerLike | None) -> None:
+        if tokenizer is None and self.stop:
+            raise ValueError(
+                "Stop strings require a tokenizer so they can't be used "
+                "with 'skip_tokenizer_init'"
             )
 
     def _validate_structured_outputs(
