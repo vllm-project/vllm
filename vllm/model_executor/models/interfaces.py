@@ -1320,6 +1320,32 @@ class LocalArgmaxMixin:
         return top
 
 
+AUX_HIDDEN_STATE_TENSOR_PREFIX = "aux_layer_"
+
+
+def extract_aux_hidden_states(
+    intermediate_tensors: "IntermediateTensors | None",
+) -> list[torch.Tensor]:
+    """Extract auxiliary hidden states packed by previous PP stages.
+
+    When Eagle3 is used with Pipeline Parallelism, each non-last PP stage
+    packs collected aux hidden states into ``IntermediateTensors`` using
+    keys with prefix ``AUX_HIDDEN_STATE_TENSOR_PREFIX``.  This helper
+    reverses the packing so that the next stage can accumulate them.
+    """
+    if intermediate_tensors is None:
+        return []
+    aux_keys = sorted(
+        (
+            k
+            for k in intermediate_tensors.tensors
+            if k.startswith(AUX_HIDDEN_STATE_TENSOR_PREFIX)
+        ),
+        key=lambda k: int(k.rsplit("_", 1)[-1]),
+    )
+    return [intermediate_tensors.tensors[k] for k in aux_keys]
+
+
 class EagleModelMixin:
     aux_hidden_state_layers: tuple[int, ...] = ()
 

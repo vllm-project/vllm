@@ -5210,7 +5210,13 @@ class GPUModelRunner(
                         self.drafter.set_eplb_state(self.eplb_state)
                         eplb_models += 1
 
-                self._setup_eagle3_aux_hidden_state_outputs()
+                    self._setup_eagle3_aux_hidden_state_outputs()
+
+                # Non-last PP ranks don't have a drafter, but they still
+                # need to configure aux layers + install PP propagation
+                # hooks so that aux hidden states flow to the last rank.
+                elif self._eagle3_uses_aux_hidden_state():
+                    self._configure_eagle3_pp_aux_for_non_last_rank()
 
                 # Resolve the MoE model, unwrapping VLM wrappers if needed.
                 # VLM models (e.g. KimiK25ForConditionalGeneration) wrap the
@@ -5330,6 +5336,26 @@ class GPUModelRunner(
 
         get_offloader().post_init()
 
+    def _eagle3_uses_aux_hidden_state(self) -> bool:
+        """Check whether Eagle3 aux hidden states are enabled.
+
+        Unlike ``self.use_aux_hidden_state_outputs`` (which is only set on
+        the last PP rank), this method can be called on **any** rank to
+        decide whether aux layer configuration / PP propagation is needed.
+        """
+        if (
+            self.speculative_config is None
+            or self.speculative_config.method != "eagle3"
+        ):
+            return False
+        draft_config = self.speculative_config.draft_model_config
+        if draft_config is None:
+            return True
+        eagle_config = getattr(draft_config.hf_config, "eagle_config", None)
+        if eagle_config is None:
+            return True
+        return eagle_config.get("use_aux_hidden_state", True)
+
     def _setup_eagle3_aux_hidden_state_outputs(self) -> None:
         if not self.use_aux_hidden_state_outputs:
             return
@@ -5350,6 +5376,57 @@ class GPUModelRunner(
             aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
 
         self.model.set_aux_hidden_state_layers(aux_layers)
+
+        # When PP > 1, install propagation hooks on ALL ranks so that aux
+        # hidden states collected on non-last ranks are forwarded through
+        # IntermediateTensors to the last rank (where the drafter runs).
+        pp_group = get_pp_group()
+        if pp_group.world_size > 1:
+            from vllm.model_executor.models.eagle3_pp_utils import (
+                install_eagle3_pp_aux_propagation,
+            )
+
+            inner = self.model
+            if hasattr(inner, "get_language_model"):
+                inner = inner.get_language_model()
+            elif hasattr(inner, "language_model"):
+                inner = inner.language_model
+            if hasattr(inner, "model"):
+                inner = inner.model
+
+            if install_eagle3_pp_aux_propagation(inner):
+                self.model.make_empty_intermediate_tensors = (
+                    inner.make_empty_intermediate_tensors
+                )
+
+    def _configure_eagle3_pp_aux_for_non_last_rank(self) -> None:
+        """Configure aux layers + PP propagation on non-last PP ranks.
+
+        Called when Eagle3 aux is enabled but this rank doesn't have a
+        drafter (i.e. non-last PP rank).  Sets aux layers and installs the
+        propagation wrapper so aux states flow to the last rank.
+        """
+        aux_layers = self._get_eagle3_aux_layers_from_config()
+        if not aux_layers:
+            aux_layers = self.model.get_eagle3_default_aux_hidden_state_layers()
+        self.model.set_aux_hidden_state_layers(aux_layers)
+
+        from vllm.model_executor.models.eagle3_pp_utils import (
+            install_eagle3_pp_aux_propagation,
+        )
+
+        inner = self.model
+        if hasattr(inner, "get_language_model"):
+            inner = inner.get_language_model()
+        elif hasattr(inner, "language_model"):
+            inner = inner.language_model
+        if hasattr(inner, "model"):
+            inner = inner.model
+
+        if install_eagle3_pp_aux_propagation(inner):
+            self.model.make_empty_intermediate_tensors = (
+                inner.make_empty_intermediate_tensors
+            )
 
     def _get_eagle3_aux_layers_from_config(self) -> tuple[int, ...] | None:
         """Extract Eagle3 auxiliary layer indices from speculative config.
