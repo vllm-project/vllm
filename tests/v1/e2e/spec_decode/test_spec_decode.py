@@ -17,6 +17,7 @@ from tests.utils import (
     multi_gpu_marks,
     multi_gpu_only,
     single_gpu_only,
+    wait_for_rocm_memory_to_settle,
 )
 from vllm import LLM, SamplingParams
 from vllm.assets.base import VLLM_S3_BUCKET_URL
@@ -448,6 +449,9 @@ def _run_eagle_correctness(
         del ref_llm
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+        # ROCm frees VRAM lazily; wait so the spec engine started right after
+        # does not OOM on its startup memory guard.
+        wait_for_rocm_memory_to_settle()
 
         spec_llm = LLM(
             model=model_name,
@@ -485,6 +489,9 @@ def _run_eagle_correctness(
         del spec_llm
         torch.accelerator.empty_cache()
         cleanup_dist_env_and_memory()
+        # ROCm frees VRAM lazily; wait so the next parametrization's engine does
+        # not OOM on its startup memory guard.
+        wait_for_rocm_memory_to_settle()
 
 
 @single_gpu_only
