@@ -1,94 +1,155 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for GPUWorker weight-transfer pass-through behavior.
 
-The worker no longer contains transport, layerwise, or sparse logic: it only
-delegates to the configured weight transfer engine and tracks whether an update
-session is active. These tests verify that delegation and the session guard.
-"""
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
+import torch
 
+from vllm.config.parallel import ParallelConfig
+from vllm.config.weight_transfer import WeightTransferConfig
+from vllm.distributed.weight_transfer.base import SparseWeightPatch
+from vllm.distributed.weight_transfer.nccl_engine import NCCLWeightTransferEngine
 from vllm.v1.worker.gpu_worker import Worker
 
 
-class _RecordingEngine:
-    """Minimal stand-in for a weight transfer engine."""
-
-    def __init__(self, raise_on_update: bool = False):
-        self.raise_on_update = raise_on_update
-        self.started = False
-        self.finished = False
-        self.update_calls: list[dict] = []
-
-    def start_weight_update(self) -> None:
-        self.started = True
-
-    def update_weights(self, update_info: dict) -> None:
-        self.update_calls.append(update_info)
-        if self.raise_on_update:
-            raise ValueError("boom")
-
-    def finish_weight_update(self) -> None:
-        self.finished = True
+def _make_nccl_engine() -> NCCLWeightTransferEngine:
+    parallel_config = MagicMock(spec=ParallelConfig)
+    parallel_config.rank = 0
+    parallel_config.world_size = 1
+    parallel_config.data_parallel_rank = 0
+    parallel_config.data_parallel_index = 0
+    return NCCLWeightTransferEngine(
+        WeightTransferConfig(backend="nccl"),
+        parallel_config,
+        MagicMock(spec=torch.nn.Module),
+    )
 
 
-def _make_worker(engine: _RecordingEngine | None) -> Worker:
+def test_update_weights_sparse_dispatches_to_sparse_receive(monkeypatch):
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+
     worker = object.__new__(Worker)
-    worker.weight_transfer_engine = engine
-    worker._weight_update_active = False
-    return worker
+    worker.device = "cpu"
+    worker.parallel_config = SimpleNamespace(world_size=1)
+    worker.weight_transfer_engine = _make_nccl_engine()
+    worker._weight_update_active = True
+    worker._is_checkpoint_format = False
+
+    applied_patches = []
+
+    def apply_sparse_weight_patches(patches):
+        applied_patches.extend(patches)
+
+    worker.model_runner = SimpleNamespace(
+        apply_sparse_weight_patches=apply_sparse_weight_patches,
+    )
+
+    received_kinds = []
+
+    def receive_sparse_weights(update_info, apply_patches):
+        received_kinds.append(update_info.update_kind)
+        apply_patches(
+            [
+                SparseWeightPatch(
+                    name="layer.weight",
+                    indices=torch.tensor([1], dtype=torch.int32),
+                    values=torch.tensor([2.0], dtype=torch.float32),
+                )
+            ]
+        )
+
+    worker.weight_transfer_engine.receive_sparse_weights = receive_sparse_weights
+
+    Worker.update_weights(
+        worker,
+        {
+            "names": ["layer.weight"],
+            "dtype_names": ["float32"],
+            "shapes": [[4]],
+            "num_updates_list": [1],
+            "update_kind": "sparse_flat",
+        },
+    )
+
+    assert received_kinds == ["sparse_flat"]
+    assert len(applied_patches) == 1
+    assert torch.equal(applied_patches[0].indices, torch.tensor([1], dtype=torch.int32))
 
 
-def test_start_update_finish_delegates_to_engine():
-    engine = _RecordingEngine()
-    worker = _make_worker(engine)
+def test_update_weights_sparse_rejects_tp_or_pp(monkeypatch):
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
 
-    Worker.start_weight_update(worker)
-    assert engine.started is True
-    assert worker._weight_update_active is True
+    worker = object.__new__(Worker)
+    worker.device = "cpu"
+    worker.parallel_config = SimpleNamespace(world_size=2)
+    worker.weight_transfer_engine = _make_nccl_engine()
+    worker._weight_update_active = True
+    worker._is_checkpoint_format = False
+    worker.model_runner = SimpleNamespace(apply_sparse_weight_patches=lambda _: None)
 
-    Worker.update_weights(worker, {"names": ["w"]})
-    assert engine.update_calls == [{"names": ["w"]}]
-    assert worker._weight_update_active is True
-
-    Worker.finish_weight_update(worker)
-    assert engine.finished is True
+    with pytest.raises(NotImplementedError, match="TP=1 and PP=1"):
+        Worker.update_weights(
+            worker,
+            {
+                "names": ["layer.weight"],
+                "dtype_names": ["float32"],
+                "shapes": [[4]],
+                "num_updates_list": [1],
+                "update_kind": "sparse_flat",
+            },
+        )
     assert worker._weight_update_active is False
+    assert worker._is_checkpoint_format is True
 
 
-def test_double_start_raises():
-    worker = _make_worker(_RecordingEngine())
-    Worker.start_weight_update(worker)
-    with pytest.raises(RuntimeError, match="already"):
-        Worker.start_weight_update(worker)
+def test_update_weights_sparse_rejects_checkpoint_format(monkeypatch):
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
 
+    worker = object.__new__(Worker)
+    worker.device = "cpu"
+    worker.parallel_config = SimpleNamespace(world_size=1)
+    worker.weight_transfer_engine = _make_nccl_engine()
+    worker._weight_update_active = True
+    worker._is_checkpoint_format = True
+    worker.model_runner = SimpleNamespace(model=MagicMock())
 
-def test_update_without_start_raises():
-    worker = _make_worker(_RecordingEngine())
-    with pytest.raises(RuntimeError, match="start_weight_update must be called"):
-        Worker.update_weights(worker, {"names": ["w"]})
-
-
-def test_finish_without_start_raises():
-    worker = _make_worker(_RecordingEngine())
-    with pytest.raises(RuntimeError, match="without a matching"):
-        Worker.finish_weight_update(worker)
-
-
-def test_update_resets_active_on_error():
-    engine = _RecordingEngine(raise_on_update=True)
-    worker = _make_worker(engine)
-    Worker.start_weight_update(worker)
-
-    with pytest.raises(ValueError, match="boom"):
-        Worker.update_weights(worker, {"names": ["w"]})
-
-    # A failed update ends the session so the next start is clean.
+    with pytest.raises(ValueError, match="start_weight_update"):
+        Worker.update_weights(
+            worker,
+            {
+                "names": ["layer.weight"],
+                "dtype_names": ["float32"],
+                "shapes": [[4]],
+                "num_updates_list": [1],
+                "update_kind": "sparse_flat",
+            },
+        )
     assert worker._weight_update_active is False
+    assert worker._is_checkpoint_format is True
 
 
-def test_missing_engine_raises():
-    worker = _make_worker(None)
-    with pytest.raises(RuntimeError, match="Weight transfer not configured"):
-        Worker.start_weight_update(worker)
+def test_update_weights_resets_state_when_update_info_is_invalid(monkeypatch):
+    monkeypatch.setattr(torch.accelerator, "synchronize", lambda: None)
+
+    worker = object.__new__(Worker)
+    worker.device = "cpu"
+    worker.parallel_config = SimpleNamespace(world_size=1)
+    worker.weight_transfer_engine = _make_nccl_engine()
+    worker._weight_update_active = True
+    worker._is_checkpoint_format = False
+
+    with pytest.raises(ValueError, match="cannot be empty"):
+        Worker.update_weights(
+            worker,
+            {
+                "names": [],
+                "dtype_names": [],
+                "shapes": [],
+                "num_updates_list": [],
+                "update_kind": "sparse_flat",
+            },
+        )
+    assert worker._weight_update_active is False
+    assert worker._is_checkpoint_format is True
