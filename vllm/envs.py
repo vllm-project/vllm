@@ -203,6 +203,7 @@ if TYPE_CHECKING:
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
     VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
+    VLLM_MOONCAKE_LOAD_BATCH_PARALLELISM: int = 1
     VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO: float = 0.9
     MOONCAKE_PREFERRED_SEGMENT: str | None = None
     MOONCAKE_REQUESTER_LOCAL_HOSTNAME: str | None = None
@@ -1555,6 +1556,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # per-request batches are too small to saturate the link on their own.
     "VLLM_MOONCAKE_LOAD_RECV_THREADS": lambda: int(
         os.getenv("VLLM_MOONCAKE_LOAD_RECV_THREADS", "1")
+    ),
+    # Maximum number of sub-batches within a single request to dispatch
+    # concurrently when loading KV cache from the Mooncake store.  When a
+    # request's KV cache exceeds the disk-offload staging buffer it is split
+    # into multiple sub-batches; this controls how many of those sub-batches
+    # run in parallel via ThreadPoolExecutor.  Default 1 (serial, preserves
+    # existing behaviour).
+    "VLLM_MOONCAKE_LOAD_BATCH_PARALLELISM": lambda: int(
+        os.getenv("VLLM_MOONCAKE_LOAD_BATCH_PARALLELISM", "1")
     ),
     # Fraction of the owner's DirectIO staging buffer to fill per GET batch.
     "VLLM_MOONCAKE_DISK_STAGING_USABLE_RATIO": lambda: float(

@@ -19,7 +19,7 @@ import threading
 import time
 from collections import defaultdict
 from collections.abc import Callable, Sequence
-from concurrent.futures import Future, ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from typing import Any, Literal, TypeVar
 
@@ -765,6 +765,14 @@ class KVCacheStoreRecvingThread(KVTransferThread):
         # _invalid_block_ids can be access by both the Worker and RecvingThread
         self._invalid_block_ids_lock = threading.Lock()
         self._invalid_block_ids: set[int] = set()
+        # Pool for parallel sub-batch dispatch; created once and reused
+        # across requests (same pattern as the recv thread itself).
+        self._sub_batch_pool = ThreadPoolExecutor(
+            max_workers=max(1, envs.VLLM_MOONCAKE_LOAD_BATCH_PARALLELISM)
+        )
+        logger.info(
+            "Started Mooncake sub-batch load parallelism: %d", envs.VLLM_MOONCAKE_LOAD_BATCH_PARALLELISM
+        )
         self.disk_offload_buffer_budget_bytes = disk_offload_buffer_budget_bytes
         self.usable_disk_offload_buffer_budget_bytes = (
             None
@@ -784,6 +792,71 @@ class KVCacheStoreRecvingThread(KVTransferThread):
             invalid_block_ids = self._invalid_block_ids.copy()
             self._invalid_block_ids.clear()
         return invalid_block_ids
+
+    def _load_sub_batch(
+        self,
+        batch_keys: list[str],
+        batch_addrs: list[list[int]],
+        batch_sizes: list[list[int]],
+        batch_block_ids: list[int],
+        req_id: str,
+        tiers_by_key: dict[str, str] | None,
+    ) -> list[int]:
+        """Load one sub-batch of KV cache blocks from the Mooncake store.
+
+        Returns the list of block_ids that failed to load (empty on success).
+        Raises on systemic errors (e.g. network failure) after recording
+        the error metric — the caller decides whether to stop or continue.
+        """
+        batch_bytes = _sum_batch_bytes(batch_sizes)
+        load_get_start = time.perf_counter()
+        try:
+            res = self.store.batch_get_into_multi_buffers(
+                batch_keys, batch_addrs, batch_sizes
+            )
+        except Exception:
+            self._record_operation(
+                "load_get",
+                load_get_start,
+                len(batch_keys),
+                num_bytes=batch_bytes,
+                status="error",
+                num_failed_keys=len(batch_keys),
+            )
+            raise
+        if tiers_by_key is not None:
+            _log_mooncake_load_tier_summary(
+                req_id, batch_keys, res, tiers_by_key
+            )
+        failed_block_ids = [
+            block_id
+            for key, value, block_id in zip(
+                batch_keys, res, batch_block_ids, strict=True
+            )
+            if value < 0
+        ]
+        if failed_block_ids:
+            logger.warning(
+                "Failed to get %d Mooncake keys from sub-batch "
+                "for req %s (batch_keys=%d, first_failures=%s)",
+                len(failed_block_ids),
+                req_id,
+                len(batch_keys),
+                [
+                    (batch_keys[i], res[i])
+                    for i, v in enumerate(res)
+                    if v < 0
+                ][:3],
+            )
+        self._record_operation(
+            "load_get",
+            load_get_start,
+            len(batch_keys),
+            num_bytes=batch_bytes,
+            status="partial_failure" if failed_block_ids else "ok",
+            num_failed_keys=len(failed_block_ids),
+        )
+        return failed_block_ids
 
     def _handle_request(self, req_meta: ReqMeta):
         token_len = req_meta.load_spec.token_len  # type: ignore[union-attr]
@@ -871,68 +944,53 @@ class KVCacheStoreRecvingThread(KVTransferThread):
                     )
                     block_id_offset = next_block_id_offset
 
-        current_batch_keys: list[str] = key_list_c
-        current_batch_block_ids: list[int] = block_id_list_c
-        batch_bytes = 0
+        # parallel sub-batch dispatch
+        # Pre-fetch tier metadata serially (fast metadata query).
+        tiers_by_key_list: list[dict[str, str] | None] = []
+        for batch_keys, _, _, _ in load_batches:
+            tiers_by_key_list.append(
+                _get_replica_tiers_by_key(self.store, batch_keys)
+                if envs.VLLM_MOONCAKE_STORE_TIER_LOG
+                else None
+            )
+
+        all_failed_block_ids: list[int] = []
         try:
-            for batch_keys, batch_addrs, batch_sizes, batch_block_ids in load_batches:
-                current_batch_keys = batch_keys
-                current_batch_block_ids = batch_block_ids
-                batch_bytes = _sum_batch_bytes(batch_sizes)
-                tiers_by_key: dict[str, str] | None = None
-                if envs.VLLM_MOONCAKE_STORE_TIER_LOG:
-                    tiers_by_key = _get_replica_tiers_by_key(self.store, batch_keys)
-                # Reset so the recorded RPC duration excludes tier lookup.
-                load_get_start = time.perf_counter()
-                res = self.store.batch_get_into_multi_buffers(
-                    batch_keys, batch_addrs, batch_sizes
+            future_to_batch: dict[Future, tuple[list[int], list[str]]] = {
+                self._sub_batch_pool.submit(
+                    self._load_sub_batch,
+                    batch_keys,
+                    batch_addrs,
+                    batch_sizes,
+                    batch_block_ids,
+                    req_id,
+                    tiers_by_key,
+                ): (batch_block_ids, batch_keys)
+                for (batch_keys, batch_addrs, batch_sizes, batch_block_ids), tiers_by_key in zip(
+                    load_batches, tiers_by_key_list
                 )
-                if tiers_by_key is not None:
-                    _log_mooncake_load_tier_summary(
-                        req_id, batch_keys, res, tiers_by_key
-                    )
-                failed = [
-                    (key, value, block_id)
-                    for key, value, block_id in zip(
-                        batch_keys, res, batch_block_ids, strict=True
-                    )
-                    if value < 0
-                ]
-                self._record_operation(
-                    "load_get",
-                    load_get_start,
-                    len(batch_keys),
-                    num_bytes=batch_bytes,
-                    status="partial_failure" if failed else "ok",
-                    num_failed_keys=len(failed),
-                )
-                if failed:
-                    self._add_load_error_block_ids(
-                        [block_id for _, _, block_id in failed]
-                    )
+            }
+            saw_error = False
+            for future in as_completed(future_to_batch):
+                batch_block_ids, batch_keys = future_to_batch[future]
+                if saw_error:
+                    future.cancel()
+                    all_failed_block_ids.extend(batch_block_ids)
+                    continue
+                try:
+                    all_failed_block_ids.extend(future.result())
+                except Exception:
+                    all_failed_block_ids.extend(batch_block_ids)
                     logger.warning(
-                        "Failed to get %d Mooncake keys from sub-batch "
-                        "(batch_keys=%d, first_failures=%s)",
-                        len(failed),
-                        len(batch_keys),
-                        [(key, value) for key, value, _ in failed[:3]],
+                        "Failed to get Mooncake sub-batch %s for req %s",
+                        batch_keys[:3],
+                        req_id,
+                        exc_info=True,
                     )
-                    break
-        except Exception as e:
-            self._add_load_error_block_ids(current_batch_block_ids)
-            self._record_operation(
-                "load_get",
-                load_get_start,
-                len(current_batch_keys),
-                num_bytes=batch_bytes,
-                status="error",
-                num_failed_keys=len(current_batch_keys),
-            )
-            logger.warning(
-                "Failed to get Mooncake sub-batch %s, error: %s",
-                current_batch_keys[:3],
-                e,
-            )
+                    saw_error = True
+        finally:
+            if all_failed_block_ids:
+                self._add_load_error_block_ids(all_failed_block_ids)
 
         self.set_finished_request(req_id)
         self.request_queue.task_done()
