@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ctypes
 import dataclasses
 import itertools
 from collections.abc import Callable
@@ -402,6 +403,20 @@ def batch_memcpy(src_ptrs, dst_ptrs, sizes):
     batch = src_ptrs.shape[0]
     assert dst_ptrs.shape[0] == batch
     assert sizes.shape[0] == batch
+
+    if not hasattr(batch_memcpy_kernel, "__getitem__"):
+        if src_ptrs.device.type != "cpu" or dst_ptrs.device.type != "cpu":
+            raise RuntimeError(
+                "batch_memcpy CPU fallback requires CPU pointer tensors when "
+                "Triton launch syntax is unavailable."
+            )
+        for src, dst, size in zip(
+            src_ptrs.cpu().tolist(),
+            dst_ptrs.cpu().tolist(),
+            sizes.cpu().tolist(),
+        ):
+            ctypes.memmove(int(dst), int(src), int(size))
+        return
 
     grid = (batch,)
     BLOCK_SIZE = 1024
