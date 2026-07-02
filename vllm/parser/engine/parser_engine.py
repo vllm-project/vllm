@@ -255,7 +255,7 @@ class ParserEngine(Parser):
         types = extract_types_from_schema(schema)
         as_str = json.dumps(value, ensure_ascii=False)
         coerced = coerce_to_schema_type(as_str, types)
-        if coerced != value:
+        if type(coerced) is not type(value) or coerced != value:
             return coerced, True
         return value, False
 
