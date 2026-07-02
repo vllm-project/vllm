@@ -15,7 +15,8 @@ void topk_sigmoid(torch::stable::Tensor& topk_weights,
                   torch::stable::Tensor& topk_indices,
                   torch::stable::Tensor& token_expert_indices,
                   torch::stable::Tensor& gating_output, bool renormalize,
-                  std::optional<torch::stable::Tensor> bias);
+                  std::optional<torch::stable::Tensor> bias,
+                  double routed_scaling_factor);
 
 void topk_softplus_sqrt(
     torch::stable::Tensor& topk_weights, torch::stable::Tensor& topk_indices,

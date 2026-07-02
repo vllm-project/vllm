@@ -372,9 +372,7 @@ class DeepseekV2MoE(nn.Module):
             topk_group=getattr(config, "topk_group", 1),
             prefix=f"{prefix}.experts",
             scoring_func=getattr(config, "scoring_func", "softmax"),
-            # aiter applies routed_scaling_factor internally
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=not self.is_rocm_aiter_moe_enabled,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
