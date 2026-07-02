@@ -3,9 +3,14 @@
 
 import torch
 
+import vllm.envs as envs
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.allocation import set_triton_allocator
 
 AWQ_TRITON_SUPPORTED_GROUP_SIZES = [-1, 32, 64, 128]
+
+_TD_ALLOCATOR_DEVICES: set[torch.device] = set()
 
 
 @triton.jit
@@ -120,6 +125,7 @@ def awq_gemm_kernel(
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
     SPLIT_K: tl.constexpr,
+    USE_TD: tl.constexpr = False,
 ):
     pid = tl.program_id(axis=0)
     pid_z = tl.program_id(1)
@@ -172,13 +178,26 @@ def awq_gemm_kernel(
     a_ptrs = a_ptr + offsets_a
     b_ptrs = b_ptr + offsets_b
 
+    if USE_TD:
+        # Only the activation a is descriptor-loadable; b is packed 4-bit and
+        # dequantized in-loop.
+        a_desc = tl.make_tensor_descriptor(
+            a_ptr, shape=[M, K], strides=[K, 1],
+            block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
+        )
+
     # NOTE: Use this in TRITON_INTERPRET=1 mode instead of tl.cdiv
     # block_offset = BLOCK_SIZE_K * SPLIT_K
     # for k in range(0, (K + block_offset - 1) // (block_offset)):
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K * SPLIT_K)):
         masks_k = offsets_k < K
-        masks_a = masks_am[:, None] & masks_k[None, :]
-        a = tl.load(a_ptrs, mask=masks_a, other=0.0)
+        if USE_TD:
+            a = a_desc.load(
+                [pid_m * BLOCK_SIZE_M, pid_z * BLOCK_SIZE_K + k * BLOCK_SIZE_K * SPLIT_K]
+            )
+        else:
+            masks_a = masks_am[:, None] & masks_k[None, :]
+            a = tl.load(a_ptrs, mask=masks_a, other=0.0)
 
         masks_b = masks_k[:, None] & masks_bn[None, :]
         b = tl.load(b_ptrs, mask=masks_b, other=0.0)
@@ -293,6 +312,7 @@ def awq_gemm_triton(
     block_size_m: int = 32,
     block_size_n: int = 32,
     block_size_k: int = 32,
+    use_td: bool | None = None,
 ) -> torch.Tensor:
     M, K = input.shape
     N = qweight.shape[1] * 8
@@ -314,6 +334,21 @@ def awq_gemm_triton(
 
     result = torch.zeros((split_k_iters, M, N), dtype=scales.dtype, device=input.device)
 
+    # TD activation load; gated on contiguity, alignment and an unmasked K range.
+    td_override = use_td if use_td is not None else envs.VLLM_TRITON_AWQ_USE_TD
+    use_td = current_platform.is_xpu() if td_override is None else td_override
+    use_td = (
+        use_td
+        and input.stride(1) == 1
+        and (K * input.element_size()) % 16 == 0
+        and K % (block_size_k * split_k_iters) == 0
+        and (block_size_m & (block_size_m - 1)) == 0
+        and (block_size_k & (block_size_k - 1)) == 0
+    )
+    if use_td and input.device not in _TD_ALLOCATOR_DEVICES:
+        set_triton_allocator(input.device)
+        _TD_ALLOCATOR_DEVICES.add(input.device)
+
     # A = input, B = qweight, C = result
     # A = M x K, B = K x N, C = M x N
     awq_gemm_kernel[grid](
@@ -330,6 +365,7 @@ def awq_gemm_triton(
         BLOCK_SIZE_N=block_size_n,
         BLOCK_SIZE_K=block_size_k,
         SPLIT_K=split_k_iters,
+        USE_TD=use_td,
     )
 
     result = result.sum(0)
