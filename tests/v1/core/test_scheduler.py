@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -28,13 +28,18 @@ from vllm.v1.core.encoder_cache_manager import EncoderCacheManager
 from vllm.v1.core.kv_cache_utils import get_request_block_hasher, init_none_hash
 from vllm.v1.core.sched.output import CachedRequestData, SchedulerOutput
 from vllm.v1.core.sched.scheduler import Scheduler
-from vllm.v1.engine import FinishReason
+from vllm.v1.engine import EngineCoreOutputs, FinishReason
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
 )
-from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
+from vllm.v1.outputs import (
+    DraftTokenIds,
+    KVConnectorOutput,
+    LogprobsLists,
+    ModelRunnerOutput,
+)
 from vllm.v1.request import Request, RequestStatus
 from vllm.v1.structured_output import StructuredOutputManager
 
@@ -5208,3 +5213,516 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.num_preemptions == 0
     assert b.request_id not in req_to_blocks
+
+
+def _make_decode_model_runner_output(
+    scheduler_output: SchedulerOutput,
+    *,
+    token_id: int = 42,
+    token_ids: list[int] | None = None,
+    logprobs: LogprobsLists | None = None,
+) -> ModelRunnerOutput:
+    req_ids = list(scheduler_output.num_scheduled_tokens.keys())
+    if token_ids is not None:
+        assert len(token_ids) == len(req_ids)
+        sampled_token_ids = [[tid] for tid in token_ids]
+    else:
+        sampled_token_ids = [[token_id] for _ in req_ids]
+    return ModelRunnerOutput(
+        req_ids=req_ids,
+        req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
+        sampled_token_ids=sampled_token_ids,
+        logprobs=logprobs,
+        prompt_logprobs_dict={},
+        pooler_output=None,
+    )
+
+
+def _setup_decode_batch(
+    num_requests: int,
+    *,
+    max_tokens: int = 64,
+    ignore_eos: bool = True,
+    **scheduler_kwargs,
+):
+    scheduler = create_scheduler(
+        max_num_seqs=num_requests,
+        max_num_batched_tokens=max(num_requests * 32, 8192),
+        **scheduler_kwargs,
+    )
+    requests = create_requests(
+        num_requests=num_requests,
+        num_tokens=32,
+        max_tokens=max_tokens,
+        ignore_eos=ignore_eos,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    prefill_output = scheduler.schedule()
+    scheduler.update_from_output(
+        prefill_output,
+        _make_decode_model_runner_output(prefill_output, token_id=0),
+    )
+    for request in requests:
+        request.num_computed_tokens = len(request.prompt_token_ids)
+    return scheduler, requests
+
+
+def test_update_from_output_simple_decode_path():
+    """Decode-only batch uses the lightweight per-request update path."""
+    num_requests = 32
+    scheduler, requests = _setup_decode_batch(num_requests)
+    sched_output = scheduler.schedule()
+    assert all(
+        num_tokens == 1 for num_tokens in sched_output.num_scheduled_tokens.values()
+    )
+
+    model_runner_output = _make_decode_model_runner_output(sched_output, token_id=42)
+    assert scheduler._can_use_simple_update_path_global(
+        sched_output,
+        model_runner_output,
+        None,
+        has_logprobs=False,
+        has_pooler_outputs=False,
+        has_num_nans_in_logits=False,
+    )
+    engine_core_outputs = scheduler.update_from_output(
+        sched_output, model_runner_output
+    )
+
+    for request in requests:
+        assert request._output_token_ids == [0, 42]
+    assert len(engine_core_outputs[0].outputs) == num_requests
+    for output in engine_core_outputs[0].outputs:
+        assert output.new_token_ids == [42]
+        assert output.new_logprobs is None
+
+
+def test_update_from_output_simple_path_disabled_with_logprobs():
+    """Sample logprobs force the full update path but preserve correctness."""
+    import numpy as np
+
+    scheduler = create_scheduler(
+        max_num_seqs=4,
+        max_num_batched_tokens=8192,
+    )
+    requests = create_requests(
+        num_requests=4,
+        num_tokens=32,
+        max_tokens=64,
+        ignore_eos=True,
+    )
+    for request in requests:
+        request.sampling_params = SamplingParams(
+            ignore_eos=True,
+            max_tokens=64,
+            logprobs=1,
+        )
+        request.sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
+        scheduler.add_request(request)
+    prefill_output = scheduler.schedule()
+    scheduler.update_from_output(
+        prefill_output,
+        _make_decode_model_runner_output(prefill_output, token_id=0),
+    )
+    for request in requests:
+        request.num_computed_tokens = len(request.prompt_token_ids)
+
+    sched_output = scheduler.schedule()
+    num_reqs = len(sched_output.num_scheduled_tokens)
+    logprobs = LogprobsLists(
+        logprob_token_ids=np.array([[7, 8]] * num_reqs, dtype=np.int32),
+        logprobs=np.array([[-1.0, -2.0]] * num_reqs, dtype=np.float32),
+        sampled_token_ranks=np.array([0] * num_reqs, dtype=np.int32),
+        cu_num_generated_tokens=list(range(num_reqs + 1)),
+    )
+    model_runner_output = _make_decode_model_runner_output(
+        sched_output,
+        token_id=11,
+        logprobs=logprobs,
+    )
+
+    engine_core_outputs = scheduler.update_from_output(
+        sched_output, model_runner_output
+    )
+
+    for request in requests:
+        assert request._output_token_ids == [0, 11]
+    for output in engine_core_outputs[0].outputs:
+        assert output.new_logprobs is not None
+
+
+def test_update_from_output_simple_path_disabled_with_spec_decode():
+    """Scheduled spec-decode tokens disable the simple update path."""
+    scheduler, requests = _setup_decode_batch(4)
+    sched_output = scheduler.schedule()
+    sched_output = dataclasses.replace(
+        sched_output,
+        scheduled_spec_decode_tokens={requests[0].request_id: []},
+    )
+
+    model_runner_output = _make_decode_model_runner_output(sched_output, token_id=5)
+    engine_core_outputs = scheduler.update_from_output(
+        sched_output, model_runner_output
+    )
+
+    for request in requests:
+        assert request._output_token_ids[-1] == 5
+    assert len(engine_core_outputs[0].outputs) == len(requests)
+
+
+def _snapshot_request_states(requests: list[Request]) -> dict[str, tuple]:
+    return {
+        request.request_id: (
+            request.status,
+            list(request._output_token_ids),
+            request.stop_reason,
+            request.num_computed_tokens,
+        )
+        for request in requests
+    }
+
+
+def _snapshot_engine_outputs(
+    engine_core_outputs: dict[int, EngineCoreOutputs],
+) -> dict[str, tuple]:
+    snapshots: dict[str, tuple] = {}
+    for outputs in engine_core_outputs.values():
+        for output in outputs.outputs:
+            snapshots[output.request_id] = (
+                output.new_token_ids,
+                output.finish_reason,
+                output.stop_reason,
+                output.new_logprobs,
+                output.new_prompt_logprobs_tensors,
+                output.pooling_output,
+                output.routed_experts,
+                output.num_nans_in_logits,
+            )
+    return snapshots
+
+
+def _snapshot_running_queue(scheduler: Scheduler) -> list[str]:
+    return [request.request_id for request in scheduler.running]
+
+
+def _snapshot_output_order(
+    engine_core_outputs: dict[int, EngineCoreOutputs],
+) -> dict[int, list[str]]:
+    return {
+        client_index: [output.request_id for output in outputs.outputs]
+        for client_index, outputs in engine_core_outputs.items()
+    }
+
+
+def _assert_update_from_output_parity(
+    sched_simple: Scheduler,
+    sched_full: Scheduler,
+    requests_simple: list[Request],
+    requests_full: list[Request],
+    sched_out_simple: SchedulerOutput,
+    sched_out_full: SchedulerOutput,
+    mro_simple: ModelRunnerOutput,
+    mro_full: ModelRunnerOutput,
+) -> tuple[dict[int, EngineCoreOutputs], dict[int, EngineCoreOutputs]]:
+    outputs_simple = sched_simple.update_from_output(sched_out_simple, mro_simple)
+    with patch.object(
+        sched_full,
+        "_can_use_simple_update_path_global",
+        return_value=False,
+    ):
+        outputs_full = sched_full.update_from_output(sched_out_full, mro_full)
+
+    assert _snapshot_request_states(requests_simple) == _snapshot_request_states(
+        requests_full
+    )
+    assert _snapshot_engine_outputs(outputs_simple) == _snapshot_engine_outputs(
+        outputs_full
+    )
+    assert _snapshot_running_queue(sched_simple) == _snapshot_running_queue(sched_full)
+    assert _snapshot_output_order(outputs_simple) == _snapshot_output_order(
+        outputs_full
+    )
+    return outputs_simple, outputs_full
+
+
+def _run_multi_step_parity(
+    num_requests: int,
+    token_ids: list[int],
+    *,
+    max_tokens: int = 64,
+    ignore_eos: bool = True,
+    setup_requests_fn=None,
+) -> None:
+    sched_simple, requests_simple = _setup_decode_batch(
+        num_requests,
+        max_tokens=max_tokens,
+        ignore_eos=ignore_eos,
+    )
+    sched_full, requests_full = _setup_decode_batch(
+        num_requests,
+        max_tokens=max_tokens,
+        ignore_eos=ignore_eos,
+    )
+    if setup_requests_fn is not None:
+        setup_requests_fn(requests_simple)
+        setup_requests_fn(requests_full)
+
+    for token_id in token_ids:
+        sched_out_simple = sched_simple.schedule()
+        sched_out_full = sched_full.schedule()
+        mro_simple = _make_decode_model_runner_output(
+            sched_out_simple,
+            token_id=token_id,
+        )
+        mro_full = _make_decode_model_runner_output(sched_out_full, token_id=token_id)
+        assert sched_simple._can_use_simple_update_path_global(
+            sched_out_simple,
+            mro_simple,
+            None,
+            has_logprobs=False,
+            has_pooler_outputs=False,
+            has_num_nans_in_logits=False,
+        )
+        _assert_update_from_output_parity(
+            sched_simple,
+            sched_full,
+            requests_simple,
+            requests_full,
+            sched_out_simple,
+            sched_out_full,
+            mro_simple,
+            mro_full,
+        )
+
+
+def test_update_from_output_simple_vs_full_path_parity():
+    """Simple and full update paths produce identical request/output state."""
+    num_requests = 8
+    token_id = 42
+
+    sched_simple, requests_simple = _setup_decode_batch(num_requests)
+    sched_full, requests_full = _setup_decode_batch(num_requests)
+
+    sched_out_simple = sched_simple.schedule()
+    sched_out_full = sched_full.schedule()
+    mro_simple = _make_decode_model_runner_output(sched_out_simple, token_id=token_id)
+    mro_full = _make_decode_model_runner_output(sched_out_full, token_id=token_id)
+
+    assert sched_simple._can_use_simple_update_path_global(
+        sched_out_simple,
+        mro_simple,
+        None,
+        has_logprobs=False,
+        has_pooler_outputs=False,
+        has_num_nans_in_logits=False,
+    )
+
+    _assert_update_from_output_parity(
+        sched_simple,
+        sched_full,
+        requests_simple,
+        requests_full,
+        sched_out_simple,
+        sched_out_full,
+        mro_simple,
+        mro_full,
+    )
+
+
+def test_update_from_output_simple_vs_full_path_multi_step_parity():
+    """Simple and full paths stay identical over multiple decode steps."""
+    _run_multi_step_parity(8, [10, 11, 12])
+
+
+def test_update_from_output_mixed_batch_disables_global_fast_path():
+    """One spec-decode request disables the global fast path for the batch."""
+    num_requests = 32
+    sched_natural, requests_natural = _setup_decode_batch(num_requests)
+    sched_baseline, requests_baseline = _setup_decode_batch(num_requests)
+
+    sched_out_natural = sched_natural.schedule()
+    sched_out_baseline = sched_baseline.schedule()
+    special_req_id = requests_natural[-1].request_id
+    sched_out_natural = dataclasses.replace(
+        sched_out_natural,
+        scheduled_spec_decode_tokens={special_req_id: []},
+    )
+    sched_out_baseline = dataclasses.replace(
+        sched_out_baseline,
+        scheduled_spec_decode_tokens={special_req_id: []},
+    )
+    mro_natural = _make_decode_model_runner_output(sched_out_natural, token_id=42)
+    mro_baseline = _make_decode_model_runner_output(sched_out_baseline, token_id=42)
+
+    assert not sched_natural._can_use_simple_update_path_global(
+        sched_out_natural,
+        mro_natural,
+        None,
+        has_logprobs=False,
+        has_pooler_outputs=False,
+        has_num_nans_in_logits=False,
+    )
+
+    _assert_update_from_output_parity(
+        sched_natural,
+        sched_baseline,
+        requests_natural,
+        requests_baseline,
+        sched_out_natural,
+        sched_out_baseline,
+        mro_natural,
+        mro_baseline,
+    )
+
+
+def test_update_from_output_finish_parity_eos_mixed_batch():
+    """EOS stop and continued decode match between simple and full paths."""
+    sched_simple, requests_simple = _setup_decode_batch(
+        2,
+        max_tokens=10,
+        ignore_eos=False,
+    )
+    sched_full, requests_full = _setup_decode_batch(
+        2,
+        max_tokens=10,
+        ignore_eos=False,
+    )
+
+    sched_out_simple = sched_simple.schedule()
+    sched_out_full = sched_full.schedule()
+    req_ids = list(sched_out_simple.num_scheduled_tokens.keys())
+    token_ids = [
+        EOS_TOKEN_ID if req_id == requests_simple[0].request_id else 42
+        for req_id in req_ids
+    ]
+    mro_simple = _make_decode_model_runner_output(
+        sched_out_simple,
+        token_ids=token_ids,
+    )
+    mro_full = _make_decode_model_runner_output(sched_out_full, token_ids=token_ids)
+
+    _assert_update_from_output_parity(
+        sched_simple,
+        sched_full,
+        requests_simple,
+        requests_full,
+        sched_out_simple,
+        sched_out_full,
+        mro_simple,
+        mro_full,
+    )
+
+    assert len(sched_simple.running) == 1
+    assert requests_simple[0].status == RequestStatus.FINISHED_STOPPED
+    assert requests_simple[0].request_id not in {
+        request.request_id for request in sched_simple.running
+    }
+    assert requests_simple[1].status == RequestStatus.RUNNING
+
+
+def test_update_from_output_finish_parity_max_tokens():
+    """Max-tokens finish matches between simple and full paths."""
+    sched_simple, requests_simple = _setup_decode_batch(
+        2,
+        max_tokens=2,
+        ignore_eos=True,
+    )
+    sched_full, requests_full = _setup_decode_batch(
+        2,
+        max_tokens=2,
+        ignore_eos=True,
+    )
+
+    sched_out_simple = sched_simple.schedule()
+    sched_out_full = sched_full.schedule()
+    mro_simple = _make_decode_model_runner_output(sched_out_simple, token_id=10)
+    mro_full = _make_decode_model_runner_output(sched_out_full, token_id=10)
+
+    _assert_update_from_output_parity(
+        sched_simple,
+        sched_full,
+        requests_simple,
+        requests_full,
+        sched_out_simple,
+        sched_out_full,
+        mro_simple,
+        mro_full,
+    )
+
+    for request in requests_simple:
+        assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+        assert request._output_token_ids == [0, 10]
+    assert sched_simple.running == []
+
+
+def test_update_from_output_structured_output_mixed_path_parity():
+    """Per-request structured output falls back to full path without drift."""
+
+    def _mark_structured(requests: list[Request]) -> None:
+        requests[0].structured_output_request = Mock()
+
+    _run_multi_step_parity(
+        4,
+        [10, 11],
+        setup_requests_fn=_mark_structured,
+    )
+
+
+def test_update_from_output_skips_unscheduled_requests_in_stale_output():
+    """Stale model-runner req_ids must not crash update_from_output."""
+    scheduler = create_scheduler(max_num_seqs=2, max_num_batched_tokens=8192)
+    requests = create_requests(
+        num_requests=2,
+        num_tokens=32,
+        max_tokens=64,
+        ignore_eos=True,
+    )
+    for request in requests:
+        scheduler.add_request(request)
+
+    prefill_output = scheduler.schedule()
+    scheduler.update_from_output(
+        prefill_output,
+        _make_decode_model_runner_output(prefill_output, token_id=0),
+    )
+    for request in requests:
+        request.num_computed_tokens = len(request.prompt_token_ids)
+
+    scheduled_req = requests[0]
+    waiting_req = requests[1]
+    sched_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={scheduled_req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    scheduler.running = [scheduled_req]
+    scheduled_req.status = RequestStatus.RUNNING
+    waiting_req.status = RequestStatus.WAITING
+
+    stale_mro = ModelRunnerOutput(
+        req_ids=[scheduled_req.request_id, waiting_req.request_id],
+        req_id_to_index={
+            scheduled_req.request_id: 0,
+            waiting_req.request_id: 1,
+        },
+        sampled_token_ids=[[42], [99]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=None,
+    )
+
+    engine_core_outputs = scheduler.update_from_output(sched_output, stale_mro)
+
+    assert scheduled_req._output_token_ids == [0, 42]
+    assert waiting_req._output_token_ids == [0]
+    assert len(engine_core_outputs[0].outputs) == 1
+    assert engine_core_outputs[0].outputs[0].request_id == scheduled_req.request_id
+    assert engine_core_outputs[0].outputs[0].new_token_ids == [42]
