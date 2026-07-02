@@ -113,6 +113,79 @@ class FatreluAndMul(CustomOp):
         return out
 
 
+@triton.jit
+def _silu_and_mul_kernel(
+    out_ptr,
+    out_stride_batch,
+    out_stride_row,
+    input_ptr,
+    input_stride_batch,
+    input_stride_row,
+    m,
+    n,
+    limit,
+    BLOCK_SIZE: tl.constexpr,
+) -> None:
+    i = tl.program_id(axis=0).to(tl.int64)
+    j = tl.program_id(axis=1)
+    batch_index = i // m
+    assert batch_index == 1
+    row_index = i % m
+    d = n // 2
+
+    out_row_ptr = out_ptr + out_stride_batch * batch_index + out_stride_row * row_index
+    input_row_ptr = (
+        input_ptr + input_stride_batch * batch_index + input_stride_row * row_index
+    )
+    offsets = j * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < d
+
+    gate = tl.load(input_row_ptr + offsets, mask=mask).to(tl.float32)
+    up = tl.load(input_row_ptr + offsets + d, mask=mask).to(tl.float32)
+    if limit is not None:
+        gate_clamped = tl.minimum(gate, limit)
+        up_clamped = tl.minimum(tl.maximum(up, -limit), limit)
+        gate_silu = tl.sigmoid(gate_clamped) * gate_clamped
+        result = gate_silu * up_clamped
+    else:
+        gate_silu = tl.sigmoid(gate) * gate
+        result = gate_silu * up
+
+    result = result.to(input_ptr.dtype.element_ty)
+    tl.store(out_row_ptr + offsets, result, mask=mask)
+
+
+def silu_and_mul_triton(
+    output: torch.Tensor, input: torch.Tensor, limit: float | None = None
+):
+    ndim = input.ndim
+    assert ndim == 2 or ndim == 3
+
+    b = 1
+    if ndim == 3:
+        b, m, n = input.shape
+    else:
+        m, n = input.shape
+    assert n % 2 == 0
+    d = n // 2
+
+    def grid(meta):
+        return (b * m, triton.cdiv(d, meta["BLOCK_SIZE"]))
+
+    _silu_and_mul_kernel[grid](
+        output,
+        output.stride(0) if ndim == 3 else 0,
+        output.stride(-2),
+        input,
+        input.stride(0) if ndim == 3 else 0,
+        input.stride(-2),
+        m=m,
+        n=n,
+        limit=limit,
+        BLOCK_SIZE=1024,
+    )
+
+
 # --8<-- [start:silu_and_mul]
 @CustomOp.register("silu_and_mul")
 class SiluAndMul(CustomOp):
@@ -180,7 +253,9 @@ class SiluAndMulWithClamp(CustomOp):
         self.swiglu_limit = float(swiglu_limit)
         self.alpha = float(alpha)
         self.beta = float(beta)
-        if current_platform.is_rocm() or current_platform.is_xpu():
+        if current_platform.is_rocm():
+            self._forward_method = self.forward_triton
+        elif current_platform.is_xpu():
             self._forward_method = self.forward_native
         elif current_platform.is_cuda_alike():
             self.op = torch.ops._C.silu_and_mul_with_clamp
@@ -192,6 +267,13 @@ class SiluAndMulWithClamp(CustomOp):
         gate = torch.clamp(x[..., :d], max=self.swiglu_limit)
         up = torch.clamp(x[..., d:], min=-self.swiglu_limit, max=self.swiglu_limit)
         return gate * torch.sigmoid(self.alpha * gate) * (up + self.beta)
+
+    def forward_triton(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        output_shape = x.shape[:-1] + (d,)
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        silu_and_mul_triton(out, x, self.swiglu_limit)
+        return out
 
     def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
         d = x.shape[-1] // 2
