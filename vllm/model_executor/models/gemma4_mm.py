@@ -965,6 +965,16 @@ class Gemma4MultimodalEmbedder(nn.Module):
 # ---------------------------------------------------------------------------
 
 
+def _pad_and_stack(tensors: list[torch.Tensor]) -> torch.Tensor:
+    """Right-pad a list of variable-length tensors along dim 0 and stack them.
+
+    ``MultiModalFieldConfig.batched()`` returns a plain list instead of a
+    stacked tensor when batched audio items differ in length. Pad them back to
+    the batch max so the audio tower receives one ``(N, s_max, ...)`` tensor.
+    """
+    return nn.utils.rnn.pad_sequence(tensors, batch_first=True)
+
+
 @MULTIMODAL_REGISTRY.register_processor(
     Gemma4MultiModalProcessor,
     info=Gemma4ProcessingInfo,
@@ -1467,8 +1477,17 @@ class Gemma4ForConditionalGeneration(
         self,
         audio_input: Gemma4AudioInputs,
     ) -> list[torch.Tensor]:
-        input_features = audio_input["input_features_padded"].squeeze(1)
-        input_features_mask = audio_input["input_features_mask"].squeeze(1)
+        input_features = audio_input["input_features_padded"]
+        input_features_mask = audio_input["input_features_mask"]
+        # Variable-length audios in one batch arrive as a list (batched() can't
+        # stack differing shapes); pad to the batch max. Otherwise squeeze the
+        # already-stacked tensor as before.
+        if isinstance(input_features, list):
+            input_features = _pad_and_stack(input_features)
+            input_features_mask = _pad_and_stack(input_features_mask)
+        else:
+            input_features = input_features.squeeze(1)
+            input_features_mask = input_features_mask.squeeze(1)
 
         # Run audio tower — mask convention: True=valid, False=padding.
         audio_outputs = self.audio_tower(input_features, input_features_mask)
