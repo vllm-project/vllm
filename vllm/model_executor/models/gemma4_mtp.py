@@ -183,14 +183,14 @@ class Gemma4MTPAttention(nn.Module):
             hidden_size,
             self.total_num_heads * self.head_dim,
             bias=config.attention_bias,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=f"{prefix}.q_proj",
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=config.attention_bias,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
         )
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
@@ -305,7 +305,7 @@ class Gemma4MTPDecoderLayer(nn.Module):
             hidden_size=self.hidden_size,
             intermediate_size=text_config.intermediate_size,
             hidden_activation=text_config.hidden_activation,
-            quant_config=None,
+            quant_config=quant_config,
             prefix=f"{prefix}.mlp",
         )
 
