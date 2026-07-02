@@ -244,6 +244,12 @@ class Qwen3Parser(ParserEngine):
             return None, model_output
         return super().extract_reasoning(model_output, request)
 
+    @property
+    def implicit_reasoning_end_strs(self) -> list[str]:
+        if not self.thinking_enabled:
+            return []
+        return [TOOL_CALL_START]
+
     def is_reasoning_end(self, input_ids: list[int]) -> bool:
         if super().is_reasoning_end(input_ids):
             return True

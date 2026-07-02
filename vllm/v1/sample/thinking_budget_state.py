@@ -35,6 +35,7 @@ class ThinkingBudgetStateHolder:
 
     think_start_token_ids: list[int]
     think_end_token_ids: list[int]
+    implicit_think_end_token_ids: list[list[int]]
 
     def __init__(
         self,
@@ -55,11 +56,15 @@ class ThinkingBudgetStateHolder:
         if reasoning_config is None:
             self.think_start_token_ids = []
             self.think_end_token_ids = []
+            self.implicit_think_end_token_ids = []
         else:
             rs = reasoning_config.reasoning_start_token_ids
             re = reasoning_config.reasoning_end_token_ids
             self.think_start_token_ids = rs if rs else []
             self.think_end_token_ids = re if re else []
+            self.implicit_think_end_token_ids = (
+                getattr(reasoning_config, "implicit_reasoning_end_token_ids", []) or []
+            )
 
         self.device = device
         self._state: dict[int, dict[str, Any]] = {}
@@ -186,6 +191,18 @@ class ThinkingBudgetStateHolder:
                 return i
         return -1
 
+    @classmethod
+    def _find_last_any_sequence_index(
+        cls, target_list: list[int], token_id_sequences: list[list[int]]
+    ) -> int:
+        return max(
+            (
+                cls._find_last_sequence_index(target_list, token_ids)
+                for token_ids in token_id_sequences
+            ),
+            default=-1,
+        )
+
     def _init_state_entry(
         self, prompt_tok_ids: list[int] | None, thinking_token_budget: int
     ) -> dict[str, Any]:
@@ -288,6 +305,10 @@ class ThinkingBudgetStateHolder:
                 self.think_end_token_ids,
                 max(scan_offset, state["end_search_pos"] - (seq_len - 1)),
             )
+            implicit_end_thinking = self._find_last_any_sequence_index(
+                state.get("output_tok_ids", []), self.implicit_think_end_token_ids
+            )
+            end_thinking = max(end_thinking, implicit_end_thinking)
             state["end_thinking"] = end_thinking
             if end_thinking == -1:
                 state["end_search_pos"] = len(output_tok_ids)
