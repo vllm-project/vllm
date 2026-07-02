@@ -14,7 +14,7 @@ from torch._inductor.pattern_matcher import PatternMatcherPass
 import vllm.ir.ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.passes.fusion.rms_quant_fusion import (
-    _rms_input_weight_dtype_match,
+    _rms_weight_is_floating_point,
 )
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
@@ -51,18 +51,39 @@ _IR_RMS_NORM_OP = torch.ops.vllm_ir.rms_norm.default
 _IR_FUSED_ADD_RMS_NORM_OP = torch.ops.vllm_ir.fused_add_rms_norm.default
 
 
-def _norm_input_weight_dtype_match(match: pm.Match) -> bool:
-    """Prevent fusion when the norm input and weight dtypes differ (e.g. a Gemma
-    fp32 weight.float()+1 gamma), covering rms_norm and fused_add_rms_norm."""
+def _norm_weight_is_floating_point(match: pm.Match) -> bool:
+    """Only fuse when weight dtype is a supported floating-point type.
+
+    The fused CUDA kernels dispatch over both input and weight dtypes via
+    VLLM_STABLE_DISPATCH_FLOATING_TYPES, which covers float32, float16, and
+    bfloat16. Reject any other weight dtype to avoid a runtime dispatch error.
+    Mixed input/weight dtypes (e.g. bf16 input + fp32 Gemma gamma) are now
+    handled by the kernel's independent weight_t template parameter.
+    """
+    supported_dtypes = {torch.float32, torch.float16, torch.bfloat16}
     for node in match.nodes:
         if node.target == _IR_RMS_NORM_OP:
-            x, weight = node.args[0], node.args[1]
+            weight_arg_idx = 1
         elif node.target == _IR_FUSED_ADD_RMS_NORM_OP:
-            x, weight = node.args[0], node.args[2]
+            weight_arg_idx = 2
         else:
             continue
-        if isinstance(x, fx.Node) and isinstance(weight, fx.Node):
-            return x.meta["val"].dtype == weight.meta["val"].dtype
+        weight = node.args[weight_arg_idx]
+        if isinstance(weight, fx.Node):
+            weight_dtype = weight.meta["val"].dtype
+            if weight_dtype not in supported_dtypes:
+                return False
+            input_node = node.args[0]
+            if isinstance(input_node, fx.Node):
+                input_dtype = input_node.meta["val"].dtype
+                if input_dtype != weight_dtype:
+                    logger.warning_once(
+                        "Fusing RMSNorm+FP8quant with mixed dtypes: "
+                        "input=%s weight=%s. Weight will be upcast to "
+                        "float32 inside the kernel.",
+                        input_dtype,
+                        weight_dtype,
+                    )
     return True
 
 
@@ -383,7 +404,7 @@ class AllReduceRMSNormPattern(BasePattern):
             self.get_inputs(),
             pm.fwd_only,
             pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
+            extra_check=_rms_weight_is_floating_point,
         )
 
 
@@ -449,7 +470,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
             self.get_inputs(),
             pm.fwd_only,
             pm_pass,
-            extra_check=_norm_input_weight_dtype_match,
+            extra_check=_norm_weight_is_floating_point,
         )
 
         # Same pattern, but only return the output and not residual
@@ -462,7 +483,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
             self.get_inputs(),
             pm.fwd_only,
             pm_pass,
-            extra_check=_norm_input_weight_dtype_match,
+            extra_check=_norm_weight_is_floating_point,
         )
 
 
@@ -658,7 +679,7 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
             self.get_inputs(),
             pm.fwd_only,
             pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
+            extra_check=_rms_weight_is_floating_point,
         )
 
 
@@ -828,7 +849,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
             self.get_inputs(),
             pm.fwd_only,
             pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
+            extra_check=_rms_weight_is_floating_point,
         )
 
 

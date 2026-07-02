@@ -42,21 +42,36 @@ _RMS_NORM_OP = torch.ops.vllm_ir.rms_norm.default
 _FUSED_ADD_RMS_NORM_OP = torch.ops.vllm_ir.fused_add_rms_norm.default
 
 
-# TODO: extend rmsnorm quant kernels to support mixed input/weight dtypes,
-# and remove this check.
-def _rms_input_weight_dtype_match(match: pm.Match) -> bool:
-    """Prevent fusion when rms_norm input and weight dtypes differ."""
+def _rms_weight_is_floating_point(match: pm.Match) -> bool:
+    """Only fuse when weight dtype is a supported floating-point type.
+
+    The fused CUDA kernels dispatch over both input and weight dtypes via
+    VLLM_STABLE_DISPATCH_FLOATING_TYPES, which covers float32, float16, and
+    bfloat16. Reject any other weight dtype (e.g. int8) to avoid a runtime
+    dispatch error.
+    """
+    supported_dtypes = {torch.float32, torch.float16, torch.bfloat16}
     for node in match.nodes:
-        if node.target == _RMS_NORM_OP:
-            # rms_norm(x, weight, epsilon, variance_size)
-            x, weight = node.args[0], node.args[1]
-        elif node.target == _FUSED_ADD_RMS_NORM_OP:
-            # fused_add_rms_norm(x, residual, weight, epsilon, variance_size)
-            x, weight = node.args[0], node.args[2]
-        else:
-            continue
-        if isinstance(x, fx.Node) and isinstance(weight, fx.Node):
-            return x.meta["val"].dtype == weight.meta["val"].dtype
+        if node.target in (_RMS_NORM_OP, _FUSED_ADD_RMS_NORM_OP):
+            # rms_norm(x, weight, ...) — weight is always args[1]
+            # fused_add_rms_norm(x, residual, weight, ...) — weight is args[2]
+            weight_arg_idx = 1 if node.target == _RMS_NORM_OP else 2
+            weight = node.args[weight_arg_idx]
+            if isinstance(weight, fx.Node):
+                weight_dtype = weight.meta["val"].dtype
+                if weight_dtype not in supported_dtypes:
+                    return False
+                input_node = node.args[0]
+                if isinstance(input_node, fx.Node):
+                    input_dtype = input_node.meta["val"].dtype
+                    if input_dtype != weight_dtype:
+                        logger.warning_once(
+                            "Fusing RMSNorm+FP8quant with mixed dtypes: "
+                            "input=%s weight=%s. Weight will be upcast to "
+                            "float32 inside the kernel.",
+                            input_dtype,
+                            weight_dtype,
+                        )
     return True
 
 
@@ -219,7 +234,7 @@ class RMSNormStaticQuantPattern(RMSNormQuantPattern):
             inputs,
             pm.fwd_only,
             pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
+            extra_check=_rms_weight_is_floating_point,
         )
 
 
@@ -286,7 +301,7 @@ class FusedAddRMSNormStaticQuantPattern(RMSNormQuantPattern):
             inputs,
             pm.fwd_only,
             pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
+            extra_check=_rms_weight_is_floating_point,
         )
 
 
@@ -361,6 +376,9 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
+            # Upcast weight to input dtype if they differ (e.g. fp32 weight
+            # with bf16 activation). The kernel requires matching dtypes.
+            weight = weight.to(dtype=input.dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
 
@@ -393,7 +411,7 @@ class FusedAddRMSNormGroupQuantPattern(RMSNormQuantPattern):
             inputs,
             pm.fwd_only,
             pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
+            extra_check=_rms_weight_is_floating_point,
         )
 
 
@@ -459,6 +477,9 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
+            # Upcast weight to input dtype if they differ (e.g. fp32 weight
+            # with bf16 activation). The kernel requires matching dtypes.
+            weight = weight.to(dtype=input.dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
             at = auto_functionalized(
@@ -487,7 +508,7 @@ class RMSNormGroupQuantPattern(RMSNormQuantPattern):
             ],
             pm.fwd_only,
             pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
+            extra_check=_rms_weight_is_floating_point,
         )
 
 
@@ -520,6 +541,9 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
+            # Upcast weight to input dtype if they differ (e.g. fp32 weight
+            # with bf16 activation). The kernel requires matching dtypes.
+            weight = weight.to(dtype=input.dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
             scale = self.quant_matcher.make_scale(input)
@@ -546,7 +570,7 @@ class RMSNormDynamicQuantPattern(RMSNormQuantPattern):
             ],
             pm.fwd_only,
             pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
+            extra_check=_rms_weight_is_floating_point,
         )
 
 
@@ -582,6 +606,9 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
             # In case we're matching native rms-norm, conversions might be
             # optimized out. We convert here just to be safe.
             input = input.to(dtype=self.model_dtype)
+            # Upcast weight to input dtype if they differ (e.g. fp32 weight
+            # with bf16 activation). The kernel requires matching dtypes.
+            weight = weight.to(dtype=input.dtype)
 
             result = torch.empty_like(input, dtype=self.quant_dtype)
             scale = self.quant_matcher.make_scale(input)
@@ -611,7 +638,7 @@ class FusedAddRMSNormDynamicQuantPattern(RMSNormQuantPattern):
             inputs,
             pm.fwd_only,
             pm_pass,
-            extra_check=_rms_input_weight_dtype_match,
+            extra_check=_rms_weight_is_floating_point,
         )
 
 
