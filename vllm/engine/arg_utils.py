@@ -2292,6 +2292,11 @@ class EngineArgs:
 
         observability_config = self.create_observability_config()
 
+        if self.disable_log_stats and observability_config.otlp_traces_endpoint:
+            raise ValueError(
+                "Disabling log stats is not supported when otlp_traces_endpoint is set."
+            )
+
         # Compilation config overrides
         compilation_config = copy.deepcopy(self.compilation_config)
         if self.cudagraph_capture_sizes is not None:
