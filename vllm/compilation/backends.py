@@ -935,6 +935,18 @@ class VllmBackend:
             self.vllm_config
         )
 
+        # Lower native-resolved IR ops before Inductor's pointwise fusion
+        # patterns so their decomposition can fuse with surrounding ops
+        # (see #41804). Kernel-backed impls are left for the late pass
+        # inside PostGradPassManager.
+        early_pass_key = "post_grad_custom_pre_pass"
+        assert early_pass_key not in self.inductor_config
+        from .passes.ir.lowering_pass import VllmIRLoweringPass
+
+        self.inductor_config[early_pass_key] = VllmIRLoweringPass(
+            self.vllm_config, early=True
+        )
+
         # Make sure pre_grad_custom_pass is not pickled
         # as part of AOTAutograd built-in cache key
         # TODO(luka) is there a cleaner way to do this
