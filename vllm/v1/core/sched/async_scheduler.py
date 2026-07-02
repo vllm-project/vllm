@@ -19,11 +19,23 @@ class AsyncScheduler(Scheduler):
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         super()._update_after_schedule(scheduler_output)
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
+        scheduled_req_ids = scheduler_output.num_scheduled_tokens.keys()
+        scheduled_req_id_set = set(scheduled_req_ids)
+        # Speculative placeholders are only valid for the next scheduling
+        # window, where worker-side draft tokens can overwrite them.
+        for request in self.running:
+            if request.request_id in scheduled_req_id_set:
+                continue
+            if request.spec_token_ids and all(
+                token_id == -1 for token_id in request.spec_token_ids
+            ):
+                request.spec_token_ids = []
+
         # Use the latest num of scheduled draft tokens in next step as placeholder.
         self._spec_token_placeholders = [
             -1
         ] * scheduler_output.num_spec_tokens_to_schedule
-        for req_id in scheduler_output.num_scheduled_tokens:
+        for req_id in scheduled_req_ids:
             request = self.requests[req_id]
             if request.is_prefill_chunk:
                 continue

@@ -136,6 +136,33 @@ def test_preempt():
         assert req.num_output_tokens == abort_order_copy.index(i)
 
 
+def test_async_spec_placeholders_cleared_for_unscheduled_reqs():
+    scheduler = create_scheduler(
+        async_scheduling=True,
+        num_speculative_tokens=2,
+    )
+    req0, req1 = create_requests(num_requests=2, max_tokens=4)
+    scheduler.add_request(req0)
+    scheduler.add_request(req1)
+
+    scheduler.schedule()
+    assert req0.spec_token_ids == [-1, -1]
+    assert req1.spec_token_ids == [-1, -1]
+
+    scheduler.max_num_scheduled_tokens = 1
+    sched_output = scheduler.schedule()
+
+    assert req0.request_id in sched_output.num_scheduled_tokens
+    assert req1.request_id not in sched_output.num_scheduled_tokens
+    assert req1.spec_token_ids == []
+
+    scheduler.running = [req1, req0]
+    sched_output = scheduler.schedule()
+
+    assert req1.request_id in sched_output.num_scheduled_tokens
+    assert req1.request_id not in sched_output.scheduled_spec_decode_tokens
+
+
 def test_prefix_caching_for_prefill_dedup():
     CHUNK_SIZE = 1000
     BLOCK_SIZE = 16
