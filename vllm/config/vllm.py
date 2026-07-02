@@ -1471,6 +1471,17 @@ class VllmConfig:
                 "--all2all-backend=nixl_ep and install the matching kernels."
             )
 
+            if self.parallel_config.all2all_backend == "deepep_high_throughput" and (
+                self.parallel_config.nnodes > 1
+                or self.parallel_config.data_parallel_size
+                > self.parallel_config.data_parallel_size_local
+            ):
+                raise ValueError(
+                    "Dual batch overlap is not supported with the "
+                    "deepep_high_throughput all2all backend in a multi-node "
+                    "deployment."
+                )
+
             if not self.model_config.disable_cascade_attn:
                 self.model_config.disable_cascade_attn = True
                 logger.warning_once("Disabling cascade attention when DBO is enabled.")
