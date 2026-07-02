@@ -246,6 +246,9 @@ class RequestOffloadState:
     # In-flight job IDs. Per the connector's invariant, at any given time
     # this contains either a single load job, or one or more store jobs.
     transfer_jobs: set[int] = field(default_factory=set)
+    # True when request_finished() queued finish-time stores and asked the
+    # scheduler to keep request blocks alive until those stores complete.
+    delay_free_until_done: bool = False
 
     def __post_init__(self) -> None:
         self.group_states = tuple(
@@ -350,6 +353,7 @@ class OffloadingConnectorScheduler:
 
         self._req_status: dict[ReqId, RequestOffloadState] = {}
         self._current_batch_load_jobs: dict[int, TransferJob] = {}
+        self._current_batch_store_jobs: dict[int, TransferJob] = {}
         self._current_batch_jobs_to_flush: set[int] = set()
         # GPU block IDs allocated in the current engine step
         self._current_batch_allocated_block_ids: set[int] = set()
@@ -373,6 +377,13 @@ class OffloadingConnectorScheduler:
         # be freed before a request finishes).
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
+        # Finished requests whose blocks are delay-freed (request_finished
+        # returned True) but their finish-time stores were discarded by
+        # reset_cache before they could complete. Their finished_sending signal
+        # was never emitted, so we stash the req ids here and use them for the
+        # next update_connector_output() so the engine reclaims their blocks
+        self._reset_finished_sending: set[str] = set()
+
         self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
 
     def _generate_job_id(self) -> int:
@@ -381,9 +392,15 @@ class OffloadingConnectorScheduler:
         return job_id
 
     def _remove_pending_job(self, job_id: int, block_ids: list[int] | None) -> None:
+        # tolerate unregistered blocks: a delay-freed finish-time store never
+        # registers its non-sliding-window blocks (request_finished returns
+        # early before that loop), so cleanup may be asked to remove blocks that
+        # were never tracked
         for bid in block_ids or ():
-            pending = self._block_id_to_pending_jobs[bid]
-            pending.remove(job_id)
+            pending = self._block_id_to_pending_jobs.get(bid)
+            if pending is None:
+                continue
+            pending.discard(job_id)
             if not pending:
                 del self._block_id_to_pending_jobs[bid]
 
@@ -841,11 +858,182 @@ class OffloadingConnectorScheduler:
                         ):
                             group_state.block_ids[j] = 0
 
+    def _build_store_jobs_for_req(
+        self,
+        req_status: RequestOffloadState,
+        num_offloadable_tokens: int,
+    ) -> dict[int, TransferJob]:
+        block_size_factor = self.config.block_size_factor
+        store_jobs: dict[int, TransferJob] = {}
+        req = req_status.req
+        req_id = req.request_id
+
+        max_offload_tokens = req_status.max_offload_tokens
+        if max_offload_tokens is not None:
+            num_offloadable_tokens = min(num_offloadable_tokens, max_offload_tokens)
+
+        # Skip decode-phase blocks: clamp to the prompt length so only
+        # prefill (prompt) blocks become eligible for store. next_stored_idx
+        # never advances past this boundary, so decode blocks are never
+        # queued in this or any later step.
+        if self.config.offload_prompt_only:
+            num_offloadable_tokens = min(num_offloadable_tokens, req.num_prompt_tokens)
+
+        # Filter out blocks skipped due to sliding window attention / SSM
+        # or unreachable by the load path's alignment constraints.
+        new_offload_keys: list[OffloadKey] = []
+        for group_config, group_state in zip(
+            self.config.kv_group_configs, req_status.group_states
+        ):
+            num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
+            if group_config.is_eagle_group:
+                num_blocks = max(0, num_blocks - 1)
+
+            start_block_idx = group_state.next_stored_block_idx
+            if num_blocks <= start_block_idx:
+                continue
+            offload_keys = group_state.offload_keys[start_block_idx:num_blocks]
+            # For each block to offload, take the last corresponding GPU block.
+            # e.g. if block size factor is 3 and GPU block IDs are
+            # 1 5 6 7 2 4 9 3 8 then we'll take blocks 6 4 8.
+            # A block_id of 0 means either a sliding window / SSM skip
+            # or a stale entry that was zeroed out — skip it either way.
+            offload_block_ids = group_state.block_ids[
+                start_block_idx * block_size_factor + block_size_factor - 1 : num_blocks
+                * block_size_factor : block_size_factor
+            ]
+            assert len(offload_keys) == len(offload_block_ids)
+
+            alignment_block_count = group_config.alignment_block_count
+            tail = group_config.sliding_window_size_in_blocks
+
+            for key_idx, (offload_key, block_id) in enumerate(
+                zip(offload_keys, offload_block_ids)
+            ):
+                if block_id == 0:
+                    continue
+                # Skip SWA blocks that can never serve a load hit:
+                # within each full-attention alignment segment, only the
+                # trailing `tail` blocks are reachable by
+                # _sliding_window_lookup. For DeepSeek V4 with 100K
+                # tokens this reduces SWA stores by ~78%.
+                if alignment_block_count is not None:
+                    assert tail is not None
+                    abs_block_idx = start_block_idx + key_idx
+                    pos_in_segment = abs_block_idx % alignment_block_count
+                    if pos_in_segment < alignment_block_count - tail:
+                        continue
+                new_offload_keys.append(offload_key)
+
+        if not new_offload_keys:
+            req_status.advance_stored_idx(num_offloadable_tokens)
+            return store_jobs
+
+        store_output = self.manager.prepare_store(
+            new_offload_keys, req_status.req_context
+        )
+        if store_output is None:
+            logger.warning("Request %s: cannot store blocks", req_id)
+            return store_jobs
+
+        if not store_output.keys_to_store:
+            req_status.advance_stored_idx(num_offloadable_tokens)
+            return store_jobs
+
+        self._touch(req_status)
+
+        keys_to_store = set(store_output.keys_to_store)
+
+        group_sizes: list[int] = []
+        block_indices: list[int] = []
+        src_block_ids: list[int] = []
+        sliding_window_block_ids: list[int] = []
+        non_sliding_window_block_ids: list[int] = []
+        for group_config, group_state in zip(
+            self.config.kv_group_configs, req_status.group_states
+        ):
+            is_sliding_window = group_config.sliding_window_size_in_blocks is not None
+            num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
+            start_block_idx = group_state.next_stored_block_idx
+            block_ids = group_state.block_ids
+            num_group_blocks = 0
+            start_gpu_block_idx: int | None = None
+            for idx, offload_key in enumerate(
+                group_state.offload_keys[start_block_idx:num_blocks]
+            ):
+                if offload_key not in keys_to_store:
+                    continue
+
+                offloaded_block_idx = start_block_idx + idx
+
+                self._events_tracker.record_store(
+                    req, group_config, offloaded_block_idx, offload_key
+                )
+
+                gpu_block_idx = offloaded_block_idx * block_size_factor
+                for i in range(block_size_factor):
+                    block_id = block_ids[gpu_block_idx + i]
+                    if block_id == 0:
+                        continue
+                    if start_gpu_block_idx is None:
+                        start_gpu_block_idx = gpu_block_idx + i
+                    src_block_ids.append(block_id)
+                    num_group_blocks += 1
+                    if is_sliding_window:
+                        sliding_window_block_ids.append(block_id)
+                    else:
+                        non_sliding_window_block_ids.append(block_id)
+
+            group_sizes.append(num_group_blocks)
+            block_indices.append(start_gpu_block_idx or 0)
+            group_state.next_stored_block_idx = num_blocks
+
+        src_spec = GPULoadStoreSpec(
+            src_block_ids, group_sizes=group_sizes, block_indices=block_indices
+        )
+        dst_spec = store_output.store_spec
+
+        job_id = self._generate_job_id()
+        # a store can only be issued when no load is pending.
+        if req_status.transfer_jobs:
+            any_jid = next(iter(req_status.transfer_jobs))
+            assert self._jobs[any_jid].is_store
+        req_status.transfer_jobs.add(job_id)
+
+        # Watch sliding window blocks as they may get evicted
+        # before the request finishes
+        for bid in sliding_window_block_ids or ():
+            self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
+
+        # the non-sliding window blocks will be watched only
+        # when the request finishes
+        self._jobs[job_id] = TransferJobStatus(
+            req_id=req_id,
+            pending_count=self.config.num_workers,
+            keys=set(keys_to_store),
+            is_store=True,
+            non_sliding_window_block_ids=non_sliding_window_block_ids,
+            sliding_window_block_ids=sliding_window_block_ids or None,
+        )
+
+        store_jobs[job_id] = TransferJob(
+            req_id=req_id, src_spec=src_spec, dst_spec=dst_spec
+        )
+
+        logger.debug(
+            "Request %s offloading %s blocks upto %d tokens (job %d)",
+            req_id,
+            len(keys_to_store),
+            num_offloadable_tokens,
+            job_id,
+        )
+
+        return store_jobs
+
     def _build_store_jobs(
         self,
         scheduler_output: SchedulerOutput,
     ) -> dict[int, TransferJob]:
-        block_size_factor = self.config.block_size_factor
         store_jobs: dict[int, TransferJob] = {}
         for req_id in scheduler_output.num_scheduled_tokens:
             req_status = self._req_status.get(req_id)
@@ -857,169 +1045,8 @@ class OffloadingConnectorScheduler:
             num_tokens_after_batch = req.num_computed_tokens + num_scheduled_tokens
             # with async scheduling, some tokens may be missing
             num_offloadable_tokens = min(num_tokens_after_batch, req.num_tokens)
-            max_offload_tokens = req_status.max_offload_tokens
-            if max_offload_tokens is not None:
-                num_offloadable_tokens = min(num_offloadable_tokens, max_offload_tokens)
-
-            # Skip decode-phase blocks: clamp to the prompt length so only
-            # prefill (prompt) blocks become eligible for store. next_stored_idx
-            # never advances past this boundary, so decode blocks are never
-            # queued in this or any later step.
-            if self.config.offload_prompt_only:
-                num_offloadable_tokens = min(
-                    num_offloadable_tokens, req.num_prompt_tokens
-                )
-
-            # Filter out blocks skipped due to sliding window attention / SSM
-            # or unreachable by the load path's alignment constraints.
-            new_offload_keys: list[OffloadKey] = []
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
-            ):
-                num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
-                if group_config.is_eagle_group:
-                    num_blocks = max(0, num_blocks - 1)
-
-                start_block_idx = group_state.next_stored_block_idx
-                if num_blocks <= start_block_idx:
-                    continue
-                offload_keys = group_state.offload_keys[start_block_idx:num_blocks]
-                # For each block to offload, take the last corresponding GPU block.
-                # e.g. if block size factor is 3 and GPU block IDs are
-                # 1 5 6 7 2 4 9 3 8 then we'll take blocks 6 4 8.
-                # A block_id of 0 means either a sliding window / SSM skip
-                # or a stale entry that was zeroed out — skip it either way.
-                offload_block_ids = group_state.block_ids[
-                    start_block_idx * block_size_factor
-                    + block_size_factor
-                    - 1 : num_blocks * block_size_factor : block_size_factor
-                ]
-                assert len(offload_keys) == len(offload_block_ids)
-
-                alignment_block_count = group_config.alignment_block_count
-                tail = group_config.sliding_window_size_in_blocks
-
-                for key_idx, (offload_key, block_id) in enumerate(
-                    zip(offload_keys, offload_block_ids)
-                ):
-                    if block_id == 0:
-                        continue
-                    # Skip SWA blocks that can never serve a load hit:
-                    # within each full-attention alignment segment, only the
-                    # trailing `tail` blocks are reachable by
-                    # _sliding_window_lookup. For DeepSeek V4 with 100K
-                    # tokens this reduces SWA stores by ~78%.
-                    if alignment_block_count is not None:
-                        assert tail is not None
-                        abs_block_idx = start_block_idx + key_idx
-                        pos_in_segment = abs_block_idx % alignment_block_count
-                        if pos_in_segment < alignment_block_count - tail:
-                            continue
-                    new_offload_keys.append(offload_key)
-
-            if not new_offload_keys:
-                req_status.advance_stored_idx(num_offloadable_tokens)
-                continue
-
-            store_output = self.manager.prepare_store(
-                new_offload_keys, req_status.req_context
-            )
-            if store_output is None:
-                logger.warning("Request %s: cannot store blocks", req_id)
-                continue
-
-            if not store_output.keys_to_store:
-                req_status.advance_stored_idx(num_offloadable_tokens)
-                continue
-
-            self._touch(req_status)
-
-            keys_to_store = set(store_output.keys_to_store)
-
-            group_sizes: list[int] = []
-            block_indices: list[int] = []
-            src_block_ids: list[int] = []
-            sliding_window_block_ids: list[int] = []
-            non_sliding_window_block_ids: list[int] = []
-            for group_config, group_state in zip(
-                self.config.kv_group_configs, req_status.group_states
-            ):
-                is_sliding_window = (
-                    group_config.sliding_window_size_in_blocks is not None
-                )
-                num_blocks = num_offloadable_tokens // group_config.offloaded_block_size
-                start_block_idx = group_state.next_stored_block_idx
-                block_ids = group_state.block_ids
-                num_group_blocks = 0
-                start_gpu_block_idx: int | None = None
-                for idx, offload_key in enumerate(
-                    group_state.offload_keys[start_block_idx:num_blocks]
-                ):
-                    if offload_key not in keys_to_store:
-                        continue
-
-                    offloaded_block_idx = start_block_idx + idx
-
-                    self._events_tracker.record_store(
-                        req, group_config, offloaded_block_idx, offload_key
-                    )
-
-                    gpu_block_idx = offloaded_block_idx * block_size_factor
-                    for i in range(block_size_factor):
-                        block_id = block_ids[gpu_block_idx + i]
-                        if block_id == 0:
-                            continue
-                        if start_gpu_block_idx is None:
-                            start_gpu_block_idx = gpu_block_idx + i
-                        src_block_ids.append(block_id)
-                        num_group_blocks += 1
-                        if is_sliding_window:
-                            sliding_window_block_ids.append(block_id)
-                        else:
-                            non_sliding_window_block_ids.append(block_id)
-
-                group_sizes.append(num_group_blocks)
-                block_indices.append(start_gpu_block_idx or 0)
-                group_state.next_stored_block_idx = num_blocks
-
-            src_spec = GPULoadStoreSpec(
-                src_block_ids, group_sizes=group_sizes, block_indices=block_indices
-            )
-            dst_spec = store_output.store_spec
-
-            job_id = self._generate_job_id()
-            # a store can only be issued when no load is pending.
-            if req_status.transfer_jobs:
-                any_jid = next(iter(req_status.transfer_jobs))
-                assert self._jobs[any_jid].is_store
-            req_status.transfer_jobs.add(job_id)
-
-            # Watch sliding window blocks as they may get evicted
-            # before the request finishes
-            for bid in sliding_window_block_ids or ():
-                self._block_id_to_pending_jobs.setdefault(bid, set()).add(job_id)
-
-            # the non-sliding window blocks will be watched only
-            # when the request finishes
-            self._jobs[job_id] = TransferJobStatus(
-                req_id=req_id,
-                pending_count=self.config.num_workers,
-                keys=set(keys_to_store),
-                is_store=True,
-                non_sliding_window_block_ids=non_sliding_window_block_ids,
-                sliding_window_block_ids=sliding_window_block_ids or None,
-            )
-
-            store_jobs[job_id] = TransferJob(
-                req_id=req_id, src_spec=src_spec, dst_spec=dst_spec
-            )
-
-            logger.debug(
-                "Request %s offloading %s blocks upto %d tokens (job %d)",
-                req_id,
-                len(keys_to_store),
-                num_offloadable_tokens,
-                job_id,
+            store_jobs.update(
+                self._build_store_jobs_for_req(req_status, num_offloadable_tokens)
             )
 
         return store_jobs
@@ -1057,12 +1084,16 @@ class OffloadingConnectorScheduler:
                 for jid in self._block_id_to_pending_jobs[bid]
             )
 
+        store_jobs = self._current_batch_store_jobs
+        store_jobs.update(self._build_store_jobs(scheduler_output))
+
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
-            store_jobs=self._build_store_jobs(scheduler_output),
+            store_jobs=store_jobs,
             jobs_to_flush=self._current_batch_jobs_to_flush,
         )
         self._current_batch_load_jobs = {}
+        self._current_batch_store_jobs = {}
         self._current_batch_jobs_to_flush = set()
         self._current_batch_allocated_block_ids = set()
         return meta
@@ -1073,9 +1104,13 @@ class OffloadingConnectorScheduler:
         While True, build_connector_meta() and update_connector_output()
         continue to be called even when no requests are scheduled.
         """
-        return bool(self._jobs) or self.manager.has_pending_work()
+        return (
+            bool(self._jobs)
+            or bool(self._reset_finished_sending)
+            or self.manager.has_pending_work()
+        )
 
-    def update_connector_output(self, connector_output: KVConnectorOutput):
+    def update_connector_output(self, connector_output: KVConnectorOutput) -> set[str]:
         """
         Update KVConnector state from worker-side connectors output.
 
@@ -1120,6 +1155,13 @@ class OffloadingConnectorScheduler:
             else:
                 self._connector_stats.aggregate(transfer_stats)
 
+        finished_sending: set[str] = set()
+        if self._reset_finished_sending:
+            # Delay-freed requests whose stores were discarded by reset_cache.
+            # Emit them now so the engine frees their (still-held) blocks.
+            finished_sending.update(self._reset_finished_sending)
+            self._reset_finished_sending.clear()
+
         for job_id, count in meta.completed_jobs.items():
             assert count > 0
             if job_id < self._stale_job_threshold:
@@ -1156,7 +1198,12 @@ class OffloadingConnectorScheduler:
             del self._jobs[job_id]
             req_status.transfer_jobs.remove(job_id)
             if not req_status.transfer_jobs and req_status.req.is_finished():
+                if req_status.delay_free_until_done:
+                    self.manager.on_request_finished(req_status.req_context)
+                    finished_sending.add(job_status.req_id)
                 del self._req_status[job_status.req_id]
+
+        return finished_sending
 
     def get_stats(self) -> OffloadingConnectorStats | None:
         stats = self._connector_stats
@@ -1185,8 +1232,6 @@ class OffloadingConnectorScheduler:
             Optional KVTransferParams to be included in the request outputs
             returned by the engine.
         """
-        # TODO(orozery): possibly kickoff offload for last block
-        # which may have been deferred due to async scheduling
         req_status = self._req_status.get(request.request_id)
 
         if req_status is None:
@@ -1196,6 +1241,30 @@ class OffloadingConnectorScheduler:
             self.manager.on_new_request(req_context)
             self.manager.on_request_finished(req_context)
             return False, None
+
+        has_pending_load = any(
+            not self._jobs[job_id].is_store for job_id in req_status.transfer_jobs
+        )
+        if not has_pending_load:
+            req_status.update_offload_keys()
+            num_confirmed_computed_tokens = min(
+                request.num_computed_tokens,
+                request.num_tokens,
+            )
+            finish_store_jobs = self._build_store_jobs_for_req(
+                req_status, num_confirmed_computed_tokens
+            )
+            if finish_store_jobs:
+                # delay-free (return True) rather than register the blocks for
+                # flush and return False like the in-flight path below. a
+                # finish-time store is created too late to ride the flush fence:
+                # it is only submitted to the worker two steps later, after the
+                # next forward pass may have overwritten its (freed, reused)
+                # blocks. holding the blocks alive until the store completes and
+                # emits finished_sending is the only safe option.
+                req_status.delay_free_until_done = True
+                self._current_batch_store_jobs.update(finish_store_jobs)
+                return True, None
 
         self.manager.on_request_finished(req_status.req_context)
 
@@ -1241,6 +1310,12 @@ class OffloadingConnectorScheduler:
 
         for req_id, status in list(self._req_status.items()):
             if status.req.is_finished():
+                if status.delay_free_until_done:
+                    self.manager.on_request_finished(status.req_context)
+                    # The finish-time store is about to be discarded, so its
+                    # completion will never emit finished_sending. Surface the
+                    # req id later so the engine still frees its delayed blocks.
+                    self._reset_finished_sending.add(req_id)
                 del self._req_status[req_id]
 
         # Reset offloading manager cache

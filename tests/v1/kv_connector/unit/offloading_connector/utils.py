@@ -353,11 +353,12 @@ class RequestRunner:
         token_ids: list[int],
         kv_transfer_params: dict | None = None,
         skip_reading_prefix_cache: bool = False,
+        max_tokens: int = 1000,
     ):
         self.req_id += 1
 
         sampling_params = SamplingParams(
-            max_tokens=1000,
+            max_tokens=max_tokens,
             skip_reading_prefix_cache=skip_reading_prefix_cache or None,
         )
         sampling_params.update_from_generation_config({}, EOS_TOKEN_ID)
@@ -549,6 +550,15 @@ class RequestRunner:
                     self.scheduler.update_from_output(
                         prev_scheduler_output, prev_model_runner_output
                     )
+                needs_finish_store_drain = (
+                    self.connector_scheduler._current_batch_store_jobs
+                    or any(
+                        state.delay_free_until_done
+                        for state in self.connector_scheduler._req_status.values()
+                    )
+                )
+                if needs_finish_store_drain:
+                    continue
                 break
 
         self._parse_transfers()

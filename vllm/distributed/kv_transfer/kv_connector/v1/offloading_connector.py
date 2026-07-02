@@ -156,7 +156,14 @@ class OffloadingConnector(KVConnectorBase_V1, SupportsHMA):
 
     def update_connector_output(self, connector_output: KVConnectorOutput):
         assert self.connector_scheduler is not None
-        self.connector_scheduler.update_connector_output(connector_output)
+        finished_sending = self.connector_scheduler.update_connector_output(
+            connector_output
+        )
+        if finished_sending:
+            if connector_output.finished_sending is None:
+                connector_output.finished_sending = finished_sending
+            else:
+                connector_output.finished_sending.update(finished_sending)
 
     def request_finished(
         self,
