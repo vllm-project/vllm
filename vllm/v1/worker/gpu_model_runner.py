@@ -1744,7 +1744,20 @@ class GPUModelRunner(
         (-1 for new requests).
         """
 
+        scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
+        has_async_spec_placeholders = self.use_async_spec_decode and any(
+            token_id < 0
+            for spec_token_ids in scheduled_spec_tokens.values()
+            for token_id in spec_token_ids
+        )
         if self.input_batch.prev_sampled_token_ids is None:
+            if has_async_spec_placeholders:
+                raise RuntimeError(
+                    "Async speculative decoding scheduled placeholder draft "
+                    "tokens, but the worker has no cached sampled token IDs "
+                    "from the previous step to replace them before model "
+                    "execution."
+                )
             # Normal scheduling case
             self.input_ids.copy_to_gpu(total_num_scheduled_tokens)
             if self.enable_prompt_embeds:
@@ -1756,7 +1769,6 @@ class GPUModelRunner(
         # iteration won't have entries in input_ids_cpu and need to be copied
         # on the GPU from prev_sampled_token_ids.
         prev_positions = self.prev_positions.np[:num_reqs]
-        scheduled_spec_tokens = scheduler_output.scheduled_spec_decode_tokens
         sample_flattened_indices: list[int] = []
         spec_flattened_indices: list[int] = []
         prev_draft_token_indices: list[int] = []
@@ -1764,13 +1776,17 @@ class GPUModelRunner(
         common_indices_match = True
         max_flattened_index = -1
         total_num_spec_tokens = 0
+        req_ids_with_placeholder_spec_without_prev: list[str] = []
 
         for cur_index in range(num_reqs):
             prev_index = prev_positions[cur_index]
+            req_id = self.input_batch.req_ids[cur_index]
             if prev_index < 0:
+                spec_token_ids = scheduled_spec_tokens.get(req_id, ())
+                if any(token_id < 0 for token_id in spec_token_ids):
+                    req_ids_with_placeholder_spec_without_prev.append(req_id)
                 continue
             prev_indices.append(prev_index)
-            req_id = self.input_batch.req_ids[cur_index]
             # We need to compute the flattened input_ids index of the
             # last token in each common request.
             draft_len = len(scheduled_spec_tokens.get(req_id, ()))
@@ -1793,6 +1809,31 @@ class GPUModelRunner(
             prev_draft_token_indices.extend(range(start, start + draft_len))
             common_indices_match &= prev_index == flattened_index
             max_flattened_index = max(max_flattened_index, flattened_index)
+
+        if req_ids_with_placeholder_spec_without_prev:
+            raise RuntimeError(
+                "Async speculative decoding scheduled placeholder draft "
+                "tokens for requests that are not present in the previous "
+                f"worker batch: {req_ids_with_placeholder_spec_without_prev}."
+            )
+
+        prev_draft_token_ids = self.input_batch.prev_draft_token_ids
+        if prev_draft_token_ids is None and torch.is_tensor(self._draft_token_ids):
+            prev_draft_token_ids = self._draft_token_ids
+        if spec_flattened_indices:
+            if prev_draft_token_ids is None:
+                raise RuntimeError(
+                    "Async speculative decoding scheduled draft tokens, but "
+                    "the worker has no cached draft token IDs to replace the "
+                    "scheduler placeholders before model execution."
+                )
+            if max(prev_draft_token_indices) >= prev_draft_token_ids.numel():
+                raise RuntimeError(
+                    "Async speculative decoding scheduled draft tokens that "
+                    "do not fit the cached draft token tensor. "
+                    f"max index: {max(prev_draft_token_indices)}, "
+                    f"cached tokens: {prev_draft_token_ids.numel()}."
+                )
 
         num_common_tokens = len(sample_flattened_indices)
         total_without_spec = total_num_scheduled_tokens - total_num_spec_tokens
@@ -1837,10 +1878,10 @@ class GPUModelRunner(
         )
 
         # Scatter the draft tokens after the sampled tokens are scattered.
-        if self._draft_token_ids is None or not spec_flattened_indices:
+        if not spec_flattened_indices:
             return
 
-        assert isinstance(self._draft_token_ids, torch.Tensor)
+        assert prev_draft_token_ids is not None
         draft_tokens_index_tensor = torch.tensor(
             spec_flattened_indices, dtype=torch.int64, pin_memory=PIN_MEMORY
         ).to(self.device, non_blocking=True)
@@ -1850,7 +1891,7 @@ class GPUModelRunner(
 
         # because input_ids dtype is torch.int32,
         # so convert draft_token_ids to torch.int32 here.
-        draft_token_ids = self._draft_token_ids.to(dtype=torch.int32)
+        draft_token_ids = prev_draft_token_ids.to(dtype=torch.int32)
 
         self.input_ids.gpu.scatter_(
             dim=0,
@@ -4487,6 +4528,7 @@ class GPUModelRunner(
         self._draft_token_req_ids = None
         self.valid_sampled_token_count_gpu = None
         self.input_batch.prev_sampled_token_ids = None
+        self.input_batch.prev_draft_token_ids = None
 
         def propose_draft_token_ids(sampled_token_ids):
             assert spec_decode_common_attn_metadata is not None
@@ -4502,6 +4544,10 @@ class GPUModelRunner(
                     spec_decode_common_attn_metadata,
                     slot_mappings,
                 )
+                if self.use_async_spec_decode and torch.is_tensor(
+                    self._draft_token_ids
+                ):
+                    self.input_batch.prev_draft_token_ids = self._draft_token_ids
                 self._copy_draft_token_ids_to_cpu(scheduler_output)
 
         spec_config = self.speculative_config
@@ -4579,6 +4625,8 @@ class GPUModelRunner(
                 ).expand(len(self.input_batch.req_ids), self.num_spec_tokens)
                 self._draft_probs = None
                 self._draft_prob_req_ids = None
+                if self.use_async_spec_decode:
+                    self.input_batch.prev_draft_token_ids = self._draft_token_ids
                 self._copy_draft_token_ids_to_cpu(scheduler_output, zeros_only=True)
 
         with record_function_or_nullcontext("gpu_model_runner: bookkeep"):
