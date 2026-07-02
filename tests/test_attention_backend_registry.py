@@ -7,6 +7,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.registry import (
     AttentionBackendEnum,
     MambaAttentionBackendEnum,
+    get_backend_config,
     register_backend,
 )
 
@@ -167,3 +168,98 @@ def test_register_custom_mamba_backend_with_class_path():
     backend_cls = MambaAttentionBackendEnum.CUSTOM.get_class()
     assert backend_cls.get_name() == "CUSTOM_MAMBA"
     assert backend_cls.get_impl_cls() == CustomMambaAttentionImpl
+
+
+def test_register_backend_config_with_class_path():
+    """Test passing backend_config via register_backend() with class_path."""
+    config = {"log_level": "debug", "sample_rate": 0.1}
+
+    # Clean up any prior state
+    AttentionBackendEnum.CUSTOM.clear_override()
+    AttentionBackendEnum.CUSTOM.clear_config()
+
+    register_backend(
+        backend=AttentionBackendEnum.CUSTOM,
+        class_path="tests.test_attention_backend_registry.CustomAttentionBackend",
+        backend_config=config,
+    )
+
+    # Config should be retrievable via the enum method
+    assert AttentionBackendEnum.CUSTOM.get_config() == config
+    # Config should also be retrievable via the module-level function
+    assert get_backend_config(AttentionBackendEnum.CUSTOM) == config
+
+    # Clean up
+    AttentionBackendEnum.CUSTOM.clear_config()
+    assert AttentionBackendEnum.CUSTOM.get_config() is None
+
+
+def test_register_backend_config_with_decorator():
+    """Test passing backend_config via the @register_backend decorator."""
+    config = {"enable_tracing": True}
+
+    # Clean up any prior state
+    AttentionBackendEnum.CUSTOM.clear_override()
+    AttentionBackendEnum.CUSTOM.clear_config()
+
+    @register_backend(AttentionBackendEnum.CUSTOM, backend_config=config)
+    class _DecoratedBackend(CustomAttentionBackend):
+        pass
+
+    assert AttentionBackendEnum.CUSTOM.get_config() == config
+    assert get_backend_config(AttentionBackendEnum.CUSTOM) == config
+
+    # Clean up
+    AttentionBackendEnum.CUSTOM.clear_config()
+    AttentionBackendEnum.CUSTOM.clear_override()
+
+
+def test_register_mamba_backend_config():
+    """Test passing backend_config for a MambaAttentionBackendEnum."""
+    config = {"conv_width": 4}
+
+    MambaAttentionBackendEnum.CUSTOM.clear_config()
+
+    register_backend(
+        backend=MambaAttentionBackendEnum.CUSTOM,
+        class_path="tests.test_attention_backend_registry.CustomMambaAttentionBackend",
+        is_mamba=True,
+        backend_config=config,
+    )
+
+    assert MambaAttentionBackendEnum.CUSTOM.get_config() == config
+    assert get_backend_config(MambaAttentionBackendEnum.CUSTOM) == config
+
+    # Clean up
+    MambaAttentionBackendEnum.CUSTOM.clear_config()
+
+
+def test_backend_config_defaults_to_none():
+    """Test that config is None when not explicitly set."""
+    AttentionBackendEnum.CUSTOM.clear_config()
+
+    # Register without backend_config
+    register_backend(
+        backend=AttentionBackendEnum.CUSTOM,
+        class_path="tests.test_attention_backend_registry.CustomAttentionBackend",
+    )
+
+    assert AttentionBackendEnum.CUSTOM.get_config() is None
+    assert get_backend_config(AttentionBackendEnum.CUSTOM) is None
+
+
+def test_backend_config_clear():
+    """Test that clear_config removes the stored config."""
+    config = {"key": "value"}
+
+    AttentionBackendEnum.CUSTOM.clear_config()
+
+    register_backend(
+        backend=AttentionBackendEnum.CUSTOM,
+        class_path="tests.test_attention_backend_registry.CustomAttentionBackend",
+        backend_config=config,
+    )
+    assert AttentionBackendEnum.CUSTOM.get_config() == config
+
+    AttentionBackendEnum.CUSTOM.clear_config()
+    assert AttentionBackendEnum.CUSTOM.get_config() is None
