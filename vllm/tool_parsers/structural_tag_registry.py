@@ -60,7 +60,6 @@ XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS = frozenset(
         "qwen_3_5",
         "qwen_3_coder",
         "qwen_3",
-        "harmony",
         "deepseek_v3_2",
         "glm_4_7",
         "deepseek_v4",
@@ -84,7 +83,7 @@ def register_vllm_structural_tag(model: str):
     return decorator
 
 
-def _any_tool_strict(
+def any_tool_strict(
     tools: Sequence[ChatCompletionToolsParam | ResponsesTool],
 ) -> bool:
     for tool in tools:
@@ -106,11 +105,11 @@ def get_model_structural_tag(
     if not tools or tool_choice == "none":
         return None
 
-    if tool_choice == "auto" and not _any_tool_strict(tools):
+    if tool_choice == "auto" and not any_tool_strict(tools):
         return None
 
-    dumped_tools = [_dump_tool_for_xgrammar(tool) for tool in tools]
-    dumped_tool_choice = _dump_tool_choice_for_xgrammar(tool_choice)
+    dumped_tools = [dump_tool_for_xgrammar(tool) for tool in tools]
+    dumped_tool_choice = dump_tool_choice_for_xgrammar(tool_choice)
 
     if model in _VLLM_STRUCTURAL_TAG_REGISTRY:
         function_tools, builtin_tools, simplified_tool_choice = normalize_tool_choice(
@@ -136,7 +135,7 @@ def get_model_structural_tag(
     )
 
 
-def _dump_tool_for_xgrammar(
+def dump_tool_for_xgrammar(
     tool: ChatCompletionToolsParam | ResponsesTool,
 ) -> dict[str, Any]:
     """Convert tool objects to xgrammar's Chat Completions tool protocol."""
@@ -156,7 +155,7 @@ def _dump_tool_for_xgrammar(
     return dict(dumped_tool)
 
 
-def _dump_tool_choice_for_xgrammar(
+def dump_tool_choice_for_xgrammar(
     tool_choice: ToolChoice,
 ) -> dict[str, Any] | str | None:
     """Convert tool_choice objects to xgrammar's expected protocol."""
@@ -204,7 +203,7 @@ def _dump_allowed_tool_ref_for_xgrammar(tool_ref: AllowedToolRef) -> AllowedTool
     return tool_ref
 
 
-def _get_function_parameters(function) -> dict[str, Any] | bool:
+def get_function_parameters(function) -> dict[str, Any] | bool:
     if getattr(function, "strict", None) is False:
         return True
     return function.parameters if function.parameters is not None else True
@@ -225,7 +224,7 @@ def _hermes_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
         TagFormat(
             begin=begin + tool.function.name + arguments_field_prefix,
             content=JSONSchemaFormat(
-                json_schema=_get_function_parameters(tool.function)
+                json_schema=get_function_parameters(tool.function)
             ),
             end=end,
         )
@@ -274,7 +273,7 @@ def _minimax_tool_tags(tools: list[FunctionToolParam]) -> list[TagFormat]:
         TagFormat(
             begin=f'<invoke name="{tool.function.name}">\n',
             content=JSONSchemaFormat(
-                json_schema=_get_function_parameters(tool.function),
+                json_schema=get_function_parameters(tool.function),
                 style="minimax_xml",
             ),
             end="</invoke>\n",

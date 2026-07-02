@@ -3,6 +3,7 @@
 
 import json
 from collections.abc import Sequence
+from typing import Any, Literal
 
 import pytest
 from openai_harmony import (
@@ -14,13 +15,17 @@ from openai_harmony import (
 )
 from transformers import AutoTokenizer
 
+from vllm.config import DeviceConfig, StructuredOutputsConfig, VllmConfig
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.parser.harmony_utils import (
     get_encoding,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.parser.harmony import HarmonyParser
 from vllm.parser.parser_manager import ParserManager
+from vllm.v1.structured_output.backend_types import StructuredOutputOptions
+from vllm.v1.structured_output.backend_xgrammar import XgrammarBackend
 
 REASONING_MODEL_NAME = "openai/gpt-oss-20b"
 
@@ -821,3 +826,266 @@ class TestProcessChunk:
             ("analysis", "One"),
             ("final", "Two"),
         ]
+
+
+class TestAdjustRequest:
+    REQUEST_TEXT = "Hello"
+    TOOL_TYPE = "function"
+    TOOL_1_NAME = "get_user_location"
+    TOOL_2_NAME = "get_weather"
+    TOOLS = [
+        {
+            "name": TOOL_1_NAME,
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": [],
+            },
+        },
+        {
+            "name": TOOL_2_NAME,
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+                "required": ["city"],
+            },
+        },
+    ]
+    OUTPUT_SCHEMA = {
+        "type": "object",
+        "properties": {"answer": {"type": "string"}},
+        "required": ["answer"],
+    }
+
+    ANALYSIS = "<|channel|>analysis<|message|>analysis message<|end|><|start|>assistant"
+    COMMENTARY = (
+        "<|channel|>commentary<|message|>commentary message<|end|><|start|>assistant"
+    )
+    TOOL_CALL_1 = (
+        ANALYSIS + f"<|channel|>commentary to=functions.{TOOL_1_NAME} json<|message|>"
+        "{}<|call|>"
+    )
+    TOOL_CALL_2 = (
+        ANALYSIS + f"<|channel|>commentary to=functions.{TOOL_2_NAME} json<|message|>"
+        '{"city": "Tokyo"}<|call|>'
+    )
+    FINAL_JSON_SCHEMA = (
+        ANALYSIS
+        + '<|channel|>final <|constrain|>json<|message|>{"answer": "Tokyo"}<|end|>'
+    )
+    FINAL_JSON_OBJECT = (
+        ANALYSIS
+        + '<|channel|>final <|constrain|>json<|message|>{"city": "Tokyo"}<|end|>'
+    )
+    FINAL_TEXT_ONLY = ANALYSIS + "<|channel|>final<|message|>Final only<|end|>"
+
+    @pytest.fixture(scope="class")
+    def xgrammar_backend(self, gpt_oss_tokenizer):
+        return XgrammarBackend(
+            VllmConfig(
+                device_config=DeviceConfig(device="cpu"),
+                structured_outputs_config=StructuredOutputsConfig(backend="xgrammar"),
+            ),
+            tokenizer=gpt_oss_tokenizer,
+            vocab_size=len(gpt_oss_tokenizer.get_vocab()),
+        )
+
+    @staticmethod
+    def _build_request(
+        request_kind: Literal["chat", "responses"],
+        tool_choice: str = "none",
+        strict_tools: bool = False,
+        response_format_type: str | None = None,
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        data: dict[str, Any] = {
+            "model": REASONING_MODEL_NAME,
+        }
+        if request_kind == "chat":
+            data["messages"] = [
+                {
+                    "role": "user",
+                    "content": TestAdjustRequest.REQUEST_TEXT,
+                }
+            ]
+        else:
+            data["input"] = TestAdjustRequest.REQUEST_TEXT
+
+        if request_kind == "chat":
+            data["tools"] = [
+                {
+                    "type": TestAdjustRequest.TOOL_TYPE,
+                    "function": {"strict": strict_tools, **tool_def},
+                }
+                for tool_def in TestAdjustRequest.TOOLS
+            ]
+            data["tool_choice"] = (
+                {
+                    "type": TestAdjustRequest.TOOL_TYPE,
+                    "function": {"name": TestAdjustRequest.TOOL_2_NAME},
+                }
+                if tool_choice == "named"
+                else tool_choice
+            )
+        else:
+            data["tools"] = [
+                {
+                    "type": TestAdjustRequest.TOOL_TYPE,
+                    "strict": strict_tools,
+                    **tool_def,
+                }
+                for tool_def in TestAdjustRequest.TOOLS
+            ]
+            data["tool_choice"] = (
+                {
+                    "type": TestAdjustRequest.TOOL_TYPE,
+                    "name": TestAdjustRequest.TOOL_2_NAME,
+                }
+                if tool_choice == "named"
+                else tool_choice
+            )
+
+        if response_format_type == "json_schema":
+            schema_format = {
+                "name": "answer_format",
+                "schema": TestAdjustRequest.OUTPUT_SCHEMA,
+                "strict": True,
+            }
+            if request_kind == "chat":
+                data["response_format"] = {
+                    "type": "json_schema",
+                    "json_schema": schema_format,
+                }
+            else:
+                data["text"] = {
+                    "format": {
+                        "type": "json_schema",
+                        **schema_format,
+                    }
+                }
+        elif response_format_type == "json_object":
+            if request_kind == "chat":
+                data["response_format"] = {"type": "json_object"}
+            else:
+                data["text"] = {"format": {"type": "json_object"}}
+
+        if request_kind == "chat":
+            return ChatCompletionRequest.model_validate(data)
+        return ResponsesRequest.model_validate(data)
+
+    @classmethod
+    def _assert_structured_outputs_admission(
+        cls,
+        xgrammar_backend: XgrammarBackend,
+        adjusted_request: ChatCompletionRequest | ResponsesRequest,
+        **expected_admission: bool,
+    ) -> None:
+        structured_outputs = adjusted_request.structured_outputs
+        assert structured_outputs is not None
+        assert structured_outputs.structural_tag is not None
+        assert structured_outputs.all_non_structural_tag_constraints_none()
+
+        grammar = xgrammar_backend.compile_grammar(
+            StructuredOutputOptions.STRUCTURAL_TAG,
+            structured_outputs.structural_tag,
+        )
+
+        for sample_name, should_admit in expected_admission.items():
+            token_ids = xgrammar_backend.tokenizer.encode(
+                getattr(cls, sample_name),
+                add_special_tokens=False,
+            )
+            admitted = grammar.validate_tokens(token_ids) == token_ids
+            assert admitted is should_admit, (
+                f"Expected structured_outputs admission for {sample_name} "
+                f"to be {should_admit}, got {admitted}."
+            )
+
+    @pytest.mark.parametrize("request_kind", ["chat", "responses"])
+    def test_structural_tag_auto_strict(
+        self, harmony_parser, xgrammar_backend, request_kind
+    ):
+        request = self._build_request(
+            request_kind, tool_choice="auto", strict_tools=True
+        )
+        adjusted_request = harmony_parser.adjust_request(request)
+        assert adjusted_request.structured_outputs is not None
+        self._assert_structured_outputs_admission(
+            xgrammar_backend,
+            adjusted_request,
+            COMMENTARY=True,
+            TOOL_CALL_1=True,
+            TOOL_CALL_2=True,
+            FINAL_JSON_SCHEMA=True,
+            FINAL_JSON_OBJECT=True,
+            FINAL_TEXT_ONLY=True,
+        )
+
+    @pytest.mark.parametrize("request_kind", ["chat", "responses"])
+    def test_structural_tag_required(
+        self, harmony_parser, xgrammar_backend, request_kind
+    ):
+        request = self._build_request(request_kind, tool_choice="required")
+        adjusted_request = harmony_parser.adjust_request(request)
+        assert adjusted_request.structured_outputs is not None
+        self._assert_structured_outputs_admission(
+            xgrammar_backend,
+            adjusted_request,
+            COMMENTARY=True,
+            TOOL_CALL_1=True,
+            TOOL_CALL_2=True,
+            FINAL_JSON_SCHEMA=False,
+            FINAL_JSON_OBJECT=False,
+            FINAL_TEXT_ONLY=False,
+        )
+
+    @pytest.mark.parametrize("request_kind", ["chat", "responses"])
+    def test_structural_tag_named(self, harmony_parser, xgrammar_backend, request_kind):
+        request = self._build_request(request_kind, tool_choice="named")
+        adjusted_request = harmony_parser.adjust_request(request)
+        assert adjusted_request.structured_outputs is not None
+        self._assert_structured_outputs_admission(
+            xgrammar_backend,
+            adjusted_request,
+            COMMENTARY=True,
+            TOOL_CALL_1=False,
+            TOOL_CALL_2=True,
+            FINAL_JSON_SCHEMA=False,
+            FINAL_JSON_OBJECT=False,
+            FINAL_TEXT_ONLY=False,
+        )
+
+    @pytest.mark.parametrize("request_kind", ["chat", "responses"])
+    def test_structural_tag_json_schema(
+        self, harmony_parser, xgrammar_backend, request_kind
+    ):
+        request = self._build_request(request_kind, response_format_type="json_schema")
+        adjusted_request = harmony_parser.adjust_request(request)
+        assert adjusted_request.structured_outputs is not None
+        self._assert_structured_outputs_admission(
+            xgrammar_backend,
+            adjusted_request,
+            COMMENTARY=False,
+            TOOL_CALL_1=False,
+            TOOL_CALL_2=False,
+            FINAL_JSON_SCHEMA=True,
+            FINAL_JSON_OBJECT=False,
+            FINAL_TEXT_ONLY=False,
+        )
+
+    @pytest.mark.parametrize("request_kind", ["chat", "responses"])
+    def test_structural_tag_json_object(
+        self, harmony_parser, xgrammar_backend, request_kind
+    ):
+        request = self._build_request(request_kind, response_format_type="json_object")
+        adjusted_request = harmony_parser.adjust_request(request)
+        assert adjusted_request.structured_outputs is not None
+        self._assert_structured_outputs_admission(
+            xgrammar_backend,
+            adjusted_request,
+            COMMENTARY=False,
+            TOOL_CALL_1=False,
+            TOOL_CALL_2=False,
+            FINAL_JSON_SCHEMA=True,
+            FINAL_JSON_OBJECT=True,
+            FINAL_TEXT_ONLY=False,
+        )

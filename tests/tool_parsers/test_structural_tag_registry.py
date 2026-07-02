@@ -29,7 +29,7 @@ from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
     VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
     XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS,
-    _get_function_parameters,
+    get_function_parameters,
     get_model_structural_tag,
 )
 
@@ -336,4 +336,4 @@ def test_get_function_parameters_relaxes_function_strict_false():
         strict=False,
     )
 
-    assert _get_function_parameters(function) is True
+    assert get_function_parameters(function) is True
