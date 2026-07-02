@@ -454,7 +454,6 @@ class Base(
         def register_fusion(fuser: BaseFuser, prefix: str):
             """Register a fused layer's mappings just before it is built."""
             orig_to_new_stacked = fuser.orig_to_new_stacked(prefix)
-            print(f"Registering fusion for {prefix}: {orig_to_new_stacked}")
             self.hf_to_vllm_mapper.orig_to_new_stacked.update(orig_to_new_stacked)
 
             packed_modules_mapping = fuser.packed_modules_mapping
