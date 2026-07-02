@@ -129,7 +129,12 @@ def test_main_benchmark_defaults_match_ascend_main_config():
     assert 'MAX_MODEL_LEN: ""' in text
     assert "&& '64' || '1024'" in text
     assert "&& '16' || '256'" in text
-    assert "perfgate-ascend-qwen25-3b-910b3.json" in text
+    assert "PERFGATE_SPEC_FILE: ${{ vars.VLLM_HUST_PERFGATE_SPEC_FILE || '' }}" in text
+    assert "VLLM_HUST_PERFGATE_HARDWARE_CHIP_MODEL" in text
+    assert "Resolve perfgate spec for Ascend runner" in text
+    assert "Resolve main same-spec file" in text
+    assert "resolve_perfgate_spec_file.py" in text
+    assert 'echo "SAME_SPEC_SPEC_FILE=$resolved_spec_file" >> "$GITHUB_ENV"' in text
     assert "official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json" in text
 
 
@@ -143,6 +148,16 @@ def test_benchmark_script_does_not_force_max_model_len():
     assert "max_model_len_args=()" in script
     assert '"${max_model_len_args[@]}"' in script
     assert script.count('"${max_model_len_args[@]}"') == 2
+
+
+def test_benchmark_script_does_not_default_pr_hardware_to_b3():
+    script = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/scripts/run_ascend_benchmark_ci.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-}" in script
+    assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-910B3}" not in script
 
 
 def test_issue_comment_uses_ubuntu_gate_before_self_hosted_runner():
