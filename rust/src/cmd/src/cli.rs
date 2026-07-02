@@ -194,6 +194,14 @@ pub struct SharedRuntimeArgs {
     #[serde(default)]
     pub enable_log_requests: bool,
 
+    /// Maximum number of prompt characters (text prompts) or token IDs
+    /// (pre-tokenized prompts) printed in the per-request log. The default of
+    /// `None` means unlimited. Matches Python `--max-log-len`. Only takes
+    /// effect when `--enable-log-requests` is also set.
+    #[arg(long)]
+    #[serde(default)]
+    pub max_log_len: Option<u32>,
+
     /// Include prompt_tokens_details in usage when cached prompt tokens are
     /// present.
     #[arg(
@@ -460,6 +468,7 @@ impl SharedRuntimeArgs {
     fn api_server_options(&self) -> ApiServerOptions {
         ApiServerOptions {
             enable_log_requests: self.enable_log_requests,
+            max_log_len: self.max_log_len.map(|n| n as usize),
             enable_prompt_tokens_details: self.enable_prompt_tokens_details,
             enable_request_id_headers: self.enable_request_id_headers,
         }

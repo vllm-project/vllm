@@ -44,10 +44,74 @@ pub enum CoordinatorMode {
 pub struct ApiServerOptions {
     /// Log a summary line for each completed request.
     pub enable_log_requests: bool,
+    /// Maximum number of prompt characters (text prompts) or token IDs
+    /// (pre-tokenized prompts) printed in the per-request log. `None` means
+    /// unlimited. Only takes effect when `enable_log_requests` is set.
+    pub max_log_len: Option<usize>,
     /// When `true`, include prompt token cache details in response usage.
     pub enable_prompt_tokens_details: bool,
     /// When `true`, set `X-Request-Id` on every HTTP response.
     pub enable_request_id_headers: bool,
+}
+
+/// Format `prompt_token_ids` for a per-request log line, truncating to at
+/// most `max_log_len` IDs and appending `...` when truncation happens.
+///
+/// Mirrors the Python `--max-log-len` behavior for pre-tokenized prompts,
+/// which only logs `prompt_token_ids` at DEBUG; callers should emit the
+/// result at DEBUG so INFO stays a summary.
+/// `None` means no truncation. An explicit `Some(0)` produces an empty list
+/// with `...`, matching how Python would render an empty slice followed by
+/// the truncation marker.
+pub fn format_prompt_token_ids_for_log(
+    prompt_token_ids: &[u32],
+    max_log_len: Option<usize>,
+) -> String {
+    match max_log_len {
+        Some(max) if prompt_token_ids.len() > max => {
+            format!("{:?}...", &prompt_token_ids[..max])
+        }
+        _ => format!("{:?}", prompt_token_ids),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::format_prompt_token_ids_for_log;
+
+    #[test]
+    fn format_no_truncation_when_max_is_none() {
+        let out = format_prompt_token_ids_for_log(&[1, 2, 3], None);
+        assert_eq!(out, "[1, 2, 3]");
+    }
+
+    #[test]
+    fn format_no_truncation_when_max_is_at_least_len() {
+        let out = format_prompt_token_ids_for_log(&[1, 2, 3], Some(3));
+        assert_eq!(out, "[1, 2, 3]");
+        let out = format_prompt_token_ids_for_log(&[1, 2, 3], Some(99));
+        assert_eq!(out, "[1, 2, 3]");
+    }
+
+    #[test]
+    fn format_truncates_when_max_is_less_than_len() {
+        let out = format_prompt_token_ids_for_log(&[1, 2, 3, 4, 5], Some(2));
+        assert_eq!(out, "[1, 2]...");
+    }
+
+    #[test]
+    fn format_truncates_to_zero_with_ellipsis() {
+        let out = format_prompt_token_ids_for_log(&[1, 2, 3], Some(0));
+        assert_eq!(out, "[]...");
+    }
+
+    #[test]
+    fn format_empty_input_passes_through() {
+        let out = format_prompt_token_ids_for_log(&[], Some(8));
+        assert_eq!(out, "[]");
+        let out = format_prompt_token_ids_for_log(&[], None);
+        assert_eq!(out, "[]");
+    }
 }
 
 /// CORS settings mirroring Python's `CORSMiddleware`; the default is permissive.
