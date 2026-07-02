@@ -68,10 +68,7 @@ impl InflightRequests {
     /// abort all outstanding requests when no external ids are given.
     pub(crate) fn all_internal_ids(&self) -> Vec<String> {
         let map = self.map.lock();
-        map.values()
-            .flat_map(|internal_ids| internal_ids.keys())
-            .cloned()
-            .collect()
+        map.values().flat_map(|internal_ids| internal_ids.keys()).cloned().collect()
     }
 
     #[cfg(test)]
