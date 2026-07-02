@@ -211,6 +211,9 @@ pub struct Config {
     /// When `true`, hot-reload the TLS certificate/key/CA from disk when the
     /// files change. Ignored when TLS is off.
     pub enable_ssl_refresh: bool,
+    /// Profiler mode that registers `/start_profile` and `/stop_profile`
+    /// routes when present.
+    pub profiler: Option<String>,
 }
 
 impl Config {

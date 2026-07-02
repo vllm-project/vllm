@@ -136,7 +136,8 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
             .with_api_server_options(config.api_server_options)
             .with_server_info(ServerInfoSnapshot::from_config(config))
             .with_api_keys(config.api_keys.clone())
-            .with_cors(config.cors.clone()),
+            .with_cors(config.cors.clone())
+            .with_profiler(config.profiler.clone()),
     ))
 }
 
