@@ -40,6 +40,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 STARTUP_POLL_PERIOD_MS = 10000
+CORE_ENGINE_IDENTITY_BYTES = 2
 
 
 class CoreEngineState(Enum):
@@ -53,7 +54,7 @@ class CoreEngine:
 
     def __init__(self, index: int = 0, local: bool = True):
         self.local = local
-        self.identity = index.to_bytes(2, "little")
+        self.identity = index.to_bytes(CORE_ENGINE_IDENTITY_BYTES, "little")
 
         self.state = CoreEngineState.NEW
 
@@ -1277,12 +1278,10 @@ def wait_for_engine_startup(
 
         # Receive HELLO and READY messages from the input socket.
         eng_identity, ready_msg_bytes = handshake_socket.recv_multipart()
-        eng_index = int.from_bytes(eng_identity, "little")
-        engine = next((e for e in core_engines if e.identity == eng_identity), None)
+        engine = _get_engine_for_handshake_identity(eng_identity, core_engines)
         if engine is None:
-            raise RuntimeError(
-                f"Message from engine with unexpected data parallel rank: {eng_index}"
-            )
+            continue
+        eng_index = int.from_bytes(eng_identity, "little")
         msg = msgspec.msgpack.decode(ready_msg_bytes)
         status, local, headless = msg["status"], msg["local"], msg["headless"]
         if local != engine.local:
@@ -1363,3 +1362,24 @@ def wait_for_engine_startup(
             "local" if local else "remote",
             eng_index,
         )
+
+
+def _get_engine_for_handshake_identity(
+    eng_identity: bytes, core_engines: list[CoreEngine]
+) -> CoreEngine | None:
+    engine = next((e for e in core_engines if e.identity == eng_identity), None)
+    if engine is not None:
+        return engine
+
+    if len(eng_identity) != CORE_ENGINE_IDENTITY_BYTES:
+        logger.warning(
+            "Ignoring non-engine message on data parallel handshake socket "
+            "with identity length %d.",
+            len(eng_identity),
+        )
+        return None
+
+    eng_index = int.from_bytes(eng_identity, "little")
+    raise RuntimeError(
+        f"Message from engine with unexpected data parallel rank: {eng_index}"
+    )
