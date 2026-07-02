@@ -2387,14 +2387,15 @@ def grouped_topk(
     Perform grouped top-k routing for mixture of experts.
 
     Args:
-        scores: Raw inputs (logits if scoring_func=1, scores if scoring_func=0)
+        scores: Raw inputs (logits if scoring_func=1 or 2,
+            pre-computed scores if scoring_func=0)
         num_expert_group: Number of expert groups
         topk_group: Number of groups to select
         topk: Number of experts to select per token
         renormalize: Whether to renormalize the output weights
         routed_scaling_factor: Scaling factor for routing weights
         bias: Bias tensor (e_score_correction_bias). Always fused in kernel.
-        scoring_func: 0=none (no activation), 1=sigmoid
+        scoring_func: 0=none (no activation), 1=sigmoid, 2=softmax
     """
     if not current_platform.is_cuda():
         raise NotImplementedError(
