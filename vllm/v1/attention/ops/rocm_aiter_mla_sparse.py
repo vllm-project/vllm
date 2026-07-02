@@ -24,6 +24,8 @@ else:
     _ON_GFX942 = False
     _ON_GFX950 = False
 
+FP8_DTYPE = current_platform.fp8_dtype()
+
 
 @triton.jit
 def _indexer_k_quant_and_cache_kernel(
@@ -661,7 +663,6 @@ def rocm_aiter_sparse_attn_indexer(
 ) -> torch.Tensor:
     # careful! this will be None in dummy run
     attn_metadata = get_forward_context().attn_metadata
-    fp8_dtype = current_platform.fp8_dtype()
     from vllm.utils.torch_utils import _resolve_layer_name
 
     k_cache_prefix = _resolve_layer_name(k_cache_prefix)
@@ -677,8 +678,8 @@ def rocm_aiter_sparse_attn_indexer(
         # Prefill k_fp8 and k_scale buffers, used by
         # rocm_aiter_sparse_attn_indexer's prefill path
         workspace_manager.get_simultaneous(
-            ((total_seq_lens, head_dim), fp8_dtype),
-            ((total_seq_lens, 4), torch.uint8),
+            ((total_seq_lens, head_dim), FP8_DTYPE),
+            ((total_seq_lens, 1), torch.float32),
         )
 
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
@@ -737,13 +738,20 @@ def rocm_aiter_sparse_attn_indexer(
     elif not skip_k_cache_insert:
         raise ValueError("k must be provided when skip_k_cache_insert is False")
 
+    from aiter import (
+        cp_gather_indexer_k_quant_cache,
+        indexer_k_quant_and_cache,
+        top_k_per_row_decode,
+    )
+
     if not skip_k_cache_insert:
-        indexer_k_quant_and_cache_triton(
+        indexer_k_quant_and_cache(
             k,
             kv_cache,
             slot_mapping,
             quant_block_size,
             scale_fmt,
+            preshuffle=kv_cache.shape[1] > 1,
         )
 
     topk_indices_buffer[: hidden_states.shape[0]] = -1
@@ -753,20 +761,21 @@ def rocm_aiter_sparse_attn_indexer(
 
         workspace_manager = current_workspace_manager()
         k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
-            ((total_seq_lens, head_dim), fp8_dtype),
-            ((total_seq_lens, 4), torch.uint8),
+            ((total_seq_lens, head_dim), FP8_DTYPE),
+            ((total_seq_lens, 1), torch.float32),
         )
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
             k_scale = k_scale_full[: chunk.total_seq_lens]
-            cp_gather_indexer_k_quant_cache_triton(
+            cp_gather_indexer_k_quant_cache(
                 kv_cache,
                 k_fp8,
-                k_scale,
+                k_scale.view(FP8_DTYPE),
                 chunk.block_table,
                 chunk.cu_seq_lens,
-                token_to_seq=chunk.token_to_seq,
+                preshuffle=kv_cache.shape[1] > 1,
             )
+
             logits = rocm_fp8_mqa_logits(
                 q_fp8[chunk.token_start : chunk.token_end],
                 (k_fp8, k_scale.view(torch.float32)),
@@ -829,16 +838,27 @@ def rocm_aiter_sparse_attn_indexer(
         topk_indices = topk_indices_buffer[:num_padded_tokens, :topk_tokens]
         num_rows = logits.shape[0]
 
-        torch.ops._C.top_k_per_row_decode(
-            logits,
-            next_n,
-            decode_metadata.seq_lens,
-            topk_indices,
-            num_rows,
-            logits.stride(0),
-            logits.stride(1),
-            topk_tokens,
-        )
+        if topk_tokens == 2048:
+            top_k_per_row_decode(
+                logits,
+                next_n,
+                decode_metadata.seq_lens,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+            )
+        else:
+            torch.ops._C.top_k_per_row_decode(
+                logits,
+                next_n,
+                decode_metadata.seq_lens,
+                topk_indices,
+                num_rows,
+                logits.stride(0),
+                logits.stride(1),
+                topk_tokens,
+            )
 
         if decode_metadata.requires_padding:
             # if padded, we need to unpack
