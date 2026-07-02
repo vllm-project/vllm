@@ -302,6 +302,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             torch.zeros(self.config.draft_vocab_size, dtype=torch.long),
             requires_grad=False,
         )
+        self._has_identity_draft_vocab_mapping = True
 
         self.use_parallel_drafting = vllm_config.speculative_config.parallel_drafting
 
@@ -328,6 +329,18 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
         inputs_embeds: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         return self.model(input_ids, positions, hidden_states, inputs_embeds)
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        """TP-safe vocab-parallel argmax without gathering full logits."""
+        draft_top_tokens = self.logits_processor.get_top_tokens(
+            self.lm_head, hidden_states
+        )
+        if self._has_identity_draft_vocab_mapping:
+            return draft_top_tokens
+        return draft_top_tokens + self.draft_id_to_target_id[draft_top_tokens]
 
     def compute_logits(
         self,
@@ -427,3 +440,9 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
             skip_substrs=skip_substrs,
         )
         loader.load_weights(model_weights.items())
+        if includes_draft_id_mapping:
+            self._has_identity_draft_vocab_mapping = bool(
+                not torch.count_nonzero(self.draft_id_to_target_id).item()
+            )
+        else:
+            self._has_identity_draft_vocab_mapping = True
