@@ -330,6 +330,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logprobs_mode=self.model_config.logprobs_mode,
                 num_speculative_tokens=self.decode_query_len,
                 use_fp64_gumbel=self.model_config.use_fp64_gumbel,
+                reasoning_config=self.vllm_config.reasoning_config,
             )
             custom = self.model_state.custom_sampler(self.sampler)
 
@@ -739,6 +740,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.prompt_logprobs_worker is not None:
             self.prompt_logprobs_worker.remove_request(req_id)
         self.lora_state.remove_request(req_id)
+        if self.sampler is not None:
+            self.sampler.remove_request(req_idx)
         return True
 
     def finish_requests(self, scheduler_output: SchedulerOutput) -> None:
