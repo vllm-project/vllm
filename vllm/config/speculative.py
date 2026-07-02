@@ -141,9 +141,14 @@ class SpeculativeConfig:
 
     use_heterogeneous_vocab: bool = False
     """Allow draft and target models to use different vocabularies.
-    When enabled, builds a token-level intersection at init and constrains
-    draft logits to shared tokens only (TLI algorithm). Requires
-    method='draft_model'."""
+    When enabled, builds a mapping between vocabularies at init.
+    Requires method='draft_model'."""
+
+    heterogeneous_vocab_method: str = "slem"
+    """Method for heterogeneous vocabulary handling.
+    "tli": Token-Level Intersection — constrains draft logits to shared tokens.
+    "slem": String-Level Exact Match — draft uses full vocab, verify via text.
+    Only applies when use_heterogeneous_vocab=True."""
 
     # Ngram proposer configuration
     prompt_lookup_max: int | None = Field(default=None, ge=1)
@@ -1113,19 +1118,26 @@ class SpeculativeConfig:
                 self.draft_parallel_config
             )
 
-        if self.use_heterogeneous_vocab and not self.uses_draft_model():
-            raise ValueError(
-                "use_heterogeneous_vocab only works with method='draft_model'"
-            )
-
-        if self.use_heterogeneous_vocab and self.draft_sample_method != "greedy":
-            raise ValueError(
-                "use_heterogeneous_vocab currently only supports greedy draft "
-                "sampling. Set draft_sample_method='greedy' (the default) or "
-                "omit it."
-            )
-
-        if not self.use_heterogeneous_vocab:
+        if self.use_heterogeneous_vocab:
+            if not self.uses_draft_model():
+                raise ValueError(
+                    "use_heterogeneous_vocab only works with method='draft_model'"
+                )
+            if self.heterogeneous_vocab_method not in ("tli", "slem"):
+                raise ValueError(
+                    f"heterogeneous_vocab_method must be 'tli' or 'slem', "
+                    f"got '{self.heterogeneous_vocab_method}'"
+                )
+            if (
+                self.heterogeneous_vocab_method == "tli"
+                and self.draft_sample_method != "greedy"
+            ):
+                raise ValueError(
+                    "heterogeneous_vocab_method='tli' currently only supports "
+                    "greedy draft sampling. Set draft_sample_method='greedy' "
+                    "(the default) or omit it."
+                )
+        else:
             self.verify_equal_vocab_size_if_draft_model()
         return self
 
