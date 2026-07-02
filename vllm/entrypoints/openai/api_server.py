@@ -81,12 +81,23 @@ async def build_async_engine_client(
     usage_context: UsageContext = UsageContext.OPENAI_API_SERVER,
     client_config: dict[str, Any] | None = None,
 ) -> AsyncIterator[EngineClient]:
-    if os.getenv("VLLM_WORKER_MULTIPROC_METHOD") == "forkserver":
+    if envs.VLLM_WORKER_MULTIPROC_METHOD == "forkserver":
         # The executor is expected to be mp.
-        # Pre-import heavy modules in the forkserver process
-        logger.debug("Setup forkserver with pre-imports")
-        multiprocessing.set_start_method("forkserver")
-        multiprocessing.set_forkserver_preload(["vllm.v1.engine.async_llm"])
+        # Start the forkserver helper process eagerly so it forks workers
+        # from a clean parent (before CUDA/heavy imports). force=True so
+        # re-entry (e.g. test fixtures that already set a method) does not
+        # raise RuntimeError.
+        #
+        # Note: we intentionally do NOT call set_forkserver_preload() here.
+        # The original landing of forkserver support (PR #40331) was reverted
+        # in PR #40438 because preloading vllm.v1.engine.async_llm pulled in
+        # a background-thread "import transformers" that broke the pooling
+        # tests. The eager-import optimization is fully separable from the
+        # forkserver opt-in; forkserver still works without it (cold imports
+        # per fork), and re-introducing the preload would re-introduce the
+        # original regression.
+        logger.debug("Setup forkserver")
+        multiprocessing.set_start_method("forkserver", force=True)
         forkserver.ensure_running()
         logger.debug("Forkserver setup complete!")
 
