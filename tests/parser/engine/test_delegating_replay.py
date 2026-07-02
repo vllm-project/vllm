@@ -20,10 +20,14 @@ from pydantic import TypeAdapter
 
 from tests.parser.engine.replay_harness import (
     CHUNK_SIZES,
+    DUMMY_TOOLS,
     MockTokenizer,
+    _test_request,
+    assert_no_terminal_leakage,
     assert_parse_output,
     collect_output,
     make_mock_tokenizer,
+    parse_non_streaming,
     replay_streaming,
 )
 from tests.parser.engine.trace_builder import _BUILDERS, build_samples
@@ -142,3 +146,51 @@ def test_delegating_replay(parser_cls, sample, chunk_size):
     )
     output = collect_output(deltas)
     assert_parse_output(output, sample)
+
+
+_TOOL_CALL_SAMPLES = [
+    (p.parser_cls, p.name, s)
+    for p in _PAIRINGS
+    for s in p.samples
+    if s.expected_tool_calls
+]
+
+
+@pytest.mark.parametrize(
+    "parser_cls,parser_name,sample",
+    _TOOL_CALL_SAMPLES,
+    ids=lambda v: v.id if hasattr(v, "id") else "",
+)
+def test_delegating_parse_tool_choice_none(parser_cls, parser_name, sample):
+    """Non-streaming parse() with tool_choice='none' via DelegatingParser
+    must not leak special tokens into content."""
+    tokenizer = make_mock_tokenizer(sample)
+    validated_tools = (
+        _TOOLS_VALIDATOR.validate_python(sample.tools) if sample.tools else None
+    )
+    parser = parser_cls(
+        tokenizer,
+        validated_tools,
+        chat_template_kwargs=sample.chat_template_kwargs,
+    )
+
+    request = _test_request(tools=DUMMY_TOOLS)
+    request.tool_choice = "none"
+
+    output = parse_non_streaming(parser, sample, request)
+
+    assert output.tool_calls == [], (
+        f"Expected no tool calls but got {output.tool_calls}"
+    )
+
+    cfg = parser._tool_parser._parser_engine.parser_engine_config
+    terminals = sorted(
+        v
+        for v in set(cfg.terminals.values()) | set(cfg.token_id_terminals.values())
+        if len(v) > 1
+    )
+    assert_no_terminal_leakage(
+        output,
+        terminals,
+        context=f"parser={parser_name}",
+    )

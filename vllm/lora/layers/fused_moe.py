@@ -39,6 +39,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self._ep_check()
 
         routed_experts = self.base_layer.routed_experts
+        routed_experts.lora_base_layer_prefix = "base_layer."
         assert not routed_experts.quant_method.is_monolithic, (
             "Monolithic kernels are not supported for Fused MoE LoRA."
         )
@@ -117,7 +118,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
     def _init_lora_stream_context(self) -> None:
         self._lora_stream: torch.cuda.Stream | None = None
-        self._events: tuple[torch.cuda.Event, ...] | None = None
+        self._events: tuple[torch.Event, ...] | None = None
         if not self._enable_aux_cuda_stream:
             return
         if not current_platform.is_cuda_alike():
@@ -126,7 +127,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         # 4 events: 2 per (base GEMM, LoRA) pair so w13 and w2 don't reuse
         # the same event objects; reuse-within-a-pair is fine because the
         # second pair starts only after intermediate_cache1.add_() has joined.
-        self._events = tuple(torch.cuda.Event() for _ in range(4))
+        self._events = tuple(torch.Event() for _ in range(4))
 
     def _build_lora_context(self):
         use_dual_stream = (

@@ -1,5 +1,5 @@
 //! TLS tests: `build_server_config` unit checks plus end-to-end OpenSSL handshakes
-//! through the production `serve_listener` path, with a trivial router since TLS
+//! through the production listener/connection path, with a trivial router since TLS
 //! terminates below the app.
 
 use std::pin::Pin;
@@ -23,8 +23,8 @@ use tokio_openssl::SslStream;
 use tokio_util::sync::CancellationToken;
 
 use crate::config::{HttpListenerMode, TlsConfig};
-use crate::listener::Listener;
-use crate::{ConnectionTimeouts, serve_listener, tls};
+use crate::listener::{Listener, MaybeTlsListener};
+use crate::{ConnectionTimeouts, serve_connections, tls};
 
 // ============================================================================
 // Test infrastructure
@@ -251,7 +251,6 @@ fn build_tls(certs: &TestCerts, cert: &str, key: Option<&str>) -> TlsConfig {
 
 /// Generous per-connection timeouts that never fire during the fast tests.
 const TEST_TIMEOUTS: ConnectionTimeouts = ConnectionTimeouts {
-    handshake: Duration::from_secs(60),
     header_read: Duration::from_secs(5),
     keep_alive_enabled: true,
 };
@@ -261,9 +260,8 @@ async fn spawn_server(tls_config: Option<TlsConfig>) -> (String, CancellationTok
 }
 
 /// Bind an ephemeral listener and serve a trivial router via the production
-/// `serve_listener`, optionally with TLS. The listener is bound (and thus
-/// accepting into the backlog) before returning, so a client may connect
-/// immediately without a sleep.
+/// listener/connection path. The listener is bound (and thus accepting into the
+/// backlog) before returning, so a client may connect immediately without a sleep.
 async fn spawn_server_with_timeouts(
     tls_config: Option<TlsConfig>,
     timeouts: ConnectionTimeouts,
@@ -274,7 +272,7 @@ async fn spawn_server_with_timeouts(
     })
     .await
     .expect("bind listener");
-    let addr = listener.local_addr().expect("local addr");
+    let addr = listener.local_addr_display().expect("local addr");
 
     let server_config =
         tls_config.map(|cfg| tls::build_server_config(&cfg).expect("build server config"));
@@ -282,14 +280,11 @@ async fn spawn_server_with_timeouts(
     let shutdown = CancellationToken::new();
     let server_shutdown = shutdown.clone();
     tokio::spawn(async move {
-        let _ = serve_listener(
-            listener,
-            server_config,
-            app,
-            server_shutdown.cancelled_owned(),
-            timeouts,
-        )
-        .await;
+        let listener = match server_config {
+            Some(context) => MaybeTlsListener::tls(listener, context),
+            None => MaybeTlsListener::plain(listener),
+        };
+        let _ = serve_connections(listener, app, server_shutdown.cancelled_owned(), timeouts).await;
     });
     (addr, shutdown)
 }
@@ -521,20 +516,19 @@ async fn plain_http_serves_when_tls_is_disabled() {
     shutdown.cancel();
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn tls_handshake_timeout_drops_silent_client() {
     // Silent client (no ClientHello) must be dropped at the handshake deadline.
     let certs = TestCerts::generate();
-    let timeouts = ConnectionTimeouts {
-        handshake: Duration::from_millis(150),
-        header_read: Duration::from_secs(5),
-        keep_alive_enabled: true,
-    };
-    let (addr, shutdown) = spawn_server_with_timeouts(Some(server_tls(&certs, 0)), timeouts).await;
+    let (addr, shutdown) = spawn_server(Some(server_tls(&certs, 0))).await;
 
     let mut tcp = TcpStream::connect(&addr).await.expect("connect");
+    tokio::task::yield_now().await;
+    tokio::time::advance(tls::TLS_HANDSHAKE_TIMEOUT + Duration::from_millis(1)).await;
+    tokio::task::yield_now().await;
+
     let mut buf = [0u8; 1];
-    let read = tokio::time::timeout(Duration::from_secs(5), tcp.read(&mut buf)).await;
+    let read = tokio::time::timeout(Duration::from_secs(1), tcp.read(&mut buf)).await;
     assert!(
         matches!(read, Ok(Ok(0)) | Ok(Err(_))),
         "server must drop a stalled TLS handshake (expected close, got {read:?})"
@@ -546,7 +540,6 @@ async fn tls_handshake_timeout_drops_silent_client() {
 async fn keep_alive_timeout_closes_idle_connection() {
     // Idle keep-alive connection must be closed at the deadline.
     let timeouts = ConnectionTimeouts {
-        handshake: Duration::from_secs(60),
         header_read: Duration::from_millis(150),
         keep_alive_enabled: true,
     };
@@ -582,7 +575,6 @@ async fn keep_alive_timeout_closes_idle_tls_connection() {
     // still fires through tls-listener's post-handshake SslStream, not just plaintext.
     let certs = TestCerts::generate();
     let timeouts = ConnectionTimeouts {
-        handshake: Duration::from_secs(60),
         header_read: Duration::from_millis(150),
         keep_alive_enabled: true,
     };
@@ -618,7 +610,6 @@ async fn keep_alive_timeout_closes_idle_tls_connection() {
 async fn idle_timeout_closes_silent_client() {
     // Silent client closed by the header-read timeout (http1-only arms it from byte 0).
     let timeouts = ConnectionTimeouts {
-        handshake: Duration::from_secs(60),
         header_read: Duration::from_millis(150),
         keep_alive_enabled: true,
     };
@@ -638,7 +629,6 @@ async fn idle_timeout_closes_silent_client() {
 async fn keep_alive_zero_disables_keep_alive() {
     // 0 disables keep-alive (serve, then close), like uvicorn's timeout_keep_alive=0.
     let timeouts = ConnectionTimeouts {
-        handshake: Duration::from_secs(60),
         header_read: Duration::from_secs(5),
         keep_alive_enabled: false,
     };
@@ -671,7 +661,6 @@ async fn disabled_keep_alive_still_closes_silent_client() {
     // Even with keep-alive off, the head read stays bounded, so a silent client
     // is dropped rather than held open.
     let timeouts = ConnectionTimeouts {
-        handshake: Duration::from_secs(60),
         header_read: Duration::from_millis(150),
         keep_alive_enabled: false,
     };
