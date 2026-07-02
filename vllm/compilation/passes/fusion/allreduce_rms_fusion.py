@@ -141,6 +141,78 @@ if flashinfer_comm is not None:
 
     MiB = 1024 * 1024
 
+    def _unfused_allreduce_rms_norm(
+        allreduce_in: torch.Tensor,
+        residual: torch.Tensor,
+        rms_gamma: torch.Tensor,
+        rms_eps: float,
+        pattern_code: int,
+        norm_out: torch.Tensor | None,
+        quant_out: torch.Tensor | None,
+        scale_out: torch.Tensor | None,
+        scale_factor: torch.Tensor | None,
+    ) -> None:
+        """Fallback for batches too large for the flashinfer fused-AR workspace.
+
+        The workspace is hard-capped in MB by a FlashInfer one-shot limit, so a
+        batch wider than that cap (e.g. the profiling run) cannot use the fused
+        kernel. The compiler pass avoids this with a per-range guard; manual
+        fusion call sites have no such guard, so we fall back to a standard
+        all-reduce plus the matching rms-norm[+quant] kernels, writing the same
+        output buffers the fused kernel would.
+        """
+        # all_reduce is out-of-place (GroupCoordinator.all_reduce), so work on
+        # the returned tensor and only copy back into allreduce_in for the
+        # no-residual case (where the caller reads it as the new residual).
+        ar = tensor_model_parallel_all_reduce(allreduce_in)
+        is_fp8 = pattern_code == ar_fusion_patterns.kARResidualRMSNormFP8Quant
+        is_fp4 = pattern_code == ar_fusion_patterns.kARResidualRMSNormFP4Quant
+
+        if norm_out is None:
+            # With residual: new residual -> `residual`; norm result is read
+            # from quant_out (quant) or allreduce_in (no-quant).
+            if is_fp8:
+                torch.ops._C.fused_add_rms_norm_static_fp8_quant(
+                    quant_out, ar, residual, rms_gamma, scale_factor, rms_eps
+                )
+            elif is_fp4:
+                assert quant_out is not None and scale_out is not None
+                torch.ops._C.fused_add_rms_norm(ar, residual, rms_gamma, rms_eps)
+                STATIC_FP4_QUANT_OP(
+                    input=ar,
+                    input_scale=scale_factor,
+                    is_sf_swizzled_layout=True,
+                    output=quant_out,
+                    output_scale=scale_out,
+                )
+            else:
+                # Split add + norm (rather than the in-place fused kernel) so
+                # the norm result lands directly in allreduce_in -- no copy.
+                residual.add_(ar)
+                torch.ops._C.rms_norm(allreduce_in, residual, rms_gamma, rms_eps)
+        else:
+            # No prior residual: the AR'd input (read from allreduce_in) becomes
+            # the residual; norm result -> norm_out. Unreached by current model
+            # wiring (do_allreduce implies a residual), kept for completeness.
+            allreduce_in.copy_(ar)
+            allreduce_in.add_(residual)
+            if is_fp8:
+                torch.ops._C.rms_norm_static_fp8_quant(
+                    quant_out, allreduce_in, rms_gamma, scale_factor, rms_eps
+                )
+            elif is_fp4:
+                assert quant_out is not None and scale_out is not None
+                torch.ops._C.rms_norm(norm_out, allreduce_in, rms_gamma, rms_eps)
+                STATIC_FP4_QUANT_OP(
+                    input=norm_out,
+                    input_scale=scale_factor,
+                    is_sf_swizzled_layout=True,
+                    output=quant_out,
+                    output_scale=scale_out,
+                )
+            else:
+                torch.ops._C.rms_norm(norm_out, allreduce_in, rms_gamma, rms_eps)
+
     def call_trtllm_fused_allreduce_norm(
         allreduce_in: torch.Tensor,
         residual: torch.Tensor,
@@ -168,11 +240,21 @@ if flashinfer_comm is not None:
         element_size = allreduce_in.element_size()
         current_tensor_size = num_tokens * hidden_size * element_size
         max_tensor_size = max_token_num * hidden_size * element_size
-        assert current_tensor_size <= max_tensor_size, (
-            f"Current tensor size {current_tensor_size} is larger than "
-            f"max token num {max_token_num} * hidden size {hidden_size} * "
-            f"element size {element_size}"
-        )
+        if current_tensor_size > max_tensor_size:
+            # Batch is wider than the fused-AR workspace; do an unfused
+            # all-reduce + rms-norm[+quant] into the same output buffers.
+            _unfused_allreduce_rms_norm(
+                allreduce_in,
+                residual,
+                rms_gamma,
+                rms_eps,
+                pattern_code,
+                norm_out,
+                quant_out,
+                scale_out,
+                scale_factor,
+            )
+            return
         curr_device = current_platform.get_device_capability()
         device_capability = curr_device.to_int() if curr_device is not None else None
         # Get one shot input size limit for the current world size

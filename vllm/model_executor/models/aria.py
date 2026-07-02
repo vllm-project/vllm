@@ -316,7 +316,8 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
     """
 
     def __init__(self, vllm_config: VllmConfig, prefix: str = "") -> None:
-        super().__init__(vllm_config, prefix)
+        # MoE MLP reduces internally, so the linears reduce too (no deferral).
+        super().__init__(vllm_config, prefix, reduce_results=True)
 
         config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
@@ -324,6 +325,9 @@ class AriaTextDecoderLayer(LlamaDecoderLayer):
         self.mlp = AriaTextMoELayer(
             config, quant_config=quant_config, prefix=f"{prefix}.mlp"
         )
+        # Rebuild so the stream captures the MoE mlp (no gate_up_proj/down_proj)
+        # TODO add MoE module property
+        self.residual_stream = self._build_residual_stream(vllm_config)
 
 
 class AriaTextModel(LlamaModel, SupportsQuant):

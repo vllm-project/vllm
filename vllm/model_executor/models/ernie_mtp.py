@@ -55,7 +55,9 @@ class ErnieMultiTokenPredictorLayer(nn.Module):
         self.mtp_linear_proj = nn.Linear(
             config.hidden_size * 2, config.hidden_size, bias=False
         )
-        self.mtp_block = LlamaDecoderLayer(vllm_config, prefix)
+        # The MTP block's output is consumed by an explicit residual add below
+        # (no finalize_norm), so it must reduce itself rather than defer.
+        self.mtp_block = LlamaDecoderLayer(vllm_config, prefix, reduce_results=True)
 
     def forward(
         self,

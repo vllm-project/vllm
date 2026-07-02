@@ -31,7 +31,6 @@ from typing import Any
 
 import torch
 from torch import nn
-from transformers import Qwen2Config
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import CacheConfig, VllmConfig
@@ -41,6 +40,7 @@ from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
 )
+from vllm.model_executor.layers.fusion.residual_stream import Scatter, finalize_norm
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
@@ -85,6 +85,7 @@ class Qwen2MLP(nn.Module):
         hidden_act: str,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        reduce_results: bool = True,
     ) -> None:
         super().__init__()
         self.gate_up_proj = MergedColumnParallelLinear(
@@ -99,6 +100,7 @@ class Qwen2MLP(nn.Module):
             hidden_size,
             bias=False,
             quant_config=quant_config,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.down_proj",
         )
         if hidden_act != "silu":
@@ -236,12 +238,15 @@ class Qwen2Attention(nn.Module):
 class Qwen2DecoderLayer(nn.Module):
     def __init__(
         self,
-        config: Qwen2Config,
-        cache_config: CacheConfig | None = None,
-        quant_config: QuantizationConfig | None = None,
+        vllm_config: VllmConfig,
         prefix: str = "",
     ) -> None:
         super().__init__()
+
+        config = vllm_config.model_config.hf_config.get_text_config()
+        cache_config = vllm_config.cache_config
+        quant_config = self.get_quant_config(vllm_config)
+
         self.hidden_size = config.hidden_size
         set_default_rope_theta(config, default_theta=1000000)
         dual_chunk_attention_config = getattr(
@@ -308,6 +313,10 @@ class Qwen2DecoderLayer(nn.Module):
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
+    def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
+        """Get quantization config for this layer. Override in subclasses."""
+        return vllm_config.quant_config
+
 
 @support_torch_compile(
     dynamic_arg_dims={
@@ -341,7 +350,6 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         super().__init__()
 
         config = vllm_config.model_config.hf_config.get_text_config()
-        cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
 
         # TODO (@robertgshaw2): see if this can be moved out
@@ -375,9 +383,7 @@ class Qwen2Model(nn.Module, EagleModelMixin):
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: decoder_layer_type(
-                config=config,
-                cache_config=cache_config,
-                quant_config=quant_config,
+                vllm_config=vllm_config,
                 prefix=prefix,
             ),
             prefix=f"{prefix}.layers",
@@ -426,7 +432,17 @@ class Qwen2Model(nn.Module, EagleModelMixin):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        # Route the final norm through the residual-stream finalizer: it reduces
+        # only when the last decoder left its output PARTIAL (migrated/deferred
+        # decoders, e.g. Qwen3). Unmigrated decoders expose no output_scatter ->
+        # FULL -> plain norm, identical to the pre-fusion path.
+        last_layer = self.layers[self.end_layer - 1]
+        hidden_states = finalize_norm(
+            self.norm,
+            hidden_states,
+            residual,
+            incoming=getattr(last_layer, "output_scatter", Scatter.FULL),
+        )
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

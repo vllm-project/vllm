@@ -88,6 +88,7 @@ class MistralAttention(LlamaAttention):
         cache_config: CacheConfig | None = None,
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
+        reduce_results: bool = True,
     ) -> None:
         super().__init__(
             config=config,
@@ -101,6 +102,7 @@ class MistralAttention(LlamaAttention):
             cache_config=cache_config,
             prefix=prefix,
             attn_type=attn_type,
+            reduce_results=reduce_results,
         )
 
         llama_4_scaling_config: dict[str, int | float | str] | None = getattr(
@@ -148,17 +150,21 @@ class MistralDecoderLayer(LlamaDecoderLayer):
         prefix: str = "",
         config: LlamaConfig | None = None,
     ) -> None:
+        config = config or vllm_config.model_config.hf_config
+        # The ada variant inserts an op between the norm and the mlp, so it keeps
+        # an explicit unfused path; standard Mistral defers to the communicator.
+        ada = bool(getattr(config, "ada_rms_norm_t_cond", False))
         super().__init__(
             vllm_config=vllm_config,
             prefix=prefix,
             config=config,
             attn_layer_type=MistralAttention,
+            reduce_results=ada,
         )
 
         self.layer_idx = int(prefix.split(sep=".")[-1])
-        config = config or vllm_config.model_config.hf_config
 
-        if getattr(config, "ada_rms_norm_t_cond", False):
+        if ada:
             self.ada_rms_norm_t_cond = nn.Sequential(
                 ColumnParallelLinear(
                     input_size=config.hidden_size,
@@ -184,21 +190,32 @@ class MistralDecoderLayer(LlamaDecoderLayer):
         residual: torch.Tensor | None,
         t_cond: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # Self Attention
-        if residual is None:
-            residual = hidden_states
-            hidden_states = self.input_layernorm(hidden_states)
-        else:
-            hidden_states, residual = self.input_layernorm(hidden_states, residual)
-        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
-
-        # Fully Connected
-        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
-
         if self.ada_rms_norm_t_cond is not None:
+            # ada variant: explicit unfused path (linears reduce themselves).
+            if residual is None:
+                residual = hidden_states
+                hidden_states = self.input_layernorm(hidden_states)
+            else:
+                hidden_states, residual = self.input_layernorm(hidden_states, residual)
+            hidden_states = self.self_attn(
+                positions=positions, hidden_states=hidden_states
+            )
+            hidden_states, residual = self.post_attention_layernorm(
+                hidden_states, residual
+            )
             assert t_cond is not None
             hidden_states = hidden_states * (1 + self.ada_rms_norm_t_cond(t_cond))
+            hidden_states = self.mlp(hidden_states)
+            return hidden_states, residual
 
+        # Standard Mistral: same residual-stream path as the base decoder.
+        hidden_states, residual = self.residual_stream.prepare_attn(
+            hidden_states, residual
+        )
+        hidden_states = self.self_attn(positions=positions, hidden_states=hidden_states)
+        hidden_states, residual = self.residual_stream.prepare_mlp(
+            hidden_states, residual
+        )
         hidden_states = self.mlp(hidden_states)
         return hidden_states, residual
 
