@@ -48,7 +48,6 @@ from vllm.v1.attention.backends.mla.hisparse import (
     _has_hisparse_ops,
     create_hisparse_coordinator,
     is_hisparse_decode_batch,
-    validate_hisparse_decode_batch,
 )
 from vllm.v1.attention.backends.mla.indexer import split_indexer_prefill_chunks
 from vllm.v1.attention.backends.utils import split_prefill_chunks
@@ -945,10 +944,10 @@ def test_hisparse_disabled_without_flag():
     assert HiSparseConfig.from_vllm_config(vllm_config, model_top_k=128) is None
 
 
-def test_hisparse_works_without_connector():
-    # Option A: HiSparse is no longer PD-only. A unified / no-connector instance
-    # still builds the coordinator (decode uses the hot buffer; prefill gathers
-    # KV from the host pool). The PD-decode consumer path stays the fast default.
+def test_hisparse_coordinator_is_connector_agnostic():
+    # The coordinator itself does not depend on a KV connector; the
+    # decode-only (kv_consumer required) deployment contract is enforced by
+    # VllmConfig.__post_init__, not here.
     vllm_config = _make_hisparse_vllm_config()
     vllm_config.kv_transfer_config = None
 
@@ -963,26 +962,22 @@ def test_hisparse_works_without_connector():
     assert coordinator is not None
 
 
-def test_hisparse_decode_batch_validation():
+def test_hisparse_decode_batch_detection():
     assert is_hisparse_decode_batch(
         max_query_len=1,
         num_reqs=8,
         num_actual_tokens=8,
     )
-
-    with pytest.raises(NotImplementedError, match="pure decode"):
-        validate_hisparse_decode_batch(
-            max_query_len=2,
-            num_reqs=8,
-            num_actual_tokens=16,
-        )
-
-    with pytest.raises(NotImplementedError, match="pure decode"):
-        validate_hisparse_decode_batch(
-            max_query_len=1,
-            num_reqs=8,
-            num_actual_tokens=9,
-        )
+    assert not is_hisparse_decode_batch(
+        max_query_len=2,
+        num_reqs=8,
+        num_actual_tokens=16,
+    )
+    assert not is_hisparse_decode_batch(
+        max_query_len=1,
+        num_reqs=8,
+        num_actual_tokens=9,
+    )
 
 
 def _make_hisparse_coordinator(
