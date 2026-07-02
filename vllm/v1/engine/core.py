@@ -1154,6 +1154,20 @@ class EngineCoreProc(EngineCore):
     def run_engine_core(*args, dp_rank: int = 0, local_dp_rank: int = 0, **kwargs):
         """Launch EngineCore busy loop in background process."""
 
+        # Install the parent-death watchdog as the very first action in the
+        # child. The watchdog raises SIGTERM to self when the parent's task
+        # struct is reaped, regardless of how the parent died (SIGKILL,
+        # OOM-kill, segfault, ``os._exit()`` from an embedding host). These
+        # are the cases where the cooperative shutdown path
+        # (``proc.terminate()`` from the parent's ``weakref.finalize``)
+        # never runs. The watchdog reuses the SIGTERM handler installed
+        # below, so no new shutdown decision is made by the child. See
+        # ``vllm/v1/engine/parent_death.py`` and vllm-project/vllm#19849.
+        if not envs.VLLM_DISABLE_PARENT_DEATH_WATCHDOG:
+            from vllm.v1.engine.parent_death import install_parent_death_watchdog
+
+            install_parent_death_watchdog()
+
         # Ensure we can serialize transformer config after spawning
         maybe_register_config_serialize_by_value()
 

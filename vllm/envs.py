@@ -267,6 +267,7 @@ if TYPE_CHECKING:
     VLLM_WEIGHT_OFFLOADING_DISABLE_UVA: bool = False
     VLLM_WSL2_ENABLE_PIN_MEMORY: bool = False
     VLLM_DISABLE_LOG_LOGO: bool = False
+    VLLM_DISABLE_PARENT_DEATH_WATCHDOG: bool = False
     VLLM_LORA_DISABLE_PDL: bool = False
     VLLM_ENABLE_CUDA_COMPATIBILITY: bool = False
     VLLM_CUDA_COMPATIBILITY_PATH: str | None = None
@@ -1888,6 +1889,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # Disable logging of vLLM logo at server startup time.
     "VLLM_DISABLE_LOG_LOGO": lambda: bool(int(os.getenv("VLLM_DISABLE_LOG_LOGO", "0"))),
+    # Disable the EngineCore parent-death watchdog. Escape hatch for
+    # debugging only. Without the watchdog, an abnormally-terminated
+    # parent (SIGKILL, OOM-kill, segfault, ``os._exit()``) will orphan
+    # the EngineCore subprocess and leak GPU memory. See
+    # vllm/v1/engine/parent_death.py.
+    "VLLM_DISABLE_PARENT_DEATH_WATCHDOG": lambda: bool(
+        int(os.getenv("VLLM_DISABLE_PARENT_DEATH_WATCHDOG", "0"))
+    ),
     # Disable PDL for LoRA, as enabling PDL with LoRA on SM100 causes
     # Triton compilation to fail.
     "VLLM_LORA_DISABLE_PDL": lambda: bool(int(os.getenv("VLLM_LORA_DISABLE_PDL", "0"))),
