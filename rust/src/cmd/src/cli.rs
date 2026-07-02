@@ -326,9 +326,9 @@ impl SharedRuntimeArgs {
             .map_or(DEFAULT_KEEP_ALIVE_TIMEOUT, Duration::from_secs)
     }
 
-    /// Return `true` when profiling is enabled via `--profiler-config`.
-    pub fn profiling_enabled(&self) -> bool {
-        self.profiler_config.as_ref().and_then(|c| c.profiler.as_ref()).is_some()
+    /// Return the configured profiler mode, when profiling is enabled.
+    pub fn profiler(&self) -> Option<String> {
+        self.profiler_config.as_ref().and_then(|c| c.profiler.clone())
     }
 
     /// Apply fallback logic for API key configuration from env variables.
@@ -359,7 +359,7 @@ impl SharedRuntimeArgs {
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
         let tls = self.tls_config();
-        let profiling_enabled = self.profiling_enabled();
+        let profiler = self.profiler();
 
         Config {
             transport_mode: TransportMode::Bootstrapped {
@@ -392,7 +392,7 @@ impl SharedRuntimeArgs {
             grpc_port: self.grpc_port,
             shutdown_timeout,
             keep_alive_timeout,
-            profiling_enabled,
+            profiler,
         }
     }
 
@@ -413,7 +413,7 @@ impl SharedRuntimeArgs {
         let api_server_options = self.api_server_options();
         let cors = self.cors_config();
         let tls = self.tls_config();
-        let profiling_enabled = self.profiling_enabled();
+        let profiler = self.profiler();
 
         Config {
             transport_mode: TransportMode::HandshakeOwner {
@@ -444,7 +444,7 @@ impl SharedRuntimeArgs {
             grpc_port: self.grpc_port,
             shutdown_timeout,
             keep_alive_timeout,
-            profiling_enabled,
+            profiler,
         }
     }
 

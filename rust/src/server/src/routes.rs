@@ -44,12 +44,10 @@ fn runtime_lora_updating_enabled() -> bool {
 
 /// Build the minimal OpenAI-compatible router for one configured model.
 pub fn build_router(state: Arc<AppState>) -> Router {
-    let profiling_enabled = state.profiling_enabled;
     build_router_with_options(
         state,
         server_dev_mode_enabled(),
         runtime_lora_updating_enabled(),
-        profiling_enabled,
     )
 }
 
@@ -64,25 +62,13 @@ fn build_router_with_dev_mode_and_lora(
     dev_mode_enabled: bool,
     runtime_lora_updating_enabled: bool,
 ) -> Router {
-    let profiling_enabled = state.profiling_enabled;
-    build_router_with_options(
-        state,
-        dev_mode_enabled,
-        runtime_lora_updating_enabled,
-        profiling_enabled,
-    )
-}
-
-#[cfg(test)]
-pub(crate) fn build_router_with_profiling(state: Arc<AppState>) -> Router {
-    build_router_with_options(state, false, false, true)
+    build_router_with_options(state, dev_mode_enabled, runtime_lora_updating_enabled)
 }
 
 fn build_router_with_options(
     state: Arc<AppState>,
     dev_mode_enabled: bool,
     runtime_lora_updating_enabled: bool,
-    profiling_enabled: bool,
 ) -> Router {
     let mut router = Router::new()
         // Health & monitoring
@@ -123,10 +109,11 @@ fn build_router_with_options(
             .route("/get_world_size", get(world_size::get_world_size))
     }
 
-    if profiling_enabled {
+    if let Some(profiler) = &state.profiler {
         warn!(
-            "Profiler is enabled in the API server. \
-             This should ONLY be used for local development!"
+            "Profiler with mode '{}' is enabled in the API server. \
+             This should ONLY be used for local development!",
+            profiler
         );
         router = router
             .route("/start_profile", post(profile::start_profile))

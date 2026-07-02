@@ -47,8 +47,9 @@ pub struct AppState {
     model_path: Option<String>,
     /// Lazily initialized runtime for heavyweight request paths.
     request_runtime: OnceLock<BackgroundShutdownRuntime>,
-    /// When `true`, `/start_profile` and `/stop_profile` routes are registered.
-    pub profiling_enabled: bool,
+    /// Profiler mode that registers `/start_profile` and `/stop_profile`
+    /// routes when present.
+    pub profiler: Option<String>,
 }
 
 impl AppState {
@@ -76,7 +77,7 @@ impl AppState {
             lora_manager: LoraManager::new(),
             model_path: None,
             request_runtime: OnceLock::new(),
-            profiling_enabled: false,
+            profiler: None,
         }
     }
 
@@ -98,9 +99,9 @@ impl AppState {
         self
     }
 
-    /// Enable or disable the `/start_profile` and `/stop_profile` routes.
-    pub fn with_profiling_enabled(mut self, profiling_enabled: bool) -> Self {
-        self.profiling_enabled = profiling_enabled;
+    /// Set the profiler mode that enables `/start_profile` and `/stop_profile`.
+    pub fn with_profiler(mut self, profiler: Option<String>) -> Self {
+        self.profiler = profiler;
         self
     }
 

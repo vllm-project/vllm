@@ -13,7 +13,7 @@ pub async fn start_profile(State(state): State<Arc<AppState>>) -> Result<StatusC
     info!("Starting profiler...");
     state
         .engine_core_client()
-        .start_profile()
+        .start_profile(None)
         .await
         .map_err(|error| utility_call_error("start_profile", error))?;
     info!("Profiler started.");
@@ -25,7 +25,7 @@ pub async fn stop_profile(State(state): State<Arc<AppState>>) -> Result<StatusCo
     info!("Stopping profiler...");
     state
         .engine_core_client()
-        .stop_profile()
+        .stop_profile(None)
         .await
         .map_err(|error| utility_call_error("stop_profile", error))?;
     info!("Profiler stopped.");

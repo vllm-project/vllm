@@ -1395,7 +1395,7 @@ fn serve_frontend_config_uses_dp_address_as_advertised_host() {
             grpc_port: None,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
-            profiling_enabled: false,
+            profiler: None,
         }
     "#]]
     .assert_debug_eq(&Config {
@@ -1479,7 +1479,7 @@ fn serve_frontend_config_keeps_tcp_transport_for_non_local_only_topology() {
             grpc_port: None,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
-            profiling_enabled: false,
+            profiler: None,
         }
     "#]]
     .assert_debug_eq(&config);
@@ -1581,7 +1581,7 @@ fn frontend_config_uses_external_coordinator_when_coordinator_address_is_present
             grpc_port: None,
             shutdown_timeout: 0ns,
             keep_alive_timeout: 5s,
-            profiling_enabled: false,
+            profiler: None,
         }
     "#]]
     .assert_debug_eq(&config);
@@ -1630,9 +1630,9 @@ fn frontend_args_json_enables_profiling_when_profiler_config_set() {
     let Command::Frontend(args) = cli.command else {
         panic!("expected frontend args");
     };
-    assert!(args.runtime.profiling_enabled());
+    assert_eq!(args.runtime.profiler().as_deref(), Some("torch"));
     let config = args.into_config();
-    assert!(config.profiling_enabled);
+    assert_eq!(config.profiler.as_deref(), Some("torch"));
 }
 
 #[test]
@@ -1654,9 +1654,9 @@ fn frontend_args_json_disables_profiling_when_profiler_config_absent() {
     let Command::Frontend(args) = cli.command else {
         panic!("expected frontend args");
     };
-    assert!(!args.runtime.profiling_enabled());
+    assert_eq!(args.runtime.profiler(), None);
     let config = args.into_config();
-    assert!(!config.profiling_enabled);
+    assert_eq!(config.profiler, None);
 }
 
 #[test]
@@ -1678,7 +1678,7 @@ fn frontend_args_json_disables_profiling_when_profiler_type_is_null() {
     let Command::Frontend(args) = cli.command else {
         panic!("expected frontend args");
     };
-    assert!(!args.runtime.profiling_enabled());
+    assert_eq!(args.runtime.profiler(), None);
     let config = args.into_config();
-    assert!(!config.profiling_enabled);
+    assert_eq!(config.profiler, None);
 }

@@ -47,10 +47,7 @@ use vllm_tokenizer::test_utils::TestTokenizer;
 use zeromq::prelude::{SocketRecv, SocketSend};
 use zeromq::{DealerSocket, PushSocket, ZmqMessage};
 
-use super::{
-    build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora,
-    build_router_with_profiling,
-};
+use super::{build_router, build_router_with_dev_mode, build_router_with_dev_mode_and_lora};
 use crate::config::{ApiServerOptions, CorsConfig};
 use crate::state::AppState;
 
@@ -6216,10 +6213,10 @@ where
 
     let chat = ChatLlm::from_shared_backend(test_llm(client), Arc::new(FakeChatBackend::new()));
     (
-        build_router_with_profiling(Arc::new(AppState::new(
-            vec!["test-model".to_string()],
-            chat,
-        ))),
+        build_router(Arc::new(
+            AppState::new(vec!["test-model".to_string()], chat)
+                .with_profiler(Some("torch".to_string())),
+        )),
         engine_task,
     )
 }

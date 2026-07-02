@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
         grpc_port: None,
         shutdown_timeout: Duration::ZERO,
         keep_alive_timeout: Duration::from_secs(5),
-        profiling_enabled: false,
+        profiler: None,
     };
 
     let bind_address = format!("127.0.0.1:{port}");
