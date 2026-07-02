@@ -7,8 +7,8 @@ Addresses #21950: verify and add CI coverage.
 
 Covers:
 1) Basic functionality
-2) Stop strings with `min_tokens` (bug #21987; fix in PR #22014)
-3) EOS behavior with `min_tokens` (potential logits-processor bug)
+2) Stop strings with `min_tokens` (regression guard for #21987)
+3) EOS behavior with `min_tokens`
 4) Edge cases (min_tokens == max_tokens, min_tokens == 0)
 5) Multiple stop conditions
 """
@@ -97,12 +97,6 @@ MIN_TOKENS_TEST_CASES = [
             ],
             expected_min_len=5,
         ),
-        marks=pytest.mark.xfail(
-            reason=(
-                "Known bug #21987: stop strings bypass min_tokens (fixed by PR #22014)"
-            ),
-            strict=False,
-        ),
         id="min_tokens_with_comprehensive_stops",
     ),
     pytest.param(
@@ -113,15 +107,9 @@ MIN_TOKENS_TEST_CASES = [
             stop=["e", "a", " "],
             expected_min_len=3,
         ),
-        marks=pytest.mark.xfail(
-            reason=(
-                "Known bug #21987: stop strings bypass min_tokens (fixed by PR #22014)"
-            ),
-            strict=False,
-        ),
         id="min_tokens_with_simple_char_stop",
     ),
-    # === EOS TOKEN WITH MIN_TOKENS (potential LogitsProcessor bug) ===
+    # === EOS TOKEN WITH MIN_TOKENS ===
     # These test the MinTokensLogitsProcessor handling of EOS tokens
     pytest.param(
         MinTokensTestCase(
@@ -130,10 +118,6 @@ MIN_TOKENS_TEST_CASES = [
             max_tokens=20,
             stop=None,  # Relies on default EOS token behavior
             expected_exact_len=20,
-        ),
-        marks=pytest.mark.xfail(
-            reason=("Potential logits-processor bug: EOS tokens may bypass min_tokens"),
-            strict=False,
         ),
         id="min_equals_max_eos_only",
     ),
@@ -208,16 +192,14 @@ def test_min_tokens_comprehensive(llm_v1: LLM, test_case: MinTokensTestCase):
 
     This test covers all critical scenarios for min_tokens:
     - Basic functionality (should work)
-    - Stop strings with min_tokens (known bug)
-    - EOS tokens with min_tokens (potential bug)
+    - Stop strings with min_tokens (regression guard for #21987)
+    - EOS tokens with min_tokens
     - Edge cases
 
     Args:
         llm_v1: V1 LLM instance
         test_case: Test scenario parameters
     """
-    # Known failing cases are handled via param-level xfail marks above.
-
     # Create sampling parameters
     sampling_params = SamplingParams(
         min_tokens=test_case.min_tokens,
@@ -272,22 +254,13 @@ def test_min_tokens_basic_functionality(llm_v1: LLM):
     assert token_count <= 20, f"Expected at most 20 tokens, got {token_count}"
 
 
-@pytest.mark.xfail(
-    reason=("Known bug #21987: stop strings bypass min_tokens (fixed by PR #22014)"),
-    strict=False,
-)
 def test_min_tokens_stop_strings_bug(llm_v1: LLM):
     """
-    Test the specific bug where stop strings bypass min_tokens.
+    Regression test for #21987: stop strings must not bypass min_tokens.
 
-    This test specifically reproduces the bug Calvin is fixing in PR #22014.
-    It should fail until that fix is merged.
-
-    Strategy: Use guaranteed stop characters that will appear
-    in any generated text.
+    Fixed by PR #22014. Strategy: use guaranteed stop characters that will
+    appear in any generated text, and assert min_tokens is still honored.
     """
-    # If the bug is fixed upstream, this test will XPASS
-
     sampling_params = SamplingParams(
         min_tokens=15,
         max_tokens=50,
@@ -310,33 +283,27 @@ def test_min_tokens_stop_strings_bug(llm_v1: LLM):
     print(f"Token count: {token_count}")
     print(f"Contains 'e': {'e' in generated_text}")
 
-    # This assertion should fail due to the bug - if stop string is found early,
-    # the model should still continue generating until min_tokens is reached
+    # If a stop string is found early, the model must still continue
+    # generating until min_tokens is reached.
     stop_reason = (
         outputs[0].outputs[0].stop_reason if outputs[0].outputs else "no output"
     )
     assert token_count >= 15, (
-        "Bug confirmed: "
+        "Regression: "
         f"{token_count} tokens < min_tokens=15. "
         f"Reason: {stop_reason}. "
         f"Text: {repr(generated_text)}"
     )
 
 
-@pytest.mark.xfail(
-    reason=("Known bug #21987: stop strings bypass min_tokens (fixed by PR #22014)"),
-    strict=False,
-)
 def test_min_tokens_stop_strings_guaranteed_early_trigger(llm_v1: LLM):
     """
-    Guaranteed test for stop strings bypassing min_tokens bug.
+    Regression test (#21987): stop strings must not bypass min_tokens.
 
-    Strategy: Use very low temperature and multiple common stop strings
-    to virtually guarantee early detection, combined with long min_tokens
-    to ensure the bug is exposed regardless of model behavior.
+    Strategy: Use greedy decoding and multiple common stop strings to
+    virtually guarantee early detection, combined with a long min_tokens,
+    and assert min_tokens is still honored.
     """
-    # If the bug is fixed upstream, this test will XPASS
-
     sampling_params = SamplingParams(
         min_tokens=50,  # Set high min_tokens to ensure bug detection
         max_tokens=200,
@@ -359,10 +326,9 @@ def test_min_tokens_stop_strings_guaranteed_early_trigger(llm_v1: LLM):
     print(f"Token count: {token_count}")
     print(f"Stop reason: {stop_reason}")
 
-    # With the bug, this will fail because ANY of the common characters
-    # will trigger early termination before min_tokens=50 is reached
-    # It's virtually impossible to generate 50 tokens without hitting
-    # at least one of: e, a, i, o, u, space, t, n, s, r
+    # ANY of the common characters will trigger a stop; min_tokens=50 must
+    # still be honored. It is virtually impossible to generate 50 tokens
+    # without hitting at least one of: e, a, i, o, u, space, t, n, s, r
     finish_reason = (
         outputs[0].outputs[0].finish_reason if outputs[0].outputs else "unknown"
     )
@@ -371,17 +337,13 @@ def test_min_tokens_stop_strings_guaranteed_early_trigger(llm_v1: LLM):
 
     if finish_reason == "stop":
         assert token_count >= 50, (
-            "Bug confirmed: "
+            "Regression: "
             f"{token_count} tokens < min_tokens=50. "
             f"Reason: {finish_reason}. "
             f"Text: {repr(generated_text)}"
         )
 
 
-@pytest.mark.xfail(
-    reason=("Potential logits-processor bug: EOS tokens may bypass min_tokens"),
-    strict=False,
-)
 def test_min_tokens_eos_behavior(llm_v1: LLM):
     """
     Verify EOS handling with and without min_tokens.
