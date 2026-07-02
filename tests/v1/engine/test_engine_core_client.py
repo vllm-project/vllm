@@ -27,7 +27,11 @@ from vllm.platforms import current_platform
 from vllm.pooling_params import LateInteractionParams, PoolingParams
 from vllm.usage.usage_lib import UsageContext
 from vllm.utils.torch_utils import set_default_torch_num_threads
-from vllm.v1.engine import EngineCoreReadyResponse, EngineCoreRequest
+from vllm.v1.engine import (
+    EngineCoreOutputs,
+    EngineCoreReadyResponse,
+    EngineCoreRequest,
+)
 from vllm.v1.engine.core import EngineCore
 from vllm.v1.engine.core_client import (
     AsyncMPClient,
@@ -235,6 +239,37 @@ def test_dplb_non_late_interaction_still_uses_lb():
 
     assert chosen_engine == client.core_engines[1]
     assert client.lb_engines[1][0] == 1
+
+
+def test_async_mp_client_get_output_nowait_drains_without_blocking():
+    """``get_output_nowait`` drains ready outputs in a bounded pass and returns
+    ``None`` on an empty queue instead of blocking, so callers can poll many
+    stages per round without head-of-line blocking.
+    See vllm-project/vllm-omni#4561.
+    """
+    client = object.__new__(AsyncMPClient)
+    client.outputs_queue = asyncio.Queue()
+    # No background output-handler task is started in this unit test.
+    client._ensure_output_queue_task = lambda: None
+    client._format_exception = lambda exc: exc
+
+    # Empty queue -> immediate None (non-blocking).
+    assert client.get_output_nowait() is None
+
+    first = EngineCoreOutputs()
+    second = EngineCoreOutputs()
+    client.outputs_queue.put_nowait(first)
+    client.outputs_queue.put_nowait(second)
+
+    # Drains already-ready outputs in FIFO order, then reports empty again.
+    assert client.get_output_nowait() is first
+    assert client.get_output_nowait() is second
+    assert client.get_output_nowait() is None
+
+    # Queued exceptions propagate, consistent with get_output_async.
+    client.outputs_queue.put_nowait(ValueError("boom"))
+    with pytest.raises(ValueError, match="boom"):
+        client.get_output_nowait()
 
 
 def test_apply_ready_response_syncs_block_size():
