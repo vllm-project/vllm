@@ -14,8 +14,10 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
 )
 from vllm.platforms import current_platform
 
-if current_platform.get_device_capability() < (7, 0):
+if current_platform.is_cuda_alike() and current_platform.get_device_capability() < (7, 0):
     pytest.skip("INT8 Triton requires CUDA 7.0 or higher", allow_module_level=True)
+
+DEVICE = "xpu" if current_platform.is_xpu() else "cuda"
 
 vllm_config = VllmConfig()
 
@@ -29,9 +31,9 @@ SEEDS = [0]
 
 
 @pytest.fixture(autouse=True, scope="module")
-def setup_cuda():
-    """Sets the default CUDA device for all tests in this module."""
-    torch.set_default_device("cuda")
+def setup_device():
+    """Sets the default device for all tests in this module."""
+    torch.set_default_device(DEVICE)
 
 
 @pytest.mark.parametrize(
