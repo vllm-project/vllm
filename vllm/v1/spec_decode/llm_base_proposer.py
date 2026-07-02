@@ -15,6 +15,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
     replace,
 )
+from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.forward_context import set_forward_context
 from vllm.logger import init_logger
@@ -79,6 +80,7 @@ class SpecDecodeBaseProposer:
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+        self.eplb_state: EplbState | None = None
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
 
         # We need to get the hidden size from the draft model config because
@@ -328,6 +330,10 @@ class SpecDecodeBaseProposer:
                 "does not support M-RoPE yet"
             )
 
+    def set_eplb_state(self, eplb_state: EplbState) -> None:
+        """Inject EPLB state after construction."""
+        self.eplb_state = eplb_state
+
     def _init_parallel_drafting_params(self):
         # For parallel drafting, we need the token ID to use for masked slots
         # And for EAGLE + parallel drafting, we need the hidden state tensor to use
@@ -527,6 +533,12 @@ class SpecDecodeBaseProposer:
         if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
             self.model.model.set_skip_topk(False)
 
+        if self.eplb_state is not None:
+            self.eplb_state.prepare_forward(
+                self.draft_model_config,
+                num_tokens,
+            )
+
         with set_forward_context(
             per_layer_attn_metadata,
             self.vllm_config,
@@ -548,6 +560,9 @@ class SpecDecodeBaseProposer:
         # and read the indices that step 0 just wrote into the shared buffer.
         if self._share_mtp_indices and hasattr(self.model.model, "set_skip_topk"):
             self.model.model.set_skip_topk(True)
+            # The topk indices were written for each query token in the multi-token
+            # batch. Compact the topk indices for each request's last token.
+            self.model.model.compact_topk_indices(token_indices_to_sample)
 
         sample_hidden_states = last_hidden_states[token_indices_to_sample]
 
@@ -671,6 +686,12 @@ class SpecDecodeBaseProposer:
             }
             if self.pass_hidden_states_to_model:
                 model_kwargs["hidden_states"] = self.hidden_states[:input_batch_size]
+
+            if self.eplb_state is not None:
+                self.eplb_state.prepare_forward(
+                    self.draft_model_config,
+                    batch_size,
+                )
 
             with set_forward_context(
                 per_layer_attn_metadata,
