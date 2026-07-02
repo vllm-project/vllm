@@ -17,9 +17,6 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.backends.mla.sparse_utils import (
-    get_sparse_mla_reorder_batch_threshold,
-)
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.attention.ops.flashmla import FlashMLASchedMeta, get_mla_metadata
 from vllm.v1.kv_cache_interface import (
@@ -292,7 +289,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
     - Chunked prefill (aligns with the indexer's chunking)
     """
 
-    # Base threshold is set from the local sparse MLA q-head count.
+    # Base threshold: query_len <= 1 is decode
     reorder_batch_threshold: int = 1
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
 
@@ -315,17 +312,15 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         )
         # Decode can have query_len up to
         #   1 + (2 if parallel drafting else 1) * num_speculative_tokens.
-        # This MUST match the flashmla_sparse / indexer threshold so that
-        # all backends agree on the decode/prefill split.
+        # sparse_swa has no MQA-vs-dense-MHA routing, so multi-token queries take
+        # the prefill path and the decode/prefill split stays at that width.
         spec_mult = (
             2 if (spec_config is not None and spec_config.parallel_drafting) else 1
         )
-        self.reorder_batch_threshold = get_sparse_mla_reorder_batch_threshold(
-            self.vllm_config
-        )
-        self.decode_threshold = (
-            self.reorder_batch_threshold + spec_mult * self.num_speculative_tokens
-        )
+        self.decode_threshold = 1 + spec_mult * self.num_speculative_tokens
+        # Vote max so we never lower the shared reorder below a routing backend's
+        # threshold (a real value, not None, so pure-SWA models still reorder).
+        self.reorder_batch_threshold = self.max_num_batched_tokens
 
         hf_config = self.vllm_config.model_config.hf_config
         assert hasattr(hf_config, "sliding_window")
@@ -416,8 +411,7 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
         # Split into decode and prefill portions using configurable threshold
         (num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens) = (
             split_decodes_and_prefills(
-                common_attn_metadata,
-                decode_threshold=self.decode_threshold,
+                common_attn_metadata, decode_threshold=self.decode_threshold
             )
         )
 

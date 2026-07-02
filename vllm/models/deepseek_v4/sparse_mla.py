@@ -23,9 +23,6 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
-from vllm.v1.attention.backends.mla.sparse_utils import (
-    get_sparse_mla_reorder_batch_threshold,
-)
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -151,7 +148,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.model_config = vllm_config.model_config
         self._init_reorder_batch_threshold(
-            get_sparse_mla_reorder_batch_threshold(vllm_config),
+            1024,
             supports_spec_as_decode=True,
         )
         self.topk_tokens = self.model_config.hf_config.index_topk

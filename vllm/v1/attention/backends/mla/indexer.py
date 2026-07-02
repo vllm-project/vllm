@@ -24,9 +24,6 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.compressor_utils import get_compressed_slot_mapping
-from vllm.v1.attention.backends.mla.sparse_utils import (
-    get_sparse_mla_reorder_batch_threshold,
-)
 from vllm.v1.attention.backends.utils import (
     get_dcp_local_seq_lens,
     split_decodes_and_prefills,
@@ -241,7 +238,9 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
 
 
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
-    reorder_batch_threshold: int = 1
+    # The indexer opts out of the shared reorder-threshold vote (see __init__),
+    # so this is None; its own split uses self.decode_threshold.
+    reorder_batch_threshold: int | None = None
 
     @classmethod
     def get_cudagraph_support(
@@ -277,9 +276,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.use_fp4_indexer_cache = (
             self.vllm_config.attention_config.use_fp4_indexer_cache
         )
-        self.reorder_batch_threshold = get_sparse_mla_reorder_batch_threshold(
-            self.vllm_config
-        )
 
         assert (
             current_platform.is_device_capability_family(100)
@@ -291,7 +287,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         )
 
         next_n = self.num_speculative_tokens + 1
-        self.reorder_batch_threshold += self.num_speculative_tokens
+        # The indexer's decode logits kernel only handles next_n query rows, so
+        # its decode/prefill split stays at next_n regardless of how the
+        # attention backends route. It opts out of the shared reorder-threshold
+        # vote (None is skipped by calculate_reorder_batch_threshold) so it never
+        # drags the single physical reorder below the attention backends' larger
+        # routing thresholds. It only needs the true decodes contiguous at the
+        # front, which the reorder's region ordering guarantees for any reorder
+        # threshold >= next_n (every attention backend votes >= next_n), so its
+        # split at next_n stays exact.
+        self.decode_threshold = next_n
+        self.reorder_batch_threshold = None
         # NOTE: SM100 datacenter GPUs support any next_n natively via the
         # multi-atom paged MQA logits kernels (FP8 and FP4 indexer
         # caches). Outside the SM100 family the FP8
@@ -571,7 +577,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
-                decode_threshold=self.reorder_batch_threshold,
+                decode_threshold=self.decode_threshold,
                 require_uniform=not self.use_flattening,
             )
         )

@@ -24,7 +24,6 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla.sparse_utils import (
-    get_sparse_mla_reorder_batch_threshold,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
@@ -156,7 +155,7 @@ class FlashAttnMLASparseMetadataBuilder(
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
 
         self._init_reorder_batch_threshold(
-            get_sparse_mla_reorder_batch_threshold(vllm_config),
+            1024,
             supports_spec_as_decode=True,
         )
 

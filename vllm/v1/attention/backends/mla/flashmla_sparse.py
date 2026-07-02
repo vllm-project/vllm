@@ -27,7 +27,6 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
-    get_sparse_mla_reorder_batch_threshold,
     triton_convert_req_index_to_global_index,
 )
 from vllm.v1.attention.backends.utils import (
@@ -257,8 +256,9 @@ class FlashMLASparseMetadataBuilder(
 
         # Route sparse MLA through MQA for short query chunks; larger chunks use
         # dense MHA prefill. The cutoff depends on the local TP q-head count.
+        num_q_heads = self.model_config.get_num_attention_heads(parallel_config)
         self._init_reorder_batch_threshold(
-            get_sparse_mla_reorder_batch_threshold(vllm_config),
+            {16: 64, 32: 128, 64: 256, 128: 1024}.get(num_q_heads, 1024),
             supports_spec_as_decode=True,
         )
 
