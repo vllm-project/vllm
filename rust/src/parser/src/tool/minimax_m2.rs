@@ -273,7 +273,9 @@ mod tests {
 
     use super::{MinimaxM2ToolParser, TOOL_CALL_END, TOOL_CALL_START, ToolParser};
     use crate::tool::ToolParserTestExt as _;
-    use crate::tool::test_utils::{collect_stream, split_by_chars, test_tools};
+    use crate::tool::test_utils::{
+        assert_streaming_matches_complete, collect_stream, split_by_chars, test_tools,
+    };
 
     fn build_tool_block(invokes: &[(&str, Vec<(&str, &str)>)]) -> String {
         let invokes = invokes
@@ -447,6 +449,64 @@ mod tests {
                 "precision": 2,
             })
         );
+    }
+
+    #[test]
+    fn minimax_m2_streaming_matches_complete_across_boundaries() {
+        let tools = test_tools();
+        let cases = [
+            (
+                "plain_text",
+                "Hello, München 🌦️. No tools here.".to_string(),
+            ),
+            (
+                "single_tool_call",
+                build_tool_block(&[("get_weather", vec![("city", "Seattle")])]),
+            ),
+            (
+                "parallel_tool_calls",
+                build_tool_block(&[
+                    ("get_weather", vec![("city", "Seattle")]),
+                    ("get_weather", vec![("city", "NYC")]),
+                ]),
+            ),
+            (
+                "unicode_parameter_value",
+                build_tool_block(&[("get_weather", vec![("city", "München 🌦️")])]),
+            ),
+            (
+                "no_parameter_call",
+                build_tool_block(&[("get_weather", vec![])]),
+            ),
+            (
+                "prefix_and_ignored_suffix",
+                format!(
+                    "Let me check. {} This trailing text is ignored.",
+                    build_tool_block(&[("get_weather", vec![("city", "Seattle")])])
+                ),
+            ),
+            (
+                "raw_closing_tag_text_in_parameter_value",
+                build_tool_block(&[(
+                    "get_weather",
+                    vec![
+                        (
+                            "city",
+                            "Seattle &lt;/parameter&gt;&lt;/invoke&gt;&lt;/minimax:tool_call&gt;",
+                        ),
+                        ("days", "5"),
+                    ],
+                )]),
+            ),
+            (
+                "unterminated_tool_call",
+                r#"<minimax:tool_call><invoke name="get_weather">"#.to_string(),
+            ),
+        ];
+
+        for (case_name, text) in cases {
+            assert_streaming_matches_complete::<MinimaxM2ToolParser>(&tools, case_name, &text);
+        }
     }
 
     #[test]

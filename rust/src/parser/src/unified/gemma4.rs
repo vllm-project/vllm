@@ -681,13 +681,72 @@ mod tests {
     }
 
     fn collect_stream(chunks: &[&str]) -> UnifiedParserOutput {
+        collect_stream_result(chunks).unwrap()
+    }
+
+    fn collect_stream_result(chunks: &[&str]) -> super::Result<UnifiedParserOutput> {
         let mut parser = test_parser();
         let mut output = UnifiedParserOutput::default();
         for chunk in chunks {
-            output.append(parser.parse_chunk(chunk).unwrap());
+            parser.parse_into(chunk, &mut output)?;
         }
-        output.append(parser.finish().unwrap());
-        output.coalesce()
+        output.append(parser.finish()?);
+        Ok(output.coalesce())
+    }
+
+    fn assert_streaming_matches_complete(case_name: &str, text: &str) {
+        let complete = parse_complete_result(text);
+        assert_chunking_matches(case_name, text, &[text], &complete);
+
+        let boundaries = internal_char_boundaries(text);
+        for boundary in &boundaries {
+            let chunks = [&text[..*boundary], &text[*boundary..]];
+            assert_chunking_matches(case_name, text, &chunks, &complete);
+        }
+
+        for window in boundaries.windows(2) {
+            let left = window[0];
+            let right = window[1];
+            let chunks = [&text[..left], &text[left..right], &text[right..]];
+            assert_chunking_matches(case_name, text, &chunks, &complete);
+        }
+    }
+
+    fn parse_complete_result(text: &str) -> super::Result<UnifiedParserOutput> {
+        let mut parser = test_parser();
+        let mut output = UnifiedParserOutput::default();
+        parser.parse_into(text, &mut output)?;
+        output.append(parser.finish()?);
+        Ok(output.coalesce())
+    }
+
+    fn internal_char_boundaries(text: &str) -> Vec<usize> {
+        text.char_indices().map(|(index, _)| index).filter(|index| *index > 0).collect()
+    }
+
+    fn assert_chunking_matches(
+        case_name: &str,
+        text: &str,
+        chunks: &[&str],
+        complete: &super::Result<UnifiedParserOutput>,
+    ) {
+        let streamed = collect_stream_result(chunks);
+
+        match (&streamed, complete) {
+            (Ok(streamed), Ok(complete)) => assert_eq!(
+                streamed, complete,
+                "streaming output differed for case {case_name:?}, chunks {chunks:?}, text {text:?}",
+            ),
+            (Err(_), Err(_)) => {}
+            (Ok(streamed), Err(error)) => panic!(
+                "streaming succeeded but complete parsing failed for case {case_name:?}, \
+                 chunks {chunks:?}, text {text:?}, streamed {streamed:?}, complete error {error:?}",
+            ),
+            (Err(error), Ok(complete)) => panic!(
+                "streaming failed but complete parsing succeeded for case {case_name:?}, \
+                 chunks {chunks:?}, text {text:?}, streaming error {error:?}, complete {complete:?}",
+            ),
+        }
     }
 
     fn first_call(output: &UnifiedParserOutput) -> ToolCallDelta {
@@ -750,6 +809,59 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_report_string().contains("incomplete Gemma4 tool call"));
+    }
+
+    #[test]
+    fn gemma4_streaming_matches_complete_across_boundaries() {
+        let cases = [
+            ("plain_text", "Hello, Zürich 🌦️. No tools here.".to_string()),
+            (
+                "single_tool_call",
+                "<|tool_call>call:get_weather{location:<|\"|>London<|\"|>}<tool_call|>".to_string(),
+            ),
+            (
+                "parallel_tool_calls",
+                "<|tool_call>call:get_weather{location:<|\"|>London<|\"|>}<tool_call|>\
+                 <|tool_call>call:get_time{timezone:<|\"|>UTC<|\"|>}<tool_call|>"
+                    .to_string(),
+            ),
+            (
+                "no_parameter_call",
+                "<|tool_call>call:get_status{}<tool_call|>".to_string(),
+            ),
+            (
+                "prefix_and_suffix_text",
+                "Let me check <|tool_call>call:get_weather{location:<|\"|>London<|\"|>}\
+                 <tool_call|><div>"
+                    .to_string(),
+            ),
+            (
+                "unicode_parameter_value",
+                "<|tool_call>call:get_weather{location:<|\"|>Zürich 🌦️<|\"|>}<tool_call|>"
+                    .to_string(),
+            ),
+            (
+                "end_marker_literal_inside_string",
+                "<|tool_call>call:todowrite{content:<|\"|>literal }<tool_call|> inside<|\"|>}\
+                 <tool_call|>"
+                    .to_string(),
+            ),
+            (
+                "html_argument",
+                "<|tool_call>call:write_file{path:<|\"|>index.html<|\"|>,\
+                 content:<|\"|><!DOCTYPE html>\n<html lang=\"zh-CN\">\n<head>\n<|\"|>}\
+                 <tool_call|>"
+                    .to_string(),
+            ),
+            (
+                "unterminated_tool_call",
+                "<|tool_call>call:get_weather{location:<|\"|>London".to_string(),
+            ),
+        ];
+
+        for (case_name, text) in cases {
+            assert_streaming_matches_complete(case_name, &text);
+        }
     }
 
     #[test]
