@@ -277,6 +277,9 @@ class BlockPool:
         new_hashes: list[ExternalBlockHash] | None = (
             [] if self.enable_kv_cache_events else None
         )
+        new_block_offsets: list[int] | None = (
+            [] if self.enable_kv_cache_events else None
+        )
         for i, blk in enumerate(new_full_blocks):
             # Some blocks may be null or masked out when enabling sparse attention
             # like sliding window attention, or Mamba models with prefix-caching
@@ -306,6 +309,8 @@ class BlockPool:
             )
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
+                assert new_block_offsets is not None
+                new_block_offsets.append(i)
 
         if self.enable_kv_cache_events:
             if num_cached_blocks == 0:
@@ -318,6 +323,12 @@ class BlockPool:
             # Calculate token range for the blocks being cached
             start_token_idx = num_cached_blocks * block_size
             end_token_idx = num_full_blocks * block_size
+            assert new_block_offsets is not None
+            block_offsets = (
+                None
+                if new_block_offsets == list(range(len(new_full_blocks)))
+                else new_block_offsets
+            )
 
             # Generate extra keys for each block individually.
             # Each block may have different extra_keys (e.g., different MM
@@ -352,6 +363,7 @@ class BlockPool:
                     else None,
                     extra_keys=extra_keys_list if extra_keys_list else None,
                     group_idx=kv_cache_group_id,
+                    block_offsets=block_offsets,
                 )
             )
 

@@ -71,6 +71,13 @@ class BlockStored(KVCacheEvent):
     # filter groups as they are learned. Remove events only need group_idx+hash.
     kv_cache_spec_kind: str | None = None
     kv_cache_spec_sliding_window: int | None = None
+    block_offsets: list[int] | None = None
+    """Optional offsets mapping block_hashes to token_ids chunks.
+
+    When present, ``block_offsets[i]`` is the block-sized chunk index inside
+    ``token_ids`` for ``block_hashes[i]``. ``None`` means dense layout:
+    block_hashes are aligned with token_ids chunks from the beginning.
+    """
 
     def __hash__(self) -> int:
         return hash(
@@ -85,6 +92,7 @@ class BlockStored(KVCacheEvent):
                 self.group_idx,
                 self.kv_cache_spec_kind,
                 self.kv_cache_spec_sliding_window,
+                tuple(self.block_offsets) if self.block_offsets else None,
             )
         )
 
