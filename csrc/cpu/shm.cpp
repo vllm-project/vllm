@@ -464,6 +464,7 @@ void memcpy_to_shm(void* dst, void* src, const int64_t bytes) {
 }
 
 void memcpy(void* dst, void* src, const int64_t bytes) {
+  if (bytes <= 0) return;
   const int64_t aligned_bytes = ((bytes >> 6) << 6);  // 64 bytes aligned
   int64_t i = 0;
 #pragma GCC unroll 4
