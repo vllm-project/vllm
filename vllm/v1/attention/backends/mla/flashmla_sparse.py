@@ -1,31 +1,30 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, ClassVar
 
-import numpy as np
 import torch
 
 from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mla_attention import (
-    get_mla_dims,
+from vllm.model_executor.layers.attention.sparse_mla_attention import (
+    SparseMLAChunkedContextMetadata,
+    SparseMLACommonImpl,
+    SparseMLACommonMetadataBuilder,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
-from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
+from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
     AttentionLayer,
     AttentionMetadata,
-    AttentionMetadataBuilder,
     CommonAttentionMetadata,
     MultipleOf,
-    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -109,7 +108,7 @@ class FlashMLASparseBackend(AttentionBackend):
         return FlashMLASparseMetadataBuilder
 
     @staticmethod
-    def get_impl_cls() -> type[SparseMLAAttentionImpl[Any]]:
+    def get_impl_cls() -> type["FlashMLASparseImpl"]:
         return FlashMLASparseImpl
 
     @classmethod
@@ -158,6 +157,16 @@ class FlashMLASparseMetadata(AttentionMetadata):
     req_id_per_token: torch.Tensor
     block_size: int = 64
     topk_tokens: int = 2048
+
+    num_decodes: int = 0
+    num_prefills: int = 0
+    num_decode_tokens: int = 0
+    seq_lens: torch.Tensor | None = None
+    prefill_query_start_loc: torch.Tensor | None = None
+    prefill_max_query_len: int = 0
+    has_context: bool = False
+    prefill_query_lens_cpu: torch.Tensor | None = None
+    chunked_context: SparseMLAChunkedContextMetadata | None = None
 
     @dataclass
     class FP8KernelMetadata:
@@ -228,8 +237,11 @@ def get_prefill_workspace_size(max_model_len: int):
     return max_model_len * 5
 
 
-class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetadata]):
+class FlashMLASparseMetadataBuilder(
+    SparseMLACommonMetadataBuilder[FlashMLASparseMetadata]
+):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+    metadata_cls = FlashMLASparseMetadata
 
     def __init__(
         self,
@@ -238,29 +250,26 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         vllm_config: VllmConfig,
         device: torch.device,
     ) -> None:
-        self.vllm_config = vllm_config
-        self.layer_names = layer_names
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         cache_config = vllm_config.cache_config
-        self.kv_cache_spec = kv_cache_spec
-        self.model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
-        self.device = device
 
-        # Classify single-token queries (plus num_speculative_tokens via
-        # supports_spec_as_decode=True) as decodes; longer queries go to
-        # prefill.
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
+        # Route sparse MLA through MQA for short query chunks; larger chunks use
+        # dense MHA prefill. The cutoff depends on the local TP q-head count.
+        num_q_heads = self.model_config.get_num_attention_heads(parallel_config)
+        self._init_reorder_batch_threshold(
+            {16: 64, 32: 128, 64: 256, 128: 1024}.get(num_q_heads, 1024),
+            supports_spec_as_decode=True,
+        )
 
         sm_count = num_compute_units(device.index)
 
         self.num_heads = self.model_config.get_num_attention_heads(parallel_config)
-        self.mla_dims = get_mla_dims(self.model_config)
         # FP8 decode kernel only supports h_q = 64 or 128, so we need to pad
         self.fp8_decode_padded_heads = (
             FlashMLASparseImpl._compute_fp8_decode_padded_heads(self.num_heads)
         )
 
-        self.topk_tokens = vllm_config.model_config.hf_config.index_topk
         self.use_fp8_kv_cache = cache_config.cache_dtype == "fp8_ds_mla"
         max_num_seqs = vllm_config.scheduler_config.max_num_seqs
         # Shape: [max_num_seqs], all elements = topk_tokens (constant for full-CG)
@@ -303,11 +312,6 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         # Sized for per-request batching (num_decodes + 1)
         self.num_splits_buffer = torch.empty(
             (max_num_seqs + 1,),
-            dtype=torch.int32,
-            device=device,
-        )
-        self.req_id_per_token_buffer = torch.empty(
-            (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
             device=device,
         )
@@ -493,51 +497,24 @@ class FlashMLASparseMetadataBuilder(AttentionMetadataBuilder[FlashMLASparseMetad
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> FlashMLASparseMetadata:
-        cm = common_attn_metadata
-        num_tokens = cm.num_actual_tokens
-        starts = np.asarray(cm.query_start_loc_cpu, dtype=np.int32)
-        seg_lengths = np.diff(starts)
-        req_id_per_token = np.repeat(
-            np.arange(seg_lengths.shape[0], dtype=np.int32), seg_lengths
-        )
-        # Zero-fill for cudagraphs
-        self.req_id_per_token_buffer.fill_(0)
-        self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            np_to_pinned_tensor(req_id_per_token), non_blocking=True
-        )
-        req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
+        metadata = super().build(common_prefix_len, common_attn_metadata, fast_build)
 
-        fp8_extra_metadata: (
-            FlashMLASparseMetadata.FP8SeparatePrefillDecode
-            | FlashMLASparseMetadata.FP8KernelMetadata
-            | None
-        ) = None
         fp8_use_mixed_batch = self.num_heads < MIN_HEADS_FOR_BF16_PREFILL
+        metadata.fp8_use_mixed_batch = fp8_use_mixed_batch
         if self.use_fp8_kv_cache:
             if fp8_use_mixed_batch:
-                fp8_extra_metadata = self._build_fp8_mixed_decode_prefill(cm)
+                metadata.fp8_extra_metadata = self._build_fp8_mixed_decode_prefill(
+                    common_attn_metadata
+                )
             else:
-                fp8_extra_metadata = self._build_fp8_separate_prefill_decode(cm)
-
-        metadata = FlashMLASparseMetadata(
-            num_reqs=cm.num_reqs,
-            max_query_len=cm.max_query_len,
-            max_seq_len=cm.max_seq_len,
-            num_actual_tokens=cm.num_actual_tokens,
-            query_start_loc=cm.query_start_loc,
-            slot_mapping=cm.slot_mapping,
-            block_table=cm.block_table_tensor,
-            req_id_per_token=req_id_per_token,
-            block_size=self.kv_cache_spec.block_size,
-            topk_tokens=self.topk_tokens,
-            fp8_extra_metadata=fp8_extra_metadata,
-            fp8_use_mixed_batch=fp8_use_mixed_batch,
-        )
+                metadata.fp8_extra_metadata = self._build_fp8_separate_prefill_decode(
+                    common_attn_metadata
+                )
 
         return metadata
 
 
-class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
+class FlashMLASparseImpl(SparseMLACommonImpl[FlashMLASparseMetadata]):
     @staticmethod
     def _compute_fp8_decode_padded_heads(num_heads: int) -> int:
         # FP8 decode kernel only supports h_q = 64 or 128
@@ -561,19 +538,22 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         indexer: "Indexer | None" = None,
         **mla_args,
     ) -> None:
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = float(scale)
-        self.num_kv_heads = num_kv_heads
-        self.kv_cache_dtype = kv_cache_dtype
-        self.kv_lora_rank: int = mla_args["kv_lora_rank"]
-        self.softmax_scale = scale
-        # The indexer carries the shared buffer for normal layers and tests;
-        # the explicitly-passed buffer covers backbone skip layers, whose
-        # indexer is not constructed (see deepseek_v2.py).
-        self.topk_indices_buffer: torch.Tensor | None = (
-            indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            indexer=indexer,
+            topk_indices_buffer=topk_indices_buffer,
+            **mla_args,
         )
+        self.softmax_scale = scale
         # Prefill BF16 kernel requires 64 on Hopper, 128 on Blackwell
         self.prefill_padding = (
             128 if current_platform.is_device_capability_family(100) else 64
