@@ -8,7 +8,12 @@
 
 import torch
 
+import vllm.envs as envs
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.triton_utils.allocation import set_triton_allocator
+
+_TD_ALLOCATOR_DEVICES: set[torch.device] = set()
 
 
 @triton.autotune(
@@ -88,6 +93,7 @@ def _bmm_chunk_fwd_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
+    USE_TD: tl.constexpr = False,
 ):
     pid_ch = tl.program_id(axis=1).to(tl.int64)
     pid_c = pid_ch // ngroups
@@ -112,22 +118,44 @@ def _bmm_chunk_fwd_kernel(
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_n[None, :] * stride_b_seqlen)
     chunk_size_limit = chunk_seqlen_end - chunk_seqlen_start
 
+    if USE_TD:
+        # a and b are both [chunk_rows, K] with K contiguous. Load a directly as
+        # [M, K]; load b as [N, K] and transpose for the a @ b.T dot
+        a_desc = tl.make_tensor_descriptor(
+            a_ptr,
+            shape=[chunk_size_limit, K],
+            strides=[stride_a_seqlen, 1],
+            block_shape=[BLOCK_SIZE_M, BLOCK_SIZE_K],
+        )
+        b_desc = tl.make_tensor_descriptor(
+            b_ptr,
+            shape=[chunk_size_limit, K],
+            strides=[stride_b_seqlen, 1],
+            block_shape=[BLOCK_SIZE_N, BLOCK_SIZE_K],
+        )
+
     acc = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
 
     # compute a * b.T
     for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        a = tl.load(
-            a_ptrs,
-            mask=(offs_m[:, None] < chunk_size_limit)
-            & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
-            other=0.0,
-        ).to(dot_dtype)
-        b = tl.load(
-            b_ptrs,
-            mask=(offs_k[:, None] < K - k * BLOCK_SIZE_K)
-            & (offs_n[None, :] < chunk_size_limit),
-            other=0.0,
-        ).to(dot_dtype)
+        if USE_TD:
+            a = a_desc.load([pid_m * BLOCK_SIZE_M, k * BLOCK_SIZE_K]).to(dot_dtype)
+            b = tl.trans(b_desc.load([pid_n * BLOCK_SIZE_N, k * BLOCK_SIZE_K])).to(
+                dot_dtype
+            )
+        else:
+            a = tl.load(
+                a_ptrs,
+                mask=(offs_m[:, None] < chunk_size_limit)
+                & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
+                other=0.0,
+            ).to(dot_dtype)
+            b = tl.load(
+                b_ptrs,
+                mask=(offs_k[:, None] < K - k * BLOCK_SIZE_K)
+                & (offs_n[None, :] < chunk_size_limit),
+                other=0.0,
+            ).to(dot_dtype)
         acc += tl.dot(a, b)
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
@@ -145,7 +173,9 @@ def _bmm_chunk_fwd_kernel(
     )
 
 
-def _bmm_chunk_fwd(a, b, chunk_size, cu_chunk_seqlens, causal=False, output_dtype=None):
+def _bmm_chunk_fwd(
+    a, b, chunk_size, cu_chunk_seqlens, causal=False, output_dtype=None, use_td=None
+):
     """
     Argument:
         a: (seqlen, ngroups, k)
@@ -179,6 +209,21 @@ def _bmm_chunk_fwd(a, b, chunk_size, cu_chunk_seqlens, causal=False, output_dtyp
             else tl.float32
         )
     )
+    # Tensor-descriptor operand loads. Gate on K-contiguity
+    # (descriptors require a unit innermost stride) and 16-byte tile alignment.
+    td_override = use_td if use_td is not None else envs.VLLM_TRITON_USE_TD
+    use_td = current_platform.is_xpu() if td_override is None else td_override
+    use_td = (
+        use_td
+        and a.stride(2) == 1
+        and b.stride(2) == 1
+        and k % 8 == 0
+        and chunk_size % 8 == 0
+    )
+    if use_td and a.device not in _TD_ALLOCATOR_DEVICES:
+        set_triton_allocator(a.device)
+        _TD_ALLOCATOR_DEVICES.add(a.device)
+
     grid = lambda META: (
         triton.cdiv(chunk_size, META["BLOCK_SIZE_M"])
         * triton.cdiv(chunk_size, META["BLOCK_SIZE_N"]),
@@ -205,5 +250,6 @@ def _bmm_chunk_fwd(a, b, chunk_size, cu_chunk_seqlens, causal=False, output_dtyp
             stride_outn=out.stride(-1),
             IS_CAUSAL=causal,
             dot_dtype=dot_dtype,
+            USE_TD=use_td,
         )
     return out
