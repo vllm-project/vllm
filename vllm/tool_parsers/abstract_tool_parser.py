@@ -162,6 +162,22 @@ class ToolParser:
                         strict=True,
                     )
                 )
+        elif request.tool_choice in ("auto", None):
+            # tool_choice "auto" (or unset, which defaults to auto when tools
+            # are provided) must leave the model free to emit tool-call
+            # tokens, which a response format constraint would prevent.
+            # tool_choice "none" keeps the response format since tools are
+            # disabled anyway.
+            if isinstance(request, ChatCompletionRequest):
+                request.response_format = None
+            if (
+                isinstance(request, ResponsesRequest)
+                and request.text is not None
+                and request.text.format is not None
+            ):
+                # Single-shot copy for the same Pydantic v2 reason as above,
+                # keeping unrelated text settings intact
+                request.text = request.text.model_copy(update={"format": None})
 
         return request
 

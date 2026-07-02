@@ -5,6 +5,7 @@ import openai
 import pytest
 
 from .utils import (
+    MESSAGES_ASKING_FOR_TOOLS,
     MESSAGES_WITHOUT_TOOLS,
     SEED,
     WEATHER_TOOL,
@@ -194,6 +195,45 @@ async def test_response_format_with_tool_choice_required(
 
     # The fix clears response_format when tool_choice forces tool calling,
     # so the request should complete successfully with tool calls
+    choice = chat_completion.choices[0]
+    assert choice.finish_reason == "tool_calls"
+    assert choice.message.tool_calls is not None
+    assert len(choice.message.tool_calls) > 0
+
+
+# Regression test for https://github.com/vllm-project/vllm/issues/39929
+# response_format: json_object suppressed tool calls when tool_choice: auto
+@pytest.mark.asyncio
+@pytest.mark.timeout(120)
+async def test_response_format_with_tool_choice_auto(
+    client: openai.AsyncOpenAI, server_config: ServerConfig
+):
+    """
+    Test that tool calls still work when response_format: json_object is
+    combined with tool_choice: auto.
+
+    Before the fix, response_format constrained decoding to plain JSON, so
+    the model could never emit tool-call tokens and answered with raw JSON
+    content instead of calling the tool.
+    """
+    models = await client.models.list()
+    model_name: str = models.data[0].id
+
+    # Same fixture and seed as the auto-choice tests in test_tool_calls.py,
+    # since calling the tool is a free model decision here, not a forced one
+    chat_completion = await client.chat.completions.create(
+        messages=ensure_system_prompt(MESSAGES_ASKING_FOR_TOOLS, server_config),
+        temperature=0,
+        max_completion_tokens=150,
+        model=model_name,
+        tools=[WEATHER_TOOL],
+        tool_choice="auto",
+        response_format={"type": "json_object"},
+        seed=SEED,
+    )
+
+    # response_format is dropped for auto, leaving the model free to call
+    # the weather tool for a weather question
     choice = chat_completion.choices[0]
     assert choice.finish_reason == "tool_calls"
     assert choice.message.tool_calls is not None
