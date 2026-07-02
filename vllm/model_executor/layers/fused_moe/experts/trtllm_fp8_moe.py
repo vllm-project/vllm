@@ -213,6 +213,7 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             weight_layout=weight_layout,
             fp8_quantization_type=fp8_quant_type,
             output=output,
+            tune_max_num_tokens=self.moe_config.tune_max_num_tokens,
         )
 
 
@@ -376,6 +377,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             use_shuffled_weight=use_shuffled_weight,
             weight_layout=weight_layout,
             fp8_quantization_type=fp8_quant_type,
+            tune_max_num_tokens=self.moe_config.tune_max_num_tokens,
         )
         if is_mxfp8 or activation == MoEActivation.RELU2_NO_MUL:
             kwargs["activation_type"] = activation_type
@@ -432,6 +434,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             use_routing_scales_on_input=apply_router_weight_on_input,
             routing_method_type=self.routing_method_type,
             activation_type=activation_type,
+            tune_max_num_tokens=self.moe_config.tune_max_num_tokens,
         )
         return out
 

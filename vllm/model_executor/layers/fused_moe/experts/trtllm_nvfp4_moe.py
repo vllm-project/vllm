@@ -319,6 +319,9 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
             output=output,
+            tune_max_num_tokens=min(
+                self.moe_config.tune_max_num_tokens, self._get_chunk_size()
+            ),
         )
 
     def apply(
@@ -479,4 +482,5 @@ class TrtLlmNvFp4ExpertsMonolithic(
             routing_method_type=self.routing_method_type,
             do_finalize=True,
             activation_type=activation_to_flashinfer_int(activation),
+            tune_max_num_tokens=self.moe_config.tune_max_num_tokens,
         )[0]

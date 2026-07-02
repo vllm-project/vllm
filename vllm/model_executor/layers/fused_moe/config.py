@@ -1366,6 +1366,30 @@ class FusedMoEConfig:
         return self.moe_parallel_config.dp_size
 
     @property
+    def tune_max_num_tokens(self) -> int:
+        """Estimate FlashInfer's MoE tuning range.
+
+        All-gather uses ``max_num_tokens * dp_size``; routed dispatch uses
+        ``max_num_tokens``. The DP factor also applies without EP because MoE
+        then uses a ``DP * TP`` tensor-parallel group; see
+        ``docs/serving/data_parallel_deployment.md``.
+
+        DeepEP, SP, or PCP may make this underestimate, however overestimation is
+        more dangerous, increase tuning cost and memory use.
+
+        Also, retain FlashInfer's default `tune_max_num_tokens=8192` floor to avoid
+        over-underestimation.
+        """
+        if (
+            self.moe_parallel_config.use_all2all_kernels
+            and not self.use_ag_rs_all2all_kernels
+        ):
+            max_tokens = self.max_num_tokens
+        else:
+            max_tokens = self.max_num_tokens * self.dp_size
+        return max(max_tokens, 8192)
+
+    @property
     def pcp_size(self):
         return self.moe_parallel_config.pcp_size
 
