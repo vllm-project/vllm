@@ -30,6 +30,7 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
 from vllm.multimodal.utils import get_mm_features_in_window
+from vllm.utils.math_utils import round_down
 from vllm.v1.core.encoder_cache_manager import (
     EncoderCacheManager,
     EncoderDecoderCacheManager,
@@ -345,49 +346,46 @@ class Scheduler(SchedulerInterface):
             + num_new_local_computed_tokens
             + num_external_computed_tokens
         )
-        # Perform block-aligned splitting at prefill phase, including:
-        # * non-resumed requests: num_computed_tokens < num_prompt_tokens + 0
-        # * resumed requests: num_computed_tokens < (
-        #                       num_prompt_tokens + num_output_tokens
-        #                     )
-        # NOTE: Use `request.num_tokens - 1` to bypass normal decoding.
-        if num_computed_tokens < max(request.num_prompt_tokens, request.num_tokens - 1):
-            # To enable block-aligned caching of the Mamba state, `num_new_tokens`
-            # must be a multiple of `block_size`.
-            # As an exception, if `num_new_tokens` is less than `block_size`, the
-            # state is simply not cached, requiring no special handling.
-            # Additionally, when Eagle mode is enabled, FullAttn prunes the last
-            # matching block. To prevent this from causing a Mamba cache miss, the
-            # last chunk must be not smaller than `block_size`.
-            block_size = self.cache_config.block_size
-            last_cache_position = request.num_tokens - request.num_tokens % block_size
-            # eagle prune
-            if self.use_eagle:
-                last_cache_position = max(last_cache_position - block_size, 0)
-            num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
-            if num_computed_tokens_after_sched < last_cache_position:
-                # align to block_size
-                num_new_tokens = num_new_tokens // block_size * block_size
-            elif (
-                num_computed_tokens
-                < last_cache_position
-                < num_computed_tokens_after_sched
-            ):
-                # force to cache the last chunk
-                num_new_tokens = last_cache_position - num_computed_tokens
-            else:
-                # prefill the last few tokens
-                pass
+        # Last position reached by prefill, for both non-resumed requests
+        # (num_prompt_tokens) and resumed ones (num_prompt_tokens +
+        # num_output_tokens). NOTE: `request.num_tokens - 1` exempts normal
+        # decode steps of resumed requests.
+        prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
+        if num_computed_tokens >= prefill_end:
+            # Decode phase: no splitting.
+            return num_new_tokens
 
-            # Marconi cache admission optimization:
-            # cache common prefixes by scheduling num_new_tokens = common prefix length
-            if (
-                num_uncached_common_prefix_tokens >= block_size
-                and num_new_tokens > num_uncached_common_prefix_tokens
-            ):
-                num_new_tokens = num_uncached_common_prefix_tokens
-                # keep alignment to block_size
-                num_new_tokens = num_new_tokens // block_size * block_size
+        # Every non-final prefill chunk must end on a block boundary: the
+        # kernel snapshots the recurrent state at the chunk end into an
+        # aligned block-table slot, and cache_blocks later hashes that slot
+        # as the boundary's state, so an unaligned chunk end poisons the
+        # prefix cache for every request that resumes from it (see #43559).
+        # A chunk reaching `last_cache_position` must stop exactly there:
+        # with Eagle, FullAttn prunes the last matching block, so the final
+        # chunk must be not smaller than `block_size` to avoid a Mamba cache
+        # miss. Only the final chunk may end unaligned, as its mid-block
+        # state can never be hashed as a boundary snapshot.
+        block_size = self.cache_config.block_size
+        last_cache_position = round_down(request.num_tokens, block_size)
+        # eagle prune
+        if self.use_eagle:
+            last_cache_position = max(last_cache_position - block_size, 0)
+
+        chunk_end = num_computed_tokens + num_new_tokens
+        if num_computed_tokens < last_cache_position:
+            chunk_end = min(round_down(chunk_end, block_size), last_cache_position)
+        elif chunk_end < prefill_end:
+            chunk_end = round_down(chunk_end, block_size)
+        num_new_tokens = max(chunk_end - num_computed_tokens, 0)
+
+        # Marconi cache admission optimization:
+        # cache common prefixes by scheduling num_new_tokens = common prefix length
+        if (
+            num_uncached_common_prefix_tokens >= block_size
+            and num_new_tokens > num_uncached_common_prefix_tokens
+        ):
+            # keep alignment to block_size
+            num_new_tokens = round_down(num_uncached_common_prefix_tokens, block_size)
         return num_new_tokens
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
