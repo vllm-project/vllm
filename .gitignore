@@ -80,6 +80,7 @@ coverage.xml
 .hypothesis/
 .pytest_cache/
 cover/
+generated_test_assets/
 
 # Translations
 *.mo

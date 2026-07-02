@@ -642,7 +642,7 @@ class Platform:
         from math import lcm
 
         from vllm.config.vllm import set_current_vllm_config
-        from vllm.model_executor.models import ModelRegistry
+        from vllm.model_executor.model_loader.utils import get_model_cls
         from vllm.utils.math_utils import cdiv
         from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE
         from vllm.v1.attention.backend import MultipleOf
@@ -718,11 +718,10 @@ class Platform:
                 kv_quant_mode=kv_quant_mode,
             ).page_size_bytes
 
-        # Compute mamba page size
-        model_cls, _ = ModelRegistry.resolve_model_cls(
-            model_config.architecture,
-            model_config=model_config,
-        )
+        # Compute mamba page size. Use get_model_cls so AnyModel (and any
+        # other dynamic-parent wrappers via resolve_wrapper_cls) resolves to
+        # the concrete subclass that actually inherits get_mamba_state_*.
+        model_cls = get_model_cls(model_config)
         mamba_page_size = MambaSpec(
             shapes=model_cls.get_mamba_state_shape_from_config(vllm_config),
             dtypes=model_cls.get_mamba_state_dtype_from_config(vllm_config),

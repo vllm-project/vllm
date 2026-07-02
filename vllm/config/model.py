@@ -622,6 +622,13 @@ class ModelConfig:
                     self.tokenizer_mode,
                     arch,
                 )
+        # AnyModel needs to patch _model_info / runner_type before the
+        # pooler/multimodal blocks read them; every other hook stays at
+        # the original late call site below to preserve init ordering.
+        # The late call is idempotent via the config_updated flag.
+        self.config_updated = False
+        if self.architecture == "AnyModel":
+            self._try_verify_and_update_model_config()
 
         # Init pooler config if needed
         if self.runner_type == "pooling":
@@ -725,8 +732,8 @@ class ModelConfig:
             # can be correctly capped to sliding window size
             self.hf_text_config.sliding_window = None
 
-        # Avoid running try_verify_and_update_config multiple times
-        self.config_updated = False
+        # Original late call site for non-AnyModel hooks. For AnyModel
+        # this is a no-op because config_updated was set by the early call.
         self._try_verify_and_update_model_config()
         self._verify_quantization()
         self._verify_cuda_graph()
@@ -1132,13 +1139,13 @@ class ModelConfig:
         if architecture is None:
             return
 
-        from vllm.model_executor.models.config import (
-            MODELS_CONFIG_MAP,
-        )
+        from vllm.model_executor.models.config import MODELS_CONFIG_MAP
 
-        cls = MODELS_CONFIG_MAP.get(architecture, None)
-        if cls is not None:
-            cls.verify_and_update_model_config(self)
+        cls = MODELS_CONFIG_MAP.get(architecture)
+        if cls is None:
+            return
+        cls.verify_and_update_model_config(self)
+        self.config_updated = True
 
     def verify_dual_chunk_attention_config(
         self,
@@ -1331,8 +1338,25 @@ class ModelConfig:
             # is only one type of attention-free block type.
             return 0 if attn_block_type else end - start
         elif self.has_noops:
-            block_configs = self.hf_config.block_configs
-            return sum(not bc.attention.no_op for bc in block_configs[start:end])
+            per_layer_config = self.hf_config.per_layer_config
+
+            def _entry_skip(entry):
+                if isinstance(entry, dict):
+                    return entry.get("skip") or ()
+                return getattr(entry, "skip", None) or ()
+
+            def _lookup(layer_idx):
+                # JSON keys are strings; Python construction may use ints.
+                return (
+                    per_layer_config.get(layer_idx)
+                    or per_layer_config.get(str(layer_idx))
+                    or {}
+                )
+
+            return sum(
+                "attention" not in _entry_skip(_lookup(layer_idx))
+                for layer_idx in range(start, end)
+            )
         else:
             # Hybrid model Jamba
             layers_block_type_value = getattr(

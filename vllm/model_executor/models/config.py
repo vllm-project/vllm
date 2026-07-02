@@ -24,6 +24,68 @@ class VerifyAndUpdateConfig:
         return
 
 
+class AnyModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        """Validate per_layer_config length and patch _model_info from base arch."""
+        from dataclasses import replace
+
+        hf_config = model_config.hf_config
+        # For VL models per_layer_config lives on text_config, not hf_config.
+        text_config = hf_config.get_text_config()
+
+        per_layer_config = getattr(text_config, "per_layer_config", None)
+        if per_layer_config:
+            n_layers = text_config.num_hidden_layers
+            for key in per_layer_config:
+                try:
+                    idx = int(key)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"per_layer_config keys must be integer layer indices; "
+                        f"got {key!r}"
+                    ) from exc
+                if not 0 <= idx < n_layers:
+                    raise ValueError(
+                        f"per_layer_config has entry for layer {idx}, but "
+                        f"num_hidden_layers is {n_layers}"
+                    )
+
+        base_arch = getattr(hf_config, "base_architecture", None)
+        if base_arch:
+            base_info = model_config.registry._try_inspect_model_cls(base_arch)
+            if base_info is not None:
+                model_config._model_info = replace(base_info, has_noops=True)
+
+                # "AnyModel" suffix auto-resolves to pooling/embed; fix that
+                # when the base arch is a text-generation model.
+                if (
+                    model_config.runner == "auto"
+                    and base_info.is_text_generation_model
+                    and model_config.runner_type != "generate"
+                ):
+                    model_config.runner_type = "generate"
+                    model_config.convert_type = "none"
+
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Delegate VllmConfig-level tuning to the base architecture's hook."""
+        base_arch = getattr(
+            vllm_config.model_config.hf_config, "base_architecture", None
+        )
+        if not base_arch:
+            return
+        base_cls = MODELS_CONFIG_MAP.get(base_arch)
+        if base_cls is None or base_cls is AnyModelConfig:
+            return
+        if (
+            base_cls.verify_and_update_config
+            is VerifyAndUpdateConfig.verify_and_update_config
+        ):
+            return
+        base_cls.verify_and_update_config(vllm_config)
+
+
 class DeepseekV32ForCausalLM(VerifyAndUpdateConfig):
     @classmethod
     def verify_and_update_config(cls, vllm_config: "VllmConfig") -> None:
@@ -802,6 +864,7 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
 
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
+    "AnyModel": AnyModelConfig,
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
     "ColQwen3_5": ColQwen3_5Config,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,

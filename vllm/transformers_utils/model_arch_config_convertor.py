@@ -481,6 +481,74 @@ class NemotronNasModelArchConfigConvertor(ModelArchConfigConvertorBase):
         )
 
 
+class AnyModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    """Convertor for NAS-optimized models with HF heterogeneity schema."""
+
+    @staticmethod
+    def _entry_items(entry) -> dict:
+        if isinstance(entry, dict):
+            return entry
+        return dict(vars(entry))
+
+    @classmethod
+    def _entry_skip(cls, entry) -> set[str]:
+        skip = cls._entry_items(entry).get("skip") or ()
+        return set(skip)
+
+    @classmethod
+    def _iter_entries(cls, per_layer_config):
+        """Yield per-layer entries (values), tolerating int/str dict keys."""
+        return list(per_layer_config.values())
+
+    def get_total_num_kv_heads(self) -> int:
+        # Return the max KV head count across non-skipped attention layers
+        # so the KV cache is allocated large enough for every layer.
+        per_layer_config = getattr(self.hf_text_config, "per_layer_config", None)
+        if per_layer_config:
+            num_hidden_layers = getattr(self.hf_text_config, "num_hidden_layers", 0)
+            global_kv = super().get_total_num_kv_heads()
+            max_kv = 0
+            # Missing-from-dict layers fall back to the global value.
+            non_overridden = num_hidden_layers - len(per_layer_config)
+            if non_overridden > 0:
+                max_kv = global_kv or 0
+            for entry in self._iter_entries(per_layer_config):
+                if "attention" in self._entry_skip(entry):
+                    continue
+                kv = self._entry_items(entry).get("num_key_value_heads", global_kv)
+                if kv is not None:
+                    max_kv = max(max_kv, kv)
+            if max_kv > 0:
+                return max_kv
+        return super().get_total_num_kv_heads()
+
+    def get_num_experts(self) -> int:
+        per_layer_config = getattr(self.hf_text_config, "per_layer_config", None)
+        if per_layer_config:
+            num_hidden_layers = getattr(self.hf_text_config, "num_hidden_layers", 0)
+            global_experts = super().get_num_experts()
+            max_experts = 0
+            non_overridden = num_hidden_layers - len(per_layer_config)
+            if non_overridden > 0 and global_experts:
+                max_experts = global_experts
+            for entry in self._iter_entries(per_layer_config):
+                if "mlp" in self._entry_skip(entry):
+                    continue
+                items = self._entry_items(entry)
+                n = items.get("num_local_experts")
+                if n is None:
+                    n = items.get("num_experts")
+                if n is None:
+                    n = items.get("n_routed_experts")
+                if n is None:
+                    n = global_experts
+                if n:
+                    max_experts = max(max_experts, n)
+            if max_experts > 0:
+                return max_experts
+        return super().get_num_experts()
+
+
 class DeepSeekMTPModelArchConfigConvertor(ModelArchConfigConvertorBase):
     def get_num_hidden_layers(self) -> int:
         return getattr(self.hf_text_config, "num_nextn_predict_layers", 0)
@@ -633,6 +701,7 @@ class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
 
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
+    "anymodel": AnyModelArchConfigConvertor,
     "cohere_asr": CohereAsrModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,
     "deepseek_mtp": DeepSeekMTPModelArchConfigConvertor,
