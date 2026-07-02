@@ -116,6 +116,36 @@ def test_register_new_tier_type():
     assert isinstance(tier, ExampleSecondaryTierManager)
 
 
+def test_create_tier_honors_required_primary_pinning():
+    class PinningSecondaryTier(ExampleSecondaryTierManager):
+        requires_primary_pinning = True
+
+        def __init__(self, *args, primary_pinning, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.primary_pinning = primary_pinning
+
+    SecondaryTierFactory._registry["pinning"] = lambda: PinningSecondaryTier
+    primary_kv_view, offloading_spec = _make_mock_args()
+    primary_pinning = object()
+
+    with pytest.raises(ValueError, match="enable_external_pinning=True"):
+        SecondaryTierFactory.create_secondary_tier(
+            {"type": "pinning"},
+            primary_kv_view,
+            offloading_spec,
+        )
+
+    tier = SecondaryTierFactory.create_secondary_tier(
+        {"type": "pinning"},
+        primary_kv_view,
+        offloading_spec,
+        primary_pinning=primary_pinning,
+    )
+
+    assert isinstance(tier, PinningSecondaryTier)
+    assert tier.primary_pinning is primary_pinning
+
+
 # ---------------------------------------------------------------------------
 # Error paths
 # ---------------------------------------------------------------------------

@@ -30,6 +30,8 @@ from vllm.v1.kv_offload.base import (
     ScheduleEndContext,
     make_offload_key,
 )
+from vllm.v1.kv_offload.tiering import manager as manager_module
+from vllm.v1.kv_offload.tiering import spec as spec_module
 from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
@@ -37,6 +39,11 @@ from vllm.v1.kv_offload.tiering.base import (
 )
 from vllm.v1.kv_offload.tiering.example.manager import ExampleSecondaryTierManager
 from vllm.v1.kv_offload.tiering.factory import SecondaryTierFactory
+from vllm.v1.kv_offload.tiering.pinning import (
+    MemDescriptor,
+    PrimaryPinningAPI,
+    TransportEndpoint,
+)
 from vllm.v1.kv_offload.tiering.manager import (
     CPUPrimaryTierOffloadingManager,
     TieringOffloadingManager,
@@ -50,8 +57,11 @@ _MOCK_OFFLOADING_SPEC = MagicMock()
 def _mock_mmap_region(num_blocks: int, row_bytes: int = 16):
     """Create a mock SharedOffloadRegion for testing."""
     mock = MagicMock()
-    view = memoryview(torch.zeros((num_blocks, row_bytes), dtype=torch.int8).numpy())
+    arr = torch.zeros((num_blocks, row_bytes), dtype=torch.int8).numpy()
+    view = memoryview(arr)
     mock.create_kv_memoryview.return_value = view
+    mock.base_addr = arr.ctypes.data
+    mock.row_stride_bytes = row_bytes
     return mock
 
 
@@ -118,6 +128,47 @@ class MetricsSecondaryTierManager(SecondaryTierManager):
         return stats
 
 
+class FakeNixlAgent:
+    instances: list["FakeNixlAgent"] = []
+
+    def __init__(self, name, config):
+        self.name = name
+        self.config = config
+        self.register_memory_calls = []
+        self.deregister_memory_calls = []
+        FakeNixlAgent.instances.append(self)
+
+    def register_memory(self, descs, mem_type=None, backends=None):
+        registration = (descs, mem_type, backends)
+        self.register_memory_calls.append(registration)
+        return registration
+
+    def deregister_memory(self, registration):
+        self.deregister_memory_calls.append(registration)
+
+
+@pytest.fixture
+def fake_nixl(monkeypatch):
+    FakeNixlAgent.instances = []
+
+    def fake_agent_config(**kwargs):
+        return {"config": kwargs}
+
+    monkeypatch.setattr(manager_module.nixl_utils, "NixlWrapper", FakeNixlAgent)
+    monkeypatch.setattr(
+        manager_module.nixl_utils, "nixl_agent_config", fake_agent_config
+    )
+    return FakeNixlAgent
+
+
+def store_ready_blocks(
+    manager: CPUPrimaryTierOffloadingManager, keys: list[OffloadKey]
+) -> None:
+    result = manager.prepare_store(keys, _CTX)
+    assert result is not None
+    manager.complete_store(keys, _CTX, success=True)
+
+
 def test_tiering_spec_collects_secondary_metric_definitions(monkeypatch):
     monkeypatch.setitem(
         SecondaryTierFactory._registry,
@@ -170,6 +221,259 @@ def test_tiering_manager_aggregates_secondary_stats():
     second_stats = manager.get_stats()
     assert second_stats is not None
     assert MetricsSecondaryTierManager.MY_TIER_METRIC not in second_stats.data["data"]
+
+
+class TestCPUPrimaryTierExternalPinning:
+    def test_external_pinning_disabled_rejects_endpoint_and_pin(self):
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=2, mmap_region=_mock_mmap_region(2)
+        )
+        pinning_api: PrimaryPinningAPI = primary_tier
+
+        with pytest.raises(RuntimeError, match="external pinning"):
+            pinning_api.get_transport_endpoint()
+        with pytest.raises(RuntimeError, match="external pinning"):
+            pinning_api.search_and_pin(to_keys([0]))
+
+    def test_external_pinning_initializes_endpoint_and_registers_mmap_once(
+        self, fake_nixl
+    ):
+        mock_region = _mock_mmap_region(3, row_bytes=32)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=3,
+            mmap_region=mock_region,
+            enable_external_pinning=True,
+        )
+
+        pinning_api: PrimaryPinningAPI = primary_tier
+        assert len(fake_nixl.instances) == 1
+        agent = fake_nixl.instances[0]
+        endpoint = pinning_api.get_transport_endpoint()
+        assert isinstance(endpoint, TransportEndpoint)
+        assert endpoint.name == agent.name
+        assert endpoint.end_point is agent
+        assert endpoint.info == "nixl"
+
+        view = primary_tier.get_kv_memoryview()
+        base_addr = view.obj.ctypes.data
+        assert agent.register_memory_calls == [
+            ([(base_addr, view.nbytes, 0, "")], "DRAM", None)
+        ]
+        primary_tier.shutdown()
+        assert agent.deregister_memory_calls == agent.register_memory_calls
+
+    def test_search_and_pin_ready_block_returns_descriptor_and_protects_eviction(
+        self, fake_nixl
+    ):
+        mock_region = _mock_mmap_region(2, row_bytes=32)
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=2,
+            mmap_region=mock_region,
+            enable_external_pinning=True,
+        )
+        key = to_keys([1])[0]
+        store_ready_blocks(primary_tier, [key])
+        pinning_api: PrimaryPinningAPI = primary_tier
+
+        block = primary_tier._policy.get(key)
+        assert block is not None
+        assert block.ref_cnt == 0
+        assert key in primary_tier._policy.evictable_blocks
+        assert primary_tier._num_evictable_cache_blocks == 1
+
+        view = primary_tier.get_kv_memoryview()
+        sentinel = b"pin-me"
+        row_addr = mock_region.base_addr + block.block_id * mock_region.row_stride_bytes
+        view.obj[block.block_id, : len(sentinel)] = list(sentinel)
+
+        pin_result = pinning_api.search_and_pin([key])
+
+        assert pin_result is not None
+        pin_handle, descriptors = pin_result
+        assert pin_handle
+        assert len(descriptors) == 1
+        descriptor = descriptors[key]
+        assert isinstance(descriptor, MemDescriptor)
+        assert descriptor.end_point_name == pinning_api.get_transport_endpoint().name
+        assert descriptor.mem_type == "DRAM"
+        assert descriptor.addr == row_addr
+        assert descriptor.size == mock_region.row_stride_bytes
+        assert descriptor.device_Id == 0
+        assert descriptor.info == ""
+        assert bytes(view.obj[block.block_id, : len(sentinel)]) == sentinel
+        assert block.ref_cnt == 1
+        assert key not in primary_tier._policy.evictable_blocks
+        assert primary_tier._num_evictable_cache_blocks == 0
+
+        assert pinning_api.unpin(pin_handle) is True
+        assert block.ref_cnt == 0
+        assert key in primary_tier._policy.evictable_blocks
+        assert primary_tier._num_evictable_cache_blocks == 1
+        assert pinning_api.unpin(pin_handle) is False
+
+    def test_overlapping_pin_handles_preserve_refcounts(self, fake_nixl):
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=3,
+            mmap_region=_mock_mmap_region(3),
+            enable_external_pinning=True,
+        )
+        keys = to_keys(range(3))
+        store_ready_blocks(primary_tier, keys)
+        pinning_api: PrimaryPinningAPI = primary_tier
+
+        first_handle, _ = pinning_api.search_and_pin(keys[:2])
+        second_handle, _ = pinning_api.search_and_pin(keys[1:])
+
+        blocks = [primary_tier._policy.get(key) for key in keys]
+        assert [block.ref_cnt for block in blocks if block is not None] == [1, 2, 1]
+
+        assert pinning_api.unpin(first_handle) is True
+        assert [block.ref_cnt for block in blocks if block is not None] == [0, 1, 1]
+        assert keys[0] in primary_tier._policy.evictable_blocks
+        assert keys[1] not in primary_tier._policy.evictable_blocks
+
+        assert pinning_api.unpin(second_handle) is True
+        assert [block.ref_cnt for block in blocks if block is not None] == [0, 0, 0]
+        assert all(key in primary_tier._policy.evictable_blocks for key in keys)
+
+    def test_search_and_pin_all_or_nothing_for_missing_and_not_ready_keys(
+        self, fake_nixl
+    ):
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=3,
+            mmap_region=_mock_mmap_region(3),
+            enable_external_pinning=True,
+        )
+        ready_key, missing_key, pending_key = to_keys(range(3))
+        store_ready_blocks(primary_tier, [ready_key])
+        pinning_api: PrimaryPinningAPI = primary_tier
+
+        assert pinning_api.search_and_pin([ready_key, missing_key]) is None
+        ready_block = primary_tier._policy.get(ready_key)
+        assert ready_block is not None
+        assert ready_block.ref_cnt == 0
+        assert ready_key in primary_tier._policy.evictable_blocks
+
+        result = primary_tier.prepare_store([pending_key], _CTX)
+        assert result is not None
+        pending_block = primary_tier._policy.get(pending_key)
+        assert pending_block is not None
+        assert pending_block.ref_cnt == -1
+
+        assert pinning_api.search_and_pin([ready_key, pending_key]) is None
+        assert ready_block.ref_cnt == 0
+        assert pending_block.ref_cnt == -1
+        assert ready_key in primary_tier._policy.evictable_blocks
+
+    def test_reset_cache_fails_with_active_external_pins(self, fake_nixl):
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=2,
+            mmap_region=_mock_mmap_region(2),
+            enable_external_pinning=True,
+        )
+        key = to_keys([0])[0]
+        store_ready_blocks(primary_tier, [key])
+        pinning_api: PrimaryPinningAPI = primary_tier
+        pin_handle, _ = pinning_api.search_and_pin([key])
+
+        with pytest.raises(RuntimeError, match="active external pins"):
+            primary_tier.reset_cache()
+
+        assert pinning_api.unpin(pin_handle) is True
+        primary_tier.reset_cache()
+        assert primary_tier.lookup(key, _CTX) is LookupResult.MISS
+
+    @pytest.mark.parametrize("cache_policy", ["lru", "arc"])
+    def test_pinned_block_survives_eviction_pressure(self, fake_nixl, cache_policy):
+        primary_tier = CPUPrimaryTierOffloadingManager(
+            num_blocks=2,
+            mmap_region=_mock_mmap_region(2),
+            cache_policy=cache_policy,
+            enable_external_pinning=True,
+        )
+        pinned_key, evictable_key, pressure_key = to_keys(range(3))
+        store_ready_blocks(primary_tier, [pinned_key, evictable_key])
+        pinning_api: PrimaryPinningAPI = primary_tier
+        pin_handle, _ = pinning_api.search_and_pin([pinned_key])
+
+        result = primary_tier.prepare_store([pressure_key], _CTX)
+        assert result is not None
+        assert result.evicted_keys == [evictable_key]
+        primary_tier.complete_store([pressure_key], _CTX, success=True)
+
+        pinned_block = primary_tier._policy.get(pinned_key)
+        assert pinned_block is not None
+        assert pinned_block.ref_cnt == 1
+        assert primary_tier.lookup(pinned_key, _CTX) is LookupResult.HIT
+        assert primary_tier.lookup(evictable_key, _CTX) is LookupResult.MISS
+        assert primary_tier.lookup(pressure_key, _CTX) is LookupResult.HIT
+
+        assert pinning_api.unpin(pin_handle) is True
+        assert pinned_block.ref_cnt == 0
+        assert primary_tier._num_evictable_cache_blocks == 2
+        assert not primary_tier._has_active_external_pins()
+
+
+def test_tiering_spec_passes_external_pinning_flag(monkeypatch):
+    class FakeSharedOffloadRegion:
+        def __init__(self, **kwargs):
+            self.kwargs = kwargs
+
+    captured = {}
+    fake_primary = MagicMock()
+    fake_primary.enable_external_pinning = True
+    fake_primary.get_kv_memoryview.return_value = memoryview(
+        torch.zeros((1, 16), dtype=torch.int8).numpy()
+    )
+
+    def fake_primary_ctor(**kwargs):
+        captured.update(kwargs)
+        return fake_primary
+
+    fake_tiering_manager = object()
+    factory_captured = {}
+    fake_secondary = MagicMock()
+    fake_secondary.tier_type = "pinning"
+
+    def fake_create_secondary_tier(
+        tier_config, primary_kv_view, offloading_spec, primary_pinning=None
+    ):
+        factory_captured["tier_config"] = tier_config
+        factory_captured["primary_kv_view"] = primary_kv_view
+        factory_captured["offloading_spec"] = offloading_spec
+        factory_captured["primary_pinning"] = primary_pinning
+        return fake_secondary
+
+    monkeypatch.setattr(spec_module, "SharedOffloadRegion", FakeSharedOffloadRegion)
+    monkeypatch.setattr(
+        spec_module, "CPUPrimaryTierOffloadingManager", fake_primary_ctor
+    )
+    monkeypatch.setattr(
+        spec_module.SecondaryTierFactory,
+        "create_secondary_tier",
+        fake_create_secondary_tier,
+    )
+    monkeypatch.setattr(
+        spec_module, "TieringOffloadingManager", lambda **kwargs: fake_tiering_manager
+    )
+
+    spec = TieringOffloadingSpec.__new__(TieringOffloadingSpec)
+    spec._manager = None
+    spec.vllm_config = MagicMock()
+    spec.vllm_config.instance_id = "instance"
+    spec.num_blocks = 1
+    spec.kv_bytes_per_offloaded_block = 16
+    spec.cpu_page_size_per_worker = 16
+    spec.eviction_policy = "lru"
+    spec.kv_events_config = MagicMock()
+    spec.kv_events_config.enable_kv_cache_events = False
+    spec.extra_config = {"enable_external_pinning": True}
+    spec.secondary_tier_configs = [{"type": "pinning"}]
+    spec._scheduler_mmap = None
+
+    assert spec.get_manager() is fake_tiering_manager
+    assert captured["enable_external_pinning"] is True
+    assert factory_captured["primary_pinning"] is fake_primary
 
 
 class TestExampleSecondaryTierManager:
