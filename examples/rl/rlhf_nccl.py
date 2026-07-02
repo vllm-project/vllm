@@ -66,7 +66,7 @@ class MyLLM(LLM):
         super().__init__(*args, **kwargs)
 
 
-@ray.remote(num_gpus=1)
+@ray.remote(num_gpus=2)
 class TrainModel:
     """Ray actor that wraps the training model on a dedicated GPU."""
 
