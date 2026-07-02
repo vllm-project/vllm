@@ -514,7 +514,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # time step projection (discretization)
         # instantiate once and copy inv_dt in init_weights of PretrainedModel
         self.dt_bias = nn.Parameter(
-            torch.ones(self.num_v_heads // self.tp_size),
+            torch.ones(self.num_v_heads // self.tp_size, dtype=torch.float32),
         )
         self.A_log = nn.Parameter(
             torch.empty(
