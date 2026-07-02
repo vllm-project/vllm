@@ -75,21 +75,19 @@ def build_emu35_vision_tokenizer(
 
 
 class ApertusImageTokenizer:
-    DEFAULT_VQ_HUB = "BAAI/Emu3.5-VisionTokenizer"
-    DEFAULT_MIN_PIXELS = 256 * 256
-    DEFAULT_MAX_PIXELS = 1400 * 1400
-    DEFAULT_IMAGE_PLACEHOLDER = "<|image|>"
-    VISUAL_TEMPLATE = "<|visual token {token_id}|>"
-    EMU35_DS_FACTOR = 16
-    DEFAULT_BOI_TOKEN = "<|img_start|>"
-    DEFAULT_IMG_TOKEN = "<|img_token_start|>"
-    DEFAULT_EOL_TOKEN = "<|img_end_of_row|>"
-    DEFAULT_EOI_TOKEN = "<|img_end|>"
-
     _vision_tokenizer_cache: dict[tuple[str, str, str, torch.dtype], Any] = {}
 
-    def __init__(self) -> None:
-        pass
+    def __init__(self, vision_config: dict[str, Any] | None = None) -> None:
+        self.vision_config = vision_config or {}
+        self.min_pixels = self.vision_config.get("min_pixels", 256 * 256)
+        self.max_pixels = self.vision_config.get("max_pixels", 1400 * 1400)
+        self.image_placeholder = self.vision_config.get("image_placeholder", "<|image|>")
+        self.visual_template = self.vision_config.get("visual_template", "<|visual token {token_id}|>")
+        self.ds_factor = self.vision_config.get("ds_factor", 16)
+        self.boi_token = self.vision_config.get("boi_token", "<|img_start|>")
+        self.img_token = self.vision_config.get("img_token", "<|img_token_start|>")
+        self.eol_token = self.vision_config.get("eol_token", "<|img_end_of_row|>")
+        self.eoi_token = self.vision_config.get("eoi_token", "<|img_end|>")
 
     @staticmethod
     def coerce_int(value: object, *, default: int) -> int:
@@ -166,39 +164,6 @@ class ApertusImageTokenizer:
         return Image.fromarray(array_np).convert("RGB")
 
     @staticmethod
-    def apertus_special_token(
-            tokenizer: TokenizerLike,
-            attr_name: str,
-            fallback: str,
-            ) -> str:
-        token = getattr(tokenizer, attr_name, None)
-        return token if isinstance(token, str) and token else fallback
-
-    # TODO delete dead code
-    @classmethod
-    def placeholder_aliases(
-            cls,
-            tokenizer: TokenizerLike,
-            mm_processor_kwargs: Mapping[str, object],
-            ) -> list[str]:
-        configured_placeholder = mm_processor_kwargs.get("apertus_image_placeholder")
-        tokenizer_placeholder = getattr(tokenizer, "image_token", None)
-        candidates = [
-            configured_placeholder if isinstance(configured_placeholder, str) else "",
-            tokenizer_placeholder if isinstance(tokenizer_placeholder, str) else "",
-            cls.DEFAULT_IMAGE_PLACEHOLDER,
-            ]
-
-        seen: set[str] = set()
-        aliases: list[str] = []
-        for candidate in candidates:
-            stripped = candidate.strip()
-            if stripped and stripped not in seen:
-                seen.add(stripped)
-                aliases.append(stripped)
-        return aliases
-
-    @staticmethod
     def _resolve_vision_tokenizer_device(
             mm_processor_kwargs: Mapping[str, object],
             ) -> tuple[str, str]:
@@ -222,9 +187,12 @@ class ApertusImageTokenizer:
         vq_hub = str(
                 mm_processor_kwargs.get(
                         "apertus_vq_hub",
-                        mm_processor_kwargs.get("vq_hub", self.DEFAULT_VQ_HUB),
+                        mm_processor_kwargs.get(
+                            "vq_hub",
+                            self.vision_config.get("vq_hub", "BAAI/Emu3.5-VisionTokenizer")
                         ),
                 )
+        )
         vq_type = str(
                 mm_processor_kwargs.get(
                         "apertus_vq_type",
@@ -269,7 +237,7 @@ class ApertusImageTokenizer:
                 )
         vision_tokenizer = build_emu35_vision_tokenizer(
                 vq_hub=vq_hub,
-                default_repo=self.DEFAULT_VQ_HUB,
+                default_repo=vq_hub,
                 device=vision_device,
                 vq_type=vq_type,
                 cache_dir=cache_dir if isinstance(cache_dir, str) else None,
@@ -280,112 +248,15 @@ class ApertusImageTokenizer:
         self._vision_tokenizer_cache[cache_key] = vision_tokenizer
         return vision_tokenizer
 
-    # TODO delete dead code
-    def build_apertus_image_prompt(
-            self,
-            image_tokens: torch.Tensor,
-            tokenizer: TokenizerLike,
-            ) -> str:
-        if image_tokens.ndim != 2:
-            raise ValueError(
-                    f"Apertus image tokens must be 2D, got "
-                    f"shape {tuple(image_tokens.shape)}",
-                    )
-
-        height, width = image_tokens.shape
-        rows = [
-            "".join(
-                    self.VISUAL_TEMPLATE.format(token_id=int(token_id)) for token_id in row,
-                    )
-            for row in image_tokens.detach().to("cpu").tolist()
-            ]
-        eol_token = self.apertus_special_token(
-                tokenizer, "eol_token", self.DEFAULT_EOL_TOKEN,
-                )
-        imgstr = eol_token.join(rows)
-
-        boi_token = self.apertus_special_token(
-                tokenizer, "boi_token", self.DEFAULT_BOI_TOKEN,
-                )
-        img_token = self.apertus_special_token(
-                tokenizer, "img_token", self.DEFAULT_IMG_TOKEN,
-                )
-        eoi_token = self.apertus_special_token(
-                tokenizer, "eoi_token", self.DEFAULT_EOI_TOKEN,
-                )
-
-        return f"{boi_token}{height}*{width}{img_token}{imgstr}{eoi_token}"
-
-    # TODO delete dead code
-    def encode_images(
-            self,
-            images: Sequence[object],
-            *,
-            tokenizer: TokenizerLike,
-            mm_processor_kwargs: Mapping[str, object],
-            ) -> list[str]:
-        if not images:
-            return []
-
-        min_pixels = self.coerce_int(
-                mm_processor_kwargs.get(
-                        "apertus_min_pixels",
-                        mm_processor_kwargs.get("emu_min_pixels", self.DEFAULT_MIN_PIXELS),
-                        ),
-                default=self.DEFAULT_MIN_PIXELS,
-                )
-        max_pixels = self.coerce_int(
-                mm_processor_kwargs.get(
-                        "apertus_max_pixels",
-                        mm_processor_kwargs.get("emu_max_pixels", self.DEFAULT_MAX_PIXELS),
-                        ),
-                default=self.DEFAULT_MAX_PIXELS,
-                )
-
-        vision_tokenizer = self.load_vision_tokenizer(mm_processor_kwargs)
-        vision_params = next(vision_tokenizer.parameters())
-        vision_device = vision_params.device
-        vision_dtype = vision_params.dtype
-
-        image_prompts: list[str] = []
-        for raw_image in images:
-            image = self.coerce_pil_image(raw_image)
-            width, height = image.size
-            current_area = width * height
-            target_area = max(min(max_pixels, current_area), min_pixels)
-            resized_image = self.smart_resize(
-                    image, target_area, self.EMU35_DS_FACTOR,
-                    )
-            resized_w, resized_h = resized_image.size
-
-            image_tensor = torch.tensor(
-                    (np.array(resized_image) / 127.5 - 1.0),
-                    device=vision_device,
-                    dtype=vision_dtype,
-                    ).permute(2, 0, 1)
-
-            with torch.inference_mode():
-                quant, emb_loss, info = vision_tokenizer.encode(image_tensor[None])
-                ind = info[2]
-
-            token_h = resized_h // self.EMU35_DS_FACTOR
-            token_w = resized_w // self.EMU35_DS_FACTOR
-            image_token_grid = ind.view(token_h, token_w).to(dtype=torch.int64)
-            image_prompts.append(
-                    self.build_apertus_image_prompt(image_token_grid, tokenizer),
-                    )
-
-        return image_prompts
-
     def preprocess_image_to_tensor(self, raw_image: object) -> tuple[torch.Tensor, int, int]:
         """Returns Normalized Float32 Tensor [3, H, W] and Expected Grid Dimensions [h_tok, w_tok]."""
         image = self.coerce_pil_image(raw_image)
         w, h = image.size
-        target_area = max(min(self.DEFAULT_MAX_PIXELS, w * h), self.DEFAULT_MIN_PIXELS)
-        resized = self.smart_resize(image, target_area, self.EMU35_DS_FACTOR)
+        target_area = max(min(self.max_pixels, w * h), self.min_pixels)
+        resized = self.smart_resize(image, target_area, self.ds_factor)
 
         tensor = torch.tensor((np.array(resized) / 127.5 - 1.0), dtype=torch.float32).permute(2, 0, 1)
-        h_tok, w_tok = tensor.shape[1] // self.EMU35_DS_FACTOR, tensor.shape[2] // self.EMU35_DS_FACTOR
+        h_tok, w_tok = tensor.shape[1] // self.ds_factor, tensor.shape[2] // self.ds_factor
         return tensor, h_tok, w_tok
 
 
@@ -616,67 +487,6 @@ class ApertusAudioTokenizer:
             serialized = tokenizer.decode(list(token_ids), skip_special_tokens=False)
 
         return serialized
-
-    def encode_audios(
-            self,
-            audios: Sequence[object],
-            *,
-            tokenizer: TokenizerLike,
-            mm_processor_kwargs: Mapping[str, object],
-            ) -> list[str]:
-        if not audios:
-            return []
-
-        token_offset = self.coerce_int(
-                mm_processor_kwargs.get("apertus_audio_token_offset"),
-                default=self.DEFAULT_AUDIO_TOKEN_OFFSET,
-                )
-        target_peak_dbfs = self.coerce_float(
-                mm_processor_kwargs.get("apertus_audio_target_peak_dbfs"),
-                default=self.DEFAULT_TARGET_PEAK_DBFS,
-                )
-
-        audio_tokenizer = self.get_audio_tokenizer(mm_processor_kwargs)
-        audio_device = self.resolve_torch_device(audio_tokenizer)
-        audio_start_id = self.load_special_token_id(
-                tokenizer, self.DEFAULT_AUDIO_START_TOKEN,
-                )
-        audio_end_id = self.load_special_token_id(
-                tokenizer, self.DEFAULT_AUDIO_END_TOKEN,
-                )
-
-        serialized_prompts: list[str] = []
-        for raw_audio in audios:
-            waveform = self.normalize_audio_input(raw_audio)
-            audio_tensor = self.to_audio_tensor(waveform)
-
-            # Match benchmark script default: peak-normalize to target dBFS.
-            peak = audio_tensor.abs().max().clamp(min=1e-10)
-            target_peak = 10 ** (target_peak_dbfs / 20.0)
-            audio_tensor = audio_tensor * (target_peak / peak)
-
-            audio_tensor = audio_tensor.to(audio_device)
-            with torch.no_grad():
-                audio_codes = audio_tokenizer.encode_audio(audio_tensor)
-
-            if audio_codes.dim() == 2:
-                audio_codes = audio_codes.squeeze(0)
-
-            shifted_codes = (
-                    audio_codes.detach().to("cpu", dtype=torch.int64) + token_offset
-            )
-            prompt_ids = [audio_start_id]
-            prompt_ids.extend(shifted_codes.tolist())
-            prompt_ids.append(audio_end_id)
-
-            serialized_prompts.append(
-                    self.serialize_audio_token_ids(
-                            prompt_ids,
-                            tokenizer,
-                            ),
-                    )
-
-        return serialized_prompts
 
     def preprocess_audio_to_tensor(self, raw_audio: object) -> tuple[torch.Tensor, int]:
         """Returns Normalized Float32 Tensor [1, Length] and Expected Tokens Count."""

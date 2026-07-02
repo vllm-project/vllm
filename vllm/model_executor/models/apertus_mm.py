@@ -13,7 +13,6 @@ from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 import torch
-from transformers import ApertusConfig
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
@@ -35,6 +34,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
     TimingContext,
     )
+from vllm.sequence import IntermediateTensors
 from .apertus import ApertusForCausalLM
 from .apertus_utils import ApertusAudioTokenizer, ApertusImageTokenizer
 from .interfaces import MultiModalEmbeddings, SupportsMultiModal
@@ -43,9 +43,6 @@ logger = init_logger(__name__)
 
 
 class ApertusProcessingInfo(BaseProcessingInfo):
-
-    def get_hf_config(self) -> ApertusConfig:
-        return self.ctx.get_hf_config(ApertusConfig)
 
     def get_data_parser(self) -> MultiModalDataParser:
         return MultiModalDataParser(
@@ -61,8 +58,9 @@ class ApertusProcessingInfo(BaseProcessingInfo):
             self, seq_len: int, mm_counts: Mapping[str, int],
             ) -> Mapping[str, int] | None:
         del mm_counts
-        ds = ApertusImageTokenizer.EMU35_DS_FACTOR
-        max_px = ApertusImageTokenizer.DEFAULT_MAX_PIXELS
+        vision_config = self.get_hf_config().vision_config
+        ds = vision_config.get("ds_factor", 16)
+        max_px = vision_config.get("max_pixels", 1400 * 1400)
 
         return {
             "image": min((max_px // (ds * ds)) + 512, seq_len),
@@ -73,8 +71,10 @@ class ApertusProcessingInfo(BaseProcessingInfo):
 class ApertusDummyInputsBuilder(BaseDummyInputsBuilder[ApertusProcessingInfo]):
 
     def get_dummy_text(self, mm_counts: Mapping[str, int]) -> str:
+        vision_config = self.info.get_hf_config().vision_config
+        image_placeholder = vision_config.get("image_placeholder", "<|image|>")
         return (
-                ApertusImageTokenizer.DEFAULT_IMAGE_PLACEHOLDER * mm_counts.get("image", 0) +
+                image_placeholder * mm_counts.get("image", 0) +
                 ApertusAudioTokenizer.DEFAULT_AUDIO_PLACEHOLDER * mm_counts.get("audio", 0)
         )
 
@@ -84,7 +84,9 @@ class ApertusDummyInputsBuilder(BaseDummyInputsBuilder[ApertusProcessingInfo]):
             mm_counts: Mapping[str, int],
             mm_options: Mapping[str, BaseDummyOptions],
             ) -> MultiModalDataDict:
-        max_side = int(ApertusImageTokenizer.DEFAULT_MAX_PIXELS ** 0.5)
+        vision_config = self.info.get_hf_config().vision_config
+        max_px = vision_config.get("max_pixels", 1400 * 1400)
+        max_side = int(max_px ** 0.5)
         audio_length = ApertusAudioTokenizer.DEFAULT_TARGET_SAMPLING_RATE
         image_overrides = mm_options.get("image")
         audio_overrides = mm_options.get("audio")
@@ -115,7 +117,8 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
             cache: object | None = None,
             ) -> None:
         super().__init__(info, dummy_inputs, cache=cache)
-        self.image_tokenizer = ApertusImageTokenizer()
+        vision_config = info.get_hf_config().vision_config
+        self.image_tokenizer = ApertusImageTokenizer(vision_config)
         self.audio_tokenizer = ApertusAudioTokenizer()
 
     def _get_mm_fields_config(
@@ -161,8 +164,8 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
                     rows = [dummy_img_token * w_tok for _ in range(h_tok)]
                     imgstr = self.image_tokenizer.DEFAULT_EOL_TOKEN.join(rows)
                     layout = (
-                        f"{self.image_tokenizer.DEFAULT_BOI_TOKEN}{h_tok * 16}*{w_tok * 16}"
-                        f"{self.image_tokenizer.DEFAULT_IMG_TOKEN}{imgstr}{self.image_tokenizer.DEFAULT_EOI_TOKEN}"
+                        f"{self.image_tokenizer.boi_token}{h_tok * 16}*{w_tok * 16}"
+                        f"{self.image_tokenizer.img_token}{imgstr}{self.image_tokenizer.eoi_token}"
                     )
                     image_layouts.append(layout)
 
@@ -180,7 +183,7 @@ class ApertusMultiModalProcessor(BaseMultiModalProcessor[ApertusProcessingInfo])
 
                 # Use instant replacement
                 for layout in image_layouts:
-                    prompt_text = prompt_text.replace(self.image_tokenizer.DEFAULT_IMAGE_PLACEHOLDER, layout, 1)
+                    prompt_text = prompt_text.replace(self.image_tokenizer.image_placeholder, layout, 1)
 
         # 2. Audio Preprocessing (Mathematical Layout & Padding Only)
         if num_audios > 0:
@@ -234,7 +237,9 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__(vllm_config=vllm_config, prefix=prefix)
-        self.image_tokenizer = ApertusImageTokenizer()
+        self.vllm_config = vllm_config
+        config = vllm_config.model_config.hf_config
+        self.image_tokenizer = ApertusImageTokenizer(config.vision_config)
         self.audio_tokenizer = ApertusAudioTokenizer()
         self.vision_tower: Any | None = None
         self.audio_tower: Any | None = None
@@ -242,17 +247,20 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
         config = vllm_config.model_config.hf_config
         dummy_image_token_id = getattr(config, "dummy_image_token_id", -1)
         dummy_audio_token_id = getattr(config, "dummy_audio_token_id", -1)
-
+        self.image_token_offset = self.config.vision_config["token_offset"]
+        assert self.image_token_offset, "vision_config.token_offset must be set"
+        self.audio_token_offset = self.config.audio_config["token_offset"]
+        assert self.audio_token_offset, "audio_config.token_offset must be set"
         # Register the dummy placeholder token IDs to vLLM. 
         # This tells the vLLM engine to automatically construct the boolean mask (is_multimodal) 
         # matching these positions, allowing the engine to slice and route multimodal embeddings 
         # to the correct locations in the input sequence.
         self.configure_mm_token_handling(
-            vocab_size=config.vocab_size,
-            mm_token_ids=[dummy_image_token_id, dummy_audio_token_id],
-        )
+                vocab_size=config.vocab_size,
+                mm_token_ids=[dummy_image_token_id, dummy_audio_token_id],
+                )
 
-    def get_language_model(self) -> torch.nn.Module:
+    def get_language_model(self):
         return self.model
 
     def forward(
@@ -271,23 +279,50 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
                 inputs_embeds,
                 )
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
+    def load_weights(
+            self, weights: Iterable[tuple[str, torch.Tensor]],
+            ) -> set[str]:
         loaded_keys = super().load_weights(weights)
 
         # Encoders are only executed on the first pipeline stage (first PP rank)
         if get_pp_group().is_first_rank:
-            model_path = getattr(self.config, "_name_or_path", "")
+            # Resolve the local path of the model directory (local or cached)
+            model_id = self.vllm_config.model_config.model
+            revision = self.vllm_config.model_config.revision
+
+            if os.path.isdir(model_id):
+                model_path = os.path.abspath(model_id)
+            else:
+                try:
+                    from huggingface_hub import try_to_load_from_cache
+                    cached_file = try_to_load_from_cache(
+                            repo_id=model_id,
+                            filename="config.json",
+                            revision=revision,
+                            )
+                    if cached_file:
+                        model_path = os.path.dirname(cached_file)
+                    else:
+                        model_path = getattr(self.config, "_name_or_path", model_id)
+                except Exception:
+                    # Fallback to the HF configuration's _name_or_path
+                    model_path = getattr(self.config, "_name_or_path", model_id)
+
             mm_kwargs = {"model_name_or_path": model_path}
             if model_path and os.path.isdir(model_path):
                 mm_kwargs["apertus_vq_hub"] = os.path.abspath(model_path)
-                mm_kwargs["apertus_audio_tokenizer_path"] = os.path.abspath(model_path)
+                mm_kwargs["apertus_audio_tokenizer_path"] = os.path.abspath(
+                        model_path,
+                        )
 
             # Strictly synchronize precision with the Backbone to prevent VRAM fragmentation
             try:
                 sample_param = next(self.parameters())
-                target_device, target_dtype = sample_param.device, sample_param.dtype
+                target_device = sample_param.device
+                target_dtype = sample_param.dtype
             except StopIteration:
-                target_device, target_dtype = torch.device("cuda"), torch.bfloat16
+                target_device = torch.device("cuda")
+                target_dtype = torch.bfloat16
 
             mm_kwargs.update(
                     {
@@ -297,11 +332,22 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
                         },
                     )
 
-            logger.info("[Apertus Worker] Loading Vision Tower natively on %s (%s)", target_device, target_dtype)
-            self.vision_tower = self.image_tokenizer.load_vision_tokenizer(mm_kwargs)
+            logger.info(
+                    "[Apertus Worker] Loading Vision Tower natively on %s (%s)",
+                    target_device,
+                    target_dtype,
+                    )
+            self.vision_tower = self.image_tokenizer.load_vision_tokenizer(
+                    mm_kwargs,
+                    )
 
-            logger.info("[Apertus Worker] Loading Audio Tower natively on %s", target_device)
-            self.audio_tower = self.audio_tokenizer.get_audio_tokenizer(mm_kwargs)
+            logger.info(
+                    "[Apertus Worker] Loading Audio Tower natively on %s",
+                    target_device,
+                    )
+            self.audio_tower = self.audio_tokenizer.get_audio_tokenizer(
+                    mm_kwargs,
+                    )
 
         return loaded_keys
 
@@ -337,13 +383,11 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
             with torch.inference_mode():
                 _, _, info = self.vision_tower.encode(pixel_values)
                 # Recover 2D grid shape based on the padded Max H/W of the batch
-                max_h_tok = pixel_values.shape[2] // self.image_tokenizer.EMU35_DS_FACTOR
-                max_w_tok = pixel_values.shape[3] // self.image_tokenizer.EMU35_DS_FACTOR
+                max_h_tok = pixel_values.shape[2] // self.image_tokenizer.ds_factor
+                max_w_tok = pixel_values.shape[3] // self.image_tokenizer.ds_factor
                 img_codes = info[2].view(pixel_values.shape[0], max_h_tok, max_w_tok)
 
             valid_codes_embeds = []
-            # TODO better find the offset
-            vocab_offset = getattr(self.config, "image_token_offset", 131272)
 
             for i, size in enumerate(image_sizes):
                 h_tok, w_tok = size.tolist()
@@ -354,7 +398,7 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
                 valid_codes_i = img_codes[i, :h_tok, :w_tok].flatten()
 
                 # Convert codebook indices to the language model vocabulary space
-                llm_img_ids_i = valid_codes_i.to(torch.long) + vocab_offset
+                llm_img_ids_i = valid_codes_i.to(torch.long) + self.image_token_offset
 
                 # Fetch embeddings from text embedding layer for the resolved token IDs
                 img_embeds_i = super().embed_input_ids(llm_img_ids_i.to(device))
@@ -372,8 +416,6 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
                 audio_codes = audio_codes.squeeze(1)  # [B, Max_Tokens]
 
             valid_codes_embeds = []
-            # TODO better find the offset
-            vocab_offset = getattr(self.config, "audio_token_offset", 262344)
 
             for i, length in enumerate(audio_lengths):
                 # Calculate the exact number of valid tokens (1 token per 600 audio samples)
@@ -383,7 +425,7 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
                 valid_codes_i = audio_codes[i, :num_tok]
 
                 # Convert WavTokenizer codes to language model vocabulary space
-                llm_audio_ids_i = valid_codes_i.to(torch.long) + vocab_offset
+                llm_audio_ids_i = valid_codes_i.to(torch.long) + self.audio_token_offset
 
                 # Fetch embeddings from text embedding layer for the resolved token IDs
                 audio_embeds_i = super().embed_input_ids(llm_audio_ids_i.to(device))
@@ -394,20 +436,20 @@ class ApertusForConditionalGeneration(ApertusForCausalLM, SupportsMultiModal):
         return []
 
     def embed_input_ids(
-        self,
-        input_ids: torch.Tensor,
-        multimodal_embeddings: MultiModalEmbeddings | None = None,
-        *,
-        is_multimodal: torch.Tensor | None = None,
-        **kwargs: object,
-    ) -> torch.Tensor:
+            self,
+            input_ids: torch.Tensor,
+            multimodal_embeddings: MultiModalEmbeddings | None = None,
+            *,
+            is_multimodal: torch.Tensor | None = None,
+            **kwargs: object,
+            ) -> torch.Tensor:
         # Route to standard vLLM multi-modal merge. 
         # This takes the text embeddings generated from input_ids and overwrites the rows 
         # corresponding to the dummy placeholders (where is_multimodal is True) with 
         # the high-fidelity visual/audio embeddings generated in embed_multimodal.
         return SupportsMultiModal.embed_input_ids(
-            self,
-            input_ids,
-            multimodal_embeddings=multimodal_embeddings,
-            is_multimodal=is_multimodal,
-        )
+                self,
+                input_ids,
+                multimodal_embeddings=multimodal_embeddings,
+                is_multimodal=is_multimodal,
+                )
