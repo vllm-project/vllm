@@ -6260,7 +6260,23 @@ class GPUModelRunner(
         max_task = max(output_size.items(), key=lambda x: x[1])[0]
         return self._dummy_pooler_run_task(hidden_states, max_task)
 
+    def _reserve_profile_scratch(self) -> None:
+        # Mirror of the V2 runner hook: pre-reserve any per-module scratch
+        # (e.g. DeepSeek-V4 padded-Q) during the memory-profiling peak so the
+        # KV-cache sizing accounts for it. Without this, buffers materialized
+        # lazily after profiling (notably the ubatch-1 padded-Q scratch when
+        # enable_dbo=True) would be charged against already-claimed KV memory.
+        seen: set[int] = set()
+        for module in self.compilation_config.static_forward_context.values():
+            if id(module) in seen:
+                continue
+            seen.add(id(module))
+            reserve = getattr(module, "reserve_profile_scratch", None)
+            if reserve is not None:
+                reserve()
+
     def profile_run(self) -> None:
+        self._reserve_profile_scratch()
         # Profile with multimodal encoder & encoder cache.
         if self.supports_mm_inputs:
             mm_config = self.model_config.multimodal_config
