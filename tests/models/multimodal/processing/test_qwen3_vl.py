@@ -138,3 +138,49 @@ def test_processor_multi_video(
         assert video_phs[i].offset >= prev_end, (
             f"Placeholder {i} overlaps with placeholder {i - 1}"
         )
+
+
+@pytest.mark.parametrize("model_id", [MODEL_ID])
+@pytest.mark.parametrize(
+    "hf_mm_kwargs",
+    [{"num_frames": [8, 16]}, {"fps": [2.0, 4.0]}],
+)
+def test_processor_multi_video_list_kwargs(
+    model_id: str,
+    hf_mm_kwargs: dict[str, Any],
+) -> None:
+    """Regression test: a multi-video request with list-valued per-video
+    ``mm_processor_kwargs`` (one ``fps``/``num_frames`` per video) must not
+    crash.
+
+    Before the fix, ``_call_hf_processor`` copied the whole kwargs to every
+    video without slicing, so ``_get_video_second_idx`` received the list
+    where a scalar was expected and raised ``TypeError``.
+    """
+    ctx = build_model_context(
+        model_id,
+        limit_mm_per_prompt={"image": 0, "video": 2},
+    )
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+
+    prompt = (
+        "<|vision_start|><|video_pad|><|vision_end|>"
+        "<|vision_start|><|video_pad|><|vision_end|>"
+    )
+    mm_data = {
+        "video": [
+            _build_video_mm_data(num_frames=16)["video"][0],
+            _build_video_mm_data(num_frames=32)["video"][0],
+        ]
+    }
+
+    processed = processor(
+        prompt,
+        mm_items=processor.info.parse_mm_data(mm_data),
+        hf_processor_mm_kwargs=hf_mm_kwargs,
+    )
+
+    video_phs = processed["mm_placeholders"].get("video", [])
+    assert len(video_phs) == 2, (
+        f"Expected exactly 2 video placeholders, got {len(video_phs)}"
+    )

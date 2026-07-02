@@ -3,3 +3,5 @@
 self-hosted-runner:
   labels:
     - vllm-runners
+    # Not yet in actionlint's known-label set.
+    - macos-26
