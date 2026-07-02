@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""A layer that compute logits from hidden_stats."""
 
 import torch
 
@@ -10,6 +9,7 @@ from vllm.distributed import (
     tensor_model_parallel_gather,
 )
 from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.softcap_kernel import softcap_logits
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
 
@@ -64,9 +64,7 @@ class LogitsProcessor(PluggableLayer):
             logits = self._get_logits(hidden_states, lm_head, embedding_bias)
         if logits is not None:
             if self.soft_cap is not None:
-                logits = logits / self.soft_cap
-                logits = torch.tanh(logits)
-                logits = logits * self.soft_cap
+                logits = softcap_logits(logits, self.soft_cap, inplace=False)
 
             if self.scale != 1.0:
                 logits *= self.scale
@@ -124,7 +122,7 @@ class LogitsProcessor(PluggableLayer):
 
         logits = lm_head.quant_method.apply(lm_head, hidden_states, bias=embedding_bias)
         if self.soft_cap is not None:
-            logits = torch.tanh(logits / self.soft_cap) * self.soft_cap
+            logits = softcap_logits(logits, self.soft_cap)
         if self.scale != 1.0:
             logits = logits * self.scale
 
