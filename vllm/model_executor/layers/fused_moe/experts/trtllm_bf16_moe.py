@@ -145,4 +145,5 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
             routed_scaling_factor=routed_scaling_factor,
             routing_method_type=self.routing_method_type,
             activation_type=activation_to_flashinfer_int(activation),
+            tune_max_num_tokens=self.moe_config.tune_max_num_tokens,
         )
