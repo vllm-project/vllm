@@ -576,6 +576,7 @@ def sparse_attn_indexer(
 
         use_cooperative_topk = (
             current_platform.is_cuda()
+            and hasattr(torch.ops._C, "cooperative_topk")
             and topk_tokens in (512, 1024, 2048)
             and num_rows <= 32
             and logits.stride(0) % 4 == 0  # TMA 16-byte alignment

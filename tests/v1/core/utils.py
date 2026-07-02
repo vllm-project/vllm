@@ -54,6 +54,7 @@ def create_scheduler(
     block_size: int = 16,
     max_model_len: int | None = None,
     num_speculative_tokens: int | None = None,
+    speculative_method: str = "ngram",
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
     pipeline_parallel_size: int = 1,
@@ -127,7 +128,9 @@ def create_scheduler(
     speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
         speculative_config = SpeculativeConfig(
-            model="ngram", num_speculative_tokens=num_speculative_tokens
+            method=speculative_method,
+            model=speculative_method,
+            num_speculative_tokens=num_speculative_tokens,
         )
 
     ec_transfer_config = (

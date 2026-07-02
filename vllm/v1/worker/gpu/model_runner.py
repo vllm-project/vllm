@@ -840,16 +840,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
     def prepare_inputs(
         self, scheduler_output: SchedulerOutput, batch_desc: BatchExecutionDescriptor
     ) -> InputBatch:
-        num_tokens = scheduler_output.total_num_scheduled_tokens
         num_tokens_after_padding = batch_desc.num_tokens
-        assert num_tokens > 0
-        if envs.VLLM_MOE_SKIP_PADDING:
-            # Mark trailing cudagraph-padding rows so kernels can skip work for
-            # them when supported.
-            self.input_buffers.is_padding[:num_tokens].fill_(False)
-            self.input_buffers.is_padding[num_tokens:num_tokens_after_padding].fill_(
-                True
-            )
         num_tokens_per_req = scheduler_output.num_scheduled_tokens
         num_reqs = len(num_tokens_per_req)
 
@@ -862,6 +853,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         idx_mapping_iter = map(self.req_states.req_id_to_index.get, req_ids)
         idx_mapping_np = np.fromiter(idx_mapping_iter, dtype=np.int32, count=num_reqs)
         idx_mapping = async_copy_to_gpu(idx_mapping_np, device=self.device)
+
+        self.draft_tokens_handler.sync_draft_token_capacities(
+            self.req_states.draft_token_capacity_np,
+            self.req_states.req_id_to_index,
+        )
 
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
@@ -879,10 +875,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs, dtype=torch.int32, device=self.device
             )
         else:
-            num_draft_tokens_per_req = np.fromiter(
+            scheduled_draft_tokens_per_req = np.fromiter(
                 (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
                 dtype=np.int32,
                 count=num_reqs,
+            )
+            num_draft_tokens_per_req = np.minimum(
+                scheduled_draft_tokens_per_req,
+                self.req_states.draft_token_capacity_np[idx_mapping_np],
+            )
+            num_scheduled_tokens -= (
+                scheduled_draft_tokens_per_req - num_draft_tokens_per_req
             )
             num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
@@ -896,6 +899,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             max_expand_len = self.decode_query_len
             expanded_idx_mapping, expanded_local_pos = expand_idx_mapping(
                 idx_mapping, total_num_logits, cu_num_logits, max_expand_len
+            )
+
+        num_tokens = int(num_scheduled_tokens.sum())
+        assert 0 < num_tokens <= num_tokens_after_padding
+        if envs.VLLM_MOE_SKIP_PADDING:
+            # Mark trailing cudagraph-padding rows so kernels can skip work for
+            # them when supported.
+            self.input_buffers.is_padding[:num_tokens].fill_(False)
+            self.input_buffers.is_padding[num_tokens:num_tokens_after_padding].fill_(
+                True
             )
 
         # Get query_start_loc.
@@ -1478,6 +1491,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=mm_inputs,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
+            draft_token_capacity = getattr(
+                self.speculator, "draft_token_capacity", None
+            )
+            if draft_token_capacity is not None:
+                draft_token_capacity = draft_token_capacity[: input_batch.num_reqs]
+        else:
+            draft_token_capacity = None
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
@@ -1485,6 +1505,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],
+                draft_token_capacity,
             )
 
         # Post-step KV connector related operations.

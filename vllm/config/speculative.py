@@ -227,6 +227,16 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
+    dspark_confidence_threshold: float | None = 0.5
+    """Minimum DSpark cumulative prefix-survival probability for keeping a draft
+    token active when no DSpark SPS profile is provided. Set to None to disable
+    DSpark confidence-based capacity."""
+
+    dspark_sps_profile: list[float] | None = None
+    """Optional DSpark target-engine step throughput profile indexed by verifier
+    batch size B. If provided, DSpark chooses per-request draft prefix lengths
+    by maximizing expected accepted tokens times this profiled SPS(B)."""
+
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
         """Mean acceptance length to unconditional per-position rates, using
@@ -1107,6 +1117,19 @@ class SpeculativeConfig:
                 "synthetic_acceptance_rates / synthetic_acceptance_length "
                 "are only valid with rejection_sample_method='synthetic'."
             )
+
+        if self.dspark_confidence_threshold is not None and not (
+            0.0 < self.dspark_confidence_threshold < 1.0
+        ):
+            raise ValueError(
+                "dspark_confidence_threshold must be in (0, 1) or None, got "
+                f"{self.dspark_confidence_threshold}."
+            )
+        if self.dspark_sps_profile is not None:
+            if not self.dspark_sps_profile:
+                raise ValueError("dspark_sps_profile must not be empty.")
+            if any(value <= 0.0 for value in self.dspark_sps_profile):
+                raise ValueError("dspark_sps_profile values must be positive.")
 
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(
