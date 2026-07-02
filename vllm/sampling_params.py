@@ -256,6 +256,10 @@ class SamplingParams(
     """Token IDs that stop the generation when they are generated. The returned
     output will contain the stop tokens unless the stop tokens are special
     tokens."""
+    trace_decode_token_ids: list[int] | None = None
+    """If provided, forces the engine to emit this predetermined sequence of
+    token IDs during decoding instead of sampling randomly. Real logprobs are
+    still computed. Conflict checking is performed at the engine level."""
     ignore_eos: bool = False
     """Whether to ignore the EOS token and continue generating
     tokens after the EOS token is generated."""
@@ -383,6 +387,7 @@ class SamplingParams(
         extra_args: dict[str, Any] | None = None,
         skip_clone: bool = False,
         repetition_detection: RepetitionDetectionParams | None = None,
+        trace_decode_token_ids: list[int] | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
             # Fast path uses a dict comprehension; on failure we iterate once
@@ -443,6 +448,7 @@ class SamplingParams(
             extra_args=extra_args,
             skip_clone=skip_clone,
             repetition_detection=repetition_detection,
+            trace_decode_token_ids=trace_decode_token_ids,
         )
 
     def __post_init__(self) -> None:
@@ -605,6 +611,15 @@ class SamplingParams(
             raise ValueError(
                 f"stop_token_ids must contain only integers, got {self.stop_token_ids}."
             )
+        if self.trace_decode_token_ids is not None:
+            if not self.trace_decode_token_ids:
+                raise ValueError("trace_decode_token_ids must be a non-empty list.")
+            if not all(
+                isinstance(t, int) and t >= 0 for t in self.trace_decode_token_ids
+            ):
+                raise ValueError(
+                    "trace_decode_token_ids must contain non-negative integers."
+                )
         assert isinstance(self.stop, list)
         if any(not stop_str for stop_str in self.stop):
             raise ValueError("stop cannot contain an empty string.")
@@ -742,6 +757,7 @@ class SamplingParams(
     ) -> None:
         self._validate_logprobs(model_config)
         self._validate_logit_bias(model_config)
+        self._validate_trace_decode_token_ids(model_config)
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
@@ -828,6 +844,25 @@ class SamplingParams(
                 f"token_id(s) {invalid_token_ids} in logit_bias contain "
                 f"out-of-vocab token ids. Vocabulary size: {vocab_size}",
                 parameter="logit_bias",
+                value=invalid_token_ids,
+            )
+
+    def _validate_trace_decode_token_ids(self, model_config: ModelConfig) -> None:
+        """Validate trace_decode_token_ids are within vocabulary range."""
+        if self.trace_decode_token_ids is None:
+            return
+
+        vocab_size = model_config.get_vocab_size()
+        invalid_token_ids = [
+            token_id
+            for token_id in self.trace_decode_token_ids
+            if token_id < 0 or token_id >= vocab_size
+        ]
+        if invalid_token_ids:
+            raise VLLMValidationError(
+                f"token_id(s) {invalid_token_ids} in trace_decode_token_ids "
+                f"contain out-of-vocab token ids. Vocabulary size: {vocab_size}",
+                parameter="trace_decode_token_ids",
                 value=invalid_token_ids,
             )
 
