@@ -556,6 +556,10 @@ async def lifespan(app: FastAPI):
         finally:
             if task is not None:
                 task.cancel()
+            serving_batches = getattr(
+                app.state, "openai_serving_batches", None)
+            if serving_batches is not None:
+                await serving_batches.shutdown()
             for attr_name in (
                 "openai_serving_transcription",
                 "openai_serving_translation",
