@@ -505,16 +505,24 @@ class MessageQueue:
         self.shutting_down = False
         return self
 
-    def wait_until_ready(self):
+    def wait_until_ready(self, timeout: float | None = None):
         """This is a collective operation. All processes (including the
         readers and the writer) should call this function.
         """
+        if timeout is None:
+            timeout = envs.VLLM_ENGINE_READY_TIMEOUT_S
+        timeout_ms = int(timeout * 1000)
+
         if self._is_writer:
             # wait for all readers to connect
 
             # local readers
             for i in range(self.n_local_reader):
                 # wait for subscription messages from all local readers
+                if not self.local_socket.poll(timeout=timeout_ms):
+                    raise TimeoutError(
+                        "Timed out waiting for local reader to connect"
+                    )
                 self.local_socket.recv()
             if self.n_local_reader > 0:
                 # send a message to all local readers
@@ -524,6 +532,10 @@ class MessageQueue:
             # remote readers
             for i in range(self.n_remote_reader):
                 # wait for subscription messages from all remote readers
+                if not self.remote_socket.poll(timeout=timeout_ms):
+                    raise TimeoutError(
+                        "Timed out waiting for remote reader to connect"
+                    )
                 self.remote_socket.recv()
             if self.n_remote_reader > 0:
                 # send a message to all remote readers
@@ -531,10 +543,18 @@ class MessageQueue:
                 self.remote_socket.send(b"READY")
         elif self._is_local_reader:
             # wait for the writer to send a message
+            if not self.local_socket.poll(timeout=timeout_ms):
+                raise TimeoutError(
+                    "Timed out waiting for writer ready message"
+                )
             recv = self.local_socket.recv()
             assert recv == b"READY"
         elif self._is_remote_reader:
             # wait for the writer to send a message
+            if not self.remote_socket.poll(timeout=timeout_ms):
+                raise TimeoutError(
+                    "Timed out waiting for writer ready message"
+                )
             recv = self.remote_socket.recv()
             assert recv == b"READY"
 
@@ -570,6 +590,9 @@ class MessageQueue:
 
                     # Release the processor to other threads
                     sched_yield()
+
+                    if self.shutting_down:
+                        raise RuntimeError("cancelled")
 
                     # if we time out, raise an exception
                     elapsed = time.monotonic() - start_time
