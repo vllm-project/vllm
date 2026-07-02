@@ -536,15 +536,34 @@ def silu_and_mul_per_block_quant(
             dtype=torch.float32,
         )
 
-    # Call the C++ kernel
-    torch.ops._C.silu_and_mul_per_block_quant(
-        output,
-        input,
-        scales,
-        group_size,  # Pass directly as int
-        scale_ub,
-        is_scale_transposed,
-    )
+    # Preferred path: per-block kernel.
+    if hasattr(torch.ops._C, "silu_and_mul_per_block_quant"):
+        torch.ops._C.silu_and_mul_per_block_quant(
+            output,
+            input,
+            scales,
+            group_size,  # Pass directly as int
+            scale_ub,
+            is_scale_transposed,
+        )
+    else:
+        # Pure-PyTorch fallback: SiLU+Mul then true per-block FP8 quantize.
+        # The old silu_and_mul_quant fallback only computed 1 scale per row
+        # and broadcast it, destroying precision for block-scaled MoE matmuls.
+        half = input.shape[-1] // 2
+        gate = input[:, :half]
+        up = input[:, half:]
+        activated = torch.nn.functional.silu(gate) * up  # bf16/fp16
+
+        fp8_max = torch.finfo(quant_dtype).max
+        for g in range(num_groups):
+            start = g * group_size
+            end = start + group_size
+            block = activated[:, start:end]
+            amax = block.abs().amax(dim=-1, keepdim=True).clamp(min=1e-12)
+            block_scale = amax / fp8_max
+            scales[:, g:g+1] = block_scale
+            output[:, start:end] = (block / block_scale).to(quant_dtype)
 
     return output, scales
 
