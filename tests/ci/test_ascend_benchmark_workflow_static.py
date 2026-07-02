@@ -150,6 +150,16 @@ def test_benchmark_script_does_not_force_max_model_len():
     assert script.count('"${max_model_len_args[@]}"') == 2
 
 
+def test_benchmark_script_does_not_default_pr_hardware_to_b3():
+    script = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/scripts/run_ascend_benchmark_ci.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-}" in script
+    assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-910B3}" not in script
+
+
 def test_issue_comment_uses_ubuntu_gate_before_self_hosted_runner():
     text = workflow_text()
 
