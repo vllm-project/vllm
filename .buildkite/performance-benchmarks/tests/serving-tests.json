@@ -29,11 +29,6 @@
       }
     },
     {
-        "dataset_name": "sharegpt",
-        "dataset_path": "./ShareGPT_V3_unfiltered_cleaned_split.json"
-      }
-    },
-    {
       "test_name": "serving_llama8B_tp1_random_128_128",
       "server_parameters": {
         "tensor_parallel_size": 1
