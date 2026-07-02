@@ -1414,7 +1414,8 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "poolside/Laguna-XS-2.1",
         speculative_model="poolside/Laguna-XS-2.1-DFlash",
         use_original_num_layers=True,
-        max_num_batched_tokens=65536,
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
     ),
     "DFlashQwen3NextDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3-Coder-Next",
