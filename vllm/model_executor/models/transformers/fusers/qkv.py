@@ -19,6 +19,10 @@ from vllm.model_executor.models.transformers.fx_utils import (
     replace_expr,
     single_self_call,
 )
+from vllm.model_executor.models.transformers.utils import (
+    log_replacement,
+    replace_linear_class,
+)
 from vllm.model_executor.models.utils import ShardId, maybe_prefix
 
 if TYPE_CHECKING:
@@ -35,6 +39,7 @@ class QKVFuser(StackedFuser):
     q_name: str
     k_name: str
     v_name: str
+    o_name: str | None
     merged_name: ClassVar[str] = "qkv_proj"
     merged_cls: ClassVar[str] = "QKVParallelLinear"
 
@@ -78,12 +83,12 @@ class QKVFuser(StackedFuser):
         if (qkv_nodes := cls._get_qkv_nodes(graph, module)) is None:
             return None
         q, k, v = qkv_nodes
-        return cls(
-            source_cls=type(module).__name__,
-            q_name=q.target,
-            k_name=k.target,
-            v_name=v.target,
-        )
+        names = dict(q_name=q.target, k_name=k.target, v_name=v.target)
+        predicate = lambda n, c: isinstance(c, nn.Linear) and n not in names.values()
+        others = [n for n, c in module.named_children() if predicate(n, c)]
+        if len(others) == 1:
+            names["o_name"] = others[0]
+        return cls(source_cls=type(module).__name__, **names)
 
     def update_forward(self, module: nn.Module) -> None:
         """Replace `q(x), k(x), v(x)` with `qkv(x).split(sizes, -1)` in source."""
@@ -199,3 +204,12 @@ class QKVFuser(StackedFuser):
         # Drop the consumed submodules so their (meta) params are not expected.
         for name in (self.q_name, self.k_name, self.v_name):
             delattr(module, name)
+        # If there is an output projection, we know it must be rowwise.
+        if self.o_name is not None:
+            o_proj_prefix = maybe_prefix(prefix, self.o_name)
+            o_proj = module.get_submodule(self.o_name)
+            new_o = replace_linear_class(
+                o_proj, "rowwise", quant_config, prefix=o_proj_prefix
+            )
+            setattr(module, self.o_name, new_o)
+            log_replacement(o_proj_prefix, o_proj, new_o)

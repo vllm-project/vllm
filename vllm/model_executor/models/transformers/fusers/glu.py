@@ -19,10 +19,16 @@ from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.model_executor.models.transformers.fusers.base import StackedFuser
 from vllm.model_executor.models.transformers.fx_utils import (
     compile_forward,
+    find_node,
     is_linear,
+    peel,
     recover_forward,
     replace_expr,
     single_self_call,
+)
+from vllm.model_executor.models.transformers.utils import (
+    log_replacement,
+    replace_linear_class,
 )
 from vllm.model_executor.models.utils import ShardId, maybe_prefix
 
@@ -49,6 +55,7 @@ class GLUFuser(StackedFuser):
     act_name: str
     gate_name: str
     up_name: str
+    down_name: str | None
     merged_name: ClassVar[str] = "gate_up_proj"
     merged_cls: ClassVar[str] = "MergedColumnParallelLinear"
 
@@ -70,16 +77,16 @@ class GLUFuser(StackedFuser):
     @classmethod
     def _get_glu_nodes(
         cls, graph: fx.Graph, module: nn.Module
-    ) -> tuple[fx.Node, fx.Node, fx.Node] | None:
+    ) -> tuple[fx.Node, fx.Node, fx.Node, fx.Node] | None:
         """Search graph for the GLU pattern `act(gate(x)) * up(x)`."""
-        for node in graph.nodes:
+        for mul in graph.nodes:
             if (
-                node.op == "call_function"
-                and node.target == operator.mul
-                and len(node.args) == 2
-                and all(isinstance(arg, fx.Node) for arg in node.args)
+                mul.op == "call_function"
+                and mul.target == operator.mul
+                and len(mul.args) == 2
+                and all(isinstance(arg, fx.Node) for arg in mul.args)
             ):
-                a, b = node.args
+                a, b = mul.args
                 if cls._is_act_of_gate(a, module) and is_linear(b, module):
                     act, gate, up = a, a.args[0], b
                 elif cls._is_act_of_gate(b, module) and is_linear(a, module):
@@ -91,7 +98,7 @@ class GLUFuser(StackedFuser):
                     and isinstance(x := gate.args[0], fx.Node)
                     and x is up.args[0]
                 ):
-                    return act, gate, up
+                    return act, gate, up, mul
         return None
 
     @staticmethod
@@ -116,7 +123,7 @@ class GLUFuser(StackedFuser):
     def match(cls, graph: fx.Graph, module: nn.Module) -> "GLUFuser | None":
         if (glu_nodes := cls._get_glu_nodes(graph, module)) is None:
             return None
-        act_node, gate_node, up_node = glu_nodes
+        act_node, gate_node, up_node, mul_node = glu_nodes
 
         gate = module.get_submodule(gate_node.target)
         up = module.get_submodule(up_node.target)
@@ -124,11 +131,14 @@ class GLUFuser(StackedFuser):
         if gate.in_features == up.in_features and (gate.bias is None) == (
             up.bias is None
         ):
+            predicate = lambda n: is_linear(n, module) and peel(n.args[0]) is mul_node
+            down_node = find_node(graph, predicate)
             return cls(
                 source_cls=type(module).__name__,
                 act_name=act_node.target,
                 gate_name=gate_node.target,
                 up_name=up_node.target,
+                down_name=down_node.target if down_node is not None else None,
             )
         return None
 
@@ -197,3 +207,12 @@ class GLUFuser(StackedFuser):
         # Drop the consumed submodules so their (meta) params are not expected.
         delattr(module, self.gate_name)
         delattr(module, self.up_name)
+        # If there is a down projection, we know it must be rowwise.
+        if self.down_name is not None:
+            down_prefix = maybe_prefix(prefix, self.down_name)
+            down = module.get_submodule(self.down_name)
+            new_down = replace_linear_class(
+                down, "rowwise", quant_config, prefix=down_prefix
+            )
+            setattr(module, self.down_name, new_down)
+            log_replacement(down_prefix, down, new_down)
