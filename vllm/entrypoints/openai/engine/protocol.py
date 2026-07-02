@@ -163,6 +163,54 @@ AnyResponseFormat: TypeAlias = (
     ResponseFormat | StructuralTagResponseFormat | LegacyStructuralTagResponseFormat
 )
 
+_SUPPORTED_RESPONSE_FORMAT_TYPES = frozenset(
+    ("text", "json_object", "json_schema", "structural_tag")
+)
+
+
+def validate_response_format_param(response_format: Any) -> None:
+    if response_format is None:
+        return
+
+    if isinstance(response_format, dict):
+        rf_type = response_format.get("type")
+        json_schema = response_format.get("json_schema")
+    else:
+        rf_type = getattr(response_format, "type", None)
+        json_schema = getattr(response_format, "json_schema", None)
+        if rf_type is None:
+            raise VLLMValidationError(
+                "response_format must be an object with a 'type' field.",
+                parameter="response_format",
+            )
+
+    if rf_type is None:
+        raise VLLMValidationError(
+            "response_format must include a 'type' field.",
+            parameter="response_format",
+        )
+
+    if rf_type not in _SUPPORTED_RESPONSE_FORMAT_TYPES:
+        raise VLLMValidationError(
+            "response_format.type must be one of: 'text', 'json_object', "
+            "'json_schema', or 'structural_tag'.",
+            parameter="response_format",
+        )
+
+    if rf_type == "json_schema":
+        if json_schema is None:
+            raise VLLMValidationError(
+                "When response_format type is 'json_schema', the "
+                "'json_schema' field must be provided.",
+                parameter="response_format",
+            )
+        if not isinstance(json_schema, (dict, JsonSchemaResponseFormat)):
+            raise VLLMValidationError(
+                "When response_format type is 'json_schema', the "
+                "'json_schema' field must be an object.",
+                parameter="response_format",
+            )
+
 
 def validate_structural_tag_response_format(
     response_format: AnyStructuralTagResponseFormat | dict[str, Any],

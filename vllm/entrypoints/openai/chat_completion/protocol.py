@@ -30,6 +30,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     StructuralTagResponseFormat,
     ToolCall,
     UsageInfo,
+    validate_response_format_param,
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
@@ -698,30 +699,19 @@ class ChatCompletionRequest(OpenAIBaseModel):
     @model_validator(mode="before")
     @classmethod
     def validate_response_format(cls, data):
-        response_format = data.get("response_format")
-        if response_format is None:
+        if not isinstance(data, dict):
             return data
 
+        response_format = data.get("response_format")
+        validate_response_format_param(response_format)
         rf_type = (
             response_format.get("type")
             if isinstance(response_format, dict)
             else getattr(response_format, "type", None)
         )
 
-        if rf_type == "json_schema":
-            json_schema = (
-                response_format.get("json_schema")
-                if isinstance(response_format, dict)
-                else getattr(response_format, "json_schema", None)
-            )
-            if json_schema is None:
-                raise VLLMValidationError(
-                    "When response_format type is 'json_schema', the "
-                    "'json_schema' field must be provided.",
-                    parameter="response_format",
-                )
-
         if rf_type == "structural_tag":
+            assert response_format is not None
             validate_structural_tag_response_format(response_format)
 
         return data
