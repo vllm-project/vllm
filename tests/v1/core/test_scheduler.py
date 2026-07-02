@@ -4318,6 +4318,63 @@ def test_abort_request_finished_recving():
     assert not scheduler.finished_recving_kv_req_ids
 
 
+def test_kv_xfer_finished_recving_for_unknown_request_does_not_crash():
+    scheduler = create_scheduler(use_kv_connector=True)
+
+    # No request was ever added, so "unknown-req" is not in scheduler.requests.
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(finished_recving={"unknown-req"}),
+    )
+
+    scheduler.update_from_output(SchedulerOutput.make_empty(), model_runner_output)
+
+    assert "unknown-req" not in scheduler.requests
+    assert "unknown-req" not in scheduler.finished_recving_kv_req_ids
+
+
+def test_kv_xfer_finished_sending_for_unknown_request_does_not_crash():
+    scheduler = create_scheduler(use_kv_connector=True)
+
+    # No request was ever added, so "unknown-req" is not in scheduler.requests.
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(finished_sending={"unknown-req"}),
+    )
+
+    # Should not raise even though the request is not tracked.
+    scheduler.update_from_output(SchedulerOutput.make_empty(), model_runner_output)
+
+    assert "unknown-req" not in scheduler.requests
+
+
+def test_kv_xfer_finished_after_abort_frees_request_without_crash():
+    scheduler = create_scheduler(use_kv_connector=True)
+
+    # add a single request and abort it before its KV transfer completes.
+    request = create_requests(num_requests=1)[0]
+    scheduler.add_request(request)
+    scheduler.finish_requests((request.request_id,), RequestStatus.FINISHED_ABORTED)
+    assert request.request_id not in scheduler.requests
+
+    # The async connector now reports completion for the already-freed request.
+    model_runner_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        kv_connector_output=KVConnectorOutput(
+            finished_recving={request.request_id},
+            finished_sending={request.request_id},
+        ),
+    )
+
+    scheduler.update_from_output(SchedulerOutput.make_empty(), model_runner_output)
+
+    assert request.request_id not in scheduler.requests
+    assert not scheduler.finished_recving_kv_req_ids
+
+
 def test_delayed_kv_connector_free_keeps_scheduler_active():
     scheduler = create_scheduler(use_kv_connector=True)
     queued_request, request = create_requests(
