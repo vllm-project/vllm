@@ -323,6 +323,8 @@ class OpenAIServingCompletion(OpenAIServing):
 
                 for output in res.outputs:
                     i = output.index + prompt_idx * num_choices
+                    finish_reason = output.finish_reason
+                    self._raise_if_error(finish_reason, request_id)
 
                     # Useful when request.return_token_ids is True
                     # Returning prompt token IDs shares the same logic
@@ -388,10 +390,7 @@ class OpenAIServingCompletion(OpenAIServing):
 
                     previous_text_lens[i] += len(output.text)
                     previous_num_tokens[i] += len(output.token_ids)
-                    finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
-
-                    self._raise_if_error(finish_reason, request_id)
 
                     chunk = CompletionStreamResponse(
                         id=request_id,

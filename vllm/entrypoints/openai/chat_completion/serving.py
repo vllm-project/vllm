@@ -558,6 +558,9 @@ class OpenAIServingChat(OpenAIServing):
 
                 for output in res.outputs:
                     i = output.index
+                    # Raise before empty chunks are skipped so clients receive the error.
+                    self._raise_if_error(output.finish_reason, request_id)
+
                     parser = parsers[i]
                     if finish_reason_sent[i]:
                         continue
@@ -676,10 +679,6 @@ class OpenAIServingChat(OpenAIServing):
 
                     # if the model is finished generating
                     else:
-                        # check for error finish reason and abort streaming
-                        # finish_reason='error' indicates a retryable error
-                        self._raise_if_error(output.finish_reason, request_id)
-
                         # Send the finish response for each request.n only once
                         # In OpenAI's API, when a tool is called, the
                         # finish_reason is:
