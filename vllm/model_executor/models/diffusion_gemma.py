@@ -482,7 +482,7 @@ def _compiled_sample_step(
     is_encoder_phase: torch.Tensor,  # [max_num_reqs]
     confident_tensor: torch.Tensor,  # [max_num_reqs]
     sc_embeds: torch.Tensor,  # [max_num_reqs, CL, hidden]
-    embed_weight: torch.Tensor,  # [vocab, hidden]
+    local_embed_weight: torch.Tensor,  # [vocab_shard, hidden]
     normalizer: torch.Tensor,
     history: torch.Tensor,  # [max_num_reqs, ST, CL]
     history_len_tensor: torch.Tensor,  # [max_num_reqs]
@@ -501,8 +501,9 @@ def _compiled_sample_step(
     # Sampler config
     entropy_bound: float,
     # Tensor-parallel vocab sharding for the self-conditioning matmul.
-    # ``embed_weight`` is vocab-sharded ([vocab/tp, hidden]) while ``probs``
-    # spans the full vocab; [sc_vocab_start, sc_vocab_end) is this rank's slice.
+    # ``local_embed_weight`` is the pre-sliced vocab shard ([vocab/tp, hidden])
+    # while ``probs`` spans the full vocab; [sc_vocab_start, sc_vocab_end) is
+    # this rank's slice.
     sc_vocab_start: int,
     sc_vocab_end: int,
     tp_size: int,
@@ -641,10 +642,10 @@ def _compiled_sample_step(
     # parallelism the embedding is vocab-sharded ([vocab/tp, hidden]) while
     # probs spans the full vocab, so each rank multiplies its local vocab slice
     # [sc_vocab_start, sc_vocab_end) and the partials are summed across ranks.
-    local_probs = probs[..., sc_vocab_start:sc_vocab_end].to(embed_weight.dtype)
-    soft_embeds = torch.matmul(
-        local_probs, embed_weight[: sc_vocab_end - sc_vocab_start]
-    )
+    # The caller pre-slices ``local_embed_weight`` so the compiled region sees
+    # a single constant-shape tensor and never needs to slice a Parameter.
+    local_probs = probs[..., sc_vocab_start:sc_vocab_end].to(local_embed_weight.dtype)
+    soft_embeds = torch.matmul(local_probs, local_embed_weight)
     if tp_size > 1:
         soft_embeds = torch.ops.vllm.all_reduce(soft_embeds, group_name=tp_group_name)
     soft_embeds = soft_embeds * normalizer
@@ -1076,6 +1077,16 @@ class DiffusionSampler:
         self.sc_vocab_end = sc_vocab_end if sc_vocab_end is not None else vocab_size
         self.tp_size = tp_size
         self.tp_group_name = tp_group_name
+        # Pre-slice the embedding shard outside the compiled step. This keeps
+        # the slice (a view over a Parameter) out of the torch.compile region,
+        # avoiding any symbolic-shape confusion on the matmul reduction dim.
+        shard_size = self.sc_vocab_end - self.sc_vocab_start
+        if embed_weight.shape[0] < shard_size:
+            raise ValueError(
+                f"embed_weight has {embed_weight.shape[0]} rows but "
+                f"self-conditioning shard size is {shard_size}"
+            )
+        self.local_embed_weight = embed_weight[:shard_size]
         self.canvas_length = (
             diffusion_config.canvas_length if diffusion_config is not None else 32
         )
@@ -1297,7 +1308,7 @@ class DiffusionSampler:
             states.is_encoder_phase,
             states.confident,
             states.self_conditioning_embeds,
-            self.embed_weight,
+            self.local_embed_weight,
             self.normalizer,
             states.accepted_canvas_history,
             states.accepted_canvas_history_len,
