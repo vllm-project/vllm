@@ -4848,12 +4848,12 @@ class GPUModelRunner(
                 continue
             row_idx = row_by_req_id.get(req_id)
             if row_idx is None:
-                logger.warning(
-                    "Missing cached draft probabilities for request %s; "
-                    "falling back to legacy speculative rejection behavior.",
-                    req_id,
+                raise RuntimeError(
+                    f"Missing cached draft probabilities for request {req_id}; "
+                    "cannot run exact probabilistic speculative rejection "
+                    "sampling without the draft distribution for every drafted "
+                    "request."
                 )
-                return None
             draft_probs_rows.append(self._draft_probs[row_idx, :num_draft])
 
         if not draft_probs_rows:

@@ -309,6 +309,21 @@ def test_sample_tokens_skips_pp_group_lookup_without_async_scheduling(
     assert output in (EMPTY_MODEL_RUNNER_OUTPUT, None)
 
 
+@pytest.mark.skip_global_cleanup
+def test_get_spec_decode_draft_probs_fails_closed_on_missing_prob_row():
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner._draft_probs = torch.ones((1, 2, 8), dtype=torch.float32)
+    runner._draft_prob_req_ids = ["req_0"]
+    runner.input_batch = SimpleNamespace(req_ids=["req_0", "req_1"])
+    metadata = SpecDecodeMetadata.make_dummy(
+        [[1], [2]],
+        device=torch.device("cpu"),
+    )
+
+    with pytest.raises(RuntimeError, match="Missing cached draft probabilities"):
+        GPUModelRunner._get_spec_decode_draft_probs(runner, metadata)
+
+
 def test_select_common_block_size_no_valid_option():
     backend_a = _make_mock_backend_for_kernel_block_size([64])
     backend_b = _make_mock_backend_for_kernel_block_size([MultipleOf(16)])
