@@ -1577,6 +1577,28 @@ class Scheduler(SchedulerInterface):
                 # In this case, we use is_finished() to check.
                 continue
 
+            if req_id not in model_runner_output.req_id_to_index:
+                # The last PP stage finished the request (e.g. via a tool-call
+                # or stop-string parser) before the master scheduler observed
+                # it.  Finish and free the request here so KV blocks are
+                # reclaimed and the API server receives a proper finish signal.
+                # A bare `continue` is NOT sufficient — it would leak KV cache
+                # blocks and leave the request in self.running forever.
+                request.status = RequestStatus.FINISHED_STOPPED
+                self._free_request(request)
+                stopped_running_reqs.add(request)
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=request.get_finished_reason(),
+                        stop_reason=request.stop_reason,
+                        events=request.take_events(),
+                        trace_headers=request.trace_headers,
+                    )
+                )
+                continue
+
             req_index = model_runner_output.req_id_to_index[req_id]
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
