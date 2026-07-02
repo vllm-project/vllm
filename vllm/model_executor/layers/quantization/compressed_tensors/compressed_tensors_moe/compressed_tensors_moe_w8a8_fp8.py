@@ -338,6 +338,7 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
+                layer=layer,
             )
 
     def maybe_make_prepare_finalize(
@@ -355,12 +356,13 @@ class CompressedTensorsW8A8Fp8MoEMethod(CompressedTensorsMoEMethod):
             fp8_backend=self.fp8_backend,
             w1_scale=layer.w13_weight_scale,
             w2_scale=layer.w2_weight_scale,
-            a1_scale=layer.w13_input_scale,
-            a2_scale=layer.w2_input_scale,
+            a1_scale=getattr(layer, "w13_input_scale", None),
+            a2_scale=getattr(layer, "w2_input_scale", None),
             per_act_token_quant=is_per_token,
             per_out_ch_quant=is_per_token,
             block_shape=self.weight_block_size,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            layer=layer,
         )
 
     def apply_monolithic(

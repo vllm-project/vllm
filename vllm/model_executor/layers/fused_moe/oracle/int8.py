@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from enum import Enum
+from typing import Any
 
 import torch
 
@@ -22,6 +23,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt8DynamicTokenSym,
     kInt8StaticChannelSym,
 )
+from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
@@ -29,6 +31,7 @@ logger = init_logger(__name__)
 
 class Int8MoeBackend(Enum):
     TRITON = "TRITON"
+    HUMMING = "HUMMING"
     CPU = "CPU"
 
 
@@ -40,6 +43,7 @@ def _get_priority_backends(
     """
     _AVAILABLE_BACKENDS = [
         Int8MoeBackend.TRITON,
+        Int8MoeBackend.HUMMING,
         Int8MoeBackend.CPU,
     ]
 
@@ -62,6 +66,19 @@ def backend_to_kernel_cls(
 
         return [TritonExperts]
 
+    elif backend == Int8MoeBackend.HUMMING:
+        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+        )
+
+        return [
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+        ]
+
     elif backend == Int8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             CPUExpertsInt8,
@@ -77,6 +94,7 @@ def map_int8_backend(runner_backend: MoEBackend) -> Int8MoeBackend:
     """Map user's MoEBackend to Int8MoeBackend."""
     mapping = {
         "triton": Int8MoeBackend.TRITON,
+        "humming": Int8MoeBackend.HUMMING,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -163,6 +181,7 @@ def select_int8_moe_backend(
 
 
 def make_int8_moe_quant_config(
+    int8_backend: Int8MoeBackend,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
     a1_scale: torch.Tensor | None = None,
@@ -170,10 +189,20 @@ def make_int8_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     per_act_token_quant: bool = False,
+    layer: torch.nn.Module | None = None,
 ) -> FusedMoEQuantConfig:
     assert (a1_scale is None and a2_scale is None) or (
         a1_scale is not None and a2_scale is not None
     ), "a1_scale and a2_scale must both be provided or both be None"
+
+    if int8_backend == Int8MoeBackend.HUMMING:
+        from vllm.model_executor.layers.fused_moe import RoutedExperts
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            get_humming_moe_quant_config,
+        )
+
+        assert isinstance(layer, RoutedExperts)
+        return get_humming_moe_quant_config(layer)
 
     if a1_scale is None or a2_scale is None:
         return int8_w8a16_moe_quant_config(
@@ -196,13 +225,56 @@ def make_int8_moe_quant_config(
     )
 
 
+def _humming_int8_weight_schema(
+    weight: torch.Tensor, weight_scale: torch.Tensor
+) -> dict[str, Any]:
+    """Build the humming compressed-tensors int8 schema from the canonical
+    on-device tensors; humming does the signed-int8 -> native conversion."""
+    config: dict[str, Any] = {
+        "quant_method": "compressed-tensors",
+        "format": "int-quantized",
+        "type": "int",
+        "num_bits": 8,
+        "symmetric": True,
+        "strategy": "channel",
+    }
+    num_experts, num_output = weight.shape[0], weight.shape[-2]
+    if weight_scale.numel() < num_experts * num_output:
+        config["strategy"] = "tensor"
+    return config
+
+
 def convert_to_int8_moe_kernel_format(
     int8_backend: Int8MoeBackend,
     w13: torch.Tensor,
     w2: torch.Tensor,
+    layer: torch.nn.Module | None = None,
+    w13_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert INT8 MoE weights to backend-specific kernel format."""
-    if int8_backend == Int8MoeBackend.CPU:
+    if int8_backend == Int8MoeBackend.HUMMING:
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            convert_to_humming_moe_kernel_format,
+        )
+
+        assert layer is not None
+        # Humming reads canonical CT scales (w*_weight_scale) from the layer.
+        # Online int8 produces per-channel (E, N) w*_scale; expose them as the
+        # (E, N, 1) w*_weight_scale humming's loader expects.
+        for sub in ("w13", "w2"):
+            if hasattr(layer, f"{sub}_weight_scale"):
+                continue
+            scale = getattr(layer, f"{sub}_scale").data
+            if scale.dim() < 3:
+                scale = scale.unsqueeze(-1)
+            replace_parameter(layer, f"{sub}_weight_scale", scale)
+            delattr(layer, f"{sub}_scale")
+        convert_to_humming_moe_kernel_format(
+            layer,
+            quant_config=_humming_int8_weight_schema(w13, layer.w13_weight_scale),
+        )
+        return layer.w13_weight, layer.w2_weight
+    elif int8_backend == Int8MoeBackend.CPU:
         from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
             prepare_int8_moe_layer_for_cpu,
         )
@@ -215,10 +287,12 @@ def convert_to_int8_moe_kernel_format(
 
 
 def make_int8_moe_kernel(
+    int8_backend: Int8MoeBackend,
     moe_quant_config: FusedMoEQuantConfig,
     moe_config: FusedMoEConfig,
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    layer: torch.nn.Module | None = None,
 ) -> mk.FusedMoEKernel:
     # Create Prepare/Finalize.
     prepare_finalize = maybe_make_prepare_finalize(
@@ -232,6 +306,11 @@ def make_int8_moe_kernel(
 
     logger.info_once("Using %s", prepare_finalize.__class__.__name__)
 
+    extra_kwargs = {}
+    if int8_backend == Int8MoeBackend.HUMMING:
+        assert layer is not None
+        extra_kwargs = {"layer": layer}
+
     # Create Experts.
     if prepare_finalize.activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
         max_num_tokens = prepare_finalize.max_num_tokens_per_rank()
@@ -241,11 +320,13 @@ def make_int8_moe_kernel(
             quant_config=moe_quant_config,
             max_num_tokens=max_num_tokens,
             num_dispatchers=prepare_finalize.num_dispatchers(),
+            **extra_kwargs,
         )
     else:
         experts = experts_cls(
             moe_config=moe_config,
             quant_config=moe_quant_config,
+            **extra_kwargs,
         )
 
     kernel = mk.FusedMoEKernel(
