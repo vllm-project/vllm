@@ -247,6 +247,11 @@ class Scheduler(SchedulerInterface):
                 # decoding instead of standard next-token sampling, so it has a query
                 # for the last sampled token plus queries for each draft token.
                 self.num_lookahead_tokens = self.num_spec_tokens + 1
+            if speculative_config.use_dspark():
+                # DSpark drafts a block of num_spec_tokens query tokens in which the
+                # anchor itself is the first prediction position (no separate bonus
+                # query), so it needs exactly num_spec_tokens lookahead slots.
+                self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -2354,6 +2359,7 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager.remove_skipped_blocks(
             request_id=request.request_id,
             total_computed_tokens=request.num_computed_tokens,
+            num_prompt_tokens=request.num_prompt_tokens,
         )
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)

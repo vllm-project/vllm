@@ -524,6 +524,16 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
+        # DSpark is implemented only by the V2 GPU model runner, and DeepSeek-V4
+        # is not otherwise a default-V2 architecture, so force V2 for it. If V2
+        # is unsupported for the rest of the config, _validate_v2_model_runner
+        # raises rather than silently falling back to V1 (which can't run dspark).
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+        ):
+            return True
+
         if self.model_config is not None and self.model_config.is_diffusion:
             return True
 
@@ -931,25 +941,38 @@ class VllmConfig:
                     model_type,
                 )
 
+        from vllm.platforms import current_platform
         from vllm.v1.executor.abstract import Executor
 
         executor_backend = self.parallel_config.distributed_executor_backend
         executor_class = Executor.get_class(self)
         executor_supports_async_sched = executor_class.supports_async_scheduling()
+        uses_rocm_deepep_ht_dbo = (
+            current_platform.is_rocm()
+            and self.parallel_config.enable_dbo
+            and self.parallel_config.all2all_backend == "deepep_high_throughput"
+        )
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
             # Currently, async scheduling only support eagle speculative
             # decoding.
+            if uses_rocm_deepep_ht_dbo:
+                raise ValueError(
+                    "Async scheduling is not compatible with ROCm DeepEP "
+                    "high-throughput DBO. Please use --no-async-scheduling or "
+                    "select a different all2all backend."
+                )
             if self.speculative_config is not None:
                 if (
                     self.speculative_config.method not in get_args(EagleModelTypes)
                     and self.speculative_config.method not in get_args(NgramGPUTypes)
                     and self.speculative_config.method != "draft_model"
+                    and self.speculative_config.method != "dspark"
                 ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP/Draft Model/NGram GPU kind of "
+                        "with EAGLE/MTP/Draft Model/NGram GPU/DSpark kind of "
                         "speculative decoding"
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
@@ -977,6 +1000,7 @@ class VllmConfig:
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
                 and self.speculative_config.method not in get_args(NgramGPUTypes)
+                and self.speculative_config.method != "dspark"
             ):
                 logger.warning_once(
                     "Async scheduling not supported with %s-based "
@@ -998,6 +1022,13 @@ class VllmConfig:
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend. ",
                     executor_backend,
+                )
+                self.scheduler_config.async_scheduling = False
+            elif uses_rocm_deepep_ht_dbo:
+                logger.warning_once(
+                    "Async scheduling is disabled for ROCm DeepEP "
+                    "high-throughput DBO because that combination can corrupt "
+                    "DP+EP generation accuracy."
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -1043,8 +1074,6 @@ class VllmConfig:
                 "torch_shm is known to fail without "
                 "VLLM_WORKER_MULTIPROC_METHOD set to spawn"
             )
-
-        from vllm.platforms import current_platform
 
         if (
             self.model_config is not None
@@ -1997,13 +2026,6 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if (
-            model_config is not None
-            and model_config.has_inner_state
-            and self.cache_config.mamba_cache_mode == "align"
-        ):
-            unsupported.append("hybrid/mamba models with align cache mode")
-
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
 
@@ -2040,11 +2062,12 @@ class VllmConfig:
             if speculative_config.uses_dynamic_speculative_decoding():
                 unsupported.append("dynamic speculative decoding")
 
-            # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle)
-            # DFlash uses parallel drafting natively in V2 via DFlashSpeculator.
+            # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
+            # DFlash and DSpark use parallel drafting natively in V2 via their
+            # own speculators.
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method != "dflash"
+                and speculative_config.method not in ("dflash", "dspark")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 
@@ -2157,10 +2180,6 @@ class VllmConfig:
                 "Chunked MM input is required because we need the flexibility "
                 "to schedule a multiple of block_size tokens even if they are "
                 "in the middle of a mm input"
-            )
-            # TODO: support align mamba cache mode for model runner v2
-            assert not envs.VLLM_USE_V2_MODEL_RUNNER, (
-                "Model Runner V2 has not yet supported mamba_cache_mode='align'. "
             )
 
     @model_validator(mode="after")
