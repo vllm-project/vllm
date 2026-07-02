@@ -154,6 +154,7 @@ class MoEMixin(MixtureOfExperts):
 
     def recursive_replace(self):
         """Initialize the MoE layers."""
+        experts_name = "experts"
         text_config = self.text_config
 
         # Positional arguments
@@ -221,7 +222,7 @@ class MoEMixin(MixtureOfExperts):
                 # down_proj = (num_experts, intermediate_size, hidden_size)
                 params = list(child_module.parameters())
                 is_3d = len(params) > 0 and all(p.ndim == 3 for p in params)
-                if child_name == "experts" and (is_modulelist or is_3d):
+                if child_name == experts_name and (is_modulelist or is_3d):
                     # Alias for readability
                     moe_block = module
                     experts = child_module
@@ -257,23 +258,17 @@ class MoEMixin(MixtureOfExperts):
                         has_bias=has_bias,
                         routed_experts_cls=TransformersRoutedExperts,
                     )
-                    fuser = MoEBlockFuser.match(moe_block)
+                    fuser = MoEBlockFuser.match(moe_block, experts_name)
                     if self.num_expert_groups <= 1 and fuser is not None:
                         # MoE block forward is fully replaced.
                         # gate/router and shared expert (if any) runs in FusedMoE.
-                        gate = fuser.build_gate(moe_block, prefix)
-                        shared_experts = fuser.build_shared_experts(moe_block, prefix)
-                        if shared_experts is not None:
-                            self.hf_to_vllm_mapper.orig_to_new_stacked.update(
-                                fuser.orig_to_new_stacked(prefix)
-                            )
                         kwargs |= dict(
                             scoring_func=fuser.scoring_func,
                             is_sequence_parallel=(
                                 self.parallel_config.use_sequence_parallel_moe
                             ),
-                            gate=gate,
-                            shared_experts=shared_experts,
+                            gate=fuser.gate(moe_block, prefix),
+                            shared_experts=fuser.shared_experts(moe_block, prefix),
                         )
                         fuser.rewrite_forward(moe_block)
                         routed = "gate + experts"

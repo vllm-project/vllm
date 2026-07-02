@@ -42,6 +42,7 @@ from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
 )
+from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
@@ -453,6 +454,7 @@ class Base(
         def register_fusion(fuser: BaseFuser, prefix: str):
             """Register a fused layer's mappings just before it is built."""
             orig_to_new_stacked = fuser.orig_to_new_stacked(prefix)
+            print(f"Registering fusion for {prefix}: {orig_to_new_stacked}")
             self.hf_to_vllm_mapper.orig_to_new_stacked.update(orig_to_new_stacked)
 
             packed_modules_mapping = fuser.packed_modules_mapping
@@ -504,7 +506,9 @@ class Base(
                     )
                     logger.info_once(fuser.info(child_name))
                     _recursive_replace(new_module, prefix=qual_name)
-                else:
+                elif not isinstance(child_module, MoERunner):
+                    # MoERunner can contain aliases of shared experts and gates,
+                    # so we don't want to recurse into it and break weight loading.
                     _recursive_replace(child_module, prefix=qual_name)
 
                 if new_module is not child_module:
