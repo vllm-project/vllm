@@ -80,11 +80,12 @@ def mock_on_mi3xx():
             "ROCM_AITER_UNIFIED_ATTN",
             AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN.get_path(),
         ),
-        # Test Case 6: VLLM_ROCM_USE_AITER=1
+        # Test Case 6: VLLM_ROCM_USE_AITER=1 -> AITER FlashAttention is
+        # preferred over the non-AITER ROCM_ATTN once AITER MHA is enabled.
         (
             {"VLLM_ROCM_USE_AITER": "1"},
             None,
-            AttentionBackendEnum.ROCM_ATTN.get_path(),
+            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
         ),
         # Test Case 7: VLLM_ROCM_USE_AITER=1 + explicit TRITON_ATTN
         (
@@ -156,6 +157,70 @@ def test_standard_attention_backend_selection(
 
     backend_path = RocmPlatform.get_attn_backend_cls(
         selected_backend=backend_enum, attn_selector_config=attn_selector_config
+    )
+
+    assert backend_path == expected_backend_path
+
+
+@pytest.mark.parametrize(
+    "env_vars, expected_backend_path",
+    [
+        # AITER opt-in -> ROCM_AITER_FA wins over the non-AITER ROCM_ATTN.
+        (
+            {"VLLM_ROCM_USE_AITER": "1"},
+            AttentionBackendEnum.ROCM_AITER_FA.get_path(),
+        ),
+        # AITER on but MHA explicitly disabled -> fall back to ROCM_ATTN
+        # (ROCM_AITER_FA must not be promoted when is_mha_enabled() is False).
+        (
+            {"VLLM_ROCM_USE_AITER": "1", "VLLM_ROCM_USE_AITER_MHA": "0"},
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
+        ),
+        # AITER fully disabled -> non-AITER ordering unchanged (ROCM_ATTN).
+        (
+            {},
+            AttentionBackendEnum.ROCM_ATTN.get_path(),
+        ),
+    ],
+)
+def test_aiter_fa_preferred_over_rocm_attn(
+    env_vars,
+    expected_backend_path,
+    mock_vllm_config,
+    mock_on_gfx9,
+    mock_on_mi3xx,
+    monkeypatch,
+):
+    """ROCM_AITER_FA must outrank ROCM_ATTN when AITER MHA is enabled.
+
+    Regression guard for the ROCm attention-backend priority order: with
+    VLLM_ROCM_USE_AITER=1 on CDNA3, auto-selection must pick ROCM_AITER_FA
+    (the AITER FlashAttention path) rather than the slower non-AITER ROCM_ATTN,
+    while leaving the non-AITER ordering unchanged when AITER (MHA) is off.
+    """
+    for key, value in env_vars.items():
+        monkeypatch.setenv(key, value)
+
+    import importlib
+
+    import vllm.envs as envs
+
+    importlib.reload(envs)
+
+    from vllm.platforms.rocm import RocmPlatform
+
+    attn_selector_config = AttentionSelectorConfig(
+        head_size=128,
+        dtype=torch.float16,
+        kv_cache_dtype="auto",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+    )
+
+    backend_path = RocmPlatform.get_attn_backend_cls(
+        selected_backend=None, attn_selector_config=attn_selector_config
     )
 
     assert backend_path == expected_backend_path
