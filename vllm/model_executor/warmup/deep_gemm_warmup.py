@@ -144,6 +144,12 @@ def _fp8_linear_may_use_deep_gemm(module: torch.nn.Module) -> bool:
         and not isinstance(module.quant_method, Mxfp8OnlineLinearMethod)
         and getattr(module.quant_method, "block_quant", False)
         and not getattr(module.quant_method, "use_marlin", True)
+        # Honor the resolved per-layer DeepGEMM decision. On Blackwell, vLLM
+        # auto-disables DeepGEMM for some model types (e.g. qwen3_5_text) by
+        # setting use_deep_gemm=False; those layers fall back to CUTLASS at
+        # inference (DeepGemmFp8BlockScaledMMKernel.can_implement rejects them),
+        # so warmup must not select DeepGEMM for them either. See #47169.
+        and getattr(module.quant_method, "use_deep_gemm", False)
     ):
         return False
 
@@ -164,6 +170,14 @@ def _fused_moe_grouped_gemm_may_use_deep_gemm(module: torch.nn.Module) -> bool:
         return False
 
     quant_method = module._quant_method
+    # Honor the resolved per-model DeepGEMM decision (see #47169): on Blackwell
+    # vLLM auto-disables DeepGEMM for some model types by setting
+    # quant_config.use_deep_gemm=False; the grouped-GEMM warmup must skip them
+    # too, matching the dense selector and inference.
+    quant_config = getattr(quant_method, "quant_config", None)
+    if getattr(quant_config, "use_deep_gemm", None) is False:
+        return False
+
     moe_quant_config = quant_method.get_fused_moe_quant_config(module.routed_experts)
 
     if (

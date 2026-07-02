@@ -7,6 +7,7 @@ import torch
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm import envs
 from vllm._aiter_ops import rocm_aiter_ops
+from vllm.config import get_current_vllm_config
 from vllm.config.kernel import MoEBackend
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.all2all_utils import (
@@ -34,6 +35,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.deep_gemm import should_auto_disable_deep_gemm
 
 logger = init_logger(__name__)
 
@@ -251,6 +253,29 @@ def map_fp8_backend(runner_backend: MoEBackend) -> Fp8MoeBackend:
     )
 
 
+def _remove_deep_gemm_if_auto_disabled(
+    available_backends: list[Fp8MoeBackend],
+) -> None:
+    """Drop DeepGEMM MoE backends when the model auto-disables DeepGEMM.
+
+    On Blackwell, vLLM auto-disables DeepGEMM for some model types (e.g.
+    qwen3_5_moe_text) because the E8M0 scale format degrades accuracy. This
+    honors that per-model decision at MoE backend selection, matching the FP8
+    linear path (DeepGemmFp8BlockScaledMMKernel.can_implement). See #47169.
+    """
+    model_config = get_current_vllm_config().model_config
+    model_type = (
+        getattr(model_config.hf_text_config, "model_type", None)
+        if model_config is not None
+        else None
+    )
+    if not should_auto_disable_deep_gemm(model_type):
+        return
+    for backend in (Fp8MoeBackend.DEEPGEMM, Fp8MoeBackend.BATCHED_DEEPGEMM):
+        if backend in available_backends:
+            available_backends.remove(backend)
+
+
 def select_fp8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
@@ -352,6 +377,13 @@ def select_fp8_moe_backend(
             return _return_or_raise(
                 backend, config, weight_key, activation_key, activation_format
             )
+
+    # On Blackwell, vLLM auto-disables DeepGEMM for some model types (e.g.
+    # qwen3_5_moe_text) because the E8M0 scale format degrades accuracy. Honor
+    # that per-model decision here too, so backend selection never lands on
+    # DeepGEMM when it is auto-disabled for the model, mirroring the FP8 linear
+    # path (DeepGemmFp8BlockScaledMMKernel.can_implement). See #47169.
+    _remove_deep_gemm_if_auto_disabled(AVAILABLE_BACKENDS)
 
     # Handle explicit MARLIN FP8 configuration.
     if envs.VLLM_TEST_FORCE_FP8_MARLIN:
