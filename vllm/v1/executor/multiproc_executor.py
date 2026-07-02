@@ -558,6 +558,51 @@ class WorkerProc:
     rpc_broadcast_mq: MessageQueue | None
     worker_response_mq: MessageQueue | None
 
+    def _validate_cross_node_config(self, vllm_config: VllmConfig) -> None:
+        """Fail fast if ranks disagree on graph-shape-affecting config.
+
+        In a multi-node TP/PP deployment each ``vllm serve --headless`` process
+        parses its own CLI args and builds its own ``VllmConfig``. If a
+        graph-shape-affecting value (e.g. ``max_num_batched_tokens``,
+        ``max_num_seqs``) is set differently across nodes, the startup
+        memory-profiling forward pass runs with mismatched shapes and the
+        collective communication deadlocks with no actionable error. Compare
+        the per-config hashes (vLLM's own definition of what affects the
+        computation graph) across the inner-DP world group and raise on
+        mismatch. On follower nodes these values are otherwise ignored at
+        runtime, but they must match for the profiling pass to stay in lockstep.
+        """
+        if vllm_config.parallel_config.nnodes_within_dp == 1:
+            # Single-node TP/PP: one CLI parse, nothing to reconcile.
+            return
+
+        local_hashes = {
+            "model_config": vllm_config.model_config.compute_hash(),
+            "parallel_config": vllm_config.parallel_config.compute_hash(),
+            "cache_config": vllm_config.cache_config.compute_hash(),
+            "compilation_config": vllm_config.compilation_config.compute_hash(),
+            "scheduler_config": vllm_config.scheduler_config.compute_hash(),
+        }
+
+        # rank 0 of the inner-DP group is the head node's first worker, whose
+        # config is the source of truth (it hosts the scheduler).
+        group = get_inner_dp_world_group()
+        head_hashes = group.broadcast_object(
+            local_hashes if group.rank_in_group == 0 else None
+        )
+        mismatched = [
+            name for name, h in local_hashes.items() if head_hashes[name] != h
+        ]
+        if mismatched:
+            raise RuntimeError(
+                "Config mismatch across multi-node TP/PP ranks for: "
+                f"{', '.join(mismatched)}. Every node in a multi-node "
+                "deployment must be launched with identical graph-shape "
+                "arguments (e.g. --max-num-batched-tokens, --max-num-seqs). "
+                "A mismatch desyncs the startup memory-profiling forward pass "
+                "and hangs the collective communication."
+            )
+
     def _init_message_queues(
         self, input_shm_handle: Handle, vllm_config: VllmConfig
     ) -> None:
@@ -628,6 +673,10 @@ class WorkerProc:
         self.setup_proc_title_and_log_prefix(
             enable_ep=vllm_config.parallel_config.enable_expert_parallel
         )
+        # init_device() has set up the distributed groups; validate that all
+        # ranks agree on the graph-shape-affecting config before doing any work
+        # that runs collectives (model load, memory profiling).
+        self._validate_cross_node_config(vllm_config)
         if envs.VLLM_ELASTIC_EP_SCALE_UP_LAUNCH:
             self.worker.elastic_ep_execute("load_model")
         else:
