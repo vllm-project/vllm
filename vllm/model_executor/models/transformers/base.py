@@ -165,7 +165,13 @@ class Base(
             dtype=self.model_config.dtype,
             trust_remote_code=self.model_config.trust_remote_code,
         )
-        self._decorate_for_torch_compile(**from_config_kwargs)
+        should_decorate_for_compile = not getattr(
+            self.model_config.hf_config,
+            "model_type",
+            None,
+        ) == "diffusion_gemma"
+        if should_decorate_for_compile:
+            self._decorate_for_torch_compile(**from_config_kwargs)
         # Init on "meta" to delay allocating GPU tensors
         with init_on_device_without_buffers("meta"):
             self.model: PreTrainedModel = AutoModel.from_config(**from_config_kwargs)
