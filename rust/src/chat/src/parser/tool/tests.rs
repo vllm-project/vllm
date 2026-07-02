@@ -154,6 +154,10 @@ fn factory_new_resolves_default_patterns() {
         Some(names::HERMES)
     );
     assert_eq!(
+        factory.resolve_name_for_model("meituan-longcat/LongCat-Flash-Chat"),
+        Some(names::LONGCAT)
+    );
+    assert_eq!(
         factory.resolve_name_for_model("tencent/Hy3-preview"),
         Some(names::HY_V3)
     );
@@ -202,6 +206,14 @@ fn factory_new_resolves_default_patterns() {
         factory.resolve_name_for_model("internlm/Intern-S1-Pro"),
         None
     );
+}
+
+#[test]
+fn factory_new_registers_longcat_by_name() {
+    let factory = ToolParserFactory::new();
+
+    assert!(factory.contains(names::LONGCAT));
+    factory.create(names::LONGCAT, &[]).unwrap();
 }
 
 #[test]
