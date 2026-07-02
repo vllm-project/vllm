@@ -288,6 +288,7 @@ class ModelArchConfigConvertorBase:
                     "deepseek_v3",
                     "deepseek_v32",
                     "deepseek_mtp",
+                    "kimi_k2",
                 )
                 and getattr(self.hf_text_config, "kv_lora_rank", None) is not None
             )
