@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import asyncio
+import contextlib
 import logging
 import threading
 import time
@@ -901,6 +902,7 @@ class MooncakeConnectorWorker:
         engine_id: str,
         kv_cache_config: "KVCacheConfig",
     ):
+        self._shutdown_done = False
         if TransferEngine is None:
             logger.error("Mooncake is not available")
             raise RuntimeError("Mooncake is not available")
@@ -1081,21 +1083,34 @@ class MooncakeConnectorWorker:
             self.block_size = kernel_block_size
 
     def __del__(self):
-        self.shutdown()
+        with contextlib.suppress(Exception):
+            self.shutdown()
 
     def shutdown(self):
         """Cleanup background threads on destruction."""
-        self.async_zmq_ctx.term()
-        if not self.is_kv_consumer:
-            self._sender_executor.shutdown(wait=False)
-            if self.sender_loop.is_running():
+        if getattr(self, "_shutdown_done", False):
+            return
+        self._shutdown_done = True
+        if getattr(self, "async_zmq_ctx", None) is not None:
+            self.async_zmq_ctx.term()
+        if not getattr(self, "is_kv_consumer", True):
+            if getattr(self, "_sender_executor", None) is not None:
+                self._sender_executor.shutdown(wait=False)
+            if (
+                getattr(self, "sender_loop", None) is not None
+                and self.sender_loop.is_running()
+            ):
                 self.sender_loop.call_soon_threadsafe(self.sender_loop.stop)
                 self._sender_listener_t.join()
             if should_launch_bootstrap_server(self.vllm_config) and hasattr(
                 self, "bootstrap_server"
             ):
                 self.bootstrap_server.shutdown()
-        if not self.is_kv_producer and self.receiver_loop.is_running():
+        if (
+            not getattr(self, "is_kv_producer", True)
+            and getattr(self, "receiver_loop", None) is not None
+            and self.receiver_loop.is_running()
+        ):
             self.receiver_loop.call_soon_threadsafe(self.receiver_loop.stop)
             self._mooncake_receiver_t.join()
 
