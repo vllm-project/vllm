@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JOB_SCRIPT="${JOB_SCRIPT:-${SCRIPT_DIR}/run_xPyD_disagg.slurm}"
 
 # ---- knobs (override from the Buildkite step env) --------------------------
-IMAGE="${IMAGE:-rocm/vllm-ci:${BUILDKITE_COMMIT:-latest}}"
+IMAGE="${IMAGE:-vllm/vllm-openai-rocm:nightly}"
 NODES="${NODES:-2}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 PARTITION="${SLURM_PARTITION:-amd-rccl}"

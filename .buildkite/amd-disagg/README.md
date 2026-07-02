@@ -80,13 +80,22 @@ passed `NODE_RANK`.
 ## Quick start — 1P1D TP8 on SLURM
 
 ```bash
-# from the SLURM login node (defaults: NODES=2, WIDE_EP_MODE=0, TP8)
+# from the SLURM login node (defaults: NODES=2, WIDE_EP_MODE=0, TP8,
+# IMAGE=vllm/vllm-openai-rocm:nightly)
+SLURM_PARTITION=amd-rccl \
+  bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+
+# …pin a specific image (e.g. a per-commit CI build) by overriding IMAGE:
 IMAGE=rocm/vllm-ci:<commit> SLURM_PARTITION=amd-rccl \
   bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
 
 # …or submit the job directly (manual/debug, no CI streaming):
 sbatch -N2 --gres=gpu:8 -p amd-rccl .buildkite/amd-disagg/run_xPyD_disagg.slurm
 ```
+
+> The default image is the rolling ROCm nightly (`vllm/vllm-openai-rocm:nightly`)
+> for manual runs. In CI, `pipeline.disagg.yaml` pins `IMAGE` to the per-commit
+> built image (`rocm/vllm-ci:$BUILDKITE_COMMIT`) so the PR's own build is tested.
 
 The launcher owns topology, host/port, EP backbone (`--enable-expert-parallel`,
 `--all2all-backend mori`, `--data-parallel-*`, `--headless`/`--data-parallel-start-rank`,
