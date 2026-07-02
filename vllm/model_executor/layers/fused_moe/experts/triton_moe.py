@@ -32,9 +32,6 @@ from vllm.model_executor.layers.fused_moe.utils import (
     moe_kernel_quantize_input,
     swiglu_limit_func,
 )
-from vllm.model_executor.layers.quantization.utils.fp8_utils import (
-    is_deep_gemm_e8m0_used,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
@@ -425,36 +422,20 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                     top_k_num=top_k_num,
                 )
 
+        self.activation(
+            activation, intermediate_cache2, intermediate_cache1.view(-1, N)
+        )
+
         a2q_scale: torch.Tensor | None = None
 
-        # Fuse SiLU+Mul + FP8 block quantize into a single kernel
-        # when conditions permit (gated SiLU, fp8 block quant with
-        # group_size=128, no LoRA requiring the BF16 intermediate).
-        if (
-            activation == MoEActivation.SILU
-            and self.quant_config.use_fp8_w8a8
-            and self.block_shape == [128, 128]
-            and lora_context is None
-            and not is_deep_gemm_e8m0_used()
-        ):
-            qintermediate_cache2, a2q_scale = ops.silu_and_mul_per_block_quant(
-                intermediate_cache1.view(-1, N),
-                group_size=128,
-                quant_dtype=current_platform.fp8_dtype(),
-            )
-        else:
-            self.activation(
-                activation, intermediate_cache2, intermediate_cache1.view(-1, N)
-            )
-
-            qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
-                intermediate_cache2,
-                a2_scale,
-                self.quant_dtype,
-                self.per_act_token_quant,
-                self.block_shape,
-                quantization_emulation=self.quantization_emulation,
-            )
+        qintermediate_cache2, a2q_scale = moe_kernel_quantize_input(
+            intermediate_cache2,
+            a2_scale,
+            self.quant_dtype,
+            self.per_act_token_quant,
+            self.block_shape,
+            quantization_emulation=self.quantization_emulation,
+        )
 
         # LoRA w2: applied to intermediate_cache3 before moe_sum, using the
         # unquantized intermediate_cache2 as the lora_a input.  Reuses the
