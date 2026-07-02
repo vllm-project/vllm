@@ -258,8 +258,14 @@ class NixlBaseConnectorWorker:
             raise ValueError("kv_transfer_config must be set for NixlConnector")
         self.kv_transfer_config = vllm_config.kv_transfer_config
 
+        # On ROCm/AMD platforms the NIXL package ships without UCX support and
+        # only provides the `cuda_ipc` backend.  Fall back to `cuda_ipc` unless
+        # the user has explicitly set a backend via kv_connector_extra_config.
+        _default_nixl_backends = (
+            ["cuda_ipc"] if current_platform.is_rocm() else ["UCX"]
+        )
         self.nixl_backends = vllm_config.kv_transfer_config.get_from_extra_config(
-            "backends", ["UCX"]
+            "backends", _default_nixl_backends
         )
         kv_lease_duration: int = vllm_config.kv_transfer_config.get_from_extra_config(
             "kv_lease_duration", 30
