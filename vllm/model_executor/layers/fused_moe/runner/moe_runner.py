@@ -243,10 +243,16 @@ class MoERunner(MoERunnerInterface):
         self._forward_entry = self._select_forward()
 
     def _select_forward(self) -> Callable:
-        if current_platform.is_tpu() or current_platform.is_cpu():
+        if (
+            current_platform.is_tpu()
+            or current_platform.is_cpu()
+            or current_platform.dispatch_key == "PrivateUse1"
+        ):
             # TODO: Once the OOM issue for the TPU backend is resolved, we
             # will switch to using the moe_forward custom op.
             # Note: CPU doesn't require wrapped _forward_impl.
+            # Note: NPU (PrivateUse1/Ascend) dispatch has compatibility
+            # issues with the moe_forward custom ops, so use raw functions.
             return _moe_forward if self._shared_experts is None else _moe_forward_shared
 
         return (
