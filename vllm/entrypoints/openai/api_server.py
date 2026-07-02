@@ -51,6 +51,7 @@ from vllm.entrypoints.serve.utils.server_utils import (
     log_response,
     validation_exception_handler,
 )
+from vllm.entrypoints.warmup import load_warmup_config, warmup_engine
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
@@ -707,6 +708,10 @@ async def run_server_worker(
         args,
         client_config=client_config,
     ) as engine_client:
+        warmup_cfg = load_warmup_config(args.warmup_config)
+        if warmup_cfg is not None:
+            await warmup_engine(engine_client, warmup_cfg)
+
         shutdown_task = await build_and_serve(
             engine_client, listen_address, sock, args, **uvicorn_kwargs
         )
