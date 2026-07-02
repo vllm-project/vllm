@@ -38,10 +38,9 @@ def test_int4_quantization_accuracy(num_embeddings, embedding_dim, dtype):
 
     # Check that quantization preserves the general structure
     # Int4 has limited precision, so we just check it's not completely broken
-    correlation = torch.corrcoef(torch.stack([
-        weight.flatten(),
-        dequantized.flatten()
-    ]))[0, 1]
+    correlation = torch.corrcoef(
+        torch.stack([weight.flatten(), dequantized.flatten()])
+    )[0, 1]
     assert correlation > 0.9  # High correlation expected
 
 
@@ -77,8 +76,7 @@ def test_int4_embedding_method():
         def __init__(self):
             super().__init__()
             self.weight = torch.nn.Parameter(
-                torch.randn(100, 256, dtype=torch.float32),
-                requires_grad=False
+                torch.randn(100, 256, dtype=torch.float32), requires_grad=False
             )
             self.params_dtype = torch.float32
 
@@ -91,7 +89,7 @@ def test_int4_embedding_method():
     # Check that weight is now packed
     assert layer.weight.dtype == torch.uint8
     assert layer.weight.shape == (100, 128)  # Packed: 256/2 = 128
-    assert hasattr(layer, 'weight_scale')
+    assert hasattr(layer, "weight_scale")
     assert layer.weight_scale.shape == (1, 256)
 
     # Test embedding lookup

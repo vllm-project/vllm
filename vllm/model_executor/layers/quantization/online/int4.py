@@ -43,7 +43,7 @@ class Int4PerChannelEmbeddingMethod(QuantizeMethodBase):
         Note: VocabParallelEmbedding creates the weight parameter.
         This method registers the weight attributes for the quantization method.
         """
-        from vllm.model_executor.parameter import set_weight_attrs
+        from vllm.model_executor.utils import set_weight_attrs
 
         if hasattr(layer, "weight"):
             set_weight_attrs(layer.weight, {"input_dim": 1, "output_dim": 0})

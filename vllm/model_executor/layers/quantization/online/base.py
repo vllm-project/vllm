@@ -25,10 +25,6 @@ from vllm.model_executor.layers.quantization.base_config import (
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
     should_ignore_layer,
 )
-from vllm.model_executor.layers.vocab_parallel_embedding import (
-    UnquantizedEmbeddingMethod,
-    VocabParallelEmbedding,
-)
 from vllm.model_executor.layers.quantization.online.fp8 import (
     Fp8PerBlockOnlineLinearMethod,
     Fp8PerBlockOnlineMoEMethod,
@@ -55,6 +51,10 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kInt4StaticChannelSym,
     kInt8StaticChannelSym,
     kMxfp8Dynamic,
+)
+from vllm.model_executor.layers.vocab_parallel_embedding import (
+    UnquantizedEmbeddingMethod,
+    VocabParallelEmbedding,
 )
 
 logger = init_logger(__name__)
