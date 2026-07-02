@@ -683,6 +683,12 @@ class DiffusionGemmaRequestStates:
         self.vocab_size = vocab_size
         self.max_denoising_steps = max_denoising_steps
         self.stability_threshold = stability_threshold
+        # The checkpoint's ``stability_threshold`` is the HF convention: ``k``
+        # means stop once the argmax canvas repeats ``k`` times, i.e. ``k + 1``
+        # identical canvases. The stability check below uses a sliding window of
+        # ``W`` canvases, so the window must be ``stability_threshold + 1`` to
+        # avoid ``stability_threshold == 1`` committing early.
+        self.stability_window = stability_threshold + 1
         self.device = device
 
         self.is_encoder_phase = torch.zeros(
@@ -701,7 +707,7 @@ class DiffusionGemmaRequestStates:
         # Accepted canvas history for stability check
         self.accepted_canvas_history = torch.zeros(
             max_num_reqs,
-            stability_threshold,
+            self.stability_window,
             canvas_length,
             dtype=torch.int64,
             device=device,
@@ -1312,7 +1318,7 @@ class DiffusionSampler:
             confidence_threshold=self.confidence_threshold,
             vocab_size=self.vocab_size,
             CL=self.canvas_length,
-            ST=states.stability_threshold,
+            ST=states.stability_window,
             entropy_bound=self.entropy_bound,
             sc_vocab_start=self.sc_vocab_start,
             sc_vocab_end=self.sc_vocab_end,
