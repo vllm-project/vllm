@@ -1216,6 +1216,19 @@ class VllmConfig:
 
         # async tp is built on top of sequence parallelism and requires it.
         pass_config = self.compilation_config.pass_config
+        # Map the umbrella `parallel_config.sp_threshold` onto the compile-based
+        # SP pass (the eager in-forward SP path reads sp_threshold directly):
+        #   None  -> defer to the optimization-level default
+        #   N > 0 -> force the pass on with N as its min-token threshold
+        sp_threshold = self.parallel_config.sp_threshold
+        # Only enable the compile-based SP pass when compilation actually runs.
+        # The eager in-forward SP path reads sp_threshold directly and runs the
+        # V2 model runner, which rejects the compile SP pass; under enforce_eager
+        # there is no compilation to attach it to anyway.
+        if sp_threshold is not None and not self.model_config.enforce_eager:
+            pass_config.enable_sp = True
+            if pass_config.sp_min_token_num is None:
+                pass_config.sp_min_token_num = sp_threshold
         if pass_config.fuse_gemm_comms:
             pass_config.enable_sp = True
         if pass_config.enable_sp:

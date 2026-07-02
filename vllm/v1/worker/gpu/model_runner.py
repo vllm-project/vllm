@@ -45,7 +45,7 @@ from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.mem_utils import DeviceMemoryProfiler, format_gib
 from vllm.utils.torch_utils import PIN_MEMORY, STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
@@ -458,6 +458,21 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.kv_cache_config,
             self.max_num_reqs,
         )
+
+        sp_threshold = self.parallel_config.sp_threshold
+        max_cg_size = self.compilation_config.max_cudagraph_capture_size
+        if (
+            sp_threshold is not None
+            and self.parallel_config.tensor_parallel_size > 1
+            and max_cg_size is not None
+            and sp_threshold <= max_cg_size
+        ):
+            raise ValueError(
+                f"sp_threshold ({sp_threshold}) must be larger than the max "
+                f"cudagraph capture size ({max_cg_size}) so that sequence "
+                "parallelism never engages on a captured cudagraph size."
+            )
+
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
             self.device,
@@ -1136,6 +1151,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
+
+        # mHC sequence parallelism shards the token dim across the TP group.
+        # so a forward that engages SP (>= sp_threshold tokens) must run
+        # on a multiple of tp_size tokens.
+        tp_size = self.parallel_config.tensor_parallel_size
+        sp_threshold = self.parallel_config.sp_threshold
+        if sp_threshold is not None and num_toks >= sp_threshold:
+            num_toks = round_up(num_toks, tp_size)
 
         num_active_loras = 0
         if self.lora_config:
