@@ -1046,7 +1046,11 @@ def get_engine_zmq_addresses(
     # In offline mode there is an LLM instance per DP rank and
     # one core engine per LLM, see
     # examples/features/data_parallel/data_parallel_offline.py.
-    offline_mode = local_start_index is not None
+    # External LB also sets data_parallel_rank_local (when the user passes
+    # --data-parallel-rank-local), but that's not offline mode.
+    offline_mode = (
+        local_start_index is not None and not parallel_config.data_parallel_external_lb
+    )
 
     # client_local_only = True for cases where this front-end
     # sends requests only to colocated engines.
@@ -1093,7 +1097,11 @@ def launch_core_engines(
     host = parallel_config.data_parallel_master_ip
     local_engines_only = parallel_config.local_engines_only
 
-    offline_mode = local_start_index is not None
+    # External LB also sets data_parallel_rank_local (when the user passes
+    # --data-parallel-rank-local), but that's not offline mode.
+    offline_mode = (
+        local_start_index is not None and not parallel_config.data_parallel_external_lb
+    )
 
     # Create a single tensor IPC queue for sharing multimodal tensors between
     # API servers and engine core. Returns a single queue since we only support
