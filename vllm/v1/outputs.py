@@ -60,10 +60,14 @@ class LogprobsTensors(NamedTuple):
     cu_num_generated_tokens: list[int] | None = None
 
     def tolists(self, cu_num_generated_tokens: list[int] | None = None):
+        # FIX: Convert to plain Python lists (not numpy ndarrays) to avoid
+        # Ray compiled-DAG cross-node serialization hang
+        # (vllm-project/vllm#38602). The Ray channel chokes on ndarrays
+        # nested in NamedTuples cross-node.
         return LogprobsLists(
-            self.logprob_token_ids.cpu().numpy(),
-            self.logprobs.cpu().numpy(),
-            self.selected_token_ranks.cpu().numpy(),
+            self.logprob_token_ids.cpu().tolist(),
+            self.logprobs.cpu().tolist(),
+            self.selected_token_ranks.cpu().tolist(),
             cu_num_generated_tokens
             if cu_num_generated_tokens is not None
             else self.cu_num_generated_tokens,
