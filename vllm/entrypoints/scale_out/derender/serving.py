@@ -3,6 +3,7 @@
 import time
 from typing import cast
 
+import vllm.envs as envs
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
 from vllm.entrypoints.openai.completion.protocol import CompletionResponse
 from vllm.entrypoints.openai.engine.protocol import (
@@ -28,6 +29,7 @@ from ..token_in_token_out.mm_serde import encode_mm_kwargs_item
 from ..token_in_token_out.protocol import (
     DerenderChatRequest,
     DerenderCompletionRequest,
+    GenerateResponse,
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
@@ -51,6 +53,64 @@ class ServingDerender(BaseServing):
 
         self.online_derenderer = online_derenderer
 
+    def _validate_derender_bounds(
+        self,
+        generate_responses: list[GenerateResponse],
+    ) -> ErrorResponse | None:
+        """Reject derender payloads that exceed resource bounds.
+
+        Runs before any tokenizer.decode() or parser invocation to prevent
+        CPU/memory exhaustion from oversized caller-supplied token structures.
+        """
+        max_n = envs.VLLM_MAX_N_SEQUENCES
+        max_model_len = self.model_config.max_model_len
+
+        if len(generate_responses) > max_n:
+            return self.create_error_response(
+                f"generate_responses count ({len(generate_responses)}) "
+                f"exceeds server maximum ({max_n}). "
+                f"Set VLLM_MAX_N_SEQUENCES to increase this limit."
+            )
+
+        for gen in generate_responses:
+            if len(gen.choices) > max_n:
+                return self.create_error_response(
+                    f"choices count ({len(gen.choices)}) in response "
+                    f"'{gen.request_id}' exceeds server maximum ({max_n})."
+                )
+
+            for choice in gen.choices:
+                if choice.token_ids and len(choice.token_ids) > max_model_len:
+                    return self.create_error_response(
+                        f"token_ids length ({len(choice.token_ids)}) in "
+                        f"choice {choice.index} exceeds "
+                        f"max_model_len ({max_model_len})."
+                    )
+                if choice.logprobs and choice.logprobs.content:
+                    if len(choice.logprobs.content) > max_model_len:
+                        return self.create_error_response(
+                            f"logprobs.content length "
+                            f"({len(choice.logprobs.content)}) in "
+                            f"choice {choice.index} exceeds "
+                            f"max_model_len ({max_model_len})."
+                        )
+                    for entry in choice.logprobs.content:
+                        if entry.top_logprobs and len(entry.top_logprobs) > 20:
+                            return self.create_error_response(
+                                f"top_logprobs count "
+                                f"({len(entry.top_logprobs)}) in "
+                                f"choice {choice.index} exceeds maximum (20)."
+                            )
+
+            if gen.prompt_logprobs and len(gen.prompt_logprobs) > max_model_len:
+                return self.create_error_response(
+                    f"prompt_logprobs length ({len(gen.prompt_logprobs)}) "
+                    f"in response '{gen.request_id}' exceeds "
+                    f"max_model_len ({max_model_len})."
+                )
+
+        return None
+
     async def derender_chat_response(
         self,
         request: DerenderChatRequest,
@@ -67,6 +127,10 @@ class ServingDerender(BaseServing):
         error_check_ret = await self._check_model(request)
         if error_check_ret is not None:
             return error_check_ret
+
+        bounds_error = self._validate_derender_bounds([request.generate_response])
+        if bounds_error is not None:
+            return bounds_error
 
         try:
             choices = await self.online_derenderer.derender_chat(
@@ -117,6 +181,13 @@ class ServingDerender(BaseServing):
         if error_check_ret is not None:
             return error_check_ret
 
+        if not request.generate_responses:
+            return self.create_error_response("generate_responses must not be empty")
+
+        bounds_error = self._validate_derender_bounds(request.generate_responses)
+        if bounds_error is not None:
+            return bounds_error
+
         (
             choices,
             total_prompt_tokens,
@@ -124,9 +195,6 @@ class ServingDerender(BaseServing):
         ) = await self.online_derenderer.derender_completion(
             request.generate_responses, request.prompt_tokens
         )
-
-        if not request.generate_responses:
-            return self.create_error_response("generate_responses must not be empty")
 
         first = request.generate_responses[0]
         kv_params = first.kv_transfer_params
