@@ -503,6 +503,12 @@ class Worker(WorkerBase):
         self.non_torch_memory = profile_result.non_torch_increase
         self.peak_activation_memory = profile_result.torch_peak_increase
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
+        self.cudagraph_memory_persistent_estimate = getattr(
+            self.model_runner, "cudagraph_memory_persistent_estimate", 0
+        )
+        self.cudagraph_memory_graph_pool_estimate = getattr(
+            self.model_runner, "cudagraph_memory_graph_pool_estimate", 0
+        )
 
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
@@ -767,15 +773,23 @@ class Worker(WorkerBase):
             and self.cudagraph_memory_estimate > 0
         ):
             GiB = lambda b: round(b / GiB_bytes, 2)
-            diff = abs(cuda_graph_memory_bytes - self.cudagraph_memory_estimate)
+            graph_pool_estimate = self.cudagraph_memory_graph_pool_estimate
+            if graph_pool_estimate == 0:
+                graph_pool_estimate = self.cudagraph_memory_estimate
+            diff = abs(cuda_graph_memory_bytes - graph_pool_estimate)
             logger.info(
                 "CUDA graph pool memory: %s GiB (actual), %s GiB (estimated), "
                 "difference: %s GiB (%.1f%%).",
                 GiB(cuda_graph_memory_bytes),
-                GiB(self.cudagraph_memory_estimate),
+                GiB(graph_pool_estimate),
                 GiB(diff),
                 100 * diff / max(cuda_graph_memory_bytes, 1),
             )
+            if self.cudagraph_memory_persistent_estimate > 0:
+                logger.info(
+                    "CUDA graph persistent memory: %s GiB (estimated).",
+                    GiB(self.cudagraph_memory_persistent_estimate),
+                )
 
         if self.cache_config.kv_cache_memory_bytes is None and hasattr(
             self, "peak_activation_memory"
@@ -792,12 +806,18 @@ class Worker(WorkerBase):
             # slightly underestimate the memory consumption.
             # So leave a small buffer (=150MiB) to avoid OOM.
             redundancy_buffer_memory = 150 * (1 << 20)
+            cuda_graph_memory_for_sizing = cuda_graph_memory_bytes
+            if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS:
+                cuda_graph_memory_for_sizing = max(
+                    cuda_graph_memory_for_sizing,
+                    self.cudagraph_memory_estimate,
+                )
 
             non_kv_cache_memory = (
                 self.model_runner.model_memory_usage
                 + self.peak_activation_memory
                 + self.non_torch_memory
-                + cuda_graph_memory_bytes
+                + cuda_graph_memory_for_sizing
             )
             kv_cache_memory_bytes_to_gpu_limit = (
                 self.init_snapshot.free_memory
@@ -820,7 +840,8 @@ class Worker(WorkerBase):
                 f"Actual usage is {format_gib(self.model_runner.model_memory_usage)} "
                 f"GiB for weight, {format_gib(self.peak_activation_memory)} GiB "
                 f"for peak activation, {format_gib(self.non_torch_memory)} GiB "
-                f"for non-torch memory, and {format_gib(cuda_graph_memory_bytes)} "
+                f"for non-torch memory, and "
+                f"{format_gib(cuda_graph_memory_for_sizing)} "
                 f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
                 f"config with `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_requested_limit}` "

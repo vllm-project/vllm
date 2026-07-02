@@ -604,6 +604,28 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
         """Get the cudagraph support level of this builder class."""
         return cls._cudagraph_support
 
+    @classmethod
+    def requires_separate_cudagraph_memory_profiling(
+        cls,
+        vllm_config: "VllmConfig",
+        kv_cache_spec: Any,
+    ) -> bool:
+        """Return whether CUDA graph memory profiling should separate warmup
+        allocations from graph-pool allocations for this builder class.
+
+        Most backends have small or already-accounted persistent warmup
+        allocations, so the default sampled estimator is retained.
+        """
+        return False
+
+    def reserve_workspace_for_cudagraph_capture(self) -> int:
+        """Reserve backend workspace that must not grow after CUDA graph capture.
+
+        Backends that use the global WorkspaceManager can override this to size
+        their worst-case execution workspace before the manager is locked.
+        """
+        return 0
+
     def _init_reorder_batch_threshold(
         self,
         reorder_batch_threshold: int | None = 1,
