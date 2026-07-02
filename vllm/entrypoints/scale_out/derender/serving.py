@@ -3,8 +3,14 @@
 import time
 from typing import cast
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionResponse
-from vllm.entrypoints.openai.completion.protocol import CompletionResponse
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionResponse,
+    ChatCompletionStreamResponse,
+)
+from vllm.entrypoints.openai.completion.protocol import (
+    CompletionResponse,
+    CompletionStreamResponse,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
     UsageInfo,
@@ -27,7 +33,10 @@ from vllm.renderers.online_derenderer import OnlineDerenderer
 from ..token_in_token_out.mm_serde import encode_mm_kwargs_item
 from ..token_in_token_out.protocol import (
     DerenderChatRequest,
+    DerenderChatStreamRequest,
     DerenderCompletionRequest,
+    DerenderCompletionStreamRequest,
+    DerenderStreamState,
     MultiModalFeatures,
     PlaceholderRangeInfo,
 )
@@ -161,6 +170,81 @@ class ServingDerender(BaseServing):
             usage=usage,
             kv_transfer_params=kv_params,
         )
+
+    async def derender_chat_stream_response(
+        self,
+        request: DerenderChatStreamRequest,
+    ) -> tuple[ChatCompletionStreamResponse, DerenderStreamState] | ErrorResponse:
+        """Streaming counterpart to ``derender_chat_response``.
+
+        Processes one ``GenerateStreamResponse`` chunk and returns the
+        derendered chunk together with the updated client carried state.
+
+        ``parser is None`` or no ``chat_request`` until reasoning/tool call
+        functionality added in future PR.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        try:
+            chunk, updated_state = await self.online_derenderer.derender_chat_stream(
+                model=request.model,
+                generate_chunk=request.generate_chunk,
+                state=request.stream_state,
+                chat_request=request.chat_request,
+                prompt_tokens=request.prompt_tokens,
+            )
+        except NotImplementedError as exc:
+            return self.create_error_response(exc)
+        except ValueError as exc:
+            return self.create_error_response(str(exc))
+
+        logger.debug(
+            "derender_chat_stream request_id=%s model=%s delta_tokens=%d",
+            request.generate_chunk.request_id,
+            request.model,
+            sum(
+                len(c.token_ids) for c in request.generate_chunk.choices if c.token_ids
+            ),
+        )
+        return chunk, updated_state
+
+    async def derender_completion_stream_response(
+        self,
+        request: DerenderCompletionStreamRequest,
+    ) -> tuple[CompletionStreamResponse, DerenderStreamState] | ErrorResponse:
+        """Streaming counterpart to ``derender_completion_response``.
+
+        Processes one ``GenerateStreamResponse`` chunk (one output sequence's
+        delta) and returns the derendered chunk and updated state.
+        """
+        error_check_ret = await self._check_model(request)
+        if error_check_ret is not None:
+            return error_check_ret
+
+        try:
+            (
+                chunk,
+                updated_state,
+            ) = await self.online_derenderer.derender_completion_stream(
+                model=request.model,
+                generate_chunk=request.generate_chunk,
+                state=request.stream_state,
+                prompt_tokens=request.prompt_tokens,
+            )
+        except ValueError as exc:
+            return self.create_error_response(str(exc))
+
+        logger.debug(
+            "derender_completion_stream request_id=%s model=%s delta_tokens=%d",
+            request.generate_chunk.request_id,
+            request.model,
+            sum(
+                len(c.token_ids) for c in request.generate_chunk.choices if c.token_ids
+            ),
+        )
+        return chunk, updated_state
 
     @staticmethod
     def _extract_mm_features(
