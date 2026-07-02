@@ -30,7 +30,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.custom_op import PluggableLayer
 from vllm.model_executor.layers.fused_moe import FusedMoE, MoERunner, RoutedExperts
 from vllm.model_executor.models.interfaces import MixtureOfExperts
-from vllm.model_executor.models.transformers.fusers.moe import MoEFuser
+from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 from vllm.model_executor.models.utils import maybe_prefix
 from vllm.utils.torch_utils import direct_register_custom_op
 
@@ -146,11 +146,11 @@ class MoEMixin(MixtureOfExperts):
         self.num_physical_experts = num_physical_experts
         self.num_local_physical_experts = num_local_physical_experts
         self.num_redundant_experts = num_physical_experts - self.num_logical_experts
-        for mlp in self.mlp_layers:
-            mlp.n_local_physical_experts = num_local_physical_experts
-            mlp.n_physical_experts = num_physical_experts
-            mlp.n_redundant_experts = self.num_redundant_experts
-            mlp.experts.update_expert_map()
+        for moe_block in self.mlp_layers:
+            moe_block.n_local_physical_experts = num_local_physical_experts
+            moe_block.n_physical_experts = num_physical_experts
+            moe_block.n_redundant_experts = self.num_redundant_experts
+            moe_block.experts.update_expert_map()
 
     def recursive_replace(self):
         """Initialize the MoE layers."""
@@ -223,10 +223,10 @@ class MoEMixin(MixtureOfExperts):
                 is_3d = len(params) > 0 and all(p.ndim == 3 for p in params)
                 if child_name == "experts" and (is_modulelist or is_3d):
                     # Alias for readability
-                    mlp = module
+                    moe_block = module
                     experts = child_module
                     # Class of the fused block (parent of gate/experts/shared)
-                    mlp_cls = type(mlp).__name__
+                    moe_block_cls = type(moe_block).__name__
                     experts_cls = type(experts).__name__
                     # Do the experts have biases
                     has_bias = False
@@ -237,8 +237,8 @@ class MoEMixin(MixtureOfExperts):
                     # If the config does not specify num_shared_experts, but
                     # the model has shared experts, we assume there is one.
                     if self.num_shared_experts == 0:
-                        for mlp_param_name, _ in mlp.named_parameters():
-                            if "shared_expert" in mlp_param_name:
+                        for moe_block_param_name, _ in moe_block.named_parameters():
+                            if "shared_expert" in moe_block_param_name:
                                 self.num_shared_experts = 1
                                 break
 
@@ -257,11 +257,12 @@ class MoEMixin(MixtureOfExperts):
                         has_bias=has_bias,
                         routed_experts_cls=TransformersRoutedExperts,
                     )
-                    if self.num_expert_groups <= 1 and (fuser := MoEFuser.match(mlp)):
-                        # MLP forward is fully replaced.
+                    fuser = MoEBlockFuser.match(moe_block)
+                    if self.num_expert_groups <= 1 and fuser is not None:
+                        # MoE block forward is fully replaced.
                         # gate/router and shared expert (if any) runs in FusedMoE.
-                        gate = fuser.build_gate(mlp, prefix)
-                        shared_experts = fuser.build_shared_experts(mlp, prefix)
+                        gate = fuser.build_gate(moe_block, prefix)
+                        shared_experts = fuser.build_shared_experts(moe_block, prefix)
                         if shared_experts is not None:
                             self.hf_to_vllm_mapper.orig_to_new_stacked.update(
                                 fuser.orig_to_new_stacked(prefix)
@@ -274,17 +275,17 @@ class MoEMixin(MixtureOfExperts):
                             gate=gate,
                             shared_experts=shared_experts,
                         )
-                        fuser.rewrite_forward(mlp)
+                        fuser.rewrite_forward(moe_block)
                         routed = "gate + experts"
                         if fuser.shared_name:
                             routed += " + shared experts"
                         logger.info_once(
                             "Fused: %s (%s) -> FusedMoE (internal routing)",
                             routed,
-                            mlp_cls,
+                            moe_block_cls,
                         )
                     else:
-                        # MLP forward is unmodified.
+                        # MoE block forward is unmodified.
                         # gate/router and shared expert (if any) runs in Transformers.
                         # We then smuggle the topk_ids in using a custom op.
                         moe_state = TransformersMoEState()
@@ -325,10 +326,10 @@ class MoEMixin(MixtureOfExperts):
                             experts_cls,
                         )
                     fused_experts = FusedMoE(**kwargs)
-                    mlp.experts = fused_experts
+                    moe_block.experts = fused_experts
                     log_replacement(qual_name, experts, fused_experts)
                     # Update MixtureOfExperts mixin state
-                    self.mlp_layers.append(mlp)
+                    self.mlp_layers.append(moe_block)
                     self.moe_layers.append(fused_experts)
                 else:
                     _recursive_replace(child_module, prefix=qual_name)

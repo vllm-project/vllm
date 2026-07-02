@@ -19,7 +19,7 @@ from vllm.model_executor.models.transformers.fuser import (
     RMSNormFuser,
     get_fuser,
 )
-from vllm.model_executor.models.transformers.fusers.moe import MoEFuser
+from vllm.model_executor.models.transformers.fusers.moe import MoEBlockFuser
 
 # GLU and QKV fusers (shared module fixtures and fuser-application helpers)
 
@@ -744,8 +744,8 @@ class MoEBlockUnaccountedBuffer(MoEBlock):
 def test_moe_fuser_detects_router(sigmoid):
     with torch.device("meta"):
         block = MoEBlock(lambda: TopKRouter(sigmoid=sigmoid))
-    fuser = MoEFuser.match(block)
-    assert isinstance(fuser, MoEFuser)
+    fuser = MoEBlockFuser.match(block)
+    assert isinstance(fuser, MoEBlockFuser)
     assert fuser.gate_name == "gate"
     assert fuser.scoring_func == ("sigmoid" if sigmoid else "softmax")
     assert fuser.shared_name is None and fuser.shared_gate_name is None
@@ -754,8 +754,8 @@ def test_moe_fuser_detects_router(sigmoid):
 def test_moe_fuser_detects_shared_experts():
     with torch.device("meta"):
         block = MoEBlockShared()
-    fuser = MoEFuser.match(block)
-    assert isinstance(fuser, MoEFuser)
+    fuser = MoEBlockFuser.match(block)
+    assert isinstance(fuser, MoEBlockFuser)
     assert fuser.shared_name == "shared_expert"
     assert fuser.shared_gate_name == "shared_expert_gate"
     # The shared expert's gate/up projections are merged, scoped to its qualname.
@@ -774,8 +774,8 @@ def test_moe_fuser_detects_shared_experts():
 def test_moe_fuser_shared_without_gate():
     with torch.device("meta"):
         block = MoEBlockSharedNoGate()
-    fuser = MoEFuser.match(block)
-    assert isinstance(fuser, MoEFuser)
+    fuser = MoEBlockFuser.match(block)
+    assert isinstance(fuser, MoEBlockFuser)
     assert fuser.shared_name == "shared_expert"
     assert fuser.shared_gate_name is None
 
@@ -783,8 +783,8 @@ def test_moe_fuser_shared_without_gate():
 def test_moe_fuser_detects_non_glu_shared_expert():
     with torch.device("meta"):
         block = MoEBlockSharedNonGLU()
-    fuser = MoEFuser.match(block)
-    assert isinstance(fuser, MoEFuser)
+    fuser = MoEBlockFuser.match(block)
+    assert isinstance(fuser, MoEBlockFuser)
     # Recognised by dataflow (added to the experts' output), though not a GLU.
     assert fuser.shared_name == "shared_expert"
     assert fuser.shared_gate_name is None
@@ -806,4 +806,4 @@ def test_moe_fuser_detects_non_glu_shared_expert():
 def test_moe_fuser_declines_unsupported(block_cls):
     with torch.device("meta"):
         block = block_cls()
-    assert MoEFuser.match(block) is None
+    assert MoEBlockFuser.match(block) is None

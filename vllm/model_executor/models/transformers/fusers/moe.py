@@ -90,7 +90,7 @@ def _reaches(node: fx.Node, key: str) -> set[fx.Node]:
     return seen
 
 
-def _match_shared_expert(
+def _match_shared_experts(
     graph: fx.Graph, experts: str = "experts"
 ) -> tuple[str | None, str | None]:
     """Detects the shared expert and its optional gate by dataflow."""
@@ -129,13 +129,13 @@ def _match_shared_expert(
 class SharedExpertMLP(nn.Module):
     """Wraps an HF shared expert, applying the output gating it is paired with."""
 
-    def __init__(self, shared_expert: nn.Module, gate: nn.Module | None = None):
+    def __init__(self, shared_experts: nn.Module, gate: nn.Module | None = None):
         super().__init__()
-        self.shared_expert = shared_expert
+        self.shared_experts = shared_experts
         self.gate = gate
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        out = self.shared_expert(hidden_states)
+        out = self.shared_experts(hidden_states)
         if self.gate is not None:
             out = torch.sigmoid(self.gate(hidden_states)[0]) * out
         return out
@@ -160,9 +160,8 @@ def _moe_block_forward(self: nn.Module, hidden_states: torch.Tensor) -> torch.Te
 
 
 @dataclass
-class MoEFuser:
-    """Fuser for an HF MoE block, routing through vLLM's `FusedMoE` with the
-    same shared expert (if any) and gate (if any) as the original block."""
+class MoEBlockFuser:
+    """Fuser for MoE block `experts`, `gate` and `shared_experts` (optional)."""
 
     gate_name: str
     scoring_func: str
@@ -171,63 +170,60 @@ class MoEFuser:
     shared_glu: GLUFuser | None
 
     @classmethod
-    def match(cls, mlp: nn.Module) -> "MoEFuser | None":
-        # The native block forward returns a single tensor.
-        if _returns_tuple(type(mlp)):
+    def match(cls, moe_block: nn.Module) -> "MoEBlockFuser | None":
+        # Standard MoE block returns a single tensor.
+        if _returns_tuple(type(moe_block)):
             return None
         # Router: the child that scores + top-k selects (traced per child).
         gate_name = scoring_func = None
-        for name, child in mlp.named_children():
+        for name, child in moe_block.named_children():
             if name != "experts" and (func := _match_router(child)) is not None:
                 gate_name, scoring_func = name, func
                 break
         if gate_name is None or scoring_func is None:
             return None
-        # Shared expert: whatever the block adds to the experts' output, found by
-        # dataflow so any MLP works, not just a GLU. A GLU inside it is fused by
-        # the base pass when it descends into the block child; we only precompute
-        # its gate/up remap (see `orig_to_new_stacked`).
-        graph = trace(mlp)
+        # Shared expert: whatever the block adds to the experts' output.
+        graph = trace(moe_block)
         if graph is None:
             return None
-        shared_name, shared_gate_name = _match_shared_expert(graph)
+        shared_name, shared_gate_name = _match_shared_experts(graph)
         if shared_gate_name is not None and not _is_scalar_gate(
-            getattr(mlp, shared_gate_name)
+            getattr(moe_block, shared_gate_name)
         ):
             return None
         shared_glu = None
         if (
             shared_name is not None
-            and (sgraph := trace(shared := getattr(mlp, shared_name))) is not None
+            and (sgraph := trace(shared := getattr(moe_block, shared_name))) is not None
         ):
             shared_glu = GLUFuser.match(sgraph, shared)
         # Fail closed: `rewrite_forward` runs only the experts and the detected
         # shared expert, so any other stateful child would be dropped.
         accounted = {"experts", gate_name, shared_name, shared_gate_name}
-        for name, child in mlp.named_children():
+        for name, child in moe_block.named_children():
             if name not in accounted and next(named_state(child), None) is not None:
                 return None
         return cls(gate_name, scoring_func, shared_name, shared_gate_name, shared_glu)
 
-    def build_gate(self, mlp: nn.Module, prefix: str) -> ReplicatedLinear:
+    def build_gate(self, moe_block: nn.Module, prefix: str) -> ReplicatedLinear:
         """Rebuild the HF router as a `ReplicatedLinear` producing logits.
 
         Shapes come from the original router weight (`[num_experts, hidden]`),
         the plain `F.linear` weight it loads by identity into. Left unquantized
         -- routers run in full precision -- matching the checkpoint's weight.
         """
-        num_experts, hidden_size = getattr(mlp, self.gate_name).weight.shape
+        num_experts, hidden_size = getattr(moe_block, self.gate_name).weight.shape
         gate = ReplicatedLinear(
             hidden_size,
             num_experts,
             bias=False,
             prefix=maybe_prefix(prefix, self.gate_name),
         )
-        setattr(mlp, self.gate_name, gate)
+        setattr(moe_block, self.gate_name, gate)
         return gate
 
     def build_shared_experts(
-        self, mlp: nn.Module, prefix: str
+        self, moe_block: nn.Module, prefix: str
     ) -> SharedExpertMLP | None:
         """Wrap the HF shared expert, folding in its sigmoid output gate.
 
@@ -238,18 +234,18 @@ class MoEFuser:
         """
         if self.shared_name is None:
             return None
-        shared_expert = getattr(mlp, self.shared_name)
+        shared_experts = getattr(moe_block, self.shared_name)
         gate = None
         if self.shared_gate_name is not None:
-            hf_gate = getattr(mlp, self.shared_gate_name)
+            hf_gate = getattr(moe_block, self.shared_gate_name)
             gate = ReplicatedLinear(
                 hf_gate.in_features,
                 hf_gate.out_features,
                 bias=hf_gate.bias is not None,
                 prefix=maybe_prefix(prefix, self.shared_gate_name),
             )
-            setattr(mlp, self.shared_gate_name, gate)
-        return SharedExpertMLP(shared_expert, gate)
+            setattr(moe_block, self.shared_gate_name, gate)
+        return SharedExpertMLP(shared_experts, gate)
 
     def orig_to_new_stacked(self, prefix: str) -> dict[str, tuple[str, ShardId]]:
         """Merge the shared expert's gate/up projections (scoped to its qualname).
@@ -263,6 +259,6 @@ class MoEFuser:
             maybe_prefix(prefix, self.shared_name)
         )
 
-    def rewrite_forward(self, mlp: nn.Module) -> None:
+    def rewrite_forward(self, moe_block: nn.Module) -> None:
         """Bind the native block forward (`experts` routes + runs shared)."""
-        mlp.forward = types.MethodType(_moe_block_forward, mlp)
+        moe_block.forward = types.MethodType(_moe_block_forward, moe_block)
