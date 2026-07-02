@@ -93,6 +93,10 @@ async def test_async_llm_model_error(
     # AsyncLLM should be errored.
     assert async_llm.errored
 
+    # Health check should detect the dead engine.
+    with pytest.raises(EngineDeadError):
+        await async_llm.check_health_gpu()
+
     # We should not be able to make another request.
     with pytest.raises(EngineDeadError):
         async for _ in async_llm.generate(
