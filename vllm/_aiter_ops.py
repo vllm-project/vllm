@@ -564,6 +564,22 @@ def _rocm_aiter_mla_decode_fwd_impl(
         kwargs["reduce_final_map"] = reduce_final_map
         kwargs["reduce_partial_map"] = reduce_partial_map
 
+    # [ROCm] Workaround for missing GQA=8 support in AITER ASM MLA decode kernel.
+    # mla_decode_stage1_asm_fwd has compiled binaries only for nhead >= 16 on
+    # gfx942/gfx950. When nhead < 16 and 16 % nhead == 0, pad q to 16 heads,
+    # call the kernel, then extract real heads from o. Output is head-agnostic
+    # after the per-head reduce so o[:, ::repeat, :] is correct.
+    # Remove this block when native GQA=8 kernels land (ROCm/aiter#2821).
+    from vllm.v1.attention.backends.mla.rocm_aiter_mla import AiterMLAHelper
+    _AITER_MIN_HEADS = AiterMLAHelper._AITER_MIN_MLA_HEADS
+    _nhead = q.shape[1]
+    _needs_pad = _nhead < _AITER_MIN_HEADS and _AITER_MIN_HEADS % _nhead == 0
+    if _needs_pad:
+        _repeat = _AITER_MIN_HEADS // _nhead
+        q = q.repeat_interleave(_repeat, dim=1)
+        o_orig = o
+        o = o_orig.new_zeros(o_orig.shape[0], _AITER_MIN_HEADS, o_orig.shape[2])
+
     mla_decode_fwd(
         q,
         kv_buffer.view(-1, 1, 1, q.shape[-1]),
@@ -575,6 +591,9 @@ def _rocm_aiter_mla_decode_fwd_impl(
         max_seqlen_qo,
         **kwargs,
     )
+
+    if _needs_pad:
+        o_orig.copy_(o[:, ::_repeat, :])
 
 
 def _rocm_aiter_mla_decode_fwd_fake(
