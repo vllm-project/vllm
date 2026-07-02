@@ -16,6 +16,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
     kFp8Dynamic128Sym,
     kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
     kFp8Static128BlockSym,
     kFp8StaticTensorSym,
     kInt4Static,
@@ -212,6 +213,10 @@ class XPUExpertsFp8(XPUExperts):
         SUPPORTED_W_A = [
             (kFp8StaticTensorSym, None),
             (kFp8StaticTensorSym, kFp8DynamicTensorSym),
+            # XpuFusedMoe takes unquantized activations and quantizes them
+            # inside the kernel, so dynamic per-token configs (the
+            # compressed-tensors FP8_DYNAMIC recipe) are equally servable.
+            (kFp8StaticTensorSym, kFp8DynamicTokenSym),
         ]
         return (weight_key, activation_key) in SUPPORTED_W_A
 
