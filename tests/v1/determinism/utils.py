@@ -27,6 +27,7 @@ BACKENDS: list[str] = [
     "FLASH_ATTN",
     "TRITON_ATTN",
     "FLEX_ATTENTION",
+    "GDN_ATTN",
 ]
 
 # FlashInfer temporarily disabled due to invariant CTA sizes.
@@ -41,6 +42,14 @@ if os.getenv("VLLM_TEST_MODEL"):
         BACKENDS = ["TRITON_MLA"]
         if flash_attn_supports_mla():
             BACKENDS.append("FLASH_ATTN_MLA")
+    # GDN_ATTN is only for models with dual_chunk_attention_config (Qwen3-Next/Qwen3.6 hybrid models)
+    elif hasattr(config, "dual_chunk_attention_config") and config.dual_chunk_attention_config is not None:
+        # For GDN models, only test GDN backend
+        BACKENDS = ["GDN_ATTN"]
+    else:
+        # Remove GDN_ATTN for models that don't have GDN architecture
+        if "GDN_ATTN" in BACKENDS:
+            BACKENDS.remove("GDN_ATTN")
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
