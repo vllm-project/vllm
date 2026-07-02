@@ -242,6 +242,24 @@ class GroupedTopk(CustomOp):
                 hidden_states, gating_output, e_score_correction_bias
             )
 
+    def forward_xpu(
+        self,
+        hidden_states: torch.Tensor,
+        gating_output: torch.Tensor,
+        e_score_correction_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        return torch.ops.vllm.xpu_ops_fused_grouped_topk(
+            hidden_states,
+            gating_output,
+            self.topk,
+            self.renormalize,
+            self.num_expert_group,
+            self.topk_group,
+            self.scoring_func,
+            self.routed_scaling_factor,
+            e_score_correction_bias,
+        )
+
 
 class GroupedTopKRouter(BaseRouter):
     """Router using grouped top-k routing (e.g., DeepSeekV2/V3)."""
@@ -331,6 +349,10 @@ class GroupedTopKRouter(BaseRouter):
                 rocm_aiter_grouped_topk,
                 num_fused_shared_experts=self.num_fused_shared_experts,
             )
+
+        elif current_platform.is_xpu():
+            grouped_topk_impl = torch.ops.vllm.xpu_ops_fused_grouped_topk
+
         else:
             grouped_topk_impl = grouped_topk
 

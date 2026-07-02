@@ -219,6 +219,60 @@ def _xpu_ops_deepseek_scaling_rope_fake(
     return query, key
 
 
+def _xpu_ops_fused_grouped_topk_impl(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int,
+    topk_group: int,
+    scoring_func: str,
+    routed_scaling_factor: float,
+    e_score_correction_bias: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    assert hidden_states.size(0) == gating_output.size(0), "Number of tokens mismatch"
+    if scoring_func == "softmax":
+        scores = torch.softmax(gating_output, dim=-1)
+    elif scoring_func == "sigmoid":
+        scores = gating_output
+    else:
+        raise ValueError(f"Unsupported scoring function: {scoring_func}")
+    return torch.ops._moe_C.fused_grouped_topk(
+        hidden_states,
+        scores,
+        topk,
+        renormalize,
+        num_expert_group,
+        topk_group,
+        scoring_func,
+        routed_scaling_factor,
+        e_score_correction_bias,
+    )
+
+
+def _xpu_ops_fused_grouped_topk_fake(
+    hidden_states: torch.Tensor,
+    gating_output: torch.Tensor,
+    topk: int,
+    renormalize: bool,
+    num_expert_group: int,
+    topk_group: int,
+    scoring_func: str,
+    routed_scaling_factor: float,
+    e_score_correction_bias: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    num_tokens = hidden_states.shape[0]
+    topk_weights = torch.empty(
+        (num_tokens, topk),
+        device=hidden_states.device,
+        dtype=torch.float32,
+    )
+    topk_ids = torch.empty(
+        (num_tokens, topk),
+        device=hidden_states.device,
+        dtype=torch.int32,
+    )
+    return topk_weights, topk_ids
 def _xpu_fp8_mqa_logits_impl(
     q: torch.Tensor,
     k_quant: torch.Tensor,
@@ -1038,6 +1092,13 @@ class xpu_ops:
                 op_func=_xpu_ops_deepseek_scaling_rope_impl,
                 mutates_args=[],
                 fake_impl=_xpu_ops_deepseek_scaling_rope_fake,
+                dispatch_key=current_platform.dispatch_key,
+            )
+            direct_register_custom_op(
+                op_name="xpu_ops_fused_grouped_topk",
+                op_func=_xpu_ops_fused_grouped_topk_impl,
+                mutates_args=[],
+                fake_impl=_xpu_ops_fused_grouped_topk_fake,
                 dispatch_key=current_platform.dispatch_key,
             )
 
