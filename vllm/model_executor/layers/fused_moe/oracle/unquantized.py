@@ -381,8 +381,8 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
 
     def backend_to_kernel_cls(
         self, backend: UnquantizedMoeBackend
-    ) -> type[mk.FusedMoEExperts]:
-        return backend_to_kernel_cls(backend)
+    ) -> list[type[mk.FusedMoEExperts]]:
+        return [backend_to_kernel_cls(backend)]
 
     def map_backend(self, runner_backend: MoEBackend) -> UnquantizedMoeBackend:
         return map_unquantized_backend(runner_backend)
@@ -414,8 +414,8 @@ class UnquantizedMoEKernelOracle(MoEKernelOracle[UnquantizedMoeBackend]):
         self,
         quant_config: FusedMoEQuantConfig,
         moe_config: FusedMoEConfig,
-        backend: UnquantizedMoeBackend,
         experts_cls: type[mk.FusedMoEExperts],
+        backend: UnquantizedMoeBackend,
         routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
     ) -> mk.FusedMoEKernel:
         return make_unquantized_moe_kernel(

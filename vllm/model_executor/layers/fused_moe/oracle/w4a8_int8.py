@@ -7,154 +7,157 @@ import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.config.kernel import MoEBackend
-from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.all2all_utils import (
-    maybe_make_prepare_finalize,
-)
 from vllm.model_executor.layers.fused_moe.config import (
     FusedMoEConfig,
     FusedMoEQuantConfig,
     FusedMoEQuantDesc,
 )
+from vllm.model_executor.layers.fused_moe.oracle.base import MoEKernelOracle
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     GroupShape,
     QuantKey,
 )
 from vllm.platforms import current_platform
 
-logger = init_logger(__name__)
-
 
 class W4A8Int8MoeBackend(Enum):
     CPU_INT4 = "CPU_INT4"
 
 
+class W4A8Int8MoEKernelOracle(MoEKernelOracle[W4A8Int8MoeBackend]):
+    """W4A8 Int8 MoE kernel oracle.
+
+    W4A8 Int8 MoE has a single backend (CPU_INT4) and is CPU-only.
+    The subclass declares the backend data
+    ``select_backend`` is inherited from ``MoEKernelOracle`` but wrapped to raise
+    a CPU-only message early on non-CPU platforms.
+    ``make_kernel`` is overridden to enforce monolithic-only experts.
+    ``make_quant_config`` and ``convert_to_kernel_format`` are overridden
+    with their full W4A8-specific signatures.
+    """
+
+    def backend_enum_cls(self) -> type[W4A8Int8MoeBackend]:
+        return W4A8Int8MoeBackend
+
+    def get_priority_backends(
+        self, moe_config: FusedMoEConfig
+    ) -> list[W4A8Int8MoeBackend]:
+        if current_platform.is_cpu():
+            return [W4A8Int8MoeBackend.CPU_INT4]
+        return []
+
+    def backend_to_kernel_cls(
+        self, backend: W4A8Int8MoeBackend
+    ) -> list[type[mk.FusedMoEExperts]]:
+        if backend == W4A8Int8MoeBackend.CPU_INT4:
+            from vllm.model_executor.layers.fused_moe.experts.cpu_int4_moe import (
+                CPUExpertsInt4,
+            )
+
+            return [CPUExpertsInt4]
+        raise ValueError(f"Unknown W4A8 Int8 MoE backend: {backend.value}")
+
+    def map_backend(self, runner_backend: MoEBackend) -> W4A8Int8MoeBackend:
+        mapping = {"cpu": W4A8Int8MoeBackend.CPU_INT4}
+        if backend := mapping.get(runner_backend):
+            return backend
+        raise ValueError(
+            f"moe_backend={runner_backend!r} is not supported for W4A8 Int8 "
+            f"MoE. Expected one of {list(mapping.keys())}."
+        )
+
+    def select_backend(
+        self,
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None = None,
+        activation_key: QuantKey | None = None,
+    ) -> tuple[W4A8Int8MoeBackend, type[mk.FusedMoEExperts] | None]:
+        if not current_platform.is_cpu():
+            raise NotImplementedError(
+                "W4A8 Int8 MoE is only supported on CPU platforms"
+            )
+        return super().select_backend(moe_config, weight_key, activation_key)
+
+    def make_kernel(
+        self,
+        quant_config: FusedMoEQuantConfig,
+        moe_config: FusedMoEConfig,
+        experts_cls: type[mk.FusedMoEExperts],
+        backend: W4A8Int8MoeBackend,
+        routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    ) -> mk.FusedMoEKernel:
+        if not issubclass(experts_cls, mk.FusedMoEExpertsMonolithic):
+            raise ValueError(
+                f"W4A8 Int8 MoE only supports monolithic experts, "
+                f"but got {experts_cls.__name__}"
+            )
+        return super().make_kernel(
+            quant_config, moe_config, experts_cls, backend, routing_tables
+        )
+
+    def convert_to_kernel_format(  # type: ignore[override]
+        self,
+        w13_weight: torch.Tensor,
+        w2_weight: torch.Tensor,
+        w13_weight_scale: torch.Tensor,
+        w2_weight_scale: torch.Tensor,
+        group_size: int,
+        w13_bias: torch.Tensor | None = None,
+        w2_bias: torch.Tensor | None = None,
+    ):
+        return convert_to_w4a8_int8_moe_format(
+            w13_weight,
+            w2_weight,
+            w13_weight_scale,
+            w2_weight_scale,
+            group_size,
+            w13_bias=w13_bias,
+            w2_bias=w2_bias,
+        )
+
+    def make_quant_config(
+        self,
+        block_shape: tuple[int, int] | None = None,
+    ) -> FusedMoEQuantConfig:
+        return make_w4a8_int8_moe_quant_config(block_shape=block_shape)
+
+
+_ORACLE = W4A8Int8MoEKernelOracle()
+
+
+# ---------------------------------------------------------------------------
+# Module-level function wrappers preserved for backward compat.
+# These delegate to the oracle singleton above so the behaviour is
+# bit-identical with the pre-refactor code path.
+# ---------------------------------------------------------------------------
+
+
 def _get_priority_backends(
     moe_config: FusedMoEConfig,
 ) -> list[W4A8Int8MoeBackend]:
-    """
-    Get available backends in priority order based on platform and config.
-
-    Currently only CPU INT4 backend is available for W4A8 INT8 MoE.
-    """
-    if current_platform.is_cpu():
-        return [W4A8Int8MoeBackend.CPU_INT4]
-    return []
+    """Wrapper preserved for backward compat."""
+    return _ORACLE.get_priority_backends(moe_config)
 
 
 def backend_to_kernel_cls(
     backend: W4A8Int8MoeBackend,
 ) -> list[type[mk.FusedMoEExperts]]:
-    """Map W4A8Int8MoeBackend to kernel class."""
-    if backend == W4A8Int8MoeBackend.CPU_INT4:
-        from vllm.model_executor.layers.fused_moe.experts.cpu_int4_moe import (
-            CPUExpertsInt4,
-        )
-
-        return [CPUExpertsInt4]
-
-    else:
-        raise ValueError(f"Unknown W4A8 Int8 MoE backend: {backend.value}")
+    """Wrapper preserved for backward compat."""
+    return _ORACLE.backend_to_kernel_cls(backend)
 
 
 def map_w4a8_int8_backend(runner_backend: MoEBackend) -> W4A8Int8MoeBackend:
-    """Map user's MoEBackend to W4A8Int8MoeBackend."""
-    mapping = {
-        "cpu": W4A8Int8MoeBackend.CPU_INT4,
-    }
-    if backend := mapping.get(runner_backend):
-        return backend
-    raise ValueError(
-        f"moe_backend='{runner_backend}' is not supported for W4A8 Int8 MoE. "
-        f"Expected one of {list(mapping.keys())}."
-    )
+    """Wrapper preserved for backward compat."""
+    return _ORACLE.map_backend(runner_backend)
 
 
 def select_w4a8_int8_moe_backend(
     config: FusedMoEConfig,
     weight_key: QuantKey | None,
     activation_key: QuantKey | None,
-) -> tuple[W4A8Int8MoeBackend, type[mk.FusedMoEExperts]]:
-    """
-    Select the primary W4A8 Int8 MoE backend.
-
-    Args:
-        config: MoE configuration
-        weight_key: Weight quantization key (should be one of kInt4W4A8Static*)
-        activation_key: Activation quantization key (currently unused for W4A8)
-
-    Returns:
-        Tuple of (backend, kernel_class)
-    """
-
-    AVAILABLE_BACKENDS = _get_priority_backends(config)
-
-    if not AVAILABLE_BACKENDS:
-        raise NotImplementedError("W4A8 Int8 MoE is only supported on CPU platforms")
-
-    activation_format = (
-        mk.FusedMoEActivationFormat.BatchedExperts
-        if config.moe_parallel_config.use_batched_activation_format
-        else mk.FusedMoEActivationFormat.Standard
-    )
-
-    def _make_log_backend(backend: W4A8Int8MoeBackend) -> str:
-        available_backend_strs = [b.value for b in AVAILABLE_BACKENDS]
-        return (
-            f"Using {backend.value} W4A8 Int8 MoE backend out "
-            f"of potential backends: {available_backend_strs}."
-        )
-
-    def _make_log_unsupported(backend: W4A8Int8MoeBackend, reason: str | None) -> str:
-        if reason:
-            return (
-                f"W4A8 Int8 MoE backend {backend.value} does not support the "
-                f"deployment configuration since {reason}."
-            )
-        else:
-            return (
-                f"W4A8 Int8 MoE backend '{backend.value}' does not support the "
-                "deployment configuration."
-            )
-
-    def _return_or_raise(
-        backend: W4A8Int8MoeBackend,
-    ) -> tuple[W4A8Int8MoeBackend, type[mk.FusedMoEExperts]]:
-        reason = None
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls, config, weight_key, activation_key, activation_format
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-        raise ValueError(_make_log_unsupported(backend, reason))
-
-    # Handle explicit moe_backend from user.
-    runner_backend = config.moe_backend
-    if runner_backend != "auto":
-        requested_backend = map_w4a8_int8_backend(runner_backend)
-        return _return_or_raise(requested_backend)
-
-    # Select kernels in order of backend.
-    for backend in AVAILABLE_BACKENDS:
-        for k_cls in backend_to_kernel_cls(backend):
-            supported, reason = k_cls.is_supported_config(
-                k_cls,
-                config,
-                weight_key,
-                activation_key,
-                activation_format,
-            )
-            if supported:
-                logger.info_once(_make_log_backend(backend))
-                return backend, k_cls
-            else:
-                logger.debug_once(_make_log_unsupported(backend, reason))
-
-    raise NotImplementedError(
-        "No W4A8 Int8 MoE backend supports the deployment configuration."
-    )
+) -> tuple[W4A8Int8MoeBackend, type[mk.FusedMoEExperts] | None]:
+    """Wrapper preserved for backward compat."""
+    return _ORACLE.select_backend(config, weight_key, activation_key)
 
 
 def make_w4a8_int8_moe_quant_config(
@@ -315,46 +318,11 @@ def make_w4a8_int8_moe_kernel(
     experts_cls: type[mk.FusedMoEExperts],
     routing_tables: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
 ) -> mk.FusedMoEKernel:
-    """
-    Create FusedMoEKernel for W4A8 Int8 MoE.
-
-    Args:
-        moe_quant_config: Quantization configuration
-        moe_config: MoE configuration
-        experts_cls: Expert kernel class (should be CPUExpertsInt4)
-        routing_tables: Optional routing tables for expert parallelism
-
-    Returns:
-        Configured FusedMoEKernel instance
-    """
-    # Create Prepare/Finalize.
-    prepare_finalize = maybe_make_prepare_finalize(
-        moe=moe_config,
-        quant_config=moe_quant_config,
-        routing_tables=routing_tables,
-        allow_new_interface=True,
-        use_monolithic=issubclass(experts_cls, mk.FusedMoEExpertsMonolithic),
+    """Wrapper preserved for backward compat."""
+    return _ORACLE.make_kernel(
+        moe_quant_config,
+        moe_config,
+        experts_cls,
+        W4A8Int8MoeBackend.CPU_INT4,
+        routing_tables,
     )
-    assert prepare_finalize is not None
-
-    logger.info_once("Using %s", prepare_finalize.__class__.__name__)
-
-    # Create Experts.
-    # W4A8 Int8 currently only supports monolithic interface
-    if not issubclass(experts_cls, mk.FusedMoEExpertsMonolithic):
-        raise ValueError(
-            f"W4A8 Int8 MoE only supports monolithic experts, "
-            f"but got {experts_cls.__name__}"
-        )
-
-    experts = experts_cls(
-        moe_config=moe_config,
-        quant_config=moe_quant_config,
-    )
-
-    kernel = mk.FusedMoEKernel(
-        prepare_finalize,
-        experts,
-    )
-
-    return kernel
