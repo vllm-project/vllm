@@ -428,6 +428,9 @@ class EngineArgs:
     trust_remote_code: bool = ModelConfig.trust_remote_code
     allowed_local_media_path: str = ModelConfig.allowed_local_media_path
     allowed_media_domains: list[str] | None = ModelConfig.allowed_media_domains
+    forbid_media_private_networks_access: bool = (
+        ModelConfig.forbid_media_private_networks_access
+    )
     download_dir: str | None = LoadConfig.download_dir
     safetensors_load_strategy: SafetensorsLoadStrategy | None = (
         LoadConfig.safetensors_load_strategy
@@ -810,6 +813,10 @@ class EngineArgs:
         )
         model_group.add_argument(
             "--allowed-media-domains", **model_kwargs["allowed_media_domains"]
+        )
+        model_group.add_argument(
+            "--forbid-media-private-networks-access",
+            **model_kwargs["forbid_media_private_networks_access"],
         )
         model_group.add_argument("--revision", **model_kwargs["revision"])
         model_group.add_argument("--code-revision", **model_kwargs["code_revision"])
@@ -1616,6 +1623,7 @@ class EngineArgs:
             trust_remote_code=self.trust_remote_code,
             allowed_local_media_path=self.allowed_local_media_path,
             allowed_media_domains=self.allowed_media_domains,
+            forbid_media_private_networks_access=self.forbid_media_private_networks_access,
             dtype=self.dtype,
             seed=self.seed,
             revision=self.revision,

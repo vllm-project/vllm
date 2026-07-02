@@ -749,6 +749,7 @@ class SpeculativeConfig:
                     trust_remote_code=self.target_model_config.trust_remote_code,
                     allowed_local_media_path=self.target_model_config.allowed_local_media_path,
                     allowed_media_domains=self.target_model_config.allowed_media_domains,
+                    forbid_media_private_networks_access=self.target_model_config.forbid_media_private_networks_access,
                     dtype=self.target_model_config.dtype,
                     seed=self.target_model_config.seed,
                     revision=self.revision,

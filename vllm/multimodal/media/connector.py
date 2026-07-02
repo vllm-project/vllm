@@ -5,7 +5,9 @@ import asyncio
 import atexit
 import contextlib
 import hashlib
+import ipaddress
 import os
+import socket
 import tempfile
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -85,6 +87,7 @@ class MediaConnector:
         *,
         allowed_local_media_path: str = "",
         allowed_media_domains: list[str] | None = None,
+        forbid_media_private_networks_access: bool = False,
     ) -> None:
         """
         Args:
@@ -96,6 +99,9 @@ class MediaConnector:
             allowed_local_media_path: A local directory to load media files from.
             allowed_media_domains: If set, only media URLs that belong to this
                                    domain can be used for multi-modal inputs.
+            forbid_media_private_networks_access: If set, only media URLs that
+                                   belong to a public domain can be used for
+                                   multimodal inputs.
         """
         super().__init__()
 
@@ -124,6 +130,7 @@ class MediaConnector:
         if allowed_media_domains is None:
             allowed_media_domains = []
         self.allowed_media_domains = allowed_media_domains
+        self.forbid_media_private_networks_access = forbid_media_private_networks_access
 
         # Media download cache (opt-in via VLLM_MEDIA_CACHE)
         self._media_cache_dir: str | None = None
@@ -283,6 +290,48 @@ class MediaConnector:
                 f"{url_spec.hostname}"
             )
 
+    def _assert_network_is_public(self, url_spec: Url) -> str:
+        hostname = url_spec.hostname
+        ipv4_addresses = []
+        ipv6_addresses = []
+        try:
+            results = socket.getaddrinfo(hostname, None, socket.AF_UNSPEC)
+            for result in results:
+                family, _, _, _, sockaddr = result
+                address = sockaddr[0]
+
+                if family == socket.AF_INET:
+                    ipv4_addresses.append(address)
+                elif family == socket.AF_INET6:
+                    ipv6_addresses.append(address)
+
+                ip_obj = ipaddress.ip_address(address)
+                # here we rely on ip_obj.is_global as ipaddress.is_private returns False
+                # for CGNAT addresses, which are used internally by cloud providers
+                # (e.g., AWS EKS default pod CIDR). An attacker could supply a URL
+                # resolving to this range to reach internal services.
+                if not ip_obj.is_global:
+                    raise ValueError(
+                        f"The media URL must resolve to a public domain. "
+                        f"Input media URL: {url_spec.url}"
+                    )
+        except socket.gaierror as e:
+            raise ValueError(f"Unable to resolve URL domain '{hostname}': {e}") from e
+
+        # this is just a safety check to please the linter, but if we end up here we
+        # have at least an ip address in one of the ip lists.
+        pre_validated_ip = (
+            ipv4_addresses[0] if len(ipv4_addresses) > 0 else ipv6_addresses[0]
+        )
+        return str(pre_validated_ip)
+
+    def _maybe_validate_private_networks_access(self, url: str | Url) -> str | None:
+        if not self.forbid_media_private_networks_access:
+            return None
+        if not isinstance(url, Url):
+            url = parse_url(url)
+        return self._assert_network_is_public(url)
+
     def load_from_url(
         self,
         url: str,
@@ -297,6 +346,7 @@ class MediaConnector:
 
         if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
+            pre_validated_ip = self._maybe_validate_private_networks_access(url_spec)
 
             cached = self._get_cached_bytes(url)
             if cached is not None:
@@ -306,7 +356,10 @@ class MediaConnector:
             data = connection.get_bytes(
                 url_spec.url,
                 timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                allow_redirects=False
+                if self.forbid_media_private_networks_access
+                else envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                pre_validated_ip=pre_validated_ip,
             )
 
             self._put_cached_bytes(url, data)
@@ -337,6 +390,7 @@ class MediaConnector:
 
         if url_spec.scheme and url_spec.scheme.startswith("http"):
             self._assert_url_in_allowed_media_domains(url_spec)
+            pre_validated_ip = self._maybe_validate_private_networks_access(url_spec)
 
             cached = await loop.run_in_executor(
                 global_thread_pool, self._get_cached_bytes, url
@@ -351,7 +405,10 @@ class MediaConnector:
             data = await connection.async_get_bytes(
                 url_spec.url,
                 timeout=fetch_timeout,
-                allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                allow_redirects=False
+                if self.forbid_media_private_networks_access
+                else envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
+                pre_validated_ip=pre_validated_ip,
             )
 
             await loop.run_in_executor(
