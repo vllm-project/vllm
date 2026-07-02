@@ -480,21 +480,44 @@ class TritonAttentionImpl(AttentionImpl):
             if self.kv_cache_dtype.startswith("fp8") and not (
                 current_platform.has_device_capability(89)
             ):
-                suggested = (
-                    "float16" if (cap is None or cap.to_int() < 80) else "bfloat16"
-                )
-                raise ValueError(
-                    f"FP8 KV cache is not supported by the Triton attention backend "
-                    f"on {dev} (compute capability {cap_str}); native FP8 (fp8e4nv) "
-                    f"requires SM89+. Re-run with --kv-cache-dtype {suggested}."
-                )
+                if current_platform.has_device_capability(75):
+                    # Pre-SM89 has no native fp8e4nv cast, so fp8 KV is supported
+                    # on the Triton path via software conversion: K/V are
+                    # decoded/encoded to the platform's native float -- bf16 where
+                    # bf16 is supported directly (SM80/86), fp16 where only fp16 is
+                    # (SM75). The conversion adds emulation overhead; warn about it.
+                    alt = (
+                        "bfloat16"
+                        if current_platform.has_device_capability(80)
+                        else "float16"
+                    )
+                    logger.warning(
+                        "FP8 KV cache on %s (compute capability %s) is supported "
+                        "on the Triton attention path via software conversion "
+                        "(this GPU has no native fp8e4nv), which adds emulation "
+                        "overhead and lowers throughput. fp8 KV halves the "
+                        "KV-cache footprint (longer supportable context); "
+                        "--kv-cache-dtype %s runs faster on this GPU but uses "
+                        "~2x the KV cache (shorter max context).",
+                        dev,
+                        cap_str,
+                        alt,
+                    )
+                else:
+                    raise ValueError(
+                        f"FP8 KV cache on the Triton attention backend is "
+                        f"supported via software conversion on SM75-88 and "
+                        f"natively on SM89+, but {dev} (compute capability "
+                        f"{cap_str}) is below SM75. Re-run with "
+                        f"--kv-cache-dtype float16."
+                    )
             if self.kv_cache_dtype == "bfloat16" and not (
                 current_platform.has_device_capability(80)
             ):
                 raise ValueError(
-                    f"bfloat16 KV cache is not supported on {dev} (compute capability "
-                    f"{cap_str}); bfloat16 requires SM80+. Re-run with "
-                    f"--kv-cache-dtype float16."
+                    f"bfloat16 KV cache is not supported on {dev} (compute "
+                    f"capability {cap_str}); bfloat16 requires SM80+. Re-run "
+                    f"with --kv-cache-dtype float16."
                 )
         if logits_soft_cap is None:
             # In flash-attn, setting logits_soft_cap as 0 means no soft cap.
@@ -516,10 +539,23 @@ class TritonAttentionImpl(AttentionImpl):
             )
         self.use_alibi_sqrt = use_alibi_sqrt
         self.chunk_lookback = chunk_lookback
-        self.supports_quant_query_input = current_platform.is_cuda()
 
         self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
         self._is_per_token_head_quant = self._kv_quant_mode.is_per_token_head
+        # Pre-SM89 CUDA has no native fp8e4nv cast -> software-convert fp8 KV in
+        # the reshape store and the unified_attention read.
+        self._fp8_software_conv = (
+            is_quantized_kv_cache(kv_cache_dtype)
+            and current_platform.is_cuda()
+            and current_platform.has_device_capability(75)
+            and not current_platform.has_device_capability(89)
+        )
+        # With software fp8 KV the query cannot be quantized to fp8 (no native
+        # cast for torch.compile to fuse into RoPE); _cast_kv_tile dequantizes
+        # K/V to the query dtype instead.
+        self.supports_quant_query_input = (
+            current_platform.is_cuda() and not self._fp8_software_conv
+        )
 
         # Enable tensor descriptors for Q/K/V load/store on platforms that
         # benefit from HW 2D block reads (Intel Xe2/Xe3).  The dead branch
@@ -610,7 +646,11 @@ class TritonAttentionImpl(AttentionImpl):
             if (
                 is_quantized_kv_cache(self.kv_cache_dtype)
                 and key_cache.dtype != self.fp8_dtype
+                and not self._fp8_software_conv
             ):
+                # Native fp8 path: reinterpret the uint8 cache as fp8. On the
+                # software-emulation path we keep it uint8 and decode explicitly
+                # inside unified_attention (no native fp8 cvt on SM80/86).
                 key_cache = key_cache.view(self.fp8_dtype)
                 value_cache = value_cache.view(self.fp8_dtype)
             descale_shape = (
@@ -672,6 +712,7 @@ class TritonAttentionImpl(AttentionImpl):
             output_scale=output_scale,
             mm_prefix_range=mm_prefix_range_tensor,
             kv_quant_mode=self._kv_quant_mode,
+            fp8_software_conv=self._fp8_software_conv,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
             chunk_lookback=self.chunk_lookback,
@@ -771,7 +812,11 @@ class TritonAttentionImpl(AttentionImpl):
             return
         # For decoder and cross-attention, use KV cache as before.
         key_cache, value_cache = kv_cache.unbind(1)
-        if is_quantized_kv_cache(self.kv_cache_dtype):
+        if is_quantized_kv_cache(self.kv_cache_dtype) and not self._fp8_software_conv:
+            # Native fp8 path reinterprets the uint8 cache as fp8. On the
+            # software-emulation path the cache stays uint8 and the reshape
+            # kernel encodes bf16->fp8e4nv bytes itself (an fp8e4nv-typed pointer
+            # would fail to compile on SM80/86).
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
         triton_reshape_and_cache_flash(

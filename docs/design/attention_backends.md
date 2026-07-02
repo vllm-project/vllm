@@ -178,6 +178,8 @@ Priority is **1 = highest** (tried first).
 > **†** FlashInfer uses TRTLLM attention on Blackwell (SM100), which supports sinks. Disable via `--attention-config.use_trtllm_attention=0`.
 >
 > **\*** Specify the FlashAttention version via `--attention-config.flash_attn_version=2`, `3`, or `4`. Default is FA4 on SM100+ (Blackwell), FA3 on SM90 (Hopper), FA2 otherwise.
+>
+> **`TRITON_ATTN` fp8 KV cache**: native `fp8e4nv` on SM89+; software-emulated on SM75-88 (`fp8e4nv` <-> `bf16` on SM80/86, `fp8e4nv` <-> `fp16` on SM75, which has no bf16 hardware type). Software conversion lowers throughput but halves the KV-cache footprint (longer supportable context).
 
 ## MiniMax M3 Sparse Attention Backends
 

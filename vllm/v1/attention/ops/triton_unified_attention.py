@@ -15,6 +15,7 @@ import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
+from vllm.v1.attention.ops.fp8e4nv import convert_from_fp8e4m3
 from vllm.v1.attention.ops.triton_attention_helpers import (
     apply_alibi_to_score,
     apply_softcap,
@@ -36,7 +37,9 @@ float8_info = torch.finfo(current_platform.fp8_dtype())
 
 
 @triton.jit
-def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
+def _cast_kv_tile(
+    data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr, FP8_SOFTWARE_CONV: tl.constexpr
+):
     """Cast a loaded KV tile to Q's dtype, dequantizing if needed.
 
     Modes handled inside the core kernel:
@@ -49,6 +52,12 @@ def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
       into the attention score and output accumulator.
     """
     if KV_QUANT_MODE == 1:
+        if FP8_SOFTWARE_CONV:
+            # Software-decode the fp8 bytes to the activation dtype and apply the
+            # per-tensor scale in that dtype (no fp32).
+            return convert_from_fp8e4m3(data, Q.dtype) * tl.load(tensor_scale).to(
+                Q.dtype
+            )
         if Q.dtype.is_fp8():
             return data.to(Q.dtype)
         return (data.to(tl.float32) * tl.load(tensor_scale)).to(Q.dtype)
@@ -262,6 +271,9 @@ def kernel_unified_attention(
     # FP8_PER_TOKEN_HEAD (3). Sub-byte INT4 (4) uses its own
     # int4_per_token_head kernel, not this one.
     KV_QUANT_MODE: tl.constexpr = 0,
+    # Pre-SM89 software fp8e4nv emulation: cache holds uint8 fp8 bytes, decode
+    # explicitly in _cast_kv_tile (no native fp8 cvt).
+    FP8_SOFTWARE_CONV: tl.constexpr = False,
     FP8_MIN: tl.constexpr = float8_info.min,
     FP8_MAX: tl.constexpr = float8_info.max,
     # Chunked / block-local attention.  ``CHUNK_LOOKBACK >= 0`` enables
@@ -472,8 +484,8 @@ def kernel_unified_attention(
                 mask=dim_mask[None, :] & tile_mask[:, None],
                 other=0.0,
             )
-        K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE)
-        V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE)
+        K = _cast_kv_tile(K_load, Q, k_scale, KV_QUANT_MODE, FP8_SOFTWARE_CONV)
+        V = _cast_kv_tile(V_load, Q, v_scale, KV_QUANT_MODE, FP8_SOFTWARE_CONV)
 
         # Per-(token, head) scales for INT8 / FP8 per-token-head modes.
         if USE_PER_TOKEN_HEAD_SCALES:
@@ -810,6 +822,7 @@ def unified_attention(
     use_alibi_sqrt=False,
     # KV cache quantization mode and per-token-head scale caches.
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
+    fp8_software_conv: bool = False,
     k_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
     v_scale_cache=None,  # [num_blocks, block_size, num_kv_heads] float32
     # Chunked attention: restrict attention to aligned blocks with lookback.
@@ -1125,6 +1138,7 @@ def unified_attention(
         USE_FP8=output_scale is not None,
         IS_3D=use_3d,
         KV_QUANT_MODE=kv_quant_mode,
+        FP8_SOFTWARE_CONV=fp8_software_conv,
         Q_IS_FP8=(q.dtype == current_platform.fp8_dtype()),
         CHUNK_LOOKBACK=chunk_lookback,
         CHUNK_SIZE=chunk_size,
