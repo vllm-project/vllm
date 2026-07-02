@@ -615,7 +615,12 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             )
             if self.hisparse_coordinator is not None:
                 _hf = get_current_vllm_config().model_config.hf_config
-                self._hisparse_index_sharing = getattr(_hf, "index_topk_freq", 1) > 1
+                # Match the model's skip_topk predicate: sharing comes from
+                # index_topk_freq > 1 or an index_topk_pattern with "S"
+                # (shared) entries (deepseek_v2 layer gating).
+                _freq = getattr(_hf, "index_topk_freq", 1) or 1
+                _pattern = getattr(_hf, "index_topk_pattern", None) or ()
+                self._hisparse_index_sharing = _freq > 1 or "S" in _pattern
                 self._hisparse_is_full_layer = indexer is not None
                 # Wire the overlap group in layer-construction order: a full
                 # layer becomes the current leader; the shared layers that
@@ -702,12 +707,10 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         kv_c_and_k_pe_cache: torch.Tensor,
         topk_indices: torch.Tensor,
         attn_metadata: FlashMLASparseMetadata,
-        num_decode_tokens: int | None = None,
         return_valid_counts: bool = False,
     ):
         assert self.hisparse_coordinator is not None
-        pure_decode = num_decode_tokens is None
-        n = topk_indices.shape[0] if pure_decode else num_decode_tokens
+        n = topk_indices.shape[0]
         # Index-sharing "shared" layer: replay the group's plan (produced by the
         # "full" layer's swap_in earlier this pass) instead of re-resolving LRU.
         if self._hisparse_index_sharing and not self._hisparse_is_full_layer:
@@ -721,9 +724,9 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             kv_cache=kv_c_and_k_pe_cache,
             req_id_per_token=attn_metadata.req_id_per_token[:n],
             block_table=attn_metadata.block_table,
-            topk_indices=topk_indices[:n],
+            topk_indices=topk_indices,
             block_size=attn_metadata.block_size,
-            slot_mapping=attn_metadata.slot_mapping if pure_decode else None,
+            slot_mapping=attn_metadata.slot_mapping,
             return_valid_counts=return_valid_counts,
             produce_plan=self._hisparse_index_sharing,
         )
@@ -828,15 +831,13 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
 
         decode_cache = kv_c_and_k_pe_cache
         decode_topk: torch.Tensor | None = None
-        use_hisparse = self.hisparse_coordinator is not None
-        if use_hisparse and num_decode_tokens > 0:
+        if self._is_hisparse_decode(attn_metadata, attn_metadata.num_actual_tokens):
+            # HiSparse only ever sees pure decode batches: a batch with
+            # prefill tokens raised in do_kv_cache_update before attention.
             decode_cache, decode_topk = self._hisparse_swap_in(
                 kv_c_and_k_pe_cache,
                 topk_indices,
                 attn_metadata,
-                num_decode_tokens=(
-                    None if num_prefill_tokens == 0 else num_decode_tokens
-                ),
             )
 
         prefill_request_ids = None
@@ -854,7 +855,7 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
         # prefill_workspace_starts has been adjusted in-place per chunk so
         # prefill indices automatically come out chunk-local
         topk_length = None
-        if num_prefill_tokens > 0 or not use_hisparse:
+        if decode_topk is None:
             topk_indices, topk_length = triton_convert_req_index_to_global_index(
                 attn_metadata.req_id_per_token,
                 attn_metadata.block_table,
@@ -916,11 +917,10 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             assert fp8_metadata.prefill is not None
             for chunk in fp8_metadata.prefill.chunks:
                 chunk_workspace = self.prefill_bf16_workspace[: chunk.chunk_tot_seqlen]
-                gather_cache, gather_bt = kv_c_and_k_pe_cache, chunk.block_table
                 ops.cp_gather_and_upconvert_fp8_kv_cache(
-                    gather_cache,
+                    kv_c_and_k_pe_cache,
                     chunk_workspace,
-                    gather_bt,
+                    chunk.block_table,
                     chunk.seq_lens,
                     chunk.workspace_starts,
                     len(chunk.block_table),

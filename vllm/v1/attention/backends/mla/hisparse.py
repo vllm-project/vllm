@@ -79,7 +79,9 @@ class HiSparseConfig:
             )
 
         top_k = int(raw_config.get("top_k", model_top_k))
-        device_buffer_size = int(raw_config["device_buffer_size"])
+        # Default matches SGLang's 2x top_k: at exactly top_k the LRU has
+        # zero slack and boundary entries thrash between steps.
+        device_buffer_size = int(raw_config.get("device_buffer_size", 2 * top_k))
         # Optional: only used to size the host pool when host_pool_gib is unset.
         host_to_device_ratio = float(raw_config.get("host_to_device_ratio", 2))
         host_pool_gib = raw_config.get("host_pool_gib")
@@ -151,6 +153,11 @@ def invalidate_blocks(
         coordinator = getattr(impl, "hisparse_coordinator", None)
         if coordinator is None:
             continue
+        if coordinator.leader is not None:
+            # Index-sharing "shared" layer: its dgi/lru are never written
+            # (apply_plan replays the leader's plan), so there is nothing
+            # to invalidate.
+            continue
         if slots is None:
             blocks = torch.tensor(
                 block_ids, dtype=torch.long, device=coordinator.device
@@ -171,6 +178,9 @@ def reset_rows(static_forward_context: dict, row_ids: list[int]) -> None:
         impl = getattr(layer, "impl", None)
         coordinator = getattr(impl, "hisparse_coordinator", None)
         if coordinator is None:
+            continue
+        if coordinator.leader is not None:
+            # Shared layers carry no live dgi/lru state (see invalidate_blocks).
             continue
         if rows is None:
             rows = torch.tensor(row_ids, dtype=torch.long, device=coordinator.device)
@@ -614,9 +624,10 @@ class HiSparseCoordinator:
                 )
             else:
                 self._mirror_slots_fallback(global_slots)
-        # Global slots can be recycled blocks; drop any stale hot copies so
-        # they cannot be served as hits.
-        self._invalidate_hot_copies(global_slots)
+        # Recycled-slot hygiene is handled at block-assignment time: the
+        # model runner invalidates every block (re)assigned to any request
+        # (new, resumed, or growing) before the step that first writes it,
+        # so no per-step in-graph invalidation is needed here.
 
     # ---------------------------------------------------------------- swap-in
 
@@ -628,7 +639,7 @@ class HiSparseCoordinator:
         block_table: torch.Tensor,
         topk_indices: torch.Tensor,
         block_size: int,
-        slot_mapping: torch.Tensor | None,
+        slot_mapping: torch.Tensor,
         return_valid_counts: bool = False,
         produce_plan: bool = False,
     ) -> (
@@ -675,16 +686,9 @@ class HiSparseCoordinator:
             global_indices = converted
             valid_counts = None
 
-        # When slot_mapping is None (mixed batches: the newest rows were
-        # written to the global store, not the reserved hot slots), newest
-        # tokens are resolved like any other entry (miss -> host load); the
-        # backup kernel runs stream-ordered, so those rows are already
-        # visible in the host pool.
-        newest_global = (
-            slot_mapping[:num_tokens].to(torch.int32).contiguous()
-            if slot_mapping is not None
-            else None
-        )
+        # Newest tokens resolve to the reserved hot slot the KV update wrote
+        # this step, keyed by their global slot id from the slot mapping.
+        newest_global = slot_mapping[:num_tokens].to(torch.int32).contiguous()
 
         # For a plan producer, resolve into the group-shared buffers so the
         # group's shared layers can replay the identical plan.
