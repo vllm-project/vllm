@@ -30,8 +30,7 @@ NUM_Q_HEADS = 8
 NUM_KV_HEADS = 8
 HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16, 64]
-# TODO: re-add torch.float16 once AITER reenables fp16 unified attention.
-DTYPES = [torch.bfloat16]
+DTYPES = [torch.bfloat16, torch.float16]
 FP8_DTYPE = current_platform.fp8_dtype()
 
 # (query_len, kv_len) per sequence
