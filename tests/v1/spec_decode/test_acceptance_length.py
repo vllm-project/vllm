@@ -1,12 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-EAGLE3 Acceptance Length Regression Tests.
+"""Acceptance-length regression tests for EAGLE3 and MTP speculative decoding.
 
-These tests verify that acceptance lengths for EAGLE3 speculative decoding
-do not regress across vLLM commits. Each test runs inference on the MT-Bench
-dataset and asserts that the mean acceptance length is within tolerance of
-the expected baseline.
+Each test runs MT-Bench inference and asserts the mean acceptance length stays
+within tolerance of a calibrated baseline.
 """
 
 from dataclasses import dataclass, field
@@ -16,6 +13,7 @@ import pytest
 import torch
 
 from tests.conftest import VllmRunner
+from tests.evals.gsm8k.gsm8k_eval import evaluate_gsm8k_offline
 from tests.utils import large_gpu_mark
 from vllm import SamplingParams
 from vllm.benchmarks.datasets import get_samples
@@ -24,67 +22,6 @@ from vllm.platforms import current_platform
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import AttentionSelectorConfig
 from vllm.v1.metrics.reader import Counter, Vector
-
-
-@dataclass
-class Eagle3ModelConfig:
-    verifier: str
-    drafter: str
-    expected_acceptance_length: float
-    expected_acceptance_lengths_per_pos: list[float] = field(default_factory=list)
-    id: str = ""
-    # Backends that are incompatible with this model (will be skipped)
-    excluded_backends: set[AttentionBackendEnum] = field(default_factory=set)
-    # Pytest marks for this configuration
-    marks: list = field(default_factory=list)
-    # Custom relative tolerance (defaults to DEFAULT_RTOL if None)
-    rtol: float | None = None
-    # ROCm-specific test configuration
-    rocm_expected_acceptance_lengths_per_pos: list[float] = field(default_factory=list)
-
-
-# Model configurations for EAGLE3 acceptance length tests.
-# Expected acceptance lengths are determined by running baseline benchmarks
-# using examples/features/speculative_decoding/spec_decode_offline.py
-# with the MT-Bench dataset.
-EAGLE3_MODEL_CONFIGS = [
-    Eagle3ModelConfig(
-        verifier="meta-llama/Llama-3.1-8B-Instruct",
-        drafter="RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3",
-        expected_acceptance_length=2.60,
-        expected_acceptance_lengths_per_pos=[0.7296, 0.5208, 0.3545],
-        id="llama3-8b-eagle3",
-    ),
-    Eagle3ModelConfig(
-        verifier="Qwen/Qwen3-8B",
-        drafter="RedHatAI/Qwen3-8B-speculator.eagle3",
-        expected_acceptance_length=2.26,
-        expected_acceptance_lengths_per_pos=[0.6541, 0.3993, 0.2020],
-        id="qwen3-8b-eagle3",
-    ),
-    Eagle3ModelConfig(
-        verifier="openai/gpt-oss-20b",
-        drafter="RedHatAI/gpt-oss-20b-speculator.eagle3",
-        expected_acceptance_length=2.56,
-        expected_acceptance_lengths_per_pos=[0.7165, 0.5120, 0.3337],
-        id="gpt-oss-20b-eagle3",
-        # FLASHINFER incompatible: gpt-oss-20b uses sink attention which
-        # FLASHINFER does not support ("sink setting not supported")
-        excluded_backends={AttentionBackendEnum.FLASHINFER},
-        rocm_expected_acceptance_lengths_per_pos=[0.7040, 0.4820, 0.3350],
-    ),
-    Eagle3ModelConfig(
-        verifier="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
-        drafter="nm-testing/Speculator-Qwen3-30B-MOE-VL-Eagle3",
-        expected_acceptance_length=1.35,
-        expected_acceptance_lengths_per_pos=[0.2900, 0.0620, 0.0115],
-        id="qwen3-30b-moe-vl-eagle3",
-        marks=[
-            pytest.mark.slow_test,
-        ],
-        rtol=0.15,  # Higher tolerance due to small absolute values at position 2
-    ),
-]
 
 # Default test parameters
 DEFAULT_NUM_SPEC_TOKENS = 3
@@ -96,9 +33,116 @@ DEFAULT_RTOL = 0.05
 # TP sizes to test
 TP_SIZES = [1, 2, 4]
 
-
 # Backends excluded from testing due to significantly different behavior
 EXCLUDED_BACKENDS = {AttentionBackendEnum.FLEX_ATTENTION}
+
+
+@dataclass
+class SpecDecodeModelConfig:
+    method: str
+    model: str
+    expected_acceptance_length: float
+    # Draft model (EAGLE3 only; MTP heads ship with the verifier)
+    drafter: str | None = None
+    num_speculative_tokens: int = DEFAULT_NUM_SPEC_TOKENS
+    expected_acceptance_lengths_per_pos: list[float] = field(default_factory=list)
+    id: str = ""
+    tp_size: int = 1
+    gpu_memory_utilization: float = 0.7
+    # Backends that are incompatible with this model (will be skipped)
+    excluded_backends: set[AttentionBackendEnum] = field(default_factory=set)
+    marks: list = field(default_factory=list)
+    # Custom relative tolerance (defaults to DEFAULT_RTOL if None)
+    rtol: float | None = None
+    rocm_expected_acceptance_lengths_per_pos: list[float] = field(default_factory=list)
+    # Extra VllmRunner kwargs (e.g. quantization, trust_remote_code)
+    extra_kwargs: dict = field(default_factory=dict)
+    # If set, also assert GSM8k accuracy stays above this floor
+    expected_gsm8k_accuracy: float | None = None
+
+
+# Baselines measured on the MT-Bench dataset with
+# examples/features/speculative_decoding/spec_decode_offline.py
+EAGLE3_MODEL_CONFIGS = [
+    SpecDecodeModelConfig(
+        method="eagle3",
+        model="meta-llama/Llama-3.1-8B-Instruct",
+        drafter="RedHatAI/Llama-3.1-8B-Instruct-speculator.eagle3",
+        expected_acceptance_length=2.60,
+        expected_acceptance_lengths_per_pos=[0.7296, 0.5208, 0.3545],
+        id="llama3-8b-eagle3",
+    ),
+    SpecDecodeModelConfig(
+        method="eagle3",
+        model="Qwen/Qwen3-8B",
+        drafter="RedHatAI/Qwen3-8B-speculator.eagle3",
+        expected_acceptance_length=2.26,
+        expected_acceptance_lengths_per_pos=[0.6541, 0.3993, 0.2020],
+        id="qwen3-8b-eagle3",
+    ),
+    SpecDecodeModelConfig(
+        method="eagle3",
+        model="openai/gpt-oss-20b",
+        drafter="RedHatAI/gpt-oss-20b-speculator.eagle3",
+        expected_acceptance_length=2.56,
+        expected_acceptance_lengths_per_pos=[0.7165, 0.5120, 0.3337],
+        id="gpt-oss-20b-eagle3",
+        # FLASHINFER incompatible: gpt-oss-20b uses sink attention which
+        # FLASHINFER does not support ("sink setting not supported")
+        excluded_backends={AttentionBackendEnum.FLASHINFER},
+        rocm_expected_acceptance_lengths_per_pos=[0.7040, 0.4820, 0.3350],
+    ),
+    SpecDecodeModelConfig(
+        method="eagle3",
+        model="Qwen/Qwen3-VL-30B-A3B-Instruct-FP8",
+        drafter="nm-testing/Speculator-Qwen3-30B-MOE-VL-Eagle3",
+        expected_acceptance_length=1.35,
+        expected_acceptance_lengths_per_pos=[0.2900, 0.0620, 0.0115],
+        id="qwen3-30b-moe-vl-eagle3",
+        marks=[pytest.mark.slow_test],
+        rtol=0.15,  # Higher tolerance due to small absolute values at position 2
+    ),
+]
+
+# Baselines measured on MT-Bench (greedy): DeepSeek-V3 tp=8, DSV4-Flash NVFP4 tp=4.
+MTP_MODEL_CONFIGS = [
+    SpecDecodeModelConfig(
+        method="mtp",
+        model="deepseek-ai/DeepSeek-V3",
+        num_speculative_tokens=1,
+        expected_acceptance_length=1.882,
+        id="deepseek-v3-mtp-fp8-tp8",
+        tp_size=8,
+        gpu_memory_utilization=0.9,
+        extra_kwargs={
+            "quantization": "fp8",
+            "trust_remote_code": True,
+            "kv_cache_dtype": "fp8",
+            "block_size": None,
+            "enforce_eager": True,
+        },
+        marks=[pytest.mark.slow_test],
+        rtol=0.10,
+        expected_gsm8k_accuracy=0.90,
+    ),
+    SpecDecodeModelConfig(
+        method="mtp",
+        model="nvidia/DeepSeek-V4-Flash-NVFP4",
+        num_speculative_tokens=1,
+        expected_acceptance_length=1.70,
+        id="deepseek-v4-flash-mtp-nvfp4-tp4",
+        tp_size=4,
+        gpu_memory_utilization=0.9,
+        extra_kwargs={
+            "trust_remote_code": True,
+            "kv_cache_dtype": "fp8",
+            "block_size": None,
+            "enforce_eager": True,
+        },
+        marks=[pytest.mark.slow_test],
+        rtol=0.10,
+    ),
+]
 
 
 def get_available_attention_backends() -> list[str]:
@@ -150,6 +194,10 @@ def get_tp_size_params() -> list[pytest.param]:
 def get_mt_bench_prompts(
     tokenizer, num_prompts: int = DEFAULT_NUM_PROMPTS
 ) -> list[list[int]]:
+    # Some checkpoints (e.g. quantized exports like the NVFP4 build) ship no
+    # chat template; applying one then produces degenerate prompts and tanks
+    # acceptance. Fall back to raw tokenization when no template is present.
+    skip_chat_template = getattr(tokenizer, "chat_template", None) is None
     args = SimpleNamespace(
         dataset_name="hf",
         dataset_path="philschmid/mt-bench",
@@ -166,7 +214,7 @@ def get_mt_bench_prompts(
         hf_output_len=DEFAULT_OUTPUT_LEN,
         no_stream=True,
         disable_shuffle=False,
-        skip_chat_template=False,
+        skip_chat_template=skip_chat_template,
         trust_remote_code=False,
         enable_multimodal_chat=False,
         request_id_prefix="",
@@ -213,56 +261,43 @@ def extract_acceptance_metrics(metrics, num_spec_tokens: int) -> dict:
     }
 
 
-@large_gpu_mark(min_gb=40)
-@pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
-    reason="This test is only supported on CUDA-alike platforms.",
-)
-@pytest.mark.parametrize(
-    "model_config",
-    [
-        pytest.param(config, id=config.id, marks=config.marks)
-        for config in EAGLE3_MODEL_CONFIGS
-    ],
-)
-@pytest.mark.parametrize("num_spec_tokens", [DEFAULT_NUM_SPEC_TOKENS])
-@pytest.mark.parametrize("tp_size", get_tp_size_params())
-@pytest.mark.parametrize("attention_backend", get_attention_backend_params())
-def test_eagle3_acceptance_length(
-    model_config: Eagle3ModelConfig,
-    num_spec_tokens: int,
+def _run_acceptance_length_test(
+    config: SpecDecodeModelConfig,
     tp_size: int,
     attention_backend: str,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    # Skip if this backend is incompatible with the model
     attention_config = None
     if attention_backend != "auto":
         backend_enum = AttentionBackendEnum[attention_backend]
-        if backend_enum in model_config.excluded_backends:
-            pytest.skip(f"{attention_backend} is incompatible with {model_config.id}")
+        if backend_enum in config.excluded_backends:
+            pytest.skip(f"{attention_backend} is incompatible with {config.id}")
         attention_config = {"backend": attention_backend}
+
+    speculative_config = {
+        "method": config.method,
+        "num_speculative_tokens": config.num_speculative_tokens,
+    }
+    if config.drafter is not None:
+        speculative_config["model"] = config.drafter
+
+    extra_kwargs = dict(config.extra_kwargs)
+    # Qwen/Qwen3-30B-A3B-FP8 with TP=4 needs EP (issue #25292)
+    if tp_size == 4 and "Qwen3-VL" in config.model:
+        extra_kwargs["enable_expert_parallel"] = True
 
     with monkeypatch.context() as m:
         m.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
         with VllmRunner(
-            model_name=model_config.verifier,
-            speculative_config={
-                "method": "eagle3",
-                "model": model_config.drafter,
-                "num_speculative_tokens": num_spec_tokens,
-            },
+            model_name=config.model,
+            speculative_config=speculative_config,
             attention_config=attention_config,
             tensor_parallel_size=tp_size,
-            gpu_memory_utilization=0.7,
+            gpu_memory_utilization=config.gpu_memory_utilization,
             disable_log_stats=False,
             max_model_len=DEFAULT_MAX_MODEL_LEN,
-            # Qwen/Qwen3-30B-A3B-FP8 with TP=4 needs EP
-            # https://github.com/vllm-project/vllm/issues/25292
-            enable_expert_parallel=(
-                tp_size == 4 and "Qwen3-VL" in model_config.verifier
-            ),
+            **extra_kwargs,
         ) as vllm_runner:
             tokenizer = vllm_runner.llm.get_tokenizer()
             prompt_ids = get_mt_bench_prompts(tokenizer, DEFAULT_NUM_PROMPTS)
@@ -277,25 +312,25 @@ def test_eagle3_acceptance_length(
             )
 
             metrics = vllm_runner.llm.get_metrics()
-            results = extract_acceptance_metrics(metrics, num_spec_tokens)
+            results = extract_acceptance_metrics(metrics, config.num_speculative_tokens)
 
-            actual_acceptance_length = results["acceptance_length"]
-            expected = model_config.expected_acceptance_length
+            actual = results["acceptance_length"]
+            expected = config.expected_acceptance_length
             actual_per_pos = results["acceptance_lengths_per_pos"]
-            expected_per_pos = model_config.expected_acceptance_lengths_per_pos
+            expected_per_pos = config.expected_acceptance_lengths_per_pos
             if (
                 current_platform.is_rocm()
-                and model_config.rocm_expected_acceptance_lengths_per_pos
+                and config.rocm_expected_acceptance_lengths_per_pos
             ):
-                expected_per_pos = model_config.rocm_expected_acceptance_lengths_per_pos
+                expected_per_pos = config.rocm_expected_acceptance_lengths_per_pos
 
-            rel_error = abs(actual_acceptance_length - expected) / expected
+            rel_error = abs(actual - expected) / expected
 
             # Overall acceptance length always uses DEFAULT_RTOL
             assert rel_error <= DEFAULT_RTOL, (
-                f"Acceptance length regression detected for {model_config.id}!\n"
+                f"Acceptance length regression detected for {config.id}!\n"
                 f"  Expected: {expected:.3f}\n"
-                f"  Actual:   {actual_acceptance_length:.3f}\n"
+                f"  Actual:   {actual:.3f}\n"
                 f"  Relative error: {rel_error:.2%} (tolerance: {DEFAULT_RTOL:.2%})\n"
                 f"  Drafts: {results['num_drafts']}, "
                 f"Accepted tokens: {results['num_accepted_tokens']}"
@@ -303,28 +338,76 @@ def test_eagle3_acceptance_length(
 
             if expected_per_pos and len(expected_per_pos) == len(actual_per_pos):
                 # Per-position checks use model-specific rtol if provided
-                rtol = (
-                    model_config.rtol if model_config.rtol is not None else DEFAULT_RTOL
-                )
-                for pos, (actual, exp) in enumerate(
-                    zip(actual_per_pos, expected_per_pos)
-                ):
+                rtol = config.rtol if config.rtol is not None else DEFAULT_RTOL
+                for pos, (act, exp) in enumerate(zip(actual_per_pos, expected_per_pos)):
                     if exp > 0:
                         min_expected = exp * (1 - rtol)
-                        assert actual >= min_expected, (
+                        assert act >= min_expected, (
                             f"Per-position acceptance length regression at pos {pos} "
-                            f"for {model_config.id}!\n"
+                            f"for {config.id}!\n"
                             f"  Expected: {exp:.3f}\n"
-                            f"  Actual:   {actual:.3f}\n"
+                            f"  Actual:   {act:.3f}\n"
                             f"  Minimum:  {min_expected:.3f}\n"
                             f"  Tolerance: rtol={rtol:.2%}"
                         )
 
+            if config.expected_gsm8k_accuracy is not None:
+                accuracy = evaluate_gsm8k_offline(vllm_runner.llm)["accuracy"]
+                assert accuracy >= config.expected_gsm8k_accuracy, (
+                    f"GSM8k accuracy {accuracy:.3f} below "
+                    f"{config.expected_gsm8k_accuracy:.3f} for {config.id}"
+                )
+
             print(
-                f"\n{model_config.id} [tp={tp_size}, backend={attention_backend}]: "
-                f"acceptance_length={actual_acceptance_length:.3f}"
+                f"\n{config.id} [tp={tp_size}, backend={attention_backend}]: "
+                f"acceptance_length={actual:.3f}"
                 f" (expected={expected:.3f}, rel_error={rel_error:.2%})"
             )
             print(f"  Per-position: {[f'{v:.3f}' for v in actual_per_pos]}")
             if expected_per_pos:
                 print(f"  Expected:     {[f'{v:.3f}' for v in expected_per_pos]}")
+
+
+@large_gpu_mark(min_gb=40)
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is only supported on CUDA-alike platforms.",
+)
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        pytest.param(config, id=config.id, marks=config.marks)
+        for config in EAGLE3_MODEL_CONFIGS
+    ],
+)
+@pytest.mark.parametrize("tp_size", get_tp_size_params())
+@pytest.mark.parametrize("attention_backend", get_attention_backend_params())
+def test_eagle3_acceptance_length(
+    model_config: SpecDecodeModelConfig,
+    tp_size: int,
+    attention_backend: str,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _run_acceptance_length_test(model_config, tp_size, attention_backend, monkeypatch)
+
+
+@large_gpu_mark(min_gb=80)
+@pytest.mark.skipif(
+    not current_platform.is_cuda_alike(),
+    reason="This test is only supported on CUDA-alike platforms.",
+)
+@pytest.mark.parametrize(
+    "model_config",
+    [
+        pytest.param(config, id=config.id, marks=config.marks)
+        for config in MTP_MODEL_CONFIGS
+    ],
+)
+def test_mtp_acceptance_length(
+    model_config: SpecDecodeModelConfig,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    num_gpus = torch.accelerator.device_count() if torch.cuda.is_available() else 1
+    if num_gpus < model_config.tp_size:
+        pytest.skip(f"Need {model_config.tp_size} GPUs, only {num_gpus} available")
+    _run_acceptance_length_test(model_config, model_config.tp_size, "auto", monkeypatch)
