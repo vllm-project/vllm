@@ -16,6 +16,9 @@ torchaudio; platform_machine != "s390x" and platform_machine != "riscv64"
 # required for the image processor of phi3v, this must be updated alongside torch
 torchvision; platform_machine != "s390x"  and platform_machine != "riscv64"
 
+# required for the torchcodec video decoding backend
+torchcodec >= 0.14; platform_machine != "s390x" and platform_machine != "riscv64" and platform_machine != "ppc64le"
+
 # Intel Extension for PyTorch, only for x86_64 CPUs
 intel-openmp==2024.2.1; platform_machine == "x86_64"
 
