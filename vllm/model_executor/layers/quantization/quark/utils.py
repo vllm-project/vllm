@@ -27,9 +27,18 @@ def should_ignore_layer(
     layer_name: str | None,
     ignore: Iterable[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
+    *,
+    check_children: bool = False,
 ) -> bool:
     if layer_name is None:
         return False
+
+    if check_children and any(
+        target == layer_name or target.startswith(layer_name + ".")
+        for target in ignore
+        if not target.startswith("re:")
+    ):
+        return True
 
     # layer_name = model.layers.0.self_attn.qkv_proj
     # proj_name = qkv_proj
