@@ -1301,8 +1301,12 @@ class StatLoggerManager:
         if enable_default_loggers and logger.isEnabledFor(logging.INFO):
             if client_count > 1:
                 logger.warning(
-                    "AsyncLLM created with api_server_count more than 1; "
-                    "disabling stats logging to avoid incomplete stats."
+                    "AsyncLLM created with api_server_count=%d > 1; "
+                    "disabling stats logging to avoid incomplete or misleading "
+                    "stats (each server only sees a subset of traffic). "
+                    "Use Prometheus metrics for accurate aggregated stats, or "
+                    "set VLLM_USE_RUST_FRONTEND=1 to avoid this limitation.",
+                    client_count,
                 )
             else:
                 default_logger_factory = (
