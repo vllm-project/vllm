@@ -579,6 +579,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             ignore_eos=self.ignore_eos,
             temperature=temperature,
             length_penalty=self.length_penalty,
+            min_tokens=self.min_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
         )
 

@@ -16,7 +16,11 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.utils import random_uuid
 from vllm.utils.async_utils import collect_from_async_generator
 
-from .utils import BeamSearchSequence, create_sort_beams_key_function
+from .utils import (
+    BeamSearchSequence,
+    create_sort_beams_key_function,
+    get_generated_token_count,
+)
 
 
 class BeamSearchOnlineMixin(ABC):
@@ -38,6 +42,7 @@ class BeamSearchOnlineMixin(ABC):
         ignore_eos = params.ignore_eos
         temperature = params.temperature
         length_penalty = params.length_penalty
+        min_tokens = params.min_tokens
         include_stop_str_in_output = params.include_stop_str_in_output
 
         tokenizer = self.renderer.get_tokenizer()
@@ -131,6 +136,9 @@ class BeamSearchOnlineMixin(ABC):
                             current_beam.cum_logprob + logprob_obj.logprob
                         )
                         if token_id == eos_token_id and not ignore_eos:
+                            generated_tokens = get_generated_token_count(current_beam)
+                            if generated_tokens < min_tokens:
+                                continue
                             completed.append(
                                 BeamSearchSequence(
                                     orig_prompt=prompt,
