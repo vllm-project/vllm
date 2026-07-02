@@ -1073,7 +1073,6 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
-            finished_recving_kv_req_ids=set(self.finished_recving_kv_req_ids),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:

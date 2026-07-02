@@ -1194,32 +1194,6 @@ class GPUModelRunner(
 
         set_num_real_reqs(num_reqs)
 
-    def _hisparse_finished_recv_rows(
-        self,
-        scheduler_output: "SchedulerOutput",
-    ) -> list[int]:
-        """Persistent-batch rows admitted after async KV receive.
-
-        Connector-agnostic: it reads ``finished_recving_kv_req_ids``, which the
-        scheduler fills from any connector's ``finished_recving`` signal. This
-        covers NixlConnector direct-to-host RDMA and MooncakeStoreConnector
-        async store loads alike — both admit a request only after its host MLA
-        (and GPU indexer) KV is in place, so the hot rows must be reset before
-        the first decode reads the loaded host pool.
-        """
-        attention_config = self.vllm_config.attention_config
-        if attention_config is None or not attention_config.enable_hisparse:
-            return []
-        recv_ids = scheduler_output.finished_recving_kv_req_ids
-        if not recv_ids:
-            return []
-        rows = []
-        for req_id in recv_ids:
-            row = self.input_batch.req_id_to_index.get(req_id)
-            if row is not None:
-                rows.append(row)
-        return rows
-
     def _update_states(self, scheduler_output: "SchedulerOutput") -> Callable | None:
         """Update the cached states and the persistent batch with the scheduler
         output.
@@ -1541,9 +1515,12 @@ class GPUModelRunner(
             if req_index is not None:
                 hisparse_new_rows.append(req_index)
             self.input_batch.update_req_spec_token_ids(request, scheduled_spec_tokens)
-        self._hisparse_reset_batch_rows(
-            hisparse_new_rows + self._hisparse_finished_recv_rows(scheduler_output)
-        )
+        # Rows are safe against async KV receives (NIXL RDMA, Mooncake store
+        # loads) without a per-connector signal: a receiving request is only
+        # admitted after its receive completes, so its row was just reset
+        # here, and _hisparse_invalidate_new_request_blocks dropped stale hot
+        # copies of its (freshly assigned) block slots across all rows.
+        self._hisparse_reset_batch_rows(hisparse_new_rows)
 
         # Condense the batched states if there are gaps left by removed requests
         self.input_batch.condense()
