@@ -16,7 +16,7 @@ from tests.v1.attention.utils import (
     try_backend_includes_kv_cache_update,
     try_get_attention_backend,
 )
-from vllm.config import ModelConfig
+from vllm.config import ModelConfig, set_current_vllm_config
 from vllm.platforms import current_platform
 from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import (
@@ -24,7 +24,11 @@ from vllm.utils.torch_utils import (
     is_torch_equal_or_newer,
     set_random_seed,
 )
-from vllm.v1.attention.backend import AttentionType, CommonAttentionMetadata
+from vllm.v1.attention.backend import (
+    AttentionCGSupport,
+    AttentionType,
+    CommonAttentionMetadata,
+)
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.backends.utils import (
     set_kv_cache_layout,
@@ -324,6 +328,7 @@ def _test_backend_correctness(
     atol: float = 1e-2,
     rtol: float = 1e-2,
     tensor_parallel_size: int = 1,
+    vllm_config_transform=None,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -372,6 +377,8 @@ def _test_backend_correctness(
         num_gpu_blocks=8192,
         hf_config_override=hf_config_override,
     )
+    if vllm_config_transform is not None:
+        vllm_config_transform(vllm_config)
     device = torch.device(f"{DEVICE_TYPE}:0")
 
     kv_cache_spec = create_standard_kv_cache_spec(vllm_config, attn_type)
@@ -626,6 +633,189 @@ def test_causal_backend_correctness(
         )
 
 
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_xqa_bmm1_scale_matches_decode_q_dtype():
+    """XQA decode should only apply q_scale when decode Q is FP8."""
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    class MockLayer:
+        _q_scale_float = 2.0
+        _k_scale_float = 3.0
+
+    impl = object.__new__(flashinfer_backend.FlashInferImpl)
+    impl.scale = 0.5
+    impl.kv_cache_dtype = "fp8"
+
+    assert impl.get_xqa_bmm1_scale(MockLayer, torch.bfloat16) == 1.5
+    assert impl.get_xqa_bmm1_scale(MockLayer, torch.float8_e4m3fn) == 3.0
+
+
+def test_flashinfer_xqa_spec_decode_causal_mask():
+    from vllm.v1.attention.backends.flashinfer import (
+        _get_xqa_spec_decode_causal_mask,
+    )
+
+    mask = _get_xqa_spec_decode_causal_mask(2, 3, torch.device("cpu"))
+
+    assert mask.shape == (2, 3, 2)
+    torch.testing.assert_close(
+        mask[..., 0],
+        torch.tensor(
+            [[0b001, 0b011, 0b111], [0b001, 0b011, 0b111]],
+            dtype=torch.uint16,
+        ),
+    )
+    assert torch.equal(mask[..., 1], torch.zeros((2, 3), dtype=torch.uint16))
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_sm90_xqa_decode_correctness(default_vllm_config):
+    """FlashInfer should route Hopper decode through XQA and match SDPA."""
+    if not current_platform.is_cuda() or not current_platform.is_device_capability(90):
+        pytest.skip("FlashInfer XQA decode requires SM90.")
+
+    import unittest.mock
+
+    from vllm.utils.flashinfer import can_use_trtllm_attention
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+    from vllm.v1.attention.backends.utils import PerLayerParameters
+
+    def mock_get_per_layer_parameters(vllm_config, layer_names, impl_cls):
+        return {
+            "placeholder": PerLayerParameters(
+                window_left=-1,
+                logits_soft_cap=0.0,
+                sm_scale=1.0,
+            )
+        }
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    batch_spec = BATCH_SPECS["small_decode"]
+    vllm_config = create_vllm_config(
+        model_name="meta-llama/Meta-Llama-3-8B",
+        max_model_len=max(batch_spec.seq_lens),
+        block_size=16,
+    )
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    kv_cache_spec = FullAttentionSpec(
+        block_size=vllm_config.cache_config.block_size,
+        num_kv_heads=vllm_config.model_config.get_num_kv_heads(
+            vllm_config.parallel_config
+        ),
+        head_size=vllm_config.model_config.get_head_size(),
+        dtype=vllm_config.model_config.dtype,
+    )
+
+    with set_current_vllm_config(vllm_config):
+        if not can_use_trtllm_attention(
+            vllm_config.model_config.get_num_attention_heads(
+                vllm_config.parallel_config
+            ),
+            kv_cache_spec.num_kv_heads,
+            is_prefill=False,
+        ):
+            pytest.skip("FlashInfer XQA decode is not available in this setup.")
+
+        with unittest.mock.patch(
+            "vllm.v1.attention.backends.flashinfer.get_per_layer_parameters",
+            mock_get_per_layer_parameters,
+        ):
+            builder = flashinfer_backend.FlashInferMetadataBuilder(
+                kv_cache_spec, ["placeholder"], vllm_config, device
+            )
+            common_attn_metadata = create_common_attn_metadata(
+                batch_spec, vllm_config.cache_config.block_size, device
+            )
+            attn_metadata = builder.build(0, common_attn_metadata)
+
+    assert (
+        flashinfer_backend.FlashInferMetadataBuilder.get_cudagraph_support(
+            vllm_config, kv_cache_spec
+        )
+        == AttentionCGSupport.UNIFORM_BATCH
+    )
+    assert isinstance(
+        attn_metadata.decode,
+        flashinfer_backend.FlashInferTrtllmAPIDecode,
+    )
+    assert attn_metadata.decode.kernel == flashinfer_backend.FlashInferDecodeKernel.XQA
+
+    _test_backend_correctness(
+        batch_spec,
+        "meta-llama/Meta-Llama-3-8B",
+        [AttentionBackendEnum.FLASHINFER],
+        causal_mask_mod,
+    )
+
+
+@pytest.mark.skipif(
+    AttentionBackendEnum.FLASHINFER not in BACKENDS_TO_TEST,
+    reason="FlashInfer is not available.",
+)
+def test_flashinfer_sm90_xqa_spec_decode_correctness(default_vllm_config):
+    """SM90 XQA spec decode should use a causal mask and match SDPA."""
+    if not current_platform.is_cuda() or not current_platform.is_device_capability(90):
+        pytest.skip("FlashInfer XQA decode requires SM90.")
+
+    from vllm.config import SpeculativeConfig
+    from vllm.utils.flashinfer import can_use_trtllm_attention
+
+    def causal_mask_mod(
+        b: torch.Tensor,
+        h: torch.Tensor,
+        q_idx: torch.Tensor,
+        kv_idx: torch.Tensor,
+        *,
+        context_len: int,
+    ):
+        return (q_idx + context_len) >= kv_idx
+
+    def enable_spec_decode(vllm_config):
+        vllm_config.speculative_config = SpeculativeConfig(
+            num_speculative_tokens=2,
+            method="ngram",
+            target_model_config=vllm_config.model_config,
+            target_parallel_config=vllm_config.parallel_config,
+        )
+
+    batch_spec = BatchSpec(seq_lens=[35, 43], query_lens=[3, 3])
+    vllm_config = create_vllm_config(
+        model_name="meta-llama/Meta-Llama-3-8B",
+        max_model_len=max(batch_spec.seq_lens),
+        block_size=16,
+    )
+    kv_cache_spec = create_standard_kv_cache_spec(vllm_config)
+    if not can_use_trtllm_attention(
+        vllm_config.model_config.get_num_attention_heads(vllm_config.parallel_config),
+        kv_cache_spec.num_kv_heads,
+        is_prefill=False,
+    ):
+        pytest.skip("FlashInfer XQA decode is not available in this setup.")
+
+    _test_backend_correctness(
+        batch_spec,
+        "meta-llama/Meta-Llama-3-8B",
+        [AttentionBackendEnum.FLASHINFER],
+        causal_mask_mod,
+        vllm_config_transform=enable_spec_decode,
+    )
+
+
 if current_platform.is_rocm():
     # FLASH_ATTN is not supported on ROCm
     SLIDING_WINDOW_BACKENDS_TO_TEST = [
@@ -656,7 +846,7 @@ else:
 @pytest.mark.parametrize("model", ["microsoft/Phi-tiny-MoE-instruct"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2, 4])
 def test_sliding_window_backend_correctness(
-    batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
 ):
     """Test backend's correctness with sliding window attention."""
 
@@ -718,7 +908,7 @@ def test_sliding_window_backend_correctness(
 @pytest.mark.parametrize("model", ["google/embeddinggemma-300m"])
 @pytest.mark.parametrize("tensor_parallel_size", [1, 2])
 def test_sliding_window_encoder_backend_correctness(
-    batch_spec_name: str, model: str, tensor_parallel_size: int
+    default_vllm_config, batch_spec_name: str, model: str, tensor_parallel_size: int
 ):
     """Test backend's correctness with sliding window attention."""
 

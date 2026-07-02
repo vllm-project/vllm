@@ -32,6 +32,7 @@ from vllm.config import (
     ModelConfig,
     ParallelConfig,
     SchedulerConfig,
+    SpeculativeConfig,
     VllmConfig,
     set_current_vllm_config,
 )
@@ -134,6 +135,8 @@ def _build_common_attn_metadata(
 def _create_vllm_config(
     config: BenchmarkConfig,
     max_num_blocks: int,
+    q_lens: list[int],
+    kv_lens: list[int],
 ) -> VllmConfig:
     """Create a VllmConfig for benchmarking with mock model methods."""
     model_config = ModelConfig(
@@ -188,6 +191,19 @@ def _create_vllm_config(
     )
     model_config.get_sliding_window = types.MethodType(lambda self: None, model_config)
 
+    speculative_config = None
+    max_query_len = max(q_lens)
+    has_spec_decode_shape = any(
+        q_len > 1 and kv_len > q_len for q_len, kv_len in zip(q_lens, kv_lens)
+    )
+    if has_spec_decode_shape:
+        speculative_config = SpeculativeConfig(
+            num_speculative_tokens=max_query_len - 1,
+            method="ngram",
+            target_model_config=model_config,
+            target_parallel_config=parallel_config,
+        )
+
     return VllmConfig(
         model_config=model_config,
         cache_config=cache_config,
@@ -196,6 +212,7 @@ def _create_vllm_config(
         device_config=device_config,
         load_config=load_config,
         compilation_config=compilation_config,
+        speculative_config=speculative_config,
     )
 
 
@@ -490,7 +507,7 @@ def run_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     # Suppress vLLM logs during setup to reduce spam
     with log_warnings_and_errors_only():
         # Create vllm_config first - uses model's native dtype via "auto"
-        vllm_config = _create_vllm_config(config, max_num_blocks)
+        vllm_config = _create_vllm_config(config, max_num_blocks, q_lens, kv_lens)
         dtype = vllm_config.model_config.dtype
 
         # Wrap everything in set_current_vllm_config context
