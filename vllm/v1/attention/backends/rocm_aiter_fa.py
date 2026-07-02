@@ -450,6 +450,25 @@ class AiterFlashAttentionMetadataBuilder(
         )
         self.scale = torch.tensor([1.0], dtype=torch.float, device=self.device)
 
+    def _maybe_allocate_shuffle_scale(self) -> None:
+        # Allocate scales for fp8 shuffle kv cache with shuffle_kv_cache enabled.
+        if (
+            rocm_aiter_ops.is_shuffle_kv_cache_enabled()
+            and self.scale.numel() == 1
+            and is_quantized_kv_cache(self.vllm_config.cache_config.cache_dtype)
+        ):
+            layers = get_layers_from_vllm_config(self.vllm_config, Attention)
+            first_layer_name = [k for k in layers][0]
+            kv_cache_shape = self.vllm_config.compilation_config.static_forward_context[
+                first_layer_name
+            ].kv_cache.shape
+            num_blocks = kv_cache_shape[0]
+            self.scale = torch.ones(
+                [num_blocks, self.num_heads_kv, self.block_size],
+                dtype=torch.float32,
+                device=self.device,
+            )
+
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
     ):
@@ -468,23 +487,7 @@ class AiterFlashAttentionMetadataBuilder(
             common_attn_metadata,
             decode_threshold=self.reorder_batch_threshold,
         )
-        # Allocate scales for fp8 shuffle kv cache with shuffle_kv_cache enabled
-        if (
-            rocm_aiter_ops.is_shuffle_kv_cache_enabled()
-            and self.scale.numel() == 1
-            and is_quantized_kv_cache(self.vllm_config.cache_config.cache_dtype)
-        ):
-            layers = get_layers_from_vllm_config(self.vllm_config, Attention)
-            first_layer_name = [k for k in layers][0]
-            kv_cache_shape = self.vllm_config.compilation_config.static_forward_context[
-                first_layer_name
-            ].kv_cache.shape
-            num_blocks = kv_cache_shape[0]
-            self.scale = torch.ones(
-                [num_blocks, self.num_heads_kv, self.block_size],
-                dtype=torch.float32,
-                device=self.device,
-            )
+        self._maybe_allocate_shuffle_scale()
         (
             num_decodes,
             num_extends,
@@ -675,6 +678,8 @@ class AiterFlashAttentionMetadataBuilder(
         skip split_decodes_prefills_and_extends() and avoid all .cpu() /
         .item() calls that would otherwise break CUDA graph capture.
         """
+        self._maybe_allocate_shuffle_scale()
+
         num_reqs = common_attn_metadata.num_reqs
         num_tokens = common_attn_metadata.num_actual_tokens
 
@@ -1147,18 +1152,81 @@ class AiterFlashAttentionImpl(AttentionImpl):
                 assert attn_metadata.decode_metadata is not None
                 decode_max_query_len = attn_metadata.decode_metadata.max_query_len
 
-                # Use unified_attention for speculative decoding (multi-token),
-                # sliding window, or sinks
-                # (pa_fwd_asm and paged_attention_v1 don't support sinks)
+                # Speculative decoding (multi-token), sliding window, or
+                # sinks need a dedicated decode path: the default kernels
+                # below (paged_attention_v1) don't support sinks and assume
+                # single-token decode. Dispatch to the appropriate kernel:
+                # pa_fwd_asm for the shuffle KV layout, flash_attn_with_kvcache
+                # for non-causal decode, otherwise varlen unified_attention.
                 if (
                     self.sliding_window[0] != -1
                     or decode_max_query_len > 1
                     or self.sinks is not None
                 ):
-                    assert not rocm_aiter_ops.is_shuffle_kv_cache_enabled(), (
-                        "Shuffle KV cache layout is not supported with sliding "
-                        "window, sinks, or speculative decoding (multi-token decode)."
-                    )
+                    if rocm_aiter_ops.is_shuffle_kv_cache_enabled():
+                        # MTP + shuffle KV: route multi-query decode to
+                        # aiter.pa_fwd_asm.
+                        assert attn_metadata.causal, (
+                            "Shuffle KV layout with multi-token decode "
+                            "requires causal attention."
+                        )
+                        _, _, head_size = query.shape
+                        num_blocks, block_size, num_kv_heads, _ = key_cache.shape
+                        x = 16 // key_cache.element_size()
+                        k_cache_template = torch.empty(
+                            [
+                                num_blocks,
+                                num_kv_heads,
+                                head_size // x,
+                                block_size,
+                                x,
+                            ],
+                            dtype=key_cache.dtype,
+                            device="meta",
+                        )
+                        v_cache_template = torch.empty(
+                            [
+                                num_blocks,
+                                num_kv_heads,
+                                block_size // x,
+                                head_size,
+                                x,
+                            ],
+                            dtype=value_cache.dtype,
+                            device="meta",
+                        )
+                        new_key_cache = key_cache.view_as(k_cache_template)
+                        new_value_cache = value_cache.view_as(v_cache_template)
+                        k_qscale = (
+                            layer._k_scale
+                            if attn_metadata.k_scale is None
+                            else attn_metadata.k_scale
+                        )
+                        v_qscale = (
+                            layer._v_scale
+                            if attn_metadata.v_scale is None
+                            else attn_metadata.v_scale
+                        )
+                        # qo_indptr: cumulative Q-token count per decode seq.
+                        qo_indptr = attn_metadata.query_start_loc[: num_decodes + 1].to(
+                            torch.int32
+                        )
+                        rocm_aiter_ops.pa_fwd_asm(
+                            Q=query[:num_decode_tokens],
+                            K=new_key_cache,
+                            V=new_value_cache,
+                            block_tables=attn_metadata.block_table[:num_decodes],
+                            context_lens=attn_metadata.seq_lens[:num_decodes],
+                            block_tables_stride0=attn_metadata.block_table[
+                                :num_decodes
+                            ].stride(0),
+                            K_QScale=k_qscale,
+                            V_QScale=v_qscale,
+                            out_=output[:num_decode_tokens],
+                            max_qlen=decode_max_query_len,
+                            qo_indptr=qo_indptr,
+                        )
+                        return
                     if not attn_metadata.causal:
                         from aiter.ops.triton.attention.mha_v3 import (
                             flash_attn_with_kvcache,
