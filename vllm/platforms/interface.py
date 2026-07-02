@@ -1008,7 +1008,7 @@ class Platform:
             self.device_type,
             key,
         )
-        return None
+        raise AttributeError(key)
 
     def get_global_graph_pool(self) -> Any:
         """
