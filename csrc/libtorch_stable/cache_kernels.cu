@@ -997,8 +997,9 @@ __global__ void gather_and_maybe_dequant_cache(
     const int32_t* __restrict__ cu_seq_lens,   // [BATCH+1]
     const int32_t* __restrict__ token_to_seq,  // [MAX_TOKEN_ACROSS_CHUNK]
     const int32_t num_tokens, const int32_t block_size,
-    const int64_t block_table_stride, const int64_t cache_block_stride,
-    const int64_t cache_entry_stride, const int64_t dst_entry_stride,
+    const int64_t block_table_stride, const int64_t block_table_width,
+    const int64_t cache_block_stride, const int64_t cache_entry_stride,
+    const int64_t dst_entry_stride,
     const float* __restrict__ scale,
     const int32_t* __restrict__ seq_starts) {  // Optional: starting offsets per
                                                // batch
@@ -1015,22 +1016,31 @@ __global__ void gather_and_maybe_dequant_cache(
     int64_t batch_id = token_to_seq[token_id];
     int64_t batch_start = cu_seq_lens[batch_id];
     int64_t batch_end = cu_seq_lens[batch_id + 1];
-    int32_t batch_offset = token_id - batch_start;
+    int64_t batch_offset = token_id - batch_start;
 
     if (token_id >= batch_end) return;
-    int32_t offset = 0;
+    int64_t offset = 0;
     if (seq_starts != nullptr) {
       offset = seq_starts[batch_id];
     }
     batch_offset += offset;
-    int32_t block_table_id = batch_offset / block_size;
+    int64_t block_table_id = batch_offset / block_size;
     int32_t slot_id = batch_offset % block_size;
-    int32_t block_table_offset = batch_id * block_table_stride + block_table_id;
+    scalar_t* dst_ = dst + token_id * dst_entry_stride;
+
+    if (batch_offset < 0 || block_table_id >= block_table_width) {
+#pragma unroll
+      for (int idx = threadIdx.x; idx < ENTRY_SIZE; idx += CTA_SIZE) {
+        dst_[idx] = scalar_t{};
+      }
+      continue;
+    }
+
+    int64_t block_table_offset = batch_id * block_table_stride + block_table_id;
     int32_t block_id = block_table[block_table_offset];
     int64_t cache_offset =
         block_id * cache_block_stride + slot_id * cache_entry_stride;
     constexpr int32_t vec_iter_cnt = ENTRY_SIZE / vec_size;
-    scalar_t* dst_ = dst + token_id * dst_entry_stride;
     cache_t* src_ = const_cast<cache_t*>(src_cache) + cache_offset;
 
 #pragma unroll
@@ -1080,9 +1090,9 @@ __global__ void gather_and_maybe_dequant_cache(
           block_table.const_data_ptr<int32_t>(),                              \
           cu_seq_lens.const_data_ptr<int32_t>(),                              \
           token_to_seq.const_data_ptr<int32_t>(), num_tokens, block_size,     \
-          block_table_stride, cache_block_stride, cache_entry_stride,         \
-          dst_entry_stride, reinterpret_cast<const float*>(scale.data_ptr()), \
-          seq_starts_ptr);
+          block_table_stride, block_table_width, cache_block_stride,          \
+          cache_entry_stride, dst_entry_stride,                               \
+          reinterpret_cast<const float*>(scale.data_ptr()), seq_starts_ptr);
 
 #define CALL_GATHER_CACHE_576(SCALAR_T, CACHE_T, KV_DTYPE) \
   CALL_GATHER_CACHE(SCALAR_T, CACHE_T, KV_DTYPE, 576)
@@ -1141,6 +1151,7 @@ void gather_and_maybe_dequant_cache(
   }
 
   int64_t block_table_stride = block_table.stride(0);
+  int64_t block_table_width = block_table.size(1);
   int64_t cache_block_stride = src_cache.stride(0);
   int64_t cache_entry_stride = src_cache.stride(1);
   int64_t dst_entry_stride = dst.stride(0);
@@ -1241,8 +1252,9 @@ __global__ void cp_gather_cache(
     const int32_t* __restrict__ block_table,  // [BATCH, BLOCK_INDICES]
     const int32_t* __restrict__ cu_seq_lens,  // [BATCH+1]
     const int32_t block_size, const int32_t entry_size,
-    const int64_t block_table_stride, const int64_t cache_block_stride,
-    const int64_t cache_entry_stride, const int64_t dst_entry_stride,
+    const int64_t block_table_stride, const int64_t block_table_width,
+    const int64_t cache_block_stride, const int64_t cache_entry_stride,
+    const int64_t dst_entry_stride,
     const int32_t* __restrict__ seq_starts  // Optional: starting offsets per
                                             // batch
 ) {
@@ -1265,12 +1277,13 @@ __global__ void cp_gather_cache(
   // Adjust the pointer for the block_table for this batch.
   // If seq_starts is provided, compute an offset based on it
   const int32_t batch_offset = bid * block_table_stride;
-  int32_t offset = split_start;
+  int64_t offset = split_start;
   if (seq_starts != nullptr) {
     offset += seq_starts[bid];
   }
-  int32_t offset_div = offset / block_size;
-  offset = offset % block_size;
+  const bool starts_before_cache = offset < 0;
+  int64_t offset_div = starts_before_cache ? -1 : offset / block_size;
+  offset = starts_before_cache ? 0 : offset % block_size;
   const int32_t* batch_block_table = block_table + batch_offset;
 
   // Adjust dst pointer based on the cumulative sequence lengths.
@@ -1281,12 +1294,21 @@ __global__ void cp_gather_cache(
     for (int i = threadIdx.x; i < entry_size; i += blockDim.x)
       _dst[i] = _src[i];
   };
+  auto zero_entry = [&](scalar_t* __restrict__ _dst) {
+    for (int i = threadIdx.x; i < entry_size; i += blockDim.x)
+      _dst[i] = scalar_t{};
+  };
 
   for (int pid = split_start; pid < split_end; ++pid) {
-    auto block_id = batch_block_table[offset_div];
-    auto block_start_ptr = src_cache + block_id * cache_block_stride;
     auto block_dst_ptr = dst + pid * dst_entry_stride;
-    copy_entry(block_start_ptr + offset * cache_entry_stride, block_dst_ptr);
+    if (starts_before_cache || offset_div < 0 ||
+        offset_div >= block_table_width) {
+      zero_entry(block_dst_ptr);
+    } else {
+      auto block_id = batch_block_table[offset_div];
+      auto block_start_ptr = src_cache + block_id * cache_block_stride;
+      copy_entry(block_start_ptr + offset * cache_entry_stride, block_dst_ptr);
+    }
     offset += 1;
     // bump to next block
     if (offset == block_size) {
@@ -1304,8 +1326,8 @@ __global__ void cp_gather_cache(
       reinterpret_cast<CPY_DTYPE*>(dst.data_ptr()),                  \
       block_table.const_data_ptr<int32_t>(),                         \
       cu_seq_lens.const_data_ptr<int32_t>(), block_size, entry_size, \
-      block_table_stride, cache_block_stride, cache_entry_stride,    \
-      dst_entry_stride, seq_starts_ptr);
+      block_table_stride, block_table_width, cache_block_stride,     \
+      cache_entry_stride, dst_entry_stride, seq_starts_ptr);
 
 // Gather sequences from the cache into the destination tensor.
 //  - cu_seq_lens contains the cumulative sequence lengths for each batch
@@ -1351,6 +1373,7 @@ void cp_gather_cache(
   }
 
   int64_t block_table_stride = block_table.stride(0);
+  int64_t block_table_width = block_table.size(1);
   int64_t cache_block_stride = src_cache.stride(0);
   int64_t cache_entry_stride = src_cache.stride(1);
   int64_t dst_entry_stride = dst.stride(0);
