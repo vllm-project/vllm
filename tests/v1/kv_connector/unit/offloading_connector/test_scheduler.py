@@ -10,7 +10,13 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     generate_store_output,
     to_keys,
 )
-from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
+from tests.v1.kv_connector.unit.utils import (
+    EOS_TOKEN_ID,
+    create_model_runner_output,
+)
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingWorkerMetadata,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
@@ -214,6 +220,112 @@ def test_request_preemption(request_runner, async_scheduling: bool):
 
     # All stores completed before request_finished -> fence index empty.
     assert runner.connector_scheduler._block_id_to_pending_jobs == {}
+
+
+def test_preempted_request_with_in_flight_store_is_deferred_on_readmit(
+    request_runner,
+):
+    block_size = 4
+    runner = request_runner(
+        block_size=block_size,
+        num_gpu_blocks=60,
+        async_scheduling=True,
+        block_size_factor=1,
+    )
+    scheduler = runner.scheduler
+    connector_scheduler = runner.connector_scheduler
+    free_block_queue = scheduler.kv_cache_manager.block_pool.free_block_queue
+    full_num_free_blocks = free_block_queue.num_free_blocks
+
+    runner.manager.prepare_store.side_effect = (
+        lambda keys, req_context: generate_store_output(keys)
+    )
+
+    # Real workers flush preempted stores by waiting for them, but the
+    # scheduler only learns about completed jobs on a later connector-output
+    # update. Keep wait() from completing the transfer immediately so the test
+    # covers that async scheduling window.
+    handler = runner.offloading_spec.handler
+
+    def mark_flushed_without_completion(job_ids: set[int]) -> None:
+        handler.flushed_jobs |= set(job_ids)
+
+    handler.wait = mark_flushed_without_completion
+
+    pending_scheduler_output = None
+    pending_model_runner_output = None
+
+    def manual_step(token_id: int = 0, consume_prev: bool = True):
+        nonlocal pending_scheduler_output, pending_model_runner_output
+
+        if consume_prev and pending_model_runner_output is not None:
+            scheduler.update_from_output(
+                pending_scheduler_output, pending_model_runner_output
+            )
+            pending_scheduler_output = None
+            pending_model_runner_output = None
+
+        scheduler_output = scheduler.schedule()
+        runner._update_gpu_blocks()
+        kv_connector_metadata = scheduler_output.kv_connector_metadata
+        assert kv_connector_metadata is not None
+
+        runner.worker_connector.handle_preemptions(kv_connector_metadata)
+        runner.worker_connector.bind_connector_metadata(kv_connector_metadata)
+        runner.worker_connector.start_load_kv(runner._dummy_ctx)
+        finished_sending, finished_recving = runner.worker_connector.get_finished(
+            scheduler_output.finished_req_ids
+        )
+        worker_meta = (
+            runner.worker_connector.build_connector_worker_meta()
+            or OffloadingWorkerMetadata()
+        )
+        runner.worker_connector.clear_connector_metadata()
+
+        pending_scheduler_output = scheduler_output
+        pending_model_runner_output = create_model_runner_output(
+            reqs=scheduler.running,
+            finished_sending=finished_sending,
+            finished_recving=finished_recving,
+            token_id=token_id,
+            kv_connector_worker_meta=worker_meta,
+        )
+        return scheduler_output
+
+    req_id = "0"
+    runner.new_request(token_ids=[0] * block_size * 8)
+
+    for _ in range(120):
+        manual_step()
+        req_status = connector_scheduler._req_status.get(req_id)
+        if (
+            req_status is not None
+            and req_status.num_locally_computed_tokens >= 56
+            and req_status.num_locally_computed_tokens % block_size == 0
+            and req_status.transfer_jobs
+        ):
+            break
+    else:
+        pytest.fail("request did not accumulate an in-flight store")
+
+    free_block_queue.num_free_blocks = 0
+    scheduler_output = manual_step()
+    assert req_id in scheduler_output.preempted_req_ids
+    assert connector_scheduler._req_status[req_id].transfer_jobs
+
+    assert pending_model_runner_output is not None
+    scheduler.update_from_output(pending_scheduler_output, pending_model_runner_output)
+    pending_scheduler_output = None
+    pending_model_runner_output = None
+
+    free_block_queue.num_free_blocks = full_num_free_blocks
+    scheduler.reset_prefix_cache()
+    connector_scheduler._maximal_prefix_lookup = lambda key, req_context: 1
+
+    scheduler_output = manual_step(consume_prev=False)
+    assert all(req.req_id != req_id for req in scheduler_output.scheduled_new_reqs)
+    assert not scheduler_output.kv_connector_metadata.load_jobs
+    assert connector_scheduler._req_status[req_id].transfer_jobs
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
