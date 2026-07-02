@@ -53,6 +53,7 @@ from vllm.model_executor.layers.quantization.utils.marlin_utils_test import (
 from vllm.model_executor.layers.quantization.utils.quant_utils import quantize_weights
 from vllm.platforms import current_platform
 from vllm.scalar_type import ScalarType, scalar_types
+from vllm.triton_utils import tl
 from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import set_random_seed
 
@@ -289,6 +290,7 @@ def run_moe_test(
 @pytest.mark.parametrize("ep_size", EP_SIZE)
 @pytest.mark.parametrize("dtype", [torch.bfloat16])
 @pytest.mark.parametrize("padding", [True, False])
+@pytest.mark.parametrize("use_td", [False, True])
 def test_fused_moe(
     m: int,
     n: int,
@@ -298,9 +300,13 @@ def test_fused_moe(
     ep_size: int,
     dtype: torch.dtype,
     padding: bool,
+    use_td: bool,
     monkeypatch,
     workspace_init,
 ):
+    if use_td and not hasattr(tl, "make_tensor_descriptor"):
+        pytest.skip("Triton < 3.6 lacks tl.make_tensor_descriptor")
+    monkeypatch.setenv("VLLM_TRITON_USE_TD", "1" if use_td else "0")
     set_random_seed(7)
 
     #
