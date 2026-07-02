@@ -432,7 +432,9 @@ class AttentionScheduler {
         cache_size, input.head_dim, input.elem_size, input.q_buffer_elem_size,
         input.logits_buffer_elem_size, input.output_buffer_elem_size,
         max_num_q_per_iter, max_num_q_per_iter);
-    const int32_t default_tile_token_num = default_tile_size / q_head_per_kv;
+    const int32_t default_tile_token_num =
+        std::min(static_cast<int32_t>(default_tile_size / q_head_per_kv),
+                 MaxQTileIterNum * max_num_q_token_per_iter);
     const int32_t split_kv_q_token_num_threshold =
         input.enable_kv_split ? 1 : 0;
     const int32_t sliding_window_size = input.sliding_window_size;
@@ -1455,10 +1457,15 @@ class AttentionMainLoop {
       ReductionWorkItemGroup* const reduction_items =
           metadata.reduction_items_ptr;
       const bool supports_gqa = q_heads_per_kv <= max_q_head_num_per_iter;
+      const auto request_q_token_num = [&](int32_t req_id) {
+        return input->query_start_loc[req_id + 1] -
+               input->query_start_loc[req_id];
+      };
       bool decode_only_batch = true;
       for (int32_t i = 0; i < metadata.workitem_group_num; ++i) {
+        const int32_t req_id = workitem_groups[i].req_id;
         decode_only_batch =
-            decode_only_batch && (workitem_groups[i].q_token_num == 1);
+            decode_only_batch && (request_q_token_num(req_id) == 1);
       }
       const bool use_gqa_fast_path = supports_gqa && decode_only_batch;
       const int32_t actual_kv_head_num =
@@ -1574,8 +1581,15 @@ class AttentionMainLoop {
             const int32_t q_token_id_start =
                 current_workitem_group->q_token_id_start;
             const int32_t q_token_num = current_workitem_group->q_token_num;
+            // Workitems are scheduler tiles, so a prefill request can produce
+            // q_token_num == 1 tiles. Only original single-token requests are
+            // decode requests eligible for the mixed-batch GQA path.
+            const int32_t q_end = input->query_start_loc[current_group_idx + 1];
+            const int32_t q_start = input->query_start_loc[current_group_idx];
+            const bool is_decode_request =
+                request_q_token_num(current_group_idx) == 1;
             const bool curr_use_gqa =
-                use_gqa_fast_path || (supports_gqa && q_token_num == 1);
+                use_gqa_fast_path || (supports_gqa && is_decode_request);
             if (!use_gqa_fast_path && curr_use_gqa &&
                 kv_head_idx % q_heads_per_kv != 0) {
               continue;
@@ -1585,14 +1599,15 @@ class AttentionMainLoop {
             const int32_t curr_max_q_token_num_per_iter =
                 max_q_head_num_per_iter / curr_q_heads_per_kv;
             const int32_t curr_default_q_tile_token_num =
-                default_tile_size / curr_q_heads_per_kv;
+                std::min(static_cast<int32_t>(default_tile_size /
+                                              curr_q_heads_per_kv),
+                         AttentionScheduler::MaxQTileIterNum *
+                             curr_max_q_token_num_per_iter);
             const int32_t q_head_start_idx =
                 use_gqa_fast_path ? (kv_head_idx * q_heads_per_kv)
                                   : kv_head_idx;
 
             // taskgroup general information
-            const int32_t q_end = input->query_start_loc[current_group_idx + 1];
-            const int32_t q_start = input->query_start_loc[current_group_idx];
             const int32_t seq_len = input->seq_lens[current_group_idx];
             const int32_t q_start_pos = seq_len - (q_end - q_start);
             const int32_t block_num = (seq_len + block_size - 1) / block_size;
@@ -1881,8 +1896,11 @@ class AttentionMainLoop {
           const int32_t curr_split_id = curr_workitem_groups->split_start_id;
           const int32_t curr_split_num = curr_workitem_groups->split_num;
           const int32_t current_group_idx = curr_workitem_groups->req_id;
+          const int32_t q_start = input->query_start_loc[current_group_idx];
+          const bool is_decode_request =
+              request_q_token_num(current_group_idx) == 1;
           const bool curr_use_gqa =
-              use_gqa_fast_path || (supports_gqa && curr_output_token_num == 1);
+              use_gqa_fast_path || (supports_gqa && is_decode_request);
           if (!use_gqa_fast_path && curr_use_gqa &&
               kv_head_idx % q_heads_per_kv != 0) {
             continue;
@@ -1891,7 +1909,6 @@ class AttentionMainLoop {
           const int32_t curr_output_head_num =
               curr_output_token_num * curr_q_heads_per_kv;
 
-          const int32_t q_start = input->query_start_loc[current_group_idx];
           const int32_t q_token_start_idx = q_start + curr_output_token_idx;
           const int32_t q_head_start_idx =
               use_gqa_fast_path ? (kv_head_idx * q_heads_per_kv) : kv_head_idx;
