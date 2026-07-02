@@ -118,7 +118,17 @@ class TopKTopPSampler(nn.Module):
             )
             self.forward = self.forward_hip
         else:
-            self.forward = self.forward_native
+            if current_platform.device_type == "cpu":
+                arch = current_platform.get_cpu_architecture()
+                # Fall back to native implementation for POWERPC and RISCV.
+                # On PowerPC argmax produces incorrect output with torch.compile.
+                # PR: https://github.com/vllm-project/vllm/pull/26987
+                if arch in (CpuArchEnum.RISCV, CpuArchEnum.POWERPC):
+                    self.forward = self.forward_native
+                else:
+                    self.forward = self.forward_cpu
+            else:
+                self.forward = self.forward_native
 
     def forward_native(
         self,
