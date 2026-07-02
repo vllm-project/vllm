@@ -93,6 +93,24 @@ HANDSHAKE_TIMEOUT_MINS = 5
 _R = TypeVar("_R")  # Return type for collective_rpc
 
 
+def _merge_engine_core_outputs(
+    dst: dict[int, "EngineCoreOutputs"], src: dict[int, "EngineCoreOutputs"]
+) -> None:
+    for client_index, out in src.items():
+        cur = dst.get(client_index)
+        if cur is None:
+            dst[client_index] = out
+            continue
+        cur.outputs.extend(out.outputs)
+        if out.finished_requests:
+            if cur.finished_requests:
+                cur.finished_requests |= out.finished_requests
+            else:
+                cur.finished_requests = out.finished_requests
+        if out.scheduler_stats is not None:
+            cur.scheduler_stats = out.scheduler_stats
+
+
 class EngineCore:
     """Inner loop of vLLM's Engine."""
 
@@ -610,6 +628,28 @@ class EngineCore:
         # in a field and do it immediately once step_with_batch_queue is
         # re-called. The latter slightly favors TTFT over TPOT/throughput.
         if deferred_scheduler_output:
+            # PP + structured outputs: the single result processed above only
+            # advances each structured request's grammar FSM by ~one step.
+            # Fine when pp_size == 1 (the FSM lags by at most one in-flight
+            # token), but with pp_size > 1 the previous token can be several
+            # batches deep, so the FSM would still be stale and the bitmask
+            # wrong. Drain the queue until those requests are caught up (#45014).
+            while batch_queue and self.scheduler.has_structured_output_in_flight(
+                deferred_scheduler_output
+            ):
+                d_future, d_scheduler_output, d_exec_fut = batch_queue.pop()
+                with (
+                    self.log_error_detail(d_scheduler_output),
+                    self.log_iteration_details(d_scheduler_output),
+                ):
+                    d_output = d_future.result()
+                    if d_output is None:
+                        d_exec_fut.result()
+                        raise RuntimeError("unexpected error")
+                _merge_engine_core_outputs(
+                    engine_core_outputs,
+                    self.scheduler.update_from_output(d_scheduler_output, d_output),
+                )
             # When draft tokens are used with structured output, validate them
             # before computing the grammar bitmask for the deferred request.
             if self.check_for_draft_tokens:
