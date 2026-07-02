@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import sys
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -14,6 +15,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
 )
 from vllm.parser.abstract_parser import DelegatingParser
+from vllm.tool_parsers import structural_tag_registry
 from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.deepseekv3_tool_parser import DeepSeekV3ToolParser
 from vllm.tool_parsers.deepseekv4_tool_parser import DeepSeekV4ToolParser
@@ -27,8 +29,6 @@ from vllm.tool_parsers.minimax_m2_tool_parser import MinimaxM2ToolParser
 from vllm.tool_parsers.qwen3_engine_tool_parser import Qwen3EngineToolParser
 from vllm.tool_parsers.structural_tag_registry import (
     SUPPORTED_STRUCTURAL_TAG_MODELS,
-    VLLM_BUILTIN_STRUCTURAL_TAG_MODELS,
-    XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS,
     _get_function_parameters,
     get_model_structural_tag,
 )
@@ -69,15 +69,31 @@ def sample_tools_strict() -> list[ChatCompletionToolsParam]:
     ]
 
 
-def test_supported_structural_tag_models_include_vllm_builtins():
-    assert SUPPORTED_STRUCTURAL_TAG_MODELS == (
-        XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS | VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
+def test_supported_structural_tag_models_include_known_formats():
+    assert (
+        frozenset(
+            {
+                "deepseek_r1",
+                "deepseek_v3_1",
+                "deepseek_v3_2",
+                "deepseek_v4",
+                "glm_4_7",
+                "harmony",
+                "hermes",
+                "kimi",
+                "llama",
+                "minimax",
+                "qwen_3",
+                "qwen_3_5",
+                "qwen_3_coder",
+            }
+        )
+        == SUPPORTED_STRUCTURAL_TAG_MODELS
     )
-    assert "hermes" in VLLM_BUILTIN_STRUCTURAL_TAG_MODELS
 
 
-@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
-def test_get_model_structural_tag_supports_all_xgrammar_builtins(
+@pytest.mark.parametrize("model", sorted(SUPPORTED_STRUCTURAL_TAG_MODELS))
+def test_get_model_structural_tag_supports_all_known_formats(
     model: str,
     sample_tools_strict: list[ChatCompletionToolsParam],
 ):
@@ -89,6 +105,43 @@ def test_get_model_structural_tag_supports_all_xgrammar_builtins(
     )
 
     assert isinstance(tag, StructuralTag)
+
+
+def test_structural_tag_builders_are_registered_by_module_path(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    builder_module = structural_tag_registry._STRUCTURAL_TAG_BUILDERS_MODULE
+    monkeypatch.delitem(sys.modules, builder_module, raising=False)
+    monkeypatch.setattr(structural_tag_registry, "_VLLM_STRUCTURAL_TAG_REGISTRY", {})
+
+    assert builder_module not in sys.modules
+    assert structural_tag_registry._VLLM_STRUCTURAL_TAG_LAZY_REGISTRY["hermes"] == (
+        builder_module,
+        "get_hermes_structural_tag",
+    )
+
+
+def test_structural_tag_builder_loads_lazily(
+    monkeypatch: pytest.MonkeyPatch,
+    sample_tools: list[ChatCompletionToolsParam],
+):
+    builder_module = structural_tag_registry._STRUCTURAL_TAG_BUILDERS_MODULE
+    monkeypatch.delitem(sys.modules, builder_module, raising=False)
+    monkeypatch.setattr(structural_tag_registry, "_VLLM_STRUCTURAL_TAG_REGISTRY", {})
+
+    tag = get_model_structural_tag(
+        model="hermes",
+        tools=sample_tools,
+        tool_choice="required",
+        reasoning=False,
+    )
+
+    assert isinstance(tag, StructuralTag)
+    assert builder_module in sys.modules
+    assert (
+        structural_tag_registry._VLLM_STRUCTURAL_TAG_REGISTRY["hermes"].__name__
+        == "get_hermes_structural_tag"
+    )
 
 
 def test_get_model_structural_tag_supports_vllm_hermes(
@@ -163,7 +216,7 @@ def test_hermes_required_tool_calls_use_empty_separator():
     assert tag.format.separator == ""
 
 
-@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+@pytest.mark.parametrize("model", sorted(SUPPORTED_STRUCTURAL_TAG_MODELS))
 def test_get_model_structural_tag_supports_named_tool_choice(
     model: str,
     sample_tools: list[ChatCompletionToolsParam],
@@ -302,7 +355,7 @@ def test_xgrammar_function_parameters_are_preserved(
     )
 
     get_model_structural_tag(
-        model="llama",
+        model="qwen_3_5",
         tools=sample_tools_strict,
         tool_choice="auto",
         reasoning=False,
@@ -315,7 +368,7 @@ def test_xgrammar_function_parameters_are_preserved(
     assert sample_tools_strict[0].function.parameters is not None
 
 
-@pytest.mark.parametrize("model", sorted(XGRAMMAR_BUILTIN_STRUCTURAL_TAG_MODELS))
+@pytest.mark.parametrize("model", sorted(SUPPORTED_STRUCTURAL_TAG_MODELS))
 def test_auto_tool_choice_skips_structural_tag_without_strict(
     model: str,
     sample_tools: list[ChatCompletionToolsParam],
