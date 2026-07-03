@@ -203,7 +203,12 @@ from vllm.v1.structured_output.utils import apply_grammar_bitmask
 from vllm.v1.utils import CpuGpuBuffer, record_function_or_nullcontext
 from vllm.v1.worker import mamba_utils
 from vllm.v1.worker.block_table import SlotMappingMode
-from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
+from vllm.v1.worker.cp_utils import (
+    check_attention_cp_compatibility,
+    get_dcp_dummy_context_len,
+    get_max_num_blocks_per_req,
+    prepare_dcp_dummy_context_metadata,
+)
 from vllm.v1.worker.dp_utils import coordinate_batch_across_dp
 from vllm.v1.worker.ec_connector_model_runner_mixin import ECConnectorModelRunnerMixin
 from vllm.v1.worker.gpu.attn_utils import _reshape_attention_kv_cache
@@ -219,7 +224,7 @@ from vllm.v1.worker.ubatch_utils import (
     split_attn_metadata,
 )
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
-from vllm.v1.worker.workspace import current_workspace_manager, lock_workspace
+from vllm.v1.worker.workspace import lock_workspace
 
 from .utils import (
     AttentionGroup,
@@ -5861,16 +5866,14 @@ class GPUModelRunner(
         num_reqs_padded = (
             batch_desc.num_reqs if batch_desc.num_reqs is not None else num_reqs
         )
-        dcp_dummy_context_len = 0
-        needs_dcp_dummy_metadata = (
-            self.dcp_world_size > 1
-            and hasattr(self, "kv_cache_config")
-            and (create_mixed_batch or (is_graph_capturing and uniform_decode))
+        dcp_dummy_context_len = get_dcp_dummy_context_len(
+            self.dcp_world_size,
+            self.parallel_config.cp_kv_cache_interleave_size,
+            hasattr(self, "kv_cache_config"),
+            create_mixed_batch,
+            is_graph_capturing,
+            uniform_decode,
         )
-        if needs_dcp_dummy_metadata:
-            dcp_dummy_context_len = (
-                self.dcp_world_size * self.parallel_config.cp_kv_cache_interleave_size
-            )
         ubatch_slices, ubatch_slices_padded = maybe_create_ubatch_slices(
             should_ubatch,
             num_scheduled_tokens,
@@ -5941,34 +5944,16 @@ class GPUModelRunner(
                 )
                 self.query_start_loc.copy_to_gpu()
 
-                if needs_dcp_dummy_metadata:
-                    # Fill every KV cache group with valid dummy block IDs.
-                    # DCP graph warmup may exercise context attention, so
-                    # block-table entries must point at allocated KV blocks.
-                    max_valid_block_id = self.kv_cache_config.num_blocks - 1
-                    assert max_valid_block_id > 0
-                    for blk_table in self.input_batch.block_table.block_tables:
-                        max_row_blocks = (
-                            blk_table.max_num_blocks_per_req
-                            // blk_table.blocks_per_kv_block
-                        )
-                        block_ids = [
-                            (block_idx % max_valid_block_id) + 1
-                            for block_idx in range(max_row_blocks)
-                        ]
-                        for req_idx in range(num_reqs):
-                            blk_table.add_row(block_ids, req_idx)
-                        blk_table.commit_block_table(num_reqs)
-
-                    self.query_pos.copy_to_gpu(num_tokens_unpadded)
-                    self.positions[:num_tokens_unpadded] = (
-                        self.query_pos.gpu[:num_tokens_unpadded] + dcp_dummy_context_len
-                    )
-                    self.input_batch.block_table.compute_slot_mapping(
-                        num_reqs,
-                        self.query_start_loc.gpu[: num_reqs + 1],
-                        self.positions[:num_tokens_unpadded],
-                    )
+                prepare_dcp_dummy_context_metadata(
+                    input_batch=self.input_batch,
+                    kv_cache_config=getattr(self, "kv_cache_config", None),
+                    query_pos=self.query_pos,
+                    positions=self.positions,
+                    query_start_loc=self.query_start_loc,
+                    num_reqs=num_reqs,
+                    num_tokens_unpadded=num_tokens_unpadded,
+                    dcp_dummy_context_len=dcp_dummy_context_len,
+                )
 
                 # Sync block table CPU->GPU so cleared rows from
                 # remove_request() are visible to the attention metadata
@@ -6412,40 +6397,6 @@ class GPUModelRunner(
         self.encoder_cache.clear()
         gc.collect()
 
-    def _allocate_dcp_context_workspace(self) -> None:
-        if self.dcp_world_size <= 1 or not hasattr(self, "kv_cache_config"):
-            return
-
-        head_size = 0
-
-        def visit_spec(kv_cache_spec: KVCacheSpec) -> None:
-            nonlocal head_size
-            if isinstance(kv_cache_spec, UniformTypeKVCacheSpecs):
-                for inner_spec in kv_cache_spec.kv_cache_specs.values():
-                    visit_spec(inner_spec)
-            elif isinstance(kv_cache_spec, FullAttentionSpec):
-                head_size = max(head_size, kv_cache_spec.head_size)
-
-        for kv_cache_group in self.kv_cache_config.kv_cache_groups:
-            visit_spec(kv_cache_group.kv_cache_spec)
-
-        if head_size == 0:
-            return
-
-        # profile_run uses max_num_tokens, but it skips attention metadata and
-        # FlashAttention returns a zero output, so the DCP context-FA workspace
-        # is not allocated there. CUDA graph capture only covers configured
-        # graph sizes and cannot build a max-token mixed DCP batch for hybrid
-        # models because GDN full graphs are decode-only. Reserve the largest
-        # possible DCP context output before the workspace is locked.
-        num_heads = (
-            self.model_config.get_num_attention_heads(self.parallel_config)
-            * self.dcp_world_size
-        )
-        current_workspace_manager().get_simultaneous(
-            ((self.max_num_tokens, num_heads, head_size), self.model_config.dtype),
-        )
-
     def _init_minimal_kv_cache_for_profiling(self) -> None:
         from vllm.v1.core.kv_cache_utils import (
             get_kv_cache_config_from_groups,
@@ -6747,7 +6698,6 @@ class GPUModelRunner(
         # Capture the large shapes first so that the smaller shapes
         # can reuse the memory pool allocated for the large shapes.
         set_cudagraph_capturing_enabled(True)
-        self._allocate_dcp_context_workspace()
         with self._freeze_gc(), graph_capture(device=self.device):
             torch.accelerator.synchronize()
             torch.accelerator.empty_cache()
@@ -7099,23 +7049,6 @@ class GPUModelRunner(
             return
         self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
 
-    def _get_max_num_blocks_per_req(self, kv_cache_spec: KVCacheSpec) -> int:
-        if (
-            isinstance(kv_cache_spec, MambaSpec)
-            and self.cache_config.mamba_cache_mode == "align"
-        ):
-            return (
-                cdiv(self.model_config.max_model_len, kv_cache_spec.block_size)
-                + kv_cache_spec.num_speculative_blocks
-            )
-        if get_kv_cache_spec_kind(kv_cache_spec) != KVCacheSpecKind.MAMBA:
-            max_model_len = max(self.max_model_len, self.max_encoder_len)
-            return cdiv(max_model_len, kv_cache_spec.block_size)
-        return cdiv(
-            kv_cache_spec.max_memory_usage_bytes(self.vllm_config),
-            kv_cache_spec.page_size_bytes,
-        )
-
     def may_reinitialize_input_batch(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
     ) -> None:
@@ -7145,7 +7078,14 @@ class GPUModelRunner(
                 slot_mapping_modes.append(SlotMappingMode.NONE)
             else:
                 slot_mapping_modes.append(SlotMappingMode.TOKEN_TO_KV_SLOT)
-            max_num_blocks_per_req = self._get_max_num_blocks_per_req(kv_cache_spec)
+            max_num_blocks_per_req = get_max_num_blocks_per_req(
+                kv_cache_spec,
+                cache_config=self.cache_config,
+                model_config=self.model_config,
+                vllm_config=self.vllm_config,
+                max_model_len=self.max_model_len,
+                max_encoder_len=self.max_encoder_len,
+            )
             max_num_blocks.append(max_num_blocks_per_req)
 
         if (

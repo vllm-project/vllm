@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from abc import ABC, abstractmethod
 from collections.abc import Sequence
-from math import lcm
 from typing import NamedTuple
 
 from vllm import envs
@@ -607,17 +606,6 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 for gid in group.group_ids:
                     self.single_type_managers[gid].use_eagle = True
 
-        # The LCM of the block sizes of all attention types.
-        # The cache hit length must be a multiple of the LCM of the block sizes
-        # to make sure the cache hit length is a multiple of the block size of
-        # each attention type. Requiring this because we don't support partial
-        # block cache hit yet.
-        block_sizes = [
-            self.single_type_managers[group.group_ids[0]].block_size
-            for group in self.attention_groups
-        ]
-        self.lcm_block_size = lcm(*block_sizes)
-
     def cache_blocks(self, request: Request, num_computed_tokens: int) -> None:
         # Cache hits in this coordinator are always a multiple of
         # ``scheduler_block_size`` tokens (see ``find_longest_cache_hit``).
@@ -724,7 +712,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                     block_pool=self.block_pool,
                     kv_cache_spec=spec,
                     drop_eagle_block=drop_eagle_block,
-                    alignment_tokens=self.lcm_block_size,
+                    alignment_tokens=self.scheduler_block_size,
                     dcp_world_size=(
                         self.dcp_world_size
                         if isinstance(spec, FullAttentionSpec)
