@@ -127,6 +127,26 @@ Co-authored-by: gemini-code-assist
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
+### HUST upstream-sync versioning
+
+When merging `upstream/main` into `vLLM-HUST/main`, keep the fork behind
+upstream by zero commits: `git rev-list --left-right --count
+origin/main...upstream/main` should report `N 0` after the merge lands, where
+`N` is the number of HUST-only commits.
+
+Update `upstream_version.json` in the same change:
+
+- `upstream_commit`: exact `git rev-parse upstream/main`
+- `upstream_version`: upstream-compatible version tag, including rc suffix
+  when present, without the leading `v`
+- `release_version`: the same version line without the rc suffix
+
+The package version must be derived from that upstream anchor plus the
+HUST-only commit count, using PEP 440 form
+`<release_version>.post1.dev<N>+g<sha>`. Do not let the upstream commits added
+by the merge inflate `N`; it must count only commits reachable from the fork
+and not from `upstream/main`.
+
 ---
 
 ## Domain-Specific Guides
