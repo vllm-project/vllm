@@ -137,6 +137,8 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
 
     fn next_chunk(&mut self) -> Option<String> {
         let cutoff = self.cumulative_output.len().saturating_sub(self.min_bytes_to_buffer);
+        // Ensure we split at a utf-8 char boundary.
+        let cutoff = self.cumulative_output.floor_char_boundary(cutoff);
         (cutoff > self.output_index).then(|| {
             let chunk = self.cumulative_output[self.output_index..cutoff].to_string();
             self.output_index = cutoff;
@@ -189,6 +191,10 @@ mod tests {
         }
 
         fn token_to_id(&self, _token: &str) -> Option<u32> {
+            unreachable!()
+        }
+
+        fn id_to_token(&self, _id: u32) -> Option<String> {
             unreachable!()
         }
     }
@@ -298,6 +304,10 @@ mod tests {
         }
 
         fn token_to_id(&self, _token: &str) -> Option<u32> {
+            unreachable!()
+        }
+
+        fn id_to_token(&self, _id: u32) -> Option<String> {
             unreachable!()
         }
     }
@@ -425,6 +435,10 @@ mod tests {
         fn token_to_id(&self, _token: &str) -> Option<u32> {
             unreachable!()
         }
+
+        fn id_to_token(&self, _id: u32) -> Option<String> {
+            unreachable!()
+        }
     }
 
     /// Without the char-boundary fix, this panics slicing mid-emoji.
@@ -462,5 +476,28 @@ mod tests {
         let (last_chunk, full_text) = decoder.flush(None).unwrap();
         assert_eq!(last_chunk.as_deref(), Some("lo!"));
         assert_eq!(full_text, "Hello!");
+    }
+
+    #[test]
+    fn next_chunk_cutoff_respects_char_boundary() {
+        // Regression: next_chunk's cutoff (len - min_bytes_to_buffer) must be
+        // aligned to a UTF-8 char boundary like push_token/flush; otherwise
+        // streaming multi-byte output (CJK/emoji) with a hold-back buffer (set
+        // by a stop string) panics slicing cumulative_output mid-character.
+        let backend = Utf8Backend;
+        let mut decoder = backend.create_decode_stream(&[], false, 2);
+        let mut out = String::new();
+        for byte in "你好A".bytes() {
+            decoder.push_token(u32::from(byte)).unwrap();
+            if let Some(chunk) = decoder.next_chunk() {
+                out.push_str(&chunk);
+            }
+        }
+        let (last_chunk, full_text) = decoder.flush(None).unwrap();
+        if let Some(chunk) = last_chunk {
+            out.push_str(&chunk);
+        }
+        assert_eq!(full_text, "你好A");
+        assert_eq!(out, "你好A");
     }
 }

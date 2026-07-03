@@ -9,42 +9,14 @@
 
 #include <vector>
 
-torch::Tensor weak_ref_tensor(torch::Tensor& tensor) {
-  // Ensure tensor is on CUDA
-  if (!tensor.is_cuda()) {
-    throw std::runtime_error("Tensor must be on CUDA device");
-  }
-
-  // Get the raw data pointer
-  void* data_ptr = tensor.data_ptr();
-
-  // Get tensor sizes and strides
-  std::vector<int64_t> sizes = tensor.sizes().vec();
-  std::vector<int64_t> strides = tensor.strides().vec();
-
-  // Get tensor options (dtype, device)
-  auto options = tensor.options();
-
-  // Create a new tensor from the raw data pointer
-  auto new_tensor = torch::from_blob(data_ptr, sizes, strides, options);
-
-  return new_tensor;
-}
-
 // rms_norm and fused_add_rms_norm declarations also exist in
 // csrc/libtorch_stable/ops.h (torch::stable ABI for CUDA). They remain here
 // because the CPU build still uses these torch::Tensor declarations.
-void rms_norm(torch::Tensor& out, torch::Tensor& input, torch::Tensor& weight,
-              double epsilon);
+void rms_norm(torch::Tensor& out, torch::Tensor& input,
+              std::optional<torch::Tensor> weight, double epsilon);
 
 void fused_add_rms_norm(torch::Tensor& input, torch::Tensor& residual,
-                        torch::Tensor& weight, double epsilon);
-
-void silu_and_mul_per_block_quant(torch::Tensor& out,
-                                  torch::Tensor const& input,
-                                  torch::Tensor& scales, int64_t group_size,
-                                  std::optional<torch::Tensor> scale_ub,
-                                  bool is_scale_transposed);
+                        std::optional<torch::Tensor> weight, double epsilon);
 
 // rotary_embedding also exist in csrc/libtorch_stable/ops.h (torch::stable
 // ABI for CUDA). It remains here because the CPU build still uses these
@@ -56,35 +28,20 @@ void rotary_embedding(torch::Tensor& positions, torch::Tensor& query,
 
 void silu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
-void silu_and_mul_clamp(torch::Tensor& out, torch::Tensor& input, double limit);
-
-void silu_and_mul_quant(torch::Tensor& out, torch::Tensor& input,
-                        torch::Tensor& scale);
-
-void persistent_masked_m_silu_mul_quant(
-    const at::Tensor& input,   // (E, T, 2*H)
-    const at::Tensor& counts,  // (E)
-    at::Tensor& y_q,           // (E, T, H) [OUT]
-    at::Tensor& y_s,           // (E, T, H//group_size) [OUT]
-    bool use_ue8m0);
+void silu_and_mul_clamp(torch::Tensor& out, torch::Tensor& input, double limit,
+                        double alpha = 1.0, double beta = 0.0);
 
 void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
+
+void gelu_tanh(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_new(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input);
-
-void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
-                        torch::Tensor const& q_pe,
-                        torch::Tensor const& kv_c_and_k_pe_cache,
-                        torch::Tensor const& seq_lens,
-                        torch::Tensor const& page_table, double scale);
-
-torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor const& scale,

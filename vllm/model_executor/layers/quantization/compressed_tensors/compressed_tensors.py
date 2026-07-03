@@ -37,7 +37,6 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsMoEMethod,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
-    WNA16_SUPPORTED_BITS,
     CompressedTensorsScheme,
     CompressedTensorsW4A4Fp4,
     CompressedTensorsW4A4Mxfp4,
@@ -210,7 +209,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             )
         return None
 
-    def _add_fused_moe_to_target_scheme_map(self):
+    def _add_fused_moe_to_target_scheme_map(self):  # XXXXXXXXXXXXXXXXXXXXXX
         """
         Helper function to update target_scheme_map
         since linear layers get fused into FusedMoE
@@ -219,10 +218,10 @@ class CompressedTensorsConfig(QuantizationConfig):
         """
         if (
             "Linear" not in self.target_scheme_map
-            or "FusedMoE" in self.target_scheme_map
+            or "RoutedExperts" in self.target_scheme_map
         ):
             return
-        self.target_scheme_map["FusedMoE"] = self.target_scheme_map["Linear"]
+        self.target_scheme_map["RoutedExperts"] = self.target_scheme_map["Linear"]
 
     @classmethod
     def from_config(cls, config: dict[str, Any]) -> "CompressedTensorsConfig":
@@ -267,8 +266,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         cls, config: dict[str, Any]
     ) -> tuple[dict[str, SparsityCompressionConfig], list[str]]:
         """
-        :param config: The `quantization_config` dictionary from config.json
-        :return: A tuple with two elements
+        Args:
+            config: The `quantization_config` dictionary from config.json
+
+        Returns:
+            A tuple with two elements
             1. A dictionary mapping target layer names to their corresponding
                 sparsity_config
             2. A list of layer names to ignore for sparsity
@@ -296,8 +298,11 @@ class CompressedTensorsConfig(QuantizationConfig):
         cls, config: dict[str, Any]
     ) -> QUANTIZATION_SCHEME_MAP_TYPE:
         """
-        :param config: The `quantization_config` dictionary from config.json
-        :return: A dictionary mapping target layer names to their corresponding
+        Args:
+            config: The `quantization_config` dictionary from config.json
+
+        Returns:
+            A dictionary mapping target layer names to their corresponding
             quantization_args for weights and input activations
         """
         target_scheme_map: dict[str, Any] = dict()
@@ -390,7 +395,7 @@ class CompressedTensorsConfig(QuantizationConfig):
                     )
             return supported
         else:
-            return False
+            return not match_exact
 
     @staticmethod
     def _is_nvfp4_format(quant_args: QuantizationArgs):
@@ -674,14 +679,7 @@ class CompressedTensorsConfig(QuantizationConfig):
             and output_quant.num_bits == 8
             and not output_quant.dynamic
         )
-        # Static int8-activation layers, plus sub-byte weight-only layers (e.g.
-        # 2-bit lm_head) that marlin-backed WNA16 cannot serve. Standard 4/8-bit
-        # weight-only (no activations) falls through to WNA16.
-        is_subbyte_weight_only = weight_quant.num_bits not in WNA16_SUPPORTED_BITS
-        needs_wNa8o8 = is_intN_weight and (
-            (is_static_int8_in and is_static_int8_out) or is_subbyte_weight_only
-        )
-        return needs_wNa8o8
+        return is_intN_weight and (is_static_int8_in and is_static_int8_out)
 
     def _get_scheme_from_parts(
         self,
@@ -734,10 +732,8 @@ class CompressedTensorsConfig(QuantizationConfig):
                 quant_format=format,
             )
 
-        if (
-            self._is_wNa16_group_channel(weight_quant, input_quant)
-            and (format == CompressionFormat.pack_quantized.value)
-            and (weight_quant.num_bits in WNA16_SUPPORTED_BITS)
+        if self._is_wNa16_group_channel(weight_quant, input_quant) and (
+            format == CompressionFormat.pack_quantized.value
         ):
             return CompressedTensorsWNA16(
                 num_bits=weight_quant.num_bits,
@@ -967,7 +963,9 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         """
         Validator for the kv cache scheme. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM
-        :param kv_cache_scheme: the compressed-tensors kv cache scheme
+
+        Args:
+            kv_cache_scheme: the compressed-tensors kv cache scheme
         """
         if kv_cache_scheme is None:
             return
@@ -975,7 +973,7 @@ class CompressedTensorsKVCacheMethod(BaseKVCacheMethod):
         type_ = kv_cache_scheme.get("type")
         num_bits = kv_cache_scheme.get("num_bits")
 
-        if type_ != "float" and num_bits != 8:
+        if type_ != "float" or num_bits != 8:
             raise NotImplementedError(
                 "Currently supported kv cache quantization is "
                 "num_bits=8, type=float, however "

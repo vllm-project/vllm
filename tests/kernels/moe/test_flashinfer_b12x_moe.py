@@ -166,7 +166,7 @@ def test_flashinfer_b12x_moe(
             num_experts=e,
             experts_per_token=topk,
             hidden_dim=k,
-            intermediate_size_per_partition=n,
+            intermediate_size=n,
             in_dtype=dtype,
         )
 

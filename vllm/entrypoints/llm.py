@@ -556,7 +556,8 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         and returns their outputs. Use after enqueue() to get results.
 
         Args:
-            output_type: The expected output type, defaults to RequestOutput.
+            output_type: The expected output type(s). If not provided, accepts
+                both RequestOutput and PoolingRequestOutput.
             use_tqdm: If True, shows a tqdm progress bar.
 
         Returns:
@@ -872,12 +873,9 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    def start_weight_update(self, is_checkpoint_format: bool = True) -> None:
+    def start_weight_update(self) -> None:
         """Start a new weight update."""
-        self.llm_engine.collective_rpc(
-            "start_weight_update",
-            kwargs={"is_checkpoint_format": is_checkpoint_format},
-        )
+        self.llm_engine.collective_rpc("start_weight_update")
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """

@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use tracing_subscriber::EnvFilter;
 use vllm_engine_core_client::TransportMode;
 use vllm_server::{
-    ChatTemplateContentFormatOption, Config, CoordinatorMode, HttpListenerMode, ParserSelection,
-    RendererSelection, serve,
+    ApiServerOptions, ChatTemplateContentFormatOption, Config, CoordinatorMode, CorsConfig,
+    HttpListenerMode, ParserSelection, RendererSelection, serve,
 };
 
 #[derive(Debug, Parser)]
@@ -64,14 +64,20 @@ async fn main() -> Result<()> {
         tool_call_parser: ParserSelection::Auto,
         reasoning_parser: ParserSelection::Auto,
         renderer: RendererSelection::Auto,
+        language_model_only: false,
         chat_template: None,
         default_chat_template_kwargs: None,
         chat_template_content_format: ChatTemplateContentFormatOption::Auto,
-        enable_log_requests: false,
-        enable_request_id_headers: false,
+        max_logprobs: None,
+        api_server_options: ApiServerOptions::default(),
+        cors: CorsConfig::default(),
+        tls: None,
+        api_keys: Vec::new(),
         disable_log_stats: false,
         grpc_port: None,
         shutdown_timeout: Duration::ZERO,
+        keep_alive_timeout: Duration::from_secs(5),
+        profiler: None,
     };
 
     let bind_address = format!("127.0.0.1:{port}");

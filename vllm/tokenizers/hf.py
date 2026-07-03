@@ -99,6 +99,9 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
     TokenizerPool.__name__ = f"TokenizerPool{og_tokenizer.__class__.__name__}"
 
     tokenizer.__class__ = TokenizerPool
+    # Return the tokenizer: TokenizerPool.__reduce__ reconstructs through this
+    # function, so falling off the end would unpickle to None (issue #45433).
+    return tokenizer
 
 
 def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:

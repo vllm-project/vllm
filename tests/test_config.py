@@ -118,12 +118,72 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
                 is_moe=False,
                 is_quantized=False,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
-                model="Qwen/Qwen3-30B-A3B",
-                architectures=["Qwen3MoeForCausalLM"],
+                model="google/gemma-2-2b",
+                architectures=["Gemma2ForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V2-Lite-Chat",
+                architectures=["DeepseekV2ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="deepseek-ai/DeepSeek-V2-Chat",
+                architectures=["DeepseekV2ForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen1.5-MoE-A2.7B",
+                architectures=["Qwen2MoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="Qwen/Qwen1.5-MoE-A2.7B-Chat",
+                architectures=["Qwen2MoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="ibm-research/PowerMoE-3b",
+                architectures=["GraniteMoeForCausalLM"],
+                runner_type="generate",
+                is_moe=True,
+                is_quantized=False,
+            ),
+            True,
+        ),
+        (
+            SimpleNamespace(
+                model="mistralai/Mixtral-8x7B-Instruct-v0.1",
+                architectures=["MixtralForCausalLM"],
                 runner_type="generate",
                 is_moe=True,
                 is_quantized=False,
@@ -138,7 +198,7 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
                 is_moe=False,
                 is_quantized=True,
             ),
-            False,
+            True,
         ),
         (
             SimpleNamespace(
@@ -147,6 +207,18 @@ def test_v2_model_runner_env_tri_state(monkeypatch, env_value, expected):
                 runner_type="generate",
                 is_moe=False,
                 is_quantized=False,
+                is_hybrid=True,
+            ),
+            False,
+        ),
+        (
+            SimpleNamespace(
+                model="state-spaces/mamba-130m-hf",
+                architectures=["MambaForCausalLM"],
+                runner_type="generate",
+                is_moe=False,
+                is_quantized=False,
+                is_attention_free=True,
             ),
             False,
         ),
@@ -1242,7 +1314,9 @@ def test_vllm_config_explicit_overrides():
         compilation_config=compilation_config,
     )
     assert config.compilation_config.cudagraph_mode == CUDAGraphMode.NONE
-    assert config.compilation_config.pass_config.enable_qk_norm_rope_fusion is True
+    assert config.compilation_config.pass_config.enable_qk_norm_rope_fusion is (
+        current_platform.is_cuda_alike() or current_platform.is_xpu()
+    )
     # Mode should still use default for O2
     assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
 
@@ -1507,3 +1581,14 @@ def test_ir_op_priority_ctx():
         # context restored even after exception
         assert ir.ops.rms_norm.get_priority() == ["vllm_c", "native"]
         assert ir.ops.fused_add_rms_norm.get_priority() == ["native"]
+
+
+def test_load_config_rejects_invalid_safetensors_load_strategy():
+    with pytest.raises(pydantic.ValidationError):
+        LoadConfig(safetensors_load_strategy="not_a_real_strategy")
+
+
+@pytest.mark.parametrize("bad_load_format", [None, 123])
+def test_load_config_rejects_non_string_load_format(bad_load_format):
+    with pytest.raises(pydantic.ValidationError):
+        LoadConfig(load_format=bad_load_format)

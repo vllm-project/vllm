@@ -283,7 +283,7 @@ class BailingMoeV25(nn.Module):
         self.hidden_size = config.hidden_size
         self.quant_config = quant_config
         self.num_shared_experts = config.num_shared_experts
-        self.score_function = getattr(config, "score_function", None)
+        self.score_function: str | None = getattr(config, "score_function", None)
         self.n_group = getattr(config, "n_group", None)
         self.topk_group = getattr(config, "topk_group", None)
         self.use_grouped_topk = self.n_group is not None and self.topk_group is not None

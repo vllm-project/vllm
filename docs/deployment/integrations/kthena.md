@@ -64,36 +64,74 @@ A simplified version of the example (`llama-multinode`) looks like:
 - `spec.replicas: 1` – one `ServingGroup` (one logical model deployment).
 - `roles`:
     - `entryTemplate` – defines **leader** pods that run:
-        - vLLM’s **multi-node cluster bootstrap script** (Ray cluster).
+        - vLLM’s **multi-node cluster bootstrap script**.
         - vLLM **OpenAI-compatible API server**.
-    - `workerTemplate` – defines **worker** pods that join the leader’s Ray cluster.
+    - `workerTemplate` – defines **worker** pods to join the leader’s Ray cluster (Ray backend) or to join same distributed process group (multiprocessing backend).
 
 Key points from the example YAML:
 
-- **Image**: `vllm/vllm-openai:latest` (matches upstream vLLM images).
-- **Command** (leader):
+Image: `vllm/vllm-openai:latest` (matches upstream vLLM images).
+Commands:
 
-  ```yaml
-  command:
-    - sh
-    - -c
-    - >
-      bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2;
-      vllm serve meta-llama/Llama-3.1-405B-Instruct
-        --port 8080
-        --tensor-parallel-size 8
-        --pipeline-parallel-size 2
-  ```
+??? code "Yaml"
+    === "Multiprocessing (default)"
+        Leader:
 
-- **Command** (worker):
+        ```yaml
+        command:
+          - sh
+          - -c
+          - >
+            vllm serve meta-llama/Llama-3.1-405B-Instruct
+              --tensor-parallel-size 8
+              --pipeline-parallel-size 2
+              --nnodes=2
+              --node-rank=0
+              --master-addr=$(ENTRY_ADDRESS)
+              --port 8080
+        ```
 
-  ```yaml
-  command:
-    - sh
-    - -c
-    - >
-      bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)
-  ```
+        Worker:
+
+        ```yaml
+        command:
+          - sh
+          - -c
+          - >
+            vllm serve meta-llama/Llama-3.1-405B-Instruct
+              --tensor-parallel-size 8
+              --pipeline-parallel-size 2
+              --nnodes=2
+              --node-rank=1
+              --master-addr=$(ENTRY_ADDRESS)
+              --headless
+        ```
+
+    === "Ray"
+        Leader:
+
+        ```yaml
+        command:
+          - sh
+          - -c
+          - >
+            bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh
+            leader --ray_cluster_size=2; python3 -m
+            vllm.entrypoints.openai.api_server --port 8080 --model
+            meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8
+            --pipeline-parallel-size 2
+        ```
+
+        Worker:
+
+        ```yaml
+        command:
+          - sh
+          - -c
+          - >
+            bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh
+            worker --ray_address=$(ENTRY_ADDRESS)
+        ```
 
 ---
 
@@ -111,96 +149,192 @@ kubectl create secret generic hf-token \
 
 ### 3.2 Apply the `ModelServing`
 
+Save one of the following manifests to `modelserving.yaml`:
+
+??? code "modelserving.yaml"
+    === "Multiprocessing (default)"
+        ```yaml
+        apiVersion: workload.serving.volcano.sh/v1alpha1
+        kind: ModelServing
+        metadata:
+          name: llama-multinode
+          namespace: default
+        spec:
+          schedulerName: volcano
+          replicas: 1  # group replicas
+          template:
+            restartGracePeriodSeconds: 60
+            gangPolicy:
+              minRoleReplicas:
+                405b: 1
+            roles:
+              - name: 405b
+                replicas: 2
+                entryTemplate:
+                  spec:
+                    containers:
+                      - name: leader
+                        image: vllm/vllm-openai:latest
+                        env:
+                          - name: HUGGING_FACE_HUB_TOKEN
+                            valueFrom:
+                              secretKeyRef:
+                                name: hf-token
+                                key: HUGGING_FACE_HUB_TOKEN
+                        command:
+                          - sh
+                          - -c
+                          - "vllm serve meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2 --nnodes 2 --node-rank 0 --master-addr $(ENTRY_ADDRESS) --distributed-executor-backend mp --port 8080"
+                        resources:
+                          limits:
+                            nvidia.com/gpu: "8"
+                            memory: 1124Gi
+                            ephemeral-storage: 800Gi
+                          requests:
+                            ephemeral-storage: 800Gi
+                            cpu: 125
+                        ports:
+                          - containerPort: 8080
+                        readinessProbe:
+                          tcpSocket:
+                            port: 8080
+                          initialDelaySeconds: 15
+                          periodSeconds: 10
+                        volumeMounts:
+                          - mountPath: /dev/shm
+                            name: dshm
+                    volumes:
+                    - name: dshm
+                      emptyDir:
+                        medium: Memory
+                        sizeLimit: 15Gi
+                workerReplicas: 1
+                workerTemplate:
+                  spec:
+                    containers:
+                      - name: worker
+                        image: vllm/vllm-openai:latest
+                        command:
+                          - sh
+                          - -c
+                          - "vllm serve meta-llama/Llama-3.1-405B-Instruct --tensor-parallel-size 8 --pipeline-parallel-size 2 --nnodes 2 --node-rank 1 --master-addr $(ENTRY_ADDRESS) --distributed-executor-backend mp --headless"
+                        resources:
+                          limits:
+                            nvidia.com/gpu: "8"
+                            memory: 1124Gi
+                            ephemeral-storage: 800Gi
+                          requests:
+                            ephemeral-storage: 800Gi
+                            cpu: 125
+                        env:
+                          - name: HUGGING_FACE_HUB_TOKEN
+                            valueFrom:
+                              secretKeyRef:
+                                name: hf-token
+                                key: HUGGING_FACE_HUB_TOKEN
+                        volumeMounts:
+                          - mountPath: /dev/shm
+                            name: dshm
+                    volumes:
+                    - name: dshm
+                      emptyDir:
+                        medium: Memory
+                        sizeLimit: 15Gi
+        ```
+
+    === "Ray"
+        ```yaml
+        apiVersion: workload.serving.volcano.sh/v1alpha1
+        kind: ModelServing
+        metadata:
+          name: llama-multinode
+          namespace: default
+        spec:
+          schedulerName: volcano
+          replicas: 1  # group replicas
+          template:
+            restartGracePeriodSeconds: 60
+            gangPolicy:
+              minRoleReplicas:
+                405b: 1
+            roles:
+              - name: 405b
+                replicas: 2
+                entryTemplate:
+                  spec:
+                    containers:
+                      - name: leader
+                        image: vllm/vllm-openai:latest
+                        env:
+                          - name: HUGGING_FACE_HUB_TOKEN
+                            valueFrom:
+                              secretKeyRef:
+                                name: hf-token
+                                key: HUGGING_FACE_HUB_TOKEN
+                        command:
+                          - sh
+                          - -c
+                          - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2;
+                            vllm serve meta-llama/Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline-parallel-size 2"
+                        resources:
+                          limits:
+                            nvidia.com/gpu: "8"
+                            memory: 1124Gi
+                            ephemeral-storage: 800Gi
+                          requests:
+                            ephemeral-storage: 800Gi
+                            cpu: 125
+                        ports:
+                          - containerPort: 8080
+                        readinessProbe:
+                          tcpSocket:
+                            port: 8080
+                          initialDelaySeconds: 15
+                          periodSeconds: 10
+                        volumeMounts:
+                          - mountPath: /dev/shm
+                            name: dshm
+                    volumes:
+                    - name: dshm
+                      emptyDir:
+                        medium: Memory
+                        sizeLimit: 15Gi
+                workerReplicas: 1
+                workerTemplate:
+                  spec:
+                    containers:
+                      - name: worker
+                        image: vllm/vllm-openai:latest
+                        command:
+                          - sh
+                          - -c
+                          - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
+                        resources:
+                          limits:
+                            nvidia.com/gpu: "8"
+                            memory: 1124Gi
+                            ephemeral-storage: 800Gi
+                          requests:
+                            ephemeral-storage: 800Gi
+                            cpu: 125
+                        env:
+                          - name: HUGGING_FACE_HUB_TOKEN
+                            valueFrom:
+                              secretKeyRef:
+                                name: hf-token
+                                key: HUGGING_FACE_HUB_TOKEN
+                        volumeMounts:
+                          - mountPath: /dev/shm
+                            name: dshm
+                    volumes:
+                    - name: dshm
+                      emptyDir:
+                        medium: Memory
+                        sizeLimit: 15Gi
+        ```
+
 ```bash
-cat  <<EOF | kubectl apply -f -
-apiVersion: workload.serving.volcano.sh/v1alpha1
-kind: ModelServing
-metadata:
-  name: llama-multinode
-  namespace: default
-spec:
-  schedulerName: volcano
-  replicas: 1  # group replicas
-  template:
-    restartGracePeriodSeconds: 60
-    gangPolicy:
-      minRoleReplicas:
-        405b: 1
-    roles:
-      - name: 405b
-        replicas: 2
-        entryTemplate:
-          spec:
-            containers:
-              - name: leader
-                image: vllm/vllm-openai:latest
-                env:
-                  - name: HUGGING_FACE_HUB_TOKEN
-                    valueFrom:
-                      secretKeyRef:
-                        name: hf-token
-                        key: HUGGING_FACE_HUB_TOKEN
-                command:
-                  - sh
-                  - -c
-                  - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh leader --ray_cluster_size=2; 
-                    vllm serve meta-llama/Llama-3.1-405B-Instruct --port 8080 --tensor-parallel-size 8 --pipeline-parallel-size 2"
-                resources:
-                  limits:
-                    nvidia.com/gpu: "8"
-                    memory: 1124Gi
-                    ephemeral-storage: 800Gi
-                  requests:
-                    ephemeral-storage: 800Gi
-                    cpu: 125
-                ports:
-                  - containerPort: 8080
-                readinessProbe:
-                  tcpSocket:
-                    port: 8080
-                  initialDelaySeconds: 15
-                  periodSeconds: 10
-                volumeMounts:
-                  - mountPath: /dev/shm
-                    name: dshm
-            volumes:
-            - name: dshm
-              emptyDir:
-                medium: Memory
-                sizeLimit: 15Gi
-        workerReplicas: 1
-        workerTemplate:
-          spec:
-            containers:
-              - name: worker
-                image: vllm/vllm-openai:latest
-                command:
-                  - sh
-                  - -c
-                  - "bash /vllm-workspace/examples/ray_serving/multi-node-serving.sh worker --ray_address=$(ENTRY_ADDRESS)"
-                resources:
-                  limits:
-                    nvidia.com/gpu: "8"
-                    memory: 1124Gi
-                    ephemeral-storage: 800Gi
-                  requests:
-                    ephemeral-storage: 800Gi
-                    cpu: 125
-                env:
-                  - name: HUGGING_FACE_HUB_TOKEN
-                    valueFrom:
-                      secretKeyRef:
-                        name: hf-token
-                        key: HUGGING_FACE_HUB_TOKEN
-                volumeMounts:
-                  - mountPath: /dev/shm
-                    name: dshm   
-            volumes:
-            - name: dshm
-              emptyDir:
-                medium: Memory
-                sizeLimit: 15Gi
-EOF
+kubectl apply -f modelserving.yaml
 ```
 
 Kthena will:
