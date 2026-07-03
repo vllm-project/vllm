@@ -112,10 +112,23 @@ class WorkspaceSizes(NamedTuple):
 
 
 def _parse_workspace_sizes(workspace_size: Any) -> WorkspaceSizes:
-    if isinstance(workspace_size, (tuple, list)):
-        float_bytes = int(workspace_size[0])
-        int_bytes = int(workspace_size[1]) if len(workspace_size) > 1 else 0
-        return WorkspaceSizes(float_bytes, int_bytes)
+    if not isinstance(workspace_size, (str, bytes)):
+        try:
+            workspace_size_len = len(workspace_size)
+        except TypeError:
+            pass
+        else:
+            if workspace_size_len == 0:
+                raise ValueError("FlashInfer workspace_size returned an empty result")
+            if workspace_size_len > 2:
+                raise ValueError(
+                    "FlashInfer workspace_size must return a scalar or a "
+                    "(float_bytes, int_bytes) pair"
+                )
+            float_bytes = int(workspace_size[0])
+            int_bytes = int(workspace_size[1]) if workspace_size_len == 2 else 0
+            return WorkspaceSizes(float_bytes, int_bytes)
+
     return WorkspaceSizes(int(workspace_size), 0)
 
 

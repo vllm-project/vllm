@@ -51,6 +51,17 @@ class _FakeFlashInferWrapper:
         self.reset_calls += 1
 
 
+class _FakeWorkspaceSizeArray:
+    def __init__(self, values: list[int]) -> None:
+        self.values = values
+
+    def __len__(self) -> int:
+        return len(self.values)
+
+    def __getitem__(self, index: int) -> int:
+        return self.values[index]
+
+
 def _make_flashinfer_builder(flashinfer_backend):
     FlashInferMetadataBuilder = flashinfer_backend.FlashInferMetadataBuilder
     builder = FlashInferMetadataBuilder.__new__(FlashInferMetadataBuilder)
@@ -59,6 +70,44 @@ def _make_flashinfer_builder(flashinfer_backend):
     builder.device = torch.device("cpu")
     builder.use_dcp = False
     return builder
+
+
+def test_flashinfer_workspace_size_parses_sequence_like_array():
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    WorkspaceSizes = flashinfer_backend.WorkspaceSizes
+
+    assert flashinfer_backend._parse_workspace_sizes(
+        _FakeWorkspaceSizeArray([1024, 64])
+    ) == WorkspaceSizes(1024, 64)
+
+
+def test_flashinfer_workspace_size_float_only_keeps_default_int_workspace():
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    builder = _make_flashinfer_builder(flashinfer_backend)
+    wrapper = _FakeFlashInferWrapper(int_workspace_bytes=64)
+    sizes = flashinfer_backend._parse_workspace_sizes(_FakeWorkspaceSizeArray([1024]))
+
+    reset_workspace_manager()
+    init_workspace_manager(torch.device("cpu"))
+    try:
+        builder._ensure_flashinfer_wrapper_workspace(wrapper, sizes)
+    finally:
+        reset_workspace_manager()
+
+    assert wrapper._float_workspace_buffer.numel() == 1024
+    assert wrapper._int_workspace_buffer.numel() == 64
+
+
+def test_flashinfer_workspace_size_rejects_invalid_sequence_length():
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    with pytest.raises(ValueError, match="workspace_size"):
+        flashinfer_backend._parse_workspace_sizes(_FakeWorkspaceSizeArray([1, 2, 3]))
 
 
 def test_flashinfer_separate_cudagraph_memory_profile_gate():
