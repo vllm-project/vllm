@@ -10,6 +10,7 @@ from typing import Any
 from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
     ResponseTextConfig,
+    ToolChoiceFunction,
 )
 from openai.types.responses.function_tool import FunctionTool
 
@@ -19,6 +20,7 @@ from vllm.entrypoints.generate.base.protocol import (
     ExtractedToolCallInformation,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionNamedToolChoiceParam,
     ChatCompletionRequest,
     ChatCompletionToolsParam,
 )
@@ -121,6 +123,16 @@ class ToolParser:
     ) -> ChatCompletionRequest | ResponsesRequest:
         # If there are no tools, return the request as is.
         if not request.tools:
+            return request
+
+        tool_choice = request.tool_choice
+        is_named_tool_choice = isinstance(
+            tool_choice, (ChatCompletionNamedToolChoiceParam, ToolChoiceFunction)
+        )
+        if (
+            not self.supports_required_and_named
+            and (tool_choice == "required" or is_named_tool_choice)
+        ):
             return request
 
         # Set structured output params when tool constraints are derived from

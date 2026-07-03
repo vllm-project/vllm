@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionToolsParam,
     FunctionDefinition,
 )
+from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.tool_parsers import ToolParserManager
 from vllm.tool_parsers.glm47_moe_tool_parser import Glm47MoeModelToolParser
 
@@ -109,6 +110,48 @@ def _collect_tool_deltas(deltas: Any) -> dict[int, _CollectedToolDelta]:
 def test_glm45_uses_shared_glm47_parser():
     assert ToolParserManager.get_tool_parser("glm45") is Glm47MoeModelToolParser
     assert ToolParserManager.get_tool_parser("glm47") is Glm47MoeModelToolParser
+
+
+def test_glm_required_tool_choice_skips_generic_json_schema():
+    tools = _tools()
+    parser = _parser(tools)
+    request = ChatCompletionRequest(
+        model=MODEL,
+        messages=[],
+        tools=tools,
+        tool_choice="required",
+    )
+
+    parser.adjust_request(request)
+
+    assert request.structured_outputs is None
+    assert request.skip_special_tokens is False
+
+
+def test_glm_required_tool_choice_skips_responses_json_schema():
+    tools = [
+        {
+            "type": "function",
+            "name": "get_current_weather",
+            "parameters": {
+                "type": "object",
+                "properties": {"city": {"type": "string"}},
+            },
+        }
+    ]
+    parser = _parser()
+    request = ResponsesRequest(
+        model=MODEL,
+        input=[{"role": "user", "content": "What is the weather in Beijing?"}],
+        tools=tools,
+        tool_choice="required",
+        stream=True,
+    )
+
+    parser.adjust_request(request)
+
+    assert request.text is None
+    assert request.skip_special_tokens is False
 
 
 def test_extract_tool_calls_with_glm45_newline_format():
