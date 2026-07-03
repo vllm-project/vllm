@@ -61,4 +61,13 @@ def load_dspark_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
             del draft_model.lm_head
         draft_model.lm_head = target_lm_head
 
+    # Opt-in rowwise-fp8 draft head (VLLM_DSPARK_FP8_DRAFT_HEAD). Must run
+    # after the lm_head aliasing above and BEFORE CUDA graph capture: the
+    # draft step is captured whole, so the fp8 copy is materialized eagerly.
+    maybe_init_fp8_draft_head = getattr(
+        draft_model, "maybe_init_fp8_draft_head", None
+    )
+    if maybe_init_fp8_draft_head is not None:
+        maybe_init_fp8_draft_head()
+
     return draft_model

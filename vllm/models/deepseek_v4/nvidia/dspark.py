@@ -15,6 +15,7 @@ import regex as re
 import torch
 import torch.nn as nn
 
+import vllm.envs as envs
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_tensor_model_parallel_rank,
@@ -24,6 +25,12 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.mhc.tilelang import (
     hc_head_fused_kernel_tilelang,
     mhc_post_tilelang,
+)
+from vllm.model_executor.layers.fp8_draft_head import (
+    Fp8DraftHead,
+    fp8_draft_head_logits,
+    fp8_draft_head_supported,
+    quantize_draft_head,
 )
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
@@ -285,6 +292,10 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
             prefix=maybe_prefix(prefix, "lm_head"),
         )
         self.logits_processor = LogitsProcessor(self.config.vocab_size)
+        # Optional rowwise-fp8 copy of the (shared) lm_head, used ONLY for
+        # draft-proposal logits. Materialized eagerly at load time via
+        # maybe_init_fp8_draft_head(); None means the bf16 path is used.
+        self._fp8_draft_head: Fp8DraftHead | None = None
 
     # --- Hooks used by the speculator -------------------------------------
 
@@ -322,8 +333,48 @@ class DSparkDeepseekV4ForCausalLM(nn.Module):
         """Base logits U_k = lm_head(norm(head_hidden))."""
         return self.logits_processor(self.lm_head, self.model.norm(hidden_states))
 
+    def maybe_init_fp8_draft_head(self) -> None:
+        """Materialize the rowwise-fp8 draft lm_head copy (opt-in).
+
+        Called by ``load_dspark_model`` right after the target's lm_head is
+        aliased onto this model. This must happen eagerly at load time, NOT
+        lazily on the first draft call: the whole DSpark draft step
+        (including ``compute_draft_logits``) runs inside a FULL captured
+        CUDA graph, so the quantization kernels must not fire during
+        capture/replay.
+
+        TP: the lm_head is vocab-sharded, so each rank quantizes its local
+        shard with per-local-row scales; the draft path's gather and argmax
+        semantics are unchanged.
+        """
+        if not envs.VLLM_DSPARK_FP8_DRAFT_HEAD:
+            return
+        if not fp8_draft_head_supported(self.lm_head.weight.device):
+            logger.warning(
+                "VLLM_DSPARK_FP8_DRAFT_HEAD is set but this device has no "
+                "fp8 support (SM89+ required); using the unquantized "
+                "draft lm_head."
+            )
+            return
+        self._fp8_draft_head = quantize_draft_head(self.lm_head.weight)
+        logger.info_once(
+            "DSpark draft-proposal logits use a rowwise-fp8 copy of the "
+            "target lm_head (draft-time only; verify pass untouched)."
+        )
+
     def compute_draft_logits(self, hidden_states: torch.Tensor) -> torch.Tensor:
         # Full-vocab draft: base logits, no d2t scatter.
+        if self._fp8_draft_head is not None:
+            # Draft-proposal-only fp8 path. Mirrors compute_logits ->
+            # LogitsProcessor._get_logits: local (shard) logits, then the
+            # same TP gather and vocab-padding slice.
+            local_logits = fp8_draft_head_logits(
+                self.model.norm(hidden_states), self._fp8_draft_head
+            )
+            logits = self.logits_processor._gather_logits(local_logits)
+            if logits is not None:
+                logits = logits[..., : self.logits_processor.org_vocab_size]
+            return logits
         return self.compute_logits(hidden_states)
 
     def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:

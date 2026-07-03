@@ -150,6 +150,7 @@ if TYPE_CHECKING:
     VLLM_SERVER_DEV_MODE: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
+    VLLM_DSPARK_FP8_DRAFT_HEAD: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: str | None = None
@@ -1319,6 +1320,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     # If set, vLLM will disable the MLA attention optimizations.
     "VLLM_MLA_DISABLE": lambda: bool(int(os.getenv("VLLM_MLA_DISABLE", "0"))),
+    # If set, DSpark speculative decoding computes its draft-proposal logits
+    # with a rowwise-fp8 copy of the shared target lm_head (draft-time only;
+    # the verify pass is untouched, so accepted outputs are unchanged).
+    # Halves draft lm_head weight traffic; largest wins on bandwidth-bound
+    # GPUs. Requires fp8 tensor cores (SM89+).
+    "VLLM_DSPARK_FP8_DRAFT_HEAD": lambda: bool(
+        int(os.getenv("VLLM_DSPARK_FP8_DRAFT_HEAD", "0"))
+    ),
     # If set, vLLM will pick up the provided Flash Attention MLA
     # Number of GPUs per worker in Ray, if it is set to be a fraction,
     # it allows ray to schedule multiple actors on a single GPU,
