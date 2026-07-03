@@ -103,6 +103,7 @@ class InputBatch:
         max_num_blocks_per_req: list[int] | None = None,
         logitsprocs: LogitsProcessors | None = None,
         logitsprocs_need_output_token_ids: bool = False,
+        enable_penalties: bool = True,
         num_spec_tokens: int = 0,
         is_pooling_model: bool = False,
         cp_kv_cache_interleave_size: int = 1,
@@ -125,7 +126,9 @@ class InputBatch:
         self._req_ids: list[str | None] = []
         self.req_id_to_index: dict[str, int] = {}
 
-        self.penalties_state = PenaltiesState(max_num_reqs, vocab_size, device)
+        self.penalties_state = PenaltiesState(
+            max_num_reqs, vocab_size, device, enabled=enable_penalties
+        )
 
         # TODO(woosuk): This buffer could be too large if max_model_len is big.
         # Find a way to reduce the CPU memory usage.
@@ -411,10 +414,7 @@ class InputBatch:
             if sampling_params.repetition_penalty != 1.0:
                 self.repetition_penalties_reqs.add(req_id)
             self.penalties_state.add_request(
-                req_index,
-                sampling_params,
-                self.token_ids_cpu[req_index, :end_idx],
-                num_prompt_tokens,
+                req_index, sampling_params, *self._penalty_token_history(req_index)
             )
 
             # NOTE(woosuk): self.generators should not include the requests that
@@ -516,6 +516,25 @@ class InputBatch:
         self.token_ids_cpu[req_index, start_index:end_token_index] = spec_token_ids
         self.is_token_ids[req_index, start_index:end_token_index] = True
         cur_spec_token_ids.extend(spec_token_ids)
+
+    def _penalty_token_history(self, req_index: int) -> tuple[np.ndarray, int]:
+        """The request's committed token history and prompt length, as the
+        penalty statistics should see them."""
+        num_prompt_tokens = int(self.num_prompt_tokens[req_index])
+        end_idx = int(self.num_tokens_no_spec[req_index])
+        if not self.is_token_ids[req_index, :num_prompt_tokens].all():
+            # Prompt embeddings: (part of) the prompt region of
+            # token_ids_cpu is uninitialized, so no prompt bitmap can be
+            # built from it.
+            return self.token_ids_cpu[req_index, num_prompt_tokens:end_idx], 0
+        return self.token_ids_cpu[req_index, :end_idx], num_prompt_tokens
+
+    def rebuild_penalties_row(self, req_index: int) -> None:
+        """Rebuild the row's penalty statistics after its committed output
+        history was rewound (KV-load-failure recovery)."""
+        self.penalties_state.rebuild_row(
+            req_index, *self._penalty_token_history(req_index)
+        )
 
     def remove_request(self, req_id: str) -> int | None:
         """This method must always be followed by a call to condense().

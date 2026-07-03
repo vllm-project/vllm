@@ -260,15 +260,114 @@ def test_slot_reuse_no_contamination(device):
 
 @pytest.mark.parametrize("device", DEVICES)
 def test_pool_growth(device):
-    """Growing past the initial capacity preserves existing statistics."""
+    """Filling many slots preserves every request's statistics."""
     rng = random.Random(21)
     device = torch.device(device)
     state = PenaltiesState(MAX_NUM_REQS, VOCAB_SIZE, device)
     rows = []
-    for i in range(30):  # > _INITIAL_POOL_SLOTS, forces two growths
+    for i in range(30):
         req = MirrorRequest(rng, with_penalties=True)
         rows.append(req)
         state.add_request(i, req.params, req.token_ids(), len(req.prompt))
         if i % 10 == 9:
             assert_apply_matches(state, rows, device, rng)
     assert_apply_matches(state, rows, device, rng)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_multi_block_vocab_and_long_history(device):
+    """Cover the multi-block kernel paths: vocab spanning several apply
+    blocks (BLOCK_SIZE=8192) with sizes not divisible by 32, and histories
+    spanning several admission blocks (BLOCK_SIZE=1024)."""
+    rng = random.Random(11)
+    device = torch.device(device)
+    vocab_size = 32003
+    state = PenaltiesState(8, vocab_size, device)
+
+    reqs = []
+    for i in range(3):
+        req = MirrorRequest(rng, with_penalties=True)
+        req.prompt = [rng.randrange(vocab_size) for _ in range(5000)]
+        req.output = [rng.randrange(vocab_size) for _ in range(2500)]
+        reqs.append(req)
+        state.add_request(i, req.params, req.token_ids(), len(req.prompt))
+    slot_mapping = state.make_slot_mapping(len(reqs))
+
+    logits = torch.randn(len(reqs), vocab_size, dtype=torch.float32, device=device)
+    expected = logits.cpu().clone().float()
+    for i, req in enumerate(reqs):
+        counts = torch.bincount(
+            torch.tensor(req.output, dtype=torch.int64, device="cpu"),
+            minlength=vocab_size,
+        )
+        output_mask = counts > 0
+        prompt_mask = (
+            torch.bincount(
+                torch.tensor(req.prompt, dtype=torch.int64, device="cpu"),
+                minlength=vocab_size,
+            )
+            > 0
+        )
+        row = expected[i]
+        rep = req.params.repetition_penalty
+        if rep != 1.0:
+            penalized = prompt_mask | output_mask
+            scale = torch.where(
+                penalized,
+                torch.tensor(rep, device="cpu"),
+                torch.tensor(1.0, device="cpu"),
+            )
+            row *= torch.where(row > 0, 1.0 / scale, scale)
+        row -= req.params.frequency_penalty * counts
+        row -= req.params.presence_penalty * output_mask
+    rep_t, freq_t, pres_t = make_penalty_tensors(reqs, device)
+    state.apply(logits, slot_mapping, rep_t, freq_t, pres_t)
+    torch.testing.assert_close(logits.cpu(), expected, rtol=1e-5, atol=1e-4)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_rebuild_row_after_history_rewind(device):
+    """KV-load-failure recovery: committed tokens are retroactively
+    discarded while the request stays alive; rebuild_row must purge them."""
+    rng = random.Random(31)
+    device = torch.device(device)
+    state = PenaltiesState(MAX_NUM_REQS, VOCAB_SIZE, device)
+    req = MirrorRequest(rng, with_penalties=True)
+    state.add_request(0, req.params, req.token_ids(), len(req.prompt))
+    slot_mapping = state.make_slot_mapping(1)
+
+    # Commit two steps of tokens.
+    committed = [rng.randrange(VOCAB_SIZE) for _ in range(8)]
+    sampled = torch.tensor([committed], dtype=torch.int64, device=device)
+    state.commit(sampled, slot_mapping, None)
+    req.output.extend(committed)
+
+    # Rewind the last 5 tokens (as the KV-load-failure path does), then
+    # rebuild from the surviving history.
+    del req.output[-5:]
+    state.rebuild_row(0, req.token_ids(), len(req.prompt))
+    assert_apply_matches(state, [req], device, rng)
+
+    # The row keeps working incrementally after the rebuild.
+    tok = rng.randrange(VOCAB_SIZE)
+    state.commit(
+        torch.tensor([[tok]], dtype=torch.int64, device=device), slot_mapping, None
+    )
+    req.output.append(tok)
+    assert_apply_matches(state, [req], device, rng)
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_disabled_state_is_inert(device):
+    """A disabled state (non-last PP rank) allocates nothing."""
+    rng = random.Random(41)
+    device = torch.device(device)
+    state = PenaltiesState(MAX_NUM_REQS, VOCAB_SIZE, device, enabled=False)
+    req = MirrorRequest(rng, with_penalties=True)
+    state.add_request(0, req.params, req.token_ids(), len(req.prompt))
+    assert state.capacity == 0
+    assert state.output_bin_counts is None
+    assert state.no_penalties
+    assert state.hold_for_profiling() is None
+    mapping = state.make_slot_mapping(1)
+    assert int(mapping[0]) == -1

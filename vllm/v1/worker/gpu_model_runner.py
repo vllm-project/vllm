@@ -704,6 +704,8 @@ class GPUModelRunner(
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config=self.vllm_config.reasoning_config,
+            # Penalty statistics are only needed where sampling happens.
+            enable_penalties=get_pp_group().is_last_rank and not self.is_pooling_model,
         )
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
@@ -1376,6 +1378,12 @@ class GPUModelRunner(
                 # Some output tokens were discarded due to a sync-KV-load
                 # failure, or output_token_ids was inflated by the optimistic
                 # extend above (async spec decode). Align the cached state.
+                # Discarded real tokens (as opposed to -1 optimistic
+                # placeholders, which were never committed) have already been
+                # folded into the penalty statistics and must be rebuilt out.
+                discarded_committed_tokens = any(
+                    t != -1 for t in req_state.output_token_ids[num_output_tokens:]
+                )
                 del req_state.output_token_ids[num_output_tokens:]
                 if req_index is not None:
                     end_idx = (
@@ -1383,6 +1391,8 @@ class GPUModelRunner(
                         + num_output_tokens
                     )
                     self.input_batch.num_tokens_no_spec[req_index] = end_idx
+                    if discarded_committed_tokens:
+                        self.input_batch.rebuild_penalties_row(req_index)
 
             # Update the block IDs.
             if not resumed_from_preemption:
@@ -6319,6 +6329,10 @@ class GPUModelRunner(
                         for i, output in enumerate(dummy_encoder_outputs):
                             self.encoder_cache[f"tmp_{i}"] = output
 
+        # Hold the fully-sized penalties pool across the dummy run so the
+        # profiled peak accounts for it; at runtime it is allocated lazily
+        # on the first penalty request.
+        penalties_reservation = self.input_batch.penalties_state.hold_for_profiling()
         # Add `is_profile` here to pre-allocate communication buffers
         hidden_states, last_hidden_states = self._dummy_run(
             self.max_num_tokens, is_profile=True
@@ -6331,7 +6345,7 @@ class GPUModelRunner(
         else:
             output = None
         self._sync_device()
-        del hidden_states, output
+        del hidden_states, output, penalties_reservation
         self.encoder_cache.clear()
         gc.collect()
 

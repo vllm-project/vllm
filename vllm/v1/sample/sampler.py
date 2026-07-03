@@ -401,7 +401,9 @@ class Sampler(nn.Module):
             logits = processor.apply(logits)
 
         # Apply penalties (e.g., freq_penalties).
-        logits = self.apply_penalties(logits, sampling_metadata, predict_bonus_token)
+        logits = self.apply_penalties(
+            logits, sampling_metadata, predict_bonus_token=predict_bonus_token
+        )
         if holder is not None and holder.has_tracked_requests():
             holder.update_state(
                 output_token_ids,
@@ -419,6 +421,7 @@ class Sampler(nn.Module):
     def apply_penalties(
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        *,
         predict_bonus_token: bool = False,
     ) -> torch.Tensor:
         if sampling_metadata.no_penalties:

@@ -8,8 +8,6 @@ from vllm.sampling_params import SamplingParams
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
 
-_INITIAL_POOL_SLOTS = 8
-
 
 def params_need_penalties(sampling_params: SamplingParams) -> bool:
     return (
@@ -32,11 +30,13 @@ class PenaltiesState:
     - ``prompt_bin_mask[slot, token // 32]``: packed bitmask of tokens that
       appear in the prompt (repetition penalty).
 
-    Slots are pooled and only allocated for requests that actually use
-    penalties; ``row_to_slot`` maps batch rows to pool slots (-1 = row has no
-    penalties). Rows move within the batch (swap/condense) by updating the
-    mapping only; slot contents never move. The pool grows geometrically on
-    demand, so a batch with no penalty requests costs nothing.
+    Slots are pooled; ``row_to_slot`` maps batch rows to pool slots (-1 =
+    row has no penalties). Rows move within the batch (swap/condense) by
+    updating the mapping only; slot contents never move. The pool is
+    allocated in full on the first penalty request — never before — and its
+    memory is accounted for during memory profiling via
+    ``hold_for_profiling()``, so a deployment that never uses penalties
+    allocates nothing.
 
     Per-step costs: building the statistics is paid once at request admission
     (O(seq_len) bincount); each step only commits the newly accepted tokens
@@ -51,22 +51,26 @@ class PenaltiesState:
         max_num_reqs: int,
         vocab_size: int,
         device: torch.device,
+        enabled: bool = True,
     ):
         self.max_num_reqs = max_num_reqs
         self.vocab_size = vocab_size
         self.device = device
+        # Disabled on PP ranks that never sample; no statistics are kept.
+        self.enabled = enabled
 
         # Batch row -> pool slot; -1 means the row has no penalties.
         self.row_to_slot = np.full(max_num_reqs, -1, dtype=np.int32)
         self.free_slots: list[int] = []
         self.capacity = 0
-        # Lazily allocated on first penalty request:
-        # output_bin_counts: int32 [capacity, vocab_size]
-        # prompt_bin_mask:   int32 [capacity, cdiv(vocab_size, 32)]
+        # Allocated in full on the first penalty request (the memory is
+        # reserved by hold_for_profiling() during memory profiling):
+        # output_bin_counts: int32 [max_num_reqs, vocab_size]
+        # prompt_bin_mask:   int32 [max_num_reqs, cdiv(vocab_size, 32)]
         self.output_bin_counts: torch.Tensor | None = None
         self.prompt_bin_mask: torch.Tensor | None = None
 
-        # Admissions staged until the next make_slot_mapping() call:
+        # Admissions staged until the next flush:
         # (slot, token_ids copy, prompt_len).
         self._staged: list[tuple[int, np.ndarray, int]] = []
 
@@ -74,30 +78,34 @@ class PenaltiesState:
     def no_penalties(self) -> bool:
         return self.capacity == len(self.free_slots) and not self._staged
 
-    def _ensure_capacity(self) -> None:
-        if self.free_slots:
-            return
-        new_capacity = max(_INITIAL_POOL_SLOTS, self.capacity * 2)
-        new_capacity = min(new_capacity, self.max_num_reqs)
-        assert new_capacity > self.capacity
-        counts = torch.zeros(
-            new_capacity, self.vocab_size, dtype=torch.int32, device=self.device
+    def _pool_shapes(self) -> tuple[tuple[int, int], tuple[int, int]]:
+        return (
+            (self.max_num_reqs, self.vocab_size),
+            (self.max_num_reqs, cdiv(self.vocab_size, 32)),
         )
-        mask = torch.zeros(
-            new_capacity,
-            cdiv(self.vocab_size, 32),
-            dtype=torch.int32,
-            device=self.device,
+
+    def _allocate_pool(self) -> None:
+        counts_shape, mask_shape = self._pool_shapes()
+        self.output_bin_counts = torch.zeros(
+            counts_shape, dtype=torch.int32, device=self.device
         )
-        if self.capacity > 0:
-            assert self.output_bin_counts is not None
-            assert self.prompt_bin_mask is not None
-            counts[: self.capacity] = self.output_bin_counts
-            mask[: self.capacity] = self.prompt_bin_mask
-        self.output_bin_counts = counts
-        self.prompt_bin_mask = mask
-        self.free_slots.extend(range(self.capacity, new_capacity))
-        self.capacity = new_capacity
+        self.prompt_bin_mask = torch.zeros(
+            mask_shape, dtype=torch.int32, device=self.device
+        )
+        self.free_slots = list(range(self.max_num_reqs))
+        self.capacity = self.max_num_reqs
+
+    def hold_for_profiling(self) -> tuple[torch.Tensor, torch.Tensor] | None:
+        """Return pool-sized tensors for the caller to hold across the
+        memory-profiling dummy run, so the profiled peak accounts for the
+        pool that is otherwise allocated lazily at runtime."""
+        if not self.enabled or self.output_bin_counts is not None:
+            return None
+        counts_shape, mask_shape = self._pool_shapes()
+        return (
+            torch.zeros(counts_shape, dtype=torch.int32, device=self.device),
+            torch.zeros(mask_shape, dtype=torch.int32, device=self.device),
+        )
 
     def add_request(
         self,
@@ -113,13 +121,31 @@ class PenaltiesState:
         after preemption); statistics are rebuilt from it.
         """
         assert self.row_to_slot[row] == -1, f"row {row} already has a slot"
-        if not params_need_penalties(sampling_params):
+        if not self.enabled or not params_need_penalties(sampling_params):
             return
-        self._ensure_capacity()
+        if self.capacity == 0:
+            self._allocate_pool()
         slot = self.free_slots.pop()
         self.row_to_slot[row] = slot
         # Copy: the caller's array is a live view of the batch buffer.
         self._staged.append((slot, token_ids.astype(np.int64), prompt_len))
+
+    def rebuild_row(self, row: int, token_ids: np.ndarray, prompt_len: int) -> None:
+        """Rebuild the row's statistics from scratch.
+
+        Needed when already-committed output tokens are retroactively
+        discarded while the request stays alive (KV-load-failure recovery
+        rewinds the output history); the committed counts would otherwise
+        keep the discarded tokens forever. Flushes immediately: this path
+        does not necessarily change the batch composition, so no metadata
+        refresh (and thus no flush) may follow.
+        """
+        slot = self.row_to_slot[row]
+        if slot == -1:
+            return
+        self._staged = [s for s in self._staged if s[0] != slot]
+        self._staged.append((int(slot), token_ids.astype(np.int64), prompt_len))
+        self._flush_staged()
 
     def remove_row(self, row: int) -> None:
         slot = self.row_to_slot[row]
@@ -369,6 +395,9 @@ class PenaltiesState:
             if prefix_lens is not None and int(prefix_lens[row]) > 0:
                 start = int(draft_starts[row])
                 prefix = draft_token_ids[start : start + int(prefix_lens[row])]
+                # Match the kernel: out-of-range draft ids never match a
+                # vocab bin, so they contribute nothing.
+                prefix = prefix[(prefix >= 0) & (prefix < vocab_size)]
                 counts = counts + torch.bincount(
                     prefix.long(), minlength=vocab_size
                 ).to(torch.int32)

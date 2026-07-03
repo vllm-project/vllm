@@ -4,12 +4,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import torch
 
 from vllm.v1.sample.logits_processor import LogitsProcessors
-from vllm.v1.sample.ops.penalties import PenaltiesState
 from vllm.v1.sample.thinking_budget_state import ThinkingBudgetStateHolder
+
+if TYPE_CHECKING:
+    from vllm.v1.sample.ops.penalties import PenaltiesState
 
 
 @dataclass
