@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.pooling.base.serving import PoolingServingBase
+from vllm.entrypoints.pooling.base.serving import PoolingBaseServing
 from vllm.entrypoints.pooling.typing import PoolingServeContext
 from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
@@ -136,7 +136,7 @@ async def test_unload_lora_adapter_not_found():
     assert response.error.code == HTTPStatus.NOT_FOUND
 
 
-class _ConcretePoolingServing(PoolingServingBase):
+class _ConcretePoolingServing(PoolingBaseServing):
     """Minimal concrete subclass used only in these unit tests."""
 
     request_id_prefix = "test"
