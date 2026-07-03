@@ -219,14 +219,8 @@ class LoggingStatLogger(StatLoggerBase):
     def log(self):
         self._update_stats()
         self.aggregate_scheduler_stats()
-        # Avoid log noise on an idle production system, but always use INFO
-        # when spec decoding stats are present so acceptance rate is visible.
-        has_spec_stats = not self.spec_decoding_logging.empty
-        log_fn = (
-            logger.debug
-            if (self.engine_is_idle and not has_spec_stats)
-            else logger.info
-        )
+        # Avoid log noise on an idle production system
+        log_fn = logger.debug if self.engine_is_idle else logger.info
         # Format and print output.
         log_parts = [
             "Avg prompt throughput: %.1f tokens/s",

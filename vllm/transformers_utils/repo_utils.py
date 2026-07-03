@@ -94,13 +94,27 @@ def list_repo_files(
         # if model is remote, use hf_hub api to list files
         try:
             if envs.VLLM_USE_MODELSCOPE:
-                from vllm.transformers_utils.utils import modelscope_list_repo_files
-
-                return modelscope_list_repo_files(
-                    repo_id,
-                    revision=revision,
-                    token=os.getenv("MODELSCOPE_API_TOKEN", None),
+                from vllm.transformers_utils.utils import (
+                    is_modelscope_legacy_hub_api_error,
+                    modelscope_list_repo_files,
                 )
+
+                try:
+                    return modelscope_list_repo_files(
+                        repo_id,
+                        revision=revision,
+                        token=os.getenv("MODELSCOPE_API_TOKEN", None),
+                    )
+                except Exception as exc:
+                    if not is_modelscope_legacy_hub_api_error(exc):
+                        raise
+                    logger.warning(
+                        "ModelScope file listing failed for '%s' due to legacy "
+                        "hub API compatibility issue. Returning an empty file "
+                        "list.",
+                        repo_id,
+                    )
+                    return []
             return hf_api().list_repo_files(
                 repo_id, revision=revision, repo_type=repo_type, token=token
             )
