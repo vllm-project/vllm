@@ -5,7 +5,9 @@ pub(crate) mod token_ids;
 
 use logprobs::validate_logprobs;
 use token_ids::{validate_prompt_token_ids, validate_vocab_range};
-use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
+use vllm_engine_core_client::protocol::sampling::{
+    EngineCoreSamplingParams, RepetitionDetectionParams,
+};
 use vllm_llm::GenerateRequest;
 use vllm_tokenizer::Tokenizer;
 
@@ -111,6 +113,7 @@ pub fn lower_sampling_params(
         logprob_token_ids.as_deref(),
         sampling_limits,
     )?;
+    validate_repetition_detection(repetition_detection.as_ref())?;
 
     // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat
     // path: https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/openai/chat_completion/protocol.py#L424-L450
@@ -164,11 +167,7 @@ pub fn lower_sampling_params(
         frequency_penalty,
         presence_penalty,
         repetition_penalty,
-        repetition_detection: if repetition_detection.as_ref().is_some_and(|p| p.is_disabled()) {
-            None
-        } else {
-            repetition_detection
-        },
+        repetition_detection: repetition_detection.filter(|p| !p.is_disabled()),
         stop_token_ids,
         eos_token_id: (!ignore_eos).then_some(primary_eos_token_id).flatten(),
         all_stop_token_ids,
@@ -198,6 +197,33 @@ fn normalize_thinking_token_budget(value: Option<i64>) -> Result<Option<u64>> {
         Some(budget) if budget >= 0 => Ok(Some(budget as u64)),
         Some(_) => Err(Error::InvalidThinkingTokenBudget),
     }
+}
+
+fn validate_repetition_detection(params: Option<&RepetitionDetectionParams>) -> Result<()> {
+    let Some(params) = params else {
+        return Ok(());
+    };
+
+    if params.min_pattern_size > params.max_pattern_size {
+        return Err(Error::InvalidRepetitionDetection {
+            message: format!(
+                "`min_pattern_size` must be less than or equal to \
+                 `max_pattern_size`, got min_pattern_size={}, \
+                 max_pattern_size={}",
+                params.min_pattern_size, params.max_pattern_size
+            ),
+        });
+    }
+    if params.max_pattern_size > 0 && params.min_count < 2 {
+        return Err(Error::InvalidRepetitionDetection {
+            message: format!(
+                "`min_count` must be at least 2, got min_count={}",
+                params.min_count
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 /// Convert bad-word strings into token-ID sequences, following the Python vLLM
@@ -394,6 +420,59 @@ mod tests {
                 max_tokens: 4,
             }
         ));
+    }
+
+    #[test]
+    fn lower_sampling_params_validates_repetition_detection() {
+        let lower = |repetition_detection| {
+            lower_sampling_params_with_limits(
+                SamplingParams {
+                    repetition_detection,
+                    ..SamplingParams::default()
+                },
+                sample_sampling_limits(),
+            )
+        };
+
+        let enabled = RepetitionDetectionParams {
+            max_pattern_size: 4,
+            min_pattern_size: 2,
+            min_count: 2,
+        };
+        assert_eq!(
+            lower(Some(enabled.clone())).unwrap().repetition_detection,
+            Some(enabled)
+        );
+
+        let disabled = RepetitionDetectionParams {
+            max_pattern_size: 0,
+            min_pattern_size: 0,
+            min_count: 0,
+        };
+        assert_eq!(lower(Some(disabled)).unwrap().repetition_detection, None);
+
+        let error = lower(Some(RepetitionDetectionParams {
+            max_pattern_size: 1,
+            min_pattern_size: 2,
+            min_count: 2,
+        }))
+        .unwrap_err();
+        let Error::InvalidRepetitionDetection { message } = error else {
+            panic!("expected repetition_detection validation error");
+        };
+        assert!(message.contains("min_pattern_size=2"));
+        assert!(message.contains("max_pattern_size=1"));
+
+        let error = lower(Some(RepetitionDetectionParams {
+            max_pattern_size: 1,
+            min_pattern_size: 1,
+            min_count: 1,
+        }))
+        .unwrap_err();
+        let Error::InvalidRepetitionDetection { message } = error else {
+            panic!("expected repetition_detection validation error");
+        };
+        assert!(message.contains("min_count=1"));
     }
 
     #[test]
