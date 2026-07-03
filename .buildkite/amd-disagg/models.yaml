@@ -33,7 +33,7 @@ models:
   - model: DeepSeek-V3
     env:
       VLLM_ROCM_USE_AITER: "1"
-      VLLM_ROCM_USE_AITER_MLA: "0"
+      VLLM_ROCM_USE_AITER_MLA: "1"
       VLLM_ROCM_USE_AITER_MOE: "1"
       VLLM_ROCM_USE_AITER_RMSNORM: "1"
       VLLM_ROCM_USE_AITER_PAGED_ATTN: "0"

@@ -21,7 +21,10 @@ _CLUSTER_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # MODEL_NAME indexes into models.yaml; MODEL_DIR is the parent dir holding it.
 # MODEL_PATH (resolved by the launcher) = ${MODEL_DIR}/${MODEL_NAME}.   [site]
 export MODEL_NAME="${MODEL_NAME:-DeepSeek-V3}"
-export MODEL_DIR="${MODEL_DIR:-/shared_inference/models_blog}"
+export MODEL_DIR="${MODEL_DIR:-/data/models2}"
+
+# Shared NFS root (5 TB, visible on every node): model weights + per-run logs. [site]
+export SHARED_MOUNT="${SHARED_MOUNT:-/data}"
 
 # Parallelism mode (launcher derives PARALLEL_MODE tp|ep from this):
 #   WIDE_EP_MODE=0  tp : each node is an independent TP server (TP8, 1P1D)
@@ -65,8 +68,7 @@ export PROXY_PING_PORT="${PROXY_PING_PORT:-36367}"
 export HANDSHAKE_PORT="${HANDSHAKE_PORT:-6301}"
 export NOTIFY_PORT="${NOTIFY_PORT:-61005}"
 
-# Path to the MoRIIO toy proxy. Uses the upstream example shipped in the image
-export PROXY_SCRIPT="${PROXY_SCRIPT:-/app/vllm/examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py}"
+export PROXY_SCRIPT="${PROXY_SCRIPT:-${_CLUSTER_SH_DIR}/moriio_toy_proxy_server.py}"
 
 # MoRIIO KV transfer direction (injected into --kv-transfer-config by the launcher):
 #   0 -> omit read_mode     (default; MoRIIO write mode: prefill pushes to decode)
@@ -94,7 +96,7 @@ fi
 
 # Where per-run logs / benchmark results are written. A $SLURM_JOB_ID subdir is
 # appended so each CI run is self-scoped (falls back to 'local' off-SLURM).  [site]
-_LOG_BASE="${LOG_BASE:-/shared_inference/csrikris/disagg_logs}"
+_LOG_BASE="${LOG_BASE:-/data/${USER:-$(id -un)}/disagg_logs}"
 export LOG_PATH="${LOG_PATH:-${_LOG_BASE}/${SLURM_JOB_ID:-local}}"
 
 # ----------------------------------------------------------------- vLLM runtime
@@ -102,7 +104,14 @@ export LOG_PATH="${LOG_PATH:-${_LOG_BASE}/${SLURM_JOB_ID:-local}}"
 # AITER kernel toggles live in models.yaml under each model's `env:` block.
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 export HSA_NO_SCRATCH_RECLAIM="${HSA_NO_SCRATCH_RECLAIM:-1}"
-# MoRIIO read-mode: decode pulls KV from prefill (matches the toy proxy READ path).
+
+#export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+#export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+#
+#export HOME=/tmp
+#export HF_HOME="${HF_HOME:-/tmp/hf_home}"
+#export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/.cache}"
+# MoRIIO read-mode: decode pulls KV from prefill (matches the toy proxy READ path").
 export VLLM_MORIIO_CONNECTOR_READ_MODE="${VLLM_MORIIO_CONNECTOR_READ_MODE:-1}"
 export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
 
@@ -114,16 +123,29 @@ export APPLY_MORIIO_PATCH="${APPLY_MORIIO_PATCH:-auto}"
 export DISTRIBUTED_TIMEOUT_SECONDS="${DISTRIBUTED_TIMEOUT_SECONDS:-7200}"
 
 # ----------------------------------------------------------------- RDMA / NCCL
-# RDMA HCA list + GID index (comma-separated; used by NCCL and MoRI).   [site]
-_IB_DEVICES="${IB_DEVICES:-mlx5_0,mlx5_2,mlx5_3,mlx5_4,mlx5_5,mlx5_7,mlx5_8,mlx5_9}"
-_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-3}"
+# AMD Pensando AINIC RoCE fabric: 8 NICs exposed as ionic_0..7 (netdevs eth2..9),
+# each rail on its own /24. GID index 1 + traffic class 104 are the
+# DigitalOcean-validated tunables (also preset cluster-wide in /etc/rccl.conf).
+# eth1 (VPC, 10.128.0.0/20) is the bootstrap/OOB socket; transport is RDMA over
+# the ionic devices. Matches /data/templates/spur-multinode-rccl-template.sh. [site]
+_IB_DEVICES="${IB_DEVICES:-ionic_0,ionic_1,ionic_2,ionic_3,ionic_4,ionic_5,ionic_6,ionic_7}"
+_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-1}"
 export IB_DEVICES="${IB_DEVICES:-${_IB_DEVICES}}"
 export NCCL_IB_HCA="${NCCL_IB_HCA:-${_IB_DEVICES}}"
 export NCCL_IB_GID_INDEX="${NCCL_IB_GID_INDEX:-${_IB_GID_INDEX}}"
 export NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-0}"
-export NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-1}"
-export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-$(ip route 2>/dev/null | awk '/^default/{print $5; exit}')}"
+# In-box RCCL net transport (no external plugin); pin bootstrap to the VPC iface.
+export NCCL_NET_PLUGIN="${NCCL_NET_PLUGIN:-none}"
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-eth0}"
 export GLOO_SOCKET_IFNAME="${GLOO_SOCKET_IFNAME:-${NCCL_SOCKET_IFNAME}}"
+export NCCL_CROSS_NIC="${NCCL_CROSS_NIC:-0}"
+export NCCL_PXN_DISABLE="${NCCL_PXN_DISABLE:-0}"
+export NCCL_NET_DISABLE_INTRA="${NCCL_NET_DISABLE_INTRA:-1}"
+export NCCL_IB_TC="${NCCL_IB_TC:-104}"
+export NCCL_IB_FIFO_TC="${NCCL_IB_FIFO_TC:-192}"
+export NCCL_IB_QPS_PER_CONNECTION="${NCCL_IB_QPS_PER_CONNECTION:-1}"
+export NCCL_IB_TIMEOUT="${NCCL_IB_TIMEOUT:-22}"
+export NCCL_IB_RETRY_CNT="${NCCL_IB_RETRY_CNT:-12}"
 # MoRI uses the same NIC set as NCCL.
 export MORI_RDMA_DEVICES="${MORI_RDMA_DEVICES:-${_IB_DEVICES}}"
 export MORI_IB_GID_INDEX="${MORI_IB_GID_INDEX:-${_IB_GID_INDEX}}"
@@ -135,8 +157,8 @@ export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-16G}"
 # ----------------------------------------------------------------- benchmark
 # Space-separated ISL/OSL pairs and concurrency levels for the bench sweep.
 # Defaults are tuned for the CI gate; override inline for a fuller prod sweep.
-export BENCHMARK_COMBINATIONS="${BENCHMARK_COMBINATIONS:-1024/1024 8192/1024}"
-export BENCHMARK_CON="${BENCHMARK_CON:-8 16 32 64 128 256}"
+export BENCHMARK_COMBINATIONS="${BENCHMARK_COMBINATIONS:-1024/128 2048/128}"
+export BENCHMARK_CON="${BENCHMARK_CON:-32 64}"
 # num-prompts per point = NUM_PROMPTS_FACTOR * concurrency (min BENCHMARK_MIN_PROMPTS).
 export NUM_PROMPTS_FACTOR="${NUM_PROMPTS_FACTOR:-2}"
 export BENCHMARK_MIN_PROMPTS="${BENCHMARK_MIN_PROMPTS:-32}"
@@ -154,4 +176,4 @@ export ACCURACY_THRESHOLD="${ACCURACY_THRESHOLD:-0.90}"
 
 # ----------------------------------------------------------------- SLURM (submit)
 # Used by run-slurm-disagg-test.sh on the login node (harmless to export here). [site]
-export SLURM_PARTITION="${SLURM_PARTITION:-amd-rccl}"
+export SLURM_PARTITION="${SLURM_PARTITION:-default}"
