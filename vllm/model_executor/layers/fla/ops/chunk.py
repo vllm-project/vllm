@@ -10,7 +10,10 @@
 
 import torch
 
+from vllm.platforms import current_platform
+
 from .chunk_delta_h import chunk_gated_delta_rule_fwd_h
+from .chunk_fused import chunk_fused_fwd_h_o
 from .chunk_o import chunk_fwd_o
 from .chunk_scaled_dot_kkt import chunk_scaled_dot_kkt_fwd
 from .cumsum import chunk_local_cumsum
@@ -18,6 +21,20 @@ from .l2norm import l2norm_fwd
 from .solve_tril import solve_tril
 from .utils import FLA_CHUNK_SIZE, SUPPRESS_LEVEL, input_guard
 from .wy_fast import recompute_w_u_fwd
+
+
+def _can_use_fused_h_o(q, k, v, cu_seqlens) -> bool:
+    # ROCm-only; threshold tuned on MI300X.
+    if not current_platform.is_rocm():
+        return False
+    if cu_seqlens is not None:
+        return False
+    K = k.shape[-1]
+    V = v.shape[-1]
+    if K > 256 or V > 256:
+        return False
+    B, T = q.shape[0], q.shape[1]
+    return B * T <= 1024
 
 
 def chunk_gated_delta_rule_fwd(
@@ -58,6 +75,22 @@ def chunk_gated_delta_rule_fwd(
         cu_seqlens=cu_seqlens,
         chunk_indices=chunk_indices,
     )
+    if _can_use_fused_h_o(q, k, v, cu_seqlens) and SUPPRESS_LEVEL < 3:
+        # Fused fwd_h + fwd_o eliminates the materialization of h (~512MB for
+        # B=4 T=4096) and v_new in HBM. Falls back to the split path for
+        # varlen and for SUPPRESS_LEVEL>=3 callers that need h / v_new out.
+        o, final_state = chunk_fused_fwd_h_o(
+            k=k,
+            w=w,
+            u=u,
+            q=q,
+            g=g,
+            scale=scale,
+            initial_state=initial_state,
+            output_final_state=output_final_state,
+        )
+        return g, o, A, final_state, None, None, None
+
     h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
         k=k,
         w=w,

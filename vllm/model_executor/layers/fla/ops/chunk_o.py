@@ -12,6 +12,7 @@
 
 import torch
 
+from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
@@ -19,7 +20,37 @@ from .op import exp
 from .utils import FLA_CHUNK_SIZE, check_shared_mem, is_nvidia_hopper
 
 BKV_LIST = [64, 128] if check_shared_mem() else [32, 64]
-NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
+if current_platform.is_rocm():
+    NUM_WARPS = [1, 2, 4, 8, 16]
+elif is_nvidia_hopper:
+    NUM_WARPS = [2, 4]
+else:
+    NUM_WARPS = [2, 4, 8]
+
+if current_platform.is_rocm():
+    _FWD_O_CONFIGS = [
+        triton.Config(
+            {
+                "BK": 64,
+                "BV": 128,
+                "matrix_instr_nonkdim": 16,
+                "waves_per_eu": 2,
+                "kpack": 2,
+            },
+            num_warps=2,
+            num_stages=1,
+        ),
+    ]
+    _FWD_O_KEY: list[str] = []  # static config; no key
+else:
+    _FWD_O_CONFIGS = [
+        triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)
+        for BK in BKV_LIST
+        for BV in BKV_LIST
+        for num_warps in NUM_WARPS
+        for num_stages in [2, 3, 4]
+    ]
+    _FWD_O_KEY = ["H", "K", "V", "BT"]
 
 
 @triton.heuristics(
@@ -29,14 +60,8 @@ NUM_WARPS = [2, 4] if is_nvidia_hopper else [2, 4, 8]
     }
 )
 @triton.autotune(
-    configs=[
-        triton.Config({"BK": BK, "BV": BV}, num_warps=num_warps, num_stages=num_stages)
-        for BK in BKV_LIST
-        for BV in BKV_LIST
-        for num_warps in NUM_WARPS
-        for num_stages in [2, 3, 4]
-    ],
-    key=["H", "K", "V", "BT"],
+    configs=_FWD_O_CONFIGS,
+    key=_FWD_O_KEY,
 )
 @triton.jit(do_not_specialize=["T"])
 def chunk_fwd_kernel_o(
@@ -132,9 +157,8 @@ def chunk_fwd_kernel_o(
     )
     b_v = tl.load(p_v, boundary_check=(0, 1))
 
-    # to fix mma -> mma layout conversion
-    # already solved by triton v3.2 or higher
-    b_o = b_o * scale + tl.dot(b_A.to(b_v.dtype), b_v) * scale
+    # Fold scale: (b_o + b_A @ b_v) * scale. Saves one elementwise mul over [BT, BV].
+    b_o = (b_o + tl.dot(b_A.to(b_v.dtype), b_v)) * scale
     tl.store(p_o, b_o.to(p_o.dtype.element_ty), boundary_check=(0, 1))
 
 
