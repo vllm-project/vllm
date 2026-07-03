@@ -178,7 +178,7 @@ def test_pooling_maybe_get_adapters_lora_name_sets_lora_request():
     serving = _make_pooling_serving(lora_name)
     ctx = _make_pooling_ctx(lora_name)
 
-    serving._maybe_get_adapters(ctx)
+    ctx.lora_request = serving._maybe_get_adapters(ctx.request)
 
     assert ctx.lora_request is not None
     assert ctx.lora_request.lora_name == lora_name
@@ -190,4 +190,4 @@ def test_pooling_maybe_get_adapters_unknown_model_raises():
     ctx = _make_pooling_ctx("unknown-model")
 
     with pytest.raises(VLLMNotFoundError):
-        serving._maybe_get_adapters(ctx)
+        serving._maybe_get_adapters(ctx.request)
