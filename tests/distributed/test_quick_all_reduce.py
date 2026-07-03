@@ -3,6 +3,9 @@
 
 import multiprocessing
 import random
+import sys
+import types
+from types import SimpleNamespace
 
 import pytest
 import ray
@@ -10,7 +13,9 @@ import torch
 import torch.distributed as dist
 
 import vllm.envs as envs
+import vllm._aiter_ops as aiter_ops
 from vllm import _custom_ops as ops
+import vllm.distributed as vllm_distributed
 from vllm.distributed.communication_op import tensor_model_parallel_all_reduce  # noqa
 from vllm.distributed.device_communicators.quick_all_reduce import (
     KB,
@@ -223,6 +228,162 @@ def test_quick_allreduce_passes_dynamic_quant_level(
     quick_reduce.quick_all_reduce(inp)
 
     assert called_quant_level == QuickReduceRegime.FP.value
+
+
+def test_rocm_aiter_fused_rmsnorm_uses_aiter_qr_rmsnorm_for_prefill(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    class FakeAiterAllReduce:
+        world_size = 2
+        fully_connected = True
+
+        def fused_ar_rms(self, *args, **kwargs):
+            raise AssertionError("expected fused QR+RMSNorm dispatch")
+
+    class FakeQuickReduce:
+        disabled = False
+
+        def __init__(self):
+            self.checked_input = None
+
+        def should_quick_allreduce(self, inp):
+            self.checked_input = inp
+            return True
+
+        def _get_qr_quant_level(self, inp):
+            return QuickReduceRegime.INT4.value
+
+    qr_comm = FakeQuickReduce()
+    device_comm = SimpleNamespace(cpu_group=object(), qr_comm=qr_comm)
+    monkeypatch.setattr(
+        vllm_distributed,
+        "get_tp_group",
+        lambda: SimpleNamespace(device_communicator=device_comm),
+    )
+    monkeypatch.setattr(
+        aiter_ops.rocm_aiter_ops,
+        "get_aiter_allreduce",
+        lambda: FakeAiterAllReduce(),
+    )
+    monkeypatch.setattr(aiter_ops.dist, "get_world_size", lambda group: 2)
+    monkeypatch.setattr(aiter_ops.dist, "get_rank", lambda group: 0)
+    monkeypatch.setattr(
+        aiter_ops.dist,
+        "all_gather_object",
+        lambda handles, handle, group: handles.__setitem__(0, handle),
+    )
+
+    calls = []
+    fake_aiter = types.SimpleNamespace(
+        init_custom_qr=lambda rank, world_size, qr_max_size: 123,
+        qr_get_handle=lambda ptr: b"handle",
+        qr_open_handles=lambda ptr, handles: None,
+    )
+
+    def fake_qr_all_reduce_rmsnorm(
+        ptr,
+        inp,
+        residual,
+        residual_out,
+        out,
+        weight,
+        eps,
+        hidden_dim,
+        quant_level,
+        cast_bf2half,
+    ):
+        calls.append(
+            {
+                "ptr": ptr,
+                "inp": inp,
+                "residual": residual,
+                "residual_out": residual_out,
+                "out": out,
+                "weight": weight,
+                "eps": eps,
+                "hidden_dim": hidden_dim,
+                "quant_level": quant_level,
+                "cast_bf2half": cast_bf2half,
+            }
+        )
+        out.copy_(inp)
+        residual_out.copy_(residual)
+
+    fake_aiter.qr_all_reduce_rmsnorm = fake_qr_all_reduce_rmsnorm
+    monkeypatch.setitem(sys.modules, "aiter", fake_aiter)
+    monkeypatch.setattr(envs, "VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB", None)
+    monkeypatch.setattr(envs, "VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16", True)
+
+    # token_num > 80 forces vLLM's AITER fused AR+RMS wrapper onto its
+    # non-1stage prefill path. hidden_dim=4096 bf16 gives an 8 KiB row, so four
+    # independent RMSNorm rows fit in one 32 KiB QR tile.
+    inp = torch.randn(81, 4096, dtype=torch.bfloat16)
+    residual = torch.randn_like(inp)
+    weight = torch.randn(4096, dtype=torch.bfloat16)
+
+    out, residual_out = aiter_ops._rocm_aiter_fused_allreduce_rmsnorm_impl(
+        inp, residual, weight, 1e-6
+    )
+
+    assert qr_comm.checked_input is inp
+    assert len(calls) == 1
+    assert calls[0]["ptr"] == 123
+    assert calls[0]["inp"] is inp
+    assert calls[0]["residual"] is residual
+    assert calls[0]["out"] is out
+    assert calls[0]["residual_out"] is residual_out
+    assert calls[0]["weight"] is weight
+    assert calls[0]["hidden_dim"] == 4096
+    assert calls[0]["quant_level"] == QuickReduceRegime.INT4.value
+    assert calls[0]["cast_bf2half"] is True
+    torch.testing.assert_close(out, inp)
+    torch.testing.assert_close(residual_out, residual)
+
+
+def test_rocm_aiter_fused_rmsnorm_keeps_1stage_decode_path(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    calls = []
+
+    class FakeAiterAllReduce:
+        world_size = 2
+        fully_connected = True
+
+        def fused_ar_rms(self, inp, residual, *, w, eps, registered, use_1stage):
+            calls.append(
+                {
+                    "inp": inp,
+                    "residual": residual,
+                    "weight": w,
+                    "eps": eps,
+                    "registered": registered,
+                    "use_1stage": use_1stage,
+                }
+            )
+            return inp + 1, residual + 1
+
+    monkeypatch.setattr(
+        aiter_ops.rocm_aiter_ops,
+        "get_aiter_allreduce",
+        lambda: FakeAiterAllReduce(),
+    )
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
+
+    inp = torch.randn(4, 4096, dtype=torch.bfloat16)
+    residual = torch.randn_like(inp)
+    weight = torch.randn(4096, dtype=torch.bfloat16)
+
+    out, residual_out = aiter_ops._rocm_aiter_fused_allreduce_rmsnorm_impl(
+        inp, residual, weight, 1e-6
+    )
+
+    assert len(calls) == 1
+    assert calls[0]["inp"] is inp
+    assert calls[0]["residual"] is residual
+    assert calls[0]["weight"] is weight
+    assert calls[0]["use_1stage"] is True
+    torch.testing.assert_close(out, inp + 1)
+    torch.testing.assert_close(residual_out, residual + 1)
 
 
 @ray.remote(num_gpus=1, max_calls=1)
