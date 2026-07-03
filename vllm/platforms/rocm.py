@@ -119,6 +119,14 @@ def _sync_hip_cuda_env_vars():
     hip_val = os.environ.get("HIP_VISIBLE_DEVICES") or None
     cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES") or None
 
+    if cuda_val is not None:
+        logger.warning_once(
+            "Using CUDA_VISIBLE_DEVICES on ROCm is deprecated and support "
+            "will be removed in vLLM v0.26.0. Please use HIP_VISIBLE_DEVICES "
+            "instead.",
+            scope="process",
+        )
+
     if hip_val is not None and cuda_val is not None:
         if hip_val != cuda_val:
             raise ValueError(
@@ -453,7 +461,6 @@ class RocmPlatform(Platform):
         "auto_awq",
         "awq_marlin",  # will be overwritten with awq
         "gptq",
-        "gptq_marlin",
         "auto_gptq",
         "fp8",
         "deepseek_v4_fp8",

@@ -47,8 +47,10 @@ steps:
   - csrc/fused_deepseek_v4_qnorm_rope_kv_insert_kernel.cu
   - vllm/models/deepseek_v4/common/ops/
   - tests/kernels/test_fused_deepseek_v4_qnorm_rope_kv_insert.py
+  - tests/kernels/test_top_k_per_row.py # it runs on Blackwell too - some kernels have arch-specific optimizations
   commands:
     - pytest -v -s kernels/test_fused_deepseek_v4_*.py
+    - pytest -v -s kernels/test_top_k_per_row.py
 
 - label: Deepseek V4 Kernel Test (B200)
   key: deepseek-v4-kernel-test-b200
@@ -284,8 +286,8 @@ steps:
       - image-build-amd
 
  
-- label: Kernels FP8 MoE Test (1 H100)
-  key: kernels-fp8-moe-test-1-h100
+- label: Kernels FP8 MoE Test (1xH100)
+  key: kernels-fp8-moe-test-1xh100
   timeout_in_minutes: 90
   device: h100
   num_devices: 1
@@ -301,8 +303,8 @@ steps:
     - pytest -v -s kernels/moe/test_triton_moe_no_act_mul.py
     - pytest -v -s kernels/moe/test_triton_moe_ptpc_fp8.py
 
-- label: Kernels FP8 MoE Test (2 H100s)
-  key: kernels-fp8-moe-test-2-h100s
+- label: Kernels FP8 MoE Test (2xH100)
+  key: kernels-fp8-moe-test-2xh100
   timeout_in_minutes: 90
   device: h100
   num_devices: 2
