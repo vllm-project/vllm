@@ -6,10 +6,12 @@ from contextlib import contextmanager
 from typing import Protocol
 
 import torch
+import torch.distributed as dist
 from torch._ops import OpOverload
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -28,6 +30,66 @@ except ImportError:
 # which is a host op, so we cache it once here.
 FP8_DTYPE = current_platform.fp8_dtype()
 _HIPB_MM_INITIALIZED_DEVICES: set[int] = set()
+logger = init_logger(__name__)
+KB = 1024
+MB = 1024 * KB
+
+
+def _get_or_create_aiter_qr_rmsnorm_comm(device_comm: object) -> tuple[int, int, bool] | None:
+    """Create the AITER QR communicator used by fused QR+RMSNorm.
+
+    vLLM's normal QuickReduce communicator owns vLLM C++ QR buffers. The fused
+    QR+RMSNorm kernel added in AITER needs an AITER DeviceComms instance, so we
+    lazily create one on the same TP CPU group and keep it on the vLLM device
+    communicator for reuse.
+    """
+    existing = getattr(device_comm, "_aiter_qr_rmsnorm_comm", None)
+    if existing is False:
+        return None
+    if existing is not None:
+        return existing
+
+    try:
+        import aiter
+    except Exception:
+        setattr(device_comm, "_aiter_qr_rmsnorm_comm", False)
+        return None
+
+    if not hasattr(aiter, "qr_all_reduce_rmsnorm"):
+        setattr(device_comm, "_aiter_qr_rmsnorm_comm", False)
+        return None
+
+    group = getattr(device_comm, "cpu_group", None)
+    if group is None:
+        setattr(device_comm, "_aiter_qr_rmsnorm_comm", False)
+        return None
+
+    world_size = dist.get_world_size(group=group)
+    rank = dist.get_rank(group=group)
+    if world_size not in (2, 4, 8):
+        setattr(device_comm, "_aiter_qr_rmsnorm_comm", False)
+        return None
+
+    qr_max_size_mb = envs.VLLM_ROCM_QUICK_REDUCE_MAX_SIZE_BYTES_MB
+    qr_max_size = None if qr_max_size_mb is None else qr_max_size_mb * MB
+
+    try:
+        ptr = aiter.init_custom_qr(rank, world_size, qr_max_size)
+        handle = aiter.qr_get_handle(ptr)
+        handles = [None] * world_size
+        dist.all_gather_object(handles, handle, group=group)
+        aiter.qr_open_handles(ptr, handles)
+    except Exception as exc:
+        logger.warning_once(
+            "AITER fused QR+RMSNorm communicator initialization failed: %s",
+            exc,
+        )
+        setattr(device_comm, "_aiter_qr_rmsnorm_comm", False)
+        return None
+
+    comm = (ptr, world_size, envs.VLLM_ROCM_QUICK_REDUCE_CAST_BF16_TO_FP16)
+    setattr(device_comm, "_aiter_qr_rmsnorm_comm", comm)
+    return comm
 
 
 def _ensure_hipb_mm_extension_initialized() -> None:
@@ -853,6 +915,57 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
         size_ok = False
 
     use_1stage = hidden_ok and token_ok and size_ok
+
+    if not use_1stage:
+        from vllm.distributed import get_tp_group
+
+        device_comm = get_tp_group().device_communicator
+        qr_comm = getattr(device_comm, "qr_comm", None)
+        row_size = hidden_dim * input_.element_size()
+        fused_qr_rmsnorm_ok = (
+            qr_comm is not None
+            and not getattr(qr_comm, "disabled", True)
+            and hasattr(qr_comm, "should_quick_allreduce")
+            and qr_comm.should_quick_allreduce(input_)
+            and input_.shape == residual.shape
+            and input_.dtype in (torch.bfloat16, torch.float16)
+            and input_.dtype == residual.dtype
+            and input_.dtype == weight.dtype
+            and weight.dim() == 1
+            and weight.numel() == hidden_dim
+            and input_.numel() % hidden_dim == 0
+            and row_size > 0
+            and row_size <= 32 * KB
+            and (32 * KB) % row_size == 0
+        )
+        if fused_qr_rmsnorm_ok:
+            aiter_qr_comm = _get_or_create_aiter_qr_rmsnorm_comm(device_comm)
+            if aiter_qr_comm is not None:
+                import aiter
+
+                ptr, _, cast_bf2half = aiter_qr_comm
+                quant_level = qr_comm._get_qr_quant_level(input_)
+                out = torch.empty_like(input_)
+                residual_out = torch.empty_like(residual)
+                logger.info_once(
+                    "Using AITER fused QuickReduce allreduce + RMSNorm for "
+                    "shape=%s dtype=%s",
+                    tuple(input_.shape),
+                    input_.dtype,
+                )
+                aiter.qr_all_reduce_rmsnorm(
+                    ptr,
+                    input_,
+                    residual,
+                    residual_out,
+                    out,
+                    weight,
+                    epsilon,
+                    hidden_dim,
+                    quant_level,
+                    cast_bf2half,
+                )
+                return out, residual_out
 
     result = aiter_ar.fused_ar_rms(
         input_,
