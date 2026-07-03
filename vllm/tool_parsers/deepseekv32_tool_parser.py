@@ -331,9 +331,7 @@ class DeepSeekV32ToolParser(ToolParser):
 
     def _param_types_for_name(self, name: str) -> list[str]:
         param_config = self._get_param_config(self._active_tool_name)
-        if name in param_config and isinstance(param_config[name], dict):
-            return extract_types_from_schema(param_config[name])
-        return ["string"]
+        return extract_types_from_schema(param_config.get(name))
 
     @staticmethod
     def _can_stream_raw_param(param_types: list[str]) -> bool:

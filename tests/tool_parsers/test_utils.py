@@ -10,6 +10,16 @@ from vllm.tool_parsers.utils import (
     extract_types_from_schema,
 )
 
+ALL_JSON_TYPES = {
+    "string",
+    "number",
+    "integer",
+    "boolean",
+    "null",
+    "object",
+    "array",
+}
+
 
 class TestCoerceToSchemaType:
     class TestNullHandling:
@@ -261,14 +271,18 @@ class TestExtractTypesFromSchema:
         result = set(extract_types_from_schema(schema))
         assert result == {"array", "object"}
 
-    def test_none_schema_defaults_to_string(self):
-        assert extract_types_from_schema(None) == ["string"]
+    def test_none_schema_allows_any_type(self):
+        assert set(extract_types_from_schema(None)) == ALL_JSON_TYPES
 
-    def test_non_dict_schema_defaults_to_string(self):
-        assert extract_types_from_schema("string") == ["string"]
+    def test_non_dict_schema_allows_any_type(self):
+        assert set(extract_types_from_schema("string")) == ALL_JSON_TYPES
 
-    def test_empty_dict_defaults_to_string(self):
-        assert extract_types_from_schema({}) == ["string"]
+    def test_empty_dict_allows_any_type(self):
+        assert set(extract_types_from_schema({})) == ALL_JSON_TYPES
+
+    def test_untyped_property_schema_allows_any_type(self):
+        schema = {"description": "Enter the requested value here."}
+        assert set(extract_types_from_schema(schema)) == ALL_JSON_TYPES
 
     def test_nested_anyof(self):
         schema = {
@@ -279,3 +293,37 @@ class TestExtractTypesFromSchema:
         }
         result = set(extract_types_from_schema(schema))
         assert result == {"integer", "null", "string"}
+
+
+class TestUntypedSchemaCoercion:
+    """A property schema without a type constraint permits any JSON type,
+    so values should be coerced to their natural JSON type instead of
+    defaulting to string (https://github.com/vllm-project/vllm/issues/47557).
+    """
+
+    def coerce_untyped(self, value: str):
+        return coerce_to_schema_type(value, extract_types_from_schema({}))
+
+    def test_integer_value(self):
+        assert self.coerce_untyped("5") == 5
+
+    def test_float_value(self):
+        assert self.coerce_untyped("3.14") == 3.14
+
+    def test_boolean_value(self):
+        assert self.coerce_untyped("true") is True
+
+    def test_null_value(self):
+        assert self.coerce_untyped("null") is None
+
+    def test_object_value(self):
+        assert self.coerce_untyped('{"a": 1}') == {"a": 1}
+
+    def test_array_value(self):
+        assert self.coerce_untyped("[1, 2]") == [1, 2]
+
+    def test_plain_text_stays_string(self):
+        assert self.coerce_untyped("hello") == "hello"
+
+    def test_numeric_looking_quoted_json_string(self):
+        assert self.coerce_untyped('"5"') == "5"
