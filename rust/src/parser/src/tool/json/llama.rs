@@ -87,7 +87,7 @@ impl Llama3JsonToolParser {
                 self.mode = LlamaJsonMode::Arguments {
                     json_scan: JsonObjectScanState::default(),
                 };
-                output.calls.push(ToolCallDelta {
+                output.push_call(ToolCallDelta {
                     tool_index,
                     name: Some(function_name),
                     arguments: String::new(),
@@ -99,7 +99,7 @@ impl Llama3JsonToolParser {
                         "Llama JSON arguments without an active tool call"
                     ));
                 };
-                output.calls.push(ToolCallDelta {
+                output.push_call(ToolCallDelta {
                     tool_index,
                     name: None,
                     arguments: self.buffer[..consumed_len].to_string(),
@@ -145,7 +145,7 @@ impl ToolParser for Llama3JsonToolParser {
         }
 
         if matches!(self.mode, LlamaJsonMode::Passthrough) {
-            output.normal_text.push_str(&self.buffer);
+            output.push_text(&self.buffer);
             self.buffer.clear();
             return Ok(());
         }
@@ -164,7 +164,7 @@ impl ToolParser for Llama3JsonToolParser {
         let mut output = ToolParserOutput::default();
         match &self.mode {
             LlamaJsonMode::Start | LlamaJsonMode::Passthrough => {
-                output.normal_text.push_str(&self.buffer);
+                output.push_text(&self.buffer);
             }
             LlamaJsonMode::AfterCall if self.buffer.trim().is_empty() => {}
             LlamaJsonMode::Header | LlamaJsonMode::Arguments { .. } => {
@@ -268,8 +268,8 @@ mod tests {
         let mut parser = Llama3JsonToolParser::new(&test_tools());
         let output = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(output.normal_text, "Hello, world!");
-        assert!(output.calls.is_empty());
+        assert_eq!(output.normal_text(), "Hello, world!");
+        assert!(output.calls().is_empty());
     }
 
     #[test]
@@ -284,10 +284,10 @@ mod tests {
         output.append(parser.finish().unwrap());
 
         assert_eq!(
-            output.normal_text,
+            output.normal_text(),
             r#"plain text first {"name":"get_weather","parameters":{"location":"Tokyo"}}"#
         );
-        assert!(output.calls.is_empty());
+        assert!(output.calls().is_empty());
     }
 
     #[test]
@@ -299,8 +299,8 @@ mod tests {
         );
         let output = parser.parse_complete(&input).unwrap();
 
-        assert_eq!(output.normal_text, input);
-        assert!(output.calls.is_empty());
+        assert_eq!(output.normal_text(), input);
+        assert!(output.calls().is_empty());
     }
 
     #[test]
@@ -312,8 +312,8 @@ mod tests {
         );
         let output = parser.parse_complete(&input).unwrap();
 
-        assert_eq!(output.normal_text, input);
-        assert!(output.calls.is_empty());
+        assert_eq!(output.normal_text(), input);
+        assert!(output.calls().is_empty());
     }
 
     #[test]
@@ -322,10 +322,10 @@ mod tests {
         let arguments = r#"{ "location": "Tokyo", "days": 3 }"#;
         let output = parser.parse_complete(&build_tool_call("get_weather", arguments)).unwrap();
 
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].tool_index, 0);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(output.calls[0].arguments, arguments);
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].tool_index, 0);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls()[0].arguments, arguments);
     }
 
     #[test]
@@ -336,7 +336,7 @@ mod tests {
             .unwrap_err();
 
         expect![[r#"
-            tool parser parsing failed: invalid Llama JSON
+            tool parser parsing failed: near "{\"name\":\"get_weather\",\"arguments\":{\"location\":\"Tokyo\"}}": invalid Llama JSON
             expected `parameters`"#]]
         .assert_eq(&error.to_report_string());
     }
@@ -353,22 +353,25 @@ mod tests {
 
         expect![[r#"
             ToolParserOutput {
-                normal_text: "",
-                calls: [
-                    ToolCallDelta {
-                        tool_index: 0,
-                        name: Some(
-                            "get_weather",
-                        ),
-                        arguments: "{\"location\":\"Shanghai\"}",
-                    },
-                    ToolCallDelta {
-                        tool_index: 1,
-                        name: Some(
-                            "add",
-                        ),
-                        arguments: "{\"x\":1,\"y\":2}",
-                    },
+                events: [
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 0,
+                            name: Some(
+                                "get_weather",
+                            ),
+                            arguments: "{\"location\":\"Shanghai\"}",
+                        },
+                    ),
+                    ToolCall(
+                        ToolCallDelta {
+                            tool_index: 1,
+                            name: Some(
+                                "add",
+                            ),
+                            arguments: "{\"x\":1,\"y\":2}",
+                        },
+                    ),
                 ],
             }
         "#]]
@@ -390,7 +393,7 @@ mod tests {
         for chunk in chunks {
             let next = parser.parse_chunk(chunk).unwrap();
             observed_arguments.extend(
-                next.calls
+                next.calls()
                     .iter()
                     .filter(|call| call.name.is_none())
                     .map(|call| call.arguments.clone()),
@@ -401,7 +404,7 @@ mod tests {
 
         assert_eq!(observed_arguments, ["{\"location\":", "\"Beijing\"", "}"]);
         assert_eq!(
-            output.coalesce_calls().calls[0].arguments,
+            output.coalesce().calls()[0].arguments,
             r#"{"location":"Beijing"}"#
         );
     }
@@ -418,14 +421,14 @@ mod tests {
 
         let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(output.normal_text, "");
-        assert_eq!(output.calls.len(), 2);
+        assert_eq!(output.normal_text(), "");
+        assert_eq!(output.calls().len(), 2);
         assert_eq!(
-            output.calls[0].arguments,
+            output.calls()[0].arguments,
             r#"{"location":"Dallas","state":"TX"}"#
         );
-        assert_eq!(output.calls[1].name.as_deref(), Some("add"));
-        assert_eq!(output.calls[1].arguments, r#"{"x":4,"y":5}"#);
+        assert_eq!(output.calls()[1].name.as_deref(), Some("add"));
+        assert_eq!(output.calls()[1].arguments, r#"{"x":4,"y":5}"#);
     }
 
     #[test]
@@ -437,7 +440,7 @@ mod tests {
 }"#;
         let output = parser.parse_complete(&build_tool_call("convert", arguments)).unwrap();
 
-        assert_eq!(output.calls[0].arguments, arguments);
+        assert_eq!(output.calls()[0].arguments, arguments);
     }
 
     #[test]
@@ -450,8 +453,8 @@ mod tests {
             ))
             .unwrap();
 
-        assert_eq!(output.normal_text, "");
-        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.normal_text(), "");
+        assert_eq!(output.calls().len(), 1);
     }
 
     #[test]
@@ -471,7 +474,7 @@ mod tests {
         let error = parser.parse_chunk(r#"{"parameters":{},"name":"get_weather"}"#).unwrap_err();
 
         expect![[r#"
-            tool parser parsing failed: invalid Llama JSON
+            tool parser parsing failed: near "{\"parameters\":{},\"name\":\"get_weather\"}": invalid Llama JSON
             expected `name`"#]]
         .assert_eq(&error.to_report_string());
     }
@@ -486,7 +489,7 @@ mod tests {
             ))
             .unwrap_err();
 
-        expect!["tool parser parsing failed: invalid Llama JSON"]
+        expect![[r#"tool parser parsing failed: near " trailing": invalid Llama JSON"#]]
             .assert_eq(&error.to_report_string());
     }
 }

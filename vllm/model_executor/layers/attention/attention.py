@@ -216,6 +216,7 @@ class Attention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
+        mm_prefix_clamp_sliding_window: bool = False,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
         **extra_impl_args,
@@ -420,6 +421,9 @@ class Attention(nn.Module, AttentionLayerBase):
                 compilation_config.static_forward_context,
             )
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
+        # (read by the Triton backend impl). Default False for all other models.
+        self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window
 
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
@@ -458,6 +462,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -472,7 +477,8 @@ class Attention(nn.Module, AttentionLayerBase):
             torch.ops.vllm.maybe_calc_kv_scales(
                 query, key, value, _encode_layer_name(self.layer_name)
             )
-        output_dtype = query.dtype
+        if output_dtype is None:
+            output_dtype = query.dtype
         if self.query_quant is not None:
             # quantizing with a simple torch operation enables
             # torch.compile to fuse this into previous ops

@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sys
 from contextlib import contextmanager
 from typing import Any
 
@@ -11,7 +12,6 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.tracing import instrument
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
@@ -78,7 +78,7 @@ class CPUModelRunner(GPUModelRunner):
         # Speculative decoding fallbacks
         import vllm.v1.sample.rejection_sampler
         import vllm.v1.spec_decode.llm_base_proposer
-        import vllm.v1.spec_decode.utils
+        import vllm.v1.spec_decode.utils as spec_decode_utils
 
         vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_inputs_padded_kernel = (
             cpu_tl.eagle_prepare_inputs_padded_kernel
@@ -89,7 +89,18 @@ class CPUModelRunner(GPUModelRunner):
         vllm.v1.spec_decode.llm_base_proposer.copy_and_expand_eagle_inputs_kernel = (
             cpu_tl.copy_and_expand_eagle_inputs_kernel
         )
-        vllm.v1.spec_decode.utils.eagle_step_slot_mapping_metadata_kernel = (
+        spec_decode_utils.copy_and_expand_dflash_inputs_kernel = (
+            cpu_tl.copy_and_expand_dflash_inputs_kernel
+        )
+        dflash_module = sys.modules.get("vllm.v1.spec_decode.dflash")
+        if dflash_module is not None:
+            dflash_kernel_name = "copy_and_expand_dflash_inputs_kernel"
+            setattr(
+                dflash_module,
+                dflash_kernel_name,
+                cpu_tl.copy_and_expand_dflash_inputs_kernel,
+            )
+        spec_decode_utils.eagle_step_slot_mapping_metadata_kernel = (
             cpu_tl.eagle_step_slot_mapping_metadata_kernel
         )
         vllm.v1.sample.rejection_sampler.rejection_greedy_sample_kernel = (
@@ -177,67 +188,6 @@ class CPUModelRunner(GPUModelRunner):
                 for block_id in block_ids:
                     kv[block_id].zero_()
 
-    # =========================================================================
-    # CPU-safe overrides for speculative decoding methods
-    # These methods override GPU-specific implementations that use CUDA streams
-    # =========================================================================
-
-    def _copy_draft_token_ids_to_cpu(
-        self, scheduler_output: "SchedulerOutput", zeros_only: bool = False
-    ) -> None:
-        """CPU-safe version: no async copy needed, tensors already on CPU."""
-        if self.use_async_scheduling and not (
-            scheduler_output.has_structured_output_requests
-            or self.input_batch.sampling_metadata.output_token_ids
-        ):
-            return
-        self._draft_token_req_ids = self.input_batch.req_ids.copy()
-
-        draft_token_ids: torch.Tensor = self._draft_token_ids
-        if not torch.is_tensor(draft_token_ids):
-            return
-
-        num_reqs = draft_token_ids.shape[0]
-        if self.draft_token_ids_cpu is not None:
-            if not zeros_only:
-                self.draft_token_ids_cpu[:num_reqs].copy_(draft_token_ids)
-            else:
-                self.draft_token_ids_cpu[:num_reqs] = 0
-
-    def _get_draft_token_ids_cpu(self) -> tuple[list[list[int]], list[str]]:
-        """CPU-safe version: no event synchronization needed."""
-        if isinstance(self._draft_token_ids, list):
-            return self._draft_token_ids, self.input_batch.req_ids
-        req_ids = self._draft_token_req_ids
-        if req_ids is None:
-            return [], []
-        if self.draft_token_ids_cpu is not None:
-            return self.draft_token_ids_cpu[: len(req_ids)].tolist(), req_ids
-        return [], []
-
-    def _copy_valid_sampled_token_count(
-        self, next_token_ids: torch.Tensor, valid_sampled_tokens_count: torch.Tensor
-    ) -> None:
-        """CPU-safe version: direct copy without CUDA streams."""
-        if self.valid_sampled_token_count_cpu is None:
-            return
-
-        counts = valid_sampled_tokens_count
-        counts_cpu = self.valid_sampled_token_count_cpu
-        counts_cpu[: counts.shape[0]].copy_(counts)
-        self.input_batch.prev_sampled_token_ids = next_token_ids.unsqueeze(1)
-
-    def _get_valid_sampled_token_count(self) -> list[int]:
-        """CPU-safe version: no event synchronization needed."""
-        prev_sampled_token_ids = self.input_batch.prev_sampled_token_ids
-        if prev_sampled_token_ids is None:
-            return []
-
-        counts_cpu = self.valid_sampled_token_count_cpu
-        if counts_cpu is None:
-            return []
-        return counts_cpu[: prev_sampled_token_ids.shape[0]].tolist()
-
     def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
         """CPU-safe version: direct tolist() without CUDA events."""
         return sampled_token_ids.tolist()
@@ -252,7 +202,8 @@ def _torch_cuda_wrapper():
 
     class _StreamPlaceholder:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            self.wait_stream = lambda *a, **kw: None
+            self.device = torch.device("cpu")
 
     cuda_event = torch.Event
     cuda_stream = torch.cuda.Stream

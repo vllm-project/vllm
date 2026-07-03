@@ -237,6 +237,16 @@ void copy_and_expand_eagle_inputs_kernel_impl(
     const int64_t padding_token_id, const int64_t parallel_drafting_token_id,
     const int64_t total_input_tokens,
     const int64_t num_padding_slots_per_request, const bool shift_input_ids);
+void copy_and_expand_dflash_inputs_kernel_impl(
+    const torch::Tensor& next_token_ids, const torch::Tensor& target_positions,
+    torch::Tensor& out_input_ids, torch::Tensor& out_context_positions,
+    torch::Tensor& out_query_positions, torch::Tensor& out_context_slot_mapping,
+    torch::Tensor& out_query_slot_mapping, torch::Tensor& out_token_indices,
+    const torch::Tensor& block_table, const torch::Tensor& query_start_loc,
+    const std::optional<torch::Tensor>& num_rejected_tokens,
+    const int64_t parallel_drafting_token_id, const int64_t block_size,
+    const int64_t num_query_per_req, const int64_t num_speculative_tokens,
+    const int64_t total_input_tokens, const bool has_num_rejected);
 void rejection_greedy_sample_kernel_impl(
     torch::Tensor& output_token_ids, const torch::Tensor& cu_num_draft_tokens,
     const torch::Tensor& draft_token_ids, const torch::Tensor& target_argmax,
@@ -287,6 +297,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   // Activation function used in GeGLU with `tanh` approximation.
   ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_tanh_and_mul", torch::kCPU, &gelu_tanh_and_mul);
+
+  // GELU tanh implementation.
+  ops.def("gelu_tanh(Tensor! out, Tensor input) -> ()");
+  ops.impl("gelu_tanh", torch::kCPU, &gelu_tanh);
 
   // GELU implementation used in GPT-2.
   ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
@@ -599,6 +613,19 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "SymInt total_input_tokens, SymInt num_padding_slots_per_request, "
       "bool shift_input_ids) -> ()",
       &cpu_utils::copy_and_expand_eagle_inputs_kernel_impl);
+  ops.def(
+      "copy_and_expand_dflash_inputs_kernel_impl("
+      "Tensor next_token_ids, Tensor target_positions, "
+      "Tensor(a2!) out_input_ids, Tensor(a3!) out_context_positions, "
+      "Tensor(a4!) out_query_positions, "
+      "Tensor(a5!) out_context_slot_mapping, "
+      "Tensor(a6!) out_query_slot_mapping, "
+      "Tensor(a7!) out_token_indices, Tensor block_table, "
+      "Tensor query_start_loc, Tensor? num_rejected_tokens, "
+      "SymInt parallel_drafting_token_id, SymInt block_size, "
+      "SymInt num_query_per_req, SymInt num_speculative_tokens, "
+      "SymInt total_input_tokens, bool has_num_rejected) -> ()",
+      &cpu_utils::copy_and_expand_dflash_inputs_kernel_impl);
   ops.def(
       "rejection_greedy_sample_kernel_impl("
       "Tensor(a0!) output_token_ids, Tensor cu_num_draft_tokens, "

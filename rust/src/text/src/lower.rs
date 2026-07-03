@@ -3,15 +3,17 @@ use std::collections::BTreeSet;
 pub(crate) mod logprobs;
 pub(crate) mod token_ids;
 
-use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
+use logprobs::validate_logprobs;
+use token_ids::{validate_prompt_token_ids, validate_vocab_range};
+use vllm_engine_core_client::protocol::sampling::{
+    EngineCoreSamplingParams, RepetitionDetectionParams,
+};
 use vllm_llm::GenerateRequest;
 use vllm_tokenizer::Tokenizer;
 
 use crate::backend::{SamplingHints, SamplingLimits};
 use crate::error::{Error, Result};
 use crate::request::{SamplingParams, TextRequest};
-use logprobs::validate_logprobs;
-use token_ids::{validate_prompt_token_ids, validate_vocab_range};
 
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
@@ -93,6 +95,7 @@ pub fn lower_sampling_params(
         frequency_penalty,
         presence_penalty,
         repetition_penalty,
+        repetition_detection,
         stop_token_ids,
         ignore_eos,
         logit_bias,
@@ -110,6 +113,7 @@ pub fn lower_sampling_params(
         logprob_token_ids.as_deref(),
         sampling_limits,
     )?;
+    validate_repetition_detection(repetition_detection.as_ref())?;
 
     // Mirrors the model-generation-config inheritance used by vLLM's OpenAI chat
     // path: https://github.com/vllm-project/vllm/blob/bc2c0c86efb28e77677a3cfb8687e976914a313a/vllm/entrypoints/openai/chat_completion/protocol.py#L424-L450
@@ -128,6 +132,12 @@ pub fn lower_sampling_params(
         prompt_len,
     )?;
     let min_tokens = min_tokens.unwrap_or(0);
+    if min_tokens > max_tokens {
+        return Err(Error::MinTokensExceedsMaxTokens {
+            min_tokens,
+            max_tokens,
+        });
+    }
     let thinking_token_budget = normalize_thinking_token_budget(thinking_token_budget)?;
     let frequency_penalty = frequency_penalty.unwrap_or(0.0);
     let presence_penalty = presence_penalty.unwrap_or(0.0);
@@ -157,6 +167,7 @@ pub fn lower_sampling_params(
         frequency_penalty,
         presence_penalty,
         repetition_penalty,
+        repetition_detection: repetition_detection.filter(|p| !p.is_disabled()),
         stop_token_ids,
         eos_token_id: (!ignore_eos).then_some(primary_eos_token_id).flatten(),
         all_stop_token_ids,
@@ -186,6 +197,33 @@ fn normalize_thinking_token_budget(value: Option<i64>) -> Result<Option<u64>> {
         Some(budget) if budget >= 0 => Ok(Some(budget as u64)),
         Some(_) => Err(Error::InvalidThinkingTokenBudget),
     }
+}
+
+fn validate_repetition_detection(params: Option<&RepetitionDetectionParams>) -> Result<()> {
+    let Some(params) = params else {
+        return Ok(());
+    };
+
+    if params.min_pattern_size > params.max_pattern_size {
+        return Err(Error::InvalidRepetitionDetection {
+            message: format!(
+                "`min_pattern_size` must be less than or equal to \
+                 `max_pattern_size`, got min_pattern_size={}, \
+                 max_pattern_size={}",
+                params.min_pattern_size, params.max_pattern_size
+            ),
+        });
+    }
+    if params.max_pattern_size > 0 && params.min_count < 2 {
+        return Err(Error::InvalidRepetitionDetection {
+            message: format!(
+                "`min_count` must be at least 2, got min_count={}",
+                params.min_count
+            ),
+        });
+    }
+
+    Ok(())
 }
 
 /// Convert bad-word strings into token-ID sequences, following the Python vLLM
@@ -269,6 +307,7 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     use serial_test::file_serial;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
     use crate::backend::hf::HfTextBackend;
@@ -276,60 +315,8 @@ mod tests {
     use crate::error::{LogprobsError, TokenIdsError};
     use crate::request::{Prompt, TextRequest};
 
-    /// Stub tokenizer that returns empty token IDs — sufficient for tests that
-    /// don't exercise bad-words tokenization.
-    struct StubTokenizer;
-
-    impl Tokenizer for StubTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(vec![])
-        }
-
-        fn decode(
-            &self,
-            _token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(String::new())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
-    }
-
-    fn stub_tokenizer() -> StubTokenizer {
-        StubTokenizer
-    }
-
-    struct FixedTokenizer {
-        token_ids: Vec<u32>,
-    }
-
-    impl Tokenizer for FixedTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(self.token_ids.clone())
-        }
-
-        fn decode(
-            &self,
-            _token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(String::new())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
+    fn stub_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
     }
 
     fn sample_request() -> TextRequest {
@@ -415,6 +402,80 @@ mod tests {
     }
 
     #[test]
+    fn lower_sampling_params_rejects_min_tokens_above_resolved_max_tokens() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                max_tokens: Some(4),
+                min_tokens: Some(5),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::MinTokensExceedsMaxTokens {
+                min_tokens: 5,
+                max_tokens: 4,
+            }
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_validates_repetition_detection() {
+        let lower = |repetition_detection| {
+            lower_sampling_params_with_limits(
+                SamplingParams {
+                    repetition_detection,
+                    ..SamplingParams::default()
+                },
+                sample_sampling_limits(),
+            )
+        };
+
+        let enabled = RepetitionDetectionParams {
+            max_pattern_size: 4,
+            min_pattern_size: 2,
+            min_count: 2,
+        };
+        assert_eq!(
+            lower(Some(enabled.clone())).unwrap().repetition_detection,
+            Some(enabled)
+        );
+
+        let disabled = RepetitionDetectionParams {
+            max_pattern_size: 0,
+            min_pattern_size: 0,
+            min_count: 0,
+        };
+        assert_eq!(lower(Some(disabled)).unwrap().repetition_detection, None);
+
+        let error = lower(Some(RepetitionDetectionParams {
+            max_pattern_size: 1,
+            min_pattern_size: 2,
+            min_count: 2,
+        }))
+        .unwrap_err();
+        let Error::InvalidRepetitionDetection { message } = error else {
+            panic!("expected repetition_detection validation error");
+        };
+        assert!(message.contains("min_pattern_size=2"));
+        assert!(message.contains("max_pattern_size=1"));
+
+        let error = lower(Some(RepetitionDetectionParams {
+            max_pattern_size: 1,
+            min_pattern_size: 1,
+            min_count: 1,
+        }))
+        .unwrap_err();
+        let Error::InvalidRepetitionDetection { message } = error else {
+            panic!("expected repetition_detection validation error");
+        };
+        assert!(message.contains("min_count=1"));
+    }
+
+    #[test]
     fn lower_text_request_applies_python_style_eos_hints() {
         let prepared = lower_text_request(
             sample_request(),
@@ -441,6 +502,7 @@ mod tests {
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.0,
+                repetition_detection: None,
                 stop_token_ids: [
                     77,
                 ],
@@ -493,6 +555,7 @@ mod tests {
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.0,
+                repetition_detection: None,
                 stop_token_ids: [],
                 eos_token_id: None,
                 all_stop_token_ids: {
@@ -624,6 +687,7 @@ mod tests {
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.0,
+                repetition_detection: None,
                 stop_token_ids: [
                     151643,
                 ],
@@ -686,6 +750,7 @@ mod tests {
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.0,
+                repetition_detection: None,
                 stop_token_ids: [
                     11,
                     77,
@@ -756,6 +821,7 @@ mod tests {
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.2,
+                repetition_detection: None,
                 stop_token_ids: [],
                 eos_token_id: None,
                 all_stop_token_ids: {},
@@ -925,9 +991,7 @@ mod tests {
 
     #[test]
     fn lower_sampling_params_rejects_out_of_vocab_bad_words() {
-        let tokenizer = FixedTokenizer {
-            token_ids: vec![1999, 2000],
-        };
+        let tokenizer = TestTokenizer::new().with_regular_token("blocked", 2000);
         let error = lower_sampling_params(
             SamplingParams {
                 bad_words: Some(vec!["blocked".to_string()]),
@@ -1006,6 +1070,7 @@ mod tests {
                 frequency_penalty: 0.0,
                 presence_penalty: 0.0,
                 repetition_penalty: 1.2,
+                repetition_detection: None,
                 stop_token_ids: [],
                 eos_token_id: None,
                 all_stop_token_ids: {},

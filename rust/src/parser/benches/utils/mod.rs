@@ -1,5 +1,11 @@
+// This module is shared by multiple benchmark targets.
+// There could be false positives for unused code or imports, and fixing them would lead to some other benchmarks failing to compile.
 #![allow(dead_code)]
+#![allow(unused_imports)]
 
+mod adapter;
+
+pub(super) use adapter::UnifiedToolParserAdapter;
 use futures::FutureExt as _;
 use openai_protocol::common::{Function as OpenAiFunction, Tool as OpenAiTool};
 use tool_parser::traits::ToolParser as ExternalToolParser;
@@ -23,7 +29,7 @@ pub(super) fn openai_tools(tools: &[Tool]) -> Vec<OpenAiTool> {
 
 pub(super) fn feed_parser(parser: &mut dyn ToolParser, chunks: &[&str]) -> (String, usize) {
     let result = collect_stream(parser, chunks);
-    (result.normal_text, result.calls.len())
+    (result.normal_text(), result.calls().len())
 }
 
 pub(super) fn feed_external_parser(

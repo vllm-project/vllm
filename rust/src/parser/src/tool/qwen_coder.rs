@@ -74,7 +74,7 @@ impl Qwen3CoderToolParser {
     fn apply_event(&mut self, event: QwenCoderEvent, output: &mut ToolParserOutput) -> Result<()> {
         match event {
             QwenCoderEvent::Text { len: consumed_len } => {
-                output.normal_text.push_str(&self.buffer[..consumed_len]);
+                output.push_text(&self.buffer[..consumed_len]);
             }
             QwenCoderEvent::ToolCallStart => {
                 self.mode = QwenCoderMode::ToolCall {
@@ -87,7 +87,7 @@ impl Qwen3CoderToolParser {
                 let arguments = serde_json::to_string(&arguments)
                     .map_err(|error| parsing_failed!("failed to serialize arguments: {}", error))?;
 
-                output.calls.push(ToolCallDelta {
+                output.push_call(ToolCallDelta {
                     tool_index: self.emitted_tool_count,
                     name: Some(name),
                     arguments,
@@ -138,7 +138,7 @@ impl ToolParser for Qwen3CoderToolParser {
             {
                 return Err(parsing_failed!("incomplete Qwen Coder tool call"));
             }
-            output.normal_text.push_str(&self.buffer);
+            output.push_text(&self.buffer);
         }
         let _ = self.reset();
         Ok(output)
@@ -268,8 +268,8 @@ mod tests {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
         let output = parser.parse_complete("Hello, world!").unwrap();
 
-        assert_eq!(output.normal_text, "Hello, world!");
-        assert!(output.calls.is_empty());
+        assert_eq!(output.normal_text(), "Hello, world!");
+        assert!(output.calls().is_empty());
     }
 
     #[test]
@@ -282,11 +282,11 @@ mod tests {
             ))
             .unwrap();
 
-        assert!(output.normal_text.is_empty());
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert!(output.normal_text().is_empty());
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({
                 "location": "SF",
                 "date": "2026-04-29"
@@ -303,8 +303,8 @@ mod tests {
         );
         let output = parser.parse_complete(&output).unwrap();
 
-        assert_eq!(output.normal_text, "Thinking... ");
-        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.normal_text(), "Thinking... ");
+        assert_eq!(output.calls().len(), 1);
     }
 
     #[test]
@@ -323,9 +323,9 @@ mod tests {
             ))
             .unwrap();
 
-        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls().len(), 1);
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({
                 "whole": 5.0,
                 "flag": true,
@@ -341,10 +341,10 @@ mod tests {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
         let output = parser.parse_complete(&build_tool_call("get_weather", &[])).unwrap();
 
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({})
         );
     }
@@ -371,10 +371,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("calculate_area"));
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("calculate_area"));
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({
                 "shape": "rectangle",
                 "dimensions": { "width": 10, "height": 20 },
@@ -396,9 +396,9 @@ mod tests {
             ))
             .unwrap();
 
-        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls().len(), 1);
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({
                 "payload": {
                     "nested": {
@@ -426,9 +426,9 @@ mod tests {
             ))
             .unwrap();
 
-        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls().len(), 1);
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({
                 "html_content": r#"<div class="test"><span>Hello</span></div>"#,
                 "xml_snippet": r#"<root><child attr="value"/></root>"#,
@@ -452,9 +452,9 @@ mod tests {
             ))
             .unwrap();
 
-        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls().len(), 1);
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({
                 "location": "杭州 &lt;/parameter&gt;&lt;/function&gt;&lt;/tool_call&gt;",
                 "date": "2026-05-08",
@@ -472,9 +472,9 @@ mod tests {
             ))
             .unwrap();
 
-        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls().len(), 1);
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({
                 "data": { "key": "value", "count": 42 },
             })
@@ -495,11 +495,11 @@ mod tests {
             ],
         );
 
-        assert!(output.normal_text.is_empty());
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert!(output.normal_text().is_empty());
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "location": "SF" })
         );
     }
@@ -519,8 +519,8 @@ mod tests {
             ],
         );
 
-        assert_eq!(output.normal_text, "Thinking... ");
-        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.normal_text(), "Thinking... ");
+        assert_eq!(output.calls().len(), 1);
     }
 
     #[test]
@@ -528,8 +528,8 @@ mod tests {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
         let output = collect_stream(&mut parser, &["Hello, ", "world!"]);
 
-        assert_eq!(output.normal_text, "Hello, world!");
-        assert!(output.calls.is_empty());
+        assert_eq!(output.normal_text(), "Hello, world!");
+        assert!(output.calls().is_empty());
     }
 
     #[test]
@@ -542,17 +542,17 @@ mod tests {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
         let output = collect_stream(&mut parser, &[&text]);
 
-        assert_eq!(output.calls.len(), 2);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
-        assert_eq!(output.calls[1].name.as_deref(), Some("get_weather"));
-        assert_eq!(output.calls[0].tool_index, 0);
-        assert_eq!(output.calls[1].tool_index, 1);
+        assert_eq!(output.calls().len(), 2);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls()[1].name.as_deref(), Some("get_weather"));
+        assert_eq!(output.calls()[0].tool_index, 0);
+        assert_eq!(output.calls()[1].tool_index, 1);
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "location": "SF" })
         );
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[1].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[1].arguments).unwrap(),
             json!({ "location": "NYC" })
         );
     }
@@ -569,16 +569,16 @@ mod tests {
         let output = collect_stream(&mut parser, &chunks);
 
         assert_eq!(
-            output.normal_text,
+            output.normal_text(),
             "I'll check two cities.Between calls.Done."
         );
-        assert_eq!(output.calls.len(), 2);
+        assert_eq!(output.calls().len(), 2);
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "city": "Dallas", "state": "TX" })
         );
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[1].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[1].arguments).unwrap(),
             json!({ "city": "Orlando", "state": "FL" })
         );
     }
@@ -590,9 +590,9 @@ mod tests {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
         let output = collect_stream(&mut parser, &chunks);
 
-        assert_eq!(output.calls.len(), 1);
+        assert_eq!(output.calls().len(), 1);
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "location": "SF" })
         );
     }
@@ -610,19 +610,19 @@ mod tests {
             )
             .unwrap();
 
-        assert!(output.normal_text.is_empty());
-        assert!(output.calls.is_empty());
+        assert!(output.normal_text().is_empty());
+        assert!(output.calls().is_empty());
 
         let mut output = output;
         output.append(parser.parse_chunk("_call>").unwrap());
         output.append(parser.finish().unwrap());
-        let output = output.coalesce_calls();
+        let output = output.coalesce();
 
-        assert!(output.normal_text.is_empty());
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert!(output.normal_text().is_empty());
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "location": "SF" })
         );
     }
@@ -641,20 +641,20 @@ mod tests {
 
         for chunk in chunks {
             let chunk_output = parser.parse_chunk(chunk).unwrap();
-            assert!(chunk_output.normal_text.is_empty());
-            assert!(chunk_output.calls.is_empty());
+            assert!(chunk_output.normal_text().is_empty());
+            assert!(chunk_output.calls().is_empty());
             output.append(chunk_output);
         }
 
         output.append(parser.parse_chunk(end_suffix).unwrap());
         output.append(parser.finish().unwrap());
-        let output = output.coalesce_calls();
+        let output = output.coalesce();
 
-        assert!(output.normal_text.is_empty());
-        assert_eq!(output.calls.len(), 1);
-        assert_eq!(output.calls[0].name.as_deref(), Some("get_weather"));
+        assert!(output.normal_text().is_empty());
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].name.as_deref(), Some("get_weather"));
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "location": long_location })
         );
     }
@@ -666,8 +666,8 @@ mod tests {
             .parse_chunk("<tool_call>\n<function=get_weather>\n<parameter=location>SF</parameter>")
             .unwrap();
 
-        assert!(output.normal_text.is_empty());
-        assert!(output.calls.is_empty());
+        assert!(output.normal_text().is_empty());
+        assert!(output.calls().is_empty());
     }
 
     #[test]
@@ -685,7 +685,8 @@ mod tests {
         let mut parser = Qwen3CoderToolParser::new(&test_tools());
         let error = parser.parse_chunk("<tool_call>\n<bad>\n</tool_call>").unwrap_err();
 
-        expect!["tool parser parsing failed: "].assert_eq(&error.to_report_string());
+        expect![[r#"tool parser parsing failed: near "\n<bad>\n</tool_call>": "#]]
+            .assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -697,7 +698,7 @@ mod tests {
             )
             .unwrap_err();
 
-        expect!["tool parser parsing failed: "].assert_eq(&error.to_report_string());
+        expect![[r#"tool parser parsing failed: near "\n<function=get_weather>\n<parameter=location>SF</function>\n</tool_call>": "#]].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -710,7 +711,7 @@ mod tests {
             .unwrap();
 
         assert_eq!(
-            serde_json::from_str::<Value>(&output.calls[0].arguments).unwrap(),
+            serde_json::from_str::<Value>(&output.calls()[0].arguments).unwrap(),
             json!({ "location": "Hangzhou" })
         );
     }
