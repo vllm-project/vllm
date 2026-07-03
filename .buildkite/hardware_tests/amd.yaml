@@ -14,6 +14,8 @@ steps:
       - bash .buildkite/scripts/rocm/refresh-base-image.sh
     env:
       DOCKER_BUILDKIT: "1"
+      BUILDKIT_PROGRESS: "tty"
+      TERM: "xterm-256color"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
@@ -36,6 +38,8 @@ steps:
       - bash .buildkite/scripts/rocm/build-ci-base.sh
     env:
       DOCKER_BUILDKIT: "1"
+      BUILDKIT_PROGRESS: "tty"
+      TERM: "xterm-256color"
       VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
       PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
       REMOTE_VLLM: "1"
@@ -59,6 +63,8 @@ steps:
       - bash .buildkite/scripts/rocm/smoke-test-image.sh
     env:
       DOCKER_BUILDKIT: "1"
+      BUILDKIT_PROGRESS: "tty"
+      TERM: "xterm-256color"
       VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
       PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
       IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"
