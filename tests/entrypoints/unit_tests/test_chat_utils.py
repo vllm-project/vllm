@@ -18,6 +18,7 @@ from vllm.entrypoints.chat_utils import (
     parse_chat_messages,
     parse_chat_messages_async,
 )
+from vllm.exceptions import VLLMValidationError
 from vllm.inputs import MultiModalDataDict, MultiModalUUIDDict
 from vllm.multimodal.utils import (
     encode_audio_url,
@@ -2742,3 +2743,43 @@ def test_postprocess_messages_null_arguments_string():
     tool_calls = messages[0]["tool_calls"]
     assert tool_calls is not None
     assert tool_calls[0]["function"]["arguments"] == {}
+
+
+def _assistant_message_with_arguments(arguments: str) -> list[ConversationMessage]:
+    return [
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {
+                    "id": "call_1",
+                    "type": "function",
+                    "function": {"name": "get_current_time", "arguments": arguments},
+                }
+            ],
+        }
+    ]
+
+
+@pytest.mark.parametrize("arguments", ['"escaped string"', "42", "true"])
+def test_postprocess_messages_scalar_arguments_string(arguments: str):
+    """arguments decoding to a JSON scalar must not reach the chat template.
+
+    json.loads('"escaped string"') returns a str, which causes Jinja2
+    templates that call tc.arguments.items() to raise
+    'str' object has no attribute 'items'. The function should coerce
+    scalars to {} instead.
+    """
+    messages = _assistant_message_with_arguments(arguments)
+    _postprocess_messages(messages)
+    tool_calls = messages[0]["tool_calls"]
+    assert tool_calls is not None
+    assert tool_calls[0]["function"]["arguments"] == {}
+
+
+def test_postprocess_messages_malformed_arguments_string():
+    """Malformed JSON in arguments must raise a validation error (400),
+    not an unhandled json.JSONDecodeError (500)."""
+    messages = _assistant_message_with_arguments('{"city": ')
+    with pytest.raises(VLLMValidationError):
+        _postprocess_messages(messages)
