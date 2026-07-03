@@ -9,7 +9,7 @@ from typing import Literal, cast
 import numpy as np
 
 from vllm.engine.protocol import EngineClient, StreamingInput
-from vllm.entrypoints.openai.engine.serving import GenerateBaseServing
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.inputs import PromptType

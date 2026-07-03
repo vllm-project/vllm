@@ -7,7 +7,7 @@ from unittest.mock import MagicMock
 import pytest
 
 import vllm.envs as envs
-from vllm.entrypoints.openai.engine.serving import GenerateBaseServing, GenerationError
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing, GenerationError
 from vllm.envs import disable_envs_cache
 
 

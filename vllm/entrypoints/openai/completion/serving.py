@@ -13,6 +13,12 @@ import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.base.serving import (
+    GenerateBaseServing,
+    GenerationError,
+    clamp_prompt_logprobs,
+    format_token_id_placeholder,
+)
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
     CompletionRequest,
@@ -26,12 +32,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     UsageInfo,
-)
-from vllm.entrypoints.openai.engine.serving import (
-    GenerateBaseServing,
-    GenerationError,
-    clamp_prompt_logprobs,
-    format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
