@@ -74,7 +74,7 @@ class MyAdminEndpointPlugin:
         state.my_engine_client = engine_client
 ```
 
-A complete, tested version of this example ships in-repo as `tests/plugins/vllm_add_dummy_endpoint_plugin` and is exercised e2e (including a real HTTP request) in `tests/plugins_tests/test_endpoint_plugins.py`.
+A complete and tested version of this example is in-repo as `tests/plugins/vllm_add_dummy_endpoint_plugin` and is exercised e2e (including a real HTTP request) in `tests/plugins_tests/test_endpoint_plugins.py`.
 
 ## Registering the entry point
 
