@@ -74,8 +74,6 @@ if TYPE_CHECKING:
     from transformers import PreTrainedModel
 
     from vllm.config import VllmConfig
-else:
-    PreTrainedModel = object
 
 logger = init_logger(__name__)
 
@@ -195,7 +193,7 @@ class Base(
         self.text_config._attn_implementation = "vllm"
         self.config.dtype = torch.get_default_dtype()
 
-    def _get_decoder_cls(self, **kwargs: dict) -> type[PreTrainedModel]:
+    def _get_decoder_cls(self, **kwargs: dict) -> type["PreTrainedModel"]:
         """
         Get the decoder class from the model.
 
@@ -214,7 +212,7 @@ class Base(
 
     def _decorate_cls_for_torch_compile(
         self,
-        cls: type[PreTrainedModel],
+        cls: type["PreTrainedModel"],
         dynamic_arg_dims: dict[str, int] | None,
         enable_if: Callable[["VllmConfig"], bool],
         is_encoder: bool,
