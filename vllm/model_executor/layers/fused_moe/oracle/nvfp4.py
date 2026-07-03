@@ -43,6 +43,7 @@ class NvFp4MoeBackend(Enum):
     FLASHINFER_B12X = "FLASHINFER_B12X"
     VLLM_CUTLASS = "VLLM_CUTLASS"
     MARLIN = "MARLIN"
+    AITER = "AITER"
     EMULATION = "EMULATION"
 
 
@@ -125,6 +126,13 @@ def backend_to_kernel_cls(
         )
 
         return [Nvfp4QuantizationEmulationTritonExperts]
+    elif backend == NvFp4MoeBackend.AITER:
+        from vllm.model_executor.layers.fused_moe.experts.aiter_nvfp4_moe import (
+            AiterNvfp4Experts,
+        )
+
+        return [AiterNvfp4Experts]
+
     else:
         raise ValueError(f"Unknown NvFP4 MoE backend: {backend.value}")
 
@@ -139,6 +147,7 @@ def map_nvfp4_backend(runner_backend: MoEBackend) -> NvFp4MoeBackend:
         "flashinfer_b12x": NvFp4MoeBackend.FLASHINFER_B12X,
         "marlin": NvFp4MoeBackend.MARLIN,
         "emulation": NvFp4MoeBackend.EMULATION,
+        "aiter": NvFp4MoeBackend.AITER,
     }
     if backend := mapping.get(runner_backend):
         return backend
@@ -169,6 +178,7 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.VLLM_CUTLASS,
         NvFp4MoeBackend.MARLIN,
+        NvFp4MoeBackend.AITER,
         NvFp4MoeBackend.EMULATION,
     ]
 
@@ -394,6 +404,51 @@ def convert_to_nvfp4_moe_kernel_format(
         # for other experts - other selection strategies may be used.
         a13_scale = 1.0 / a13_scale.max().to(torch.float32)
         a2_scale = 1.0 / a2_scale.max().to(torch.float32)
+    elif nvfp4_backend == NvFp4MoeBackend.AITER:
+        if a13_scale is None or a2_scale is None:
+            raise ValueError(
+                "Activation global scales should not be None, got"
+                f" a13_scale={a13_scale}, a2_scale={a2_scale}"
+            )
+
+        if torch.unique(a13_scale).numel() != 1 or torch.unique(a2_scale).numel() != 1:
+            logger.warning_once(
+                "In NVFP4 linear, the activation global scale for inputs are different"
+                " for MOE w13 (gate_up_proj) layer or MOE w2 (down_proj). Using"
+                " a13_scale = a13_scale.max() and a2_scale = a2_scale.max()."
+            )
+
+        # AITER's FlyDSL NVFP4-BF16 kernels consume weights in the
+        # kpack_bytes=8 preshuffled layout.
+        for weight_name, weight in (("w13", w13), ("w2", w2)):
+            if weight.ndim != 3:
+                raise ValueError(
+                    f"Expected 3D NVFP4 MoE {weight_name} weight, "
+                    f"got shape {weight.shape}."
+                )
+
+            experts, n_out, packed_k = weight.shape
+            if n_out % 16 != 0 or packed_k % 32 != 0:
+                raise ValueError(
+                    "AITER NVFP4 MoE requires N to be divisible by 16 and "
+                    f"packed K to be divisible by 32, got {weight_name} "
+                    f"shape {(experts, n_out, packed_k)}."
+                )
+
+            shuffled = weight.contiguous().view(experts * n_out, packed_k)
+            shuffled = shuffled.view(experts * n_out // 16, 16, packed_k // 32, 4, 8)
+            shuffled = shuffled.permute(0, 2, 3, 1, 4).contiguous()
+            if weight_name == "w13":
+                w13 = shuffled.view_as(weight)
+            else:
+                w2 = shuffled.view_as(weight)
+
+        w13_scale = w13_scale.permute(0, 2, 1).contiguous()
+        w2_scale = w2_scale.permute(0, 2, 1).contiguous()
+        w13_scale_2 = w13_scale_2.to(torch.float32).contiguous()
+        w2_scale_2 = w2_scale_2.to(torch.float32).contiguous()
+        a13_scale = a13_scale.max().to(torch.float32)
+        a2_scale = a2_scale.max().to(torch.float32)
     else:
         raise ValueError(f"Unknown NvFp4 backend for MoE: {nvfp4_backend}")
 

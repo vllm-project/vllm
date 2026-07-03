@@ -135,7 +135,7 @@ def test_nvfp4(vllm_runner, model, eager, backend):
         "RedHatAI/Qwen3-30B-A3B-NVFP4",
     ],
 )
-@pytest.mark.parametrize("backend", ["emulation"])
+@pytest.mark.parametrize("backend", ["emulation", "aiter"])
 @pytest.mark.skipif(
     not current_platform.is_rocm(),
     reason="NVFP4 MOE emulation is only useful on AMD Instinct MI3xx",
