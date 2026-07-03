@@ -2104,12 +2104,6 @@ def cleanup_dist_env_and_memory(shutdown_ray: bool = False):
     gc.collect()
     from vllm.platforms import current_platform
 
-    # Drop the cached CUDA graph memory pool. It is a class-level attribute
-    # that persists across engine creations; reusing the same pool id for a
-    # new engine's graph capture triggers a `use_count > 0` assert in the
-    # caching allocator once the previous engine has been torn down.
-    current_platform.__class__._global_graph_pool = None
-
     if not current_platform.is_cpu():
         torch.accelerator.empty_cache()
         try:
