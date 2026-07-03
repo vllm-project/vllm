@@ -168,6 +168,41 @@ class ExtraProjAttention(FakeAttention):
         self.sink_proj = nn.Linear(self.head_dim, self.head_dim, bias=False)
 
 
+class QKNormAttention(FakeAttention):
+    """OLMoE-style: a full-dim norm applied to the whole q/k projection output."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.q_norm = nn.RMSNorm(self.q_proj.out_features)
+        self.k_norm = nn.RMSNorm(self.k_proj.out_features)
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        q = self.q_norm(self.q_proj(hidden_states))
+        k = self.k_norm(self.k_proj(hidden_states))
+        v = self.v_proj(hidden_states)
+        return self.o_proj(q + k + v), None
+
+
+class PerHeadQKNormAttention(FakeAttention):
+    """Qwen3-style: a per-head norm (`head_dim`) applied after the head reshape."""
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.q_norm = nn.RMSNorm(self.head_dim)
+        self.k_norm = nn.RMSNorm(self.head_dim)
+
+    def forward(
+        self, hidden_states, attention_mask=None, past_key_values=None, **kwargs
+    ):
+        shape = (*hidden_states.shape[:-1], -1, self.head_dim)
+        q = self.q_norm(self.q_proj(hidden_states).view(shape))
+        k = self.k_norm(self.k_proj(hidden_states).view(shape))
+        v = self.v_proj(hidden_states).view(shape)
+        return self.o_proj((q + k + v).flatten(-2)), None
+
+
 class FakeSelfAttn(nn.Module):
     """Stand-in for the vLLM `Attention` looked up in `attention_instances`."""
 
@@ -331,6 +366,9 @@ def test_qkv_identifies_output_projection():
         assert get_fuser(FakeAttention()).o_name == "o_proj"
         assert get_fuser(ReversedFakeAttention()).o_name == "o_proj"
         assert get_fuser(ExtraProjAttention()).o_name is None
+        # Norm children (q_norm/k_norm) must not disturb o_proj identification.
+        assert get_fuser(QKNormAttention()).o_name == "o_proj"
+        assert get_fuser(PerHeadQKNormAttention()).o_name == "o_proj"
 
 
 def test_fuser_is_cached_per_class():
