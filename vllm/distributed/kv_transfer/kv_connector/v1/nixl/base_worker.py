@@ -96,7 +96,13 @@ class NixlBaseConnectorWorker:
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs."""
         num_fa_regions = self.num_regions
-        num_ssm_regions = len(self.block_len_per_layer) * 4 if self._has_mamba else 0
+        num_ssm_regions = 0
+        if self._has_mamba:
+            assert self._conv_decomp is not None
+            # NIXL regions per SSM layer = conv sub-projections + 1 SSM temporal
+            # (Mamba2/GDN: 3+1=4; Mamba1: 1+1=2).
+            ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
+            num_ssm_regions = len(self.block_len_per_layer) * ssm_regions_per_layer
 
         num_blocks = dst_num_blocks
         if block_size_ratio is not None:
@@ -279,8 +285,8 @@ class NixlBaseConnectorWorker:
         # ---- Model state (derived from model config) ----
         mamba_ssm_size = (0, 0)
         # Conv state sub-projection decomposition (None when no Mamba).
-        # The 3-read transfer requires DS (dim, state_len) conv layout so
-        # that x/B/C sub-projections are contiguous in memory.
+        # The transfer requires DS (dim, state_len) conv layout so that
+        # conv sub-projections are contiguous in memory.
         self._conv_decomp: MambaConvSplitInfo | None = None
         self._has_mamba = any(
             isinstance(g.kv_cache_spec, MambaSpec)
@@ -1186,8 +1192,8 @@ class NixlBaseConnectorWorker:
         base_addresses: list[int],
         block_size_ratio: int,
     ) -> list[tuple[int, int, int]]:
-        """Build 4 desc regions (x, B, C, ssm) per layer for local mamba
-        blocks, enabling the 3-read transfer with DS conv layout."""
+        """Build desc regions (conv sub-projections + ssm) per layer for
+        local mamba blocks with DS conv layout."""
         assert block_size_ratio == 1, (
             "Mamba 3-read transfer with block_size_ratio != 1 is not tested. "
             f"Got block_size_ratio={block_size_ratio}."
@@ -1227,9 +1233,9 @@ class NixlBaseConnectorWorker:
         tp_ratio: int,
         transfer_info: EngineTransferInfo,
     ) -> list[tuple[int, int, int]]:
-        """Build 4 remote desc regions (proj0, proj1, proj2, ssm) per layer
-        for the 3-read transfer.  For hetero-TP, each D rank reads only its
-        sub-projection slice from the P rank."""
+        """Build remote desc regions (conv sub-projections + ssm) per layer.
+        For hetero-TP, each D rank reads only its sub-projection slice from
+        the P rank."""
         assert self._conv_decomp is not None
         effective_ratio = max(tp_ratio, 1)
         # Mamba conv state is always TP-sharded, even when attention KV
@@ -1951,6 +1957,8 @@ class NixlBaseConnectorWorker:
         for block_ids in block_ids_for_heterogeneous_attn_post_process:
             self.post_process_device_kv_on_receive_heterogeneous_attn(block_ids)
 
+        self._sync_device_after_mamba_recv(done_recving, failed_recv_reqs)
+
         # Handle timeout to avoid stranding blocks on remote.
         now = time.perf_counter()
         while self._reqs_to_send:
@@ -1971,6 +1979,22 @@ class NixlBaseConnectorWorker:
             done_sending.add(req_id)
 
         return done_sending, done_recving
+
+    def _sync_device_after_mamba_recv(
+        self,
+        done_recving: set[str],
+        failed_recv_reqs: set[str],
+    ) -> None:
+        """Synchronize ROCm direct-GPU Mamba receives before model execution."""
+        if (
+            not current_platform.is_rocm()
+            or not self._has_mamba
+            or self.use_host_buffer
+            or not (done_recving - failed_recv_reqs)
+        ):
+            return
+
+        torch.accelerator.synchronize()
 
     def _get_new_notifs(self) -> set[str]:
         """Get req_ids which got a remote xfer notification.

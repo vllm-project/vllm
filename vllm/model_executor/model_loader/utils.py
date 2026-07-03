@@ -20,6 +20,7 @@ from vllm.model_executor.layers.attention import (
     MLAAttention,
     MMEncoderAttention,
 )
+from vllm.model_executor.layers.hpc import HpcModule
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
@@ -124,6 +125,15 @@ def process_weights_after_loading(
             # of process_weights_after_loading
             with device_loading_context(module, target_device):
                 module.process_weights_after_loading(model_config.dtype)
+
+    # Process HPC modules (HpcRopeNorm, etc.) that rely on
+    # process_weights_after_loading being called from the model's
+    # load_weights(). When using DummyModelLoader (e.g. profiling or
+    # sleep/wake_up reload), the model's load_weights() is not called, so we
+    # must handle HPC modules here generically.
+    for _, module in model.named_modules():
+        if isinstance(module, HpcModule):
+            module.process_weights_after_loading(model)
 
     # Needed for torchao model reloading via model.reload_weights
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
@@ -295,6 +305,6 @@ def configure_quant_config(
 
         # pass mappings by reference to quant_config
         if hf_to_vllm_mapper is not None:
-            quant_config.apply_vllm_mapper(hf_to_vllm_mapper)
+            quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_unstacked_mapper())
         if packed_mapping is not None:
             quant_config.packed_modules_mapping = packed_mapping

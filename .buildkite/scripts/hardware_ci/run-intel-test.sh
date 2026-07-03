@@ -360,7 +360,7 @@ export HF_TOKEN ZE_AFFINITY_MASK
     --ipc=host \
     --privileged \
     -v /dev/dri/by-path:/dev/dri/by-path \
-    -v "${HOME}/.cache/huggingface:/root/.cache/huggingface" \
+    -v "/data/huggingface:/root/.cache/huggingface" \
     --entrypoint='' \
     -e HF_TOKEN \
     -e ZE_AFFINITY_MASK \
@@ -369,7 +369,7 @@ export HF_TOKEN ZE_AFFINITY_MASK
     -e CMDS \
     --name "${container_name}" \
     "${IMAGE}" \
-    bash -c 'set -e; echo "ZE_AFFINITY_MASK is ${ZE_AFFINITY_MASK:-}"; eval "$CMDS"' \
+    bash -c 'set -e; source /opt/intel/oneapi/setvars.sh --force; source /opt/intel/oneapi/ccl/2021.15/env/vars.sh --force; echo "ZE_AFFINITY_MASK is ${ZE_AFFINITY_MASK:-}"; eval "$CMDS"' \
     >/dev/null
 } 9>/tmp/docker-pull.lock
 

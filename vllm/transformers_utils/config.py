@@ -124,10 +124,10 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_5_moe="Qwen3_5MoeConfig",
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
-    tarsier2="Tarsier2Config",
+    **{"unlimited-ocr": "UnlimitedOCRConfig"},
 )
 
-_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
+_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
 
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 
@@ -897,9 +897,9 @@ def get_sentence_transformer_tokenizer_config(
     encoder_dict = None
 
     for config_file in sentence_transformer_config_files:
-        if (
-            try_get_local_file(model=model, file_name=config_file, revision=revision)
-            is not None
+        if isinstance(
+            try_get_local_file(model=model, file_name=config_file, revision=revision),
+            Path,
         ):
             encoder_dict = get_hf_file_to_dict(config_file, model, revision)
             if encoder_dict:
