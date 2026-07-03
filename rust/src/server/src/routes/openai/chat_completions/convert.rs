@@ -13,7 +13,9 @@ use crate::routes::openai::utils::structured_outputs::convert_from_response_form
 use crate::routes::openai::utils::types::{
     ChatMessage, ContentPart, MessageContent, Tool, ToolChoice, ToolChoiceValue,
 };
-use crate::utils::{ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params};
+use crate::utils::{
+    ResolvedRequestContext, convert_logit_bias, merge_kv_transfer_params, merge_session_id,
+};
 
 /// Lowered chat request plus the public response metadata carried by every SSE
 /// chunk.
@@ -131,9 +133,9 @@ pub(super) fn prepare_chat_request(
             logprob_token_ids: None,
             structured_outputs,
             skip_reading_prefix_cache: None,
-            vllm_xargs: merge_kv_transfer_params(
-                request.vllm_xargs,
-                request.kv_transfer_params.as_ref(),
+            vllm_xargs: merge_session_id(
+                merge_kv_transfer_params(request.vllm_xargs, request.kv_transfer_params.as_ref()),
+                ctx.session_id.as_deref(),
             ),
         },
         chat_options: ChatOptions {
@@ -1106,6 +1108,65 @@ mod tests {
         )
         .expect("request is valid");
         assert_eq!(prepared.chat_request.data_parallel_rank, None);
+    }
+
+    #[test]
+    fn prepare_chat_request_threads_session_id_from_correlation_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Correlation-ID", "conv-abc".parse().unwrap());
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("request is valid");
+        let xargs = prepared.chat_request.sampling_params.vllm_xargs.unwrap();
+        assert_eq!(xargs.get("session_id"), Some(&json!("conv-abc")));
+    }
+
+    #[test]
+    fn prepare_chat_request_prefers_session_header_over_correlation() {
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Correlation-ID", "conv-abc".parse().unwrap());
+        headers.insert("X-Session-ID", "sess-1".parse().unwrap());
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("request is valid");
+        let xargs = prepared.chat_request.sampling_params.vllm_xargs.unwrap();
+        assert_eq!(xargs.get("session_id"), Some(&json!("sess-1")));
+    }
+
+    #[test]
+    fn prepare_chat_request_body_session_id_overrides_header() {
+        let mut request = base_request();
+        request.vllm_xargs = Some(HashMap::from([(
+            "session_id".to_string(),
+            json!("from-body"),
+        )]));
+        let mut headers = HeaderMap::new();
+        headers.insert("X-Correlation-ID", "conv-abc".parse().unwrap());
+        let prepared = prepare_chat_request(
+            request,
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            request_context(&headers, None),
+        )
+        .expect("request is valid");
+        let xargs = prepared.chat_request.sampling_params.vllm_xargs.unwrap();
+        assert_eq!(xargs.get("session_id"), Some(&json!("from-body")));
+    }
+
+    #[test]
+    fn prepare_chat_request_leaves_session_id_absent_without_header() {
+        let prepared = prepare_chat_request(
+            base_request(),
+            &served(&["Qwen/Qwen1.5-0.5B-Chat"]),
+            ResolvedRequestContext::default(),
+        )
+        .expect("request is valid");
+        assert!(prepared.chat_request.sampling_params.vllm_xargs.is_none());
     }
 
     #[test]

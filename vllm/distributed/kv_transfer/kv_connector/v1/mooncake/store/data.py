@@ -285,6 +285,8 @@ class RequestTracker:
     # For a fresh request this is len(prompt). For a resumed-from-preemption
     # request it includes previously-generated tokens, which are re-prefilled.
     prefill_end_tokens: int = 0
+    # Session/conversation id (e.g. from X-Correlation-ID), if provided.
+    session_id: str | None = None
 
     def reset(self) -> None:
         self.token_len = 0
@@ -327,6 +329,7 @@ class ReqMeta:
 
     token_ids: list[int] | None = None
     num_prompt_tokens: int | None = None
+    session_id: str | None = None
 
     @staticmethod
     def from_request_tracker(
@@ -387,6 +390,7 @@ class ReqMeta:
             is_last_chunk=is_last_chunk,
             token_ids=token_ids,
             num_prompt_tokens=tracker.prefill_end_tokens,
+            session_id=tracker.session_id,
         )
 
 

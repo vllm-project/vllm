@@ -280,6 +280,8 @@ class OpenAIServingChat(OpenAIServing):
         # Extract data_parallel_rank from header (router can inject it)
         data_parallel_rank = self._get_data_parallel_rank(raw_request)
 
+        session_id = self._get_session_id(raw_request)
+
         # Schedule the request and get the result generator.
         max_model_len = self.model_config.max_model_len
         generators: list[AsyncGenerator[RequestOutput, None]] = []
@@ -315,6 +317,10 @@ class OpenAIServingChat(OpenAIServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+                if session_id is not None:
+                    if sampling_params.extra_args is None:
+                        sampling_params.extra_args = {}
+                    sampling_params.extra_args.setdefault("session_id", session_id)
 
             self._log_inputs(
                 sub_request_id,

@@ -30,6 +30,16 @@ from vllm.v1.request import Request
 logger = init_logger(__name__)
 
 
+def _session_id_from_request(request: Request) -> str | None:
+    """Read the session id from ``sampling_params.extra_args``; None if unset."""
+    sampling_params = getattr(request, "sampling_params", None)
+    extra_args = getattr(sampling_params, "extra_args", None)
+    if not extra_args:
+        return None
+    session_id = extra_args.get("session_id")
+    return session_id if isinstance(session_id, str) else None
+
+
 def _new_req_prefill_tokens(request: NewRequestData) -> list[int]:
     """Tokens this prefill will compute KV for.
 
@@ -213,6 +223,7 @@ class MooncakeStoreScheduler:
                 num_saved_tokens=0,
                 token_ids=prefill_tokens[:num_tokens_to_compute],
                 prefill_end_tokens=len(prefill_tokens),
+                session_id=_session_id_from_request(request_real),
             )
             self._request_trackers[request.req_id] = request_tracker
 
@@ -263,6 +274,7 @@ class MooncakeStoreScheduler:
                         num_saved_tokens=0,
                         token_ids=prefill_tokens[:num_tokens_to_compute].copy(),
                         prefill_end_tokens=len(prefill_tokens),
+                        session_id=_session_id_from_request(request_real),
                     )
                     self._request_trackers[req_id] = request_tracker
 
@@ -336,6 +348,7 @@ class MooncakeStoreScheduler:
                     token_len=num_tokens_to_compute,
                     allocated_block_ids=block_ids,
                     num_saved_tokens=0,
+                    session_id=_session_id_from_request(unfinished_req),
                 )
                 self._request_trackers[request_id] = request_tracker
                 req_meta = ReqMeta.from_request_tracker(

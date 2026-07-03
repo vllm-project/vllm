@@ -10,6 +10,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.data import (
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.scheduler import (
     MooncakeStoreScheduler,
+    _session_id_from_request,
 )
 
 
@@ -537,3 +538,46 @@ def test_full_external_hit_with_full_local_hit_skips_load():
     assert need_to_allocate == 0
     assert load_async is False
     assert "req-0" not in scheduler.load_specs
+
+
+def _request_with_extra_args(extra_args):
+    return SimpleNamespace(sampling_params=SimpleNamespace(extra_args=extra_args))
+
+
+def test_session_id_from_request_extracts_str():
+    request = _request_with_extra_args({"session_id": "conv-abc"})
+    assert _session_id_from_request(request) == "conv-abc"
+
+
+def test_session_id_from_request_missing_returns_none():
+    assert _session_id_from_request(SimpleNamespace(sampling_params=None)) is None
+    assert _session_id_from_request(_request_with_extra_args(None)) is None
+    assert _session_id_from_request(_request_with_extra_args({})) is None
+    assert _session_id_from_request(_request_with_extra_args({"other": "x"})) is None
+
+
+def test_session_id_from_request_non_str_ignored():
+    assert (
+        _session_id_from_request(_request_with_extra_args({"session_id": 123})) is None
+    )
+
+
+def test_from_request_tracker_propagates_session_id():
+    tracker = RequestTracker(
+        req_id="req-0",
+        token_len=48,
+        allocated_block_ids=([0, 1, 2],),
+        num_saved_tokens=0,
+        session_id="conv-abc",
+    )
+
+    req_meta = ReqMeta.from_request_tracker(
+        tracker,
+        block_size=16,
+        load_spec=None,
+        skip_save=False,
+        block_hashes=[b"h0", b"h1", b"h2"],
+    )
+
+    assert req_meta is not None
+    assert req_meta.session_id == "conv-abc"

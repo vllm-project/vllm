@@ -40,6 +40,8 @@ logger = init_logger(__name__)
 RequestT = TypeVar("RequestT", bound=AnyRequest)
 _T = TypeVar("_T")
 
+SESSION_ID_HEADERS: tuple[str, ...] = ("X-Session-ID", "X-Correlation-ID")
+
 
 @dataclass(kw_only=True)
 class ServeContext(Generic[RequestT]):
@@ -157,6 +159,17 @@ class OpenAIServing(BaseServing, BeamSearchOnlineMixin):
             return int(rank_str)
         except ValueError:
             return None
+
+    @staticmethod
+    def _get_session_id(raw_request: Request | None) -> str | None:
+        """Resolve a session id from ``SESSION_ID_HEADERS`` (None if absent)."""
+        if raw_request is None:
+            return None
+        for header in SESSION_ID_HEADERS:
+            value = raw_request.headers.get(header)
+            if value:
+                return value
+        return None
 
     async def _with_kv_transfer_rejection_cleanup(
         self,
