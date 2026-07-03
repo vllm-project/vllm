@@ -161,7 +161,7 @@ class ReversedFakeAttention(FakeAttention):
 
 
 class ExtraProjAttention(FakeAttention):
-    """A second non-qkv linear -> `o_proj` is ambiguous, so `o_name` is None."""
+    """A second non-qkv linear of a different width -> `o_proj` still found."""
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
@@ -357,15 +357,10 @@ def test_detects_and_rewrites_qkv(attn_cls, kv_heads):
 
 
 def test_qkv_identifies_output_projection():
-    """The output projection consuming the attention output is identified.
-
-    It is forced to `RowParallelLinear` in `update_attrs` so its sharded input
-    matches the head-sharded qkv; `None` (falling back to `tp_plan`) when the
-    attention has more than one non-qkv linear, so `o_proj` is ambiguous."""
     with torch.device("meta"):
         assert get_fuser(FakeAttention()).o_name == "o_proj"
         assert get_fuser(ReversedFakeAttention()).o_name == "o_proj"
-        assert get_fuser(ExtraProjAttention()).o_name is None
+        assert get_fuser(ExtraProjAttention()).o_name == "o_proj"
         # Norm children (q_norm/k_norm) must not disturb o_proj identification.
         assert get_fuser(QKNormAttention()).o_name == "o_proj"
         assert get_fuser(PerHeadQKNormAttention()).o_name == "o_proj"
