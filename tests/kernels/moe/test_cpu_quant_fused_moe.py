@@ -9,6 +9,17 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+from vllm.model_executor.layers.fused_moe.config import (
+    FusedMoEConfig,
+    FusedMoEParallelConfig,
+    FusedMoEQuantConfig,
+    RoutingMethodType,
+)
+from vllm.model_executor.layers.fused_moe.expert_map_manager import (
+    determine_expert_map,
+)
+from vllm.model_executor.layers.fused_moe.experts.cpu_moe import CPUExpertsFp8
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -341,6 +352,272 @@ def test_w8a16_block_fp8_cpu_fused_moe_invalid_expert_id_raises(
 
     with pytest.raises(RuntimeError, match="Invalid expert id"):
         _run_fp8_cpu_fused_moe(a, pw1, pw2, topk_weight, topk_ids, w1_s, w2_s)
+
+
+# Non-divisible (E, num_ranks) pairs are intentional: they exercise the
+# remainder-distribution path in determine_expert_map.
+@pytest.mark.parametrize("M", [1, 64, 121])
+@pytest.mark.parametrize(
+    "N,K,E,topk",
+    [
+        (256, 512, 8, 2),
+        (512, 512, 8, 4),
+        # E=10, num_ranks=4 maps to 3/3/2/2.
+        (256, 512, 10, 2),
+        # E=12, num_ranks=6 maps to 2 each.
+        (256, 512, 12, 2),
+    ],
+)
+@pytest.mark.parametrize(
+    "num_ranks",
+    [
+        2,
+        4,
+        3,  # E=8 maps to 3/3/2.
+        6,  # E=8 maps to 2/2/1/1/1/1.
+    ],
+)
+@pytest.mark.parametrize("seed", [0])
+def test_w8a16_block_fp8_cpu_fused_moe_expert_parallel(
+    M, N, K, E, topk, num_ranks, seed
+):
+    """Expert parallelism: summed per-rank outputs match the single-rank ref.
+
+    Uses ``determine_expert_map`` (the production placement function) so the
+    test mirrors real EP placement, including the remainder-to-first-ranks
+    distribution for non-divisible expert counts.
+
+    The router produces global expert ids; each rank remaps them to local ids
+    and zeroes non-local weights (the masking path in ``CPUExpertsFp8.apply``).
+    Because the kernel applies topk_weights internally and combine is SUM, the
+    sum of per-rank outputs must equal the full single-rank mixture.
+    """
+    if num_ranks > E:
+        pytest.skip(f"E={E} < num_ranks={num_ranks}, skipping degenerate case")
+
+    set_random_seed(seed)
+
+    a = torch.randn(M, K, dtype=torch.bfloat16) / math.sqrt(K)
+    w1, w2, w1_s, w2_s = _make_fp8_moe_weights(E, N, K, BLOCK_SIZE)
+
+    score = torch.randn(M, E, dtype=torch.bfloat16)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref_out = ref_w8a16_block_fp8_moe(
+        a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, BLOCK_SIZE
+    )
+
+    summed = torch.zeros(M, K, dtype=torch.bfloat16)
+    for rank in range(num_ranks):
+        local_num_experts, expert_map, _ = determine_expert_map(
+            ep_size=num_ranks,
+            ep_rank=rank,
+            global_num_experts=E,
+        )
+        assert expert_map is not None
+
+        # Derive the contiguous start index for this rank's global experts
+        # by finding the first non-(-1) entry in expert_map.
+        owned = (expert_map != -1).nonzero(as_tuple=False)
+        lo = int(owned[0].item())
+        hi = lo + local_num_experts
+
+        w1_local = w1[lo:hi].contiguous()
+        w2_local = w2[lo:hi].contiguous()
+        w1_s_local = w1_s[lo:hi].contiguous()
+        w2_s_local = w2_s[lo:hi].contiguous()
+
+        # Remap + mask (mirrors CPUExpertsFp8.apply).
+        local_ids = expert_map[topk_ids.long()]
+        topk_weight_masked = topk_weight * (local_ids != -1)
+        topk_ids_local = local_ids.clamp_min(0).to(torch.int32)
+
+        pw1, pw2 = _prepack_experts(w1_local), _prepack_experts(w2_local)
+        out = ops.fused_experts_cpu(
+            a.clone(),
+            pw1,
+            pw2,
+            topk_weight_masked,
+            topk_ids_local,
+            False,
+            ops.CPUQuantMethod.FP8_W8A16,
+            w1_s_local,
+            w2_s_local,
+            None,
+            None,
+            BLOCK_SIZE,
+            is_vnni=True,
+        )
+        summed += out
+
+    torch.testing.assert_close(ref_out.bfloat16(), summed, atol=1e-2, rtol=1e-2)
+
+
+@pytest.mark.parametrize("M", [1, 64, 121])
+@pytest.mark.parametrize(
+    "N,K,E,topk",
+    [
+        (256, 512, 10, 2),
+        (256, 512, 12, 2),
+    ],
+)
+@pytest.mark.parametrize("num_ranks", [3, 6])
+@pytest.mark.parametrize("seed", [0])
+def test_w8a16_block_fp8_cpu_fused_moe_expert_parallel_apply(
+    M, N, K, E, topk, num_ranks, seed
+):
+    """Same as test_w8a16_block_fp8_cpu_fused_moe_expert_parallel, but drives
+    the masking/remapping through ``CPUExpertsFp8.apply()`` (the production
+    entry point) instead of hand-rolling the mask/remap logic, so the
+    ``expert_map is not None`` branch is actually exercised.
+    """
+    if num_ranks > E:
+        pytest.skip(f"E={E} < num_ranks={num_ranks}, skipping degenerate case")
+
+    set_random_seed(seed)
+
+    a = torch.randn(M, K, dtype=torch.bfloat16) / math.sqrt(K)
+    w1, w2, w1_s, w2_s = _make_fp8_moe_weights(E, N, K, BLOCK_SIZE)
+
+    # Default routing (softmax over all logits, then topk, no renormalize)
+    # so router_logits reproduce the same topk_weight/topk_ids as `score`.
+    router_logits = torch.randn(M, E, dtype=torch.float32)
+    score = torch.softmax(router_logits, dim=-1)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    ref_out = ref_w8a16_block_fp8_moe(
+        a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, BLOCK_SIZE
+    )
+
+    moe_parallel_config = FusedMoEParallelConfig.make_no_parallel()
+
+    summed = torch.zeros(M, K, dtype=torch.bfloat16)
+    for rank in range(num_ranks):
+        local_num_experts, expert_map, _ = determine_expert_map(
+            ep_size=num_ranks,
+            ep_rank=rank,
+            global_num_experts=E,
+        )
+        assert expert_map is not None
+
+        owned = (expert_map != -1).nonzero(as_tuple=False)
+        lo = int(owned[0].item())
+        hi = lo + local_num_experts
+
+        w1_local = _prepack_experts(w1[lo:hi].contiguous())
+        w2_local = _prepack_experts(w2[lo:hi].contiguous())
+        w1_s_local = w1_s[lo:hi].contiguous()
+        w2_s_local = w2_s[lo:hi].contiguous()
+
+        moe_config = FusedMoEConfig(
+            num_experts=E,
+            experts_per_token=topk,
+            hidden_dim=K,
+            intermediate_size=N,
+            num_local_experts=local_num_experts,
+            num_logical_experts=E,
+            moe_parallel_config=moe_parallel_config,
+            activation=MoEActivation.SILU,
+            in_dtype=torch.bfloat16,
+            device="cpu",
+            routing_method=RoutingMethodType.Default,
+        )
+        quant_config = FusedMoEQuantConfig.make(
+            torch.float8_e4m3fn,
+            block_shape=BLOCK_SIZE,
+            w1_scale=w1_s_local,
+            w2_scale=w2_s_local,
+        )
+        experts = CPUExpertsFp8(moe_config, quant_config)
+
+        out = experts.apply(
+            hidden_states=a.clone(),
+            w1=w1_local,
+            w2=w2_local,
+            router_logits=router_logits,
+            activation=MoEActivation.SILU,
+            global_num_experts=E,
+            expert_map=expert_map,
+            a1q_scale=None,
+            apply_router_weight_on_input=False,
+        )
+        summed += out
+
+    torch.testing.assert_close(ref_out.bfloat16(), summed, atol=1e-2, rtol=1e-2)
+
+
+# ===========================================================================
+# FP8 W8A16 MoE: VLLM_MOE_SKIP_PADDING (dummy/padding-row skip)
+# ===========================================================================
+
+
+@pytest.mark.parametrize("M,N,K,E,topk,num_ranks", [(8, 256, 512, 8, 2, 3)])
+@pytest.mark.parametrize("seed", [0])
+def test_fp8_cpu_fused_moe_skip_padding_expert_parallel(
+    M, N, K, E, topk, num_ranks, seed
+):
+    """EP branch (fused_experts_cpu_local_skip): a topk_ids row containing
+    -1 must not index expert_map[-1] and must produce zero output for that
+    row, while other rows are unaffected."""
+    from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+        fused_experts_cpu_local_skip,
+    )
+
+    set_random_seed(seed)
+
+    a = torch.randn(M, K, dtype=torch.bfloat16) / math.sqrt(K)
+    w1, w2, w1_s, w2_s = _make_fp8_moe_weights(E, N, K, BLOCK_SIZE)
+    score = torch.softmax(torch.randn(M, E, dtype=torch.bfloat16), dim=-1)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    topk_ids = topk_ids.to(torch.int32)
+
+    padded_row = 1
+    topk_ids_padded = topk_ids.clone()
+    topk_ids_padded[padded_row] = -1
+
+    local_num_experts, expert_map, _ = determine_expert_map(
+        ep_size=num_ranks, ep_rank=0, global_num_experts=E
+    )
+    assert expert_map is not None
+    owned = (expert_map != -1).nonzero(as_tuple=False)
+    lo = int(owned[0].item())
+    hi = lo + local_num_experts
+    w1_p = _prepack_experts(w1[lo:hi].contiguous())
+    w2_p = _prepack_experts(w2[lo:hi].contiguous())
+    w1_s_local = w1_s[lo:hi].contiguous()
+    w2_s_local = w2_s[lo:hi].contiguous()
+
+    common_args = (
+        w1_p,
+        w2_p,
+        expert_map,
+        ops.CPUQuantMethod.FP8_W8A16,
+        w1_s_local,
+        w2_s_local,
+        None,
+        None,
+        BLOCK_SIZE,
+        None,
+        None,
+        None,
+        None,
+        True,
+    )
+    out_padded = fused_experts_cpu_local_skip(
+        a.clone(), *common_args[:2], topk_weight, topk_ids_padded, *common_args[2:]
+    )
+    out_unpadded = fused_experts_cpu_local_skip(
+        a.clone(), *common_args[:2], topk_weight, topk_ids, *common_args[2:]
+    )
+
+    torch.testing.assert_close(
+        out_padded[padded_row], torch.zeros(K, dtype=out_padded.dtype)
+    )
+    other = torch.arange(M) != padded_row
+    torch.testing.assert_close(out_padded[other], out_unpadded[other])
 
 
 @pytest.mark.parametrize("M,N,K,E,topk", [(8, 256, 512, 8, 2)])

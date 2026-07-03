@@ -44,6 +44,131 @@ def prepare_fp8_moe_layer_for_cpu(
     return packed_w13, packed_w2
 
 
+def _fused_experts_cpu_local_skip_impl(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor,
+    moe_comp_method: int,
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
+    w1_zero: torch.Tensor | None,
+    w2_zero: torch.Tensor | None,
+    block_shape: list[int] | None,
+    w1_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    alpha: float | None,
+    limit: float | None,
+    is_vnni: bool,
+) -> torch.Tensor:
+    M, H = hidden_states.shape
+    valid = topk_ids != -1
+    local_ids = expert_map[topk_ids.clamp(min=0).long()]  # [M, topk]
+    sel = valid & (local_ids != -1)
+    if not bool(sel.any()):
+        return hidden_states.new_zeros((M, H))
+
+    token_idx, slot_idx = sel.nonzero(as_tuple=True)  # [S], [S]
+    sel_hidden = hidden_states.index_select(0, token_idx).contiguous()
+    sel_weights = topk_weights[token_idx, slot_idx].unsqueeze(1).contiguous()
+    sel_ids = local_ids[token_idx, slot_idx].unsqueeze(1).to(torch.int32).contiguous()
+
+    sel_out = fused_experts_cpu(
+        sel_hidden,
+        w1,
+        w2,
+        sel_weights,
+        sel_ids,
+        False,  # inplace
+        CPUQuantMethod(moe_comp_method),
+        w1_scale,
+        w2_scale,
+        w1_zero,
+        w2_zero,
+        block_shape,
+        w1_bias,
+        w2_bias,
+        alpha,
+        limit,
+        is_vnni,
+    )  # [S, H], already weighted
+
+    out = hidden_states.new_zeros((M, sel_out.shape[1]))
+    out.index_add_(0, token_idx, sel_out)
+    return out
+
+
+@torch.library.custom_op("vllm::fused_experts_cpu_local_skip", mutates_args=())
+def fused_experts_cpu_local_skip(
+    hidden_states: torch.Tensor,
+    w1: torch.Tensor,
+    w2: torch.Tensor,
+    topk_weights: torch.Tensor,
+    topk_ids: torch.Tensor,
+    expert_map: torch.Tensor,
+    moe_comp_method: int,
+    w1_scale: torch.Tensor | None,
+    w2_scale: torch.Tensor | None,
+    w1_zero: torch.Tensor | None,
+    w2_zero: torch.Tensor | None,
+    block_shape: list[int] | None,
+    w1_bias: torch.Tensor | None,
+    w2_bias: torch.Tensor | None,
+    alpha: float | None,
+    limit: float | None,
+    is_vnni: bool,
+) -> torch.Tensor:
+    """Run only this rank's local expert selections; scatter-add back.
+
+    Opaque to torch.compile (registered as a custom op) to avoid data-dependent
+    control flow errors during AOT fullgraph compilation.
+    """
+    return _fused_experts_cpu_local_skip_impl(
+        hidden_states,
+        w1,
+        w2,
+        topk_weights,
+        topk_ids,
+        expert_map,
+        moe_comp_method,
+        w1_scale,
+        w2_scale,
+        w1_zero,
+        w2_zero,
+        block_shape,
+        w1_bias,
+        w2_bias,
+        alpha,
+        limit,
+        is_vnni,
+    )
+
+
+@fused_experts_cpu_local_skip.register_fake
+def _(
+    hidden_states,
+    w1,
+    w2,
+    topk_weights,
+    topk_ids,
+    expert_map,
+    moe_comp_method,
+    w1_scale,
+    w2_scale,
+    w1_zero,
+    w2_zero,
+    block_shape,
+    w1_bias,
+    w2_bias,
+    alpha,
+    limit,
+    is_vnni,
+):
+    return hidden_states.new_empty(hidden_states.shape)
+
+
 class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
     """CPU FP8 W8A16 block-quantized monolithic MoE experts."""
 
@@ -161,6 +286,32 @@ class CPUExpertsFp8(mk.FusedMoEExpertsMonolithic):
                 else None
             )
         )
+
+        if expert_map is not None:
+            # Expert parallelism: select_experts returns global expert ids, but
+            # w1/w2 only hold this rank's local experts. Skip the non-local
+            # selections entirely (instead of masking them to weight 0 and
+            # still running their GEMMs), saving ~world_size x of expert
+            # compute per rank.
+            return fused_experts_cpu_local_skip(
+                hidden_states,
+                w1,
+                w2,
+                topk_weights,
+                topk_ids,
+                expert_map,
+                int(CPUQuantMethod.FP8_W8A16),  # moe_comp_method
+                self.w1_scale,  # w1_scale
+                self.w2_scale,  # w2_scale
+                None,  # w1_zero
+                None,  # w2_zero
+                block_shape,  # block_size
+                None,  # w1_bias
+                None,  # w2_bias
+                None,  # alpha
+                None,  # limit
+                True,  # is_vnni
+            )
 
         return fused_experts_cpu(
             hidden_states,
