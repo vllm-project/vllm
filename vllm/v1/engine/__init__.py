@@ -31,6 +31,8 @@ FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition")
 
 EEP_NOTIFICATION_CALL_ID = -1
 
+FT_STATUS_CALL_ID = -2
+
 
 class EEPNotificationType(enum.Enum):
     NEW_CORE_ENGINES_INIT_READY = "NEW_CORE_ENGINES_INIT_READY"

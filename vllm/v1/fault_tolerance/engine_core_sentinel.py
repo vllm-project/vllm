@@ -11,7 +11,12 @@ from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.utils import stateless_init_torch_distributed_process_group
 from vllm.logger import init_logger
 from vllm.utils.network_utils import get_open_port
-from vllm.v1.engine import EngineCoreOutputs, EngineStatusType, UtilityOutput
+from vllm.v1.engine import (
+    FT_STATUS_CALL_ID,
+    EngineCoreOutputs,
+    EngineStatusType,
+    UtilityOutput,
+)
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import UtilityResult, run_method
@@ -77,15 +82,21 @@ class EngineCoreSentinel:
         logger.info(
             "[FT] Engine %d status -> UNHEALTHY:", self.engine_index, exc_info=exc
         )
+        self._push_status()
 
-    def status(self, ft_request: FaultToleranceRequest) -> dict:
-        result = {
-            "id": self.engine_index,
-            "status": self.status_type.name.lower(),
-        }
+    def _push_status(self):
+        """Push current health to the client so it can refresh its cache."""
+        payload = {"id": self.engine_index, "status": self.status_type.name.lower()}
         if self.status_type == EngineStatusType.UNHEALTHY:
-            result["fault_info"] = self.fault_info
-        return result
+            payload["fault_info"] = self.fault_info
+        outputs = EngineCoreOutputs(
+            utility_output=UtilityOutput(
+                call_id=FT_STATUS_CALL_ID,
+                result=UtilityResult(payload),
+            )
+        )
+        outputs.engine_index = self.engine_index
+        self.engine.output_queue.put_nowait((0, outputs))
 
     def retry(self, ft_request: FaultToleranceRequest) -> dict:
         engine = self.engine
@@ -101,6 +112,7 @@ class EngineCoreSentinel:
         self.status_type = EngineStatusType.HEALTHY
         logger.info("[FT] Engine %d status -> HEALTHY", self.engine_index)
         self.resumed.set()
+        self._push_status()
         return {"request_id": ft_request.request_id, "success": True}
 
     def _reinit_dp_group(self) -> dict:
