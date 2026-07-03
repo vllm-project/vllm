@@ -636,6 +636,11 @@ class SpeculativeConfig:
         # default.
 
         # infer method from user args
+        # Record whether the user explicitly configured a method, before any
+        # normalization below. Auto-detection from the draft checkpoint may
+        # only fill in a missing method, never override an explicit one.
+        method_was_explicit = self.method is not None
+
         # Check if the model field contains a custom module path (e.g., 'pkg.Mod')
         if (
             self.model is not None
@@ -786,8 +791,11 @@ class SpeculativeConfig:
                 # lack a model_type key in config.json, so AutoConfig cannot
                 # detect them. When the method is explicitly "medusa", inject
                 # model_type so MedusaConfig.from_pretrained is used instead.
-                draft_hf_overrides: HfOverrides
-                if self.method == "medusa":
+                is_legacy_medusa = (
+                    self.method == "medusa" and not self._raw_config_has_model_type()
+                )
+                draft_hf_overrides: HfOverrides = SpeculativeConfig.hf_config_override
+                if is_legacy_medusa:
                     draft_hf_overrides = {"model_type": "medusa"}
                 else:
                     # Compose any callable hf_overrides set on the target so the
@@ -826,56 +834,17 @@ class SpeculativeConfig:
                 # omit vocab_size in config.json, so MedusaConfig falls back to
                 # its default (32001). Align with the target model's vocab size
                 # to avoid shape mismatches when loading LM-head weights.
-                if self.method == "medusa":
+                if is_legacy_medusa:
                     target_vocab = self.target_model_config.hf_config.vocab_size
                     draft_hf = self.draft_model_config.hf_config
                     if draft_hf.vocab_size != target_vocab:
                         draft_hf.vocab_size = target_vocab
                         draft_hf.truncated_vocab_size = target_vocab
 
-                # Automatically detect the method
-                if self.method in ("eagle", "eagle3", "dflash", "dspark"):
-                    pass
-                # examples:
-                # yuhuili/EAGLE-LLaMA3-Instruct-8B
-                # yuhuili/EAGLE3-LLaMA3.1-Instruct-8B
-                # AngelSlim/Qwen3-8B_eagle3
-                # deepseek-ai/dspark_qwen3_8b_block7
-                elif "eagle-" in self.draft_model_config.model.lower():
-                    self.method = "eagle"
-                elif "eagle3" in self.draft_model_config.model.lower():
-                    self.method = "eagle3"
-                elif "dflash" in self.draft_model_config.model.lower():
-                    self.method = "dflash"
-                elif (
-                    "dspark" in self.draft_model_config.model.lower()
-                    or "Qwen3DSparkModel" in self.draft_model_config.architectures
-                ):
-                    self.method = "dspark"
-                elif self.draft_model_config.hf_config.model_type == "medusa":
-                    self.method = "medusa"
-                elif self.draft_model_config.hf_config.model_type == "mlp_speculator":
-                    self.method = "mlp_speculator"
-                elif self.draft_model_config.hf_config.model_type in get_args(
-                    MTPModelTypes
-                ):
-                    self.method = "mtp"
-                    if (
-                        self.num_speculative_tokens > 1
-                        and self.draft_model_config.hf_config.model_type
-                        != "step3p5_mtp"
-                    ):
-                        logger.warning(
-                            "Enabling num_speculative_tokens > 1 will run "
-                            "multiple times of forward on same MTP layer"
-                            ",which may result in lower acceptance rate"
-                        )
-                elif self.method == "draft_model":
-                    pass
-                else:
-                    raise NotImplementedError(
-                        f"Unsupported speculative method: '{self.method}'"
-                    )
+                # Resolve the speculative method: honor an explicitly
+                # configured method (validating it against the draft
+                # checkpoint), otherwise auto-detect it.
+                self._resolve_draft_method(method_was_explicit)
 
                 # Replace hf_config for EAGLE draft_model
                 if self.method in ("eagle", "eagle3", "dflash"):
@@ -1153,6 +1122,116 @@ class SpeculativeConfig:
                 return None
             return AttentionBackendEnum[value.upper()]
         return value
+
+    def _raw_config_has_model_type(self) -> bool:
+        """Whether the draft checkpoint's raw config.json declares a
+        ``model_type``.
+
+        Old-format Medusa checkpoints (e.g. FasterDecoding/medusa-*) omit it,
+        and only those need the medusa ``model_type`` injection; checkpoints
+        that declare their own type must keep it so that method validation
+        can see what the checkpoint really is.
+        """
+        from transformers import PretrainedConfig
+
+        try:
+            config_dict, _ = PretrainedConfig.get_config_dict(
+                self.model,
+                revision=self.revision,
+                trust_remote_code=self.target_model_config.trust_remote_code,
+            )
+        except Exception:
+            return False
+        return "model_type" in config_dict
+
+    def _detect_draft_method(self) -> SpeculativeMethod | None:
+        """Best-effort detection of the speculative method implied by the
+        draft checkpoint, in the legacy detection order (name hints first).
+        """
+        # NOTE: this mirrors the legacy detection order exactly, with the
+        # name hints first: DeepSeek EAGLE heads are structurally MTP-typed
+        # (e.g. model_type="deepseek_mtp") and rely on the name hint to route
+        # to the eagle path.
+        model_name = self.draft_model_config.model.lower()
+        if "eagle-" in model_name:
+            return "eagle"
+        if "eagle3" in model_name:
+            return "eagle3"
+        if "dflash" in model_name:
+            return "dflash"
+        if "dspark" in model_name or "Qwen3DSparkModel" in (
+            self.draft_model_config.architectures or []
+        ):
+            return "dspark"
+        hf_config = self.draft_model_config.hf_config
+        model_type = getattr(hf_config, "model_type", None)
+        if model_type == "medusa":
+            return "medusa"
+        if model_type == "mlp_speculator":
+            return "mlp_speculator"
+        if model_type in get_args(MTPModelTypes):
+            return "mtp"
+        return None
+
+    def _method_mismatch_msg(self, detected: str | None) -> str:
+        hf_config = self.draft_model_config.hf_config
+        if detected is not None:
+            looks = f"looks like a {detected!r} checkpoint"
+            hint = f" Use method={detected!r} if that is what you intended."
+        else:
+            looks = (
+                "is not recognized as any drafter type (a plain causal LM "
+                "can be used with method='draft_model')"
+            )
+            hint = ""
+        return (
+            f"speculative_config requested method={self.method!r}, but the "
+            f"draft model {self.draft_model_config.model!r} {looks} "
+            f"(model_type={getattr(hf_config, 'model_type', None)!r}, "
+            f"architectures={getattr(hf_config, 'architectures', None)}). "
+            f"Pass a matching method or a matching draft checkpoint.{hint}"
+        )
+
+    def _resolve_draft_method(self, method_was_explicit: bool) -> None:
+        """Set or validate ``self.method`` against the draft checkpoint.
+
+        Auto-detection only applies when the user did not explicitly
+        configure a method; an explicitly configured method is validated
+        against the checkpoint and never silently overridden.
+        """
+        detected = self._detect_draft_method()
+
+        if not method_was_explicit:
+            # self.method defaulted to "draft_model"; adopt the detection.
+            if detected is not None:
+                self.method = detected
+        elif self.method in ("eagle", "eagle3", "dflash", "dspark"):
+            # Eagle-family checkpoints often cannot be detected structurally,
+            # and some legitimately carry an MTP model_type (e.g. DeepSeek
+            # EAGLE heads), so trust the explicit method; EAGLEConfig rejects
+            # incompatible configs with an actionable error. Only a
+            # structural medusa/mlp_speculator checkpoint can never work.
+            if detected in ("medusa", "mlp_speculator"):
+                raise ValueError(self._method_mismatch_msg(detected))
+        elif self.method == "draft_model":
+            # draft_model accepts any standalone causal LM, but a drafter
+            # head (medusa/mlp_speculator/mtp) cannot run standalone.
+            if detected in ("medusa", "mlp_speculator", "mtp"):
+                raise ValueError(self._method_mismatch_msg(detected))
+        elif self.method != detected:
+            # medusa / mlp_speculator / mtp were requested explicitly.
+            raise ValueError(self._method_mismatch_msg(detected))
+
+        if (
+            self.method == "mtp"
+            and self.num_speculative_tokens > 1
+            and self.draft_model_config.hf_config.model_type != "step3p5_mtp"
+        ):
+            logger.warning(
+                "Enabling num_speculative_tokens > 1 will run "
+                "multiple times of forward on same MTP layer"
+                ",which may result in lower acceptance rate"
+            )
 
     @model_validator(mode="after")
     def _verify_args(self) -> Self:
