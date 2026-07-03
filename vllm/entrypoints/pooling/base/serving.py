@@ -19,6 +19,7 @@ from vllm.entrypoints.chat_utils import ChatTemplateConfig
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.serving import BaseServing
+from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.lora.request import LoRARequest
 from vllm.renderers.base import BaseRenderer
@@ -209,7 +210,7 @@ class PoolingBaseServing(ABC, BaseServing):
 
     async def _check_model(
         self,
-        request: AnyPoolingRequest,
+        request: AnyRequest | AnyPoolingRequest,
     ) -> ErrorResponse | None:
         if self._is_model_supported(request.model):
             return None
