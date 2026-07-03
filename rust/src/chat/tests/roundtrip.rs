@@ -214,14 +214,17 @@ macro_rules! roundtrip_tests {
     ($($case:ident => [$($(#[$fixture_attr:meta])* $fixture:ident),* $(,)?]),+ $(,)?) => {
         paste::paste! {
             $(
-                $(
-                    #[tokio::test]
-                    $(#[$fixture_attr])*
-                    #[file_serial([<hf_ $case>])]
-                    async fn [<roundtrip_ $case _ $fixture>]() -> Result<()> {
-                        [<run_roundtrip_ $fixture>](RoundtripCase::$case()).await
-                    }
-                )*
+                #[tokio::test]
+                #[file_serial([<hf_ $case>])]
+                async fn [<roundtrip_ $case>]() -> Result<()> {
+                    let case = RoundtripCase::$case();
+                    let backends = load_roundtrip_backends(&case).await?;
+                    $(
+                        $(#[$fixture_attr])*
+                        [<run_roundtrip_ $fixture>](&case, &backends).await?;
+                    )*
+                    Ok(())
+                }
             )+
         }
     };
@@ -241,18 +244,21 @@ roundtrip_tests! {
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
-async fn run_roundtrip_reasoning_and_content(case: RoundtripCase) -> Result<()> {
+async fn run_roundtrip_reasoning_and_content(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+) -> Result<()> {
     for thinking in case.thinking_behavior.fixtures() {
-        run_roundtrip_reasoning_and_content_inner(case.clone(), thinking).await?;
+        run_roundtrip_reasoning_and_content_inner(case, backends, thinking).await?;
     }
     Ok(())
 }
 
 async fn run_roundtrip_reasoning_and_content_inner(
-    case: RoundtripCase,
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
     thinking: Option<bool>,
 ) -> Result<()> {
-    let backends = load_roundtrip_backends(&case).await?;
     let request = roundtrip_request(
         "roundtrip-reasoning-content",
         vec![ChatMessage::text(ChatRole::User, "What is 2 + 2?")],
@@ -293,8 +299,10 @@ async fn run_roundtrip_reasoning_and_content_inner(
 }
 
 /// Run the fixed reasoning+multiple-tools fixture for one model/parser case.
-async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
-    let backends = load_roundtrip_backends(&case).await?;
+async fn run_roundtrip_tool_call_mix(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+) -> Result<()> {
     let request = roundtrip_request(
         "roundtrip-reasoning-tools",
         vec![ChatMessage::text(
