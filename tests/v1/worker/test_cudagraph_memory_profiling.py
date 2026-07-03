@@ -356,7 +356,8 @@ def test_flashinfer_reserves_prefill_tail_workspace(monkeypatch):
         ),
         speculative_config=None,
     )
-    builder.q_data_type = torch.float16
+    builder.q_data_type_prefill = torch.float16
+    builder.q_data_type_decode = torch.float16
     builder.kv_cache_dtype = torch.uint8
     builder.page_size = 16
     builder.window_left = -1
