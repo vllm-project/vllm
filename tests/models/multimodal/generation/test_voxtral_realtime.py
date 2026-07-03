@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import contextlib
-
 import pytest
 import pytest_asyncio
 from mistral_common.protocol.transcription.request import (
@@ -12,7 +10,7 @@ from mistral_common.tokens.tokenizers.audio import Audio
 from mistral_common.tokens.tokenizers.mistral import MistralTokenizer
 from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 
-from vllm import LLM, EngineArgs, SamplingParams
+from vllm import LLM, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils.math_utils import cdiv
@@ -100,77 +98,87 @@ def tokenizer() -> MistralTokenizer:
     return MistralTokenizer.from_hf_hub(MODEL_NAME)
 
 
-@pytest.fixture
-def engine(monkeypatch: pytest.MonkeyPatch):
-    # Disable multiprocessing allows us to access model executor from LLM engine
-    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
-    engine_args = EngineArgs(**ENGINE_CONFIG)
-    llm = LLM.from_engine_args(engine_args)
-    try:
-        yield llm
-    finally:
-        with contextlib.suppress(Exception):
-            llm.llm_engine.engine_core.shutdown()
-        import torch
-
-        torch.accelerator.empty_cache()
-
-
 @pytest_asyncio.fixture
 async def async_engine():
+    gpu_memory_utilization = ENGINE_CONFIG.get("gpu_memory_utilization", 0.9)
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        from tests.utils import wait_for_rocm_memory_to_settle
+
+        wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+
     engine_args = AsyncEngineArgs(**ENGINE_CONFIG)
     llm = AsyncLLM.from_engine_args(engine_args)
     try:
         yield llm
     finally:
         llm.shutdown()
+        del llm
+        import torch
+
+        torch._dynamo.reset()
+        from vllm.distributed import cleanup_dist_env_and_memory
+
+        cleanup_dist_env_and_memory()
+        from tests.utils import wait_for_rocm_memory_to_settle
+
+        wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
 
-def test_voxtral_realtime_forward(audio_assets, tokenizer, engine):
-    assert_encoder_kv_cache_spec(engine)
-    audio_config = tokenizer.instruct_tokenizer.tokenizer.audio
+def test_voxtral_realtime_forward(audio_assets, tokenizer, vllm_runner, monkeypatch):
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
 
-    def from_file(file_path: str):
-        audio = Audio.from_file(file_path, strict=False)
-        req = TranscriptionRequest(
-            audio=audio.to_base64(audio.format),
-            streaming=StreamingMode.OFFLINE,
-            language=None,
+    vllm_kwargs = {**ENGINE_CONFIG}
+    vllm_kwargs["model_name"] = vllm_kwargs.pop("model")
+
+    with vllm_runner(**vllm_kwargs) as vllm_model:
+        assert_encoder_kv_cache_spec(vllm_model.llm)
+        audio_config = tokenizer.instruct_tokenizer.tokenizer.audio
+
+        def from_file(file_path: str):
+            audio = Audio.from_file(file_path, strict=False)
+            req = TranscriptionRequest(
+                audio=audio.to_base64(audio.format),
+                streaming=StreamingMode.OFFLINE,
+                language=None,
+            )
+            tokenized = tokenizer.instruct_tokenizer.encode_transcription(req)
+
+            return (tokenized.tokens, tokenized.audios[0].audio_array)
+
+        tokenized_list = [
+            from_file(audio_asset.get_local_path()) for audio_asset in audio_assets
+        ]
+
+        inputs = []
+        sampling_params = []
+
+        for tokens, audio_array in tokenized_list:
+            num_samples = audio_array.shape[0]
+            max_tokens = audio_config.num_audio_tokens(num_samples) - len(tokens) - 1
+            sampling_params.append(
+                SamplingParams(temperature=0.0, max_tokens=max_tokens)
+            )
+
+            input_dict = {
+                "multi_modal_data": {"audio": [(audio_array, None)]},
+                "prompt_token_ids": tokens,
+            }
+            inputs.append(input_dict)
+
+        outputs = vllm_model.llm.generate(
+            inputs,
+            sampling_params=sampling_params,
         )
-        tokenized = tokenizer.instruct_tokenizer.encode_transcription(req)
 
-        return (tokenized.tokens, tokenized.audios[0].audio_array)
-
-    tokenized_list = [
-        from_file(audio_asset.get_local_path()) for audio_asset in audio_assets
-    ]
-
-    inputs = []
-    sampling_params = []
-
-    for tokens, audio_array in tokenized_list:
-        num_samples = audio_array.shape[0]
-        max_tokens = audio_config.num_audio_tokens(num_samples) - len(tokens) - 1
-        sampling_params.append(SamplingParams(temperature=0.0, max_tokens=max_tokens))
-
-        input_dict = {
-            "multi_modal_data": {"audio": [(audio_array, None)]},
-            "prompt_token_ids": tokens,
-        }
-        inputs.append(input_dict)
-
-    outputs = engine.generate(
-        inputs,
-        sampling_params=sampling_params,
-    )
-
-    texts = _normalize([out.outputs[0].text for out in outputs])
-    for i, (got, expected) in enumerate(zip(texts, EXPECTED_TEXT)):
-        assert got == expected, (
-            f"Output mismatch at index {i}:\n"
-            f"  got:      {got!r}\n"
-            f"  expected: {expected!r}"
-        )
+        texts = _normalize([out.outputs[0].text for out in outputs])
+        for i, (got, expected) in enumerate(zip(texts, EXPECTED_TEXT)):
+            assert got == expected, (
+                f"Output mismatch at index {i}:\n"
+                f"  got:      {got!r}\n"
+                f"  expected: {expected!r}"
+            )
 
 
 @pytest.mark.asyncio
