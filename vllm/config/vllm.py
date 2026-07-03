@@ -67,12 +67,9 @@ logger = init_logger(__name__)
 
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
-        "Qwen3ForCausalLM",
         "DeepseekV2ForCausalLM",
         "Qwen2MoeForCausalLM",
         "GraniteMoeForCausalLM",
-        "LlamaForCausalLM",
-        "MistralForCausalLM",
     }
 )
 
@@ -565,9 +562,15 @@ class VllmConfig:
         if model_config.runner_type != "generate":
             return False
 
+        if getattr(model_config, "is_hybrid", False):
+            return False
+
+        if getattr(model_config, "is_attention_free", False):
+            return False
         architectures = getattr(model_config, "architectures", [])
-        return any(
-            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
+        return (
+            any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures)
+            or not model_config.is_moe
         )
 
     @property
