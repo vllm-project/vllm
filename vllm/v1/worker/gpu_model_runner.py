@@ -7204,10 +7204,42 @@ class GPUModelRunner(
                 else:
                     raise NotImplementedError
 
-        if has_attn and has_mamba:
+        # Reconcile divergent KV layouts to blocks-first. Triggered by hybrid
+        # attention/mamba models, and by encoder-decoder models whose shared
+        # decoder/cross-attention allocation mixes K/V-first and blocks-first
+        # backends (see _has_mixed_attention_kv_layout).
+        if has_attn and (
+            has_mamba or self._has_mixed_attention_kv_layout(kernel_block_sizes)
+        ):
             self._update_hybrid_attention_mamba_layout(kv_caches, kernel_block_sizes)
 
         return kv_caches
+
+    def _has_mixed_attention_kv_layout(self, kernel_block_sizes: list[int]) -> bool:
+        """Whether attention groups disagree on the physical KV cache layout.
+
+        Encoder-decoder models (e.g. Whisper) share one raw KV allocation
+        between a decoder self-attention layer (K/V-first ROCM_ATTN, block dim
+        1) and a cross-attention layer (blocks-first, block dim 0). Mixed block
+        dims mean a block ID maps to different bytes per layer, so the shared
+        buffer must be normalized to a single (blocks-first) layout.
+        """
+        block_dims: set[int] = set()
+        for group in self._kv_cache_spec_attn_group_iterator():
+            kv_cache_spec = group.kv_cache_spec
+            if not isinstance(kv_cache_spec, AttentionSpec):
+                continue
+            if group.kv_cache_group_id == len(kernel_block_sizes):
+                continue
+            block_dims.add(
+                group.backend.get_kv_cache_block_dim(
+                    kernel_block_sizes[group.kv_cache_group_id],
+                    kv_cache_spec.num_kv_heads,
+                    kv_cache_spec.head_size,
+                    cache_dtype_str=self.cache_config.cache_dtype,
+                )
+            )
+        return len(block_dims) > 1
 
     def _update_hybrid_attention_mamba_layout(
         self, kv_caches: dict[str, torch.Tensor], kernel_block_sizes: list[int]
