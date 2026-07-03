@@ -284,6 +284,33 @@ def _create_metadata_builder(
                 device=device,
             )
 
+    if backend_name == "HPC_ATTN":
+        import unittest.mock
+
+        from vllm.v1.attention.backends.utils import PerLayerParameters
+
+        def mock_get_per_layer_parameters_hpc(vllm_config, layer_names, impl_cls):
+            head_size = kv_cache_spec.head_size
+            return {
+                layer_name: PerLayerParameters(
+                    window_left=-1,
+                    logits_soft_cap=0.0,
+                    sm_scale=1.0 / (head_size**0.5),
+                )
+                for layer_name in layer_names
+            }
+
+        with unittest.mock.patch(
+            "vllm.v1.attention.backends.hpc_attn.get_per_layer_parameters",
+            mock_get_per_layer_parameters_hpc,
+        ):
+            return builder_cls(
+                kv_cache_spec=kv_cache_spec,
+                layer_names=layer_names,
+                vllm_config=vllm_config,
+                device=device,
+            )
+
     return builder_cls(
         kv_cache_spec=kv_cache_spec,
         layer_names=layer_names,
