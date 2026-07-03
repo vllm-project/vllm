@@ -1320,9 +1320,10 @@ def _model_output(scheduler, output, sampled):
 
 
 def test_spec_decode_padding_first_decode_step():
-    """A decode-shaped prefix-cache boundary step is padded with placeholder
-    (-1) spec tokens so it enters the worker with the same 1 + num_spec_tokens
-    shape as the other speculative decodes, keeping the batch uniform.
+    """A request taking its first decode step (whole prompt already computed via
+    a prefix-cache hit) is padded with placeholder (-1) spec tokens so it enters
+    the worker with the same 1 + num_spec_tokens shape as the other speculative
+    decodes, keeping the batch uniform.
     """
     num_spec = 3
     scheduler = create_scheduler(
@@ -1344,7 +1345,7 @@ def test_spec_decode_padding_first_decode_step():
     _model_output(scheduler, out, [[100]])
     scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
 
-    # r2 arrives; all but the prompt tail is a prefix-cache hit.
+    # r2 arrives; its whole prompt is a prefix-cache hit -> first decode step.
     scheduler.add_request(r2)
     out = scheduler.schedule()
 
