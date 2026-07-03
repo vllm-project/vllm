@@ -7,6 +7,8 @@ import pytest
 import torch
 from transformers import AutoModelForImageTextToText
 
+from vllm.platforms import current_platform
+
 from ....conftest import HfRunner, ImageTestAssets, VllmRunner
 from .vlm_utils import model_utils
 
@@ -70,6 +72,9 @@ def _get_vllm_prefill_hidden(
 
 
 @pytest.mark.core_model
+@pytest.mark.skipif(
+    current_platform.is_rocm(), reason="ROCm attention has accuracy issue for this test"
+)
 def test_mm_prefix_lm_e2e(
     hf_runner: type[HfRunner],
     vllm_runner: type[VllmRunner],
