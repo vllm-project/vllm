@@ -49,14 +49,34 @@ def modelscope_list_repo_files(
     api = HubApi()
     api.login(token)
     # same as huggingface_hub.list_repo_files
-    files = [
-        file["Path"]
-        for file in api.get_model_files(
-            model_id=repo_id, revision=revision, recursive=True
+    try:
+        files = [
+            file["Path"]
+            for file in api.get_model_files(
+                model_id=repo_id, revision=revision, recursive=True
+            )
+            if file["Type"] == "blob"
+        ]
+    except Exception as exc:
+        if not is_modelscope_legacy_hub_api_error(exc):
+            raise
+        logger.warning(
+            "ModelScope file listing failed due to legacy hub API "
+            "compatibility issue for '%s': %s",
+            repo_id,
+            exc,
         )
-        if file["Type"] == "blob"
-    ]
+        return []
     return files
+
+
+def is_modelscope_legacy_hub_api_error(exc: Exception) -> bool:
+    """Return True for ModelScope legacy hub compatibility failures."""
+    exc_name = type(exc).__name__
+    if "LegacyHubApi" in exc_name:
+        return True
+
+    return "LegacyHubApi" in str(exc)
 
 
 def _maybe_json_dict(path: str | PathLike) -> dict[str, str]:
