@@ -3,7 +3,7 @@ use std::time::Duration;
 use criterion::{BatchSize, Criterion, Throughput, black_box, criterion_group, criterion_main};
 use vllm_parser::tool::test_utils::{split_by_chars, test_tools};
 use vllm_parser::tool::{Tool, ToolParser};
-use vllm_parser::unified::Gemma4UnifiedParser;
+use vllm_parser::unified::{Gemma4ConfigDrivenParser, Gemma4UnifiedParser};
 
 mod utils;
 use utils::{UnifiedToolParserAdapter, feed_parser};
@@ -68,14 +68,22 @@ fn long_tool_argument_fixture() -> String {
     )
 }
 
+type MakeParser = fn(&[Tool]) -> Box<dyn ToolParser>;
+
 fn parser(tools: &[Tool]) -> Box<dyn ToolParser> {
     UnifiedToolParserAdapter::<Gemma4UnifiedParser>::create(tools)
         .expect("Gemma4 unified parser should initialize")
 }
 
+fn config_driven_parser(tools: &[Tool]) -> Box<dyn ToolParser> {
+    UnifiedToolParserAdapter::<Gemma4ConfigDrivenParser>::create(tools)
+        .expect("Gemma4 config-driven parser should initialize")
+}
+
 fn run_stream_group(
     c: &mut Criterion,
     name: &str,
+    make_parser: MakeParser,
     tools: &[Tool],
     text: &str,
     chunk_chars: usize,
@@ -91,7 +99,7 @@ fn run_stream_group(
     group.throughput(Throughput::Bytes(text.len() as u64));
 
     group.bench_function("reuse_parser", |b| {
-        let mut parser = parser(tools);
+        let mut parser = make_parser(tools);
         b.iter(|| {
             let result = feed_parser(&mut *parser, black_box(&chunks));
             debug_assert_eq!(result.0, expected_normal_text);
@@ -102,7 +110,7 @@ fn run_stream_group(
 
     group.bench_function("create_parser", |b| {
         b.iter_batched(
-            || parser(tools),
+            || make_parser(tools),
             |mut parser| {
                 let result = feed_parser(&mut *parser, black_box(&chunks));
                 debug_assert_eq!(result.0, expected_normal_text);
@@ -122,35 +130,45 @@ fn bench_gemma4(c: &mut Criterion) {
     let long_tool_argument = long_tool_argument_fixture();
     let long_normal_text = long_normal_text_fixture();
 
-    run_stream_group(
-        c,
-        "gemma4/mixed_complex_tool_call",
-        &tools,
-        &mixed_text,
-        CHUNK_CHARS,
-        "I will inspect the data before answering.\n Finished.",
-        2,
-    );
+    let variants: [(&str, MakeParser); 2] = [
+        ("gemma4", parser),
+        ("gemma4_config_driven", config_driven_parser),
+    ];
 
-    run_stream_group(
-        c,
-        "gemma4/long_tool_argument",
-        &tools,
-        &long_tool_argument,
-        CHUNK_CHARS,
-        "I will write the file.\nDone.",
-        1,
-    );
+    for (prefix, make_parser) in variants {
+        run_stream_group(
+            c,
+            &format!("{prefix}/mixed_complex_tool_call"),
+            make_parser,
+            &tools,
+            &mixed_text,
+            CHUNK_CHARS,
+            "I will inspect the data before answering.\n Finished.",
+            2,
+        );
 
-    run_stream_group(
-        c,
-        "gemma4/long_normal_text",
-        &tools,
-        &long_normal_text,
-        CHUNK_CHARS,
-        &long_normal_text,
-        0,
-    );
+        run_stream_group(
+            c,
+            &format!("{prefix}/long_tool_argument"),
+            make_parser,
+            &tools,
+            &long_tool_argument,
+            CHUNK_CHARS,
+            "I will write the file.\nDone.",
+            1,
+        );
+
+        run_stream_group(
+            c,
+            &format!("{prefix}/long_normal_text"),
+            make_parser,
+            &tools,
+            &long_normal_text,
+            CHUNK_CHARS,
+            &long_normal_text,
+            0,
+        );
+    }
 }
 
 criterion_group!(benches, bench_gemma4);

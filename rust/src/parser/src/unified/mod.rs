@@ -1,9 +1,14 @@
 //! Unified parser interface for reasoning and tool-call deltas.
 
 mod combined;
+mod config_driven;
 mod gemma4;
 
 pub use combined::CombinedParser;
+pub use config_driven::{
+    ArgsEndScan, ConfigDrivenParser, Gemma4ConfigDrivenParser, Gemma4Format, ParserFormat,
+    PlainArgsScan,
+};
 pub use gemma4::Gemma4UnifiedParser;
 use thiserror::Error;
 use thiserror_ext::Macro;
