@@ -689,8 +689,15 @@ def report_usage_stats(
         else None
     )
 
+    if model_config.using_transformers_backend():
+        backend_cls = model_config._model_info.architecture
+        # Show what was wrapped e.g. TransformersForCausalLM(Starcoder2ForCausalLM)
+        architecture = f"{backend_cls}({model_config.architectures[0]})"
+    else:
+        architecture = get_architecture_class_name(model_config)
+
     usage_message.report_usage(
-        get_architecture_class_name(model_config),
+        architecture,
         usage_context,
         extra_kvs={
             # Common configuration
