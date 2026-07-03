@@ -14,12 +14,13 @@ from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
+from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.engine.arg_utils import AsyncEngineArgs
 from vllm.utils.math_utils import cdiv
 from vllm.v1.engine.async_llm import AsyncLLM
 from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
-from ....utils import ROCM_ENGINE_KWARGS
+from ....utils import ROCM_ENGINE_KWARGS, wait_for_rocm_memory_to_settle
 
 MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
 AUDIO_LAYER_NAME = "whisper_encoder.whisper_encoder.layers.0.layers.self_attn.attn"
@@ -111,9 +112,11 @@ def engine(monkeypatch: pytest.MonkeyPatch):
     finally:
         with contextlib.suppress(Exception):
             llm.llm_engine.engine_core.shutdown()
-        import torch
-
-        torch.accelerator.empty_cache()
+        # pytest pins the fixture value, so drop the engine ref for cleanup.
+        del llm.llm_engine
+        del llm
+        cleanup_dist_env_and_memory()
+        wait_for_rocm_memory_to_settle()
 
 
 @pytest_asyncio.fixture
