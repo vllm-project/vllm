@@ -349,6 +349,38 @@ class FreeKVCacheBlockQueue:
 
         self.num_free_blocks += len(blocks)
 
+    def prependleft_n(self, blocks: list[KVCacheBlock]) -> None:
+        """Insert blocks at the head of the free queue.
+
+        These blocks will be allocated first by subsequent
+        :meth:`popleft_n` calls.
+
+        Args:
+            blocks: Blocks to insert at the front, in the order they
+                    should be allocated (``blocks[0]`` is allocated
+                    first).
+        """
+        if not blocks:
+            return
+
+        old_first = self.fake_free_list_head.next_free_block
+        assert old_first is not None
+
+        # Add inter-connections between consecutive blocks.
+        for i in range(len(blocks) - 1):
+            blocks[i].next_free_block = blocks[i + 1]
+            blocks[i + 1].prev_free_block = blocks[i]
+
+        # Wire fake_head → blocks[0]
+        self.fake_free_list_head.next_free_block = blocks[0]
+        blocks[0].prev_free_block = self.fake_free_list_head
+
+        # Wire blocks[-1] → old_first
+        blocks[-1].next_free_block = old_first
+        old_first.prev_free_block = blocks[-1]
+
+        self.num_free_blocks += len(blocks)
+
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.
 

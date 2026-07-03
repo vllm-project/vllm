@@ -1788,6 +1788,23 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_XPU_ENABLE_XPU_GRAPH": lambda: bool(
         int(os.getenv("VLLM_XPU_ENABLE_XPU_GRAPH", "0"))
     ),
+    # ================== Knorm KV Cache Compression ==================
+    # Fraction of KV cache blocks to KEEP. 1.0 = no compression.
+    "VLLM_KNORM_COMPRESSION_RATIO": lambda: float(
+        os.getenv("VLLM_KNORM_COMPRESSION_RATIO", "0.5")
+    ),
+    # Number of tokens at the sequence start to always keep (attention sink).
+    "VLLM_KNORM_WARMUP_TOKENS": lambda: int(
+        os.getenv("VLLM_KNORM_WARMUP_TOKENS", "32")
+    ),
+    # Whether Knorm compression is enabled. Set to '0' to disable.
+    "VLLM_KNORM_ENABLED": lambda: bool(int(os.getenv("VLLM_KNORM_ENABLED", "1"))),
+    # How to aggregate token norms within a block: 'min', 'mean', or 'max'.
+    "VLLM_KNORM_SCORE_AGGREGATION": lambda: os.getenv(
+        "VLLM_KNORM_SCORE_AGGREGATION", "min"
+    ),
+    # How to reduce norms across heads: 'mean', 'max', or 'sum'.
+    "VLLM_KNORM_NORM_REDUCE_OP": lambda: os.getenv("VLLM_KNORM_NORM_REDUCE_OP", "mean"),
 }
 
 

@@ -1173,3 +1173,21 @@ def get_manager_for_kv_cache_spec(
         )
     manager = manager_class(kv_cache_spec, **kwargs)
     return manager
+
+
+# ---------------------------------------------------------------------------
+# Knorm integration: override FullAttentionSpec → KnormFullAttentionManager.
+# Placed at end-of-file to avoid circular import (KnormFullAttentionManager
+# imports FullAttentionManager from this module, which is already defined).
+# ---------------------------------------------------------------------------
+def _install_knorm_manager() -> None:
+    """Replace FullAttentionSpec manager with KnormFullAttentionManager."""
+    try:
+        from vllm.knorm.manager import KnormFullAttentionManager
+
+        spec_manager_map[FullAttentionSpec] = KnormFullAttentionManager
+    except ImportError:
+        pass  # knorm module not installed — use default FullAttentionManager
+
+
+_install_knorm_manager()
