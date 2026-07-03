@@ -117,6 +117,7 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.network_utils import get_ip
 from vllm.utils.torch_utils import resolve_kv_cache_dtype_string
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.fault_tolerance.utils import FT_BACKEND_SET
 from vllm.v1.sample.logits_processor import LogitsProcessor
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -2029,6 +2030,11 @@ class EngineArgs:
                 "Fault tolerance requires external load balancer mode "
                 "(--data-parallel-external-lb or --data-parallel-rank). "
                 "Internal LB mode is not supported."
+            )
+        if self.enable_fault_tolerance and self.all2all_backend not in FT_BACKEND_SET:
+            raise ValueError(
+                "Fault tolerance requires an FT-capable all2all backend "
+                f"(deepep_low_latency or nixl_ep), but got '{self.all2all_backend}'."
             )
         if (
             self.data_parallel_size > 1

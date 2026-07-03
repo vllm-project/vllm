@@ -39,10 +39,6 @@ class EngineCoreSentinel:
         self.status_type = EngineStatusType.HEALTHY
         self._dp_reinit_epoch = 0
 
-    # ------------------------------------------------------------------
-    # Command dispatch (called from process_input_sockets thread)
-    # ------------------------------------------------------------------
-
     def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
         """Dispatch an FT command by instruction name and enqueue result."""
         ft_request = FaultToleranceRequest(**ft_args)
@@ -62,10 +58,6 @@ class EngineCoreSentinel:
             (client_idx, EngineCoreOutputs(utility_output=uo))
         )
 
-    # ------------------------------------------------------------------
-    # Fault handling (called by wrapper, runs in busy-loop thread)
-    # ------------------------------------------------------------------
-
     def on_fault(self, exc: Exception):
         """Called by the wrapper when the busy loop raises an exception."""
         self.resumed.clear()
@@ -83,10 +75,6 @@ class EngineCoreSentinel:
         logger.info(
             "[FT] Engine %d status -> UNHEALTHY:", self.engine_index, exc_info=exc
         )
-
-    # ------------------------------------------------------------------
-    # Instruction handlers (method name == instruction string)
-    # ------------------------------------------------------------------
 
     def status(self, ft_request: FaultToleranceRequest) -> dict:
         return {
@@ -111,10 +99,6 @@ class EngineCoreSentinel:
         logger.info("[FT] Engine %d status -> HEALTHY", self.engine_index)
         self.resumed.set()
         return {"request_id": ft_request.request_id, "success": True}
-
-    # ------------------------------------------------------------------
-    # Recovery helpers
-    # ------------------------------------------------------------------
 
     def _reinit_dp_group(self) -> dict:
         """Reinit DP process group if in DP mode. Returns worker params."""
