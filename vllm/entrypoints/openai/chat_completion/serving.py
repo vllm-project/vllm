@@ -125,6 +125,40 @@ def _decode_raw_output(tokenizer, token_ids) -> str:
         return ""
 
 
+def _reasoning_parser_text(
+    tokenizer, reasoning_parser, output_text, token_ids, skip_special_tokens
+) -> str:
+    """Return the model output text to feed a reasoning parser's non-streaming
+    ``extract_reasoning``.
+
+    Normally this is just ``output_text``. But when the reasoning end marker
+    (e.g. ``</think>``) is a *special* token, ``skip_special_tokens=True`` (the
+    request default) strips it from ``output_text``, so the parser's
+    string-based split can't find it and routes all reasoning into content.
+
+    In that case we rebuild a text that reinserts only the end marker, driven
+    by the token ids: decode each side with the request's
+    ``skip_special_tokens`` (so a trailing EOS such as ``<|im_end|>`` and a
+    leading ``<think>`` stay stripped exactly as before) and splice the literal
+    marker string at the split. The parser's own scaffolding cleanup
+    (leading/trailing whitespace) runs as usual on the result.
+    """
+    end_id = getattr(reasoning_parser, "end_token_id", None)
+    end_tok = getattr(reasoning_parser, "end_token", None)
+    ids = list(token_ids or [])
+    if end_id is None or not end_tok or end_tok in output_text or end_id not in ids:
+        return output_text
+    i = ids.index(end_id)
+    try:
+        return (
+            tokenizer.decode(ids[:i], skip_special_tokens=skip_special_tokens)
+            + end_tok
+            + tokenizer.decode(ids[i + 1 :], skip_special_tokens=skip_special_tokens)
+        )
+    except Exception:
+        return output_text
+
+
 class OpenAIServingChat(OpenAIServing):
     def __init__(
         self,
@@ -1694,8 +1728,18 @@ class OpenAIServingChat(OpenAIServing):
             if reasoning_parser:
                 # If the reasoning parser is enabled,
                 # tool calls are extracted exclusively from the content.
+                # Reinsert the reasoning end marker when it was a special token
+                # stripped from output.text, so the string-based extractor can
+                # still find the reasoning/content split (see helper docstring).
+                parser_text = _reasoning_parser_text(
+                    tokenizer,
+                    reasoning_parser,
+                    output.text,
+                    output.token_ids,
+                    request.skip_special_tokens,
+                )
                 reasoning, content = reasoning_parser.extract_reasoning(
-                    output.text, request=request
+                    parser_text, request=request
                 )
                 if not request.include_reasoning:
                     reasoning = None
