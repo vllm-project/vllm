@@ -33,6 +33,41 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _copy_h2d_dst_strided(dst: torch.Tensor, src: torch.Tensor) -> None:
+    """Copy src into dst, keeping the host->device memcpy contiguous.
+
+    Fused-MoE checkpoints (e.g. ModelOpt Llama-4) store expert weights
+    transposed relative to the runtime layout, so ``src`` arrives here as
+    a non-contiguous CPU view of the memory-mapped checkpoint tensor.
+    ``dst.copy_(src)`` then materializes ``src.contiguous()`` on the CPU,
+    an elementwise strided gather that costs seconds per expert tensor
+    (see https://github.com/vllm-project/vllm/issues/31624).
+
+    Flipping the strided side to the destination keeps the H2D transfer
+    dense: ``src.transpose(-1, -2)`` recovers the contiguous on-disk slab
+    at zero cost, and the transpose is performed as a strided device-side
+    write into the existing parameter storage. No extra device memory is
+    retained; the staging buffer lives inside ATen's copy op.
+    """
+    if (
+        dst.device != src.device
+        and src.device.type == "cpu"
+        and src.ndim >= 2
+        and not src.is_contiguous()
+    ):
+        src_t = src.transpose(-1, -2)
+        if src_t.is_contiguous():
+            dst.transpose(-1, -2).copy_(src_t)
+            return
+        if src_t.stride(-1) == 1:
+            # TP-narrowed slab: unit inner stride but padded row pitch.
+            # Contiguation here degrades to row-run memcpys instead of an
+            # elementwise gather, after which the H2D transfer is dense.
+            dst.transpose(-1, -2).copy_(src_t.contiguous())
+            return
+    dst.copy_(src)
+
+
 class FusedMoeWeightScaleSupported(Enum):
     TENSOR = "tensor"
     CHANNEL = "channel"
@@ -378,7 +413,7 @@ class RoutedExperts(PluggableLayer):
                 hidden_dim=hidden_dim,
                 shard_dim=shard_dim,
             )
-            expert_data.copy_(loaded_weight)
+            _copy_h2d_dst_strided(expert_data, loaded_weight)
         elif shard_id in ("w1", "w3"):
             self._load_w13(
                 shard_id=shard_id,
@@ -494,7 +529,7 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
-        expert_data.copy_(loaded_weight)
+        _copy_h2d_dst_strided(expert_data, loaded_weight)
 
     def _load_w2(
         self,
@@ -529,7 +564,7 @@ class RoutedExperts(PluggableLayer):
             hidden_dim=hidden_dim,
             shard_dim=shard_dim,
         )
-        expert_data.copy_(loaded_weight)
+        _copy_h2d_dst_strided(expert_data, loaded_weight)
 
     def _load_single_value(
         self, param: torch.nn.Parameter, loaded_weight: torch.Tensor, expert_id: int
