@@ -106,15 +106,19 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
         body = {}
 
     request_ids = body.get("request_ids")
-    if not request_ids:
-        # The dev RL server runs AsyncLLM; abort everything it is tracking.
-        from vllm.v1.engine.async_llm import AsyncLLM
-
-        assert isinstance(engine, AsyncLLM)
-        request_ids = list(engine.output_processor.request_states.keys())
 
     try:
-        await engine.abort(request_ids)
+        if request_ids:
+            # Body ids are external (user-supplied) request ids.
+            await engine.abort(request_ids)
+        else:
+            # The dev RL server runs AsyncLLM; abort everything it is tracking.
+            # request_states is keyed by internal ids, so abort as internal.
+            from vllm.v1.engine.async_llm import AsyncLLM
+
+            assert isinstance(engine, AsyncLLM)
+            request_ids = list(engine.output_processor.request_states.keys())
+            await engine.abort(request_ids, internal=True)
         return JSONResponse(
             content={"status": "aborted", "aborted": len(request_ids)},
             status_code=HTTPStatus.OK.value,
