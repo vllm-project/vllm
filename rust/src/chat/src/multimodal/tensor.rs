@@ -31,14 +31,14 @@ pub(super) fn collect_tensors(
     float_dtype: ModelDtype,
 ) -> Result<HashMap<String, KwargValue>> {
     let PreprocessedImages {
-        pixel_values,
+        encoder_input,
         model_specific,
         ..
     } = preprocessed;
 
     let pixel_values = {
-        let shape = pixel_values.shape().to_vec();
-        let data = pixel_values.into_iter().collect();
+        let shape = encoder_input.shape().to_vec();
+        let data = encoder_input.into_iter().collect();
         KwargValue::from_f32_tensor(data, shape, float_dtype)?
     };
 

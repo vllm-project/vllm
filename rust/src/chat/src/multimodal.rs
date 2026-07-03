@@ -556,6 +556,10 @@ impl TokenResolver for TokenizerResolver {
     fn id_to_token(&self, id: u32) -> Option<String> {
         self.0.id_to_token(id)
     }
+
+    fn encode_text(&self, text: &str) -> Option<Vec<u32>> {
+        self.0.encode(text, false).ok()
+    }
 }
 
 #[cfg(test)]
