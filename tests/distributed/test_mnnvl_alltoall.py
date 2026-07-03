@@ -63,8 +63,11 @@ def _spawn_workers(worker_fn, world_size, *, dp_size=None):
         )
         p.start()
         procs.append(p)
-    for p in procs:
+    exit_errors = []
+    for rank, p in enumerate(procs):
         p.join()
+        if p.exitcode != 0:
+            exit_errors.append(f"[Rank {rank}] worker exited with code {p.exitcode}")
 
     # Collect any errors from workers before asserting.
     errors = []
@@ -72,8 +75,9 @@ def _spawn_workers(worker_fn, world_size, *, dp_size=None):
         errors.append(err_queue.get_nowait())
     err_queue.close()
     err_queue.join_thread()
-    if errors:
-        pytest.fail("Worker(s) failed:\n" + "\n---\n".join(errors))
+    failures = errors + exit_errors
+    if failures:
+        pytest.fail("Worker(s) failed:\n" + "\n---\n".join(failures))
 
 
 def _run_worker(rank, world_size, port, worker_fn, dp_size, dp_port, err_queue):
@@ -141,7 +145,12 @@ def _init_dp_environment(world_size, rank, port, dp_size, dp_port):
         ensure_model_parallel_initialized(1, 1)
 
 
-def _make_forward_context(rank, world_size, num_tokens_per_rank):
+def _make_forward_context(
+    rank,
+    world_size,
+    num_tokens_per_rank,
+    num_tokens_across_dp: list[int] | None = None,
+):
     """Create a forward context with mock DP metadata for AgRs tests.
 
     Returns a context manager suitable for ``with`` statements.
@@ -166,13 +175,13 @@ def _make_forward_context(rank, world_size, num_tokens_per_rank):
         is_moe_model=True,
         data_parallel_rank=rank,
     )
+    if num_tokens_across_dp is None:
+        num_tokens_across_dp = [num_tokens_per_rank] * world_size
     return set_forward_context(
         _AttnMeta(),
         vllm_config,
         num_tokens=num_tokens_per_rank,
-        num_tokens_across_dp=torch.tensor(
-            [num_tokens_per_rank] * world_size, dtype=torch.int
-        ),
+        num_tokens_across_dp=torch.tensor(num_tokens_across_dp, dtype=torch.int),
     )
 
 
@@ -450,10 +459,10 @@ def _args_dispatch_combine_worker(rank, world_size):
     device = torch.device(f"cuda:{rank}")
 
     hidden_size = 64
-    tokens_per_rank = 16
     experts_per_token = 2
     num_experts = world_size * 4
-    total_tokens = world_size * tokens_per_rank
+    tokens_per_rank = 2
+    total_tokens = tokens_per_rank * world_size
 
     # Deterministic per-rank data: rank r has value (r + 1)
     hidden = torch.full(

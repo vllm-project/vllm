@@ -94,7 +94,7 @@ class AgRsAll2AllManager(All2AllManagerBase):
         | tuple[torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]
     ):
         """
-        Gather hidden_states and router_logits from all dp ranks.
+        Gather hidden_states and topk weights/ids from all dp ranks.
         """
         dp_metadata = get_forward_context().dp_metadata
         assert dp_metadata is not None
