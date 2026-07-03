@@ -25,7 +25,7 @@ from vllm.entrypoints.openai.engine.protocol import (
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.speech_to_text.base.serving import (
-    OpenAISpeechToText,
+    SpeechToTextBaseServing,
     asr_inter_chunk_separator,
 )
 from vllm.entrypoints.speech_to_text.transcription.protocol import TranscriptionRequest
@@ -234,7 +234,9 @@ async def test_create_transcription_non_streaming_joins_chunks_by_language():
             "vllm.model_executor.model_loader.get_model_cls",
             return_value=_StubTranscriptionModel,
         ),
-        patch.object(OpenAISpeechToText, "_preprocess_speech_to_text", preprocess_mock),
+        patch.object(
+            SpeechToTextBaseServing, "_preprocess_speech_to_text", preprocess_mock
+        ),
     ):
         serving = OpenAIServingTranscription(engine_client, models, request_logger=None)
 
