@@ -21,6 +21,7 @@ from vllm.forward_context import (
     is_forward_context_available,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.hw_agnostic._custom_op_lib import vllm_hw_agnostic_lib
 from vllm.model_executor.hw_agnostic.layers.fused_moe.activation import (
     MoEActivation,
 )
@@ -39,7 +40,6 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.router.fused_moe_router im
 from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.moe_runner_interface import (  # noqa: E501
     MoERunnerInterface,
 )
-from vllm.model_executor.hw_agnostic._custom_op_lib import vllm_hw_agnostic_lib
 from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts import (  # noqa: E501
     SharedExperts,
     SharedExpertsOrder,
