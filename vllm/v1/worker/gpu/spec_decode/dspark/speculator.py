@@ -217,6 +217,10 @@ class DSparkSpeculator(DFlashSpeculator):
         self.use_draft_token_capacity = (
             self.min_survival_probability is not None or self.sps_profile is not None
         )
+        if self.use_draft_token_capacity:
+            self.extra_uniform_decode_lens = list(
+                range(1, self.num_speculative_steps + 1)
+            )
 
     def load_draft_model(
         self,

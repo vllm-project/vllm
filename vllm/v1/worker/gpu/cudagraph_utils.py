@@ -110,6 +110,11 @@ def get_uniform_token_count(
 
 
 class CudaGraphManager:
+    # Request-count buckets for extra uniform-decode FULL graph capture.
+    UNIFORM_DECODE_REQUEST_BUCKETS: tuple[int, ...] = (
+        1, 2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 192, 256,
+    )  # fmt: skip
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -117,6 +122,7 @@ class CudaGraphManager:
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        extra_uniform_decode_lens: list[int] | None = None,
     ):
         self.vllm_config = vllm_config
         self.device = device
@@ -125,6 +131,12 @@ class CudaGraphManager:
         assert self.compilation_config is not None
         self.cudagraph_mode = cudagraph_mode
         self.decode_query_len = decode_query_len
+        self.extra_uniform_decode_lens = [
+            q
+            for q in (extra_uniform_decode_lens or [])
+            if q >= 1 and q != decode_query_len
+        ]
+        self._uniform_candidates: dict[int, list[BatchExecutionDescriptor]] = {}
 
         self.dp_size = vllm_config.parallel_config.data_parallel_size
         self.tp_size = vllm_config.parallel_config.tensor_parallel_size
@@ -274,6 +286,34 @@ class CudaGraphManager:
                 descs_by_mode[mixed_mode].append(desc)
                 descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
 
+        if separate_decode_routine and decode_mode and self.extra_uniform_decode_lens:
+            max_size = max(capture_sizes)
+            req_buckets = sorted(
+                {
+                    r
+                    for r in self.UNIFORM_DECODE_REQUEST_BUCKETS
+                    if r <= self.max_num_reqs
+                }
+                | {self.max_num_reqs}
+            )
+            for q, num_active_loras in product(
+                self.extra_uniform_decode_lens, self.lora_capture_cases
+            ):
+                for r in req_buckets:
+                    if r * q > max_size:
+                        break
+                    desc = BatchExecutionDescriptor(
+                        cg_mode=decode_mode,
+                        num_tokens=r * q,
+                        num_reqs=r,
+                        uniform_token_count=q,
+                        num_active_loras=num_active_loras,
+                    )
+                    descs_by_mode[decode_mode].append(desc)
+                    self._uniform_candidates.setdefault(q, []).append(desc)
+            for uniform_descs in self._uniform_candidates.values():
+                uniform_descs.sort(key=lambda d: d.num_tokens)
+
         if not descs_by_token_lora:
             return
 
@@ -378,6 +418,21 @@ class CudaGraphManager:
         """Find matching cudagraph descriptor from priority-ordered candidates."""
 
         effective_loras = self._resolve_effective_loras(num_active_loras)
+        if (
+            self._graphs_captured
+            and num_tokens > 0
+            and uniform_token_count is not None
+            and uniform_token_count in self._uniform_candidates
+        ):
+            for desc in self._uniform_candidates[uniform_token_count]:
+                if desc.num_tokens >= num_tokens and _is_compatible(
+                    desc,
+                    num_reqs,
+                    num_tokens,
+                    uniform_token_count,
+                    effective_loras,
+                ):
+                    return desc
         key = (num_tokens, effective_loras)
         if self._graphs_captured and num_tokens > 0 and key in self._candidates:
             for desc in self._candidates[key]:
@@ -435,6 +490,7 @@ class ModelCudaGraphManager(CudaGraphManager):
         cudagraph_mode: CUDAGraphMode,
         decode_query_len: int,
         lora_capture_cases: list[int] | None = None,
+        extra_uniform_decode_lens: list[int] | None = None,
     ):
         super().__init__(
             vllm_config,
@@ -442,6 +498,7 @@ class ModelCudaGraphManager(CudaGraphManager):
             cudagraph_mode,
             decode_query_len,
             lora_capture_cases=lora_capture_cases,
+            extra_uniform_decode_lens=extra_uniform_decode_lens,
         )
         self.hidden_states: torch.Tensor | None = None
         self.aux_hidden_states: list[torch.Tensor] = []

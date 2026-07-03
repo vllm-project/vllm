@@ -110,6 +110,9 @@ class InputBatch:
     # [num_reqs] per-request prompt length, only populated for R-SWA.
     prompt_lens: torch.Tensor | None
 
+    # Unpadded query starts when target forward is padded for FULL graph replay.
+    real_query_start_loc: torch.Tensor | None = None
+
     # Sampler-only logical metadata used when verifier inputs are compacted by
     # DSpark draft-token capacity. Target forward/attention keep using the
     # compact fields above.
@@ -179,6 +182,7 @@ class InputBatch:
             num_draft_tokens_per_req=None,
             query_start_loc=query_start_loc,
             query_start_loc_np=query_start_loc_np,
+            real_query_start_loc=None,
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=None,
@@ -330,6 +334,7 @@ def _combine_sampled_and_draft_tokens_kernel(
     logits_indices_ptr,
     BLOCK_SIZE: tl.constexpr,
     NUM_NEW_SAMPLED_TOKENS: tl.constexpr = 1,
+    PREFIX_MODE: tl.constexpr = False,
 ):
     batch_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + batch_idx)
@@ -340,10 +345,14 @@ def _combine_sampled_and_draft_tokens_kernel(
     num_logits = cu_num_logits_end - cu_num_logits_start
     num_draft_tokens = num_logits - NUM_NEW_SAMPLED_TOKENS
 
-    # Compute the logits indices.
+    # Compute the logits indices. By default real tokens are at the end of the
+    # query span. Padded compact speculation writes them at the beginning.
     block = tl.arange(0, BLOCK_SIZE)
     query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
-    logits_start = query_end - num_logits
+    if PREFIX_MODE:
+        logits_start = tl.load(query_start_loc_ptr + batch_idx)
+    else:
+        logits_start = query_end - num_logits
     tl.store(
         logits_indices_ptr + cu_num_logits_start + block,
         logits_start + block,
@@ -359,7 +368,7 @@ def _combine_sampled_and_draft_tokens_kernel(
     if NUM_NEW_SAMPLED_TOKENS > 0:
         # Write the last sampled token ID to input_ids.
         last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
-        tl.store(input_ids_ptr + query_end - num_logits, last_token_id)
+        tl.store(input_ids_ptr + logits_start, last_token_id)
 
     # Write the draft tokens (if any) to input_ids.
     if num_draft_tokens > 0:
@@ -369,7 +378,7 @@ def _combine_sampled_and_draft_tokens_kernel(
             mask=mask,
         )
         tl.store(
-            input_ids_ptr + query_end - num_draft_tokens + block,
+            input_ids_ptr + logits_start + NUM_NEW_SAMPLED_TOKENS + block,
             draft_tokens,
             mask=mask,
         )
@@ -386,6 +395,7 @@ def combine_sampled_and_draft_tokens(
     cu_num_logits: torch.Tensor,
     num_logits: int,
     num_new_sampled_tokens: int = 1,  # excl accepted draft tokens, a.k.a bonus tokens
+    prefix_mode: bool = False,
 ) -> torch.Tensor:
     assert num_new_sampled_tokens in (0, 1), (
         f"num_new_sampled_tokens must be 0 or 1, got {num_new_sampled_tokens}"
@@ -411,6 +421,7 @@ def combine_sampled_and_draft_tokens(
         cu_num_logits,
         logits_indices,
         NUM_NEW_SAMPLED_TOKENS=num_new_sampled_tokens,
+        PREFIX_MODE=prefix_mode,
         # NOTE(woosuk): Add num_new_sampled_tokens to ensure the block covers the
         # last sampled token in addition to all draft tokens.
         BLOCK_SIZE=triton.next_power_of_2(
