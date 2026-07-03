@@ -264,8 +264,10 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         # AITER ASM prefill backend is inactive. When the AITER ASM prefill backend is
         # active, it owns all prefill related logic and hence initializing the PS
         # buffers here would be redundant.
-        self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
-            not _asm_prefill_backend_active(vllm_config)
+        self._fp8_prefill_enabled = (
+            _fp8_mla_prefill_supported()
+            and (not _asm_prefill_backend_active(vllm_config))
+            and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2")
         )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
@@ -749,12 +751,16 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         from vllm.config import get_current_vllm_config
 
+        vllm_config = get_current_vllm_config()
+
         # Only use fp8 prefill PS path here in the AITER MLA backend if the dedicated
         # AITER ASM prefill backend is inactive. When the AITER ASM prefill backend is
         # active, it owns all prefill related logic and hence initializing the PS
         # buffers here would be redundant.
-        self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
-            not _asm_prefill_backend_active(get_current_vllm_config())
+        self._fp8_prefill_enabled = (
+            _fp8_mla_prefill_supported()
+            and (not _asm_prefill_backend_active(vllm_config))
+            and vllm_config.cache_config.cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2")
         )
         if self._fp8_prefill_enabled:
             from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1
