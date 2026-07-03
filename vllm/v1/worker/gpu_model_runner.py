@@ -49,7 +49,6 @@ from vllm.distributed.parallel_state import (
     is_global_first_rank,
     prepare_communication_buffer_for_model,
 )
-from vllm.distributed.weight_transfer.base import SparseWeightPatch
 from vllm.forward_context import (
     BatchDescriptor,
     set_forward_context,
@@ -2331,13 +2330,20 @@ class GPUModelRunner(
 
         # Compute mm_prefix bidirectional ranges before building
         # attention metadata so builders handle them during build().
-        # Ranges exceeding sliding_window are skipped to prevent
-        # early tokens from attending across the entire image span.
+        # By default, ranges exceeding sliding_window are skipped to prevent
+        # early tokens from attending across the entire image span. Models that
+        # clamp mm_prefix to the sliding window *in-kernel* (e.g. Gemma4, which
+        # needs HF's (causal OR blockwise) AND sliding_window on sliding layers)
+        # opt out of the skip so the bidirectional range survives for images
+        # larger than the window; the kernel then bounds it per-query.
         req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
         if self.is_mm_prefix_lm:
             req_doc_ranges = {}
             hf_text_config = self.model_config.hf_text_config
             _bidi_sw = getattr(hf_text_config, "sliding_window", None)
+            _clamps_in_kernel = getattr(
+                self.model, "mm_prefix_clamp_sliding_window", False
+            )
             for req_id in self.input_batch.req_ids:
                 image_doc_ranges = []
                 req_state = self.requests[req_id]
@@ -2347,7 +2353,11 @@ class GPUModelRunner(
                     pos_info = mm_feature.mm_position
                     img_doc_range = pos_info.extract_embeds_range()
                     for r in img_doc_range:
-                        if _bidi_sw is not None and (r[1] - r[0] + 1) > _bidi_sw:
+                        if (
+                            not _clamps_in_kernel
+                            and _bidi_sw is not None
+                            and (r[1] - r[0] + 1) > _bidi_sw
+                        ):
                             continue
                         image_doc_ranges.append(r)
                 req_idx = self.input_batch.req_id_to_index[req_id]
@@ -3244,44 +3254,6 @@ class GPUModelRunner(
             return self.model.unwrap()
         return self.model
 
-    def apply_sparse_weight_patches(self, patches: Iterable[SparseWeightPatch]) -> None:
-        """Apply sparse flat-index patches directly to existing model params."""
-        model = self.get_model()
-        for patch in patches:
-            param = model.get_parameter(patch.name)
-            if not param.data.is_contiguous():
-                raise NotImplementedError(
-                    "Sparse weight updates currently require contiguous params: "
-                    f"{patch.name}"
-                )
-
-            if patch.indices.dtype != torch.int32:
-                raise ValueError(
-                    "Sparse weight updates currently require int32 indices: "
-                    f"{patch.name}"
-                )
-            if patch.indices.ndim != 1 or patch.values.ndim != 1:
-                raise ValueError(
-                    f"Sparse weight patches must be 1D flattened updates: {patch.name}"
-                )
-            if patch.indices.numel() != patch.values.numel():
-                raise ValueError(
-                    "`indices` and `values` must have matching lengths for "
-                    f"{patch.name}"
-                )
-            if patch.values.dtype != param.dtype:
-                raise ValueError(
-                    f"Sparse values dtype {patch.values.dtype} does not match "
-                    f"parameter dtype {param.dtype} for {patch.name}"
-                )
-
-            flat_param = param.data.view(-1)
-            flat_param.index_copy_(
-                0,
-                patch.indices.to(device=flat_param.device, dtype=torch.long),
-                patch.values.to(device=flat_param.device),
-            )
-
     def get_supported_generation_tasks(self) -> list[GenerationTask]:
         model = self.get_model()
         supported_tasks = list[GenerationTask]()
@@ -3478,6 +3450,10 @@ class GPUModelRunner(
         num_scheduled_tokens = scheduler_output.total_num_scheduled_tokens
         is_first_rank = get_pp_group().is_first_rank
         is_encoder_decoder = self.model_config.is_encoder_decoder
+
+        # Clamp speculative scheduler placeholders (-1) before embedding lookup.
+        if self.speculative_config is not None:
+            self.input_ids.gpu[:num_input_tokens].clamp_(min=0)
 
         # _prepare_inputs may reorder the batch, so we must gather multi
         # modal outputs after that to ensure the correct order
