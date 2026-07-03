@@ -221,6 +221,9 @@ def kernel_unified_attention(
     USE_MM_PREFIX: tl.constexpr,  # bool
     MAX_MM_RANGES: tl.constexpr,  # int
     mm_prefix_range_ptr,
+    rswa_prefix_lens_ptr,
+    R_SWA_WINDOW: tl.constexpr,  # int
+    USE_R_SWA: tl.constexpr,  # bool
     stride_k_cache_0: tl.int64,  # int
     stride_k_cache_1: tl.int64,  # int
     stride_k_cache_2: tl.int64,  # int
@@ -395,7 +398,7 @@ def kernel_unified_attention(
         BLOCK_Q,
         num_queries_per_kv,
         SLIDING_WINDOW,
-        USE_MM_PREFIX,
+        USE_MM_PREFIX or USE_R_SWA,
         IS_3D,
         USE_CAUSAL,
         USE_PER_SEQ_CAUSAL,
@@ -511,6 +514,9 @@ def kernel_unified_attention(
             USE_CAUSAL,
             USE_PER_SEQ_CAUSAL,
             per_seq_causal_ptr,
+            rswa_prefix_lens_ptr,
+            R_SWA_WINDOW,
+            USE_R_SWA,
             CHUNK_LOOKBACK,
             CHUNK_SIZE,
             MM_PREFIX_CLAMP_SW,
@@ -812,6 +818,10 @@ def unified_attention(
     sinks=None,
     # Optional tensor for prefix lengths (PrefixLM support)
     mm_prefix_range=None,
+    # R-SWA support: prefix tokens stay globally visible, generated tokens use
+    # a fixed sliding window.
+    rswa_prefix_lens=None,
+    rswa_window: int | None = None,
     use_alibi_sqrt=False,
     # KV cache quantization mode and per-token-head scale caches.
     kv_quant_mode: KVQuantMode = KVQuantMode.NONE,
@@ -896,6 +906,8 @@ def unified_attention(
             raise ValueError(
                 f"Unsupported mm_prefix_range shape: {mm_prefix_range.shape}"
             )
+
+    use_rswa = rswa_window is not None and rswa_prefix_lens is not None
 
     use_alibi_slopes = alibi_slopes is not None
     use_qq_bias = qq_bias is not None
@@ -1111,6 +1123,9 @@ def unified_attention(
         USE_MM_PREFIX=use_mm_prefix,
         MAX_MM_RANGES=max_mm_ranges,
         mm_prefix_range_ptr=mm_prefix_range,
+        rswa_prefix_lens_ptr=rswa_prefix_lens if use_rswa else seqused_k,
+        R_SWA_WINDOW=rswa_window or 0,
+        USE_R_SWA=use_rswa,
         stride_k_cache_0=k.stride(0),
         stride_k_cache_1=k.stride(1),
         stride_k_cache_2=k.stride(2),
