@@ -1,13 +1,34 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import importlib.metadata
+from importlib.util import find_spec
+
 import pytest
+import torch
+from packaging import version
 
 import vllm
 from vllm.lora.request import LoRARequest
 from vllm.platforms import current_platform
 
 from ..utils import multi_gpu_test
+
+# Require amd-quark >= 0.12 on torch >= 2.11.
+# Earlier torch releases work with older quark versions. See
+# https://github.com/amd/Quark/issues/34
+# TODO: Remove once amd-quark>=0.12.0
+QUARK_TORCH_COMPATIBLE = find_spec("quark") is not None and (
+    version.parse(importlib.metadata.version("amd-quark")) >= version.parse("0.12.0")
+    if version.parse(torch.__version__.split("+")[0]) >= version.parse("2.11")
+    else True
+)
+
+if current_platform.is_rocm() and not QUARK_TORCH_COMPATIBLE:
+    pytest.skip(
+        "This test requires amd-quark >= 0.12 on torch >= 2.11.",
+        allow_module_level=True,
+    )
 
 MODEL_PATH = "openai/gpt-oss-20b"
 
@@ -70,17 +91,20 @@ def generate_and_test(llm: vllm.LLM, lora_path: str, lora_id: int) -> None:
         assert generated_texts[i].startswith(EXPECTED_LORA_OUTPUT[i])
 
 
-@pytest.mark.skipif(
-    not current_platform.is_cuda(),
-    reason=(
-        "Mxfp4 LoRA on ROCm is blocked by a spawn compatibility issue. "
-        "The fused_moe_lora Triton kernel crashes in spawned subprocesses, "
-        "and vLLM forces spawn mode when HIP is initialized before "
-        "multiprocessing. Fixing this requires either making the LoRA "
-        "Triton kernel spawn-safe or pre-warming the kernel cache."
-    ),
+# TODO: make the Mxfp4MoeBackend.TRITON spawn-safe.
+# For now just use TRITON_UNFUSED kernel
+@pytest.mark.parametrize(
+    "mxfp4_use_marlin",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(), reason="marlin not supported"
+            ),
+        ),
+    ],
 )
-@pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
 @pytest.mark.parametrize("specialize_active_lora", [True, False])
 def test_gpt_oss_lora(
     gptoss20b_lora_files,
@@ -109,7 +133,18 @@ def test_gpt_oss_lora(
 
 @multi_gpu_test(num_gpus=2)
 @pytest.mark.parametrize("fully_sharded_loras", [False, True])
-@pytest.mark.parametrize("mxfp4_use_marlin", [True, False])
+@pytest.mark.parametrize(
+    "mxfp4_use_marlin",
+    [
+        False,
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                current_platform.is_rocm(), reason="marlin not supported"
+            ),
+        ),
+    ],
+)
 def test_gpt_oss_lora_tp2(
     gptoss20b_lora_files,
     fully_sharded_loras,
