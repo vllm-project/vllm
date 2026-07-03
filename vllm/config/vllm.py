@@ -38,7 +38,7 @@ from .kv_events import KVEventsConfig
 from .kv_transfer import KVTransferConfig
 from .load import LoadConfig
 from .lora import LoRAConfig
-from .mamba import MambaConfig
+from .mamba import MambaBackendEnum, MambaConfig
 from .model import ModelConfig
 from .observability import ObservabilityConfig
 from .offload import OffloadConfig
@@ -2208,6 +2208,76 @@ class VllmConfig:
         if mamba_block_size_is_set and not self.cache_config.enable_prefix_caching:
             raise ValueError(
                 "--mamba-block-size can only be set with --enable-prefix-caching"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_mamba_cached_kernel(self) -> "VllmConfig":
+        if not self.cache_config.use_replayssm:
+            if self.cache_config.replayssm_route != "output_only":
+                raise ValueError(
+                    "--replayssm-route is only meaningful when "
+                    "--use-replayssm is enabled"
+                )
+            return self
+        if self.cache_config.mamba_cache_mode != "none":
+            raise ValueError(
+                "--use-replayssm requires --mamba-cache-mode none"
+            )
+        if self.num_speculative_tokens > 0:
+            raise ValueError(
+                "--use-replayssm does not support speculative decoding"
+            )
+        if self.mamba_config.backend != MambaBackendEnum.TRITON:
+            raise ValueError(
+                "--use-replayssm requires --mamba-backend triton"
+            )
+        if self.mamba_config.enable_stochastic_rounding:
+            raise ValueError(
+                "--use-replayssm does not support Mamba cache "
+                "stochastic rounding"
+            )
+        return self
+
+    @model_validator(mode="after")
+    def validate_mamba_cached_spec_kernel(self) -> "VllmConfig":
+        if not self.cache_config.use_replayssm_spec:
+            return self
+        # Inverted guard: the cached-SPEC kernel *requires* speculative decode
+        # (the opposite of --use-replayssm, which forbids it).
+        if self.cache_config.use_replayssm:
+            raise ValueError(
+                "--use-replayssm-spec is mutually exclusive with "
+                "--use-replayssm (different page shapes / decode paths)"
+            )
+        if self.num_speculative_tokens <= 0:
+            raise ValueError(
+                "--use-replayssm-spec requires speculative decoding "
+                "(num_speculative_tokens > 0)"
+            )
+        if self.cache_config.mamba_cache_mode != "none":
+            raise ValueError(
+                "--use-replayssm-spec requires --mamba-cache-mode none"
+            )
+        if self.mamba_config.backend != MambaBackendEnum.TRITON:
+            raise ValueError(
+                "--use-replayssm-spec requires --mamba-backend triton"
+            )
+        if self.mamba_config.enable_stochastic_rounding:
+            raise ValueError(
+                "--use-replayssm-spec does not support Mamba cache "
+                "stochastic rounding"
+            )
+        max_spec_len = 1 + self.num_speculative_tokens
+        # replayssm_buffer_len is the history block B; the flush threshold is
+        # L = B + max_spec_len and the usable committed history is B - max_spec_len,
+        # so B must be at least max_spec_len. The physical ring buffer is the
+        # power-of-two next_pow2(L), so B itself need not be a power of two.
+        if self.cache_config.replayssm_buffer_len < max_spec_len:
+            raise ValueError(
+                "--use-replayssm-spec requires --replayssm-buffer-len "
+                f">= 1 + num_speculative_tokens ({max_spec_len}); "
+                f"got {self.cache_config.replayssm_buffer_len}"
             )
         return self
 

@@ -74,6 +74,21 @@ class BaseMambaAttentionMetadata:
     nums_dict: dict | None = None
     batch_ptr: torch.Tensor | None = None
     token_chunk_offset_ptr: torch.Tensor | None = None
+    write_pos_d: torch.Tensor | None = None
+    is_flush_d: torch.Tensor | None = None
+    # Shared per-step scratch for the output-only (output_only) variant:
+    # (decode_rows, ngroups, max_cache_len) fp32. None for the recurrent
+    # variant or when the cached kernel is disabled.
+    bc_pre_scratch: torch.Tensor | None = None
+    # cached-SPEC (hybrid) cursors: persistent, block-keyed (full (num_blocks,)
+    # buffers indexed by physical SSM block id), shared across all Mamba2 layers
+    # and advanced once per step by the commit. spec_bc_pre_scratch is the
+    # per-step (decode_rows, ngroups, max_cache_len, block_spec) fp32 scratch.
+    # All None unless the cached-spec kernel is enabled.
+    spec_write_pos_d: torch.Tensor | None = None
+    spec_post_origin_d: torch.Tensor | None = None
+    spec_is_flush_d: torch.Tensor | None = None
+    spec_bc_pre_scratch: torch.Tensor | None = None
 
 
 class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
@@ -98,6 +113,15 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.compilation_config = vllm_config.compilation_config
         self.num_spec_tokens: int = vllm_config.num_speculative_tokens
         self.use_spec_decode = self.num_spec_tokens > 0
+        self.use_cached_kernel = vllm_config.cache_config.use_replayssm
+        self.max_cache_len = vllm_config.cache_config.replayssm_buffer_len
+        self.use_cache_spec_kernel = (
+            vllm_config.cache_config.use_replayssm_spec
+        )
+        self.max_spec_len = 1 + self.num_spec_tokens
+        # L = B + max_spec_len history window; physical pow2 ring = next_pow2(L).
+        self.spec_flush_threshold = self.max_cache_len + self.max_spec_len
+        self.spec_cache_buf_len = 1 << (self.spec_flush_threshold - 1).bit_length()
 
         assert isinstance(kv_cache_spec, MambaSpec)
         scheduler_config = vllm_config.scheduler_config
@@ -156,6 +180,85 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             self.decode_num_accepted_tokens: torch.Tensor = torch.empty(
                 (self.decode_cudagraph_max_bs,),
                 dtype=torch.int32,
+                device=device,
+            )
+        if self.use_cached_kernel:
+            self.decode_write_pos_d: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int32,
+                device=device,
+            )
+            self.decode_is_flush_d: torch.Tensor = torch.empty(
+                (self.decode_cudagraph_max_bs,),
+                dtype=torch.int8,
+                device=device,
+            )
+            self.cached_kernel_variant: str = (
+                vllm_config.cache_config.replayssm_route
+            )
+            if self.cached_kernel_variant == "output_only":
+                # B_cache shape = (ngroups, max_cache_len, dstate). Index in
+                # MambaSpec.shapes is (conv_state, ssm_state, x_cache,
+                # dt_cache, B_cache) when the cached kernel is enabled.
+                if len(kv_cache_spec.shapes) < 5:
+                    raise ValueError(
+                        "output-only variant requires the 5-tensor Mamba2 "
+                        "page (conv, ssm, x_cache, dt_cache, B_cache)"
+                    )
+                bc_ngroups = kv_cache_spec.shapes[4][0]
+                self.decode_bc_pre_scratch: torch.Tensor = torch.empty(
+                    (
+                        self.decode_cudagraph_max_bs,
+                        bc_ngroups,
+                        self.max_cache_len,
+                    ),
+                    dtype=torch.float32,
+                    device=device,
+                )
+            else:
+                self.decode_bc_pre_scratch = None
+        else:
+            self.cached_kernel_variant = "state_and_output"
+            self.decode_bc_pre_scratch = None
+
+        # cached-SPEC (hybrid): persistent block-keyed cursors are allocated
+        # lazily on first build() (they need num_gpu_blocks). The per-step CB
+        # scratch is fixed-address (CUDA-graph safe), sized here. ngroups is
+        # derived from the page shapes (conv, ssm, post_conv_cache, dt_cache).
+        self.spec_write_pos: torch.Tensor | None = None
+        self.spec_post_origin: torch.Tensor | None = None
+        self.spec_is_flush: torch.Tensor | None = None
+        self.decode_spec_bc_pre: torch.Tensor | None = None
+        if self.use_cache_spec_kernel:
+            if len(kv_cache_spec.shapes) < 4:
+                raise ValueError(
+                    "cached-spec kernel requires the 4-tensor hybrid Mamba2 page "
+                    "(conv, ssm, post_conv_cache, dt_cache)"
+                )
+            local_nheads, head_dim, dstate = kv_cache_spec.shapes[1]
+            conv_dim_local = kv_cache_spec.shapes[2][1]
+            d_inner_local = local_nheads * head_dim
+            ngroups_local = (conv_dim_local - d_inner_local) // (2 * dstate)
+            block_spec = 1 << (max(1, self.max_spec_len) - 1).bit_length()
+            # This is a PER-STEP scratch consumed by the scatter on every decode
+            # step (eager AND cudagraph), indexed by pid_b in [0, num_decodes).
+            # It must therefore cover the max decode batch (max_num_seqs), NOT
+            # decode_cudagraph_max_bs -- the latter is 0 under enforce_eager
+            # (max_cudagraph_capture_size=0), which would make this scratch empty
+            # and the scatter write bc_pre[pid_b] out of bounds (IMA). Sizing by
+            # max_num_seqs is CUDA-graph safe: the captured [:num_decodes] slice
+            # shares the same (offset-0) base pointer and row strides.
+            spec_scratch_bs = max(
+                self.decode_cudagraph_max_bs, scheduler_config.max_num_seqs
+            )
+            self.decode_spec_bc_pre = torch.empty(
+                (
+                    spec_scratch_bs,
+                    ngroups_local,
+                    self.spec_cache_buf_len,
+                    block_spec,
+                ),
+                dtype=torch.float32,
                 device=device,
             )
 
@@ -401,6 +504,11 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         has_prior_state = seq_lens_cpu > 1
         prefill_to_decode = single_token_prefill_rows & has_prior_state
         if torch.any(prefill_to_decode).item():
+            if self.use_cached_kernel and metadata.num_decodes > 0:
+                raise ValueError(
+                    "--use-replayssm does not support single-token "
+                    "prefill rows replayed through the decode path"
+                )
             is_prefilling = is_prefilling.clone()
             is_prefilling[prefill_to_decode] = False
             common_attn_metadata = common_attn_metadata.replace(
@@ -431,6 +539,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
 
         # for causal_conv1d
         nums_dict, batch_ptr, token_chunk_offset_ptr = None, None, None
+        write_pos_d = None
+        is_flush_d = None
 
         if self.vllm_config.cache_config.mamba_cache_mode == "all":
             num_computed_tokens = common_attn_metadata.compute_num_computed_tokens()
@@ -518,6 +628,137 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     num_reqs - num_prefills : num_reqs
                 ]
 
+        if self.use_cached_kernel and num_decodes > 0:
+            num_prompt_tokens_cpu = common_attn_metadata.num_prompt_tokens_cpu
+            num_computed_tokens_cpu = common_attn_metadata._num_computed_tokens_cpu
+            if num_prompt_tokens_cpu is None or num_computed_tokens_cpu is None:
+                raise ValueError(
+                    "--use-replayssm requires CPU prompt and "
+                    "computed-token counts to derive decode write positions"
+                )
+            decode_steps_cpu = (
+                num_computed_tokens_cpu[:num_decodes]
+                - num_prompt_tokens_cpu[:num_decodes]
+            )
+            query_lens_cpu = (
+                common_attn_metadata.query_start_loc_cpu[1 : num_decodes + 1]
+                - common_attn_metadata.query_start_loc_cpu[:num_decodes]
+            )
+            valid_decode_rows = query_lens_cpu > 0
+            if torch.any(decode_steps_cpu[valid_decode_rows] < 0).item():
+                raise ValueError(
+                    "--use-replayssm requires decode-step counts "
+                    "that exclude prompt tokens and start at zero"
+                )
+            decode_steps_cpu = torch.where(
+                valid_decode_rows,
+                decode_steps_cpu,
+                torch.zeros_like(decode_steps_cpu),
+            )
+            write_pos_cpu = torch.remainder(decode_steps_cpu, self.max_cache_len)
+            is_flush_cpu = (write_pos_cpu == self.max_cache_len - 1).to(torch.int8)
+            write_pos_d = async_tensor_h2d(
+                write_pos_cpu.to(torch.int32).tolist(),
+                dtype=torch.int32,
+                device=common_attn_metadata.query_start_loc.device,
+            )
+            is_flush_d = async_tensor_h2d(
+                is_flush_cpu.tolist(),
+                dtype=torch.int8,
+                device=common_attn_metadata.query_start_loc.device,
+            )
+
+        bc_pre_scratch = None
+        if (
+            self.use_cached_kernel
+            and self.cached_kernel_variant == "output_only"
+            and self.decode_bc_pre_scratch is not None
+            and num_decodes > 0
+        ):
+            bc_pre_scratch = self.decode_bc_pre_scratch[:num_decodes]
+
+        # cached-SPEC (hybrid): commit-at-start advances the persistent
+        # block-keyed cursors using the previous step's num_accepted_tokens,
+        # then first-decode rows are reset. The kernels read the full
+        # (num_gpu_blocks,) cursor buffers, indexed by physical SSM block id.
+        spec_write_pos_d = None
+        spec_post_origin_d = None
+        spec_is_flush_d = None
+        spec_bc_pre_scratch = None
+        if (
+            self.use_cache_spec_kernel
+            and num_decodes > 0
+            and self.use_spec_decode
+            and num_accepted_tokens is not None
+        ):
+            from vllm.model_executor.layers.mamba.ops.selective_state_update_replayssm_spec import (  # noqa: E501
+                commit_replayssm_spec,
+                reset_replayssm_spec_cursors,
+            )
+
+            cursor_device = common_attn_metadata.query_start_loc.device
+            if self.spec_write_pos is None:
+                n_blocks = self.vllm_config.cache_config.num_gpu_blocks
+                assert n_blocks is not None and n_blocks > 0, (
+                    "--use-replayssm-spec needs num_gpu_blocks at "
+                    "build time to size the block-keyed cursor buffers"
+                )
+                self.spec_write_pos = torch.zeros(
+                    n_blocks, dtype=torch.int32, device=cursor_device
+                )
+                self.spec_post_origin = torch.zeros(
+                    n_blocks, dtype=torch.int32, device=cursor_device
+                )
+                self.spec_is_flush = torch.zeros(
+                    n_blocks, dtype=torch.int8, device=cursor_device
+                )
+            sbi = state_indices_tensor_d[:, 0]
+            commit_replayssm_spec(
+                self.spec_write_pos,
+                self.spec_post_origin,
+                self.spec_is_flush,
+                num_accepted_tokens.to(torch.int32),
+                sbi,
+                max_cache_len=self.spec_flush_threshold,
+                max_spec_len=self.max_spec_len,
+                cache_buf_len=self.spec_cache_buf_len,
+            )
+            # prefill->decode reset for first-decode rows (cursors only; no conv
+            # seed -- conv_state carries context). A request's first spec verify
+            # has num_computed_tokens == num_prompt_tokens; that resets its
+            # (possibly recycled) block's cursors to write_pos=0, and -- because
+            # the commit above runs BEFORE this reset -- also undoes any write_pos
+            # the first-decode commit advanced from the freshly-zeroed cursor.
+            # Derive the mask from the DEVICE-side compute_num_computed_tokens()
+            # (always populated), NOT _num_computed_tokens_cpu, which is None on
+            # the spec verify path -> the old guard silently skipped the reset,
+            # leaving recycled blocks with stale cursors and fresh blocks with a
+            # wrong first-decode write_pos (coherent-but-divergent output +
+            # acceptance drop).
+            num_prompt_tokens_cpu = common_attn_metadata.num_prompt_tokens_cpu
+            if num_prompt_tokens_cpu is not None:
+                ctx_lens = common_attn_metadata.compute_num_computed_tokens()
+                num_prompt_d = num_prompt_tokens_cpu.to(
+                    ctx_lens.device, non_blocking=True
+                )
+                first_decode_d = (
+                    ctx_lens[:num_decodes] == num_prompt_d[:num_decodes]
+                ).to(torch.int8)
+                reset_replayssm_spec_cursors(
+                    self.spec_write_pos,
+                    self.spec_post_origin,
+                    self.spec_is_flush,
+                    first_decode_d,
+                    sbi,
+                    max_cache_len=self.spec_flush_threshold,
+                    max_spec_len=self.max_spec_len,
+                )
+            spec_write_pos_d = self.spec_write_pos
+            spec_post_origin_d = self.spec_post_origin
+            spec_is_flush_d = self.spec_is_flush
+            if self.decode_spec_bc_pre is not None:
+                spec_bc_pre_scratch = self.decode_spec_bc_pre[:num_decodes]
+
         metadata = self.metadata_cls(
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
@@ -527,6 +768,13 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
             has_initial_states_p=has_initial_states_p,
             state_indices_tensor_p=state_indices_tensor_p,
             state_indices_tensor_d=state_indices_tensor_d,
+            write_pos_d=write_pos_d,
+            is_flush_d=is_flush_d,
+            bc_pre_scratch=bc_pre_scratch,
+            spec_write_pos_d=spec_write_pos_d,
+            spec_post_origin_d=spec_post_origin_d,
+            spec_is_flush_d=spec_is_flush_d,
+            spec_bc_pre_scratch=spec_bc_pre_scratch,
             num_accepted_tokens=num_accepted_tokens,
             query_start_loc_d=query_start_loc_d,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
@@ -561,6 +809,17 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         block_idx_last_scheduled_token_prev_step = (
             metadata.block_idx_last_scheduled_token_prev_step
         )
+        write_pos_d = metadata.write_pos_d
+        is_flush_d = metadata.is_flush_d
+        bc_pre_scratch = metadata.bc_pre_scratch
+        # cached-spec cursors are full (num_blocks,) fixed-address buffers indexed
+        # by physical block id, so they need NO per-batch padding (padding rows
+        # carry NULL_BLOCK_ID in state_indices and are skipped by the kernels).
+        # Only the per-row CB scratch is re-sliced to the padded batch.
+        spec_write_pos_d = metadata.spec_write_pos_d
+        spec_post_origin_d = metadata.spec_post_origin_d
+        spec_is_flush_d = metadata.spec_is_flush_d
+        spec_bc_pre_scratch = metadata.spec_bc_pre_scratch
         if (
             metadata.num_prefills == 0
             and metadata.num_decodes <= self.decode_cudagraph_max_bs
@@ -622,11 +881,44 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                     )
                     block_idx_last_scheduled_token_prev_step[metadata.num_decodes :] = 0
 
+            if self.use_cached_kernel:
+                assert write_pos_d is not None
+                assert is_flush_d is not None
+                self.decode_write_pos_d[: metadata.num_decodes].copy_(
+                    write_pos_d[: metadata.num_decodes],
+                    non_blocking=True,
+                )
+                write_pos_d = self.decode_write_pos_d[:padded_bs]
+                write_pos_d[metadata.num_decodes :] = 0
+
+                self.decode_is_flush_d[: metadata.num_decodes].copy_(
+                    is_flush_d[: metadata.num_decodes],
+                    non_blocking=True,
+                )
+                is_flush_d = self.decode_is_flush_d[:padded_bs]
+                is_flush_d[metadata.num_decodes :] = 0
+
+                if (
+                    self.cached_kernel_variant == "output_only"
+                    and self.decode_bc_pre_scratch is not None
+                ):
+                    bc_pre_scratch = self.decode_bc_pre_scratch[:padded_bs]
+
+            if self.use_cache_spec_kernel and self.decode_spec_bc_pre is not None:
+                spec_bc_pre_scratch = self.decode_spec_bc_pre[:padded_bs]
+
         return replace(
             metadata,
             state_indices_tensor_d=state_indices_tensor_d,
             query_start_loc_d=query_start_loc_d,
             num_accepted_tokens=num_accepted_tokens,
+            write_pos_d=write_pos_d,
+            is_flush_d=is_flush_d,
+            bc_pre_scratch=bc_pre_scratch,
+            spec_write_pos_d=spec_write_pos_d,
+            spec_post_origin_d=spec_post_origin_d,
+            spec_is_flush_d=spec_is_flush_d,
+            spec_bc_pre_scratch=spec_bc_pre_scratch,
             block_idx_last_scheduled_token=block_idx_last_scheduled_token,
             block_idx_last_computed_token=block_idx_last_computed_token,
             block_idx_last_scheduled_token_prev_step=(

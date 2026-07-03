@@ -41,11 +41,11 @@ def test_fused_recurrent_packed_decode_matches_reference(
     A_log = torch.randn((HV,), device=device, dtype=dtype)
     dt_bias = torch.randn((HV,), device=device, dtype=dtype)
 
-    # Continuous batching indices (include PAD_SLOT_ID=-1 cases).
-    ssm_state_indices = torch.arange(B, device=device, dtype=torch.int32)
+    # Continuous batching indices (slot 0 is the null block; include PAD_SLOT_ID=-1).
+    ssm_state_indices = torch.arange(1, B + 1, device=device, dtype=torch.int32)
     ssm_state_indices[-3:] = -1
 
-    state0 = torch.randn((B, HV, V, K), device=device, dtype=dtype)
+    state0 = torch.randn((B + 1, HV, V, K), device=device, dtype=dtype)
     state_ref = state0.clone()
     state_packed = state0.clone()
 

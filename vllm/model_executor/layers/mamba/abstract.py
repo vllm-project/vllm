@@ -52,10 +52,16 @@ class MambaBase(AttentionLayerBase):
             page_size_padded=page_size_padded,
             mamba_type=self.mamba_type,
             mamba_cache_mode=vllm_config.cache_config.mamba_cache_mode,
+            # The cached GDN spec kernel never uses the per-token speculative
+            # checkpoint slots the baseline spec kernel writes. 
             num_speculative_blocks=(
-                vllm_config.speculative_config.num_speculative_tokens
-                if vllm_config.speculative_config
-                else 0
+                0
+                if vllm_config.cache_config.use_replayssm_spec
+                else (
+                    vllm_config.speculative_config.num_speculative_tokens
+                    if vllm_config.speculative_config
+                    else 0
+                )
             ),
         )
 

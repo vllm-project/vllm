@@ -448,6 +448,10 @@ class CommonAttentionMetadata:
     and for all rows outside async spec decode; optimistic for async-spec
     decode rows (assumes every draft was accepted). Not safe for kernels
     that need exact per-row context lengths on decode rows."""
+    num_prompt_tokens_cpu: torch.Tensor | None = None
+    """(batch_size,) CPU prompt lengths, when available from the worker input
+    batch. Used by Mamba2 cached decode metadata to derive generated-token
+    counts without including prompt tokens."""
 
     mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
     """PrefixLM bidirectional ranges for multimodal tokens. Maps
@@ -530,6 +534,7 @@ class CommonAttentionMetadata:
             _num_computed_tokens_cpu=self._num_computed_tokens_cpu[:num_actual_reqs]
             if self._num_computed_tokens_cpu is not None
             else None,
+            num_prompt_tokens_cpu=maybe_slice_reqs(self.num_prompt_tokens_cpu),
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
@@ -547,6 +552,10 @@ class CommonAttentionMetadata:
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
             rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
+            seq_lens_cpu_upper_bound=maybe_slice_reqs(self.seq_lens_cpu_upper_bound),
+            positions=self.positions[:num_actual_tokens]
+            if self.positions is not None
+            else None,
         )
 
 
