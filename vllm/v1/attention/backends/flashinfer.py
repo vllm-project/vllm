@@ -754,19 +754,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             can_use_trtllm and self.num_qo_heads // self.num_kv_heads > 1
         ), f"Unexpected FlashInfer page size {self.page_size} without trtllm-gen GQA"
 
-        if (
-            can_use_trtllm
-            and not vllm_config.attention_config.disable_flashinfer_q_quantization
-        ):
-            if self.is_kvcache_nvfp4:
-                # NVFP4 KV cache uses FP8 quantized queries
-                self.q_data_type = FlashInferBackend.get_dtype_for_flashinfer(
-                    "fp8_e4m3"
-                )
-            else:
-                self.q_data_type = self.kv_cache_dtype
-        else:
-            self.q_data_type = self.model_config.dtype
+        self.q_data_type = self.get_q_data_type(
+            is_prefill=False,
+            use_trtllm_gen=can_use_trtllm,
+        )
 
         # Prefer TRTLLM attention for decoding in all cases.
         # This allows us to use AttentionCGSupport.UNIFORM_BATCH mode.
@@ -802,6 +793,25 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
         self._reserve_nvfp4_fa2_prefill_workspace(can_use_trtllm)
+
+    def get_q_data_type(self, is_prefill: bool, use_trtllm_gen: bool) -> torch.dtype:
+        del is_prefill  # This branch still stores one Q dtype for both phases.
+
+        # The user sets --attention-config.disable_flashinfer_q_quantization
+        # to 1 explicitly, use model dtype for query.
+        if self.vllm_config.attention_config.disable_flashinfer_q_quantization:
+            return self.model_config.dtype
+
+        if not use_trtllm_gen:
+            return self.model_config.dtype
+
+        if self.is_kvcache_nvfp4:
+            # NVFP4 KV uses FP8-Q only on the trtllm-gen path. Native FA2
+            # prefill/decode, including SM8x and SM90 fallback, consumes
+            # model-dtype Q.
+            return FlashInferBackend.get_dtype_for_flashinfer("fp8_e4m3")
+
+        return self.kv_cache_dtype
 
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype = torch.int32
