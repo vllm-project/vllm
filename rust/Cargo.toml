@@ -53,7 +53,7 @@ hyper-util = { version = "0.1.20", features = [
 indexmap = "2.13.0"
 itertools = "0.14.0"
 libc = "0.2.177"
-llm-multimodal = { git = "https://github.com/vllm-project/llm-multimodal", rev = "046b669bd1c4faa2a7e05344d8cbf7b2befb37d5" }
+llm-multimodal = { git = "hhttps://github.com/smg-project/llm-multimodal", rev = "7d74582aeaf0e4086a44964382655d22f1af0686" }
 mimalloc = "0.1.52"
 minijinja = { version = "2.0", features = ["unstable_machinery", "json", "builtins", "loader", "loop_controls", "preserve_order"] }
 minijinja-contrib = { version = "2.0", features = ["pycompat"] }

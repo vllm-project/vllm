@@ -16,10 +16,11 @@ use std::sync::{Arc, LazyLock};
 
 use itertools::izip;
 use llm_multimodal::{
-    AsyncMultiModalTracker, FieldLayout, ImagePreProcessor, ImageProcessorRegistry, MediaConnector,
-    MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelProcessorSpec,
-    ModelRegistry, PreProcessorConfig, PreprocessedImages, PromptReplacement, TokenResolver,
-    TrackedMedia,
+    AsyncMultiModalTracker, FieldLayout, MediaConnector, MediaConnectorConfig, MediaContentPart,
+    Modality, ModelMetadata, ModelProcessorSpec, ModelRegistry, PreProcessorConfig,
+    PreprocessedEncoderInputs as PreprocessedImages, PromptReplacement, Tokenizer as TokenResolver,
+    TrackedMedia, VisionPreProcessor as ImagePreProcessor,
+    VisionProcessorRegistry as ImageProcessorRegistry,
 };
 use tracing::warn;
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
