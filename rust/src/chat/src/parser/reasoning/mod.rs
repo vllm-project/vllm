@@ -102,7 +102,6 @@ impl ReasoningParserFactory {
             .register_pattern("seedoss", names::SEED_OSS)
             .register_pattern("olmo-3", names::OLMO3)
             .register_pattern("olmo3", names::OLMO3)
-            .register_pattern("olmo", names::OLMO3)
             .register_pattern("minimax-m3", names::MINIMAX_M3)
             .register_pattern("mm-m3", names::MINIMAX_M3)
             .register_pattern("minimax", names::MINIMAX_M2)
