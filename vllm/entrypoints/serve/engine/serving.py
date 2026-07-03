@@ -39,7 +39,7 @@ class BaseServing:
 
     async def _check_model(
         self,
-        request: AnyRequest,
+        request: AnyRequest | AnyPoolingRequest,
     ) -> ErrorResponse | None:
         error_response = None
 
