@@ -478,14 +478,10 @@ def test_cannot_schedule_after_recv():
     # request is retrieved from preempted list.
     scheduler_output = scheduler.schedule()
     model_runner_output = create_model_runner_output(reqs=[request_remote])
-    # V2 emits a resumed (previously preempted) request as a NewRequestData
-    # rather than a cached request.
-    if scheduler.use_v2_model_runner:
-        num_computed = scheduler_output.scheduled_new_reqs[0].num_computed_tokens
-    else:
-        cached = scheduler_output.scheduled_cached_reqs
-        num_computed = cached.num_computed_tokens[0]
-    assert num_computed == NUM_PROMPT_BLOCKS * BLOCK_SIZE
+    assert (
+        scheduler_output.scheduled_cached_reqs.num_computed_tokens[0]
+        == NUM_PROMPT_BLOCKS * BLOCK_SIZE
+    )
     scheduler.update_from_output(scheduler_output, model_runner_output)
     assert len(scheduler.running) == 1
     assert _num_waiting_requests(scheduler) == 0
