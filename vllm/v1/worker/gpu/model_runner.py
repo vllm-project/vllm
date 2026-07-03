@@ -759,14 +759,96 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return 0
 
         reserved_before = torch.accelerator.memory_reserved(self.device)
+        allocated_before = torch.accelerator.memory_allocated(self.device)
+        requested_total = 0
+        builder_records: list[tuple[str, int, int, int, int | None]] = []
         for groups in self.attn_groups:
             for attn_group in groups:
                 for builder in attn_group.metadata_builders:
-                    builder.reserve_workspace_for_cudagraph_capture()
+                    builder_reserved_before = torch.accelerator.memory_reserved(
+                        self.device
+                    )
+                    builder_allocated_before = torch.accelerator.memory_allocated(
+                        self.device
+                    )
+                    requested_bytes = int(
+                        builder.reserve_workspace_for_cudagraph_capture() or 0
+                    )
+                    builder_reserved_after = torch.accelerator.memory_reserved(
+                        self.device
+                    )
+                    builder_allocated_after = torch.accelerator.memory_allocated(
+                        self.device
+                    )
+                    requested_total += max(requested_bytes, 0)
+                    workspace_buffer_ptr = None
+                    get_workspace_buffer_state = getattr(
+                        builder, "get_workspace_buffer_state", None
+                    )
+                    if callable(get_workspace_buffer_state):
+                        workspace_state = get_workspace_buffer_state()
+                        workspace_buffer = getattr(workspace_state, "buffer", None)
+                        if isinstance(workspace_buffer, torch.Tensor):
+                            workspace_buffer_ptr = workspace_buffer.data_ptr()
+                    builder_records.append(
+                        (
+                            type(builder).__name__,
+                            requested_bytes,
+                            max(
+                                builder_reserved_after - builder_reserved_before,
+                                0,
+                            ),
+                            max(
+                                builder_allocated_after - builder_allocated_before,
+                                0,
+                            ),
+                            workspace_buffer_ptr,
+                        )
+                    )
         torch.accelerator.synchronize()
         torch.accelerator.empty_cache()
         reserved_after = torch.accelerator.memory_reserved(self.device)
-        return max(reserved_after - reserved_before, 0)
+        allocated_after = torch.accelerator.memory_allocated(self.device)
+        reserved_delta = max(reserved_after - reserved_before, 0)
+        allocated_delta = max(allocated_after - allocated_before, 0)
+
+        if builder_records:
+            unique_workspace_buffers = {
+                buffer_ptr
+                for _, _, _, _, buffer_ptr in builder_records
+                if buffer_ptr is not None
+            }
+            logger.debug(
+                "Reserved attention workspace before CUDA graph capture: "
+                "%.2f MiB allocator reserved delta, %.2f MiB allocated delta, "
+                "%.2f MiB requested by builders, %.2f MiB unexplained "
+                "(%d builders, %d unique workspace buffers)",
+                reserved_delta / (1 << 20),
+                allocated_delta / (1 << 20),
+                requested_total / (1 << 20),
+                max(reserved_delta - requested_total, 0) / (1 << 20),
+                len(builder_records),
+                len(unique_workspace_buffers),
+            )
+            for (
+                builder_name,
+                requested_bytes,
+                builder_reserved_delta,
+                builder_allocated_delta,
+                workspace_buffer_ptr,
+            ) in builder_records:
+                logger.debug(
+                    "Reserved attention workspace builder=%s requested=%.2f MiB "
+                    "reserved_delta=%.2f MiB allocated_delta=%.2f MiB "
+                    "workspace_buffer_ptr=%s",
+                    builder_name,
+                    requested_bytes / (1 << 20),
+                    builder_reserved_delta / (1 << 20),
+                    builder_allocated_delta / (1 << 20),
+                    workspace_buffer_ptr,
+                )
+
+        return reserved_delta
 
     def profile_cudagraph_memory(self) -> int:
         self.cudagraph_memory_persistent_estimate = 0

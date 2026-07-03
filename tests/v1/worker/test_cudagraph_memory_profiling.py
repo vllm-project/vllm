@@ -656,6 +656,7 @@ def test_v2_capture_reserves_workspace_before_measurement_and_locks(monkeypatch)
         def reserve_workspace_for_cudagraph_capture(self):
             events.append("builder_reserve")
             self.reserved = True
+            return 128
 
     class FakeCudaGraphManager:
         def needs_capture(self):
@@ -693,7 +694,8 @@ def test_v2_capture_reserves_workspace_before_measurement_and_locks(monkeypatch)
     runner.use_aux_hidden_state_outputs = False
     runner.speculator = None
 
-    memory_reserved_values = iter([1_000, 1_128])
+    memory_reserved_values = iter([1_000, 1_000, 1_128, 1_128])
+    memory_allocated_values = iter([500, 500, 628, 628])
     get_memory_info_values = iter([(10_000, 0), (9_000, 0)])
 
     monkeypatch.setattr(
@@ -706,6 +708,11 @@ def test_v2_capture_reserves_workspace_before_measurement_and_locks(monkeypatch)
         gpu_model_runner_v2.torch.accelerator,
         "memory_reserved",
         lambda device: next(memory_reserved_values),
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_v2.torch.accelerator,
+        "memory_allocated",
+        lambda device: next(memory_allocated_values),
     )
 
     def get_memory_info():
@@ -731,3 +738,71 @@ def test_v2_capture_reserves_workspace_before_measurement_and_locks(monkeypatch)
         "memory_info",
         "lock",
     ]
+
+
+def test_v2_attention_workspace_reserve_logs_breakdown(monkeypatch):
+    from vllm.v1.worker.gpu import model_runner as gpu_model_runner_v2
+    from vllm.v1.worker.gpu.model_runner import GPUModelRunner
+
+    mib = 1 << 20
+    workspace_buffer = torch.empty(1)
+
+    class Builder:
+        def __init__(self, requested_bytes):
+            self.requested_bytes = requested_bytes
+
+        def reserve_workspace_for_cudagraph_capture(self):
+            return self.requested_bytes
+
+        def get_workspace_buffer_state(self):
+            return SimpleNamespace(buffer=workspace_buffer)
+
+    runner = GPUModelRunner.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.attn_groups = [
+        [
+            SimpleNamespace(
+                metadata_builders=[
+                    Builder(64 * mib),
+                    Builder(32 * mib),
+                ]
+            )
+        ]
+    ]
+
+    memory_reserved_values = iter(
+        [1000 * mib, 1000 * mib, 1064 * mib, 1064 * mib, 1160 * mib, 1160 * mib]
+    )
+    memory_allocated_values = iter(
+        [500 * mib, 500 * mib, 564 * mib, 564 * mib, 596 * mib, 596 * mib]
+    )
+    debug_logs = []
+
+    monkeypatch.setattr(
+        gpu_model_runner_v2.torch.accelerator,
+        "memory_reserved",
+        lambda device: next(memory_reserved_values),
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_v2.torch.accelerator,
+        "memory_allocated",
+        lambda device: next(memory_allocated_values),
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_v2.torch.accelerator, "synchronize", lambda: None
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_v2.torch.accelerator, "empty_cache", lambda: None
+    )
+    monkeypatch.setattr(
+        gpu_model_runner_v2.logger,
+        "debug",
+        lambda msg, *args: debug_logs.append(msg % args if args else msg),
+    )
+
+    assert runner._reserve_attention_workspace_for_cudagraph_capture() == 160 * mib
+
+    assert any("96.00 MiB requested by builders" in log for log in debug_logs)
+    assert any("64.00 MiB unexplained" in log for log in debug_logs)
+    assert any("1 unique workspace buffers" in log for log in debug_logs)
+    assert sum("builder=Builder" in log for log in debug_logs) == 2
