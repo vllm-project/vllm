@@ -373,7 +373,7 @@ def qwen_triton_warmup(
     warmed_zeroer = _warm_zero_kv_blocks_with_runner_zeroer(runner)
     if zero_config is not None:
         _warm_zero_kv_blocks_kernel(device, zero_config)
-    else:
+    elif not warmed_zeroer:
         logger.info("Skipping Qwen zero-kv warmup: no KVBlockZeroer metadata.")
 
     _warm_compute_slot_mapping_kernel(device)
