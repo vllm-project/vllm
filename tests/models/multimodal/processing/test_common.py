@@ -452,6 +452,15 @@ def test_processing_correctness(
             "audio placeholders from processed audio lengths. Its vLLM "
             "processor paths are covered by test_moss_audio.py."
         )
+    if model_id == "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct":
+        pytest.skip(
+            "LLaVA-OneVision-2 video processing routes frames through custom "
+            "video backends (qwen_vl_utils / codec) that require real encoded "
+            "video bytes and metadata. The synthetic numpy-array videos used by "
+            "this test yield empty video features, so the generic correctness "
+            "check cannot exercise the video path. Image processing is covered "
+            "by registration/inference tests."
+        )
 
     _test_processing_correctness(
         model_id,
