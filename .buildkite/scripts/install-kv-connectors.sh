@@ -4,6 +4,11 @@
 
 set -euo pipefail
 
+# do-not-merge: resolve the NIXL 1.3.1 RC2 prerelease from TestPyPI for CI.
+export UV_PRERELEASE=allow
+export UV_INDEX_STRATEGY="${UV_INDEX_STRATEGY:-unsafe-best-match}"
+export UV_EXTRA_INDEX_URL="${UV_EXTRA_INDEX_URL:+${UV_EXTRA_INDEX_URL} }https://test.pypi.org/simple/"
+
 if python3 -c "import torch; raise SystemExit(0 if torch.version.hip is not None else 1)"; then
     uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
     exit 0
