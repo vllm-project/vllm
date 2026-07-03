@@ -78,6 +78,18 @@ pub fn validate_top_p_value(top_p: f32) -> Result<(), validator::ValidationError
     Ok(())
 }
 
+/// Validates repetition_penalty: finite and greater than 0.0.
+pub fn validate_repetition_penalty_value(
+    repetition_penalty: f32,
+) -> Result<(), validator::ValidationError> {
+    if !repetition_penalty.is_finite() || repetition_penalty <= 0.0 {
+        return Err(validator::ValidationError::new(
+            "repetition_penalty must be a finite number greater than 0.0",
+        ));
+    }
+    Ok(())
+}
+
 // ============================================================================
 // Content Parts (for multimodal messages)
 // ============================================================================
