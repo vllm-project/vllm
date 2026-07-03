@@ -1672,3 +1672,99 @@ class TestDropSpecialTokens:
             e.value for e in events if e.type == EventType.REASONING_CHUNK
         )
         assert "<bos>" not in reasoning_text
+
+
+# ── TestTruncatedToolOpenerStreamParity ──────────────────────────────
+
+
+class TestTruncatedToolOpenerStreamParity:
+    """Regression tests for #47137: when generation terminates inside a
+    ``<tool_call>`` opener that has not been promoted to a tool call
+    (via ``max_tokens`` or a ``stop`` string), the non-streaming path
+    must drop the incomplete markup, matching the streaming path."""
+
+    _QWEN3_VOCAB = {
+        "<tool_call>": 100,
+        "</tool_call>": 101,
+    }
+
+    def _make_parser(self):
+        from vllm.parser.parser_manager import ParserManager
+
+        parser_cls = ParserManager.get_parser(
+            tool_parser_name="qwen3_coder",
+            enable_auto_tools=True,
+        )
+        tokenizer = make_mock_tokenizer(self._QWEN3_VOCAB)
+        return parser_cls(tokenizer, [])
+
+    def _stream_content(self, request, chunks: list[str]) -> str:
+        parser = self._make_parser()
+        content = ""
+        for i, chunk in enumerate(chunks):
+            delta_token_ids = [
+                tid for text, tid in self._QWEN3_VOCAB.items() if text in chunk
+            ]
+            delta = parser.parse_delta(
+                chunk,
+                delta_token_ids,
+                request,
+                prompt_token_ids=[1],
+                finished=(i == len(chunks) - 1),
+            )
+            if delta and delta.content:
+                content += delta.content
+        return content
+
+    @pytest.mark.parametrize(
+        "chunks",
+        [
+            ["<tool_call>"],
+            ["<tool_call>", "\n"],
+            ["<tool_call>", "\n", "<"],
+            ["<tool_call>", "\n", "<function"],
+        ],
+    )
+    def test_truncated_opener_dropped_in_both_paths(self, mock_request, chunks):
+        """A cutoff inside the opener yields no content and no tool calls
+        in both the non-streaming and streaming paths."""
+        text = "".join(chunks)
+
+        _, content, tool_calls = self._make_parser().parse(
+            text, mock_request, enable_auto_tools=True
+        )
+        streamed = self._stream_content(mock_request, chunks)
+
+        assert not tool_calls
+        assert (content or "") == streamed == ""
+
+    def test_content_before_truncated_opener_preserved(self, mock_request):
+        """Only the incomplete markup is dropped; content generated before
+        the opener is returned identically by both paths."""
+        chunks = ["Checking the weather. ", "<tool_call>", "\n", "<function"]
+        text = "".join(chunks)
+
+        _, content, tool_calls = self._make_parser().parse(
+            text, mock_request, enable_auto_tools=True
+        )
+        streamed = self._stream_content(mock_request, chunks)
+
+        assert not tool_calls
+        assert content == streamed == "Checking the weather. "
+
+    def test_complete_tool_call_still_promoted(self, mock_request):
+        """Sanity check: a complete tool call still parses in the
+        non-streaming path after the truncation fix."""
+        text = (
+            "<tool_call>\n"
+            "<function=get_weather>\n"
+            "<parameter=city>Tokyo</parameter>\n"
+            "</function>\n"
+            "</tool_call>"
+        )
+        _, content, tool_calls = self._make_parser().parse(
+            text, mock_request, enable_auto_tools=True
+        )
+        assert tool_calls is not None and len(tool_calls) == 1
+        assert tool_calls[0].name == "get_weather"
+        assert not content

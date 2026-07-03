@@ -504,6 +504,12 @@ class DelegatingParser(Parser):
                     or (isinstance(content, str) and not content.strip())
                 ):
                     return [], None
+                # No complete tool calls: return the tool parser's content,
+                # which drops incomplete tool-call markup (e.g. a
+                # <tool_call> opener truncated by max_tokens or a stop
+                # string), so the non-streaming path matches streaming.
+                if tool_call_info is not None:
+                    return None, tool_call_info.content or None
                 return None, content
 
         return tool_calls, content
