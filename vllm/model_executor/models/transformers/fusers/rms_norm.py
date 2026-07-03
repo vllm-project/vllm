@@ -17,7 +17,13 @@ from vllm.distributed.parallel_state import model_parallel_is_initialized
 from vllm.distributed.utils import split_tensor_along_last_dim
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.models.transformers.fusers.base import BaseFuser
-from vllm.model_executor.models.transformers.fx_utils import find_node, is_op, peel
+from vllm.model_executor.models.transformers.fx_utils import (
+    find_node,
+    forward_input_count,
+    is_op,
+    peel,
+    trace,
+)
 
 if TYPE_CHECKING:
     from vllm.config.model import ModelConfig
@@ -63,6 +69,14 @@ def _is_one_plus(node: object) -> bool:
     return any(isinstance(a, (int, float)) and a == 1 for a in node.args)
 
 
+def _has_trailing_compute(graph: fx.Graph, node: fx.Node) -> bool:
+    """Does the forward compute anything after `node` before returning?"""
+    output = find_node(graph, lambda n: n.op == "output")
+    if output is None or not output.args:
+        return False
+    return peel(output.args[0]) is not node
+
+
 class TPAwareNormMixin(nn.Module):
     """Mixin for RMSNorms that reconstructs a TP-sharded input before normalizing."""
 
@@ -103,10 +117,6 @@ class TPAwareGemmaRMSNorm(TPAwareNormMixin, GemmaRMSNorm):
 class RMSNormFuser(BaseFuser):
     """Fuser for RMSNorm patterns, including Gemma-style zero-centered weights."""
 
-    eps: float | None
-    """`None` only for a fused `rms_norm` op with default eps; resolved in `fuse`."""
-    has_weight: bool
-    """Does the norm have a weight?"""
     zero_centered: bool
     """Gemma-style `(1 + weight)` scaling (weight initialised at zero)."""
     source_cls: str
@@ -119,26 +129,22 @@ class RMSNormFuser(BaseFuser):
     @classmethod
     def match(cls, graph: fx.Graph, module: nn.Module) -> "RMSNormFuser | None":
         """Match a graph to the RMSNorm pattern, returning a fuser if found."""
+        if forward_input_count(type(module)) != 1:
+            return None
         x = find_node(graph, lambda n: n.op == "placeholder")
         if x is None:
             return None
         # Handle native torch `rms_norm` op.
-        fused = find_node(graph, lambda n: is_op(n, "rms_norm"))
-        if fused is not None and fused.args and peel(fused.args[0]) is x:
-            args, kwargs = fused.args, fused.kwargs
-            weight = args[2] if len(args) > 2 else kwargs.get("weight")
-            eps = args[3] if len(args) > 3 else kwargs.get("eps")
-            return cls(
-                eps=eps if isinstance(eps, (int, float)) else None,
-                has_weight=isinstance(weight, fx.Node),
-                zero_centered=False,
-                source_cls=type(module).__name__,
-            )
+        rms_norm = find_node(graph, lambda n: is_op(n, "rms_norm"))
+        if rms_norm is not None and rms_norm.args and peel(rms_norm.args[0]) is x:
+            if _has_trailing_compute(graph, rms_norm):
+                return None
+            return cls(zero_centered=False, source_cls=type(module).__name__)
         # Handle explicit `x * rsqrt(mean(x**2, -1) + eps)` pattern.
         # The rsqrt over the mean-square variance is the spine of the norm.
-        eps = rsqrt = None
+        rsqrt = None
         for node in graph.nodes:
-            if is_op(node, "rsqrt") and (eps := _variance_eps(node, x)) is not None:
+            if is_op(node, "rsqrt") and _variance_eps(node, x) is not None:
                 rsqrt = node
                 break
         if rsqrt is None:
@@ -150,22 +156,34 @@ class RMSNormFuser(BaseFuser):
         if normalize is None:
             return None
         # An optional later `weight * normalized` (or `(1 + weight) * normalized`).
-        has_weight = zero_centered = False
+        tail, zero_centered = normalize, False
         for node in graph.nodes:
             if not is_op(node, "mul") or node is normalize:
                 continue
             operands = [peel(a) for a in node.args if isinstance(a, fx.Node)]
             if len(operands) == 2 and normalize in operands:
                 weight = next(o for o in operands if o is not normalize)
-                has_weight = True
-                zero_centered = _is_one_plus(weight)
+                tail, zero_centered = node, _is_one_plus(weight)
                 break
-        return cls(
-            eps=eps,
-            has_weight=has_weight,
-            zero_centered=zero_centered,
-            source_cls=type(module).__name__,
-        )
+        # The norm must be the last compute in forward, or it is not a pure norm.
+        if _has_trailing_compute(graph, tail):
+            return None
+        return cls(zero_centered=zero_centered, source_cls=type(module).__name__)
+
+    @staticmethod
+    def _eps_from_graph(graph: fx.Graph) -> float | None:
+        """Extract the `eps` constant from the graph, if present."""
+        if (x := find_node(graph, lambda n: n.op == "placeholder")) is None:
+            return None
+        fused = find_node(graph, lambda n: is_op(n, "rms_norm"))
+        if fused is not None and fused.args and peel(fused.args[0]) is x:
+            args, kwargs = fused.args, fused.kwargs
+            eps = args[3] if len(args) > 3 else kwargs.get("eps")
+            return eps if isinstance(eps, (int, float)) else None
+        for node in graph.nodes:
+            if is_op(node, "rsqrt") and (eps := _variance_eps(node, x)) is not None:
+                return eps
+        return None
 
     def validate(self, module: nn.Module, model_config: "ModelConfig") -> bool:
         return True
@@ -182,14 +200,15 @@ class RMSNormFuser(BaseFuser):
         hidden_size = (
             weight.size(0) if weight is not None else model_config.get_hidden_size()
         )
-        eps = self.eps
+        graph = trace(module)
+        eps = self._eps_from_graph(graph) if graph is not None else None
         if eps is None:
-            # Could be `None` for native torch `rms_norm`. Match torch behaviour.
+            # If eps not in graph, match torch behaviour.
             dtype = weight.dtype if weight is not None else model_config.dtype
             eps = torch.finfo(dtype).eps
         if self.zero_centered:
             return TPAwareGemmaRMSNorm(hidden_size=hidden_size, eps=eps)
-        has_weight = self.has_weight and weight is not None
+        has_weight = weight is not None
         return TPAwareRMSNorm(
             hidden_size=hidden_size,
             eps=eps,

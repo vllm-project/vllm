@@ -129,6 +129,22 @@ def recover_forward(cls: type[nn.Module]) -> tuple[ast.FunctionDef, Callable]:
     return funcdef, fn
 
 
+def forward_input_count(cls: type[nn.Module]) -> int:
+    """The number of tensor inputs `cls.forward` declares, excluding `self` and
+    any `*args`/`**kwargs`. Read from the signature, so it is independent of
+    whether the trace completes (unlike counting placeholders)."""
+    try:
+        params = list(inspect.signature(cls.forward).parameters.values())[1:]
+    except (ValueError, TypeError):
+        return 1  # uninspectable: assume a single input and let matching decide
+    fixed = (
+        inspect.Parameter.POSITIONAL_ONLY,
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.KEYWORD_ONLY,
+    )
+    return sum(1 for p in params if p.kind in fixed)
+
+
 def compile_forward(funcdef: ast.FunctionDef, fn: Callable) -> Callable:
     """Compile `funcdef` in `fn`'s module so tracebacks point at the source."""
     module = ast.Module(body=[funcdef], type_ignores=[])
