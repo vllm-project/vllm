@@ -1548,20 +1548,15 @@ def test_draft_sample_method_gumbel_is_rejected():
         )
 
 
-def test_dspark_confidence_threshold_validation():
-    speculative_config = SpeculativeConfig(
-        method="ngram",
-        num_speculative_tokens=1,
-        dspark_confidence_threshold=None,
-    )
-    assert speculative_config.dspark_confidence_threshold is None
-
+def test_dspark_capacity_config_validation():
     speculative_config = SpeculativeConfig(
         method="ngram",
         num_speculative_tokens=1,
         dspark_confidence_threshold=0.25,
+        dspark_sps_profile=[1.0, 0.75],
     )
     assert speculative_config.dspark_confidence_threshold == 0.25
+    assert speculative_config.dspark_sps_profile == [1.0, 0.75]
 
     for threshold in (0.0, 1.0, -0.1, 1.1):
         with pytest.raises(ValueError, match="dspark_confidence_threshold"):
@@ -1570,15 +1565,6 @@ def test_dspark_confidence_threshold_validation():
                 num_speculative_tokens=1,
                 dspark_confidence_threshold=threshold,
             )
-
-
-def test_dspark_sps_profile_validation():
-    speculative_config = SpeculativeConfig(
-        method="ngram",
-        num_speculative_tokens=1,
-        dspark_sps_profile=[1.0, 0.75],
-    )
-    assert speculative_config.dspark_sps_profile == [1.0, 0.75]
 
     for profile in ([], [1.0, 0.0], [1.0, -0.1]):
         with pytest.raises(ValueError, match="dspark_sps_profile"):

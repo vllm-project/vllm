@@ -45,6 +45,17 @@ def _compute_global_logsumexp(
 
 
 @triton.jit
+def _target_logit_idx(
+    logit_idx,
+    target_logit_idx_mapping_ptr,
+    HAS_TARGET_LOGIT_IDX_MAPPING: tl.constexpr,
+):
+    if HAS_TARGET_LOGIT_IDX_MAPPING:
+        return tl.load(target_logit_idx_mapping_ptr + logit_idx).to(tl.int64)
+    return logit_idx
+
+
+@triton.jit
 def _compute_global_residual_mass(
     local_residual_mass_ptr,
     local_residual_mass_stride,
@@ -56,10 +67,12 @@ def _compute_global_residual_mass(
     target_local_sumexp_ptr,
     target_local_sumexp_stride,
     draft_sampled_ptr,
+    target_logit_idx_mapping_ptr,
     logit_idx,
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    HAS_TARGET_LOGIT_IDX_MAPPING: tl.constexpr,
 ):
     if HAS_DRAFT_LOGITS:
         blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
@@ -75,6 +88,8 @@ def _compute_global_residual_mass(
         # so the residual mass reduces to the closed form:
         #   p * (1 - M_b(draft_token)).
         draft_token = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
+        if draft_token < 0:
+            return prefix_joint_ratio
         target_lse = _compute_global_logsumexp(
             target_local_max_ptr,
             target_local_max_stride,
@@ -84,8 +99,11 @@ def _compute_global_residual_mass(
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS,
         )
+        target_logit_idx = _target_logit_idx(
+            logit_idx, target_logit_idx_mapping_ptr, HAS_TARGET_LOGIT_IDX_MAPPING
+        )
         target_logit = tl.load(
-            target_logits_ptr + logit_idx * target_logits_stride + draft_token,
+            target_logits_ptr + target_logit_idx * target_logits_stride + draft_token,
         ).to(tl.float32)
         m_b = tl.exp(target_logit - target_lse)
         return prefix_joint_ratio * (1.0 - m_b)
@@ -124,6 +142,8 @@ def _compute_global_logprobs_and_logsumexp(
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
+    # [logical_num_logits]
+    target_logit_idx_mapping_ptr,
     # [num_logits, num_blocks]
     target_local_max_ptr,
     target_local_max_stride,
@@ -141,9 +161,13 @@ def _compute_global_logprobs_and_logsumexp(
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    HAS_TARGET_LOGIT_IDX_MAPPING: tl.constexpr,
 ):
+    target_logit_idx = _target_logit_idx(
+        logit_idx, target_logit_idx_mapping_ptr, HAS_TARGET_LOGIT_IDX_MAPPING
+    )
     target_logit = tl.load(
-        target_logits_ptr + logit_idx * target_logits_stride + token,
+        target_logits_ptr + target_logit_idx * target_logits_stride + token,
         mask=mask,
         other=float("-inf"),
     ).to(tl.float32)
@@ -203,6 +227,8 @@ def _compute_local_logits_stats_kernel(
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
+    # [logical_num_logits]
+    target_logit_idx_mapping_ptr,
     # [max_num_reqs, num_speculative_steps, V]
     draft_logits_ptr,
     draft_logits_stride_0,
@@ -217,6 +243,7 @@ def _compute_local_logits_stats_kernel(
     num_speculative_steps,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    HAS_TARGET_LOGIT_IDX_MAPPING: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
@@ -231,11 +258,14 @@ def _compute_local_logits_stats_kernel(
     block_idx = tl.program_id(1)
     block_offsets = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block_offsets < vocab_size
+    target_logit_idx = _target_logit_idx(
+        logit_idx, target_logit_idx_mapping_ptr, HAS_TARGET_LOGIT_IDX_MAPPING
+    )
 
     if temp == 0.0:
         # Greedy sampling. Only the target max/argmax are needed.
         target_logits = tl.load(
-            target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
+            target_logits_ptr + target_logit_idx * target_logits_stride + block_offsets,
             mask=mask,
             other=float("-inf"),
         ).to(tl.float32)
@@ -254,7 +284,7 @@ def _compute_local_logits_stats_kernel(
     else:
         # Get local target max and summed exponentials.
         target_logits = tl.load(
-            target_logits_ptr + logit_idx * target_logits_stride + block_offsets,
+            target_logits_ptr + target_logit_idx * target_logits_stride + block_offsets,
             mask=mask,
             other=float("-inf"),
         ).to(tl.float32)
@@ -299,6 +329,8 @@ def _compute_cumulative_log_p_kernel(
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
+    # [logical_num_logits]
+    target_logit_idx_mapping_ptr,
     # [num_logits, num_blocks]
     target_local_max_ptr,
     target_local_max_stride,
@@ -326,6 +358,7 @@ def _compute_cumulative_log_p_kernel(
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    HAS_TARGET_LOGIT_IDX_MAPPING: tl.constexpr,
 ):
     req_idx = tl.program_id(0)
     req_state_idx = tl.load(idx_mapping_ptr + req_idx).to(tl.int64)
@@ -340,6 +373,8 @@ def _compute_cumulative_log_p_kernel(
     for step in range(num_draft_tokens):
         logit_idx = start_idx + step
         draft_token = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
+        is_valid_draft = draft_token >= 0
+        draft_token = tl.maximum(0, draft_token)
         target_logprob, draft_logprob, _, _ = _compute_global_logprobs_and_logsumexp(
             draft_token,
             True,  # mask
@@ -348,6 +383,7 @@ def _compute_cumulative_log_p_kernel(
             step,
             target_logits_ptr,
             target_logits_stride,
+            target_logit_idx_mapping_ptr,
             target_local_max_ptr,
             target_local_max_stride,
             target_local_sumexp_ptr,
@@ -362,8 +398,13 @@ def _compute_cumulative_log_p_kernel(
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS,
             HAS_DRAFT_LOGITS,
+            HAS_TARGET_LOGIT_IDX_MAPPING,
         )
-        log_p = tl.minimum(log_p + (target_logprob - draft_logprob), 0.0)
+        log_p = tl.where(
+            is_valid_draft,
+            tl.minimum(log_p + (target_logprob - draft_logprob), 0.0),
+            float("-inf"),
+        )
         tl.store(cumulative_log_p_ptr + logit_idx, log_p)
 
 
@@ -377,6 +418,8 @@ def _compute_local_residual_mass_kernel(
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
+    # [logical_num_logits]
+    target_logit_idx_mapping_ptr,
     # [num_logits, num_blocks]
     target_local_max_ptr,
     target_local_max_stride,
@@ -404,6 +447,7 @@ def _compute_local_residual_mass_kernel(
     vocab_num_blocks,
     BLOCK_SIZE: tl.constexpr,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
+    HAS_TARGET_LOGIT_IDX_MAPPING: tl.constexpr,
 ):
     logit_idx = tl.program_id(0).to(tl.int64)
     draft_step_idx = tl.load(expanded_local_pos_ptr + logit_idx)
@@ -429,6 +473,7 @@ def _compute_local_residual_mass_kernel(
         draft_step_idx,
         target_logits_ptr,
         target_logits_stride,
+        target_logit_idx_mapping_ptr,
         target_local_max_ptr,
         target_local_max_stride,
         target_local_sumexp_ptr,
@@ -443,6 +488,7 @@ def _compute_local_residual_mass_kernel(
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS,
         True,  # HAS_DRAFT_LOGITS
+        HAS_TARGET_LOGIT_IDX_MAPPING,
     )
 
     # Compute the residual mass: max(p_i * M_b(x|x_{<i}) - M_s(x|x_{<i}), 0)
@@ -470,6 +516,8 @@ def _rejection_kernel(
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
+    # [logical_num_logits]
+    target_logit_idx_mapping_ptr,
     # [num_logits, num_blocks]
     target_local_argmax_ptr,
     target_local_argmax_stride,
@@ -511,6 +559,7 @@ def _rejection_kernel(
     vocab_num_blocks,
     PADDED_VOCAB_NUM_BLOCKS: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    HAS_TARGET_LOGIT_IDX_MAPPING: tl.constexpr,
     SYNTHETIC_MODE: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
 ):
@@ -530,36 +579,45 @@ def _rejection_kernel(
     for i in range(num_draft_tokens):
         logit_idx = start_idx + i
         draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
+        is_valid_draft = draft_sampled >= 0
         pos = tl.load(pos_ptr + logit_idx)
         u = tl_rand32(seed, pos, includes_zero=False)
         if USE_BLOCK_VERIFICATION and not is_greedy:
             # Block verification (Sun et al., 2024): https://arxiv.org/abs/2403.10444
-            prefix_joint_ratio = tl.exp(
-                tl.load(cumulative_log_p_ptr + logit_idx).to(tl.float32)
-            )
-            if i < num_draft_tokens - 1:
-                residual_mass = _compute_global_residual_mass(
-                    local_residual_mass_ptr,
-                    local_residual_mass_stride,
-                    prefix_joint_ratio,
-                    target_logits_ptr,
-                    target_logits_stride,
-                    target_local_max_ptr,
-                    target_local_max_stride,
-                    target_local_sumexp_ptr,
-                    target_local_sumexp_stride,
-                    draft_sampled_ptr,
-                    logit_idx + 1,
-                    vocab_num_blocks,
-                    PADDED_VOCAB_NUM_BLOCKS,
-                    HAS_DRAFT_LOGITS,
+            if is_valid_draft:
+                prefix_joint_ratio = tl.exp(
+                    tl.load(cumulative_log_p_ptr + logit_idx).to(tl.float32)
                 )
-                denom = residual_mass + 1.0 - prefix_joint_ratio
-                h = tl.where(denom > 0.0, residual_mass / denom, 1.0)
+                if i < num_draft_tokens - 1:
+                    residual_mass = _compute_global_residual_mass(
+                        local_residual_mass_ptr,
+                        local_residual_mass_stride,
+                        prefix_joint_ratio,
+                        target_logits_ptr,
+                        target_logits_stride,
+                        target_local_max_ptr,
+                        target_local_max_stride,
+                        target_local_sumexp_ptr,
+                        target_local_sumexp_stride,
+                        draft_sampled_ptr,
+                        target_logit_idx_mapping_ptr,
+                        logit_idx + 1,
+                        vocab_num_blocks,
+                        PADDED_VOCAB_NUM_BLOCKS,
+                        HAS_DRAFT_LOGITS,
+                        HAS_TARGET_LOGIT_IDX_MAPPING,
+                    )
+                    denom = residual_mass + 1.0 - prefix_joint_ratio
+                    h = tl.where(denom > 0.0, residual_mass / denom, 1.0)
+                else:
+                    h = prefix_joint_ratio
             else:
-                h = prefix_joint_ratio
+                h = 0.0
             accepted_length = tl.where(u <= h, i + 1, accepted_length)
-            tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
+            tl.store(
+                sampled_ptr + req_idx * sampled_stride + i,
+                tl.maximum(0, draft_sampled),
+            )
         elif accepted:
             if is_greedy:
                 # Greedy sampling. Accept IFF draft matches target argmax.
@@ -587,7 +645,6 @@ def _rejection_kernel(
             else:
                 # Speculative decoding (Leviathan et al., 2023): https://arxiv.org/abs/2211.17192
                 # -1 is used for padded draft token ids that should be rejected.
-                is_valid_draft = draft_sampled >= 0
                 # Avoid possible OOB ptr access.
                 draft_sampled = tl.maximum(0, draft_sampled)
                 target_logprob, draft_logprob, target_lse, draft_lse = (
@@ -599,6 +656,7 @@ def _rejection_kernel(
                         i,
                         target_logits_ptr,
                         target_logits_stride,
+                        target_logit_idx_mapping_ptr,
                         target_local_max_ptr,
                         target_local_max_stride,
                         target_local_sumexp_ptr,
@@ -613,6 +671,7 @@ def _rejection_kernel(
                         vocab_num_blocks,
                         PADDED_VOCAB_NUM_BLOCKS,
                         HAS_DRAFT_LOGITS,
+                        HAS_TARGET_LOGIT_IDX_MAPPING,
                     )
                 )
                 if SYNTHETIC_MODE:
@@ -664,6 +723,8 @@ def _resample_kernel(
     # [num_logits, V]
     target_logits_ptr,
     target_logits_stride,
+    # [logical_num_logits]
+    target_logit_idx_mapping_ptr,
     # [num_reqs]
     target_rejected_logsumexp_ptr,
     # [max_num_reqs, num_speculative_steps, V]
@@ -691,6 +752,7 @@ def _resample_kernel(
     vocab_size,
     BLOCK_SIZE: tl.constexpr,
     HAS_DRAFT_LOGITS: tl.constexpr,
+    HAS_TARGET_LOGIT_IDX_MAPPING: tl.constexpr,
     USE_FP64: tl.constexpr,
     USE_BLOCK_VERIFICATION: tl.constexpr,
 ):
@@ -711,14 +773,25 @@ def _resample_kernel(
     block_idx = tl.program_id(1)
     block = block_idx * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = block < vocab_size
+    target_logit_idx = _target_logit_idx(
+        resample_token_idx,
+        target_logit_idx_mapping_ptr,
+        HAS_TARGET_LOGIT_IDX_MAPPING,
+    )
     target_logits = tl.load(
-        target_logits_ptr + resample_token_idx * target_logits_stride + block,
+        target_logits_ptr + target_logit_idx * target_logits_stride + block,
         mask=mask,
         other=float("-inf"),
     ).to(tl.float32)
 
     # Compute the residual logits to resample the rejected token from.
-    if is_bonus:
+    rejected_draft_token = tl.load(
+        draft_sampled_ptr + resample_token_idx + 1,
+        mask=~is_bonus,
+        other=-1,
+    )
+    is_invalid_draft = rejected_draft_token < 0
+    if is_bonus or is_invalid_draft:
         # Bonus token (no rejections). Directly use the target logits.
         residual_logits = target_logits
     elif HAS_DRAFT_LOGITS:
@@ -765,7 +838,6 @@ def _resample_kernel(
         #   p_tau * M_b(x) / Z  otherwise
         # Therefore p_tau is a constant that cancels under normalization,
         # and does not need to be applied.
-        rejected_draft_token = tl.load(draft_sampled_ptr + resample_token_idx + 1)
         residual_logits = tl.where(
             block != rejected_draft_token,
             target_logits,
@@ -887,9 +959,12 @@ def rejection_sample(
     synthetic_conditional_rates: torch.Tensor | None = None,
     use_fp64: bool = False,
     use_block_verification: bool = False,
+    target_logit_idx_mapping: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     num_reqs = cu_num_logits.shape[0] - 1
-    num_logits, vocab_size = target_logits.shape
+    num_logits = draft_sampled.shape[0]
+    _, vocab_size = target_logits.shape
+    has_target_logit_idx_mapping = target_logit_idx_mapping is not None
     draft_logits_stride_0 = 0
     draft_logits_stride_1 = 0
     if has_draft_logits := draft_logits is not None:
@@ -933,6 +1008,7 @@ def rejection_sample(
         draft_local_sumexp.stride(0),
         target_logits,
         target_logits.stride(0),
+        target_logit_idx_mapping,
         draft_logits,
         draft_logits_stride_0,
         draft_logits_stride_1,
@@ -943,6 +1019,7 @@ def rejection_sample(
         num_speculative_steps,
         BLOCK_SIZE=VOCAB_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        HAS_TARGET_LOGIT_IDX_MAPPING=has_target_logit_idx_mapping,
     )
 
     # Precompute the running joint ratio and residual mass for block
@@ -960,6 +1037,7 @@ def rejection_sample(
             cumulative_log_p,
             target_logits,
             target_logits.stride(0),
+            target_logit_idx_mapping,
             target_local_max,
             target_local_max.stride(0),
             target_local_sumexp,
@@ -978,6 +1056,7 @@ def rejection_sample(
             vocab_num_blocks,
             PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
             HAS_DRAFT_LOGITS=has_draft_logits,
+            HAS_TARGET_LOGIT_IDX_MAPPING=has_target_logit_idx_mapping,
             num_warps=1,
         )
 
@@ -995,6 +1074,7 @@ def rejection_sample(
                 cumulative_log_p,
                 target_logits,
                 target_logits.stride(0),
+                target_logit_idx_mapping,
                 target_local_max,
                 target_local_max.stride(0),
                 target_local_sumexp,
@@ -1014,6 +1094,7 @@ def rejection_sample(
                 vocab_num_blocks,
                 BLOCK_SIZE=VOCAB_BLOCK_SIZE,
                 PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
+                HAS_TARGET_LOGIT_IDX_MAPPING=has_target_logit_idx_mapping,
             )
         else:
             local_residual_mass = None
@@ -1037,6 +1118,7 @@ def rejection_sample(
         draft_rejected_logsumexp,
         target_logits,
         target_logits.stride(0),
+        target_logit_idx_mapping,
         target_local_argmax,
         target_local_argmax.stride(0),
         target_local_max,
@@ -1063,6 +1145,7 @@ def rejection_sample(
         vocab_num_blocks,
         PADDED_VOCAB_NUM_BLOCKS=padded_vocab_num_blocks,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        HAS_TARGET_LOGIT_IDX_MAPPING=has_target_logit_idx_mapping,
         SYNTHETIC_MODE=synthetic_conditional_rates is not None,
         USE_BLOCK_VERIFICATION=use_block_verification,
         num_warps=1,
@@ -1087,6 +1170,7 @@ def rejection_sample(
         resampled_local_max.stride(0),
         target_logits,
         target_logits.stride(0),
+        target_logit_idx_mapping,
         target_rejected_logsumexp,
         draft_logits,
         draft_logits_stride_0,
@@ -1103,6 +1187,7 @@ def rejection_sample(
         vocab_size,
         BLOCK_SIZE=RESAMPLE_BLOCK_SIZE,
         HAS_DRAFT_LOGITS=has_draft_logits,
+        HAS_TARGET_LOGIT_IDX_MAPPING=has_target_logit_idx_mapping,
         USE_FP64=use_fp64,
         USE_BLOCK_VERIFICATION=use_block_verification,
     )

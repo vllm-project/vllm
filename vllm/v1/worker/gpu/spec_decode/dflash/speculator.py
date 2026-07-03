@@ -197,6 +197,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        is_profile: bool = False,
     ) -> None:
         last_hidden_states = self._run_model(
             num_tokens_padded,
@@ -315,6 +316,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 slot_mappings=None,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                is_profile=is_profile,
             )
             return self.draft_tokens[:num_reqs]
 
@@ -408,6 +410,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 draft_slot_mappings_by_layer,
                 num_tokens_across_dp=num_tokens_across_dp,
                 cudagraph_runtime_mode=batch_desc.cg_mode,
+                is_profile=is_profile,
             )
 
         return self.draft_tokens[:num_reqs]

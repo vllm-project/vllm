@@ -1209,45 +1209,6 @@ def test_spec_decoding_stats_empty_output():
     assert scheduler_stats is None or scheduler_stats.spec_decoding_stats is None
 
 
-def test_compact_draft_tokens_compact_scheduled_tokens():
-    num_spec_tokens = 3
-    scheduler = create_scheduler(
-        num_speculative_tokens=num_spec_tokens,
-        skip_tokenizer_init=True,
-    )
-    requests = create_requests(num_requests=2, num_tokens=1)
-    req_ids = [request.request_id for request in requests]
-    for request in requests:
-        scheduler.add_request(request)
-
-    output = scheduler.schedule()
-    scheduler.update_from_output(
-        output,
-        ModelRunnerOutput(
-            req_ids=req_ids,
-            req_id_to_index={req_id: i for i, req_id in enumerate(req_ids)},
-            sampled_token_ids=[[0], [0]],
-            logprobs=None,
-            prompt_logprobs_dict={},
-            pooler_output=[],
-        ),
-    )
-
-    scheduler.update_draft_token_ids(
-        DraftTokenIds(
-            req_ids,
-            [[1], [4, 5, 6]],
-        )
-    )
-    output = scheduler.schedule()
-
-    assert output.num_scheduled_tokens[req_ids[0]] == 2
-    assert output.num_scheduled_tokens[req_ids[1]] == 4
-    assert output.total_num_scheduled_tokens == 6
-    assert output.scheduled_spec_decode_tokens[req_ids[0]] == [1]
-    assert output.scheduled_spec_decode_tokens[req_ids[1]] == [4, 5, 6]
-
-
 def test_no_spec_tokens_scheduled_for_prefill_chunks():
     """Test that draft tokens are ignored for prefill chunk requests.
 

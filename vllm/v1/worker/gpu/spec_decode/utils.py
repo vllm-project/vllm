@@ -3,9 +3,40 @@
 import numpy as np
 import torch
 
+from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.input_batch import InputBatch
+
+
+def get_effective_scheduled_token_counts(
+    scheduler_output: SchedulerOutput,
+    req_id_to_index: dict[str, int],
+    draft_token_capacity_np: np.ndarray,
+) -> tuple[int, int]:
+    num_tokens_per_req = scheduler_output.num_scheduled_tokens
+    req_ids = tuple(num_tokens_per_req)
+    num_reqs = len(req_ids)
+    num_scheduled_tokens = np.fromiter(
+        num_tokens_per_req.values(), dtype=np.int32, count=num_reqs
+    )
+    draft_tokens = scheduler_output.scheduled_spec_decode_tokens
+    if draft_tokens:
+        scheduled_draft_tokens_per_req = np.fromiter(
+            (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        idx_mapping_np = np.fromiter(
+            map(req_id_to_index.get, req_ids),
+            dtype=np.int32,
+            count=num_reqs,
+        )
+        num_scheduled_tokens -= scheduled_draft_tokens_per_req - np.minimum(
+            scheduled_draft_tokens_per_req,
+            draft_token_capacity_np[idx_mapping_np],
+        )
+    return int(num_scheduled_tokens.sum()), int(num_scheduled_tokens.max())
 
 
 class DraftTokensHandler:
@@ -15,6 +46,7 @@ class DraftTokensHandler:
         self.copy_event = torch.Event()
 
         self.req_ids: list[str] = []
+        self.idx_mapping_np: np.ndarray | None = None
         self.draft_tokens_np: np.ndarray | None = None
         self.draft_token_capacity_np: np.ndarray | None = None
         self.num_draft_tokens: int = 0
@@ -25,13 +57,10 @@ class DraftTokensHandler:
             self.copy_event.synchronize()
             self.copy_event_pending = False
 
-    def _get_draft_token_capacities(self) -> list[int] | None:
+    def _get_draft_token_capacities(self) -> np.ndarray | None:
         if self.draft_token_capacity_np is None:
             return None
-        return [
-            max(0, min(int(capacity), self.num_draft_tokens))
-            for capacity in self.draft_token_capacity_np.tolist()
-        ]
+        return np.clip(self.draft_token_capacity_np, 0, self.num_draft_tokens)
 
     def set_draft_tokens(
         self,
@@ -40,6 +69,7 @@ class DraftTokensHandler:
         draft_token_capacity: torch.Tensor | None = None,
     ) -> None:
         self.req_ids = input_batch.req_ids
+        self.idx_mapping_np = input_batch.idx_mapping_np
         self.num_draft_tokens = draft_tokens.shape[1]
         self.draft_tokens_np = None
         self.draft_token_capacity_np = None
@@ -77,15 +107,16 @@ class DraftTokensHandler:
         self._sync_copy()
         draft_token_capacities = self._get_draft_token_capacities()
         assert draft_token_capacities is not None
-        for req_id, capacity in zip(self.req_ids, draft_token_capacities):
-            req_index = req_id_to_index.get(req_id)
-            if req_index is not None:
-                draft_token_capacity_np[req_index] = capacity
+        assert self.idx_mapping_np is not None
+        active = np.isin(self.req_ids, tuple(req_id_to_index))
+        draft_token_capacity_np[self.idx_mapping_np[active]] = draft_token_capacities[
+            active
+        ]
 
     def get_draft_tokens(self) -> DraftTokenIds | None:
-        self._sync_copy()
-        draft_token_capacities = self._get_draft_token_capacities()
         if self.draft_tokens_np is not None:
+            self._sync_copy()
+            draft_token_capacities = self._get_draft_token_capacities()
             draft_token_ids = self.draft_tokens_np.tolist()
             if draft_token_capacities is not None:
                 draft_token_ids = [
@@ -95,13 +126,9 @@ class DraftTokensHandler:
                     )
                 ]
         else:
-            # No token-id copy was needed; placeholders still carry capacity.
-            if draft_token_capacities is None:
-                draft_token_ids = [[-1] * self.num_draft_tokens for _ in self.req_ids]
-            else:
-                draft_token_ids = [
-                    [-1] * capacity for capacity in draft_token_capacities
-                ]
+            # No token-id copy was needed. Keep placeholder lengths unchanged so
+            # capacity-only batches do not block the scheduler on a D2H copy.
+            draft_token_ids = [[-1] * self.num_draft_tokens for _ in self.req_ids]
         return DraftTokenIds(self.req_ids, draft_token_ids)
 
 

@@ -34,6 +34,17 @@ class InputBuffers:
 
 
 @dataclass
+class SamplerDecompactionMetadata:
+    cu_num_logits: torch.Tensor
+    expanded_idx_mapping: torch.Tensor
+    expanded_local_pos: torch.Tensor
+    draft_sampled: torch.Tensor
+    pos: torch.Tensor
+    target_logit_idx_mapping: torch.Tensor
+    query_start_loc: torch.Tensor
+
+
+@dataclass
 class InputBatch:
     # batch_idx -> req_id
     req_ids: list[str]
@@ -98,6 +109,11 @@ class InputBatch:
 
     # [num_reqs] per-request prompt length, only populated for R-SWA.
     prompt_lens: torch.Tensor | None
+
+    # Sampler-only logical metadata used when verifier inputs are compacted by
+    # DSpark draft-token capacity. Target forward/attention keep using the
+    # compact fields above.
+    sampler_decompaction: SamplerDecompactionMetadata | None = None
 
     @classmethod
     def make_dummy(
@@ -402,6 +418,122 @@ def combine_sampled_and_draft_tokens(
         ),
     )
     return logits_indices
+
+
+@triton.jit
+def _prepare_sampler_decompaction_metadata_kernel(
+    sampler_target_logit_idx_mapping_ptr,
+    sampler_draft_sampled_ptr,
+    sampler_pos_ptr,
+    compact_cu_num_logits_ptr,
+    full_cu_num_logits_ptr,
+    compact_query_start_loc_ptr,
+    idx_mapping_ptr,
+    positions_ptr,
+    last_sampled_tokens_ptr,
+    draft_tokens_ptr,
+    draft_tokens_stride,
+    BLOCK_SIZE: tl.constexpr,
+    NUM_NEW_SAMPLED_TOKENS: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    req_state_idx = tl.load(idx_mapping_ptr + req_idx)
+
+    compact_start = tl.load(compact_cu_num_logits_ptr + req_idx)
+    compact_end = tl.load(compact_cu_num_logits_ptr + req_idx + 1)
+    compact_num_logits = compact_end - compact_start
+    compact_last_local = compact_num_logits - 1
+    compact_draft_tokens = compact_num_logits - NUM_NEW_SAMPLED_TOKENS
+
+    full_start = tl.load(full_cu_num_logits_ptr + req_idx)
+    full_end = tl.load(full_cu_num_logits_ptr + req_idx + 1)
+    full_num_logits = full_end - full_start
+
+    block = tl.arange(0, BLOCK_SIZE)
+    mask = block < full_num_logits
+    compact_local = tl.minimum(block, compact_last_local)
+    compact_logit_idx = compact_start + compact_local
+    full_logit_idx = full_start + block
+    tl.store(
+        sampler_target_logit_idx_mapping_ptr + full_logit_idx,
+        compact_logit_idx,
+        mask=mask,
+    )
+
+    compact_query_start = tl.load(compact_query_start_loc_ptr + req_idx)
+    compact_input_idx = compact_query_start + compact_local
+    pos = tl.load(positions_ptr + compact_input_idx, mask=mask, other=0)
+    tl.store(sampler_pos_ptr + full_logit_idx, pos, mask=mask)
+
+    last_sampled = tl.load(last_sampled_tokens_ptr + req_state_idx)
+    draft_idx = block - NUM_NEW_SAMPLED_TOKENS
+    is_sampled_token = block < NUM_NEW_SAMPLED_TOKENS
+    is_draft_token = block >= NUM_NEW_SAMPLED_TOKENS
+    is_valid_draft = is_draft_token & (draft_idx < compact_draft_tokens)
+    draft_token = tl.load(
+        draft_tokens_ptr + req_state_idx * draft_tokens_stride + draft_idx,
+        mask=mask & is_valid_draft,
+        other=0,
+    )
+    token = tl.where(is_sampled_token, last_sampled, draft_token)
+    draft_sampled = tl.where(is_draft_token & ~is_valid_draft, -1, token)
+    tl.store(sampler_draft_sampled_ptr + full_logit_idx, draft_sampled, mask=mask)
+
+
+def prepare_sampler_decompaction_metadata(
+    compact_cu_num_logits: torch.Tensor,
+    full_cu_num_logits: torch.Tensor,
+    full_expanded_idx_mapping: torch.Tensor,
+    full_expanded_local_pos: torch.Tensor,
+    full_query_start_loc: torch.Tensor,
+    compact_query_start_loc: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    positions: torch.Tensor,
+    last_sampled_tokens: torch.Tensor,
+    draft_tokens: torch.Tensor,
+    total_num_logits: int,
+    max_num_logits_per_req: int,
+    num_new_sampled_tokens: int = 1,
+) -> SamplerDecompactionMetadata:
+    assert num_new_sampled_tokens == 1, (
+        "sampler decompaction is only supported for speculative decoding"
+    )
+    device = idx_mapping.device
+    target_logit_idx_mapping = torch.empty(
+        total_num_logits,
+        dtype=torch.int64,
+        device=device,
+    )
+    sampler_draft_sampled = torch.empty(
+        total_num_logits,
+        dtype=torch.int64,
+        device=device,
+    )
+    sampler_pos = torch.empty(total_num_logits, dtype=positions.dtype, device=device)
+    _prepare_sampler_decompaction_metadata_kernel[(idx_mapping.shape[0],)](
+        target_logit_idx_mapping,
+        sampler_draft_sampled,
+        sampler_pos,
+        compact_cu_num_logits,
+        full_cu_num_logits,
+        compact_query_start_loc,
+        idx_mapping,
+        positions,
+        last_sampled_tokens,
+        draft_tokens,
+        draft_tokens.stride(0),
+        BLOCK_SIZE=triton.next_power_of_2(max_num_logits_per_req),
+        NUM_NEW_SAMPLED_TOKENS=num_new_sampled_tokens,
+    )
+    return SamplerDecompactionMetadata(
+        cu_num_logits=full_cu_num_logits,
+        expanded_idx_mapping=full_expanded_idx_mapping,
+        expanded_local_pos=full_expanded_local_pos,
+        draft_sampled=sampler_draft_sampled,
+        pos=sampler_pos,
+        target_logit_idx_mapping=target_logit_idx_mapping,
+        query_start_loc=full_query_start_loc,
+    )
 
 
 @triton.jit

@@ -227,7 +227,7 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
-    dspark_confidence_threshold: float | None = 0.5
+    dspark_confidence_threshold: float | None = None
     """Minimum DSpark cumulative prefix-survival probability for keeping a draft
     token active when no DSpark SPS profile is provided. Set to None to disable
     DSpark confidence-based capacity."""

@@ -288,7 +288,7 @@ def test_placeholder_draft_token_rejected():
     """
     torch.manual_seed(0)
     device = "cuda"
-    num_trials = 64
+    num_trials = 10 * VOCAB_SIZE
     K = 1
     temperature = 0.6
 
@@ -309,6 +309,53 @@ def test_placeholder_draft_token_rejected():
     assert torch.equal(num_sampled, torch.ones_like(num_sampled))
     recovered = sampled[:, 0]
     assert (recovered >= 0).all() and (recovered < VOCAB_SIZE).all()
+    target_probs = torch.softmax(target_logits_1d, dim=0)
+    _assert_distribution_match(recovered, target_probs, device)
+
+
+def test_rejection_sample_uses_compact_target_logits_for_decompacted_rows():
+    device = "cuda"
+    vocab_size = 16
+    num_speculative_steps = 3
+    draft_token = 5
+    resampled_token = 7
+
+    target_logits = torch.full((2, vocab_size), -100.0, device=device)
+    target_logits[0, draft_token] = 100.0
+    target_logits[1, resampled_token] = 100.0
+
+    draft_sampled = torch.tensor(
+        [101, draft_token, -1, -1], dtype=torch.int64, device=device
+    )
+    cu_num_logits = torch.tensor([0, 4], dtype=torch.int32, device=device)
+    pos = torch.arange(4, dtype=torch.int64, device=device)
+    idx_mapping = torch.tensor([0], dtype=torch.int32, device=device)
+    expanded_idx_mapping = torch.zeros(4, dtype=torch.int32, device=device)
+    expanded_local_pos = torch.arange(4, dtype=torch.int32, device=device)
+    temperature = torch.zeros(1, dtype=torch.float32, device=device)
+    seed = torch.zeros(1, dtype=torch.int64, device=device)
+    target_logit_idx_mapping = torch.tensor(
+        [0, 1, 1, 1], dtype=torch.int64, device=device
+    )
+
+    sampled, num_sampled = rejection_sample(
+        target_logits=target_logits,
+        draft_logits=None,
+        draft_sampled=draft_sampled,
+        cu_num_logits=cu_num_logits,
+        pos=pos,
+        idx_mapping=idx_mapping,
+        expanded_idx_mapping=expanded_idx_mapping,
+        expanded_local_pos=expanded_local_pos,
+        temperature=temperature,
+        seed=seed,
+        num_speculative_steps=num_speculative_steps,
+        target_logit_idx_mapping=target_logit_idx_mapping,
+    )
+
+    torch.accelerator.synchronize()
+    assert num_sampled.cpu().tolist() == [2]
+    assert sampled[0, :2].cpu().tolist() == [draft_token, resampled_token]
 
 
 @pytest.mark.parametrize(

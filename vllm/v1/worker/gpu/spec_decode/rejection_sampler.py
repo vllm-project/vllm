@@ -118,21 +118,36 @@ class RejectionSampler:
             draft_sampled,
             input_batch.expanded_local_pos,
         )
+        decompaction = input_batch.sampler_decompaction
+        rejection_draft_sampled = draft_sampled
+        rejection_cu_num_logits = input_batch.cu_num_logits
+        rejection_pos = pos
+        rejection_expanded_idx_mapping = input_batch.expanded_idx_mapping
+        rejection_expanded_local_pos = input_batch.expanded_local_pos
+        target_logit_idx_mapping = None
+        if decompaction is not None:
+            rejection_draft_sampled = decompaction.draft_sampled
+            rejection_cu_num_logits = decompaction.cu_num_logits
+            rejection_pos = decompaction.pos
+            rejection_expanded_idx_mapping = decompaction.expanded_idx_mapping
+            rejection_expanded_local_pos = decompaction.expanded_local_pos
+            target_logit_idx_mapping = decompaction.target_logit_idx_mapping
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
-            draft_sampled,
-            input_batch.cu_num_logits,
-            pos,
+            rejection_draft_sampled,
+            rejection_cu_num_logits,
+            rejection_pos,
             input_batch.idx_mapping,
-            input_batch.expanded_idx_mapping,
-            input_batch.expanded_local_pos,
+            rejection_expanded_idx_mapping,
+            rejection_expanded_local_pos,
             self.sampler.sampling_states.temperature.gpu,
             self.sampler.sampling_states.seeds.gpu,
             self.num_speculative_steps,
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
+            target_logit_idx_mapping=target_logit_idx_mapping,
         )
         logprobs_tensors = self._get_logprobs_tensors(
             input_batch,
@@ -146,7 +161,7 @@ class RejectionSampler:
         num_sampled, num_rejected = get_num_sampled_and_rejected(
             num_sampled,
             input_batch.seq_lens,
-            input_batch.cu_num_logits,
+            rejection_cu_num_logits,
             input_batch.idx_mapping,
             self.sampler.req_states.prefill_len.gpu,
         )

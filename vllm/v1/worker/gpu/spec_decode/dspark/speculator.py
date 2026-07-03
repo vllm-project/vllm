@@ -73,8 +73,8 @@ def _allocate_draft_token_capacity_kernel(
     lengths = tl.full((REQ_BLOCK,), 0, tl.int32)
     best_lengths = tl.full((REQ_BLOCK,), 0, tl.int32)
 
-    batch_size = num_reqs
-    expected_tokens = num_reqs.to(tl.float32)
+    batch_size = tl.full((), num_reqs, tl.int32)
+    expected_tokens = batch_size.to(tl.float32)
     if HAS_SPS_PROFILE:
         profile_idx = tl.minimum(batch_size, SPS_PROFILE_LEN - 1)
         sps = tl.load(sps_profile_ptr + profile_idx).to(tl.float32)
@@ -82,7 +82,7 @@ def _allocate_draft_token_capacity_kernel(
         sps = 1.0
     best_throughput = expected_tokens * sps
 
-    for _ in tl.static_range(0, MAX_ADMISSIONS):
+    for _ in tl.range(0, MAX_ADMISSIONS):
         has_next = active & (lengths < NUM_SPECULATIVE_STEPS)
         next_scores = tl.load(
             survival_probs_ptr + offsets * NUM_SPECULATIVE_STEPS + lengths,
@@ -206,13 +206,16 @@ class DSparkSpeculator(DFlashSpeculator):
             device=device,
         )
         self.min_survival_probability = getattr(
-            self.speculative_config, "dspark_confidence_threshold", 0.5
+            self.speculative_config, "dspark_confidence_threshold", None
         )
         sps_profile = getattr(self.speculative_config, "dspark_sps_profile", None)
         self.sps_profile = (
             None
             if sps_profile is None
             else torch.tensor(sps_profile, dtype=torch.float32, device=device)
+        )
+        self.use_draft_token_capacity = (
+            self.min_survival_probability is not None or self.sps_profile is not None
         )
 
     def load_draft_model(
@@ -239,7 +242,12 @@ class DSparkSpeculator(DFlashSpeculator):
             )
         return model
 
-    def _sample_sequential(self, num_reqs: int, head_hidden: torch.Tensor) -> None:
+    def _sample_sequential(
+        self,
+        num_reqs: int,
+        head_hidden: torch.Tensor,
+        is_profile: bool = False,
+    ) -> None:
         # Sequential Markov sampling over the backbone's output hidden states.
         n_spec = self.num_speculative_steps
         num_sample = num_reqs * n_spec
@@ -306,7 +314,7 @@ class DSparkSpeculator(DFlashSpeculator):
             self.draft_tokens[:num_reqs, i] = draft_sampled_i
             prev = draft_sampled_i
 
-        if use_confidence_capacity:
+        if use_confidence_capacity and not is_profile:
             allocator_min_survival_probability = (
                 0.0
                 if self.sps_profile is not None or min_survival_probability is None
@@ -332,6 +340,7 @@ class DSparkSpeculator(DFlashSpeculator):
         slot_mappings: dict[str, torch.Tensor] | None,
         num_tokens_across_dp: torch.Tensor | None,
         cudagraph_runtime_mode: CUDAGraphMode = CUDAGraphMode.NONE,
+        is_profile: bool = False,
     ) -> None:
         # Full draft step (captured under CUDA graph): parallel backbone forward
         # then sequential Markov sampling over its hidden state outputs.
@@ -342,4 +351,4 @@ class DSparkSpeculator(DFlashSpeculator):
             num_tokens_across_dp,
             cudagraph_runtime_mode,
         )
-        self._sample_sequential(num_reqs, head_hidden)
+        self._sample_sequential(num_reqs, head_hidden, is_profile=is_profile)
