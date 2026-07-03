@@ -41,7 +41,6 @@ inline int getSMVersion() {
 static constexpr int DEFAULT_NUM_EXPERTS = 256;
 static constexpr int KIMI_K2_NUM_EXPERTS = 384;
 static constexpr int DEFAULT_HIDDEN_DIM = 7168;
-static constexpr int GLM_5_HIDDEN_DIM = 6144;
 
 template <typename T, int kNumTokens, int kNumExperts, int kHiddenDim>
 void invokeRouterGemmFloatOutput(float* output, T const* mat_a, T const* mat_b,
@@ -122,20 +121,13 @@ void dsv3_router_gemm(
 
   STD_TORCH_CHECK(mat_a.size(1) == mat_b.size(1),
                   "mat_a and mat_b must have the same hidden_dim");
-  STD_TORCH_CHECK(
-      hidden_dim == DEFAULT_HIDDEN_DIM || hidden_dim == GLM_5_HIDDEN_DIM,
-      "Expected hidden_dim=", DEFAULT_HIDDEN_DIM,
-      " or hidden_dim=", GLM_5_HIDDEN_DIM, ", but got hidden_dim=", hidden_dim);
+  STD_TORCH_CHECK(hidden_dim == DEFAULT_HIDDEN_DIM,
+                  "Expected hidden_dim=", DEFAULT_HIDDEN_DIM,
+                  ", but got hidden_dim=", hidden_dim);
   STD_TORCH_CHECK(
       num_experts == DEFAULT_NUM_EXPERTS || num_experts == KIMI_K2_NUM_EXPERTS,
       "Expected num_experts=", DEFAULT_NUM_EXPERTS,
       " or num_experts=", KIMI_K2_NUM_EXPERTS,
-      ", but got num_experts=", num_experts);
-  // KIMI_K2_NUM_EXPERTS is only instantiated for the default hidden_dim.
-  STD_TORCH_CHECK(
-      hidden_dim == DEFAULT_HIDDEN_DIM || num_experts == DEFAULT_NUM_EXPERTS,
-      "hidden_dim=", GLM_5_HIDDEN_DIM,
-      " only supports num_experts=", DEFAULT_NUM_EXPERTS,
       ", but got num_experts=", num_experts);
   STD_TORCH_CHECK(num_tokens >= 1 && num_tokens <= 16,
                   "currently num_tokens must be less than or equal to 16 for "
@@ -163,42 +155,30 @@ void dsv3_router_gemm(
 
   if (output.scalar_type() == torch::headeronly::ScalarType::Float) {
     float* out_ptr = reinterpret_cast<float*>(output.mutable_data_ptr());
-    if (hidden_dim == DEFAULT_HIDDEN_DIM) {
-      if (num_experts == DEFAULT_NUM_EXPERTS) {
-        LoopUnroller<1, 16, DEFAULT_NUM_EXPERTS,
-                     DEFAULT_HIDDEN_DIM>::unroll_float_output(num_tokens,
-                                                              out_ptr, a_ptr,
-                                                              b_ptr, stream);
-      } else {
-        LoopUnroller<1, 16, KIMI_K2_NUM_EXPERTS,
-                     DEFAULT_HIDDEN_DIM>::unroll_float_output(num_tokens,
-                                                              out_ptr, a_ptr,
-                                                              b_ptr, stream);
-      }
-    } else {  // GLM_5_HIDDEN_DIM
+    if (num_experts == DEFAULT_NUM_EXPERTS) {
       LoopUnroller<1, 16, DEFAULT_NUM_EXPERTS,
-                   GLM_5_HIDDEN_DIM>::unroll_float_output(num_tokens, out_ptr,
-                                                          a_ptr, b_ptr, stream);
+                   DEFAULT_HIDDEN_DIM>::unroll_float_output(num_tokens, out_ptr,
+                                                            a_ptr, b_ptr,
+                                                            stream);
+    } else {
+      LoopUnroller<1, 16, KIMI_K2_NUM_EXPERTS,
+                   DEFAULT_HIDDEN_DIM>::unroll_float_output(num_tokens, out_ptr,
+                                                            a_ptr, b_ptr,
+                                                            stream);
     }
   } else if (output.scalar_type() == torch::headeronly::ScalarType::BFloat16) {
     __nv_bfloat16* out_ptr =
         reinterpret_cast<__nv_bfloat16*>(output.mutable_data_ptr());
-    if (hidden_dim == DEFAULT_HIDDEN_DIM) {
-      if (num_experts == DEFAULT_NUM_EXPERTS) {
-        LoopUnroller<1, 16, DEFAULT_NUM_EXPERTS,
-                     DEFAULT_HIDDEN_DIM>::unroll_bf16_output(num_tokens,
-                                                             out_ptr, a_ptr,
-                                                             b_ptr, stream);
-      } else {
-        LoopUnroller<1, 16, KIMI_K2_NUM_EXPERTS,
-                     DEFAULT_HIDDEN_DIM>::unroll_bf16_output(num_tokens,
-                                                             out_ptr, a_ptr,
-                                                             b_ptr, stream);
-      }
-    } else {  // GLM_5_HIDDEN_DIM
+    if (num_experts == DEFAULT_NUM_EXPERTS) {
       LoopUnroller<1, 16, DEFAULT_NUM_EXPERTS,
-                   GLM_5_HIDDEN_DIM>::unroll_bf16_output(num_tokens, out_ptr,
-                                                         a_ptr, b_ptr, stream);
+                   DEFAULT_HIDDEN_DIM>::unroll_bf16_output(num_tokens, out_ptr,
+                                                           a_ptr, b_ptr,
+                                                           stream);
+    } else {
+      LoopUnroller<1, 16, KIMI_K2_NUM_EXPERTS,
+                   DEFAULT_HIDDEN_DIM>::unroll_bf16_output(num_tokens, out_ptr,
+                                                           a_ptr, b_ptr,
+                                                           stream);
     }
   }
 }

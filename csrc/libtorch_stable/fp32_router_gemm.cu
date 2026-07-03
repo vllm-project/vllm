@@ -176,7 +176,8 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
 
 // ---------------------------------------------------------------------------
 // Explicit instantiations: M=1..32, for both input types, for the supported
-// (E, H) pairs:  (256, 3072) [MiniMax-M2/M2.5]  and  (128, 6144) [MiniMax-M3].
+// (E, H) pairs:  (256, 3072) [MiniMax-M2/M2.5],  (128, 6144) [MiniMax-M3]
+// and  (256, 6144) [GLM-5].
 // ---------------------------------------------------------------------------
 
 #define INSTANTIATE(T, M, E, H)                                    \
@@ -221,6 +222,8 @@ INSTANTIATE_ALL(float, 256, 3072)
 INSTANTIATE_ALL(__nv_bfloat16, 256, 3072)
 INSTANTIATE_ALL(float, 128, 6144)
 INSTANTIATE_ALL(__nv_bfloat16, 128, 6144)
+INSTANTIATE_ALL(float, 256, 6144)
+INSTANTIATE_ALL(__nv_bfloat16, 256, 6144)
 
 #undef INSTANTIATE_ALL
 #undef INSTANTIATE
