@@ -9,6 +9,7 @@ from compressed_tensors import CompressionFormat
 from compressed_tensors.quantization import QuantizationStrategy
 from torch.nn import Module
 
+from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Static128BlockSym,
     kFp8StaticChannelSym,
@@ -19,6 +20,8 @@ from vllm.model_executor.parameter import (
     ChannelQuantScaleParameter,
     PerTensorScaleParameter,
 )
+
+logger = init_logger(__name__)
 
 # Maps quantization strategy to the corresponding scale parameter type.
 # Shared across compressed-tensor scheme classes (w8a16_fp8, w8a8_fp8, …).
@@ -73,23 +76,28 @@ def should_ignore_layer(
         ]
 
         # Layer should be ignored if shards are ignored.
-        should_ignore_layer = None
-        for shard_name in shard_names:
-            should_ignore_shard = check_equal_or_regex_match(
-                layer_name=shard_name, targets=ignore
+        shard_ignore_flags = [
+            check_equal_or_regex_match(layer_name=shard_name, targets=ignore)
+            for shard_name in shard_names
+        ]
+
+        if any(shard_ignore_flags) and not all(shard_ignore_flags):
+            # Fused layer can't mix schemes across shards; treat as ignored.
+            missing = tuple(
+                name
+                for name, flag in zip(shard_proj_names, shard_ignore_flags)
+                if not flag
             )
-
-            # If shard_idx=0, set layer ignore to match shard.
-            if should_ignore_layer is None:
-                should_ignore_layer = should_ignore_shard
-
-            # If shard_idx=1+ confirm scheme matches prior shards.
-            elif should_ignore_shard != should_ignore_layer:
-                raise ValueError(
-                    f"Found a different quantization schemes for "
-                    f"{shard_proj_names} in {layer_name}. vLLM "
-                    "requires all to use the same scheme."
-                )
+            logger.warning_once(
+                "Fused layer %s has mixed ignore state across shards %s "
+                "(%s not in ignore); treating as ignored.",
+                layer_name,
+                tuple(shard_proj_names),
+                missing,
+            )
+            should_ignore_layer = True
+        else:
+            should_ignore_layer = shard_ignore_flags[0] if shard_ignore_flags else False
 
     # Unfused layers like down_proj and o_proj will match
     # the safetensors checkpoint already.
