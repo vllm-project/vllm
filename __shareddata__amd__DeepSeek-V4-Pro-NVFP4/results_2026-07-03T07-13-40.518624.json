@@ -4,10 +4,10 @@
       "name": "gsm8k",
       "alias": "gsm8k",
       "sample_len": 1319,
-      "exact_match,strict-match": 0.9484457922668689,
-      "exact_match_stderr,strict-match": 0.006090887955262833,
-      "exact_match,flexible-extract": 0.9476876421531463,
-      "exact_match_stderr,flexible-extract": 0.006133057708959221
+      "exact_match,strict-match": 0.9507202426080363,
+      "exact_match_stderr,strict-match": 0.005962150655812469,
+      "exact_match,flexible-extract": 0.9499620924943138,
+      "exact_match_stderr,flexible-extract": 0.006005442354577738
     }
   },
   "group_subtasks": {},
@@ -146,8 +146,8 @@
     "torch_seed": 1234,
     "fewshot_seed": 1234
   },
-  "git_hash": "v0.13.0rc1-6188-g3b673753d",
-  "date": 1782896538.2387617,
+  "git_hash": "v0.13.0rc1-6189-gfd290f47a",
+  "date": 1783062199.2409708,
   "pretty_env_info": "PyTorch version: 2.10.0+git8514f05\nIs debug build: False\nCUDA used to build PyTorch: N/A\nROCM used to build PyTorch: 7.2.53211\n\nOS: Ubuntu 22.04.5 LTS (x86_64)\nGCC version: (Ubuntu 11.4.0-1ubuntu1~22.04.3) 11.4.0\nClang version: 22.0.0git (https://github.com/RadeonOpenCompute/llvm-project roc-7.2.3 26084 f58b06dce1f9c15707c5f808fd002e18c2accf7e)\nCMake version: version 3.31.10\nLibc version: glibc-2.35\n\nPython version: 3.12.13 (main, Mar  4 2026, 09:23:07) [GCC 11.4.0] (64-bit runtime)\nPython platform: Linux-5.15.0-70-generic-x86_64-with-glibc2.35\nIs CUDA available: True\nCUDA runtime version: Could not collect\nCUDA_MODULE_LOADING set to: \nGPU models and configuration:  (gfx950:sramecc+:xnack-)\nNvidia driver version: Could not collect\ncuDNN version: Could not collect\nIs XPU available: False\nHIP runtime version: 7.2.53211\nMIOpen runtime version: 3.5.1\nIs XNNPACK available: True\nCaching allocator config: N/A\n\nCPU:\nArchitecture:                    x86_64\nCPU op-mode(s):                  32-bit, 64-bit\nAddress sizes:                   52 bits physical, 57 bits virtual\nByte Order:                      Little Endian\nCPU(s):                          384\nOn-line CPU(s) list:             0-383\nVendor ID:                       AuthenticAMD\nModel name:                      AMD EPYC 9965 192-Core Processor\nCPU family:                      26\nModel:                           17\nThread(s) per core:              1\nCore(s) per socket:              192\nSocket(s):                       2\nStepping:                        0\nFrequency boost:                 enabled\nCPU max MHz:                     3700.1951\nCPU min MHz:                     1500.0000\nBogoMIPS:                        4499.80\nFlags:                           fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx mmxext fxsr_opt pdpe1gb rdtscp lm constant_tsc rep_good nopl nonstop_tsc cpuid extd_apicid aperfmperf rapl pni pclmulqdq monitor ssse3 fma cx16 pcid sse4_1 sse4_2 x2apic movbe popcnt aes xsave avx f16c rdrand lahf_lm cmp_legacy svm extapic cr8_legacy abm sse4a misalignsse 3dnowprefetch osvw ibs skinit wdt tce topoext perfctr_core perfctr_nb bpext perfctr_llc mwaitx cpb cat_l3 cdp_l3 invpcid_single hw_pstate ssbd mba ibrs ibpb stibp vmmcall fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid cqm rdt_a avx512f avx512dq rdseed adx smap avx512ifma clflushopt clwb avx512cd sha_ni avx512bw avx512vl xsaveopt xsavec xgetbv1 xsaves cqm_llc cqm_occup_llc cqm_mbm_total cqm_mbm_local avx_vnni avx512_bf16 clzero irperf xsaveerptr rdpru wbnoinvd amd_ppin cppc arat npt lbrv svm_lock nrip_save tsc_scale vmcb_clean flushbyasid decodeassists pausefilter pfthreshold avic v_vmsave_vmload vgif v_spec_ctrl avx512vbmi umip pku ospke avx512_vbmi2 gfni vaes vpclmulqdq avx512_vnni avx512_bitalg avx512_vpopcntdq la57 rdpid bus_lock_detect movdiri movdir64b overflow_recov succor smca fsrm avx512_vp2intersect flush_l1d\nVirtualization:                  AMD-V\nL1d cache:                       18 MiB (384 instances)\nL1i cache:                       12 MiB (384 instances)\nL2 cache:                        384 MiB (384 instances)\nL3 cache:                        768 MiB (24 instances)\nNUMA node(s):                    2\nNUMA node0 CPU(s):               0-191\nNUMA node1 CPU(s):               192-383\nVulnerability Itlb multihit:     Not affected\nVulnerability L1tf:              Not affected\nVulnerability Mds:               Not affected\nVulnerability Meltdown:          Not affected\nVulnerability Mmio stale data:   Not affected\nVulnerability Retbleed:          Not affected\nVulnerability Spec store bypass: Mitigation; Speculative Store Bypass disabled via prctl and seccomp\nVulnerability Spectre v1:        Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:        Mitigation; Retpolines, IBPB conditional, IBRS_FW, STIBP disabled, RSB filling, PBRSB-eIBRS Not affected\nVulnerability Srbds:             Not affected\nVulnerability Tsx async abort:   Not affected\n\nVersions of relevant libraries:\n[pip3] conch-triton-kernels==1.2.1\n[pip3] numpy==2.1.3\n[pip3] onnx==1.19.0\n[pip3] onnx-ir==0.2.1\n[pip3] onnxscript==0.7.0\n[pip3] onnxslim==0.1.94\n[pip3] torch==2.10.0+git8514f05\n[pip3] torch_c_dlpack_ext==0.1.5\n[pip3] torchaudio==2.9.0+eaa9e4e\n[pip3] torchvision==0.24.1+d801a34\n[pip3] triton==3.6.0\n[pip3] triton_kernels==1.0.0\n[conda] Could not collect",
   "transformers_version": "5.11.0",
   "lm_eval_version": "0.4.12",
@@ -175,5 +175,5 @@
   "fewshot_as_multiturn": null,
   "chat_template": null,
   "chat_template_sha": null,
-  "total_evaluation_time_seconds": "853.7998252629768"
+  "total_evaluation_time_seconds": "624.6545174079947"
 }

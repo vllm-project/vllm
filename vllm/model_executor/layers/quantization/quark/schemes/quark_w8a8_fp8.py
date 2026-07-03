@@ -57,7 +57,16 @@ class QuarkW8A8Fp8(QuarkScheme):
 
         self.is_per_block = self.weight_qscheme == "per_block"
         self.weight_config = weight_config
-        self.weight_block_size = list(weight_config.get("block_size") or [128, 128])
+        block_size = weight_config.get("block_size")
+        if self.is_per_block:
+            if not block_size:
+                raise ValueError(
+                    "Quark W8A8 FP8 per-block weight quantization requires "
+                    "`block_size` in the weight quantization config."
+                )
+            self.weight_block_size = list(block_size)
+        else:
+            self.weight_block_size = list(block_size or [128, 128])
         per_token_activation = (
             not self.is_static_input_scheme and self.input_qscheme == "per_channel"
         )
@@ -94,6 +103,9 @@ class QuarkW8A8Fp8(QuarkScheme):
             if isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel):
                 self.fp8_linear.process_weights_after_loading(layer)
                 return
+            # Non-Marlin per-block FP8 kernels use dynamic 128-group
+            # activation scaling, so there is no checkpoint-provided static
+            # input scale to pass through.
             layer.input_scale = None
             self.fp8_linear.process_weights_after_loading(layer)
             return
