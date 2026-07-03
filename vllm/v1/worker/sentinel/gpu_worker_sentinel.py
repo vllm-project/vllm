@@ -8,6 +8,7 @@ from vllm.config import set_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
     get_ep_group,
+    stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
 )
 from vllm.logger import init_logger
@@ -18,8 +19,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_worker import Worker
 
 logger = init_logger(__name__)
-
-_FT_BACKEND_SET = {"deepep_low_latency", "nixl_ep"}
 
 
 class WorkerSentinel:
@@ -35,11 +34,6 @@ class WorkerSentinel:
         self.dp_size = worker.parallel_config.data_parallel_size
         self.data_parallel_master_ip = worker.parallel_config.data_parallel_master_ip
 
-        self.use_ft_backend = (
-            worker.parallel_config.all2all_backend in _FT_BACKEND_SET
-            and self.dp_size > 1
-        )
-
     def handle_command(self, ft_request: FaultToleranceRequest):
         """Dispatch an FT command by instruction name."""
         with set_current_vllm_config(self.worker.vllm_config):
@@ -50,6 +44,8 @@ class WorkerSentinel:
         params = ft_request.params
         self._clean_worker_state()
         if self.dp_size > 1:
+            old_cpu_group = get_dp_group().cpu_group
+            stateless_destroy_torch_distributed_process_group(old_cpu_group)
             port = params["new_stateless_dp_group_port"]
             get_dp_group().cpu_group = stateless_init_torch_distributed_process_group(
                 self.data_parallel_master_ip,
@@ -58,11 +54,12 @@ class WorkerSentinel:
                 self.dp_size,
                 backend="gloo",
             )
-            if self.use_ft_backend:
-                comm = get_ep_group().device_communicator
-                assert comm and comm.all2all_manager
-                mgr = comm.all2all_manager
-                mgr.clean_buffers()
+            self._get_all2all_manager().clean_buffers()
+
+    def _get_all2all_manager(self):
+        comm = get_ep_group().device_communicator
+        assert comm and comm.all2all_manager
+        return comm.all2all_manager
 
     def _clean_worker_state(self):
         self.worker.model_runner.execute_model_state = None

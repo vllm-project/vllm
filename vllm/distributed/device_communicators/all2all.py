@@ -582,11 +582,13 @@ class NixlEPAll2AllManager(All2AllManagerBase):
         if NixlEPAll2AllManager._buffer is None:
             return
         state = NixlEPAll2AllManager._buffer
-        state.buffer.get_local_buffer_tensor(dtype=torch.int8).zero_()
+        state.buffer.get_local_buffer_tensor(
+            dtype=torch.int8, use_rdma_buffer=True
+        ).zero_()
         torch.accelerator.synchronize()
         state.buffer.clean_mask_buffer()
         torch.accelerator.synchronize()
-        NixlEPAll2AllManager._last_active_mask = None
+        NixlEPAll2AllManager._last_mask = None
 
 
 class FlashInferNVLinkTwoSidedManager(All2AllManagerBase):
