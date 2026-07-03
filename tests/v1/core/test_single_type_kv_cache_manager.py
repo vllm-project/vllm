@@ -51,6 +51,108 @@ def get_chunked_local_attention_manager(
     )
 
 
+def _legacy_sliding_window_find_longest_cache_hit(
+    block_hashes,
+    max_length,
+    kv_cache_group_ids,
+    block_pool,
+    kv_cache_spec,
+    drop_eagle_block,
+    alignment_tokens,
+) -> tuple[list[KVCacheBlock], ...]:
+    sliding_window_contiguous_blocks = (
+        SlidingWindowManager._contiguous_blocks_for_hit(
+            kv_cache_spec.sliding_window,
+            kv_cache_spec.block_size,
+            drop_eagle_block,
+        )
+    )
+    sliding_window_contiguous_blocks = max(1, sliding_window_contiguous_blocks)
+    max_num_blocks = max_length // kv_cache_spec.block_size
+    computed_blocks = tuple(
+        [block_pool.null_block] * max_num_blocks
+        for _ in range(len(kv_cache_group_ids))
+    )
+    block_size = kv_cache_spec.block_size
+    num_contiguous_blocks = 0
+    match_found = False
+    for i in range(max_num_blocks - 1, -1, -1):
+        if cached_block := block_pool.get_cached_block(
+            block_hashes[i], kv_cache_group_ids
+        ):
+            if num_contiguous_blocks == 0 and block_size != alignment_tokens:
+                post_pop_blocks = i if drop_eagle_block else i + 1
+                if (post_pop_blocks * block_size) % alignment_tokens != 0:
+                    continue
+            for computed, cached in zip(computed_blocks, cached_block):
+                computed[i] = cached
+            num_contiguous_blocks += 1
+            if num_contiguous_blocks >= sliding_window_contiguous_blocks:
+                for computed in computed_blocks:
+                    del computed[i + num_contiguous_blocks :]
+                match_found = True
+                break
+        else:
+            num_contiguous_blocks = 0
+    if not match_found:
+        for computed in computed_blocks:
+            del computed[num_contiguous_blocks:]
+        while (
+            block_size != alignment_tokens
+            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+        ):
+            for computed in computed_blocks:
+                computed.pop()
+    if drop_eagle_block and computed_blocks[0]:
+        for computed in computed_blocks:
+            computed.pop()
+        while (
+            block_size != alignment_tokens
+            and len(computed_blocks[0]) * block_size % alignment_tokens != 0
+        ):
+            for computed in computed_blocks:
+                computed.pop()
+    return computed_blocks
+
+
+def _sliding_window_cache_hit_for_mask(
+    mask: list[bool],
+    sliding_window_spec: SlidingWindowSpec,
+    block_pool: BlockPool,
+    drop_eagle_block: bool,
+    alignment_tokens: int,
+    use_legacy: bool = False,
+) -> tuple[list[KVCacheBlock], ...]:
+    block_hash_list = [BlockHash(str(i).encode()) for i in range(len(mask))]
+
+    block_pool.cached_block_hash_to_block._cache.clear()
+    for i, (block_hash, is_cached) in enumerate(zip(block_hash_list, mask)):
+        if is_cached:
+            block_pool.cached_block_hash_to_block.insert(
+                make_block_hash_with_group_id(block_hash, 0),
+                block_pool.blocks[i + 10],
+            )
+
+    find_longest_cache_hit = (
+        _legacy_sliding_window_find_longest_cache_hit
+        if use_legacy
+        else SlidingWindowManager.find_longest_cache_hit
+    )
+    return find_longest_cache_hit(
+        block_hashes=block_hash_list,
+        max_length=len(block_hash_list) * sliding_window_spec.block_size,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=sliding_window_spec,
+        drop_eagle_block=drop_eagle_block,
+        alignment_tokens=alignment_tokens,
+    )
+
+
+def _block_ids_by_group(blocks_by_group: tuple[list[KVCacheBlock], ...]):
+    return [[block.block_id for block in blocks] for blocks in blocks_by_group]
+
+
 def test_chunked_local_attention_possible_cached_prefix():
     block_size = 2
     chunked_local_attention_spec = ChunkedLocalAttentionSpec(
@@ -193,6 +295,112 @@ def test_sliding_window_possible_cached_prefix():
         [True, True, False, True, False, False, True, True, False, False, False, True],
         8,
     )
+
+
+@pytest.mark.parametrize(
+    ("block_size", "sliding_window", "alignment_tokens", "drop_eagle_block"),
+    [
+        (2, 4, 2, False),
+        (2, 4, 4, False),
+        (2, 4, 4, True),
+        (4, 12, 8, False),
+        (8, 128, 64, False),
+    ],
+)
+def test_sliding_window_cache_hit_matches_legacy_scan(
+    block_size, sliding_window, alignment_tokens, drop_eagle_block
+):
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=sliding_window,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=1000, enable_caching=True, hash_block_size=block_size
+    )
+    rng = random.Random(0)
+
+    masks = [
+        [],
+        [False] * 32,
+        [True] * 32,
+        [True, False] * 16,
+        [False, True] * 16,
+        [True, True, False, True, False, False, True, True, False, True],
+    ]
+    masks.extend(
+        [rng.choice([False, True]) for _ in range(rng.randrange(1, 64))]
+        for _ in range(200)
+    )
+
+    for mask in masks:
+        actual = _sliding_window_cache_hit_for_mask(
+            mask,
+            sliding_window_spec,
+            block_pool,
+            drop_eagle_block,
+            alignment_tokens,
+        )
+        expected = _sliding_window_cache_hit_for_mask(
+            mask,
+            sliding_window_spec,
+            block_pool,
+            drop_eagle_block,
+            alignment_tokens,
+            use_legacy=True,
+        )
+        assert _block_ids_by_group(actual) == _block_ids_by_group(expected)
+
+
+def test_sliding_window_cache_hit_skips_windows_on_miss(monkeypatch):
+    block_size = 4
+    sliding_window_spec = SlidingWindowSpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        sliding_window=32,
+    )
+    block_pool = BlockPool(
+        num_gpu_blocks=1000, enable_caching=True, hash_block_size=block_size
+    )
+    block_hash_list = [BlockHash(str(i).encode()) for i in range(64)]
+    contiguous_blocks = max(
+        1,
+        SlidingWindowManager._contiguous_blocks_for_hit(
+            sliding_window_spec.sliding_window,
+            sliding_window_spec.block_size,
+            use_eagle=False,
+        ),
+    )
+    expected_lookups = (len(block_hash_list) + contiguous_blocks - 1) // (
+        contiguous_blocks
+    )
+
+    num_lookups = 0
+    original_get_cached_block = block_pool.get_cached_block
+
+    def counting_get_cached_block(*args, **kwargs):
+        nonlocal num_lookups
+        num_lookups += 1
+        return original_get_cached_block(*args, **kwargs)
+
+    monkeypatch.setattr(block_pool, "get_cached_block", counting_get_cached_block)
+    computed_blocks = SlidingWindowManager.find_longest_cache_hit(
+        block_hashes=block_hash_list,
+        max_length=len(block_hash_list) * block_size,
+        kv_cache_group_ids=[0],
+        block_pool=block_pool,
+        kv_cache_spec=sliding_window_spec,
+        drop_eagle_block=False,
+        alignment_tokens=block_size,
+    )
+
+    assert computed_blocks == ([],)
+    assert num_lookups == expected_lookups
+    assert num_lookups < len(block_hash_list)
 
 
 def test_chunked_local_attention_remove_skipped_blocks():
