@@ -148,6 +148,12 @@ class XPUExperts(mk.FusedMoEExpertsModular):
     ):
         if self.fused_moe_impl is None:
             topk = topk_ids.size(-1)
+            if (
+                self.quant_config is not None
+                and self.quant_config.weight_quant_dtype == "mxfp4"
+            ):
+                w1 = w1.view(torch.float4_e2m1fn_x2)
+                w2 = w2.view(torch.float4_e2m1fn_x2)
             self.fused_moe_impl = XpuFusedMoe(
                 w13=w1,
                 w13_scales=self.w1_scale,
