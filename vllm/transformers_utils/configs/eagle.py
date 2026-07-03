@@ -33,6 +33,15 @@ class EAGLEConfig(PretrainedConfig):
         if self.model is None:
             self.truncated_vocab_size = None
         else:
+            if truncated_vocab_size is None and not hasattr(self.model, "vocab_size"):
+                raise ValueError(
+                    "The draft model config "
+                    f"({type(self.model).__name__}) does not define "
+                    "'vocab_size', so it does not look like an EAGLE draft "
+                    "checkpoint. If the draft model is a different drafter "
+                    "type (e.g. an MTP head), set the matching 'method' in "
+                    "speculative_config."
+                )
             self.truncated_vocab_size = (
                 self.model.vocab_size
                 if truncated_vocab_size is None
