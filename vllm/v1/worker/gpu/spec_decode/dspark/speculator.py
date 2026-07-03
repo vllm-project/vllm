@@ -42,7 +42,12 @@ class DSparkSpeculator(DFlashSpeculator):
         draft_hidden = (
             vllm_config.speculative_config.draft_model_config.get_hidden_size()
         )
-        super().__init__(vllm_config, device, hidden_states_size=draft_hidden)
+        super().__init__(
+            vllm_config,
+            device,
+            hidden_states_size=draft_hidden,
+            allocate_hidden_states=False,
+        )
 
         # Anchor-first: N query tokens per request (anchor + N-1 noise), not 1+N.
         self.num_query_per_req = self.num_speculative_steps

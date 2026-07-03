@@ -608,9 +608,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # target returns a persistent buffer sized at max_num_batched_tokens;
             # slice to the active token count that propose() expects.
             spec_hidden_states = hidden_states
-            if hasattr(self.model, "get_mtp_target_hidden_states"):
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.method == "mtp"
+                and hasattr(self.model, "get_mtp_target_hidden_states")
+            ):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+                if pre_hc_hidden_states is not None:
+                    spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]
             self.speculator.propose(
                 input_batch=input_batch,
                 attn_metadata=attn_metadata,
@@ -1491,9 +1496,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # target returns a persistent buffer sized at max_num_batched_tokens;
             # slice to the active token count that propose() expects.
             spec_hidden_states = hidden_states
-            if hasattr(self.model, "get_mtp_target_hidden_states"):
+            if (
+                self.speculative_config is not None
+                and self.speculative_config.method == "mtp"
+                and hasattr(self.model, "get_mtp_target_hidden_states")
+            ):
                 pre_hc_hidden_states = self.model.get_mtp_target_hidden_states()
-                spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]  # type: ignore[union-attr]
+                if pre_hc_hidden_states is not None:
+                    spec_hidden_states = pre_hc_hidden_states[: hidden_states.shape[0]]
             draft_tokens = self.speculator.propose(
                 input_batch,
                 attn_metadata,

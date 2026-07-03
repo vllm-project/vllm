@@ -36,13 +36,16 @@ class DFlashSpeculator(DraftModelSpeculator):
         vllm_config: VllmConfig,
         device: torch.device,
         hidden_states_size: int | None = None,
+        allocate_hidden_states: bool = True,
     ):
         super().__init__(vllm_config, device)
 
         hidden_states_size = hidden_states_size or self.hidden_size
-        self.hidden_states = torch.zeros(
-            self.max_num_tokens, hidden_states_size, dtype=self.dtype, device=device
-        )
+        self.hidden_states: torch.Tensor | None = None
+        if allocate_hidden_states:
+            self.hidden_states = torch.zeros(
+                self.max_num_tokens, hidden_states_size, dtype=self.dtype, device=device
+            )
 
         # Multimodal inputs not currently supported.
         self.supports_mm_inputs = False
@@ -335,7 +338,10 @@ class DFlashSpeculator(DraftModelSpeculator):
             )
         else:
             hidden_states = last_hidden_states
-        self.hidden_states[:num_target_tokens].copy_(hidden_states[:num_target_tokens])
+        context_hidden_states = hidden_states[:num_target_tokens]
+        if self.hidden_states is not None:
+            self.hidden_states[:num_target_tokens].copy_(context_hidden_states)
+            context_hidden_states = self.hidden_states[:num_target_tokens]
 
         self._copy_request_inputs(
             num_reqs,
@@ -356,7 +362,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                     "num_rejected_tokens": num_rejected,
                 }
             self.model.precompute_and_store_context_kv(
-                self.hidden_states[:num_target_tokens],
+                context_hidden_states,
                 self.context_positions[:num_target_tokens],
                 **precompute_kwargs,
             )
@@ -423,7 +429,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 "num_rejected_tokens": num_rejected,
             }
         self.model.precompute_and_store_context_kv(
-            self.hidden_states[:num_target_tokens],
+            context_hidden_states,
             self.context_positions[:num_target_tokens],
             context_slots,
             **precompute_kwargs,
