@@ -12,7 +12,7 @@ set -euo pipefail
 
 
 # ---- inputs (env > default; forwarded by run-slurm-disagg-test.sh via --export)
-IMAGE="${IMAGE:-vllm/vllm-openai-rocm:nightly}"
+IMAGE="${IMAGE:-vllm/vllm-openai-rocm:v0.23.0}"
 WIDE_EP_MODE="${WIDE_EP_MODE:-0}"
 xP="${xP:-1}"
 yD="${yD:-1}"
