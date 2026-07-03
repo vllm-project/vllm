@@ -314,10 +314,11 @@ class TokenizeParams:
             # while still failing `self._token_len_check` as expected by users
             max_length = self.max_input_tokens + 1
 
-        # Explicit truncation-side overrides require the full token sequence so
-        # we can slice from the requested side in _token_truncation. Disable
-        # tokenizer-level truncation because generation tokenizers default to
-        # left truncation while callers may request right truncation.
+        # Explicit truncation-side overrides require the full token sequence
+        # so we can slice from the requested side in _token_truncation.
+        # Disable tokenizer-level truncation because its default side may
+        # differ from the requested side.  The defense against unbounded
+        # tokenization lives in _text_len_check (character-level pre-trim).
         if self.truncation_side is not None and self.truncate_prompt_tokens is not None:
             return dict(
                 truncation=False,
@@ -333,15 +334,13 @@ class TokenizeParams:
     def _text_len_check(self, tokenizer: TokenizerLike | None, text: str) -> str:
         """Apply length checks to prompt text if necessary."""
         max_input_tokens = self.max_input_tokens
-        if max_input_tokens is None:
+        if max_input_tokens is None or tokenizer is None:
             return text
 
-        if self.truncate_prompt_tokens is None and tokenizer is not None:
-            max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
+        max_input_chars = max_input_tokens * tokenizer.max_chars_per_token
 
+        if self.truncate_prompt_tokens is None:
             if len(text) > max_input_chars:
-                # To save resources, fail the request outright without even
-                # attempting tokenization
                 raise VLLMValidationError(
                     f"This model's maximum context length is "
                     f"{self.max_total_tokens} tokens. However, you requested "
@@ -354,6 +353,11 @@ class TokenizeParams:
                     parameter="input_text",
                     value=len(text),
                 )
+        elif self.truncation_side is not None and len(text) > max_input_chars:
+            if self.truncation_side == "left":
+                text = text[-max_input_chars:]
+            else:
+                text = text[:max_input_chars]
 
         return text
 

@@ -17,6 +17,7 @@ from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
     RequestOffloadingContext,
+    ScheduleEndContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
@@ -242,7 +243,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context.req_id)
 
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         self._lookup_manager.flush()
 
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
