@@ -712,6 +712,11 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
                 elif _new_hit_length < curr_hit_length:
                     # length shrunk; invalidate previous eagle verifications
                     eagle_verified.clear()
+                # Mamba/linear-attention groups may miss when their single
+                # checkpoint boundary lands in request-unique tokens (#45238).
+                # Don't let a Mamba miss zero out valid attention cache hits.
+                if _new_hit_length == 0 and not isinstance(spec, FullAttentionSpec):
+                    continue  # preserve curr_hit_length from attention groups
                 curr_hit_length = _new_hit_length
                 for group_id, blocks in zip(group_ids, hit_blocks):
                     hit_blocks_by_group[group_id] = blocks
