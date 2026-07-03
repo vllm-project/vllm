@@ -556,6 +556,36 @@ run_node() {
         exit 0
     fi
 
+    # aiter and flydsl keep runtime JIT/kernel caches inside the aiter install
+    # tree (…/aiter/jit and …/aiter/jit/flydsl_cache), which is read-only for the
+    # non-root (--user) container. AITER_JIT_DIR / FLYDSL_RUNTIME_CACHE_DIR
+    # redirect those to node-local /tmp (both are sanctioned overrides: aiter only
+    # points flydsl at its bundled cache when FLYDSL_RUNTIME_CACHE_DIR is unset).
+    # Seed each once from the image's bundled copy so we keep the prebuilt
+    # modules/kernels (fast, no NFS, no from-source rebuild / MLIR recompile).
+    local _aiter_src
+    _aiter_src="$(python3 -c 'import os,aiter; print(os.path.join(os.path.dirname(aiter.__file__),"jit"))' 2>/dev/null || true)"
+    if [[ -n "${AITER_JIT_DIR:-}" && ! -e "${AITER_JIT_DIR}/.seeded" ]]; then
+        if [[ -n "${_aiter_src}" && -d "${_aiter_src}" ]]; then
+            mkdir -p "${AITER_JIT_DIR}"
+            cp -a "${_aiter_src}/." "${AITER_JIT_DIR}/" 2>/dev/null || true
+            touch "${AITER_JIT_DIR}/.seeded" 2>/dev/null || true
+            log "seeded AITER_JIT_DIR=${AITER_JIT_DIR} from ${_aiter_src}"
+        else
+            log "WARN: could not locate aiter jit dir to seed AITER_JIT_DIR=${AITER_JIT_DIR}; aiter may rebuild from source"
+        fi
+    fi
+    if [[ -n "${FLYDSL_RUNTIME_CACHE_DIR:-}" && ! -e "${FLYDSL_RUNTIME_CACHE_DIR}/.seeded" ]]; then
+        mkdir -p "${FLYDSL_RUNTIME_CACHE_DIR}"
+        if [[ -n "${_aiter_src}" && -d "${_aiter_src}/flydsl_cache" ]]; then
+            cp -a "${_aiter_src}/flydsl_cache/." "${FLYDSL_RUNTIME_CACHE_DIR}/" 2>/dev/null || true
+            log "seeded FLYDSL_RUNTIME_CACHE_DIR=${FLYDSL_RUNTIME_CACHE_DIR} from ${_aiter_src}/flydsl_cache"
+        else
+            log "FLYDSL_RUNTIME_CACHE_DIR=${FLYDSL_RUNTIME_CACHE_DIR} set; no bundled flydsl_cache to seed (will JIT-compile at runtime)"
+        fi
+        touch "${FLYDSL_RUNTIME_CACHE_DIR}/.seeded" 2>/dev/null || true
+    fi
+
     # Start this node's server in the background (full server log -> LOGF; this
     # shell's stdout stays free for orchestration logs the srun/CI captures).
     build_server_cmd

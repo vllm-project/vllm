@@ -248,6 +248,7 @@ run_node_container() {
     set -o pipefail   # propagate docker run exit code through the tee pipe
     echo "Rank $rank on $(hostname)"
     docker rm -f "$DOCKER_CONT_NAME" 2>/dev/null || true
+    docker ps -q | xargs --no-run-if-empty docker stop;
     local stale
     stale=$(docker ps -aq --filter name=vllm_disagg_ 2>/dev/null) || true
     [ -n "$stale" ] && { echo "Reaping stale containers on $(hostname): $stale"; docker rm -f $stale 2>/dev/null || true; }
@@ -264,6 +265,16 @@ run_node_container() {
     [ -f /etc/libibverbs.d/ionic.driver ] && \
         IONIC_MOUNTS+=(-v "/etc/libibverbs.d/ionic.driver:/etc/libibverbs.d/ionic.driver:ro")
     echo "Rank $rank ionic mounts: ${IONIC_MOUNTS[*]:-<none>}"
+
+    # Pull latest container.
+    if [ "$DRY_RUN" != "1" ]; then
+        echo "Rank $rank pulling image on $(hostname): $IMAGE"
+        docker pull "$IMAGE" || echo "WARN: docker pull failed on $(hostname) for $IMAGE (using local copy if present)"
+        if [ "$ROUTER_TYPE" = "vllm-router" ] && [ "$rank" = "0" ]; then
+            echo "Rank $rank pulling router image on $(hostname): $VLLM_ROUTER_IMAGE"
+            docker pull "$VLLM_ROUTER_IMAGE" || echo "WARN: docker pull failed on $(hostname) for $VLLM_ROUTER_IMAGE (using local copy if present)"
+        fi
+    fi
 
     # Start the external vLLM router as a SEPARATE container on the rank-0 node.
     # It shares the host network with the main container (both --network host):
@@ -309,6 +320,11 @@ run_node_container() {
 	-e HOME=/workspace \
         -e USER="$(id -un)" \
         -e LOGNAME="$(id -un)" \
+        -e TRITON_CACHE_DIR=/tmp/triton_cache \
+        -e TORCHINDUCTOR_CACHE_DIR=/tmp/inductor_cache \
+        -e VLLM_CACHE_ROOT=/tmp/vllm_cache \
+        -e AITER_JIT_DIR=/tmp/aiter_jit \
+        -e FLYDSL_RUNTIME_CACHE_DIR=/tmp/flydsl_cache \
         -e SLURM_JOB_ID="$SLURM_JOB_ID" \
         -e SLURM_JOB_NODELIST="$SLURM_JOB_NODELIST" \
         -e NODE_RANK="$rank" \

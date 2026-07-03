@@ -68,8 +68,7 @@ export PROXY_PING_PORT="${PROXY_PING_PORT:-36367}"
 export HANDSHAKE_PORT="${HANDSHAKE_PORT:-6301}"
 export NOTIFY_PORT="${NOTIFY_PORT:-61005}"
 
-# Path to the MoRIIO toy proxy. Uses the upstream example shipped in the image
-export PROXY_SCRIPT="${PROXY_SCRIPT:-/app/vllm/examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py}"
+export PROXY_SCRIPT="${PROXY_SCRIPT:-${_CLUSTER_SH_DIR}/moriio_toy_proxy_server.py}"
 
 # MoRIIO KV transfer direction (injected into --kv-transfer-config by the launcher):
 #   0 -> omit read_mode     (default; MoRIIO write mode: prefill pushes to decode)
@@ -112,7 +111,7 @@ export HSA_NO_SCRATCH_RECLAIM="${HSA_NO_SCRATCH_RECLAIM:-1}"
 #export HOME=/tmp
 #export HF_HOME="${HF_HOME:-/tmp/hf_home}"
 #export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/.cache}"
-# MoRIIO read-mode: decode pulls KV from prefill (matches the toy proxy READ path).
+# MoRIIO read-mode: decode pulls KV from prefill (matches the toy proxy READ path").
 export VLLM_MORIIO_CONNECTOR_READ_MODE="${VLLM_MORIIO_CONNECTOR_READ_MODE:-1}"
 export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"
 
