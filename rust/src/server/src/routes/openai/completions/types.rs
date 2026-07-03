@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use validator::Validate;
+use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_text::Prompt;
 
 use crate::routes::openai::utils::types::{
@@ -99,6 +100,9 @@ pub struct CompletionRequest {
 
     /// Repetition penalty for reducing repetitive text
     pub repetition_penalty: Option<f32>,
+
+    /// Parameters for detecting repetitive N-gram patterns in output tokens
+    pub repetition_detection: Option<RepetitionDetectionParams>,
 
     /// Length penalty for beam search
     pub length_penalty: Option<f32>,

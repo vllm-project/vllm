@@ -2462,6 +2462,7 @@ fn python_msgpack_fixtures_match_rust_encoding() {
             frequency_penalty: 0.0,
             presence_penalty: 0.0,
             repetition_penalty: 1.0,
+            repetition_detection: None,
             stop_token_ids: Vec::new(),
             eos_token_id: None,
             all_stop_token_ids: BTreeSet::new(),

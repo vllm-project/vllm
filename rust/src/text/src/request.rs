@@ -6,6 +6,7 @@ use serde_json::Value;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::multimodal::MmFeatures;
 use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
+use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 
 use crate::error::{Error, Result};
@@ -83,6 +84,9 @@ pub struct SamplingParams {
     /// Repetition penalty applied by the sampler. `None` means no explicit user
     /// override.
     pub repetition_penalty: Option<f32>,
+    /// Parameters for detecting repetitive N-gram patterns. `None` means no
+    /// explicit user override.
+    pub repetition_detection: Option<RepetitionDetectionParams>,
     /// Explicit stop token IDs provided by the caller. `None` means no explicit
     /// user override.
     pub stop_token_ids: Option<Vec<u32>>,
@@ -130,6 +134,7 @@ impl Default for SamplingParams {
             frequency_penalty: None,
             presence_penalty: None,
             repetition_penalty: None,
+            repetition_detection: None,
             stop_token_ids: None,
             ignore_eos: false,
             logit_bias: None,
