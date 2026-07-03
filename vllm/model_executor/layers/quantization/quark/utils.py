@@ -8,10 +8,6 @@ from typing import Any
 import regex as re
 import torch
 
-from vllm.logger import init_logger
-
-logger = init_logger(__name__)
-
 
 def deep_compare(dict1: Any, dict2: Any) -> bool:
     if type(dict1) is not type(dict2):
@@ -59,22 +55,20 @@ def should_ignore_layer(
         ]
 
         if any(shard_ignore_flags) and not all(shard_ignore_flags):
-            # Fused layer can't mix schemes across shards; treat as ignored.
-            missing = tuple(
+            missing = [
                 name
                 for name, flag in zip(shard_proj_names, shard_ignore_flags)
                 if not flag
+            ]
+            raise ValueError(
+                f"Fused layer {layer_name}: shards "
+                f"{list(shard_proj_names)} have mixed ignore state "
+                f"({missing} not in `ignore`). Add the missing shard(s) to "
+                f"`ignore` if the recipe intended to skip the whole fused "
+                f"layer, or (for models with structural weight sharing "
+                f"between shards) implement `get_checkpoint_shard_aliases`."
             )
-            logger.warning_once(
-                "Fused layer %s has mixed ignore state across shards %s "
-                "(%s not in ignore); treating as ignored.",
-                layer_name,
-                tuple(shard_proj_names),
-                missing,
-            )
-            should_ignore_layer = True
-        else:
-            should_ignore_layer = shard_ignore_flags[0] if shard_ignore_flags else False
+        should_ignore_layer = shard_ignore_flags[0] if shard_ignore_flags else False
 
     # Unfused layers like down_proj and o_proj will match
     # the safetensors checkpoint already.

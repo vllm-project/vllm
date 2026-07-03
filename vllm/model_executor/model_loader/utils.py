@@ -10,6 +10,7 @@ from typing import Any
 
 import torch
 from torch import nn
+from transformers import PretrainedConfig
 from typing_extensions import assert_never
 
 import vllm.envs as envs
@@ -53,7 +54,9 @@ def initialize_model(
         model_class, _ = get_model_architecture(model_config)
 
     if vllm_config.quant_config is not None:
-        configure_quant_config(vllm_config.quant_config, model_class)
+        configure_quant_config(
+            vllm_config.quant_config, model_class, model_config.hf_config
+        )
 
     signatures = inspect.signature(model_class.__init__)
     all_params = [param.name for param in signatures.parameters.values()]
@@ -282,24 +285,28 @@ class ParamMapping:
 
 
 def configure_quant_config(
-    quant_config: QuantizationConfig, model_class: type[nn.Module]
+    quant_config: QuantizationConfig,
+    model_class: type[nn.Module],
+    hf_config: PretrainedConfig,
 ):
     """
-    Pass packed_modules_mapping by reference to quant_config so that
-    quant_config can properly match fused modules
-
-    Note that model attributes are passed by reference to quant_config,
-    enabling them to be updated by model_class.__new__ (ex. chatglm, qwen)
-
-    Once the `SupportsQuant` mixin has been added to all models, this
-    function can be removed
+    Propagate model-declared checkpoint shard aliases into the quant config
+    (for `SupportsQuant` subclasses), then fall through to the legacy
+    hf_to_vllm_mapper / packed_modules_mapping compat shim for models not yet
+    migrated to `SupportsQuant`. The compat shim can be removed once every
+    model uses the mixin; the alias propagation stays.
     """
-    if not issubclass(model_class, SupportsQuant):
-        hf_to_vllm_mapper = getattr(model_class, "hf_to_vllm_mapper", None)
-        packed_mapping = getattr(model_class, "packed_modules_mapping", None)
+    if issubclass(model_class, SupportsQuant):
+        aliases = model_class.get_checkpoint_shard_aliases(hf_config)
+        if aliases:
+            quant_config.apply_checkpoint_shard_aliases(aliases)
+        return
 
-        # pass mappings by reference to quant_config
-        if hf_to_vllm_mapper is not None:
-            quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_unstacked_mapper())
-        if packed_mapping is not None:
-            quant_config.packed_modules_mapping = packed_mapping
+    hf_to_vllm_mapper = getattr(model_class, "hf_to_vllm_mapper", None)
+    packed_mapping = getattr(model_class, "packed_modules_mapping", None)
+
+    # pass mappings by reference to quant_config
+    if hf_to_vllm_mapper is not None:
+        quant_config.apply_vllm_mapper(hf_to_vllm_mapper.get_unstacked_mapper())
+    if packed_mapping is not None:
+        quant_config.packed_modules_mapping = packed_mapping

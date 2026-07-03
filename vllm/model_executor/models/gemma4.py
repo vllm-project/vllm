@@ -72,6 +72,7 @@ from .interfaces import (
     SupportsEagle3,
     SupportsLoRA,
     SupportsPP,
+    SupportsQuant,
 )
 from .utils import (
     AutoWeightsLoader,
@@ -213,6 +214,34 @@ def _get_text_config(config):
     if hasattr(config, "text_config"):
         return config.text_config
     return config
+
+
+def gemma4_checkpoint_shard_aliases(hf_config) -> dict[str, list[str]]:
+    # k_eq_v full_attention layers ship no v_proj (cloned from k at load);
+    # mirror in quant config. HF-space names.
+    text_config = _get_text_config(hf_config)
+    if not getattr(text_config, "attention_k_eq_v", False):
+        return {}
+    aliases: dict[str, list[str]] = {}
+    for idx, layer_type in enumerate(getattr(text_config, "layer_types", ())):
+        if layer_type != "full_attention":
+            continue
+        base = f"model.language_model.layers.{idx}.self_attn"
+        aliases[f"{base}.k_proj"] = [f"{base}.v_proj"]
+    return aliases
+
+
+class Gemma4CheckpointAliasesMixin(SupportsQuant):
+    """Registers Gemma-4 k_eq_v shard aliasing on the quant-config side.
+
+    Applied to every Gemma-4 wrapper (CausalLM, ConditionalGeneration,
+    DiffusionGemma) so `should_ignore_layer` sees v_proj entries for
+    layers whose checkpoints only carry k_proj.
+    """
+
+    @classmethod
+    def get_checkpoint_shard_aliases(cls, hf_config) -> dict[str, list[str]]:
+        return gemma4_checkpoint_shard_aliases(hf_config)
 
 
 class Gemma4MLP(nn.Module):
@@ -1499,7 +1528,12 @@ class Gemma4Model(nn.Module, EagleModelMixin):
 
 
 class Gemma4ForCausalLM(
-    nn.Module, SupportsLoRA, SupportsPP, MixtureOfExperts, SupportsEagle3
+    nn.Module,
+    SupportsLoRA,
+    SupportsPP,
+    Gemma4CheckpointAliasesMixin,
+    MixtureOfExperts,
+    SupportsEagle3,
 ):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={

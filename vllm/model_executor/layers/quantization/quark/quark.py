@@ -19,6 +19,7 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (  # noqa: E501
     QuantizationConfig,
     QuantizeMethodBase,
+    extend_with_shard_aliases,
 )
 from vllm.model_executor.layers.quantization.kv_cache import BaseKVCacheMethod
 from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E501
@@ -33,6 +34,7 @@ from vllm.model_executor.layers.quantization.quark.schemes import (
     QuarkW8A8Int8,
 )
 from vllm.model_executor.layers.quantization.quark.utils import (
+    check_equal_or_regex_match,
     deep_compare,
     should_ignore_layer,
 )
@@ -139,6 +141,11 @@ class QuarkConfig(QuantizationConfig):
                     quant_config_with_hf_to_vllm_mapper[k] = v
 
         self.quant_config = quant_config_with_hf_to_vllm_mapper
+
+    def apply_checkpoint_shard_aliases(self, aliases: dict[str, list[str]]) -> None:
+        exclude = self.quant_config.get("exclude") or []
+        self.quant_config["exclude"] = exclude
+        extend_with_shard_aliases(exclude, aliases, check_equal_or_regex_match)
 
     def get_quant_method(
         self, layer: torch.nn.Module, prefix: str

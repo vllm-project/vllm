@@ -35,7 +35,10 @@ from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
 )
-from vllm.model_executor.models.gemma4 import Gemma4Model
+from vllm.model_executor.models.gemma4 import (
+    Gemma4CheckpointAliasesMixin,
+    Gemma4Model,
+)
 from vllm.model_executor.models.gemma4_mm import (
     Gemma4DummyInputsBuilder,
     Gemma4ForConditionalGeneration,
@@ -60,7 +63,6 @@ from vllm.v1.worker.gpu.states import RequestState
 from .interfaces import (
     SupportsMultiModal,
     SupportsPP,
-    SupportsQuant,
 )
 
 logger = init_logger(__name__)
@@ -140,7 +142,7 @@ def _softcap_logits(logits: torch.Tensor, cap: float) -> torch.Tensor:
 class DiffusionGemmaForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
-    SupportsQuant,
+    Gemma4CheckpointAliasesMixin,
     SupportsPP,
 ):
     """DiffusionGemma for vLLM.

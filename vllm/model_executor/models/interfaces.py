@@ -1038,6 +1038,17 @@ class SupportsQuant:
         if self.packed_modules_mapping is not None:
             self.quant_config.packed_modules_mapping.update(self.packed_modules_mapping)
 
+    @classmethod
+    def get_checkpoint_shard_aliases(cls, hf_config) -> dict[str, list[str]]:
+        """Return {checkpoint_shard: [runtime_clone_shards]} for shards
+        vLLM materializes at load time (e.g. Gemma-4 k_eq_v k->v cloning).
+
+        The framework calls this before backends consume the quant config and
+        propagates the aliases into the config's ignore/target storage.
+        Default returns {}; override in models with structural weight sharing.
+        """
+        return {}
+
 
 @runtime_checkable
 class SupportsRealtime(Protocol):

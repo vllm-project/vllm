@@ -29,6 +29,7 @@ from vllm.model_executor.layers.quantization import QuantizationMethods
 from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
+    extend_with_shard_aliases,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_embedding import (  # noqa: E501
     CompressedTensorsEmbeddingWNA16Int,
@@ -54,6 +55,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.transform.linear
     get_linear_transform_schemes,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.utils import (
+    check_equal_or_regex_match,
     find_matched_target,
     is_activation_quantization_format,
     should_ignore_layer,
@@ -146,6 +148,9 @@ class CompressedTensorsConfig(QuantizationConfig):
         self.ignore = _apply_list(self.ignore)
         if self.kv_cache_scheme is not None:
             self.kv_cache_scheme = _apply_dict(self.kv_cache_scheme)
+
+    def apply_checkpoint_shard_aliases(self, aliases: dict[str, list[str]]) -> None:
+        extend_with_shard_aliases(self.ignore, aliases, check_equal_or_regex_match)
 
     def get_quant_method(
         self,
