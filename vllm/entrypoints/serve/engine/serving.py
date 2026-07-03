@@ -125,7 +125,7 @@ class BaseServing:
 
         return random_uuid() if default is None else default
 
-    def _get_message_types(self, request: AnyRequest) -> set[str]:
+    def _get_message_types(self, request: AnyRequest | AnyPoolingRequest) -> set[str]:
         """Retrieve the set of types from message content dicts up
         until `_`; we use this to match potential multimodal data
         with default per modality loras.
@@ -150,7 +150,9 @@ class BaseServing:
                         message_types.add(content_dict["type"].split("_")[0])
         return message_types
 
-    def _get_active_default_mm_loras(self, request: AnyRequest) -> LoRARequest | None:
+    def _get_active_default_mm_loras(
+        self, request: AnyRequest | AnyPoolingRequest
+    ) -> LoRARequest | None:
         """Determine if there are any active default multimodal loras."""
         # TODO: Currently this is only enabled for chat completions
         # to be better aligned with only being enabled for .generate

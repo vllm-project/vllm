@@ -475,7 +475,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
 
         input_len = (
-            OpenAISpeechToText._get_decoder_prompt_len(engine_inputs)
+            SpeechToTextBaseServing._get_decoder_prompt_len(engine_inputs)
             if request.use_beam_search
             else 0
         )
