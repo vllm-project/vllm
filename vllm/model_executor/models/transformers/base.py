@@ -31,7 +31,6 @@ from transformers.conversion_mapping import (
     WeightRenaming,
     get_model_conversion_mapping,
 )
-from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config.utils import getattr_iter
@@ -79,31 +78,6 @@ else:
     PreTrainedModel = object
 
 logger = init_logger(__name__)
-
-
-def vllm_attention_forward(
-    # Transformers args
-    module: torch.nn.Module,
-    query: torch.Tensor,
-    key: torch.Tensor,
-    value: torch.Tensor,
-    attention_mask: torch.Tensor,
-    # Transformers kwargs
-    scaling: float | None = None,
-    # vLLM kwargs
-    attention_instances: dict[int, Attention] | None = None,
-    **kwargs,
-):
-    self_attn = attention_instances[module.layer_idx]
-    if scaling is not None:
-        self_attn.impl.scale = float(scaling)
-    hidden = query.shape[-2]
-    query, key, value = (x.transpose(1, 2) for x in (query, key, value))
-    query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
-    return self_attn.forward(query, key, value), None
-
-
-ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_attention_forward
 
 
 class Base(
