@@ -198,6 +198,7 @@ class TestDeviceTransfers:
         store = _create_storage(size=1024, block_size=256, pin=True)
         gpu_data = torch.arange(512, dtype=torch.uint8, device="cuda")
         store.write_from_device(gpu_data, blocks=[0, 1])
+        torch.accelerator.synchronize()
 
         # Verify CPU side
         assert torch.equal(store._shm_tensor[0], gpu_data[0:256].cpu())
@@ -220,6 +221,8 @@ class TestDeviceTransfers:
         store._shm_tensor[1][:256] = cpu_data[256:512]
 
         result = store.read_to_device(512, blocks=[0, 1], device="cuda")
+        torch.accelerator.synchronize()
+
         assert result.device.type == "cuda"
         assert torch.equal(result.cpu(), cpu_data)
         _cleanup(store)

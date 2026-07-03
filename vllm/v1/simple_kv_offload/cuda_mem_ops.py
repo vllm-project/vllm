@@ -32,6 +32,12 @@ def pin_tensor(tensor: torch.Tensor) -> None:
         raise RuntimeError(f"cudaHostRegister failed: {err}")
 
 
+def unpin_tensor(tensor: torch.Tensor) -> None:
+    err = torch.cuda.cudart().cudaHostUnregister(tensor.data_ptr())
+    if err.value != 0:
+        raise RuntimeError(f"cudaHostUnregister failed: {err}")
+
+
 class _CUmemLocation(ctypes.Structure):
     _fields_ = [("type", ctypes.c_uint), ("id", ctypes.c_int)]
 
