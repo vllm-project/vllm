@@ -57,6 +57,14 @@ class DraftTokensHandler:
             self.copy_event.synchronize()
             self.copy_event_pending = False
 
+    def _copy_ready(self) -> bool:
+        if not self.copy_event_pending:
+            return True
+        if not self.copy_event.query():
+            return False
+        self.copy_event_pending = False
+        return True
+
     def _get_draft_token_capacities(self) -> np.ndarray | None:
         if self.draft_token_capacity_np is None:
             return None
@@ -97,14 +105,15 @@ class DraftTokensHandler:
             self.copy_event.record()
             self.copy_event_pending = True
 
-    def sync_draft_token_capacities(
+    def try_update_draft_token_capacities(
         self,
         draft_token_capacity_np: np.ndarray,
         req_id_to_index: dict[str, int],
-    ) -> None:
+    ) -> bool:
         if self.draft_token_capacity_np is None:
-            return
-        self._sync_copy()
+            return False
+        if not self._copy_ready():
+            return False
         draft_token_capacities = self._get_draft_token_capacities()
         assert draft_token_capacities is not None
         assert self.idx_mapping_np is not None
@@ -112,6 +121,7 @@ class DraftTokensHandler:
         draft_token_capacity_np[self.idx_mapping_np[active]] = draft_token_capacities[
             active
         ]
+        return True
 
     def get_draft_tokens(self) -> DraftTokenIds | None:
         if self.draft_tokens_np is not None:

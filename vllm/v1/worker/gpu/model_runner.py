@@ -1253,7 +1253,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         if not dummy_run:
-            self.draft_tokens_handler.sync_draft_token_capacities(
+            self.draft_tokens_handler.try_update_draft_token_capacities(
                 self.req_states.draft_token_capacity_np,
                 self.req_states.req_id_to_index,
             )
@@ -1661,6 +1661,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
+            self.draft_tokens_handler.try_update_draft_token_capacities(
+                self.req_states.draft_token_capacity_np,
+                self.req_states.req_id_to_index,
+            )
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],

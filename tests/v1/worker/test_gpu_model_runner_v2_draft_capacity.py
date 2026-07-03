@@ -103,14 +103,15 @@ def test_draft_tokens_handler_uses_capacity_placeholders():
     assert handler.copy_event_pending
 
     draft_token_capacity_np = np.full(4, 3, dtype=np.int32)
-    handler.sync_draft_token_capacities(
+    torch.accelerator.synchronize()
+    assert handler.try_update_draft_token_capacities(
         draft_token_capacity_np,
         {"req0": 2, "req1": 0},
     )
     assert draft_token_capacity_np.tolist() == [2, 3, 1, 3]
 
     draft_token_capacity_np.fill(3)
-    handler.sync_draft_token_capacities(
+    assert handler.try_update_draft_token_capacities(
         draft_token_capacity_np,
         {"req1": 0},
     )
