@@ -28,7 +28,7 @@ Docker / Ray setup and compatibility
 The container may not include this file or Ray (ROCm OpenAI image or similar).
 Copy the script in (``docker cp .../batch_vlm_inference.py <container>:/tmp/``)
 or bind-mount your vLLM tree (e.g. ``-v /path/to/vllm:/workspace``) and run from
-there. Install once: ``pip3 install "ray[data]>=2.44.1"``. Sanity check:
+there. Install once: ``pip3 install "ray[data]>=2.44.1,<=2.55.1"``. Sanity check:
 ``python3 -c "import ray; from ray.data.llm import build_llm_processor; \
 print(ray.__version__)"``.
 
@@ -38,6 +38,7 @@ https://github.com/vllm-project/vllm/pull/46013 (or ``main`` after it merges).
 
 import argparse
 import functools
+import os
 from io import BytesIO
 from typing import Any
 
@@ -49,8 +50,8 @@ from packaging.version import Version
 from PIL import Image
 from ray.data.llm import build_llm_processor, vLLMEngineProcessorConfig
 
-assert Version(ray.__version__) >= Version("2.44.1"), (
-    "Ray version must be at least 2.44.1"
+assert Version("2.44.1") <= Version(ray.__version__) <= Version("2.55.1"), (
+    "Ray version must be between 2.44.1 and 2.55.1"
 )
 
 
@@ -253,9 +254,11 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     args = parse_args()
 
-    # Pass GPU count explicitly to ray.init — some ROCm environments (e.g. TheRock)
-    # ship libamd_smi instead of librocm_smi64, causing Ray's auto-detection to
-    # return 0 GPUs. torch.accelerator works correctly on ROCm via HIP.
+    if torch.version.hip:
+        cuda_devices = os.environ.pop("CUDA_VISIBLE_DEVICES", None)
+        if cuda_devices and not os.environ.get("HIP_VISIBLE_DEVICES"):
+            os.environ["HIP_VISIBLE_DEVICES"] = cuda_devices
+
     num_gpus = torch.accelerator.device_count()
     ray.init(num_gpus=num_gpus if num_gpus > 0 else None)
 
