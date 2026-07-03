@@ -183,12 +183,11 @@ torch::stable::Tensor awq_dequantize(torch::stable::Tensor _kernel,
 // AllSpark ops: declarations are in the source files
 // (allspark_repack.cu and allspark_qgemm_w8a16.cu)
 
-// TODO: Move this out once ROCm upgrade their torch to 2.11.
-// CPU tensor -> CUDA UVA view (shared CUDA)
+#endif
+
+// CPU tensor -> CUDA UVA view (shared CUDA/ROCm)
 torch::stable::Tensor get_cuda_view_from_cpu_tensor(
     torch::stable::Tensor& cpu_tensor);
-
-#endif
 
 // Attention kernels (shared CUDA/ROCm)
 void merge_attn_states(
@@ -290,10 +289,6 @@ void fused_deepseek_v4_qnorm_rope_kv_rope_full_cache_fp8_insert(
     int64_t cache_block_size);
 
 #ifndef USE_ROCM
-torch::stable::Tensor minimax_allreduce_rms(
-    torch::stable::Tensor const& input,
-    torch::stable::Tensor const& norm_weight, torch::stable::Tensor workspace,
-    int64_t const rank, int64_t const nranks, double const eps);
 std::tuple<torch::stable::Tensor, torch::stable::Tensor>
 minimax_allreduce_rms_qk(torch::stable::Tensor qkv,
                          torch::stable::Tensor const& norm_weight_q,
@@ -458,32 +453,6 @@ torch::stable::Tensor gptq_gemm(torch::stable::Tensor a,
 
 void gptq_shuffle(torch::stable::Tensor q_weight, torch::stable::Tensor q_perm,
                   int64_t bit);
-
-void paged_attention_v1(
-    torch::stable::Tensor& out, torch::stable::Tensor& query,
-    torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
-    int64_t num_kv_heads, double scale, torch::stable::Tensor& block_tables,
-    torch::stable::Tensor& seq_lens, int64_t block_size, int64_t max_seq_len,
-    const std::optional<torch::stable::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
-    torch::stable::Tensor& v_scale, const int64_t tp_rank,
-    const int64_t blocksparse_local_blocks,
-    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step);
-
-void paged_attention_v2(
-    torch::stable::Tensor& out, torch::stable::Tensor& exp_sums,
-    torch::stable::Tensor& max_logits, torch::stable::Tensor& tmp_out,
-    torch::stable::Tensor& query, torch::stable::Tensor& key_cache,
-    torch::stable::Tensor& value_cache, int64_t num_kv_heads, double scale,
-    torch::stable::Tensor& block_tables, torch::stable::Tensor& seq_lens,
-    int64_t block_size, int64_t max_seq_len,
-    const std::optional<torch::stable::Tensor>& alibi_slopes,
-    const std::string& kv_cache_dtype, torch::stable::Tensor& k_scale,
-    torch::stable::Tensor& v_scale, const int64_t tp_rank,
-    const int64_t blocksparse_local_blocks,
-    const int64_t blocksparse_vert_stride, const int64_t blocksparse_block_size,
-    const int64_t blocksparse_head_sliding_step);
 
 // Cache ops (shared CUDA/ROCm)
 void swap_blocks(torch::stable::Tensor& src, torch::stable::Tensor& dst,
