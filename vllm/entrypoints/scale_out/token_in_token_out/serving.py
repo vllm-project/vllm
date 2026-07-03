@@ -26,7 +26,10 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing, clamp_prompt_logprobs
+from vllm.entrypoints.openai.engine.serving import (
+    GenerateBaseServing,
+    clamp_prompt_logprobs,
+)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -55,7 +58,7 @@ from .protocol import (
 logger = init_logger(__name__)
 
 
-class ServingTokens(OpenAIServing):
+class ServingTokens(GenerateBaseServing):
     """Provides Tokens IN <> Tokens OUT functionality to vLLM API."""
 
     def __init__(

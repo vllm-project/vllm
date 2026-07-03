@@ -127,7 +127,6 @@ def test_responses_api_logprobs_with_return_tokens_as_token_ids():
     """Test that return_tokens_as_token_ids works in Responses API logprobs."""
     from unittest.mock import MagicMock
 
-    from vllm.entrypoints.openai.engine.serving import OpenAIServing
     from vllm.entrypoints.openai.responses.serving import OpenAIServingResponses
     from vllm.logprobs import Logprob as SampleLogprob
 

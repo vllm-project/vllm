@@ -41,8 +41,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.openai.engine.serving import (
+    GenerateBaseServing,
     GenerationError,
-    OpenAIServing,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -101,7 +101,7 @@ def _make_prompt_tokens_details(
     )
 
 
-class OpenAIServingChat(OpenAIServing):
+class OpenAIServingChat(GenerateBaseServing):
     def __init__(
         self,
         engine_client: EngineClient,

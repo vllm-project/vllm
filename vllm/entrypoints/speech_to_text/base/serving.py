@@ -22,7 +22,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing
+from vllm.entrypoints.openai.engine.serving import GenerateBaseServing
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
@@ -87,7 +87,7 @@ def asr_inter_chunk_separator(
     return "" if language and language.lower() in no_space_languages else " "
 
 
-class OpenAISpeechToText(OpenAIServing):
+class SpeechToTextBaseServing(GenerateBaseServing):
     """Base class for speech-to-text operations like transcription and
     translation."""
 

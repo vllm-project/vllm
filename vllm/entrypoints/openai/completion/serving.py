@@ -28,8 +28,8 @@ from vllm.entrypoints.openai.engine.protocol import (
     UsageInfo,
 )
 from vllm.entrypoints.openai.engine.serving import (
+    GenerateBaseServing,
     GenerationError,
-    OpenAIServing,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -50,7 +50,7 @@ from vllm.utils.collection_utils import as_list
 logger = init_logger(__name__)
 
 
-class OpenAIServingCompletion(OpenAIServing):
+class OpenAIServingCompletion(GenerateBaseServing):
     def __init__(
         self,
         engine_client: EngineClient,
