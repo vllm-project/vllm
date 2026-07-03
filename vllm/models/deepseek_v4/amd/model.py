@@ -582,6 +582,10 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
         # hc_mult streams to [T, hidden_size]. Empty unless a draft model set
         # aux_hidden_state_layers.
         aux_hidden_states: list[torch.Tensor] = []
+        # On the fused path the final layer's hc_post output is reused below
+        # (avoids computing hc_post twice when the last layer is also an aux
+        # layer).
+        final_aux_recon: torch.Tensor | None = None
         for idx, layer in enumerate(
             islice(self.layers, self.start_layer, self.end_layer),
             start=self.start_layer,
@@ -602,11 +606,22 @@ class DeepseekV4Model(nn.Module, EagleModelMixin):
                     aux_recon = layer.hc_post(
                         hidden_states, residual, post_mix, res_mix
                     )
+                    final_aux_recon = aux_recon
                 else:
                     aux_recon = hidden_states
                 aux_hidden_states.append(aux_recon.mean(dim=1))
         if layer is not None and layer.use_fused_mhc:
-            hidden_states = layer.hc_post(hidden_states, residual, post_mix, res_mix)
+            # Reuse the last layer's hc_post output if it was already computed
+            # for the aux hidden state above; otherwise compute it now.
+            if (
+                final_aux_recon is not None
+                and self.end_layer in self.aux_hidden_state_layers
+            ):
+                hidden_states = final_aux_recon
+            else:
+                hidden_states = layer.hc_post(
+                    hidden_states, residual, post_mix, res_mix
+                )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors({"hidden_states": hidden_states})
