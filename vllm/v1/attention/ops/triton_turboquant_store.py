@@ -357,7 +357,7 @@ def _tq_fused_cast_norm_rot_store_mse(
     Value_ptr,  # [NH, D] bf16/fp16 — raw values
     PiT_half_ptr,  # [D, D] fp16 — rotation matrix (Pi^T in fp16)
     # Quantization tables
-    Midpoints_ptr,  # [n_centroids-1] fp32
+    Midpoints_half_ptr,  # [n_centroids-1] fp32
     # Cache and indexing
     KV_cache_ptr,  # [total_bytes] uint8 (flattened view)
     Slot_mapping_ptr,  # [N] int32 — per-token slot indices
@@ -414,7 +414,8 @@ def _tq_fused_cast_norm_rot_store_mse(
 
     # ── 1. KEY: bf16 → fp32 + L2 norm + normalize ──────────────────
     k = tl.load(Key_ptr + base + d_offs, mask=d_mask, other=0.0).to(tl.float32)
-    norm = tl.sqrt(tl.sum(k * k, axis=0) + 1e-16)
+    k_f32 = k.to(tl.float32)
+    norm = tl.sqrt(tl.sum(k_f32 * k_f32, axis=0) + 1e-16).to(tl.float16)
     x_hat = k / norm
 
     # ── 2. ROTATION: y = x_hat @ PiT_half ──────────────────────────
@@ -426,8 +427,7 @@ def _tq_fused_cast_norm_rot_store_mse(
     # Matrix-vector multiply via broadcast + reduce:
     # y[j] = sum_i(x_hat[i] * PiT_half[i, j])
     # x_hat_2d = tl.expand_dims(x_hat, axis=1)  # [D, 1]
-    x_hat_2d = x_hat[:, None]  # [D, 1] fp32
-    y_vec = tl.sum(x_hat_2d * PiT_half.to(tl.float32), axis=0)  # [D] fp32
+    y_vec = tl.sum(x_hat[:, None] * PiT_half, axis=0)  # [D] fp16
 
     # ── 3. BINARY SEARCH BUCKETIZE ─────────────────────────────────
     lo = tl.zeros([BLOCK_D], dtype=tl.int32)
@@ -435,7 +435,7 @@ def _tq_fused_cast_norm_rot_store_mse(
     for _ in range(MSE_BITS):
         mid = (lo + hi) >> 1
         safe_mid = tl.minimum(mid, N_CENTROIDS - 2)
-        mid_val = tl.load(Midpoints_ptr + safe_mid, mask=d_mask, other=0.0)
+        mid_val = tl.load(Midpoints_half_ptr + safe_mid, mask=d_mask, other=0.0)
         lo = tl.where(y_vec >= mid_val, mid + 1, lo)
         hi = tl.where(y_vec >= mid_val, hi, mid)
     idx = tl.minimum(lo, N_CENTROIDS - 1)
@@ -464,7 +464,7 @@ def _tq_fused_cast_norm_rot_store_mse(
 
     # ── 5. STORE vec_norm (fp16, 2 bytes) ──────────────────────────
     norm_offset = MSE_BYTES
-    vn_f16 = norm.to(tl.float16)
+    vn_f16 = norm
     vn_u16 = vn_f16.to(tl.uint16, bitcast=True)
     tl.store(KV_cache_ptr + slot_base + norm_offset, (vn_u16 & 0xFF).to(tl.uint8))
     tl.store(
@@ -552,6 +552,7 @@ def triton_turboquant_store(
     value_quant_bits: int,
     key_fp8: bool = False,
     PiT_half: torch.Tensor | None = None,  # [D, D] fp16 — rotation matrix for fused store
+    midpoints_half: torch.Tensor | None = None,
 ):
     """Launch TQ store kernel (FP8 or MSE path)."""
     N, H, D = key.shape
@@ -618,7 +619,7 @@ def triton_turboquant_store(
         k_flat,
         v_flat,
         PiT_half,
-        midpoints,
+        midpoints_half,
         kv_cache.view(-1),
         slot_mapping,
         stride_cache_block=stride_block,

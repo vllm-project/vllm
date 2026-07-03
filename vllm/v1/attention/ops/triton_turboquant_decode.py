@@ -42,7 +42,7 @@ def _use_fp8_e4b15(device: int = 0) -> int:
 
 @triton.jit
 def _tq_decode_stage1(
-    # Query (raw bf16 for MSE path with fused rotation; pre-rotated for FP8)
+    # Precomputed query projection
     Q_rot_ptr,  # [B, Hq, D] bf16
     # Compressed KV cache (combined K+V)
     KV_cache_ptr,  # [num_blocks, block_size, Hk, padded_slot] uint8
@@ -53,8 +53,6 @@ def _tq_decode_stage1(
     Centroids_ptr,  # [n_centroids] bf16
     # Output (intermediate for stage2)
     Mid_o_ptr,  # [B, Hq, NUM_KV_SPLITS, D+1] float32
-    # Rotation matrix for MSE path (fused GEMM)
-    PiT_half_ptr,  # [D, D] fp16 — rotation matrix (None for FP8 path)
     # Strides
     stride_qb,
     stride_qh,  # Q strides: [B, Hq, D]
@@ -65,8 +63,6 @@ def _tq_decode_stage1(
     stride_mid_b,
     stride_mid_h,
     stride_mid_s,  # mid_o strides
-    stride_pit_r,
-    stride_pit_c,  # PiT_half strides: [D, D]
     # Constexpr dims
     NUM_KV_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
@@ -119,28 +115,14 @@ def _tq_decode_stage1(
     d_mask = d_offs < HEAD_DIM
     kv_range = tl.arange(0, BLOCK_N)
 
-    # Load query matrix: raw query — [BLOCK_H, BLOCK_D] bf16
+    # Load query matrix: q_rot — [BLOCK_H, BLOCK_D] bf16
     # Each row is one Q head in this group
     q_base = bid * stride_qb + cur_head[:, None] * stride_qh + d_offs[None, :]
-    q_raw = tl.load(
+    q_group = tl.load(
         Q_rot_ptr + q_base,
         mask=mask_h[:, None] & d_mask[None, :],
         other=0.0,
     )
-
-    # Fused rotation for MSE path (FP8 path: no rotation needed)
-    if not KEY_FP8:
-        # Load PiT_half: [BLOCK_D, BLOCK_D] fp16
-        pi_offs = d_offs[:, None] * stride_pit_r + d_offs[None, :] * stride_pit_c
-        pi_mask = d_mask[:, None] & d_mask[None, :]
-        PiT_half = tl.load(PiT_half_ptr + pi_offs, mask=pi_mask, other=0.0)
-
-        # Rotate: q_group = q_raw @ PiT_half (bf16 TC, fp32 accumulator)
-        PiT_bf16 = PiT_half.to(tl.bfloat16)
-        q_group = tl.dot(q_raw, PiT_bf16).to(tl.bfloat16)
-    else:
-        # FP8 path: query is already in correct form
-        q_group = q_raw
 
     # Precompute byte/bit index vectors for MSE gather loads
     if not KEY_FP8:
@@ -165,7 +147,7 @@ def _tq_decode_stage1(
     # ================================================================
     # TILED LOOP: process BLOCK_N tokens per iteration
     # ================================================================
-    for start_n in range(split_start, split_end, BLOCK_N):
+    for start_n in tl.range(split_start, split_end, BLOCK_N):
         kv_offs = start_n + kv_range
         kv_mask = kv_offs < split_end
 
@@ -581,14 +563,15 @@ def triton_turboquant_decode_attention(
     value_quant_bits: int,
     key_fp8: bool = False,
     norm_correction: bool = False,
-    PiT: torch.Tensor | None = None,  # [D, D] pre-computed Pi.T contiguous (unused, kept for compat)
+    PiT: torch.Tensor | None = None,  # [D, D] pre-computed Pi.T contiguous
+    PiT_half: torch.Tensor | None = None,
+    PiT_bf16: torch.Tensor | None = None,
     # Pre-allocated buffers (optional, avoids per-call allocation)
     mid_o_buf: torch.Tensor | None = None,
     output_buf: torch.Tensor | None = None,
     lse_buf: torch.Tensor | None = None,
     buf_holder: Any = None,
     max_num_kv_splits: int = 32,  # fixed split count (must be constant for cudagraph)
-    PiT_half: torch.Tensor | None = None,  # [D, D] fp16 — rotation matrix for fused query rotation
 ) -> torch.Tensor:
     """Launch fused TQ decode attention (Triton stage1 + stage2).
 
@@ -602,10 +585,20 @@ def triton_turboquant_decode_attention(
 
     cfg = _get_layout(D, mse_bits, value_quant_bits, key_packed_size)
 
-    # Pass raw query to kernel — rotation is now fused inside
-    # FP8 path: kernel uses query directly (no rotation)
-    # MSE path: kernel performs q @ PiT_half rotation using bf16 TC
-    q_rot = query.contiguous()
+    # Compute q_rot = q @ Pi.T (rotated query for MSE key scoring)
+    # FP8 path: pass query directly (float16); kernel casts inline.
+    # MSE path: still needs external GEMM (cuBLAS), output cast to bf16 for TC.
+    if key_fp8:
+        q_rot = query.contiguous()
+    else:
+        # q_float = query.float()
+        # if PiT is None:
+        #     PiT = Pi.T.contiguous()
+        # q_rot = (q_float @ PiT).to(query.dtype).contiguous()  # Cast to bf16
+        # PiT_bf16 = PiT_half.to(torch.bfloat16)
+        if PiT_bf16 is None:
+            PiT = Pi.T.to(torch.bfloat16).contiguous()
+        q_rot = (query @ PiT_bf16).contiguous()
 
     NUM_KV_SPLITS = max_num_kv_splits
 
@@ -644,7 +637,6 @@ def triton_turboquant_decode_attention(
         seq_lens,
         centroids,
         mid_o,
-        PiT_half,
         q_rot.stride(0),
         q_rot.stride(1),
         kv_cache.stride(0),
@@ -654,8 +646,6 @@ def triton_turboquant_decode_attention(
         mid_o.stride(0),
         mid_o.stride(1),
         mid_o.stride(2),
-        PiT_half.stride(0) if PiT_half is not None else 0,
-        PiT_half.stride(1) if PiT_half is not None else 0,
         NUM_KV_HEADS=Hk,
         HEAD_DIM=D,
         BLOCK_SIZE=block_size,
