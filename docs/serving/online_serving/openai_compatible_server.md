@@ -192,3 +192,48 @@ The following extra parameters in the response object are supported:
     ```python
     --8<-- "vllm/entrypoints/openai/responses/protocol.py:responses-response-extra-params"
     ```
+
+### llm_sign response signatures (experimental)
+
+!!! warning
+    `llm_sign` support is experimental and subject to change. The `llm_sign`
+    protocol is currently in beta; breaking changes may happen at any time,
+    and production use is not recommended.
+
+vLLM can attach `llm_sign` metadata to OpenAI-compatible Chat Completions and
+Responses API responses. The metadata lets downstream clients verify that the
+visible response body was signed by the provider certificate key instead of
+being silently modified by an intermediate relay.
+
+This integration is disabled by default. When it is disabled, vLLM does not add
+the `llm_sign` field.
+
+Install `llm-sign` alongside vLLM and point vLLM at the TLS certificate and
+private key used to identify the provider:
+
+```bash
+pip install llm-sign
+
+export VLLM_LLM_SIGN_ENABLED=1
+export VLLM_LLM_SIGN_CERTFILE=/path/to/fullchain.pem
+export VLLM_LLM_SIGN_KEYFILE=/path/to/privkey.pem
+
+vllm serve meta-llama/Meta-Llama-3-8B-Instruct
+```
+
+When enabled, vLLM signs non-streaming `/v1/chat/completions` responses and
+final `/v1/responses` response objects, then attaches the artifact under the
+`llm_sign` field. vLLM-only request and response extensions are excluded from
+the signed OpenAI-compatible payload.
+
+Clients can verify signed responses with the `llm_sign` client helpers:
+
+```python
+from llm_sign.client import (
+    verify_openai_response,
+    verify_openai_responses_response,
+)
+
+chat_result = verify_openai_response(chat_response)
+responses_result = verify_openai_responses_response(responses_response)
+```
