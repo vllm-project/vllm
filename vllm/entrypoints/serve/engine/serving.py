@@ -11,6 +11,7 @@ from vllm.entrypoints.openai.models.serving import (
     OpenAIModelRegistry,
     OpenAIServingModels,
 )
+from vllm.entrypoints.pooling.typing import AnyPoolingRequest
 from vllm.entrypoints.serve.engine.typing import AnyRequest
 from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
@@ -174,7 +175,7 @@ class BaseServing:
 
     def _maybe_get_adapters(
         self,
-        request: AnyRequest,
+        request: AnyRequest | AnyPoolingRequest,
         supports_default_mm_loras: bool = False,
     ) -> LoRARequest | None:
         if request.model in self.models.lora_requests:

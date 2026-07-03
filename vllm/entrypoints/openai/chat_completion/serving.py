@@ -52,7 +52,7 @@ from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.entrypoints.serve.utils.tool_calls_utils import (
     maybe_filter_parallel_tool_calls,
 )
-from vllm.inputs import EngineInput
+from vllm.inputs import EngineInput, MultiModalPlaceholders
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
@@ -76,7 +76,7 @@ def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
     counted in ``usage.prompt_tokens``.
     """
     mm_placeholders = cast(
-        "MultiModalPlaceholders | None", engine_input.get("mm_placeholders")
+        MultiModalPlaceholders | None, engine_input.get("mm_placeholders")
     )
     return {
         modality: sum(p.length for p in ranges)
