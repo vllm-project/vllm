@@ -34,6 +34,32 @@ logger = init_logger(__name__)
 is_batch_invariant = envs.VLLM_BATCH_INVARIANT
 float8_info = torch.finfo(current_platform.fp8_dtype())
 
+# Minimum KV length at which multi-query decode (max_seqlen_q > 1) switches to
+# the 3D segmented attention path. Below this the single-pass 2D path already
+# saturates the GPU, so 3D's reduction overhead is not worth it.
+_ATTN_3D_MIN_KV_FOR_MULTI_Q = 8192
+
+# Multi-query decode uses the 3D segmented path while the 2D grid provides fewer
+# than this many CTAs per SM: with a long KV each 2D CTA serially reduces the
+# whole KV, and a couple of CTAs per SM is too few to hide that latency, so
+# splitting the reduction across segments wins. (Larger grids already have enough
+# CTAs to hide it and keep the 2D path.)
+_ATTN_3D_MULTI_Q_CTAS_PER_SM = 2
+
+# Cached SM count per device — used to decide when a 2D launch grid under-fills
+# the GPU. (MIN_LAUNCH_GRID_SIZE_2D is a conservative constant ~128; the true
+# occupancy bound is the device's SM count, e.g. 148 on B200.)
+_DEVICE_SM_COUNT: dict[int, int] = {}
+
+
+def _device_sm_count(device: torch.device) -> int:
+    idx = device.index if device.index is not None else torch.cuda.current_device()
+    if idx not in _DEVICE_SM_COUNT:
+        _DEVICE_SM_COUNT[idx] = torch.cuda.get_device_properties(
+            idx
+        ).multi_processor_count
+    return _DEVICE_SM_COUNT[idx]
+
 
 @triton.jit
 def _cast_kv_tile(data, Q, tensor_scale, KV_QUANT_MODE: tl.constexpr):
@@ -1026,6 +1052,32 @@ def unified_attention(
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
     )
+    # Multi-query decode (max_seqlen_q > 1) was forced onto the 2D path above.
+    # That path launches a (total_num_q_blocks x num_kv_heads) grid; with few
+    # sequences over a long KV it under-occupies the GPU (e.g. a diffusion-LM
+    # bidirectional canvas, or MTP/speculative decode: one request, a few-hundred
+    # query rows, a 100k-token KV -> only ~100 CTAs). The 3D segmented
+    # (flash-decoding) path splits the long KV across NUM_PAR_SOFTMAX_SEGMENTS
+    # extra CTAs and reduces the partials, recovering occupancy. Output is
+    # identical (same online-softmax, different reduction tiling). Enable it for
+    # multi-query decode when the 2D grid (total_num_q_blocks * num_kv_heads)
+    # under-fills the GPU's SMs, gated on a long-enough KV (so short sequences,
+    # where 2D is already efficient, are untouched) and on the segm buffers being
+    # large enough to hold every query token (else fall back to 2D). Large
+    # multi-query batches that already saturate the SMs keep using the 2D path.
+    # Standard autoregressive decode has max_seqlen_q == 1 and is never affected.
+    if (
+        not use_3d
+        and softmax_segm_output is not None
+        and seq_threshold_3D is not None
+        and not is_batch_invariant
+        and max_seqlen_q > 1
+        and total_num_q_blocks * num_kv_heads
+        < _device_sm_count(q.device) * _ATTN_3D_MULTI_Q_CTAS_PER_SM
+        and max_seqlen_k >= _ATTN_3D_MIN_KV_FOR_MULTI_Q
+        and q.shape[0] <= softmax_segm_output.shape[0]
+    ):
+        use_3d = True
 
     # The kernel signature is the same for 2D and 3D — only the launch
     # grid + a handful of constexpr toggles differ.  Per-token-head scale
