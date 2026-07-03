@@ -441,12 +441,15 @@ class Worker(WorkerBase):
         """
         if (
             self.cache_config.kv_cache_memory_bytes is None
-            and envs.VLLM_STARTUP_PLAN_DIR
+            and envs.VLLM_ENABLE_STARTUP_PLAN
         ):
-            from vllm.v1.worker.startup_plan import maybe_apply_startup_plan
+            from vllm.v1.worker.startup_plan import (
+                default_plan_dir,
+                maybe_apply_startup_plan,
+            )
 
             applied = maybe_apply_startup_plan(
-                envs.VLLM_STARTUP_PLAN_DIR,
+                default_plan_dir(),
                 self.vllm_config,
                 self.rank,
                 self.parallel_config.world_size,
@@ -850,14 +853,15 @@ class Worker(WorkerBase):
 
             logger.debug(msg)
 
-            if envs.VLLM_STARTUP_PLAN_DIR:
+            if envs.VLLM_ENABLE_STARTUP_PLAN:
                 from vllm.v1.worker.startup_plan import (
                     compute_plan_fingerprint,
+                    default_plan_dir,
                     save_startup_plan,
                 )
 
                 save_startup_plan(
-                    envs.VLLM_STARTUP_PLAN_DIR,
+                    default_plan_dir(),
                     compute_plan_fingerprint(
                         self.vllm_config,
                         self.rank,

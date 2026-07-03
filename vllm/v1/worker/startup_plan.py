@@ -7,13 +7,15 @@ computes the ``--kv-cache-memory`` value that reproduces that allocation.
 For a fixed (model, config, hardware, library) combination the result is
 deterministic, yet it is re-measured on every boot.
 
-When ``VLLM_STARTUP_PLAN_DIR`` is set, each worker persists that value,
-keyed by a fingerprint of everything the value depends on, and later boots
-apply it automatically -- skipping the memory-profiling measurement and the
-CUDA-graph memory estimation pass -- if and only if the fingerprint matches
-and the device has at least as much free memory as when the plan was
-recorded. On any mismatch the worker falls back to full profiling, so a
-stale plan costs nothing and is never trusted.
+When ``VLLM_ENABLE_STARTUP_PLAN=1``, each worker persists that value under
+``{VLLM_CACHE_ROOT}/startup_plan/`` (regenerable derived state, alongside
+the torch.compile cache), keyed by a fingerprint of everything the value
+depends on, and later boots apply it automatically -- skipping the
+memory-profiling measurement and the CUDA-graph memory estimation pass --
+if and only if the fingerprint matches and the device has at least as much
+free memory as when the plan was recorded. On any mismatch the worker
+falls back to full profiling, so a stale plan costs nothing and is never
+trusted.
 """
 
 import hashlib
@@ -23,6 +25,7 @@ import time
 
 import torch
 
+import vllm.envs as envs
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -30,6 +33,13 @@ from vllm.platforms import current_platform
 logger = init_logger(__name__)
 
 PLAN_SCHEMA_VERSION = 1
+
+
+def default_plan_dir() -> str:
+    """Plans are regenerable derived state, so they live under the standard
+    vLLM cache root (like the torch.compile cache) and relocate with
+    ``VLLM_CACHE_ROOT`` instead of needing a location knob of their own."""
+    return os.path.join(envs.VLLM_CACHE_ROOT, "startup_plan")
 
 
 def compute_plan_fingerprint(
@@ -41,13 +51,20 @@ def compute_plan_fingerprint(
     cache, parallel, and compilation configs, but deliberately contains no
     device identity (``DeviceConfig.compute_hash`` is empty), so device
     name, total memory, compute capability, and the torch/CUDA build are
-    added here. Rank is included because per-rank memory use differs under
-    TP/PP. Driver-only changes are not part of the key; the free-memory
-    gate at apply time bounds the residual risk.
+    added here. The vLLM version is also pinned as an explicit factor so
+    version invalidation holds no matter how ``compute_hash`` evolves.
+    Rank is included because per-rank memory use differs under TP/PP.
+    Driver-only changes are not part of the key; the free-memory gate at
+    apply time bounds the residual risk.
     """
+    # Imported here (as VllmConfig.compute_hash does) to avoid a cycle with
+    # the top-level vllm package.
+    from vllm import __version__ as vllm_version
+
     capability = current_platform.get_device_capability()
     factors = {
         "schema": PLAN_SCHEMA_VERSION,
+        "vllm": vllm_version,
         "vllm_config": vllm_config.compute_hash(),
         "device_name": current_platform.get_device_name(),
         "device_total_memory": current_platform.get_device_total_memory(),
