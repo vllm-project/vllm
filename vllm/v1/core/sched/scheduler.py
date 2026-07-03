@@ -2483,7 +2483,10 @@ class Scheduler(SchedulerInterface):
                 self._free_blocks(self.requests[req_id])
         for req_id in kv_connector_output.finished_sending or ():
             logger.debug("Finished sending KV transfer for request %s", req_id)
-            assert req_id in self.requests
+            # The request may already have been freed in an earlier step; its
+            # blocks are released, so a late finished-send is a no-op.
+            if req_id not in self.requests:
+                continue
             self._free_blocks(self.requests[req_id])
 
     def _update_requests_with_invalid_blocks(
