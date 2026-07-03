@@ -16,7 +16,6 @@ from vllm.v1.outputs import LogprobsLists, LogprobsTensors, SamplerOutput
 from vllm.v1.sample.logits_processor.builtin import MinTokensLogitsProcessor
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words_with_drafts
-from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import apply_top_k_top_p
 from vllm.v1.sample.sampler import Sampler
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
@@ -132,6 +131,8 @@ class RejectionSampler(nn.Module):
             sampling_metadata=replace(
                 sampling_metadata,
                 max_num_logprobs=-1,
+                spec_draft_token_ids=metadata.draft_token_ids,
+                spec_cu_num_draft_tokens=metadata.cu_num_draft_tokens,
             ),
             predict_bonus_token=True,
             # Override the logprobs mode to return logits because they are
@@ -289,14 +290,11 @@ class RejectionSampler(nn.Module):
         metadata: SpecDecodeMetadata,
     ) -> torch.Tensor:
         has_penalties = not sampling_metadata.no_penalties
-        any_penalties_or_bad_words = (
-            sampling_metadata.bad_words_token_ids or has_penalties
-        )
         holder = sampling_metadata.thinking_budget_state_holder
         needs_thinking = holder is not None and holder.has_tracked_requests()
 
         output_token_ids = sampling_metadata.output_token_ids
-        if any_penalties_or_bad_words or needs_thinking:
+        if sampling_metadata.bad_words_token_ids or needs_thinking:
             output_token_ids = self._combine_outputs_with_spec_tokens(
                 output_token_ids,
                 sampling_metadata.spec_token_ids,
@@ -318,7 +316,7 @@ class RejectionSampler(nn.Module):
                 device=logits.device, non_blocking=True
             )
             logits = self.apply_penalties(
-                logits, sampling_metadata, metadata, repeat_indices, output_token_ids
+                logits, sampling_metadata, metadata, repeat_indices
             )
 
             # Apply allowed token ids.
@@ -351,27 +349,35 @@ class RejectionSampler(nn.Module):
         sampling_metadata: SamplingMetadata,
         metadata: SpecDecodeMetadata,
         repeat_indices: torch.Tensor,
-        output_token_ids: list[list[int]],
     ) -> torch.Tensor:
         if sampling_metadata.no_penalties:
             return logits
 
-        assert sampling_metadata.prompt_token_ids is not None
+        state = sampling_metadata.penalties_state
+        slot_mapping = sampling_metadata.penalty_slot_mapping
+        assert state is not None and slot_mapping is not None
 
-        prompt_token_ids = sampling_metadata.prompt_token_ids[repeat_indices]
-        presence_penalties = sampling_metadata.presence_penalties[repeat_indices]
-        frequency_penalties = sampling_metadata.frequency_penalties[repeat_indices]
-        repetition_penalties = sampling_metadata.repetition_penalties[repeat_indices]
-
-        logits = apply_all_penalties(
-            logits,
-            prompt_token_ids,
-            presence_penalties,
-            frequency_penalties,
-            repetition_penalties,
-            output_token_ids,
+        # The row verifying draft position p sees this step's drafts [0, p).
+        cu = metadata.cu_num_draft_tokens
+        starts = torch.zeros_like(cu)
+        starts[1:] = cu[:-1]
+        row_starts = starts[repeat_indices.long()]
+        local_pos = (
+            torch.arange(logits.shape[0], device=logits.device, dtype=cu.dtype)
+            - row_starts
         )
-        return logits
+
+        return state.apply(
+            logits,
+            slot_mapping,
+            sampling_metadata.repetition_penalties,
+            sampling_metadata.frequency_penalties,
+            sampling_metadata.presence_penalties,
+            row_to_req=repeat_indices,
+            prefix_lens=local_pos,
+            draft_token_ids=metadata.draft_token_ids,
+            draft_starts=row_starts,
+        )
 
     @staticmethod
     def _combine_outputs_with_spec_tokens(

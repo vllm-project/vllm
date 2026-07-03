@@ -3649,6 +3649,18 @@ class GPUModelRunner(
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
         logprobs_tensors = sampler_output.logprobs_tensors
+
+        sampling_metadata = self.input_batch.sampling_metadata
+        if not sampling_metadata.no_penalties:
+            # Fold this step's accepted tokens into the persistent penalty
+            # statistics; placeholder/rejected ids and discarded rows are
+            # skipped inside.
+            assert sampling_metadata.penalty_slot_mapping is not None
+            self.input_batch.penalties_state.commit(
+                sampled_token_ids,
+                sampling_metadata.penalty_slot_mapping,
+                self.discard_request_mask.gpu[:num_sampled_tokens],
+            )
         invalid_req_indices = []
         logprobs_lists = None
         if not self.use_async_scheduling:

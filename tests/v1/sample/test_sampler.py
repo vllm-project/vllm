@@ -7,10 +7,12 @@ import torch
 
 from tests.v1.sample.utils import create_allowed_token_ids
 from vllm.platforms import current_platform
+from vllm.sampling_params import SamplingParams
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
+from vllm.v1.sample.ops.penalties import PenaltiesState
 from vllm.v1.sample.sampler import Sampler
 
 PIN_MEMORY_AVAILABLE = is_pin_memory_available()
@@ -166,6 +168,26 @@ def _create_default_sampling_metadata(
     return fake_sampling_metadata
 
 
+def _install_penalties_state(metadata: SamplingMetadata, device: torch.device) -> None:
+    """Build the persistent penalty statistics the sampler now reads,
+    from the metadata's prompt/output token ids."""
+    batch_size = len(metadata.output_token_ids)
+    state = PenaltiesState(MAX_NUM_REQS, VOCAB_SIZE, device)
+    for i in range(batch_size):
+        params = SamplingParams(
+            presence_penalty=float(metadata.presence_penalties[i]),
+            frequency_penalty=float(metadata.frequency_penalties[i]),
+            repetition_penalty=float(metadata.repetition_penalties[i]),
+        )
+        # Recover the unpadded prompt (padded with VOCAB_SIZE).
+        prompt_row = metadata.prompt_token_ids[i]
+        prompt = prompt_row[prompt_row < VOCAB_SIZE].tolist()
+        tokens = np.array(prompt + metadata.output_token_ids[i], dtype=np.int64)
+        state.add_request(i, params, tokens, len(prompt))
+    metadata.penalties_state = state
+    metadata.penalty_slot_mapping = state.make_slot_mapping(batch_size)
+
+
 def _create_weighted_output_token_list(
     batch_size: int, vocab_size: int
 ) -> tuple[list[list[int]], list[list[int]]]:
@@ -222,10 +244,9 @@ def test_sampler_presence_penalty(
         batch_size, presence_penalty, torch.device(device)
     )
     sampling_metadata.no_penalties = False
+    _install_penalties_state(sampling_metadata, torch.device(device))
     sampler = Sampler()
-    logits = sampler.apply_penalties(
-        fake_logits, sampling_metadata, sampling_metadata.output_token_ids
-    )
+    logits = sampler.apply_penalties(fake_logits, sampling_metadata)
     logits = logits.cpu()
     for batch_idx in range(batch_size):
         # Since all tokens initially have the same logits, the non-penalized
@@ -276,10 +297,9 @@ def test_sampler_frequency_penalty(
     )
     sampling_metadata.output_token_ids = output_token_ids
     sampling_metadata.no_penalties = False
+    _install_penalties_state(sampling_metadata, torch.device(device))
     sampler = Sampler()
-    logits = sampler.apply_penalties(
-        fake_logits, sampling_metadata, sampling_metadata.output_token_ids
-    )
+    logits = sampler.apply_penalties(fake_logits, sampling_metadata)
     logits = logits.cpu()
     for batch_idx in range(batch_size):
         non_penalized_token_id = logits[batch_idx].argmax().item()
@@ -328,10 +348,9 @@ def test_sampler_repetition_penalty(
         batch_size, repetition_penalty, torch.device(device)
     )
     sampling_metadata.no_penalties = False
+    _install_penalties_state(sampling_metadata, torch.device(device))
     sampler = Sampler()
-    logits = sampler.apply_penalties(
-        fake_logits, sampling_metadata, sampling_metadata.output_token_ids
-    )
+    logits = sampler.apply_penalties(fake_logits, sampling_metadata)
     logits = logits.cpu()
     for batch_idx in range(batch_size):
         non_penalized_token_id = logits[batch_idx].argmax().item()

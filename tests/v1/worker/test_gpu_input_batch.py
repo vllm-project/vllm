@@ -10,7 +10,6 @@ import torch
 
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams
-from vllm.utils.torch_utils import make_tensor_with_pad
 from vllm.v1.pool.metadata import PoolingMetadata
 from vllm.v1.sample.logits_processor import LogitsProcessors
 from vllm.v1.sample.metadata import SamplingMetadata
@@ -26,7 +25,18 @@ DEVICES = [f"{DEVICE_TYPE}:{i}" for i in range(min(current_platform.device_count
 MAX_NUM_PROMPT_TOKENS = 64
 
 
-def _compare_objs(obj1, obj2, skip: Sequence = ("logitsprocs", "batch_update_builder")):
+def _compare_objs(
+    obj1,
+    obj2,
+    # Penalty pool slot numbers depend on allocation order; equivalence of
+    # the underlying statistics is asserted via _assert_penalties_state.
+    skip: Sequence = (
+        "logitsprocs",
+        "batch_update_builder",
+        "penalties_state",
+        "penalty_slot_mapping",
+    ),
+):
     attrs = inspect.getmembers(obj1, lambda a: not (inspect.isroutine(a)))
     attr_names = set(
         [a[0] for a in attrs if not (a[0].startswith("__") and a[0].endswith("__"))]
@@ -151,12 +161,10 @@ def _construct_expected_sampling_metadata(
         else torch.tensor(top_k, dtype=torch.int, device=device),
         generators={},
         max_num_logprobs=0,
-        prompt_token_ids=make_tensor_with_pad(
-            prompt_token_ids,
-            pad=VOCAB_SIZE,
-            device=torch.device(device),
-            dtype=torch.int64,
-        ),
+        # Penalties no longer need per-step prompt/output token id tensors;
+        # they read the persistent PenaltiesState instead (asserted
+        # separately via _assert_penalties_state).
+        prompt_token_ids=None,
         frequency_penalties=torch.tensor(
             frequency_penalties, dtype=torch.float, device=device
         ),
@@ -166,7 +174,7 @@ def _construct_expected_sampling_metadata(
         repetition_penalties=torch.tensor(
             repetition_penalties, dtype=torch.float, device=device
         ),
-        output_token_ids=output_token_ids,
+        output_token_ids=[],
         spec_token_ids=[[] for _ in range(len(output_token_ids))],
         no_penalties=(
             all(x == 0 for x in presence_penalties)
@@ -290,9 +298,7 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         expected_sampling_metadata.repetition_penalties,
         sampling_metadata.repetition_penalties,
     )
-    assert torch.allclose(
-        expected_sampling_metadata.prompt_token_ids, sampling_metadata.prompt_token_ids
-    )
+    assert sampling_metadata.prompt_token_ids is None
     assert (
         expected_sampling_metadata.output_token_ids
         == sampling_metadata.output_token_ids
@@ -307,6 +313,51 @@ def test_sampling_metadata_in_input_batch(device: str, batch_size: int):
         expected_sampling_metadata.bad_words_token_ids
         == sampling_metadata.bad_words_token_ids
     )
+    _assert_penalties_state(input_batch, reqs, req_ids_retained, sampling_metadata)
+
+
+def _assert_penalties_state(
+    input_batch: InputBatch,
+    reqs: list[CachedRequestState],
+    req_ids_retained: set[str],
+    sampling_metadata: SamplingMetadata,
+) -> None:
+    """The pool statistics must equal a bincount of each retained request's
+    token history, whatever add/remove/condense/swap sequence produced the
+    current batch layout."""
+    state = input_batch.penalties_state
+    if sampling_metadata.no_penalties:
+        assert sampling_metadata.penalty_slot_mapping is None
+        return
+    slot_mapping = sampling_metadata.penalty_slot_mapping.cpu()
+    for req in reqs:
+        if req.req_id not in req_ids_retained:
+            continue
+        row = input_batch.req_id_to_index[req.req_id]
+        params = req.sampling_params
+        needs = (
+            params.presence_penalty != 0
+            or params.frequency_penalty != 0
+            or params.repetition_penalty != 1
+        )
+        slot = int(slot_mapping[row])
+        assert (slot >= 0) == needs
+        if not needs:
+            continue
+        counts = state.output_bin_counts[slot].cpu()
+        expected_counts = torch.bincount(
+            torch.tensor(req.output_token_ids, dtype=torch.int64, device="cpu"),
+            minlength=VOCAB_SIZE,
+        ).to(torch.int32)
+        assert torch.equal(counts[:VOCAB_SIZE], expected_counts)
+        packed = state.prompt_bin_mask[slot].cpu()
+        bits = (packed.unsqueeze(1) >> torch.arange(32, device="cpu")) & 1
+        prompt_mask = bits.reshape(-1)[:VOCAB_SIZE].bool()
+        expected_mask = torch.zeros(VOCAB_SIZE, dtype=torch.bool, device="cpu")
+        expected_mask[
+            torch.tensor(req.prompt_token_ids, dtype=torch.int64, device="cpu")
+        ] = True
+        assert torch.equal(prompt_mask, expected_mask)
 
 
 @pytest.mark.parametrize("device", DEVICES)
@@ -372,6 +423,11 @@ def test_swap_states_in_input_batch(device: str, batch_size: int, swap_list: lis
     ref_input_batch.refresh_metadata()
 
     _compare_objs(input_batch, ref_input_batch)
+    retained = {req.req_id for req in reqs}
+    _assert_penalties_state(input_batch, reqs, retained, input_batch.sampling_metadata)
+    _assert_penalties_state(
+        ref_input_batch, reqs, retained, ref_input_batch.sampling_metadata
+    )
 
 
 def _construct_pooling_request(req_id_suffix: int, pooling_params=None):

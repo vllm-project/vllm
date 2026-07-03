@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import torch
 
 from vllm.v1.sample.logits_processor import LogitsProcessors
+from vllm.v1.sample.ops.penalties import PenaltiesState
 from vllm.v1.sample.thinking_budget_state import ThinkingBudgetStateHolder
 
 
@@ -48,8 +49,18 @@ class SamplingMetadata:
     # req_index -> list of token IDs to get logprobs for
     logprob_token_ids: dict[int, list[int]] | None = None
 
+    # Persistent penalty statistics and the batch-row -> pool-slot snapshot
+    # for this batch composition. Set iff `not no_penalties`.
+    penalties_state: PenaltiesState | None = None
+    penalty_slot_mapping: torch.Tensor | None = None
+
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
+    # This step's flat draft token ids and their cumulative counts per
+    # request; set by the rejection sampler for the bonus-token sampling
+    # call so penalties can account for the drafts.
+    spec_draft_token_ids: torch.Tensor | None = None
+    spec_cu_num_draft_tokens: torch.Tensor | None = None
     # When non-None, use ``holder.has_tracked_requests()`` to see if this batch applies
     # thinking-token-budget logits (holder may exist with an empty tracking set).
     thinking_budget_state_holder: ThinkingBudgetStateHolder | None = None

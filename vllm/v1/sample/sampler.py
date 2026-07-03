@@ -11,7 +11,6 @@ from vllm.v1.outputs import LogprobsTensors, SamplerOutput
 from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.ops.bad_words import apply_bad_words
 from vllm.v1.sample.ops.logprobs import batched_count_greater_than
-from vllm.v1.sample.ops.penalties import apply_all_penalties
 from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
 _SAMPLING_EPS = 1e-5
@@ -375,15 +374,12 @@ class Sampler(nn.Module):
         predict_bonus_token: bool,
     ) -> torch.Tensor:
         bad_words_token_ids = sampling_metadata.bad_words_token_ids
-        any_penalties_or_bad_words = (
-            bool(bad_words_token_ids) or not sampling_metadata.no_penalties
-        )
         holder = sampling_metadata.thinking_budget_state_holder
         needs_thinking_combine = holder is not None and holder.has_tracked_requests()
 
         output_token_ids = sampling_metadata.output_token_ids
         if predict_bonus_token and (
-            any_penalties_or_bad_words or needs_thinking_combine
+            bool(bad_words_token_ids) or needs_thinking_combine
         ):
             # Combine base outputs with spec tokens when speculative decoding
             # is enabled.
@@ -405,7 +401,7 @@ class Sampler(nn.Module):
             logits = processor.apply(logits)
 
         # Apply penalties (e.g., freq_penalties).
-        logits = self.apply_penalties(logits, sampling_metadata, output_token_ids)
+        logits = self.apply_penalties(logits, sampling_metadata, predict_bonus_token)
         if holder is not None and holder.has_tracked_requests():
             holder.update_state(
                 output_token_ids,
@@ -423,17 +419,32 @@ class Sampler(nn.Module):
     def apply_penalties(
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
-        output_token_ids: list[list[int]],
+        predict_bonus_token: bool = False,
     ) -> torch.Tensor:
         if sampling_metadata.no_penalties:
             return logits
 
-        assert sampling_metadata.prompt_token_ids is not None
-        return apply_all_penalties(
+        state = sampling_metadata.penalties_state
+        slot_mapping = sampling_metadata.penalty_slot_mapping
+        assert state is not None and slot_mapping is not None
+
+        prefix_lens = draft_token_ids = draft_starts = None
+        if predict_bonus_token and sampling_metadata.spec_draft_token_ids is not None:
+            # Bonus rows see all of the request's draft tokens for this step.
+            cu = sampling_metadata.spec_cu_num_draft_tokens
+            assert cu is not None
+            draft_starts = torch.zeros_like(cu)
+            draft_starts[1:] = cu[:-1]
+            prefix_lens = cu - draft_starts
+            draft_token_ids = sampling_metadata.spec_draft_token_ids
+
+        return state.apply(
             logits,
-            sampling_metadata.prompt_token_ids,
-            sampling_metadata.presence_penalties,
-            sampling_metadata.frequency_penalties,
+            slot_mapping,
             sampling_metadata.repetition_penalties,
-            output_token_ids,
+            sampling_metadata.frequency_penalties,
+            sampling_metadata.presence_penalties,
+            prefix_lens=prefix_lens,
+            draft_token_ids=draft_token_ids,
+            draft_starts=draft_starts,
         )
