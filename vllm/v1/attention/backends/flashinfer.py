@@ -436,7 +436,15 @@ class FlashInferBackend(AttentionBackend):
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
-        return [64, 128, 256, 512]
+        if (
+            current_platform.is_device_capability_family(100)
+            and supports_trtllm_attention(is_prefill=True)
+            and supports_trtllm_attention(is_prefill=False)
+        ):
+            # FlashInfer on Blackwell supports 512 head size
+            return [64, 128, 256, 512]
+        else:
+            return [64, 128, 256]
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
