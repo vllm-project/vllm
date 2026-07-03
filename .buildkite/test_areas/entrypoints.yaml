@@ -13,6 +13,11 @@ steps:
   commands:
   - pytest -v -s entrypoints/unit_tests
   - pytest -v -s entrypoints/weight_transfer
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (LLM)
   key: entrypoints-integration-llm
@@ -122,6 +127,11 @@ steps:
   - tests/entrypoints/openai/responses
   commands:
   - pytest -v -s entrypoints/openai/responses
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (Speech to Text)
   device: h200_35gb
@@ -146,6 +156,11 @@ steps:
   commands:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s entrypoints/multimodal
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Entrypoints Integration (Pooling)
   key: entrypoints-integration-pooling

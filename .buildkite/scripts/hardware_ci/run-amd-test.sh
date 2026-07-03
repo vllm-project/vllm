@@ -448,9 +448,13 @@ checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
 if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
   checkout="."
 fi
-if git -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# Pass safe.directory per-command (-c) rather than mutating ~/.gitconfig.
+# The K8s agent stack runs git checkout as root but the job command as a different
+# user (e.g. buildkite-agent/uid=1001); git 2.35.2+ rejects the repo with
+# "fatal: detected dubious ownership" unless the directory is explicitly allowed.
+if git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   vllm_standalone_merge_base="$(
-    git -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
+    git -c "safe.directory=${checkout}" -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
   )"
 fi
 if [[ -z "${vllm_standalone_merge_base}" ]]; then

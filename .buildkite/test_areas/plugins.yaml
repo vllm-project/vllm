@@ -44,6 +44,16 @@ steps:
   - pytest -v -s plugins_tests/test_oot_registration_online.py # it needs a clean process
   - pytest -v -s plugins_tests/test_oot_registration_offline.py # it needs a clean process
   - pytest -v -s plugins_tests/lora_resolvers # unit tests for in-tree lora resolver plugins
+  mirror:
+    amd:
+      device: mi250_2
+      timeout_in_minutes: 50
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/plugins/
+      - tests/plugins/
+      - vllm/platforms/rocm.py
 
 
 - label: GGUF Plugin

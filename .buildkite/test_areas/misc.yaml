@@ -58,7 +58,7 @@ steps:
     - pytest -v -s v1/test_outputs.py
   mirror:
     amd:
-      device: mi325_1
+      device: mi300_1
       depends_on:
       - image-build-amd
 
@@ -314,6 +314,11 @@ steps:
   - pytest -v -s detokenizer
   - pytest -v -s -m 'not cpu_test' multimodal
   - pytest -v -s utils_
+  mirror:
+    amd:
+      device: mi325_1
+      depends_on:
+      - image-build-amd
 
 - label: Async Engine, Inputs, Utils, Worker, Config (CPU)
   key: async-engine-inputs-utils-worker-config-cpu
