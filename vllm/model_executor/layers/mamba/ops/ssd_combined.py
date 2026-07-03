@@ -158,6 +158,21 @@ def _mamba_chunk_scan_combined_fwd_cuda(
 
 @CustomOp.register("mamba_chunk_scan_combined_fwd")
 class MambaChunkScanCombinedFwdOp(CustomOp):
+    def __init__(self):
+        # Bypass dispatch_forward() / get_current_vllm_config() by directly
+        # selecting the forward method based on the platform.  This op may be
+        # instantiated during Mamba2 kernel warm-up, which happens before the
+        # vLLM compilation config is available.
+        super(CustomOp, self).__init__()  # nn.Module.__init__ only
+        from vllm.platforms import current_platform
+
+        if current_platform.is_cpu():
+            self._forward_method = self.forward_cpu
+        elif current_platform.is_rocm():
+            self._forward_method = self.forward_hip
+        else:
+            self._forward_method = self.forward_cuda
+
     def forward_native(self, *args, **kwargs):
         return _mamba_chunk_scan_combined_fwd_cpu(*args, **kwargs)
 
@@ -168,10 +183,13 @@ class MambaChunkScanCombinedFwdOp(CustomOp):
         return _mamba_chunk_scan_combined_fwd_cuda(*args, **kwargs)
 
 
-_mamba_chunk_scan_combined_fwd_op = MambaChunkScanCombinedFwdOp()
+_mamba_chunk_scan_combined_fwd_op: "MambaChunkScanCombinedFwdOp | None" = None
 
 
 def _mamba_chunk_scan_combined_fwd(*args, **kwargs):
+    global _mamba_chunk_scan_combined_fwd_op
+    if _mamba_chunk_scan_combined_fwd_op is None:
+        _mamba_chunk_scan_combined_fwd_op = MambaChunkScanCombinedFwdOp()
     return _mamba_chunk_scan_combined_fwd_op(*args, **kwargs)
 
 
@@ -246,3 +264,4 @@ def mamba_chunk_scan_combined_varlen(
     )
 
     return varlen_states
+

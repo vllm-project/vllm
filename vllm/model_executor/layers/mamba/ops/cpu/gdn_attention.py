@@ -100,12 +100,13 @@ def cpu_gdn_attention_core(
         if is_amx:
             decode_mixed_qkv = ops.causal_conv1d_update_cpu(
                 x=decode_mixed_qkv,
-                conv_states=conv_state,
+                conv_state=conv_state,
                 weight=layer.conv1d.weight,
                 bias=layer.conv1d.bias,
-                silu_activation=layer.activation == "silu",
+                activation="silu" if layer.activation == "silu" else None,
                 conv_state_indices=decode_state_indices,
-                is_vnni=True,
+                query_start_loc=None,
+                pad_slot_id=0,
             )
         else:
             decode_conv_state = conv_state[decode_state_indices].contiguous()
@@ -230,3 +231,4 @@ def register_cpu_gdn_attention_ops() -> None:
         fake_impl=cpu_gdn_attention_core_fake,
     )
     _CPU_GDN_ATTENTION_OPS_REGISTERED = True
+

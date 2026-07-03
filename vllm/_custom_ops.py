@@ -3395,27 +3395,6 @@ def causal_conv1d_fwd_cpu(
     )
 
 
-def causal_conv1d_update_cpu(
-    x: torch.Tensor,
-    conv_states: torch.Tensor,
-    weight: torch.Tensor,
-    bias: torch.Tensor | None,
-    silu_activation: bool,
-    conv_state_indices: torch.Tensor | None,
-    is_vnni: bool,
-) -> torch.Tensor:
-    return torch.ops._C.causal_conv1d_update_cpu(
-        x,
-        conv_states,
-        weight,
-        bias,
-        silu_activation,
-        None,
-        conv_state_indices,
-        -1,
-        is_vnni,
-    )
-
 
 class CPUDNNLGEMMHandler:
     def __init__(self) -> None:
@@ -3870,3 +3849,4 @@ if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
             torch.empty([token_num, q_size], dtype=qkv.dtype, device=qkv.device),
             torch.empty([token_num, kv_size], dtype=qkv.dtype, device=qkv.device),
         )
+
