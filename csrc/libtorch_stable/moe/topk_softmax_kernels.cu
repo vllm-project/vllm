@@ -25,7 +25,7 @@
 #include <torch/headeronly/util/Exception.h>
 
 #include "../../cuda_compat.h"
-#include "../../cub_helpers.h"
+#include "../cub_helpers.h"
 #include "libtorch_stable/torch_utils.h"
 
 #ifndef USE_ROCM
