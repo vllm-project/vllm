@@ -20,12 +20,12 @@ Pre-built vLLM wheels for Arm are available since version 0.11.2. These wheels c
 
 ```bash
 export VLLM_VERSION=$(curl -s https://api.github.com/repos/vllm-project/vllm/releases/latest | jq -r .tag_name | sed 's/^v//')
-uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_aarch64.whl
+uv pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_aarch64.whl --torch-backend cpu
 ```
 
 ??? console "pip"
     ```bash
-    pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_aarch64.whl
+    pip install https://github.com/vllm-project/vllm/releases/download/v${VLLM_VERSION}/vllm-${VLLM_VERSION}+cpu-cp38-abi3-manylinux_2_35_aarch64.whl --extra-index-url https://download.pytorch.org/whl/cpu
     ```
 
 !!! warning "set `LD_PRELOAD`"
@@ -53,7 +53,7 @@ LLM inference is a fast-evolving field, and the latest code may contain bug fixe
 To install from nightly index, run:
 
 ```bash
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu --index-strategy first-index
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu --index-strategy first-index --torch-backend cpu
 ```
 
 ??? console "pip (there's a caveat)"
@@ -63,7 +63,7 @@ uv pip install vllm --extra-index-url https://wheels.vllm.ai/nightly/cpu --index
     If you insist on using `pip`, you have to specify the full URL (link address) of the wheel file (which can be obtained from https://wheels.vllm.ai/nightly/cpu/vllm).
 
     ```bash
-    pip install https://wheels.vllm.ai/4fa7ce46f31cbd97b4651694caf9991cc395a259/vllm-0.13.0rc2.dev104%2Bg4fa7ce46f.cpu-cp38-abi3-manylinux_2_35_aarch64.whl # current nightly build (the filename will change!)
+    pip install https://wheels.vllm.ai/4fa7ce46f31cbd97b4651694caf9991cc395a259/vllm-0.13.0rc2.dev104%2Bg4fa7ce46f.cpu-cp38-abi3-manylinux_2_35_aarch64.whl --extra-index-url https://download.pytorch.org/whl/cpu # current nightly build (the filename will change!)
     ```
 
 #### Install specific revisions
@@ -72,7 +72,7 @@ If you want to access the wheels for previous commits (e.g. to bisect the behavi
 
 ```bash
 export VLLM_COMMIT=730bd35378bf2a5b56b6d3a45be28b3092d26519 # use full commit hash from the main branch
-uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/cpu --index-strategy first-index
+uv pip install vllm --extra-index-url https://wheels.vllm.ai/${VLLM_COMMIT}/cpu --index-strategy first-index --torch-backend cpu
 ```
 
 --8<-- [end:pre-built-wheels]
@@ -96,8 +96,8 @@ cd vllm_source
 Third, install required dependencies:
 
 ```bash
-uv pip install -r requirements/build/cpu.txt --torch-backend cpu
-uv pip install -r requirements/cpu.txt --torch-backend cpu
+uv pip install -r requirements/build/cpu.txt --torch-backend cpu --index-strategy unsafe-best-match
+uv pip install -r requirements/cpu.txt --torch-backend cpu --index-strategy unsafe-best-match
 ```
 
 ??? console "pip"

@@ -115,7 +115,7 @@ def find_matched_target(
     module: Module,
     targets: Iterable[str],
     fused_mapping: Mapping[str, list[str]] = MappingProxyType({}),
-) -> str:
+) -> str | None:
     """
     Helper function to look up which "target" in the compressed-tensors
     config that a layer corresponds to.
@@ -133,12 +133,11 @@ def find_matched_target(
         *All* component module names must match in order for a match to be
         successful. A successful match returns the first component target
 
-    :param layer_name: layer name
-    :param module: torch.nn.Module
-    :param targets: list of targets to match the layer against
-    :param fused_mapping: map from fused layer names to its components
-    :param fused_strategy: either "all" or "any". If using "all", fused
-        layers match if "all" of its components match
+    Args:
+        layer_name: layer name
+        module: torch.nn.Module
+        targets: list of targets to match the layer against
+        fused_mapping: map from fused layer names to its components
     """
 
     if layer_name is None:
@@ -149,12 +148,6 @@ def find_matched_target(
         or _find_first_match(module.__class__.__name__, targets, True)
         or _match_fused_layer(layer_name, targets, fused_mapping)
     )
-
-    if matched_target is None:
-        raise ValueError(
-            f"Unable to find matching target for {layer_name} in the "
-            "compressed-tensors config."
-        )
 
     return matched_target
 
@@ -167,9 +160,10 @@ def _find_first_match(
     exactly or as a regex after 're:'. If check_contains is set to True,
     additionally checks if the target string is contained within the value.
 
-    :param value: string to compare the list of targets against
-    :param targets: list of targets to match the layer against
-    :param check_contains: whether or not to do a substring match
+    Args:
+        value: string to compare the list of targets against
+        targets: list of targets to match the layer against
+        check_contains: whether or not to do a substring match
     """
 
     for target in targets:
@@ -211,9 +205,10 @@ def _match_fused_layer(
     Implements an "all" matching strategy where a fused layer matches iff
     "all" of its components match
 
-    :param layer_name: layer name
-    :param target_layers: list of targets to match the layer against
-    :param fused_mapping: map from fused layer names to its components
+    Args:
+        layer_name: layer name
+        target_layers: list of targets to match the layer against
+        fused_mapping: map from fused layer names to its components
 
     Examples:
         layer_name = "model.layers.0.self_attn.qkv_proj"

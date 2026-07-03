@@ -1,115 +1,242 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from types import SimpleNamespace
-
-import pytest
 import torch
 
-from vllm.v1.attention.backend import CommonAttentionMetadata
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
-
-pytestmark = pytest.mark.skip_global_cleanup
-
-
-class _RecordingBuilder:
-    def __init__(self) -> None:
-        self.seen_metadata: list[CommonAttentionMetadata] = []
-
-    def build(
-        self,
-        common_prefix_len: int,
-        common_attn_metadata: CommonAttentionMetadata,
-    ) -> CommonAttentionMetadata:
-        assert common_prefix_len == 0
-        _ = common_attn_metadata.seq_lens_cpu
-        self.seen_metadata.append(common_attn_metadata)
-        return common_attn_metadata
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
+from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
+from vllm.v1.worker.utils import AttentionGroup
 
 
-class _FakeAttentionGroup:
-    def __init__(self, builder: _RecordingBuilder, layer_name: str) -> None:
-        self._builder = builder
-        self.layer_names = [layer_name]
+class FakeFlashAttentionBackend:
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
-    def get_metadata_builder(self, common_prefix_len: int) -> _RecordingBuilder:
-        assert common_prefix_len == 0
-        return self._builder
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        assert not include_num_layers_dimension
+        return (0, 1, 2, 3, 4)
 
 
-def test_build_attn_metadata_seeds_seq_lens_cpu_for_all_kv_groups():
-    original_seq_lens_prop = CommonAttentionMetadata.seq_lens_cpu
-    original_seq_lens_fget = original_seq_lens_prop.fget
-    original_num_computed_prop = CommonAttentionMetadata.num_computed_tokens_cpu
-    original_num_computed_fget = original_num_computed_prop.fget
-    lazy_seq_lens_init_count = 0
-    lazy_num_computed_init_count = 0
+class FakeHNDFlashAttentionBackend(FakeFlashAttentionBackend):
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        assert not include_num_layers_dimension
+        return (0, 1, 3, 2, 4)
 
-    def tracking_seq_lens_cpu(self: CommonAttentionMetadata) -> torch.Tensor:
-        nonlocal lazy_seq_lens_init_count
-        if self._seq_lens_cpu is None:
-            lazy_seq_lens_init_count += 1
-        assert original_seq_lens_fget is not None
-        return original_seq_lens_fget(self)
 
-    def tracking_num_computed_tokens_cpu(
-        self: CommonAttentionMetadata,
-    ) -> torch.Tensor:
-        nonlocal lazy_num_computed_init_count
-        if self._num_computed_tokens_cpu is None:
-            lazy_num_computed_init_count += 1
-        assert original_num_computed_fget is not None
-        return original_num_computed_fget(self)
-
-    CommonAttentionMetadata.seq_lens_cpu = property(tracking_seq_lens_cpu)
-    CommonAttentionMetadata.num_computed_tokens_cpu = property(
-        tracking_num_computed_tokens_cpu
+def test_reshape_padded_flash_attention_kv_cache_strides_by_page():
+    num_blocks = 3
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=384,
     )
-    try:
-        builder0 = _RecordingBuilder()
-        builder1 = _RecordingBuilder()
-        attn_groups = [
-            [_FakeAttentionGroup(builder0, "layer0")],
-            [_FakeAttentionGroup(builder1, "layer1")],
-        ]
-        query_start_loc_cpu = torch.tensor([0, 2, 5], dtype=torch.int32)
-        query_start_loc_gpu = query_start_loc_cpu.clone()
-        seq_lens = torch.tensor([8, 16], dtype=torch.int32)
-        shared_block_table = torch.zeros((2, 2), dtype=torch.int32)
-        shared_slot_mapping = torch.zeros(5, dtype=torch.int64)
+    assert spec.real_page_size_bytes == 256
 
-        attn_metadata = build_attn_metadata(
-            attn_groups=attn_groups,
-            num_reqs=2,
-            num_tokens=5,
-            query_start_loc_gpu=query_start_loc_gpu,
-            query_start_loc_cpu=query_start_loc_cpu,
-            max_query_len=3,
-            seq_lens=seq_lens,
-            max_seq_len=16,
-            block_tables=(shared_block_table, shared_block_table),
-            slot_mappings=(shared_slot_mapping, shared_slot_mapping),
-            kv_cache_config=SimpleNamespace(kv_cache_groups=[object(), object()]),
+    raw_tensors = {
+        "layer": torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.int8)
+    }
+    attn_groups = [
+        AttentionGroup(
+            backend=FakeFlashAttentionBackend,
+            layer_names=["layer"],
+            kv_cache_spec=spec,
+            kv_cache_group_id=0,
         )
-    finally:
-        CommonAttentionMetadata.seq_lens_cpu = original_seq_lens_prop
-        CommonAttentionMetadata.num_computed_tokens_cpu = original_num_computed_prop
+    ]
 
-    for metadata in builder0.seen_metadata + builder1.seen_metadata:
-        _ = metadata.num_computed_tokens_cpu
+    kv_cache = _reshape_kv_cache(
+        attn_groups,
+        raw_tensors,
+        "auto",
+        [spec.block_size],
+        {},
+    )["layer"]
 
-    assert lazy_seq_lens_init_count == 0
-    assert lazy_num_computed_init_count == 0
-    assert set(attn_metadata) == {"layer0", "layer1"}
-    assert len(builder0.seen_metadata) == 1
-    assert len(builder1.seen_metadata) == 1
-    assert builder0.seen_metadata[0]._seq_lens_cpu is not None
+    assert kv_cache.shape == (num_blocks, 2, 16, 1, 2)
+    assert kv_cache.stride(0) == spec.page_size_bytes // 4
+    assert kv_cache.stride(1) == spec.real_page_size_bytes // 2 // 4
+    assert kv_cache[1, 0].storage_offset() == spec.page_size_bytes // 4
     assert (
-        builder0.seen_metadata[0]._seq_lens_cpu
-        is builder1.seen_metadata[0]._seq_lens_cpu
+        kv_cache[1, 1].storage_offset()
+        == (spec.page_size_bytes + spec.real_page_size_bytes // 2) // 4
     )
-    assert builder0.seen_metadata[0]._num_computed_tokens_cpu is not None
+
+
+def test_reshape_padded_hnd_flash_attention_kv_cache_strides_by_page():
+    num_blocks = 3
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=3,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=1024,
+    )
+    assert spec.real_page_size_bytes == 768
+
+    raw_tensors = {
+        "layer": torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.int8)
+    }
+    attn_groups = [
+        AttentionGroup(
+            backend=FakeHNDFlashAttentionBackend,
+            layer_names=["layer"],
+            kv_cache_spec=spec,
+            kv_cache_group_id=0,
+        )
+    ]
+
+    kv_cache = _reshape_kv_cache(
+        attn_groups,
+        raw_tensors,
+        "auto",
+        [spec.block_size],
+        {},
+    )["layer"]
+
+    assert kv_cache.shape == (num_blocks, 2, 16, 3, 2)
+    assert kv_cache.stride(0) == spec.page_size_bytes // 4
+    assert kv_cache.stride(1) == spec.real_page_size_bytes // 2 // 4
+    assert kv_cache.stride(2) == 2
+    assert kv_cache.stride(3) == spec.block_size * spec.head_size
+    assert kv_cache[1, 0].storage_offset() == spec.page_size_bytes // 4
     assert (
-        builder0.seen_metadata[0]._num_computed_tokens_cpu
-        is builder1.seen_metadata[0]._num_computed_tokens_cpu
+        kv_cache[1, 1].storage_offset()
+        == (spec.page_size_bytes + spec.real_page_size_bytes // 2) // 4
     )
+    assert (
+        kv_cache[1, 1, 3, 2].storage_offset()
+        == (
+            spec.page_size_bytes
+            + spec.real_page_size_bytes // 2
+            + 3 * spec.head_size * 4
+            + 2 * spec.block_size * spec.head_size * 4
+        )
+        // 4
+    )
+
+
+class FakeDiffKVBackend:
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        return (num_blocks, block_size, num_kv_heads, head_size * 2)
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        assert not include_num_layers_dimension
+        return (0, 1, 2, 3)
+
+
+def test_reshape_padded_diff_kv_cache_does_not_infer_kv_dim():
+    num_blocks = 3
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=2,
+        dtype=torch.float32,
+        page_size_padded=384,
+    )
+
+    raw_tensors = {
+        "layer": torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.int8)
+    }
+    attn_groups = [
+        AttentionGroup(
+            backend=FakeDiffKVBackend,
+            layer_names=["layer"],
+            kv_cache_spec=spec,
+            kv_cache_group_id=0,
+        )
+    ]
+
+    kv_cache = _reshape_kv_cache(
+        attn_groups,
+        raw_tensors,
+        "auto",
+        [spec.block_size],
+        {},
+    )["layer"]
+
+    assert kv_cache.shape == (num_blocks, 16, 1, 4)
+    assert kv_cache.stride(0) == spec.page_size_bytes // 4
+    assert kv_cache.stride(1) == 4
+
+
+class FakePerTokenScaleBackend:
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+        cache_dtype_str: str = "auto",
+    ) -> tuple[int, ...]:
+        return (num_blocks, 2, block_size, num_kv_heads, head_size + 4)
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        assert not include_num_layers_dimension
+        return (0, 1, 2, 3, 4)
+
+
+def test_reshape_padded_quantized_kv_cache_preserves_scale_stride():
+    num_blocks = 3
+    spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=1,
+        head_size=4,
+        dtype=torch.int8,
+        kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
+        page_size_padded=384,
+    )
+    assert spec.real_page_size_bytes == 128
+    assert spec.page_size_bytes == 384
+
+    raw_tensors = {
+        "layer": torch.zeros(spec.page_size_bytes * num_blocks, dtype=torch.int8)
+    }
+    attn_groups = [
+        AttentionGroup(
+            backend=FakePerTokenScaleBackend,
+            layer_names=["layer"],
+            kv_cache_spec=spec,
+            kv_cache_group_id=0,
+        )
+    ]
+
+    kv_cache = _reshape_kv_cache(
+        attn_groups,
+        raw_tensors,
+        "int8_per_token_head",
+        [spec.block_size],
+        {},
+    )["layer"]
+
+    assert kv_cache.shape == (num_blocks, 2, 16, 1, 8)
+    assert kv_cache.stride(0) == spec.page_size_bytes
+    assert kv_cache.stride(1) == 16 * 1 * 8
+    assert kv_cache[1, 1].storage_offset() == spec.page_size_bytes + 16 * 1 * 8

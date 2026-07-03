@@ -130,8 +130,12 @@ def test_models(
         monkeypatch.setenv("VLLM_ROCM_USE_AITER", "1")
         if model == "TitanML/tiny-mixtral":
             # Untrained model: near-uniform logits make argmax sensitive to
-            # AITER's bfloat16 rounding error in plain rms_norm.
+            # AITER's bfloat16 rounding error. Route the plain rms_norm and the
+            # fused MoE (whose near-uniform router logits flip expert selection
+            # under ~1 ULP drift) through the native kernels for this model.
+            # See ROCm/aiter#3806 for the tracking issue and minimal repro.
             monkeypatch.setenv("VLLM_ROCM_USE_AITER_RMSNORM", "0")
+            monkeypatch.setenv("VLLM_ROCM_USE_AITER_MOE", "0")
     elif use_rocm_aiter and model not in AITER_MODEL_LIST:
         # Skip model that are not using AITER tests.
         # When more AITER kernels are added, this list will not be
@@ -139,7 +143,20 @@ def test_models(
         # in parts of the operators
         pytest.skip(f"Skipping '{model}' model test with AITER kernel.")
 
-    with hf_runner(model) as hf_model:
+    if model == "bigcode/starcoder2-3b":
+        # Replace example.txt's Test1 (an NL prompt) with a code prompt:
+        # starcoder2-3b is a code model, so NL prompts give near-uniform
+        # digit logits where HF<->vLLM bf16 drift can reorder top-K.
+        example_prompts = list(example_prompts)
+        example_prompts[1] = (
+            "def add(a, b):\n    return a + b\n\ndef sub(a, b):\n    return a - "
+        )
+
+    with hf_runner(
+        model,
+        revision=model_info.revision,
+        trust_remote_code=model_info.trust_remote_code,
+    ) as hf_model:
         hf_outputs = hf_model.generate_greedy_logprobs_limit(
             example_prompts, max_tokens, num_logprobs
         )
@@ -175,6 +192,7 @@ def test_models(
         model,
         tokenizer_name=model_info.tokenizer or model,
         tokenizer_mode=model_info.tokenizer_mode,
+        revision=model_info.revision,
         trust_remote_code=model_info.trust_remote_code,
         # Remove the effects of batch variance on ROCm since batch invariance
         # is not yet supported.

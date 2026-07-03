@@ -8,9 +8,10 @@ import math
 from dataclasses import field
 from enum import Enum, IntEnum
 from functools import cached_property
-from typing import Any, ClassVar
+from typing import Annotated, Any
 
 import msgspec
+from pydantic import BeforeValidator
 from pydantic.dataclasses import dataclass
 
 import vllm.envs as envs
@@ -31,6 +32,35 @@ MAX_LOGPROB_TOKEN_IDS = 128
 the per-request row width allocated by the sampler's `LogprobTokenIdsState`."""
 
 
+def validate_thinking_token_budget(value: int | float | bool | None) -> int | None:
+    """Validate ``thinking_token_budget``; return ``None`` if unset."""
+    if value is None:
+        return None
+    if isinstance(value, (bool, float)) or not isinstance(value, int):
+        raise VLLMValidationError(
+            "`thinking_token_budget` must be a non-negative integer "
+            "or -1 for unlimited.",
+            parameter="thinking_token_budget",
+            value=value,
+        )
+    if value == -1:
+        return None
+    if value < 0:
+        raise VLLMValidationError(
+            "`thinking_token_budget` must be a non-negative integer "
+            "or -1 for unlimited.",
+            parameter="thinking_token_budget",
+            value=value,
+        )
+    return value
+
+
+ThinkingTokenBudget = Annotated[
+    int | None,
+    BeforeValidator(validate_thinking_token_budget),
+]
+
+
 class SamplingType(IntEnum):
     GREEDY = 0
     RANDOM = 1
@@ -40,22 +70,6 @@ class SamplingType(IntEnum):
 # maybe make msgspec?
 @dataclass
 class StructuredOutputsParams:
-    CONSTRAINT_FIELDS: ClassVar[tuple[str, ...]] = (
-        "json",
-        "regex",
-        "choice",
-        "grammar",
-        "json_object",
-        "structural_tag",
-    )
-    NON_STRUCTURAL_TAG_CONSTRAINT_FIELDS: ClassVar[tuple[str, ...]] = (
-        "json",
-        "regex",
-        "choice",
-        "grammar",
-        "json_object",
-    )
-
     # One of these fields will be used to build a logit processor.
     json: str | dict | None = None
     regex: str | None = None
@@ -76,8 +90,14 @@ class StructuredOutputsParams:
     def __post_init__(self):
         """Validate that some fields are mutually exclusive."""
         count = sum(
-            getattr(self, field_name) is not None
-            for field_name in self.CONSTRAINT_FIELDS
+            [
+                self.json is not None,
+                self.regex is not None,
+                self.choice is not None,
+                self.grammar is not None,
+                self.json_object is not None,
+                self.structural_tag is not None,
+            ]
         )
         if count > 1:
             raise ValueError(
@@ -95,17 +115,30 @@ class StructuredOutputsParams:
         Returns True if all structured-output constraint fields are None.
         """
         return all(
-            getattr(self, field_name) is None for field_name in self.CONSTRAINT_FIELDS
+            getattr(self, field) is None
+            for field in (
+                "json",
+                "regex",
+                "choice",
+                "grammar",
+                "json_object",
+                "structural_tag",
+            )
         )
 
     def all_non_structural_tag_constraints_none(self) -> bool:
         """
-        Returns True if all structured-output constraints except
-        ``structural_tag`` are None.
+        Returns True if all structured-output constraint fields are None.
         """
         return all(
-            getattr(self, field_name) is None
-            for field_name in self.NON_STRUCTURAL_TAG_CONSTRAINT_FIELDS
+            getattr(self, field) is None
+            for field in (
+                "json",
+                "regex",
+                "choice",
+                "grammar",
+                "json_object",
+            )
         )
 
 
@@ -292,6 +325,13 @@ class SamplingParams(
     """Arbitrary additional args, that can be used by custom sampling
     implementations, plugins, etc. Not used by any in-tree sampling
     implementations."""
+    routed_experts_prompt_start: int = 0
+    """When enable_return_routed_experts is active, skip the first
+    routed_experts_prompt_start prompt tokens from the returned routing
+    data. In multi-turn agent scenarios, set this to the length of the
+    already-returned prefix to avoid duplicating routing for prompt tokens
+    covered by earlier turns. Default 0 returns routing for all prompt
+    tokens."""
 
     # Fields used for bad words
     bad_words: list[str] | None = None
@@ -345,12 +385,31 @@ class SamplingParams(
         repetition_detection: RepetitionDetectionParams | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
-            # Convert token_id to integer
-            # Clamp the bias between -100 and 100 per OpenAI API spec
-            logit_bias = {
-                int(token): min(100.0, max(-100.0, bias))
-                for token, bias in logit_bias.items()
-            }
+            # Fast path uses a dict comprehension; on failure we iterate once
+            # to identify the exact offending entry for the error message.
+            try:
+                logit_bias = {
+                    int(token): min(100.0, max(-100.0, bias))
+                    for token, bias in logit_bias.items()
+                }
+            except (ValueError, TypeError):
+                invalid_keys = []
+                converted_logit_bias = {}
+                for token, bias in logit_bias.items():
+                    try:
+                        token_id = int(token)
+                    except (ValueError, TypeError):
+                        invalid_keys.append(token)
+                        continue
+                    converted_logit_bias[token_id] = min(100.0, max(-100.0, bias))
+                if invalid_keys:
+                    raise VLLMValidationError(
+                        f"logit_bias contains key(s) that cannot be "
+                        f"converted to integer token IDs: {invalid_keys!r}",
+                        parameter="logit_bias",
+                        value=invalid_keys,
+                    ) from None
+                logit_bias = converted_logit_bias
 
         return SamplingParams(
             n=1 if n is None else n,
@@ -399,6 +458,10 @@ class SamplingParams(
 
         if self.seed == -1:
             self.seed = None
+
+        self.thinking_token_budget = validate_thinking_token_budget(
+            self.thinking_token_budget
+        )
 
         if self.stop is None:
             self.stop = []
@@ -550,6 +613,12 @@ class SamplingParams(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
+        assert isinstance(self.bad_words, list)
+        if any(not bad_word for bad_word in self.bad_words):
+            raise ValueError(
+                f"bad_words cannot contain an empty string. "
+                f"Got bad_words={self.bad_words}"
+            )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
@@ -676,7 +745,9 @@ class SamplingParams(
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
-        self._validate_structured_outputs(structured_outputs_config, tokenizer)
+        self._validate_structured_outputs(
+            model_config, structured_outputs_config, tokenizer
+        )
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
         max_logprobs = model_config.max_logprobs
@@ -702,6 +773,28 @@ class SamplingParams(
                 raise VLLMValidationError(
                     f"Requested logprob_token_ids of length {n}, "
                     f"which is greater than max allowed: {MAX_LOGPROB_TOKEN_IDS}",
+                    parameter="logprob_token_ids",
+                    value=n,
+                )
+            vocab_size = model_config.get_vocab_size()
+            invalid_token_ids = [
+                token_id
+                for token_id in self.logprob_token_ids
+                if token_id < 0 or token_id >= vocab_size
+            ]
+            if invalid_token_ids:
+                raise VLLMValidationError(
+                    f"token_id(s) {invalid_token_ids} in logprob_token_ids "
+                    f"contain out-of-vocab token ids. Vocabulary size: "
+                    f"{vocab_size}",
+                    parameter="logprob_token_ids",
+                    value=invalid_token_ids,
+                )
+            if self.logprobs is not None and self.logprobs != n:
+                raise VLLMValidationError(
+                    f"When both logprobs and logprob_token_ids are set, "
+                    f"logprobs must equal len(logprob_token_ids). Got "
+                    f"logprobs={self.logprobs}, len(logprob_token_ids)={n}.",
                     parameter="logprob_token_ids",
                     value=n,
                 )
@@ -787,11 +880,24 @@ class SamplingParams(
 
     def _validate_structured_outputs(
         self,
+        model_config: ModelConfig,
         structured_outputs_config: StructuredOutputsConfig | None,
         tokenizer: TokenizerLike | None,
     ) -> None:
         if structured_outputs_config is None or self.structured_outputs is None:
             return
+
+        if model_config.is_diffusion:
+            # Diffusion LLMs denoise a whole canvas of tokens in parallel
+            # rather than sampling left-to-right, which the grammar FSM
+            # requires. Without this check, requests fail mid-generation
+            # with an FSM rejection (HTTP 500). See issue #45436.
+            raise ValueError(
+                "Structured outputs are not yet supported for diffusion "
+                "language models. Remove the structured output constraint "
+                "(e.g. `response_format`, `structured_outputs`) from the "
+                "request."
+            )
 
         if tokenizer is None:
             raise ValueError(
@@ -832,6 +938,18 @@ class SamplingParams(
             and self.structured_outputs.grammar.strip() == ""
         ):
             raise ValueError("structured_outputs.grammar cannot be an empty string")
+        # Reject empty string json schema early to avoid engine-side crashes
+        if (
+            isinstance(self.structured_outputs.json, str)
+            and self.structured_outputs.json.strip() == ""
+        ):
+            raise ValueError("structured_outputs.json cannot be an empty string")
+        # Reject json_object=False early to avoid engine-side crashes
+        if self.structured_outputs.json_object is False:
+            raise ValueError(
+                "structured_outputs.json_object must be True if set; omit "
+                "structured_outputs to disable structured outputs"
+            )
 
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
@@ -982,3 +1100,4 @@ class BeamSearchParams(
     temperature: float = 0.0
     length_penalty: float = 1.0
     include_stop_str_in_output: bool = False
+    structured_outputs: StructuredOutputsParams | None = None

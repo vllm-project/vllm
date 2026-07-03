@@ -67,7 +67,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         return self.num_dispatchers_
 
     def output_is_reduced(self) -> bool:
-        return False
+        return True
 
     def topk_indices_dtype(self) -> torch.dtype | None:
         return torch.int32
@@ -106,7 +106,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
                 quant_config.quant_dtype,
                 quant_config.per_act_token_quant,
                 quant_config.block_shape,
-                is_fp4_scale_swizzled=False,  # delay swizzle to after comm
+                is_scale_swizzled=False,  # delay swizzle to after comm
                 mx_alignment=quant_config.mx_alignment,
             )
 
@@ -129,10 +129,7 @@ class FlashInferNVLinkOneSidedPrepareAndFinalize(mk.FusedMoEPrepareAndFinalizeMo
         if a1q_scale is not None:
             a1q_recv, a1q_scale_recv, topk_ids_recv, topk_weights_recv = recv_payloads
             # Apply scale interleaving only for CUTLASS (not TRT-LLM)
-            if (
-                quant_config.quant_dtype == "nvfp4"
-                and quant_config.is_nvfp4_scale_swizzled
-            ):
+            if quant_config.quant_dtype == "nvfp4" and quant_config.is_scale_swizzled:
                 a1q_scale_recv = a1q_scale_recv.view(-1, a1q_scale_recv.shape[-1])
                 a1q_scale_recv = a1q_scale_recv.view(torch.uint8)
                 a1q_scale_recv = nvfp4_block_scale_interleave(a1q_scale_recv)

@@ -5,10 +5,10 @@ import argparse
 import os
 import signal
 import sys
-from collections.abc import Callable
-from typing import TYPE_CHECKING, TypeVar
+import time
+from typing import TYPE_CHECKING
 
-from openai import APIConnectionError, OpenAI
+from openai import OpenAI
 from openai.types.chat import ChatCompletionMessageParam
 
 from vllm.entrypoints.cli.types import CLISubcommand
@@ -18,10 +18,6 @@ if TYPE_CHECKING:
 else:
     FlexibleArgumentParser = argparse.ArgumentParser
 
-DEFAULT_OPENAI_API_URL = "http://localhost:8000/v1"
-
-RequestResult = TypeVar("RequestResult")
-
 
 def _register_signal_handlers():
     def signal_handler(sig, frame):
@@ -29,79 +25,6 @@ def _register_signal_handlers():
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTSTP, signal_handler)
-
-
-def _build_api_connection_error_message(
-    args: argparse.Namespace,
-    error: APIConnectionError,
-) -> str:
-    message_lines = [
-        f"Could not connect to the OpenAI-compatible API server at {args.url}.",
-    ]
-
-    if args.url == DEFAULT_OPENAI_API_URL:
-        message_lines.append(
-            "Start a local server first, for example: vllm serve <model>"
-        )
-    else:
-        message_lines.append(
-            "Check that the server is running and that --url points to its "
-            "/v1 endpoint."
-        )
-
-    if not args.model_name:
-        message_lines.append(
-            "You can also pass --model-name to skip the initial model "
-            "auto-discovery request."
-        )
-
-    message_lines.append(
-        "If the server is running elsewhere, rerun with --url http://<host>:<port>/v1."
-    )
-
-    error_message = str(error)
-    if error_message and error_message != "Connection error.":
-        message_lines.append(f"Underlying error: {error_message}")
-
-    return "\n".join(message_lines)
-
-
-def _run_openai_request(
-    args: argparse.Namespace,
-    request: Callable[[], RequestResult],
-) -> RequestResult:
-    try:
-        return request()
-    except APIConnectionError as error:
-        raise SystemExit(_build_api_connection_error_message(args, error)) from error
-
-
-def _create_chat_completion_stream(
-    args: argparse.Namespace,
-    client: OpenAI,
-    model_name: str,
-    conversation: list[ChatCompletionMessageParam],
-):
-    return _run_openai_request(
-        args,
-        lambda: client.chat.completions.create(
-            model=model_name,
-            messages=conversation,
-            stream=True,
-        ),
-    )
-
-
-def _create_completion_stream(
-    args: argparse.Namespace,
-    client: OpenAI,
-    prompt: str,
-    **kwargs,
-):
-    return _run_openai_request(
-        args,
-        lambda: client.completions.create(prompt=prompt, **kwargs),
-    )
 
 
 def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
@@ -114,7 +37,7 @@ def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
     if args.model_name:
         model_name = args.model_name
     else:
-        available_models = _run_openai_request(args, openai_client.models.list)
+        available_models = openai_client.models.list()
         model_name = available_models.data[0].id
 
     print(f"Using model: {model_name}")
@@ -122,33 +45,62 @@ def _interactive_cli(args: argparse.Namespace) -> tuple[str, OpenAI]:
     return model_name, openai_client
 
 
-def _print_chat_stream(stream) -> str:
+def _print_chat_stream(stream, stats: bool = False) -> str:
     output = ""
+    start = time.perf_counter()
+    ttft: float | None = None
+    completion_tokens = 0
     for chunk in stream:
+        if chunk.usage is not None:
+            completion_tokens = chunk.usage.completion_tokens
+        if not chunk.choices:
+            continue
         delta = chunk.choices[0].delta
         if delta.content:
+            if ttft is None:
+                ttft = time.perf_counter() - start
             output += delta.content
             print(delta.content, end="", flush=True)
     print()
+    if stats:
+        _print_metrics(start, ttft, completion_tokens)
     return output
 
 
-def _print_completion_stream(stream) -> str:
+def _print_metrics(start: float, ttft: float | None, completion_tokens: int) -> None:
+    total_time = time.perf_counter() - start
+    if ttft is None or total_time <= 0:
+        return
+    print(f"{'TTFT:':<5} {ttft * 1000:.2f} ms")
+    print(
+        f"{'TPS:':<5} {completion_tokens / total_time:.2f} tokens/s "
+        f"({completion_tokens} tokens in {total_time:.2f}s)"
+    )
+
+
+def _print_completion_stream(stream, stats: bool = False) -> str:
     output = ""
+    start = time.perf_counter()
+    ttft: float | None = None
+    completion_tokens = 0
     for chunk in stream:
+        if chunk.usage is not None:
+            completion_tokens = chunk.usage.completion_tokens
+        if not chunk.choices:
+            continue
         text = chunk.choices[0].text
-        if text is not None:
+        if text:
+            if ttft is None:
+                ttft = time.perf_counter() - start
             output += text
             print(text, end="", flush=True)
     print()
+    if stats:
+        _print_metrics(start, ttft, completion_tokens)
     return output
 
 
 def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
-    request_args = argparse.Namespace(
-        url=str(getattr(client, "base_url", DEFAULT_OPENAI_API_URL)),
-        model_name=model_name,
-    )
     conversation: list[ChatCompletionMessageParam] = []
     if system_prompt is not None:
         conversation.append({"role": "system", "content": system_prompt})
@@ -161,11 +113,8 @@ def chat(system_prompt: str | None, model_name: str, client: OpenAI) -> None:
             break
         conversation.append({"role": "user", "content": input_message})
 
-        stream = _create_chat_completion_stream(
-            request_args,
-            client,
-            model_name,
-            conversation,
+        stream = client.chat.completions.create(
+            model=model_name, messages=conversation, stream=True
         )
         output = _print_chat_stream(stream)
         conversation.append({"role": "assistant", "content": output})
@@ -175,7 +124,7 @@ def _add_query_options(parser: FlexibleArgumentParser) -> FlexibleArgumentParser
     parser.add_argument(
         "--url",
         type=str,
-        default=DEFAULT_OPENAI_API_URL,
+        default="http://localhost:8000/v1",
         help="url of the running OpenAI-Compatible RESTful API server",
     )
     parser.add_argument(
@@ -212,21 +161,23 @@ class ChatCommand(CLISubcommand):
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
         system_prompt = args.system_prompt
+        stats = args.stats
         conversation: list[ChatCompletionMessageParam] = []
 
         if system_prompt is not None:
             conversation.append({"role": "system", "content": system_prompt})
 
+        create_kwargs = {"model": model_name, "stream": True}
+        if stats:
+            create_kwargs["stream_options"] = {"include_usage": True}
+
         if args.quick:
             conversation.append({"role": "user", "content": args.quick})
 
-            stream = _create_chat_completion_stream(
-                args,
-                client,
-                model_name,
-                conversation,
+            stream = client.chat.completions.create(
+                messages=conversation, **create_kwargs
             )
-            output = _print_chat_stream(stream)
+            output = _print_chat_stream(stream, stats)
             conversation.append({"role": "assistant", "content": output})
             return
 
@@ -238,13 +189,10 @@ class ChatCommand(CLISubcommand):
                 break
             conversation.append({"role": "user", "content": input_message})
 
-            stream = _create_chat_completion_stream(
-                args,
-                client,
-                model_name,
-                conversation,
+            stream = client.chat.completions.create(
+                messages=conversation, **create_kwargs
             )
-            output = _print_chat_stream(stream)
+            output = _print_chat_stream(stream, stats)
             conversation.append({"role": "assistant", "content": output})
 
     @staticmethod
@@ -266,6 +214,11 @@ class ChatCommand(CLISubcommand):
             type=str,
             metavar="MESSAGE",
             help=("Send a single prompt as MESSAGE and print the response, then exit."),
+        )
+        parser.add_argument(
+            "--stats",
+            action="store_true",
+            help="Print TTFT and TPS statistics after each response.",
         )
         return parser
 
@@ -289,6 +242,7 @@ class CompleteCommand(CLISubcommand):
     @staticmethod
     def cmd(args: argparse.Namespace) -> None:
         model_name, client = _interactive_cli(args)
+        stats = args.stats
 
         kwargs = {
             "model": model_name,
@@ -296,10 +250,12 @@ class CompleteCommand(CLISubcommand):
         }
         if args.max_tokens:
             kwargs["max_tokens"] = args.max_tokens
+        if stats:
+            kwargs["stream_options"] = {"include_usage": True}
 
         if args.quick:
-            stream = _create_completion_stream(args, client, args.quick, **kwargs)
-            _print_completion_stream(stream)
+            stream = client.completions.create(prompt=args.quick, **kwargs)
+            _print_completion_stream(stream, stats)
             return
 
         print("Please enter prompt to complete:")
@@ -308,13 +264,8 @@ class CompleteCommand(CLISubcommand):
                 input_prompt = input("> ")
             except EOFError:
                 break
-            stream = _create_completion_stream(
-                args,
-                client,
-                input_prompt,
-                **kwargs,
-            )
-            _print_completion_stream(stream)
+            stream = client.completions.create(prompt=input_prompt, **kwargs)
+            _print_completion_stream(stream, stats)
 
     @staticmethod
     def add_cli_args(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
@@ -331,6 +282,11 @@ class CompleteCommand(CLISubcommand):
             type=str,
             metavar="PROMPT",
             help="Send a single prompt and print the completion output, then exit.",
+        )
+        parser.add_argument(
+            "--stats",
+            action="store_true",
+            help="Print TTFT and TPS statistics after each response.",
         )
         return parser
 

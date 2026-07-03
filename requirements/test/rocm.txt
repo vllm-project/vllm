@@ -42,6 +42,11 @@ anyio==4.13.0
     #   sse-starlette
     #   starlette
     #   watchfiles
+apache-tvm-ffi==0.1.10
+    # via
+    #   -c requirements/rocm.txt
+    #   tilelang
+    #   xgrammar
 arctic-inference==0.1.1
     # via -r requirements/test/rocm.in
 argcomplete==3.6.3
@@ -122,7 +127,11 @@ click==8.3.1
     #   typer
     #   uvicorn
 cloudpickle==3.1.2
-    # via -r requirements/test/../common.txt
+    # via
+    #   -r requirements/test/../common.txt
+    #   tilelang
+cohere-melody==0.9.0
+    # via -r requirements/test/rocm.in
 colorama==0.4.6
     # via
     #   perceptron
@@ -131,7 +140,7 @@ colorful==0.5.8
     # via ray
 colorlog==6.10.1
     # via optuna
-compressed-tensors==0.15.0.1
+compressed-tensors==0.17.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -198,7 +207,6 @@ docstring-parser==0.17.0
 einops==0.8.2
     # via
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
     #   encodec
     #   vector-quantize-pytorch
     #   vocos
@@ -228,8 +236,10 @@ fastar==0.10.0
     # via fastapi-cloud-cli
 fastparquet==2026.3.0
     # via genai-perf
-fastsafetensors @ git+https://github.com/foundation-model-stack/fastsafetensors.git@65d80088fca7a8f567fba30415fbcc80f7d2259c
-    # via -r requirements/test/rocm.in
+fastsafetensors==0.3.2
+    # via
+    #   -c requirements/rocm.txt
+    #   -r requirements/test/rocm.in
 filelock==3.25.2
     # via
     #   -c requirements/common.txt
@@ -262,10 +272,6 @@ genai-perf==0.0.16
     # via -r requirements/test/rocm.in
 genson==1.3.0
     # via datamodel-code-generator
-gguf==0.18.0
-    # via
-    #   -c requirements/common.txt
-    #   -r requirements/test/../common.txt
 google-api-core==2.30.0
     # via
     #   google-cloud-core
@@ -398,7 +404,6 @@ isort==8.0.1
     # via datamodel-code-generator
 jinja2==3.1.6
     # via
-    #   -r requirements/test/../common.txt
     #   datamodel-code-generator
     #   fastapi
     #   genai-perf
@@ -422,6 +427,8 @@ joblib==1.5.3
     #   scikit-learn
 jsonschema==4.26.0
     # via
+    #   -c requirements/common.txt
+    #   -r requirements/test/../common.txt
     #   hypothesis-jsonschema
     #   mcp
     #   mistral-common
@@ -450,7 +457,7 @@ libnacl==2.1.0
     # via tensorizer
 librosa==0.10.2.post1
     # via -r requirements/test/rocm.in
-llguidance==1.3.0
+llguidance==1.7.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -493,11 +500,13 @@ mcp==1.27.0
     # via -r requirements/test/../common.txt
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.11.2
+mistral-common==1.11.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
     #   -r requirements/test/rocm.in
+ml-dtypes==0.5.4
+    # via tilelang
 model-hosting-container-standards==0.1.14
     # via
     #   -c requirements/common.txt
@@ -553,7 +562,6 @@ numba==0.65.0
 numpy==2.2.6
     # via
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
     #   accelerate
     #   albumentations
     #   bitsandbytes
@@ -567,13 +575,13 @@ numpy==2.2.6
     #   evaluate
     #   fastparquet
     #   genai-perf
-    #   gguf
     #   imagehash
     #   imageio
     #   librosa
     #   lm-eval
     #   matplotlib
     #   mistral-common
+    #   ml-dtypes
     #   mteb
     #   numba
     #   opencv-python-headless
@@ -597,6 +605,7 @@ numpy==2.2.6
     #   statsmodels
     #   tensorizer
     #   tifffile
+    #   tilelang
     #   torchvision
     #   transformers
     #   tritonclient
@@ -621,7 +630,6 @@ opencv-python-headless==4.13.0.92
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
     #   albumentations
     #   mistral-common
 openpyxl==3.1.5
@@ -678,15 +686,13 @@ orjson==3.11.7
     # via
     #   genai-perf
     #   kaleido
-outlines-core==0.2.11
+outlines-core==0.2.14
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
 packaging==26.0
     # via
-    #   -c requirements/common.txt
     #   -c requirements/rocm.txt
-    #   -r requirements/test/../common.txt
     #   accelerate
     #   bitsandbytes
     #   black
@@ -800,6 +806,7 @@ psutil==7.2.2
     #   accelerate
     #   peft
     #   tensorizer
+    #   tilelang
 py==1.11.0
     # via pytest-forked
 py-cpuinfo==9.0.0
@@ -826,7 +833,6 @@ pydantic==2.12.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
     #   albumentations
     #   anthropic
     #   compressed-tensors
@@ -934,7 +940,6 @@ pyyaml==6.0.3
     #   datamodel-code-generator
     #   datasets
     #   genai-perf
-    #   gguf
     #   huggingface-hub
     #   lm-format-enforcer
     #   optuna
@@ -979,7 +984,6 @@ requests==2.32.5
     #   datasets
     #   docker
     #   evaluate
-    #   gguf
     #   google-api-core
     #   google-cloud-storage
     #   gpt-oss
@@ -1125,7 +1129,7 @@ sqlitedict==2.1.0
     # via lm-eval
 sse-starlette==3.3.4
     # via mcp
-starlette==1.2.1
+starlette==1.3.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1177,6 +1181,10 @@ tiktoken==0.12.0
     #   gpt-oss
     #   lm-eval
     #   mistral-common
+tilelang==0.1.10
+    # via
+    #   -c requirements/rocm.txt
+    #   -r requirements/test/rocm.in
 timm==1.0.17
     # via
     #   -c requirements/rocm.txt
@@ -1189,12 +1197,13 @@ tokenizers==0.22.2
     #   -r requirements/test/../common.txt
     #   -r requirements/test/rocm.in
     #   transformers
+torch-c-dlpack-ext==0.1.5
+    # via tilelang
 tqdm==4.67.3
     # via
     #   -r requirements/test/../common.txt
     #   datasets
     #   evaluate
-    #   gguf
     #   huggingface-hub
     #   lm-eval
     #   mteb
@@ -1206,6 +1215,7 @@ tqdm==4.67.3
     #   pqdm
     #   segmentation-models-pytorch
     #   sentence-transformers
+    #   tilelang
     #   transformers
 transformers==5.5.3
     # via
@@ -1246,6 +1256,7 @@ typing-extensions==4.15.0
     #   alembic
     #   anthropic
     #   anyio
+    #   apache-tvm-ffi
     #   azure-core
     #   azure-identity
     #   azure-storage-blob
@@ -1275,6 +1286,7 @@ typing-extensions==4.15.0
     #   sentence-transformers
     #   sqlalchemy
     #   starlette
+    #   tilelang
     #   torch
     #   typeguard
     #   typing-inspection
@@ -1323,7 +1335,7 @@ word2number==1.1
     # via lm-eval
 wrapt==2.1.2
     # via smart-open
-xgrammar==0.1.33
+xgrammar==0.2.1
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1333,6 +1345,8 @@ xxhash==3.6.0
     #   evaluate
 yarl==1.23.0
     # via aiohttp
+z3-solver==4.15.4.0
+    # via tilelang
 zipp==3.23.0
     # via importlib-metadata
 

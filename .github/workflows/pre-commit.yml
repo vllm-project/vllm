@@ -20,9 +20,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
     - name: Check PR label and author merge count
-      uses: actions/github-script@ed597411d8f924073f98dfc5c65a23a2325f34cd # v8.0.0
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
       with:
-        retries: 3
         script: |
           const { data: pr } = await github.rest.pulls.get({
             ...context.repo,
@@ -47,60 +46,19 @@ jobs:
   pre-commit:
     needs: pre-run-check
     if: always() && (needs.pre-run-check.result == 'success' || needs.pre-run-check.result == 'skipped')
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux, x64, vllm-runners]
     steps:
-    - uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 # v6.0.1
-      with:
-        fetch-depth: 0
+    - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
     - uses: actions/setup-python@83679a892e2d95755f2dac6acb0bfd1e9ac5d548 # v6.1.0
       with:
-        python-version: "3.11"
-    - name: Install actionlint
-      run: |
-        mkdir -p "$HOME/.local/bin"
-        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-        curl -fsSL \
-          https://github.com/rhysd/actionlint/releases/download/v1.7.7/actionlint_1.7.7_linux_amd64.tar.gz \
-          -o /tmp/actionlint.tar.gz
-        tar -xzf /tmp/actionlint.tar.gz -C /tmp
-        install -m 0755 /tmp/actionlint "$HOME/.local/bin/actionlint"
-    - name: Install shellcheck
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y shellcheck
+        python-version: "3.12"
+    # Provide shellcheck on PATH so tools/pre_commit/shellcheck.sh skips its
+    # wget + tar -xJ self-download, which the self-hosted runner image lacks
+    # (no wget/xz). Pinned to shellcheck 0.10.0 to match the script's "stable".
+    - run: python -m pip install shellcheck-py==0.10.0.1
     - run: echo "::add-matcher::.github/workflows/matchers/actionlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/markdownlint.json"
     - run: echo "::add-matcher::.github/workflows/matchers/mypy.json"
-    - name: Run actionlint
-      run: actionlint -color
-    - name: Determine pre-commit range
-      id: pre_commit_range
-      run: |
-        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-          echo "from_ref=${{ github.event.pull_request.base.sha }}" >> "$GITHUB_OUTPUT"
-          echo "to_ref=${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
-        elif [[ -n "${{ github.event.before }}" && "${{ github.event.before }}" != "0000000000000000000000000000000000000000" ]]; then
-          echo "from_ref=${{ github.event.before }}" >> "$GITHUB_OUTPUT"
-          echo "to_ref=${{ github.sha }}" >> "$GITHUB_OUTPUT"
-        else
-          echo "full_scan=true" >> "$GITHUB_OUTPUT"
-        fi
-    - name: Install pre-commit
-      run: python -m pip install pre-commit
-    - name: Run pre-commit
-      env:
-        PRE_COMMIT_HOME: ${{ runner.temp }}/.cache/pre-commit
-        GOCACHE: ${{ runner.temp }}/.cache/go-build
-        XDG_CACHE_HOME: ${{ runner.temp }}/.cache
-        XDG_CONFIG_HOME: ${{ runner.temp }}/.config
-        UV_CACHE_DIR: ${{ runner.temp }}/.cache/uv
-        SKIP: actionlint
-      run: |
-        if [[ "${{ steps.pre_commit_range.outputs.full_scan }}" == "true" ]]; then
-          pre-commit run --all-files --hook-stage manual
-        else
-          pre-commit run \
-            --from-ref "${{ steps.pre_commit_range.outputs.from_ref }}" \
-            --to-ref "${{ steps.pre_commit_range.outputs.to_ref }}" \
-            --hook-stage manual
-        fi
+    - uses: pre-commit/action@2c7b3805fd2a0fd8c1884dcaebf91fc102a13ecd # v3.0.1
+      with:
+        extra_args: --all-files --hook-stage manual

@@ -5,10 +5,12 @@ import math
 import random
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 
 import pytest
 import torch
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
@@ -557,15 +559,21 @@ def test_contexted_kv_attention_alibi(
             query_len, seq_len, alibi_slopes, device, dtype
         )
 
-        # Compute attention
-        out = F.scaled_dot_product_attention(
-            q_sdpa,
-            k_sdpa,
-            v_sdpa,
-            attn_mask=alibi_mask,
-            dropout_p=0.0,
-            scale=scale,
-        )
+        # Compute attention. On ROCm we force use of the Math SDPA backend rather than
+        # the Flash or Mem-Efficient backends for increased numerical accuracy
+        if current_platform.is_rocm():
+            sdpa_context = sdpa_kernel(SDPBackend.MATH)
+        else:
+            sdpa_context = nullcontext()
+        with sdpa_context:
+            out = F.scaled_dot_product_attention(
+                q_sdpa,
+                k_sdpa,
+                v_sdpa,
+                attn_mask=alibi_mask,
+                dropout_p=0.0,
+                scale=scale,
+            )
 
         # Reshape output back to [query_len, num_heads, head_size]
         out = out.view(num_heads, query_len, head_size).permute(1, 0, 2)

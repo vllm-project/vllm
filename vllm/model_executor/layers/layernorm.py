@@ -9,10 +9,8 @@ import torch.nn.functional as F
 # Import kernels
 import vllm.kernels  # noqa: F401
 from vllm import envs, ir
-from vllm.config import get_current_vllm_config
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
-from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.batch_invariant import rms_norm_batch_invariant
 
 logger = init_logger(__name__)
@@ -66,19 +64,12 @@ class RMSNorm(CustomOp):
         if self.has_weight:
             self.weight = nn.Parameter(self.weight)
 
-        # Do not pass identity weight to native implementation (causes issue on TPU).
-        # Other implementations require weight to be passed even if all ones.
-        # Cheat and predict if native will be dispatched to:
-        #  1) if native is first in priority list
-        #  2) if variance_size_override is given (only supported by native impl)
-        # TODO(luka): address weight passing inconsistency:
-        # https://github.com/vllm-project/vllm/issues/39370
-        priority = get_current_vllm_config().kernel_config.ir_op_priority
-        var_override = self.variance_size_override is not None
-        native_rms_norm = priority.rms_norm[0] == "native" or var_override
-        native_add_rms_norm = priority.fused_add_rms_norm[0] == "native" or var_override
-        self.pass_weight = self.has_weight or not native_rms_norm
-        self.pass_weight_add = self.has_weight or not native_add_rms_norm
+        # When has_weight=False, pass weight=None so implementations that
+        # support a weightless path can skip the per-channel multiply.
+        # Implementations that require weight (e.g. oink) fall back via IR
+        # op priority when weight=None is unsupported.
+        self.pass_weight = self.has_weight
+        self.pass_weight_add = self.has_weight
 
     def forward_native(
         self,
@@ -107,12 +98,16 @@ class RMSNorm(CustomOp):
         x: torch.Tensor,
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
-        if (
-            envs.VLLM_BATCH_INVARIANT
-            and residual is None
-            and self.variance_size_override is None
-        ):
-            return rms_norm_batch_invariant(x, self.weight.data, self.variance_epsilon)
+        if envs.VLLM_BATCH_INVARIANT:
+            assert self.variance_size_override is None, (
+                "Batch invariance is not supported for variance_size_override"
+            )
+            return rms_norm_batch_invariant(
+                x,
+                self.weight.data,
+                self.variance_epsilon,
+                residual=residual,
+            )
 
         return self.forward_native(x, residual)
 
@@ -156,20 +151,10 @@ class GemmaRMSNorm(CustomOp):
         residual: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
         """PyTorch-native implementation equivalent to forward()."""
-        orig_dtype = x.dtype
-        weight = self.weight.data.float() + 1.0
-        if residual is not None:
-            x = (
-                x.float() + residual.float()
-                if orig_dtype == torch.float16
-                else x + residual
-            )
-            residual = x
-        # ir.ops.rms_norm handles fp32 upcast internally
-        out = ir.ops.rms_norm(x, weight, self.variance_epsilon)
-        return (
-            out.to(orig_dtype) if residual is None else (out.to(orig_dtype), residual)
-        )
+        weight = self.weight.float() + 1.0
+        if residual is None:
+            return ir.ops.rms_norm(x, weight, self.variance_epsilon)
+        return ir.ops.fused_add_rms_norm(x, residual, weight, self.variance_epsilon)
 
     def forward_cuda(
         self,
@@ -187,7 +172,7 @@ class RMSNormGated(CustomOp):
     This is a native PyTorch implementation that supports:
     - Standard RMS normalization
     - Group RMS normalization
-    - Optional gating with configurable activation
+    - Optional gating with SiLU activation
     """
 
     # --8<-- [end:rms_norm_gated]
@@ -211,8 +196,8 @@ class RMSNormGated(CustomOp):
                         having group_size elements.
                         group_size=None is equivalent to group_size=hidden_size
                         (i.e. there's only 1 group).
-            norm_before_gate: If True and z is provided: out = norm(x) * act(z)
-                              If False and z is provided: out = norm(x * act(z))
+            norm_before_gate: If True and z is provided: out = norm(x) * silu(z)
+                              If False and z is provided: out = norm(x * silu(z))
             device: Device to create parameters on
             dtype: Data type for parameters
             activation: Activation function name for gating
@@ -230,56 +215,70 @@ class RMSNormGated(CustomOp):
     def reset_parameters(self):
         torch.nn.init.ones_(self.weight)
 
-    def forward_native(
-        self, x: torch.Tensor, z: torch.Tensor | None = None
+    @staticmethod
+    def forward_static(
+        x: torch.Tensor,
+        z: torch.Tensor | None,
+        weight: torch.Tensor,
+        epsilon: float,
+        orig_dtype: torch.dtype,
+        group_size: int | None = None,
+        norm_before_gate: bool = True,
+        activation: str = "swish",
     ) -> torch.Tensor:
+        """Pure-PyTorch RMS normalization with optional gating.
+
+        This static method contains the full native logic so that both
+        ``forward_native`` and ``MatcherRMSNormGated`` (used by the
+        compilation pattern matcher) can share the same implementation.
+
+        If *z* is not None and *norm_before_gate* is True:
+            ``out = rms_norm(x) * act(z)``
+        If *z* is not None and *norm_before_gate* is False:
+            ``out = rms_norm(x * act(z))``
         """
-        Native PyTorch implementation of RMS normalization with gating.
-
-        Args:
-            x: Input tensor
-            z: Optional gating tensor
-
-        Returns:
-            Normalized (and optionally gated) tensor
-
-        If z is not None:
-            - norm_before_gate=True: out = norm(x) * act(z)
-            - norm_before_gate=False: out = norm(x * act(z))
-        """
-        orig_dtype = x.dtype
         x = x.float()
-        weight = self.weight.float()
-        z = z.float() if z is not None else None
-        act_fn = get_act_fn(self.activation)
+        weight = weight.float()
+        if z is not None:
+            z = z.float()
 
-        assert self.activation in ["silu", "sigmoid", "swish"]
-        act_fn = F.sigmoid if self.activation == "sigmoid" else F.silu
+        assert activation in ["silu", "sigmoid", "swish"]
+        act_fn = F.sigmoid if activation == "sigmoid" else F.silu
 
-        # Apply gating before normalization if needed
-        if z is not None and not self.norm_before_gate:
+        if z is not None and not norm_before_gate:
             x = x * act_fn(z)
 
-        # RMS Normalization
-        if self.group_size is None:
-            # Standard RMS norm across the last dimension
+        if group_size is None:
             variance = x.pow(2).mean(dim=-1, keepdim=True)
-            x_normed = x * torch.rsqrt(variance + self.eps)
+            x_normed = x * torch.rsqrt(variance + epsilon)
             out = x_normed * weight
         else:
-            # Group RMS norm
             from einops import rearrange
 
-            x_group = rearrange(x, "... (g d) -> ... g d", d=self.group_size)
+            x_group = rearrange(x, "... (g d) -> ... g d", d=group_size)
             variance = x_group.pow(2).mean(dim=-1, keepdim=True)
-            x_normed = x_group * torch.rsqrt(variance + self.eps)
+            x_normed = x_group * torch.rsqrt(variance + epsilon)
             out = rearrange(x_normed, "... g d -> ... (g d)") * weight
 
-        # Apply gating after normalization if needed
-        if z is not None and self.norm_before_gate:
+        if z is not None and norm_before_gate:
             out = out * act_fn(z)
 
         return out.to(orig_dtype)
+
+    def forward_native(
+        self, x: torch.Tensor, z: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """PyTorch-native implementation equivalent to forward()."""
+        return self.forward_static(
+            x,
+            z,
+            self.weight,
+            self.eps,
+            x.dtype,
+            group_size=self.group_size,
+            norm_before_gate=self.norm_before_gate,
+            activation=self.activation,
+        )
 
     def forward_cuda(
         self, x: torch.Tensor, z: torch.Tensor | None = None

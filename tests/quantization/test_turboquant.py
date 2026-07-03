@@ -6,6 +6,7 @@ Run: .venv/bin/python -m pytest tests/quantization/test_turboquant.py -v
 """
 
 import math
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -182,20 +183,221 @@ class TestTurboQuantConfig:
 
     # ---- Boundary skip layers ----
 
+    @staticmethod
+    def _dense_model_config(num_layers):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            is_hybrid=False,
+            hf_text_config=SimpleNamespace(num_hidden_layers=num_layers),
+        )
+
     def test_boundary_skip_layers_basic(self):
-        layers = TurboQuantConfig.get_boundary_skip_layers(32)
+        mc = self._dense_model_config(32)
+        layers = TurboQuantConfig.get_boundary_skip_layers(mc)
         assert layers == ["0", "1", "30", "31"]
 
     def test_boundary_skip_layers_zero(self):
-        assert TurboQuantConfig.get_boundary_skip_layers(32, 0) == []
+        mc = self._dense_model_config(32)
+        assert TurboQuantConfig.get_boundary_skip_layers(mc, 0) == []
 
     def test_boundary_skip_layers_small_model(self):
-        layers = TurboQuantConfig.get_boundary_skip_layers(4)
+        mc = self._dense_model_config(4)
+        layers = TurboQuantConfig.get_boundary_skip_layers(mc)
         assert layers == ["0", "1", "2", "3"]
 
     def test_boundary_skip_layers_cap_at_half(self):
-        layers = TurboQuantConfig.get_boundary_skip_layers(8, 10)
+        mc = self._dense_model_config(8)
+        layers = TurboQuantConfig.get_boundary_skip_layers(mc, 10)
         assert len(layers) == 8
+
+
+class TestHybridAttentionIndices:
+    """Regression tests for boundary protection on hybrid models.
+
+    Hybrid models (attention + Mamba / linear-attention) identify KV-carrying
+    layers via layer_types / layers_block_type / attn_type_list. The helper
+    must return the *global* layer indices of the full-attention layers so
+    that kv_cache_dtype_skip_layers matches what extract_layer_index(prefix)
+    reports on the Attention layers at runtime.
+    """
+
+    @staticmethod
+    def _fake_model_config(text_cfg=None, hf_cfg=None):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            hf_text_config=text_cfg if text_cfg is not None else SimpleNamespace(),
+            hf_config=hf_cfg if hf_cfg is not None else SimpleNamespace(),
+        )
+
+    def test_layer_types_full_attention(self):
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            _get_full_attention_layer_indices,
+        )
+
+        cfg = type("C", (), {})()
+        cfg.layer_types = [
+            "linear_attention",
+            "linear_attention",
+            "full_attention",
+            "linear_attention",
+            "full_attention",
+            "full_attention",
+        ]
+        mc = self._fake_model_config(text_cfg=cfg)
+        assert _get_full_attention_layer_indices(mc) == [2, 4, 5]
+
+    def test_layers_block_type_jamba(self):
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            _get_full_attention_layer_indices,
+        )
+
+        cfg = type("C", (), {})()
+        cfg.layers_block_type = ["mamba", "attention", "mamba", "attention"]
+        mc = self._fake_model_config(text_cfg=cfg)
+        assert _get_full_attention_layer_indices(mc) == [1, 3]
+
+    def test_attn_type_list_minimax(self):
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            _get_full_attention_layer_indices,
+        )
+
+        hf = type("C", (), {})()
+        hf.attn_type_list = [0, 1, 0, 1, 1]
+        mc = self._fake_model_config(hf_cfg=hf)
+        assert _get_full_attention_layer_indices(mc) == [1, 3, 4]
+
+    def test_no_hybrid_hints_returns_empty(self):
+        from vllm.model_executor.layers.quantization.turboquant.config import (
+            _get_full_attention_layer_indices,
+        )
+
+        mc = self._fake_model_config()
+        assert _get_full_attention_layer_indices(mc) == []
+
+
+class TestTurboQuantWorkspaceReservation:
+    @staticmethod
+    def _fake_vllm_config(
+        *,
+        max_num_seqs: int = 16,
+        max_num_batched_tokens: int = 4096,
+        enable_chunked_prefill: bool = True,
+        max_model_len: int = 8192,
+        dtype: torch.dtype = torch.float16,
+        max_num_kv_splits: int = 4,
+    ):
+        return SimpleNamespace(
+            scheduler_config=SimpleNamespace(
+                max_num_seqs=max_num_seqs,
+                max_num_batched_tokens=max_num_batched_tokens,
+                enable_chunked_prefill=enable_chunked_prefill,
+            ),
+            model_config=SimpleNamespace(
+                max_model_len=max_model_len,
+                dtype=dtype,
+                get_num_attention_heads=lambda parallel_config: 8,
+            ),
+            parallel_config=SimpleNamespace(
+                tensor_parallel_size=2,
+                decode_context_parallel_size=1,
+            ),
+            attention_config=SimpleNamespace(
+                tq_max_kv_splits_for_cuda_graph=max_num_kv_splits
+            ),
+        )
+
+    @staticmethod
+    def _fake_kv_cache_spec():
+        from vllm.v1.kv_cache_interface import TQFullAttentionSpec
+
+        return TQFullAttentionSpec(
+            block_size=32,
+            num_kv_heads=4,
+            head_size=128,
+            head_size_v=128,
+            dtype=torch.uint8,
+            tq_slot_size=102,
+        )
+
+    def test_metadata_builder_reserves_decode_and_continuation_prefill_workspace(
+        self, monkeypatch
+    ):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        calls = []
+
+        class FakeWorkspaceManager:
+            def get_simultaneous(self, *shapes_and_dtypes):
+                calls.append(shapes_and_dtypes)
+
+        monkeypatch.setattr(
+            turboquant_attn,
+            "current_workspace_manager",
+            lambda: FakeWorkspaceManager(),
+        )
+        monkeypatch.setattr(
+            turboquant_attn,
+            "is_workspace_manager_initialized",
+            lambda: True,
+        )
+
+        turboquant_attn.TurboQuantMetadataBuilder(
+            kv_cache_spec=self._fake_kv_cache_spec(),
+            layer_names=["layers.0.self_attn.attn"],
+            vllm_config=self._fake_vllm_config(),
+            device=torch.device("cuda"),
+        )
+
+        assert calls == [
+            (
+                ((16, 8, 4, 129), torch.float32),
+                ((16, 8, 128), torch.float16),
+                ((16, 8), torch.float32),
+            ),
+            (
+                ((1, 4, 8192, 128), torch.float16),
+                ((1, 4, 8192, 128), torch.float16),
+            ),
+        ]
+
+    def test_metadata_builder_skips_continuation_prefill_when_disabled(
+        self, monkeypatch
+    ):
+        from vllm.v1.attention.backends import turboquant_attn
+
+        calls = []
+
+        class FakeWorkspaceManager:
+            def get_simultaneous(self, *shapes_and_dtypes):
+                calls.append(shapes_and_dtypes)
+
+        monkeypatch.setattr(
+            turboquant_attn,
+            "current_workspace_manager",
+            lambda: FakeWorkspaceManager(),
+        )
+        monkeypatch.setattr(
+            turboquant_attn,
+            "is_workspace_manager_initialized",
+            lambda: True,
+        )
+
+        turboquant_attn.TurboQuantMetadataBuilder(
+            kv_cache_spec=self._fake_kv_cache_spec(),
+            layer_names=["layers.0.self_attn.attn"],
+            vllm_config=self._fake_vllm_config(enable_chunked_prefill=False),
+            device=torch.device("cuda"),
+        )
+
+        assert calls == [
+            (
+                ((16, 8, 4, 129), torch.float32),
+                ((16, 8, 128), torch.float16),
+                ((16, 8), torch.float32),
+            )
+        ]
 
 
 # ============================================================================

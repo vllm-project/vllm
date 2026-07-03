@@ -515,3 +515,68 @@ def test_prefill_split_across_ubatches(
         # Map to original request index
         orig_idx = split_req_idx + j
         assert int(second_meta.seq_lens[j]) == seq_lens[orig_idx]
+
+
+def test_build_attention_metadata_zeros_stale_is_prefilling():
+    """_build_attention_metadata zeroes is_prefilling for padded rows."""
+    from unittest.mock import MagicMock, patch
+
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+    num_reqs = 3
+    num_reqs_padded = 5
+
+    # Real rows [0-2] have known computed/prompt values; padded rows [3-4]
+    # carry stale data from a prior prefill (num_computed < num_prompt → True).
+    num_computed = torch.tensor([50, 100, 200, 10, 20], dtype=torch.int32)
+    num_prompt = torch.tensor([50, 200, 200, 100, 200], dtype=torch.int32)
+
+    runner = MagicMock()
+    runner.kv_cache_config.kv_cache_groups = [
+        MagicMock()
+    ]  # non-empty: skip early return
+    runner.attn_groups = [[]]  # empty inner list: inner loop never runs
+    runner.input_batch.num_computed_tokens_cpu_tensor = num_computed
+    runner.input_batch.num_prompt_tokens_cpu_tensor = num_prompt
+    runner.optimistic_seq_lens_cpu = torch.tensor([100, 200, 300, 0, 0])
+    runner.query_start_loc.gpu = torch.zeros(num_reqs_padded + 1, dtype=torch.int32)
+    runner.query_start_loc.cpu = torch.zeros(num_reqs_padded + 1, dtype=torch.int32)
+    runner.seq_lens = torch.zeros(num_reqs_padded, dtype=torch.int32)
+    runner.positions = torch.zeros(num_reqs_padded, dtype=torch.int64)
+    runner.routed_experts_initialized = False
+    runner.use_async_spec_decode = False
+    runner.dcp_world_size = 1
+    runner.speculative_config = None
+    runner.is_mm_prefix_lm = False
+    runner._get_encoder_seq_lens.return_value = (None, None)
+
+    # Intercept CommonAttentionMetadata construction to capture is_prefilling.
+    # With speculative_config=None the constructor is called exactly once (for
+    # cm_base), so captured reflects what the fix produced before storage.
+    captured_is_prefilling = None
+    original_init = CommonAttentionMetadata.__init__
+
+    def capturing_init(self, *args, **kwargs):
+        nonlocal captured_is_prefilling
+        if "is_prefilling" in kwargs:
+            captured_is_prefilling = kwargs["is_prefilling"]
+        original_init(self, *args, **kwargs)
+
+    with patch.object(CommonAttentionMetadata, "__init__", capturing_init):
+        GPUModelRunner._build_attention_metadata(
+            runner,
+            num_tokens=num_reqs,
+            num_reqs=num_reqs,
+            max_query_len=1,
+            num_tokens_padded=num_reqs_padded,
+            num_reqs_padded=num_reqs_padded,
+            slot_mappings={0: torch.zeros(num_reqs_padded, dtype=torch.int64)},
+        )
+
+    assert captured_is_prefilling is not None
+    assert not captured_is_prefilling[0]  # decode  (50 >= 50)
+    assert captured_is_prefilling[1]  # prefill (100 < 200)
+    assert not captured_is_prefilling[2]  # decode  (200 >= 200)
+    assert not captured_is_prefilling[3]  # stale data (10 < 100) zeroed
+    assert not captured_is_prefilling[4]  # stale data (20 < 200) zeroed

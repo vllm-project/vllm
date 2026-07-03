@@ -18,6 +18,7 @@ from vllm.v1.structured_output.backend_guidance import GuidanceBackend
 from vllm.v1.structured_output.backend_types import (
     StructuredOutputBackend,
     StructuredOutputGrammar,
+    StructuredOutputOptions,
 )
 
 if TYPE_CHECKING:
@@ -260,11 +261,8 @@ class StructuredOutputManager:
         if not structured_output_request_ids:
             return None
 
-        max_num_spec_tokens = 0
-        if self.vllm_config.speculative_config is not None:
-            max_num_spec_tokens = (
-                self.vllm_config.speculative_config.num_speculative_tokens
-            )
+        # Covers both speculative decoding and diffusion LLMs (canvas_length).
+        max_num_spec_tokens = self.vllm_config.num_speculative_tokens
 
         if self._grammar_bitmask is None:
             assert self.backend is not None
@@ -326,7 +324,13 @@ class StructuredOutputManager:
 
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                for token in itertools.chain(req_tokens, (-1,)):
+                if self.vllm_config.model_config.is_diffusion and req_tokens:
+                    # Diffusion LLMs don't sample a bonus token after the
+                    # scheduled positions, so don't append the -1 placeholder.
+                    token_iter: Iterable[int] = req_tokens
+                else:
+                    token_iter = itertools.chain(req_tokens, (-1,))
+                for token in token_iter:
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
                         # Stop advancing the grammar once we hit a padding token.
@@ -400,9 +404,21 @@ class StructuredOutputManager:
         if reasoner.is_reasoning_end_streaming(
             all_token_ids, itertools.islice(all_token_ids, start, None)
         ):
-            # Reasoning just ended, so we shouldn't advance til
-            # next pass
             structured_req.reasoning_ended = True
+
+            # Reasoning just ended this step. Defer FSM advance until the next
+            # pass (see reasoning_ended check above) for JSON/regex/choice/grammar:
+            # advancing on the closing boundary token can accept tokens that still
+            # belong to the reasoning stream. Structural tags are the only safe
+            # same-step exception: they model phased output (e.g. thinking tag ->
+            # answer tag), and speculative decoding must run grammar.validate_tokens
+            # on draft tokens produced immediately after that transition.
+            if (
+                self.vllm_config.speculative_config is not None
+                and structured_req.structured_output_key[0]
+                == StructuredOutputOptions.STRUCTURAL_TAG
+            ):
+                return True
 
         return False
 

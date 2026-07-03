@@ -15,6 +15,7 @@ import pytest
 import torch
 import torch.distributed as dist
 
+import vllm.envs as envs
 from vllm.config.parallel import ParallelConfig
 from vllm.utils.network_utils import get_open_port
 from vllm.utils.system_utils import update_environment_variables
@@ -379,7 +380,13 @@ def _distributed_packed_a2a_worker(env: dict[str, str]) -> None:
     update_environment_variables(env)
     local_rank = int(env["LOCAL_RANK"])
     torch.accelerator.set_device_index(local_rank)
-    dist.init_process_group(backend="nccl")
+    if envs.VLLM_DISTRIBUTED_USE_SPLIT_GROUP:
+        dist.init_process_group(
+            backend="cpu:gloo,cuda:nccl",
+            device_id=torch.device(f"cuda:{local_rank}"),
+        )
+    else:
+        dist.init_process_group(backend="nccl")
     use_workspace = env.get("USE_WORKSPACE") == "1"
     if use_workspace:
         from vllm.v1.worker.workspace import init_workspace_manager
