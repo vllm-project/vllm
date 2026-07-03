@@ -28,6 +28,7 @@ from vllm.model_executor.model_loader import get_model
 from vllm.model_executor.models import supports_multimodal
 from vllm.model_executor.models.deepseek_eagle3 import Eagle3DeepseekV2ForCausalLM
 from vllm.model_executor.models.interfaces import SupportsMultiModal
+from vllm.model_executor.models.laguna_dflash import DFlashLagunaForCausalLM
 from vllm.model_executor.models.llama_eagle3 import Eagle3LlamaForCausalLM
 from vllm.model_executor.models.qwen3_dflash import DFlashQwen3ForCausalLM
 from vllm.model_executor.models.qwen3_eagle3 import Eagle3Qwen3ForCausalLM
@@ -533,6 +534,7 @@ class SpecDecodeBaseProposer:
                     Eagle3DeepseekV2ForCausalLM,
                     DFlashQwen3ForCausalLM,
                     Eagle3Qwen3ForCausalLM,
+                    DFlashLagunaForCausalLM,
                 ),
             )
             target_hidden_states = self.model.combine_hidden_states(

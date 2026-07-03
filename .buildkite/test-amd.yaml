@@ -434,6 +434,28 @@ steps:
   commands:
   - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
 
+#-----------------------------------------------------------  mi250 · docker  ----------------------------------------------------------#
+
+- label: Docker Build Metadata (ROCm) # TBD
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - .buildkite/scripts/docker-build-metadata-args.sh
+  - .buildkite/scripts/ci-bake-rocm.sh
+  - docker/Dockerfile
+  - docker/Dockerfile.cpu
+  - docker/Dockerfile.rocm
+  - docker/Dockerfile.rocm_base
+  - docker/ci-rocm.hcl
+  - docker/docker-bake.hcl
+  - docker/docker-bake-rocm.hcl
+  - tests/tools/test_docker_build_metadata_args.py
+  commands:
+  - pytest -v -s tools/test_docker_build_metadata_args.py
+
 #########################################################################################################################################
 #                                                                                                                                       #
 #                                                         MI300 (gfx942) tests                                                          #
@@ -1166,6 +1188,27 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
+
+- label: Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy (4xH100-4xMI300) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/eplb
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - .buildkite/scripts/scheduled_integration_test/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050
 
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # TBD
   timeout_in_minutes: 180
@@ -2095,7 +2138,8 @@ steps:
 - label: Extract Hidden States Integration # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_1
+  agent_pool: mi300_2
+  num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/config/speculative.py
