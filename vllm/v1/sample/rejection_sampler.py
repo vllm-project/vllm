@@ -3,9 +3,10 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import torch
 import torch.nn as nn
@@ -28,10 +29,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 PLACEHOLDER_TOKEN_ID: tl.constexpr = -1
+NO_THINK_BOUNDARY_TOKEN_ID: tl.constexpr = -2
 GREEDY_TEMPERATURE: tl.constexpr = 0
 # Maximum number of speculative draft tokens allowed per request in a single
 # step. This value is chosen to be large enough to handle typical use cases.
 MAX_SPEC_LEN = 128
+RELAXED_THINKING_RATIO: Final = 0.5
+RELAXED_THINKING_TOP_K: Final = 3
 
 
 class RejectionSampler(nn.Module):
@@ -69,6 +73,12 @@ class RejectionSampler(nn.Module):
         logprobs_mode = self.sampler.logprobs_mode
         self.is_processed_logprobs_mode = logprobs_mode.startswith("processed")
         self.is_logits_logprobs_mode = logprobs_mode.endswith("logits")
+        self.relaxed_thinking = (
+            spec_config is not None
+            and getattr(spec_config, "relaxed_thinking", False) is True
+        )
+        self.relax_ratio = RELAXED_THINKING_RATIO
+        self.relax_top_k = RELAXED_THINKING_TOP_K
 
         self.synthetic_conditional_rates: torch.Tensor | None = None
         if (
@@ -93,6 +103,9 @@ class RejectionSampler(nn.Module):
         # [num_tokens + batch_size, vocab_size]
         logits: torch.Tensor,
         sampling_metadata: SamplingMetadata,
+        thinking_states: torch.Tensor | None = None,
+        think_start_token_id: int | None = None,
+        think_end_token_id: int | None = None,
     ) -> SamplerOutput:
         """
         Args:
@@ -177,6 +190,12 @@ class RejectionSampler(nn.Module):
             sampling_metadata,
             synthetic_mode=self.synthetic_mode,
             synthetic_conditional_rates=self.synthetic_conditional_rates,
+            relaxed_thinking=self.relaxed_thinking,
+            relax_ratio=self.relax_ratio,
+            relax_top_k=self.relax_top_k,
+            thinking_states=thinking_states,
+            think_start_token_id=think_start_token_id,
+            think_end_token_id=think_end_token_id,
             use_fp64_gumbel=self.use_fp64_gumbel,
         )
 
@@ -408,6 +427,12 @@ def rejection_sample(
     sampling_metadata: SamplingMetadata,
     synthetic_mode: bool = False,
     synthetic_conditional_rates: torch.Tensor | None = None,
+    relaxed_thinking: bool = False,
+    relax_ratio: float = RELAXED_THINKING_RATIO,
+    relax_top_k: int = RELAXED_THINKING_TOP_K,
+    thinking_states: torch.Tensor | None = None,
+    think_start_token_id: int | None = None,
+    think_end_token_id: int | None = None,
     use_fp64_gumbel: bool = False,
 ) -> torch.Tensor:
     assert draft_token_ids.ndim == 1
@@ -423,6 +448,17 @@ def rejection_sample(
     assert draft_probs is None or draft_probs.is_contiguous()
     assert bonus_token_ids.is_contiguous()
     assert target_logits.shape == (num_tokens, vocab_size)
+
+    if relaxed_thinking:
+        if not sampling_metadata.all_greedy:
+            raise ValueError(
+                "relaxed_thinking speculative decoding only supports greedy sampling."
+            )
+        if thinking_states is not None and thinking_states.numel() != batch_size:
+            raise ValueError(
+                "thinking_states must have one entry per request when "
+                "relaxed_thinking is enabled."
+            )
 
     # Create output buffer.
     output_token_ids = torch.full(
@@ -453,20 +489,61 @@ def rejection_sample(
     if not sampling_metadata.all_random:
         # Rejection sampling for greedy sampling requests.
         target_argmax = target_logits.argmax(dim=-1)
-        rejection_greedy_sample_kernel[(batch_size,)](
-            output_token_ids,
-            cu_num_draft_tokens,
-            draft_token_ids,
-            target_argmax,
-            bonus_token_ids,
-            is_greedy,
-            max_spec_len,
-            uniform_probs,
-            synthetic_conditional_rates,
-            SYNTHETIC_MODE=synthetic_mode,
+        start_token_id = (
+            think_start_token_id
+            if think_start_token_id is not None
+            else NO_THINK_BOUNDARY_TOKEN_ID
         )
-        if sampling_metadata.all_greedy:
-            return output_token_ids
+        end_token_id = (
+            think_end_token_id
+            if think_end_token_id is not None
+            else NO_THINK_BOUNDARY_TOKEN_ID
+        )
+        use_relaxed = (
+            relaxed_thinking
+            and not synthetic_mode
+            and thinking_states is not None
+            and thinking_states.numel() == batch_size
+        )
+        if use_relaxed:
+            relax_top_k = min(relax_top_k, vocab_size)
+            topk_values, topk_indices = torch.topk(target_logits, k=relax_top_k, dim=-1)
+            relaxed_thinking_sample_kernel[(batch_size,)](
+                output_token_ids,
+                cu_num_draft_tokens,
+                draft_token_ids,
+                target_argmax,
+                topk_values.contiguous(),
+                topk_indices.to(torch.int32).contiguous(),
+                bonus_token_ids,
+                is_greedy,
+                max_spec_len,
+                thinking_states,
+                start_token_id,
+                end_token_id,
+                math.log(relax_ratio),
+                K=relax_top_k,
+                num_warps=1,
+            )
+            if sampling_metadata.all_greedy:
+                return output_token_ids
+        else:
+            rejection_greedy_sample_kernel[(batch_size,)](
+                output_token_ids,
+                cu_num_draft_tokens,
+                draft_token_ids,
+                target_argmax,
+                bonus_token_ids,
+                is_greedy,
+                max_spec_len,
+                start_token_id if relaxed_thinking else NO_THINK_BOUNDARY_TOKEN_ID,
+                end_token_id if relaxed_thinking else NO_THINK_BOUNDARY_TOKEN_ID,
+                uniform_probs,
+                synthetic_conditional_rates,
+                SYNTHETIC_MODE=synthetic_mode,
+            )
+            if sampling_metadata.all_greedy:
+                return output_token_ids
 
     # Compute probability distribution from target logits.
     target_probs = target_logits.softmax(dim=-1, dtype=torch.float32)
@@ -720,6 +797,8 @@ def rejection_greedy_sample_kernel(
     bonus_token_ids_ptr,  # [batch_size]
     is_greedy_ptr,  # [batch_size] or None
     max_spec_len,
+    think_start_token_id,
+    think_end_token_id,
     uniform_probs_ptr,  # [num_tokens] or None (synthetic mode only)
     synthetic_conditional_rates_ptr,  # [num_speculative_tokens] or None
     SYNTHETIC_MODE: tl.constexpr,
@@ -754,14 +833,97 @@ def rejection_greedy_sample_kernel(
                 rejected = not accepted
             else:
                 token_id = target_argmax_id
-                rejected = draft_token_id != target_argmax_id
+                accepted = draft_token_id == target_argmax_id
+                rejected = not accepted
             tl.store(
                 output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
                 token_id,
             )
+            is_think_start_token = draft_token_id == think_start_token_id
+            is_think_end_token = draft_token_id == think_end_token_id
+            if accepted and (is_think_start_token or is_think_end_token):
+                rejected = True
 
     if not rejected:
         # If all tokens are accepted, append the bonus token.
+        bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
+        tl.store(
+            output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,
+            bonus_token_id,
+        )
+
+
+@triton.jit(do_not_specialize=["max_spec_len"])
+def relaxed_thinking_sample_kernel(
+    output_token_ids_ptr,  # [batch_size, max_spec_len + 1]
+    cu_num_draft_tokens_ptr,  # [batch_size]
+    draft_token_ids_ptr,  # [num_tokens]
+    target_argmax_ptr,  # [num_tokens]
+    topk_values_ptr,  # [num_tokens, K]
+    topk_indices_ptr,  # [num_tokens, K]
+    bonus_token_ids_ptr,  # [batch_size]
+    is_greedy_ptr,  # [batch_size] or None
+    max_spec_len,
+    thinking_states_ptr,  # [batch_size]
+    think_start_token_id,
+    think_end_token_id,
+    log_relax_ratio,
+    K: tl.constexpr,
+):
+    req_idx = tl.program_id(0)
+    is_greedy = True if is_greedy_ptr is None else tl.load(is_greedy_ptr + req_idx)
+    if not is_greedy:
+        return
+
+    start_idx = (
+        tl.zeros([], dtype=cu_num_draft_tokens_ptr.dtype.element_ty)
+        if req_idx == 0
+        else tl.load(cu_num_draft_tokens_ptr + req_idx - 1)
+    )
+    end_idx = tl.load(cu_num_draft_tokens_ptr + req_idx)
+    num_draft_tokens = end_idx - start_idx
+    thinking = tl.load(thinking_states_ptr + req_idx) != 0
+
+    rejected = False
+    for pos in range(num_draft_tokens):
+        if not rejected:
+            draft_token_id = tl.load(draft_token_ids_ptr + start_idx + pos).to(tl.int32)
+            target_argmax_id = tl.load(target_argmax_ptr + start_idx + pos).to(tl.int32)
+
+            accepted = False
+            token_id = target_argmax_id
+            if thinking:
+                top1_logit = tl.load(topk_values_ptr + (start_idx + pos) * K)
+                logit_floor = top1_logit + log_relax_ratio
+                for i in range(K):
+                    if not accepted:
+                        candidate_logit = tl.load(
+                            topk_values_ptr + (start_idx + pos) * K + i
+                        )
+                        candidate_id = tl.load(
+                            topk_indices_ptr + (start_idx + pos) * K + i
+                        ).to(tl.int32)
+                        if (candidate_logit >= logit_floor) and (
+                            draft_token_id == candidate_id
+                        ):
+                            token_id = draft_token_id
+                            accepted = True
+            else:
+                accepted = draft_token_id == target_argmax_id
+                if accepted:
+                    token_id = draft_token_id
+
+            rejected = not accepted
+            tl.store(
+                output_token_ids_ptr + req_idx * (max_spec_len + 1) + pos,
+                token_id,
+            )
+            is_think_start_token = draft_token_id == think_start_token_id
+            is_think_end_token = draft_token_id == think_end_token_id
+            if accepted and (is_think_start_token or is_think_end_token):
+                rejected = True
+
+    if not rejected:
         bonus_token_id = tl.load(bonus_token_ids_ptr + req_idx)
         tl.store(
             output_token_ids_ptr + req_idx * (max_spec_len + 1) + num_draft_tokens,

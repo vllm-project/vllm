@@ -782,6 +782,24 @@ class GPUModelRunner(
         self.num_accepted_tokens = self._make_buffer(
             self.max_num_reqs, dtype=torch.int32
         )
+        self.relaxed_thinking_states: CpuGpuBuffer | None = None
+        self.think_start_token_id: int | None = None
+        self.think_end_token_id: int | None = None
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.relaxed_thinking
+        ):
+            self.relaxed_thinking_states = self._make_buffer(
+                self.max_num_reqs, dtype=torch.bool
+            )
+            reasoning_config = self.vllm_config.reasoning_config
+            assert reasoning_config is not None
+            start_ids = reasoning_config.reasoning_start_token_ids
+            end_ids = reasoning_config.reasoning_end_token_ids
+            assert start_ids is not None
+            assert end_ids is not None
+            self.think_start_token_id = start_ids[0]
+            self.think_end_token_id = end_ids[0]
 
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
         if self.uses_mrope:
@@ -3574,6 +3592,7 @@ class GPUModelRunner(
         self,
         logits: torch.Tensor | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
+        scheduler_output: "SchedulerOutput | None" = None,
     ) -> SamplerOutput:
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
@@ -3593,11 +3612,46 @@ class GPUModelRunner(
             self.input_batch.update_async_spec_token_ids(draft_token_ids_cpu)
 
         draft_probs = self._get_spec_decode_draft_probs(spec_decode_metadata)
+        thinking_states: torch.Tensor | None = None
+        speculative_config = getattr(self, "speculative_config", None)
+        relaxed_thinking = bool(
+            speculative_config is not None and speculative_config.relaxed_thinking
+        )
+        if relaxed_thinking:
+            if scheduler_output is None:
+                raise RuntimeError(
+                    "relaxed_thinking requires SchedulerOutput so thinking "
+                    "state can be passed to the rejection sampler."
+                )
+            cached_req_data = scheduler_output.scheduled_cached_reqs
+            req_ids = getattr(self.input_batch, "req_ids", ())
+            req_id_to_index = {req_id: idx for idx, req_id in enumerate(req_ids)}
+            states_buffer = getattr(self, "relaxed_thinking_states", None)
+            if states_buffer is not None:
+                num_reqs = len(req_ids)
+                states_cpu = states_buffer.np
+                states_cpu[:num_reqs].fill(False)
+                has_thinking = False
+                for req_id, thinking_state in zip(
+                    cached_req_data.req_ids, cached_req_data.thinking_states
+                ):
+                    if not thinking_state:
+                        continue
+                    req_index = req_id_to_index.get(req_id)
+                    if req_index is not None:
+                        states_cpu[req_index] = True
+                        has_thinking = True
+                if has_thinking:
+                    states_buffer.copy_to_gpu(num_reqs)
+                    thinking_states = states_buffer.gpu[:num_reqs]
         sampler_output = self.rejection_sampler(
             spec_decode_metadata,
             draft_probs,
             logits,
             sampling_metadata,
+            thinking_states=thinking_states,
+            think_start_token_id=getattr(self, "think_start_token_id", None),
+            think_end_token_id=getattr(self, "think_end_token_id", None),
         )
         return sampler_output
 
@@ -4466,7 +4520,9 @@ class GPUModelRunner(
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            sampler_output = self._sample(
+                logits, spec_decode_metadata, scheduler_output
+            )
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output

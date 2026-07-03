@@ -50,7 +50,11 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
-from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.sched.utils import (
+    check_stop,
+    maybe_update_thinking_state,
+    remove_all,
+)
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
@@ -229,6 +233,9 @@ class Scheduler(SchedulerInterface):
         )
 
         speculative_config = vllm_config.speculative_config
+        self.relaxed_thinking = False
+        self.think_start_token_id: int | None = None
+        self.think_end_token_id: int | None = None
         self.use_eagle = False
         self.num_spec_tokens = vllm_config.num_speculative_tokens
         self.num_lookahead_tokens = 0
@@ -255,6 +262,19 @@ class Scheduler(SchedulerInterface):
                 # anchor itself is the first prediction position (no separate bonus
                 # query), so it needs exactly num_spec_tokens lookahead slots.
                 self.num_lookahead_tokens = self.num_spec_tokens
+            if speculative_config.relaxed_thinking:
+                reasoning_config = vllm_config.reasoning_config
+                if reasoning_config is None or not reasoning_config.enabled:
+                    raise ValueError(
+                        "relaxed_thinking requires initialized reasoning token IDs."
+                    )
+                start_ids = reasoning_config.reasoning_start_token_ids
+                end_ids = reasoning_config.reasoning_end_token_ids
+                assert start_ids is not None
+                assert end_ids is not None
+                self.relaxed_thinking = True
+                self.think_start_token_id = start_ids[0]
+                self.think_end_token_id = end_ids[0]
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -1269,6 +1289,7 @@ class Scheduler(SchedulerInterface):
         all_token_ids: dict[str, list[int]] = {}
         num_computed_tokens: list[int] = []
         num_output_tokens: list[int] = []
+        thinking_states: list[bool] = []
         resumed_req_ids = set()
 
         num_running_reqs = len(running_reqs)
@@ -1303,6 +1324,8 @@ class Scheduler(SchedulerInterface):
             num_output_tokens.append(
                 req.num_output_tokens + req.num_output_placeholders
             )
+            if self.relaxed_thinking:
+                thinking_states.append(req.thinking_state)
 
         return CachedRequestData(
             req_ids=req_ids,
@@ -1312,6 +1335,7 @@ class Scheduler(SchedulerInterface):
             new_block_ids=new_block_ids,
             num_computed_tokens=num_computed_tokens,
             num_output_tokens=num_output_tokens,
+            thinking_states=thinking_states,
         )
 
     def _try_schedule_encoder_inputs(
@@ -1891,6 +1915,13 @@ class Scheduler(SchedulerInterface):
         # to return empty token ids for the request.
         stopped = False
         for num_new, output_token_id in enumerate(new_token_ids, 1):
+            if self.relaxed_thinking:
+                maybe_update_thinking_state(
+                    request,
+                    output_token_id,
+                    self.think_start_token_id,
+                    self.think_end_token_id,
+                )
             request.append_output_token_ids(output_token_id)
 
             # Check for stop and update request state.

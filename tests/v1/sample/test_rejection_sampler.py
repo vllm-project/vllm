@@ -1,5 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
+import subprocess
+import sys
+from pathlib import Path
 from typing import Any
 from unittest.mock import Mock
 
@@ -14,12 +18,16 @@ from vllm.v1.sample.metadata import SamplingMetadata
 from vllm.v1.sample.rejection_sampler import (
     PLACEHOLDER_TOKEN_ID,
     RejectionSampler,
+    rejection_sample,
     sample_recovered_tokens,
 )
 from vllm.v1.sample.sampler import Sampler, SamplerOutput
 from vllm.v1.spec_decode.metadata import SpecDecodeMetadata
 
 DEVICE_TYPE = current_platform.device_type
+# Repo root (…/tests/v1/sample/test_rejection_sampler.py -> parents[3]) so the
+# CPU accept-rule subprocess can import the ``tests`` package.
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 @pytest.fixture
@@ -126,6 +134,205 @@ def create_sampling_metadata(
         allowed_token_ids_mask=allowed_token_ids_mask,
         bad_words_token_ids={} if bad_words_token_ids is None else bad_words_token_ids,
         logitsprocs=LogitsProcessors(),
+    )
+
+
+def run_relaxed_rejection_sample(
+    draft_token_ids: list[int],
+    target_logits: torch.Tensor,
+    thinking_state: bool | None,
+    *,
+    relax_ratio: float = 0.5,
+    relax_top_k: int = 3,
+    think_start_token_id: int = 10,
+    think_end_token_id: int = 11,
+    sampling_metadata: SamplingMetadata | None = None,
+    device: str = DEVICE_TYPE,
+) -> list[int]:
+    num_draft_tokens = [len(draft_token_ids)]
+    thinking_states = (
+        None
+        if thinking_state is None
+        else torch.tensor([thinking_state], dtype=torch.bool, device=device)
+    )
+    output = rejection_sample(
+        draft_token_ids=torch.tensor(draft_token_ids, dtype=torch.int32, device=device),
+        num_draft_tokens=num_draft_tokens,
+        max_spec_len=len(draft_token_ids),
+        cu_num_draft_tokens=torch.tensor(
+            num_draft_tokens, dtype=torch.int32, device=device
+        ),
+        draft_probs=None,
+        target_logits=target_logits,
+        bonus_token_ids=torch.tensor([12], dtype=torch.int64, device=device),
+        sampling_metadata=sampling_metadata
+        if sampling_metadata is not None
+        else create_sampling_metadata(all_greedy=True),
+        relaxed_thinking=True,
+        relax_ratio=relax_ratio,
+        relax_top_k=relax_top_k,
+        thinking_states=thinking_states,
+        think_start_token_id=think_start_token_id,
+        think_end_token_id=think_end_token_id,
+    )
+    return output[0].tolist()
+
+
+def test_relaxed_thinking_accepts_top_k_token_above_ratio():
+    target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 5] = 10.0
+    target_logits[0, 7] = 9.4
+
+    output = run_relaxed_rejection_sample([7], target_logits, True)
+
+    assert output == [7, 12]
+
+
+def test_relaxed_thinking_false_uses_strict_argmax():
+    target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 5] = 10.0
+    target_logits[0, 7] = 9.4
+
+    output = run_relaxed_rejection_sample([7], target_logits, False)
+
+    assert output == [5, PLACEHOLDER_TOKEN_ID]
+
+
+def test_relaxed_thinking_fallback_truncates_after_boundary_token():
+    target_logits = torch.full((2, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 10] = 10.0
+    target_logits[1, 8] = 10.0
+
+    output = run_relaxed_rejection_sample([10, 8], target_logits, None)
+
+    assert output == [
+        10,
+        PLACEHOLDER_TOKEN_ID,
+        PLACEHOLDER_TOKEN_ID,
+    ]
+
+
+def test_relaxed_thinking_rejects_token_below_ratio_floor():
+    target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 5] = 10.0
+    target_logits[0, 7] = 8.0
+
+    output = run_relaxed_rejection_sample([7], target_logits, True)
+
+    assert output == [5, PLACEHOLDER_TOKEN_ID]
+
+
+def test_relaxed_thinking_truncates_after_accepted_boundary_token():
+    target_logits = torch.full((3, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 7] = 10.0
+    target_logits[1, 11] = 10.0
+    target_logits[2, 8] = 10.0
+
+    output = run_relaxed_rejection_sample([7, 11, 8], target_logits, True)
+
+    assert output == [7, 11, PLACEHOLDER_TOKEN_ID, PLACEHOLDER_TOKEN_ID]
+
+
+def test_relaxed_thinking_rejects_non_greedy_sampling():
+    target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 7] = 10.0
+
+    with pytest.raises(ValueError, match="greedy sampling"):
+        run_relaxed_rejection_sample(
+            [7],
+            target_logits,
+            True,
+            sampling_metadata=create_sampling_metadata(
+                all_greedy=False,
+                temperature=torch.ones(1, device=DEVICE_TYPE),
+            ),
+        )
+
+
+def test_relaxed_thinking_rejects_misaligned_thinking_states():
+    target_logits = torch.full((1, 16), -100.0, device=DEVICE_TYPE)
+    target_logits[0, 7] = 10.0
+
+    with pytest.raises(ValueError, match="thinking_states"):
+        rejection_sample(
+            draft_token_ids=torch.tensor([7], dtype=torch.int32, device=DEVICE_TYPE),
+            num_draft_tokens=[1],
+            max_spec_len=1,
+            cu_num_draft_tokens=torch.tensor(
+                [1], dtype=torch.int32, device=DEVICE_TYPE
+            ),
+            draft_probs=None,
+            target_logits=target_logits,
+            bonus_token_ids=torch.tensor([12], dtype=torch.int64, device=DEVICE_TYPE),
+            sampling_metadata=create_sampling_metadata(all_greedy=True),
+            relaxed_thinking=True,
+            thinking_states=torch.tensor(
+                [True, False], dtype=torch.bool, device=DEVICE_TYPE
+            ),
+        )
+
+
+def _cpu_accept_rule_checks() -> None:
+    """Assert the relaxed accept rule against the REAL kernel on CPU.
+
+    Run in a subprocess by ``test_relaxed_thinking_accept_rule_runs_on_cpu``
+    with ``TRITON_INTERPRET=1`` set (before ``triton.jit`` decorates the
+    kernel) so ``relaxed_thinking_sample_kernel`` executes on CPU tensors with
+    no GPU. Raises ``AssertionError`` (non-zero exit) if the rule regresses.
+    """
+    # top1 = id5 @ 10.0 -> ratio floor = 10.0 + log(0.5) ~= 9.307.
+    # Draft id7 @ 9.4 is in the target top-3 AND >= floor, so the relaxed rule
+    # ACCEPTS id7 even though argmax is id5. Strict argmax would emit id5, so
+    # this case is what distinguishes the relaxed rule from strict decoding.
+    logits = torch.full((1, 16), -100.0)
+    logits[0, 5] = 10.0
+    logits[0, 7] = 9.4
+    accepted = run_relaxed_rejection_sample([7], logits, True, device="cpu")
+    assert accepted == [7, 12], f"relaxed should accept id7, got {accepted}"
+
+    # Draft id7 @ 8.0 is below the ratio floor -> REJECTED, strict argmax id5.
+    logits = torch.full((1, 16), -100.0)
+    logits[0, 5] = 10.0
+    logits[0, 7] = 8.0
+    rejected = run_relaxed_rejection_sample([7], logits, True, device="cpu")
+    assert rejected == [5, PLACEHOLDER_TOKEN_ID], (
+        f"draft below floor should fall back to argmax, got {rejected}"
+    )
+
+
+def test_relaxed_thinking_accept_rule_runs_on_cpu():
+    """Defend the relaxed accept rule on a CPU-only box (no GPU).
+
+    The existing relaxed tests dispatch to the Triton kernel and need CUDA/HIP,
+    so a revert of the accept rule to strict argmax is invisible without a GPU.
+    This runs the SAME production kernel under Triton's interpreter on CPU
+    tensors. ``TRITON_INTERPRET`` must be set before ``triton.jit`` decorates
+    the kernel, so the checks run in a fresh subprocess with the env applied
+    and all GPUs hidden. Fails if the relaxed rule is reverted to strict argmax.
+    """
+    env = {
+        **os.environ,
+        "TRITON_INTERPRET": "1",
+        "CUDA_VISIBLE_DEVICES": "",
+        "HIP_VISIBLE_DEVICES": "",
+        "ROCR_VISIBLE_DEVICES": "",
+    }
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from tests.v1.sample.test_rejection_sampler import "
+            "_cpu_accept_rule_checks; _cpu_accept_rule_checks()",
+        ],
+        cwd=REPO_ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, (
+        "CPU relaxed accept-rule checks failed "
+        f"(rc={result.returncode})\nstdout:\n{result.stdout}\n"
+        f"stderr:\n{result.stderr}"
     )
 
 

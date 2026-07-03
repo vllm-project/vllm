@@ -884,6 +884,91 @@ def test_invalid_draft_suffixes_remain_rejected_in_metadata():
     assert metadata.draft_token_ids.tolist() == [10, -1, 12, 13, -1]
 
 
+def test_sample_passes_reordered_thinking_states_to_rejection_sampler():
+    class FakeBoolBuffer:
+        def __init__(self):
+            self.np = np.zeros(3, dtype=np.bool_)
+            self.gpu = torch.zeros(3, dtype=torch.bool)
+
+        def copy_to_gpu(self, n: int):
+            self.gpu[:n] = torch.from_numpy(self.np[:n])
+
+    runner = object.__new__(GPUModelRunner)
+    runner.use_async_scheduling = False
+    runner.speculative_config = SimpleNamespace(relaxed_thinking=True)
+    runner.relaxed_thinking_states = FakeBoolBuffer()
+    runner.think_start_token_id = 10
+    runner.think_end_token_id = 11
+    runner.input_batch = SimpleNamespace(
+        sampling_metadata=Mock(spec=SamplingMetadata),
+        update_async_output_token_ids=Mock(),
+        req_ids=["req_a", "req_b", "req_c"],
+    )
+    runner.rejection_sampler = Mock(return_value="sampler_output")
+    runner.sampler = Mock()
+    runner._draft_prob_req_ids = None
+    runner._draft_probs = None
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData(
+            req_ids=["req_b", "req_a"],
+            resumed_req_ids=set(),
+            new_token_ids=[],
+            all_token_ids={},
+            new_block_ids=[None, None],
+            num_computed_tokens=[0, 0],
+            num_output_tokens=[0, 0],
+            thinking_states=[True, False],
+        ),
+        num_scheduled_tokens={"req_a": 1, "req_b": 1},
+        total_num_scheduled_tokens=2,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        [[1], [2], []],
+        device=torch.device("cpu"),
+    )
+    logits = torch.randn(5, 4)
+
+    output = GPUModelRunner._sample(
+        runner, logits, spec_decode_metadata, scheduler_output
+    )
+
+    assert output == "sampler_output"
+    kwargs = runner.rejection_sampler.call_args.kwargs
+    assert kwargs["think_start_token_id"] == 10
+    assert kwargs["think_end_token_id"] == 11
+    assert kwargs["thinking_states"].tolist() == [False, True, False]
+
+
+def test_relaxed_thinking_requires_scheduler_output():
+    runner = object.__new__(GPUModelRunner)
+    runner.use_async_scheduling = False
+    runner.speculative_config = SimpleNamespace(relaxed_thinking=True)
+    runner.input_batch = SimpleNamespace(
+        sampling_metadata=Mock(spec=SamplingMetadata),
+        update_async_output_token_ids=Mock(),
+        req_ids=["req_a"],
+    )
+    runner.rejection_sampler = Mock()
+    runner.sampler = Mock()
+    runner._draft_prob_req_ids = None
+    runner._draft_probs = None
+
+    spec_decode_metadata = SpecDecodeMetadata.make_dummy(
+        [[1]],
+        device=torch.device("cpu"),
+    )
+
+    with pytest.raises(RuntimeError, match="SchedulerOutput"):
+        GPUModelRunner._sample(runner, torch.randn(2, 4), spec_decode_metadata)
+
+
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"

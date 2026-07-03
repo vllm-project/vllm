@@ -128,3 +128,15 @@ def check_stop(request: Request, max_model_len: int) -> bool:
         return True
 
     return False
+
+
+def maybe_update_thinking_state(
+    request: Request,
+    new_token_id: int,
+    think_start_token_id: int | None,
+    think_end_token_id: int | None,
+) -> None:
+    if think_start_token_id is not None and new_token_id == think_start_token_id:
+        request.thinking_state = True
+    if think_end_token_id is not None and new_token_id == think_end_token_id:
+        request.thinking_state = False
