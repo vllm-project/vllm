@@ -16,6 +16,7 @@ import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.config import (
     CompilationConfig,
+    DeviceConfig,
     KernelConfig,
     ModelConfig,
     ParallelConfig,
@@ -329,6 +330,28 @@ def test_async_scheduling_with_pipeline_parallelism_is_allowed():
         ),
     )
     assert cfg.scheduler_config.async_scheduling is True
+
+
+def _make_config_for_return_routed_experts(is_moe: bool) -> VllmConfig:
+    cfg = VllmConfig(device_config=DeviceConfig(device="cpu"))
+    cfg.model_config = SimpleNamespace(
+        enable_return_routed_experts=True,
+        is_moe=is_moe,
+    )
+    return cfg
+
+
+def test_return_routed_experts_requires_moe_model():
+    cfg = _make_config_for_return_routed_experts(is_moe=False)
+
+    with pytest.raises(ValueError, match="only supported for MoE models"):
+        cfg._verify_return_routed_experts()
+
+
+def test_return_routed_experts_allows_moe_model():
+    cfg = _make_config_for_return_routed_experts(is_moe=True)
+
+    cfg._verify_return_routed_experts()
 
 
 @dataclass
