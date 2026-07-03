@@ -164,7 +164,7 @@ class DeepSeekV32ToolParser(ToolParser):
                 converted[name] = value
                 continue
 
-            param_types = extract_types_from_schema(param_config.get(name, {}))
+            param_types = extract_types_from_schema(param_config.get(name))
             converted[name] = coerce_to_schema_type(value, param_types)
         return self._repair_param_dict(converted, param_config)
 

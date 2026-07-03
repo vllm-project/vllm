@@ -271,11 +271,11 @@ class TestExtractTypesFromSchema:
         result = set(extract_types_from_schema(schema))
         assert result == {"array", "object"}
 
-    def test_none_schema_allows_any_type(self):
-        assert set(extract_types_from_schema(None)) == ALL_JSON_TYPES
+    def test_none_schema_defaults_to_string(self):
+        assert extract_types_from_schema(None) == ["string"]
 
-    def test_non_dict_schema_allows_any_type(self):
-        assert set(extract_types_from_schema("string")) == ALL_JSON_TYPES
+    def test_non_dict_schema_defaults_to_string(self):
+        assert extract_types_from_schema("string") == ["string"]
 
     def test_empty_dict_allows_any_type(self):
         assert set(extract_types_from_schema({})) == ALL_JSON_TYPES

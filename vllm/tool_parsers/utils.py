@@ -512,12 +512,13 @@ def extract_types_from_schema(schema: Any) -> list[str]:
     """Extract all possible type strings from a JSON Schema definition.
 
     Handles ``type`` (string or list), ``enum`` value inference, and
-    recursive ``anyOf``/``oneOf``/``allOf``.  Returns all JSON types
-    when no type information can be determined, since a schema without
-    a ``type`` constraint permits any type.
+    recursive ``anyOf``/``oneOf``/``allOf``.  A schema dict without a
+    ``type`` constraint permits any type, so all JSON types are
+    returned. When there is no schema at all (``None`` or a non-dict),
+    falls back to ``["string"]`` to preserve raw values as-is.
     """
     if schema is None or not isinstance(schema, dict):
-        return list(_ANY_JSON_TYPES)
+        return ["string"]
 
     types: set[str] = set()
 
