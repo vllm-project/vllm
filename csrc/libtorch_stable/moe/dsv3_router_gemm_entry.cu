@@ -143,6 +143,8 @@ void dsv3_router_gemm(
           output.scalar_type() == torch::headeronly::ScalarType::BFloat16,
       "output must be float32 or bf16");
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      mat_a.get_device_index());
   const int sm = getSMVersion();
   STD_TORCH_CHECK(sm >= 90, "required CUDA ARCH >= SM_90");
 
