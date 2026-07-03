@@ -113,7 +113,8 @@ async def async_engine():
     try:
         yield llm
     finally:
-        llm.shutdown()
+        shutdown_timeout = 60.0 if current_platform.is_rocm() else None
+        llm.shutdown(timeout=shutdown_timeout)
         del llm
         import torch
 
