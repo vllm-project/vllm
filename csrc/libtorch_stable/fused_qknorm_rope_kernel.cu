@@ -22,7 +22,7 @@
 
 #include "async_util.cuh"
 #include "../cuda_compat.h"
-#include "../type_convert.cuh"
+#include "type_convert.cuh"
 #include "dispatch_utils.h"
 
 #define CHECK_TYPE(x, st)                                                  \

@@ -1,7 +1,9 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use vllm_engine_core_client::protocol::output::{
+    EngineCoreEvent, EngineCoreEventType, EngineCoreOutput,
+};
 use vllm_engine_core_client::protocol::stats::PrefillStats;
-use vllm_engine_core_client::protocol::{EngineCoreEvent, EngineCoreEventType, EngineCoreOutput};
 use vllm_metrics::{
     EngineLabels, FinishedReasonLabels, METRICS, PromptTokenSourceLabels, RequestMetrics,
 };
@@ -98,27 +100,33 @@ impl RequestMetricsTracker {
             self.observe_events(engine_index, events);
         }
 
-        if self.is_prefilling {
-            if let Some(prefill_stats) = &output.prefill_stats {
-                record_prompt_tokens(&self.model_name, engine_index, prefill_stats);
+        // Only outputs that actually carry tokens drive token-timing metrics.
+        // A terminal output with no new tokens (e.g. the synthesized abort
+        // output) must not log a stray time-to-first-token or inter-token
+        // sample.
+        if !output.new_token_ids.is_empty() {
+            if self.is_prefilling {
+                if let Some(prefill_stats) = &output.prefill_stats {
+                    record_prompt_tokens(&self.model_name, engine_index, prefill_stats);
+                }
+                self.first_token_latency = received_at - self.arrival_time;
+                observe_time_to_first_token_seconds(
+                    &self.model_name,
+                    engine_index,
+                    self.first_token_latency,
+                );
+                self.first_token_ts = batch_timestamp;
+                self.is_prefilling = false;
+            } else if self.last_token_ts > 0.0 {
+                observe_inter_token_latency_seconds(
+                    &self.model_name,
+                    engine_index,
+                    batch_timestamp - self.last_token_ts,
+                );
             }
-            self.first_token_latency = received_at - self.arrival_time;
-            observe_time_to_first_token_seconds(
-                &self.model_name,
-                engine_index,
-                self.first_token_latency,
-            );
-            self.first_token_ts = batch_timestamp;
-            self.is_prefilling = false;
-        } else if self.last_token_ts > 0.0 {
-            observe_inter_token_latency_seconds(
-                &self.model_name,
-                engine_index,
-                batch_timestamp - self.last_token_ts,
-            );
-        }
 
-        self.last_token_ts = batch_timestamp;
+            self.last_token_ts = batch_timestamp;
+        }
     }
 
     /// Emit the terminal request metrics once a finished output has been
@@ -322,8 +330,8 @@ pub(crate) fn current_unix_timestamp_secs() -> f64 {
 
 #[cfg(test)]
 mod tests {
+    use vllm_engine_core_client::protocol::output::{EngineCoreEvent, EngineCoreEventType};
     use vllm_engine_core_client::protocol::stats::PrefillStats;
-    use vllm_engine_core_client::protocol::{EngineCoreEvent, EngineCoreEventType};
 
     use super::{RequestMetricsTracker, diff_or_zero};
 
@@ -335,7 +343,7 @@ mod tests {
             2,
             10.0,
             100.2,
-            &vllm_engine_core_client::protocol::EngineCoreOutput {
+            &vllm_engine_core_client::protocol::output::EngineCoreOutput {
                 request_id: "req-1".to_string(),
                 new_token_ids: vec![1],
                 finish_reason: None,
@@ -363,7 +371,7 @@ mod tests {
             2,
             11.5,
             100.4,
-            &vllm_engine_core_client::protocol::EngineCoreOutput {
+            &vllm_engine_core_client::protocol::output::EngineCoreOutput {
                 request_id: "req-1".to_string(),
                 new_token_ids: vec![2, 3],
                 finish_reason: None,

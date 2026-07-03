@@ -27,6 +27,10 @@ import transformers
 from packaging.version import Version
 from torch import nn
 from transformers import AutoModel
+from transformers.conversion_mapping import (
+    WeightRenaming,
+    get_model_conversion_mapping,
+)
 from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.compilation.decorators import support_torch_compile
@@ -154,9 +158,6 @@ class Base(
                     "Transformers modeling backend does "
                     "not support MXFP4 quantization yet."
                 )
-            # Skip loading extra bias for GPTQ models.
-            if "gptq" in quant_method_name:
-                self.ignore_unexpected_suffixes.append(".bias")
 
         self._patch_config()
         from_config_kwargs = dict(
@@ -212,16 +213,9 @@ class Base(
         `create_attention_instances` are used
         - Sets the dtype to the default torch dtype set by vLLM because Transformers
         uses the config dtype when creating the model
-        - Propagates this dtype to any sub-configs because Transformers model
-        implementations do not support/use different dtypes in sub-models
         """
         self.text_config._attn_implementation = "vllm"
         self.config.dtype = torch.get_default_dtype()
-        # TODO(hmellor): Remove this when Transformers v4 support is dropped
-        for sub_config_name in getattr(self.config, "sub_configs", {}):
-            sub_config = getattr(self.config, sub_config_name)
-            if sub_config.dtype != (dtype := self.config.dtype):
-                sub_config.dtype = dtype
 
     def _get_decoder_cls(self, **kwargs: dict) -> type[PreTrainedModel]:
         """
@@ -300,47 +294,20 @@ class Base(
 
         This handles:
 
-        - Transformers weight renaming:
-            - from `WeightRenaming` in Transformers v5
-            - from `_checkpoint_conversion_mapping` in Transformers v4
+        - Transformers weight renaming from `WeightRenaming`
         - Checkpoints saved with a base model prefix that is not `model`
         - Checkpoints saved with no base model prefix
         - Any quantization config specific mappings
         """
         self.hf_to_vllm_mapper = WeightsMapper()
+        orig_to_new_renamings = self.hf_to_vllm_mapper.orig_to_new_renamings
         orig_to_new_regex = self.hf_to_vllm_mapper.orig_to_new_regex
 
-        if Version(transformers.__version__) >= Version("5.0.0"):
-            from transformers.conversion_mapping import (
-                WeightRenaming,
-                get_model_conversion_mapping,
-            )
-
-            for mapping in get_model_conversion_mapping(self.model):
-                # Handle weights which have been renamed in Transformers
-                if isinstance(mapping, WeightRenaming):
-                    # Recompile using regex (Transformers used re)
-                    compiled_sources = re.compile(
-                        mapping.compiled_sources.pattern, mapping.compiled_sources.flags
-                    )
-                    target_pattern = mapping.target_patterns[0]
-                    orig_to_new_regex[compiled_sources] = target_pattern
-                # TODO: Handle WeightConverter to enable layer merging
-        else:
-            # Replace legacy suffixes used for norms
-            # TODO(hmellor): Remove this when Transformers v4 support is dropped
-            orig_to_new_regex.update(
-                {
-                    re.compile(r"\.gamma$"): ".weight",
-                    re.compile(r"\.beta$"): ".bias",
-                }
-            )
-
-        # Handle weights which have been renamed in Transformers
-        # TODO(hmellor): Remove this when Transformers v4 support is dropped
-        ccm = getattr(self.model, "_checkpoint_conversion_mapping", {})
-        for source, target in ccm.items():
-            orig_to_new_regex[re.compile(source)] = target
+        for mapping in get_model_conversion_mapping(self.model):
+            # Handle weights which have been renamed in Transformers
+            if isinstance(mapping, WeightRenaming):
+                orig_to_new_renamings.append(mapping)
+            # TODO: Handle WeightConverter to enable layer merging
 
         # Handle unexpected weights which should be ignored
         if self.model._keys_to_ignore_on_load_unexpected is not None:
@@ -377,7 +344,7 @@ class Base(
         """
         Check if the model has tied word embeddings.
         """
-        # Transformers v4 and v5 will store this in different places
+        # Models created with Transformers v4 and v5 will store this in different places
         tie_word_embeddings_v4 = getattr(self.text_config, "tie_word_embeddings", False)
         tie_word_embeddings_v5 = getattr(self.config, "tie_word_embeddings", False)
         return tie_word_embeddings_v4 or tie_word_embeddings_v5
@@ -673,10 +640,7 @@ class Base(
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=self.skip_prefixes,

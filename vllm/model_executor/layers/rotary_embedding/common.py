@@ -2,7 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import math
-from importlib.util import find_spec
+from contextlib import suppress
+from importlib import import_module
 
 import torch
 
@@ -135,10 +136,11 @@ class ApplyRotaryEmb(CustomOp):
         self.enable_fp32_compute = enable_fp32_compute
 
         self.apply_rotary_emb_flash_attn = None
-        if not current_platform.is_cpu() and find_spec("flash_attn") is not None:
-            from flash_attn.ops.triton.rotary import apply_rotary
-
-            self.apply_rotary_emb_flash_attn = apply_rotary
+        if not current_platform.is_cpu():
+            with suppress(ModuleNotFoundError):
+                self.apply_rotary_emb_flash_attn = import_module(
+                    "flash_attn.ops.triton.rotary"
+                ).apply_rotary
 
     @staticmethod
     def forward_static(

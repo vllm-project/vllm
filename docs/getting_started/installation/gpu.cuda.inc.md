@@ -139,6 +139,15 @@ You can find more information about vLLM's wheels in [Install the latest code](#
 
 #### Full build (with compilation) {#full-build}
 
+!!! note "Compiler requirement"
+    Building from source requires GCC/G++ ≥ 11.3. PyTorch's C++20 headers are
+    not compatible with GCC 10 or GCC < 11.3. On Ubuntu 22.04:
+    ```bash
+    sudo apt-get install -y gcc-11 g++-11
+    sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-11 110 \
+        --slave /usr/bin/g++ g++ /usr/bin/g++-11
+    ```
+
 If you want to modify C++ or CUDA code, you'll need to build vLLM from source. This can take several minutes:
 
 ```bash

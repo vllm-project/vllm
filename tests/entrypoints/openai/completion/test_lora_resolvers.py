@@ -14,10 +14,10 @@ from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
 from vllm.entrypoints.openai.engine.protocol import ErrorResponse
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.lora.request import LoRARequest
 from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.renderers.hf import HfRenderer
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
 from vllm.v1.engine.async_llm import AsyncLLM
 
@@ -144,16 +144,15 @@ def mock_serving_setup():
         base_model_paths=BASE_MODEL_PATHS,
     )
 
-    serving_render = OpenAIServingRender(
+    online_renderer = OnlineRenderer(
         model_config=mock_engine.model_config,
         renderer=mock_engine.renderer,
-        model_registry=models.registry,
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
     )
     serving_completion = OpenAIServingCompletion(
-        mock_engine, models, openai_serving_render=serving_render, request_logger=None
+        mock_engine, models, online_renderer=online_renderer, request_logger=None
     )
 
     return mock_engine, serving_completion

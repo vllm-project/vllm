@@ -55,6 +55,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+_MODALITY_TO_TOKEN_TYPE_ID = {"image": 1, "video": 2, "audio": 3}
+
 
 class MultiModalProcessingInfo(BaseProcessingInfo):
     def get_supported_mm_limits(self):
@@ -72,35 +74,7 @@ class MultiModalProcessingInfo(BaseProcessingInfo):
             image_sizes=([height, width],), **mm_processor_kwargs
         )
         image_tokens = mm_tokens["num_image_tokens"][0]
-        return self._get_max_encoder_tokens(processor, mm_tokens) or image_tokens
-
-    @staticmethod
-    def _get_mm_values(mm_tokens: object, key: str) -> object:
-        if isinstance(mm_tokens, Mapping):
-            return mm_tokens.get(key)
-        return getattr(mm_tokens, key, None)
-
-    def _get_max_encoder_tokens(
-        self, processor: object, mm_tokens: object
-    ) -> int | None:
-        if "gemma3" not in processor.__class__.__name__.lower():
-            return None
-
-        vision_config = getattr(self.get_hf_config(), "vision_config", None)
-        image_size = getattr(vision_config, "image_size", None)
-        patch_size = getattr(vision_config, "patch_size", None)
-        if not image_size or not patch_size:
-            return None
-
-        # Gemma3 pools each 64x64 SigLIP patch grid down to 256 image tokens.
-        # Profile the vision encoder against the pre-pooling patch-token count.
-        patches_per_image = (image_size // patch_size) ** 2
-        num_image_patches = self._get_mm_values(mm_tokens, "num_image_patches") or [1]
-        if isinstance(num_image_patches, int):
-            max_image_patches = num_image_patches
-        else:
-            max_image_patches = max(num_image_patches)
-        return patches_per_image * int(max_image_patches)
+        return image_tokens
 
     def get_max_image_size(self):
         return 10_000, 10_000  # hardcode for arbitrary very large size
@@ -234,9 +208,8 @@ class MultiModalProcessor(BaseMultiModalProcessor[MultiModalProcessingInfo]):
             )
 
         # For gemma3 we check `token_type_ids` as the key
-        mm_token_type_ids = processed_data.get(
-            "mm_token_type_ids", processed_data.pop("token_type_ids", None)
-        )
+        mm_token_type_ids = processed_data.pop("token_type_ids", None)
+        mm_token_type_ids = processed_data.pop("mm_token_type_ids", mm_token_type_ids)
 
         # We can infer vLLM style placeholder from token type ids, if we split
         # it for each input `mm_data`.
@@ -405,7 +378,6 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             return None
 
         num_image_patches = kwargs.pop("num_image_patches")
-        kwargs.pop("mm_token_type_ids", None)  # used only in `model.get_rope_index`
 
         if pixel_values is not None:
             # ROCm: Force math SDP backend for vision encoder to avoid accuracy issues
@@ -496,24 +468,18 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             {
                 "image_grid_thw",
                 "video_grid_thw",
-                "mm_token_type_ids",
                 "second_per_grid_ts",
                 "audio_feature_lengths",
                 "use_audio_in_video",
             },
         )
-        if any(
-            v
-            for k, v in kwargs.items()
-            if k not in {"image_grid_thw", "mm_token_type_ids"}
-        ):
+        if any(v for k, v in kwargs.items() if k not in {"image_grid_thw"}):
             raise NotImplementedError(
                 "Transformers modeling backend only supports images."
             )
 
         image_grid_thw = kwargs.get("image_grid_thw", [])
         video_grid_thw = kwargs.get("video_grid_thw", [])
-        mm_token_type_ids = kwargs.get("mm_token_type_ids")
 
         image_grid_thw = (torch.stack if image_grid_thw else torch.tensor)(
             image_grid_thw
@@ -522,8 +488,7 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
             video_grid_thw
         )
 
-        # In v4 `get_rope_index` doesn't have wildcard `kwargs`, and
-        # can't accept arbitrary args, even if its value is `None`
+        # `get_rope_index` doesn't always accept arbitrary `kwargs`
         kwargs = {}
         if not hasattr(self, "_get_rope_index_accepts_mm_token_type_ids"):
             import inspect
@@ -535,11 +500,13 @@ class MultiModalMixin(SupportsMultiModal, SupportsMRoPE):
                 or any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
             )
         if self._get_rope_index_accepts_mm_token_type_ids:
-            if mm_token_type_ids:
-                kwargs["mm_token_type_ids"] = torch.cat(mm_token_type_ids)
-            else:
-                shape = (1, len(input_tokens))
-                kwargs["mm_token_type_ids"] = torch.zeros(*shape, dtype=torch.int)
+            mm_token_type_ids = torch.zeros(len(input_tokens), dtype=torch.int)
+            for feature in mm_features:
+                position = feature.mm_position
+                offset, length = position.offset, position.length
+                mm_token_type_id = _MODALITY_TO_TOKEN_TYPE_ID[feature.modality]
+                mm_token_type_ids[offset : offset + length] = mm_token_type_id
+            kwargs["mm_token_type_ids"] = mm_token_type_ids.unsqueeze(0)
 
         mrope_positions, mrope_position_delta = self.model.get_rope_index(
             input_ids=torch.tensor(input_tokens).unsqueeze(0),

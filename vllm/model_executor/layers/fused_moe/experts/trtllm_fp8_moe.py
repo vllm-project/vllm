@@ -56,6 +56,35 @@ class TrtLlmFp8ExpertsBase:
         self.moe_config = moe_config
         self.quant_config = quant_config
 
+        # Per-expert SwiGLU parameters from quant_config (MXFP8 + Swiglu only).
+        device = torch.accelerator.current_device_index()
+        if quant_config.gemm1_alpha is not None:
+            self.gemm1_alpha = torch.tensor(
+                [quant_config.gemm1_alpha] * self.local_num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_alpha = None
+
+        if quant_config.gemm1_beta is not None:
+            self.gemm1_beta = torch.tensor(
+                [quant_config.gemm1_beta] * self.local_num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_beta = None
+
+        if quant_config.gemm1_clamp_limit is not None:
+            self.gemm1_clamp_limit = torch.tensor(
+                [quant_config.gemm1_clamp_limit] * self.local_num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_clamp_limit = None
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -77,8 +106,12 @@ class TrtLlmFp8ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports only SiLU and RELU^2 non-gated activation."""
-        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        """Supports SiLU, SwiGLU-OAI (uninterleaved), and RELU^2 non-gated."""
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.RELU2_NO_MUL,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -198,6 +231,9 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             hidden_states_scale=hidden_states_scale,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale,
             num_experts=global_num_experts,
@@ -327,7 +363,11 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
 
         assert not apply_router_weight_on_input
-        assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        assert activation in [
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.RELU2_NO_MUL,
+        ]
         activation_type = activation_to_flashinfer_int(activation)
         assert self.topk <= global_num_experts
         assert global_num_experts % 4 == 0
@@ -362,6 +402,9 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             hidden_states_scale=hidden_states_scale,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale,
             num_experts=global_num_experts,

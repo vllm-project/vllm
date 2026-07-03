@@ -1,15 +1,19 @@
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use tokio::runtime::Runtime;
 use tokio::time::{Duration, Instant, sleep_until};
 use tracing::warn;
 use vllm_chat::ChatLlm;
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
+use vllm_engine_core_client::runtime::BackgroundShutdownRuntime;
 
+use crate::config::{ApiServerOptions, CorsConfig};
 use crate::lora::{LoadLoraError, LoraManager, LoraModelResolution, UnloadLoraError};
+use crate::runtime::build_request_runtime;
 use crate::server_info::{ServerInfoConfigFormat, ServerInfoSnapshot};
 
 const SHUTDOWN_REFCOUNT_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -27,10 +31,10 @@ pub struct AppState {
     served_model_names: Vec<String>,
     /// Shared chat facade used by all requests.
     pub chat: ChatLlm,
-    /// Whether to log a summary line for each completed request.
-    pub enable_log_requests: bool,
-    /// Whether to set X-Request-Id on every HTTP response.
-    pub enable_request_id_headers: bool,
+    /// HTTP/API-server behavior switches.
+    pub api_server_options: ApiServerOptions,
+    /// CORS settings applied to every HTTP response.
+    pub cors: CorsConfig,
     /// Runtime server information returned by `/server_info`, when available.
     server_info: Option<ServerInfoSnapshot>,
     /// SHA-256 hashes of API keys accepted as bearer tokens for guarded routes.
@@ -39,6 +43,13 @@ pub struct AppState {
     server_load: AtomicU64,
     /// Dynamic LoRA adapter registry.
     lora_manager: LoraManager,
+    /// Backend model path reported as `root` for base-model cards.
+    model_path: Option<String>,
+    /// Lazily initialized runtime for heavyweight request paths.
+    request_runtime: OnceLock<BackgroundShutdownRuntime>,
+    /// Profiler mode that registers `/start_profile` and `/stop_profile`
+    /// routes when present.
+    pub profiler: Option<String>,
 }
 
 impl AppState {
@@ -58,24 +69,39 @@ impl AppState {
         Self {
             served_model_names,
             chat,
-            enable_log_requests: false,
-            enable_request_id_headers: false,
+            api_server_options: ApiServerOptions::default(),
+            cors: CorsConfig::default(),
             server_info: None,
             api_key_hashes: Vec::new(),
             server_load: AtomicU64::new(0),
             lora_manager: LoraManager::new(),
+            model_path: None,
+            request_runtime: OnceLock::new(),
+            profiler: None,
         }
     }
 
-    /// Enable per-request completion logging.
-    pub fn with_log_requests(mut self, enabled: bool) -> Self {
-        self.enable_log_requests = enabled;
+    /// Set HTTP/API-server behavior switches.
+    pub fn with_api_server_options(mut self, options: ApiServerOptions) -> Self {
+        self.api_server_options = options;
         self
     }
 
-    /// Enable X-Request-Id response headers.
-    pub fn with_request_id_headers(mut self, enabled: bool) -> Self {
-        self.enable_request_id_headers = enabled;
+    /// Set the CORS settings applied to every HTTP response.
+    pub fn with_cors(mut self, cors: CorsConfig) -> Self {
+        self.cors = cors;
+        self
+    }
+
+    /// Set the backend model path reported as `root` for base-model cards.
+    pub fn with_model_path(mut self, model_path: String) -> Self {
+        self.model_path = Some(model_path);
+        self
+    }
+
+    /// Set the profiler mode that enables `/start_profile` and `/stop_profile`.
+    pub fn with_profiler(mut self, profiler: Option<String>) -> Self {
+        self.profiler = profiler;
         self
     }
 
@@ -122,10 +148,14 @@ impl AppState {
         &self.served_model_names
     }
 
-    /// Return base served model names plus dynamically loaded LoRA adapter
-    /// names.
-    pub async fn served_model_names_with_loras(&self) -> Vec<String> {
-        self.lora_manager.served_model_names(&self.served_model_names).await
+    /// Backend model path reported as `root` for base-model cards, if known.
+    pub fn model_path(&self) -> Option<&str> {
+        self.model_path.as_deref()
+    }
+
+    /// Snapshot the loaded LoRA adapters in load order, for `/v1/models` cards.
+    pub async fn served_lora_requests(&self) -> Vec<LoraRequest> {
+        self.lora_manager.served_lora_requests().await
     }
 
     /// Resolve the requested model against one dynamic LoRA registry snapshot.
@@ -171,6 +201,12 @@ impl AppState {
         self.chat.engine_core_client()
     }
 
+    /// Runtime used by middleware to isolate heavyweight request handlers from
+    /// the HTTP reactor.
+    pub(crate) fn request_runtime(&self) -> &Runtime {
+        self.request_runtime.get_or_init(build_request_runtime)
+    }
+
     /// Return the current in-flight inference request count for the `/load`
     /// endpoint.
     pub fn server_load(&self) -> u64 {
@@ -200,6 +236,7 @@ impl AppState {
             match Arc::try_unwrap(self) {
                 Ok(state) => {
                     state.chat.shutdown().await?;
+                    drop(state.request_runtime); // shutdown in background
                     return Ok(());
                 }
                 Err(state) => self = state,

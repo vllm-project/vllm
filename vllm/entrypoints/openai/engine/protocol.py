@@ -101,6 +101,11 @@ class ModelList(OpenAIBaseModel):
 
 class PromptTokenUsageInfo(OpenAIBaseModel):
     cached_tokens: int | None = None
+    multimodal_tokens: dict[str, int] | None = None
+    """Prompt tokens contributed by each input modality, keyed by modality name
+    (e.g. `image`, `audio`, `video`). A breakdown of the multimodal
+    placeholder tokens already counted in `prompt_tokens`; `None` when the
+    request has no multimodal input."""
 
 
 class UsageInfo(OpenAIBaseModel):
@@ -242,11 +247,14 @@ class FunctionDefinition(OpenAIBaseModel):
     name: str
     description: str | None = None
     parameters: dict[str, Any] | None = None
+    strict: bool | None = None
     defer_loading: bool | None = None
 
     @model_serializer(mode="wrap")
     def _serialize(self, handler):
         data = handler(self)
+        if self.strict is None:
+            data.pop("strict", None)
         if self.defer_loading is None:
             data.pop("defer_loading", None)
         return data
@@ -344,6 +352,13 @@ class DeltaMessage(OpenAIBaseModel):
     content: str | None = None
     reasoning: str | None = None
     tool_calls: list[DeltaToolCall] = Field(default_factory=list)
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if len(data.get("tool_calls", [])) == 0:
+            data.pop("tool_calls", None)
+        return data
 
 
 class GenerationError(Exception):

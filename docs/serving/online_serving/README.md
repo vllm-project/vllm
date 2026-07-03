@@ -9,12 +9,13 @@ We currently support the following OpenAI APIs:
 - [Completions API](./openai_compatible_server.md#completions-api) (`/v1/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md).
     - *Note: `suffix` parameter is not supported.*
-- [Responses API](./openai_compatible_server.md#responses-api) (`/v1/responses`)
-    - Only applicable to [text generation models](../../models/generative_models.md).
 - [Chat Completions API](./openai_compatible_server.md#chat-api) (`/v1/chat/completions`)
     - Only applicable to [text generation models](../../models/generative_models.md) with a [chat template](./openai_compatible_server.md#chat-template).
     - *Note: `user` parameter is ignored.*
     - *Note:* Setting the `parallel_tool_calls` parameter to `false` ensures vLLM only returns zero or one tool call per request. Setting it to `true` (the default) allows returning more than one tool call per request. There is no guarantee more than one tool call will be returned if this is set to `true`, as that behavior is model dependent and not all models are designed to support parallel tool calls.
+- [Chat Completions batch API](./openai_compatible_server.md#chat-api) (`/v1/chat/completions/batch`)
+- [Responses API](./openai_compatible_server.md#responses-api) (`/v1/responses`, `/v1/responses/{response_id}`, `/v1/responses/{response_id}/cancel`)
+    - Only applicable to [text generation models](../../models/generative_models.md).
 - [Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
 - [Transcriptions API](./speech_to_text.md#transcriptions-api) (`/v1/audio/transcriptions`)
@@ -24,7 +25,7 @@ We currently support the following OpenAI APIs:
 
 ## Anthropic APIs
 
-- Anthropic messages API (`/v1/messages`)
+- Anthropic messages API (`/v1/messages`, `/v1/messages/count_tokens`)
 
 ## Cohere APIs
 
@@ -34,10 +35,6 @@ We currently support the following OpenAI APIs:
 - [Cohere Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Implements [Jina AI's v1 rerank API](https://jina.ai/reranker/)
     - compatible with [Cohere's v1 & v2 rerank APIs](https://docs.cohere.com/v2/reference/rerank)
-
-## SageMaker APIs
-
-- `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
 
 ## Pooling APIs
 
@@ -51,7 +48,7 @@ For further details on pooling models, please refer to [this page](../../models/
     - [OpenAI-compatible Embeddings API](../../models/pooling_models/embed.md#openai-compatible-embeddings-api) (`/v1/embeddings`)
     - Only applicable to [embedding models](../../models/pooling_models/embed.md).
 - [Scoring Usages](../../models/pooling_models/scoring.md)
-    - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`)
+    - [Score API](../../models/pooling_models/scoring.md#score-api) (`/score`, `/v1/score`)
     - [Cohere Rerank API](../../models/pooling_models/scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
     - Applicable to [score models](../../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
 - [Pooling API](../../models/pooling_models/README.md#pooling-api) (`/pooling`)
@@ -68,17 +65,6 @@ For further details on speech to text, please refer to [this page](speech_to_tex
 - [Realtime API](./speech_to_text.md#realtime-api) (`/v1/realtime`)
     - Only applicable to [Automatic Speech Recognition (ASR) models](../../models/supported_models.md#realtime-transcription).
 
-## Disaggregated APIs
-
-### Renderer APIs
-
-For further details on renderer APIs, please refer to [this page](renderer.md).
-
-- [Completions Render API](renderer.md) (`/v1/completions/render`)
-    - Render completion requests
-- [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)
-    - Render chat completions
-
 ## Custom APIs
 
 - [Classification API](../../models/pooling_models/classify.md#classification-api) (`/classify`)
@@ -91,14 +77,79 @@ For further details on renderer APIs, please refer to [this page](renderer.md).
     - Applicable to [CausalLM models](../../models/generative_models.md) (task `"generate"`).
     - Computes next-token probabilities for specified `label_token_ids`.
 
-## Utility APIs
+## Instrumentator APIs
+
+### Basic APIs
+
+- `/version` - Version information
+- `/load` - Server load metrics
+- `/v1/models` - List available models
+- `/health` - Health check
+
+### Metrics APIs
+
+For further details on metrics, please refer to [this page](../../design/metrics.md).
+
+- `/metrics` - Prometheus-compatible metrics HTTP endpoint
+
+### Offline API Documentation
+
+The FastAPI `/docs` endpoint requires an internet connection by default. To enable offline access in air-gapped environments, use the `--enable-offline-docs` flag:
+
+```bash
+vllm serve NousResearch/Meta-Llama-3-8B-Instruct --enable-offline-docs
+```
+
+### LoRA dynamic loading
+
+LoRA dynamic loading & unloading is enabled in the API server. This should ONLY be used for local development!
+
+- `/v1/load_lora_adapter` - LoRA dynamic loading
+- `/v1/unload_lora_adapter` - LoRA dynamic unloading
+
+### Profiling APIs
+
+For further details on profiling vLLM, please refer to [this page](../../contributing/profiling.md).
+
+- `/start_profile` - Start PyTorch profiler
+- `/stop_profile` - Stop PyTorch profiler
+
+### SageMaker APIs
+
+- `/ping` - SageMaker health check
+- `/invocations` - SageMaker-compatible endpoint (routes to the same inference functions as `/v1` endpoints)
+
+## Scale-Out APIs
+
+### Tokens IN <> Tokens OUT APIs
+
+- `/inference/v1/generate` - Generate completions
+- `/abort_requests` - Abort in-flight requests (only when `--tokens-only` is also set)
+
+### Renderer APIs
+
+For further details on renderer APIs, please refer to [this page](renderer.md).
+
+- [Completions Render API](renderer.md) (`/v1/completions/render`)
+    - Render completion requests
+- [Chat Completions Render API](renderer.md) (`/v1/chat/completions/render`)
+    - Render chat completions
+
+### Derenderer APIs
+
+- `/v1/completions/derender` - Derenderer completion requests
+- `/v1/chat/completions/derender` - Derenderer chat completion requests
+
+## Tokenize APIs
 
 - `/tokenize` - Tokenize text
 - `/detokenize` - Detokenize tokens
-- `/health` - Health check
-- `/ping` - SageMaker health check
-- `/version` - Version information
-- `/load` - Server load metrics
+- `/tokenizer_info` - Get comprehensive tokenizer information including chat templates and configuration
+
+## Elastic Expert Parallelism (EEP)
+
+- `/scale_elastic_ep` - Trigger scaling operations
+- `/is_scaling_elastic_ep` - Check if scaling is in progress
 
 ## Server in development mode
 
@@ -120,7 +171,9 @@ For further details on Weight Transfer, please refer to [this page](../../traini
 - `/resume` - Resume generation
 - `/is_paused` - Check if generation is paused
 - `/init_weight_transfer_engine` - Initialize weight transfer engine for RLHF
+- `/start_weight_update` - Prepares the inference engine for a weight update.
 - `/update_weights` - Update model weights (can alter model behavior)
+- `/finish_weight_update` - Finalizes the weight update
 - `/get_world_size` - Get distributed world size
 
 ### Collective RPC
@@ -188,14 +241,6 @@ the detected format, which can be one of:
 
 If the result is not what you expect, you can set the `--chat-template-content-format` CLI argument
 to override which format to use.
-
-## Offline API Documentation
-
-The FastAPI `/docs` endpoint requires an internet connection by default. To enable offline access in air-gapped environments, use the `--enable-offline-docs` flag:
-
-```bash
-vllm serve NousResearch/Meta-Llama-3-8B-Instruct --enable-offline-docs
-```
 
 ## Ray Serve LLM
 

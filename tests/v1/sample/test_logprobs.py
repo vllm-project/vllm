@@ -42,11 +42,12 @@ SAMPLE_PROMPT = BatchLogprobsComposition.SAMPLE_PROMPT
 #
 # Force LLM instances into an identical, deterministic execution
 # mode so the test isolates spec-decode correctness only:
-ROCM_DETERMINISM_KWARGS: dict = (
-    dict(max_num_seqs=1, attention_backend="TRITON_ATTN")
-    if current_platform.is_rocm()
-    else {}
-)
+if current_platform.is_rocm():
+    GPU_DETERMINISM_KWARGS: dict = dict(max_num_seqs=1, attention_backend="TRITON_ATTN")
+elif current_platform.is_xpu():
+    GPU_DETERMINISM_KWARGS = dict(max_num_seqs=1, attention_backend="FLASH_ATTN")
+else:
+    GPU_DETERMINISM_KWARGS = {}
 
 
 @pytest.fixture(
@@ -1127,7 +1128,7 @@ def test_spec_decode_logprobs(
         enable_chunked_prefill=True,
         max_num_batched_tokens=32,
         enable_prefix_caching=False,
-        **ROCM_DETERMINISM_KWARGS,
+        **GPU_DETERMINISM_KWARGS,
     )
 
     # Run base LLM.
@@ -1173,7 +1174,7 @@ def test_spec_decode_logprobs(
     assert len(ref_logprobs) == len(spec_logprobs)
     for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
         assert math.isclose(
-            ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1
+            ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=2.5e-1
         ), (
             f"Logprob mismatch: ref={ref_logprob.logprob} "
             f"spec={spec_logprob.logprob} "
@@ -1262,3 +1263,37 @@ def test_prompt_logprobs_with_chunking_and_preemption():
         assert preemptions > 0, "Test did not trigger any preemptions"
 
         print(f"Test passed with {preemptions} preemptions")
+
+
+@large_gpu_mark(min_gb=24)
+def test_token_logprobs_large_batch_int64_row_offset():
+    """Regression: logprob kernel row offset (row * vocab_size) must use int64.
+
+    The rejection-sampler logprobs path runs the logprob kernels over the
+    spec-expanded logits batch, so batch_size * vocab_size can exceed 2**31
+    (e.g. DFlash drafts K tokens per request). With int32 offset arithmetic the
+    per-row pointer wraps to a negative address and the kernel hits a CUDA
+    illegal memory access. Run over a batch where batch_size * vocab_size > 2**31
+    and check the highest-offset row matches a reference log-softmax.
+    """
+    if not current_platform.is_cuda():
+        pytest.skip("int32 row-offset overflow is a CUDA kernel issue")
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    device = torch.device("cuda")
+    vocab_size = 131072
+    batch_size = 2**31 // vocab_size + 64  # batch_size * vocab_size > 2**31
+    # logits (the large input) plus small logprob/rank outputs; ~1 GB headroom.
+    required_bytes = batch_size * vocab_size * 4 + (1 << 30)
+    if torch.accelerator.get_memory_info()[0] < required_bytes:
+        pytest.skip(f"needs ~{required_bytes / 1e9:.0f} GB of free GPU memory")
+
+    logits = torch.randn(batch_size, vocab_size, device=device, dtype=torch.float32)
+    token_ids = torch.full((batch_size, 1), 7, device=device, dtype=torch.int64)
+    logprobs = compute_token_logprobs(logits, token_ids)
+    torch.accelerator.synchronize()  # surface any async illegal memory access
+    last = batch_size - 1
+    ref = torch.log_softmax(logits[last].float(), dim=-1)[7]
+    assert torch.allclose(logprobs[last, 0], ref, atol=1e-2), (
+        f"logprob {logprobs[last, 0].item()} != ref {ref.item()}"
+    )

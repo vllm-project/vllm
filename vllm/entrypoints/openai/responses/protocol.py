@@ -525,23 +525,30 @@ class ResponsesRequest(OpenAIBaseModel):
                     processed_input.append(item)
 
             elif item_type == "message" and item.get("role") == "assistant":
+                content = item.get("content")
+                if not isinstance(content, list):
+                    # String content is a valid EasyInputMessageParam,
+                    # do not coerce it to ResponseOutputMessage
+                    processed_input.append(item)
+                    continue
+
+                original_item = item
                 item = dict(item)
                 if "id" not in item:
                     item["id"] = f"msg_{random_uuid()}"
                 if "status" not in item:
                     item["status"] = "completed"
                 # ResponseOutputText requires annotations
-                if isinstance(item.get("content"), list):
-                    new_content = []
-                    for c in item["content"]:
-                        if (
-                            isinstance(c, dict)
-                            and c.get("type") == "output_text"
-                            and "annotations" not in c
-                        ):
-                            c = {**c, "annotations": []}
-                        new_content.append(c)
-                    item["content"] = new_content
+                new_content = []
+                for c in content:
+                    if (
+                        isinstance(c, dict)
+                        and c.get("type") == "output_text"
+                        and "annotations" not in c
+                    ):
+                        c = {**c, "annotations": []}
+                    new_content.append(c)
+                item["content"] = new_content
                 try:
                     processed_input.append(ResponseOutputMessage(**item))
                 except ValidationError:
@@ -549,7 +556,7 @@ class ResponsesRequest(OpenAIBaseModel):
                         "Failed to parse assistant message to ResponseOutputMessage, "
                         "leaving for Pydantic validation"
                     )
-                    processed_input.append(item)
+                    processed_input.append(original_item)
 
             else:
                 processed_input.append(item)

@@ -177,3 +177,15 @@ def test_hunyuan_a13b_tool_parser_streaming(model_deltas, expected_tool_calls):
         reconstructor.tool_calls[idx].id = expected_tool_calls[idx].id
 
     assert reconstructor.tool_calls == expected_tool_calls
+
+
+def test_hunyuan_a13b_tool_parser_non_ascii():
+    mock_tokenizer = MagicMock()
+    tool_parser: ToolParser = ToolParserManager.get_tool_parser("hunyuan_a13b")(
+        mock_tokenizer
+    )
+    model_output = '<tool_calls>[{"name": "get_weather", "arguments": {"city": "北京"}}]</tool_calls>'
+    _, tool_calls = run_tool_extraction(tool_parser, model_output, streaming=False)
+    args = tool_calls[0].function.arguments
+    assert "北京" in args
+    assert "\\u" not in args

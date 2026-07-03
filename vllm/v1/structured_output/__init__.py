@@ -211,11 +211,8 @@ class StructuredOutputManager:
         if not structured_output_request_ids:
             return None
 
-        max_num_spec_tokens = 0
-        if self.vllm_config.speculative_config is not None:
-            max_num_spec_tokens = (
-                self.vllm_config.speculative_config.num_speculative_tokens
-            )
+        # Covers both speculative decoding and diffusion LLMs (canvas_length).
+        max_num_spec_tokens = self.vllm_config.num_speculative_tokens
 
         if self._grammar_bitmask is None:
             assert self.backend is not None
@@ -277,7 +274,13 @@ class StructuredOutputManager:
 
                 state_advancements = 0
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                for token in itertools.chain(req_tokens, (-1,)):
+                if self.vllm_config.model_config.is_diffusion and req_tokens:
+                    # Diffusion LLMs don't sample a bonus token after the
+                    # scheduled positions, so don't append the -1 placeholder.
+                    token_iter: Iterable[int] = req_tokens
+                else:
+                    token_iter = itertools.chain(req_tokens, (-1,))
+                for token in token_iter:
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
                     if token == -1:
                         # Stop advancing the grammar once we hit a padding token.

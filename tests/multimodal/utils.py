@@ -94,7 +94,7 @@ def create_long_gop_video(
         }
         for i in range(num_frames):
             img = np.zeros((height, width, 3), dtype=np.uint8)
-            img[:, :, 1] = i
+            img[:, :, 1] = i % 256
             frame = av.VideoFrame.from_ndarray(img, format="rgb24")
             for packet in stream.encode(frame):
                 container.mux(packet)

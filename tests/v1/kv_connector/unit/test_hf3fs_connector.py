@@ -33,7 +33,7 @@ def hf3fs_stats():
 def _make_cuda_event():
     """Return a real CUDA event when available, otherwise a MagicMock."""
     if torch.cuda.is_available():
-        return torch.cuda.Event()
+        return torch.Event()
     return MagicMock()
 
 

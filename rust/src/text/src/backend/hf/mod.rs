@@ -36,6 +36,8 @@ pub struct HfTextBackend {
     /// Generation-config for sampling defaults that may be inherited when the
     /// user does not explicitly override them.
     generation_config: GenerationConfig,
+    /// Model vocabulary size from the selected text config.
+    model_vocab_size: usize,
     /// Model config (`config.json`).
     model_config: ModelConfig,
 }
@@ -58,6 +60,7 @@ impl HfTextBackend {
             .and_then(|token| tokenizer.token_to_id(token.as_str()));
 
         let model_config = load_model_config(files.config_path.as_deref())?;
+        let model_vocab_size = model_config.vocab_size()? as usize;
         let generation_config = load_generation_config(files.generation_config_path.as_deref())?;
         let mut extra_eos_token_ids = generation_config
             .eos_token_id
@@ -80,6 +83,7 @@ impl HfTextBackend {
             primary_eos_token_id,
             extra_eos_token_ids,
             generation_config,
+            model_vocab_size,
             model_config,
         })
     }
@@ -100,6 +104,10 @@ impl TextBackend for HfTextBackend {
         self.model_config.is_moe()
     }
 
+    fn model_vocab_size(&self) -> usize {
+        self.model_vocab_size
+    }
+
     fn model_id(&self) -> &str {
         &self.model_id
     }
@@ -114,7 +122,6 @@ impl TextBackend for HfTextBackend {
             default_min_p: self.generation_config.min_p,
             default_repetition_penalty: self.generation_config.repetition_penalty,
             default_max_tokens: self.generation_config.max_new_tokens,
-            max_model_len: self.model_config.max_position_embeddings(),
         })
     }
 }

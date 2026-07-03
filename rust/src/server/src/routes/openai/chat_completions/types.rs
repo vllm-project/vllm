@@ -6,6 +6,7 @@ use serde_json::Value;
 use serde_with::SerializeDisplay;
 use validator::Validate;
 use vllm_chat::ReasoningEffort;
+use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
@@ -165,8 +166,10 @@ pub struct ChatCompletionRequest {
     pub bad_words: Option<Vec<String>>,
 
     // -------- Extra vLLM Parameters --------
-    /// Token budget for reasoning/thinking
-    pub thinking_token_budget: Option<u32>,
+    /// Token budget for reasoning/thinking. Accepts a non-negative integer, or
+    /// `-1` for unlimited (mirroring the Python frontend, which normalizes `-1`
+    /// to "no budget").
+    pub thinking_token_budget: Option<i64>,
 
     /// Whether to include reasoning content in the response
     #[serde(default = "default_true")]
@@ -234,7 +237,7 @@ pub struct ChatCompletionRequest {
     pub vllm_xargs: Option<HashMap<String, Value>>,
 
     /// Parameters for detecting repetitive N-gram patterns in output tokens
-    pub repetition_detection: Option<Value>,
+    pub repetition_detection: Option<RepetitionDetectionParams>,
 }
 
 impl Default for ChatCompletionRequest {

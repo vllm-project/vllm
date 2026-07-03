@@ -140,8 +140,8 @@ class BitsAndBytesModelLoader(BaseModelLoader):
                 download_safetensors_index_file_from_hf(
                     model_name_or_path,
                     index_file,
-                    self.load_config.download_dir,
-                    revision,
+                    cache_dir=self.load_config.download_dir,
+                    revision=revision,
                 )
             hf_weights_files = filter_duplicate_safetensors_files(
                 hf_weights_files, hf_folder, index_file
@@ -567,16 +567,11 @@ class BitsAndBytesModelLoader(BaseModelLoader):
 
         if is_moe_model(model):
             self.expert_params_mapping = get_moe_expert_mapping(model)
-            if not self.expert_params_mapping:
-                raise AttributeError(
-                    f"MoE Model {type(model).__name__} does not support "
-                    "BitsAndBytes quantization yet. Ensure this model has "
-                    "'get_expert_mapping' method."
-                )
         # For some models like Molmo, we need to use hf_to_vllm_mapper
         # to ensure correct loading of weights.
         if hf_to_vllm_mapper := getattr(model, "hf_to_vllm_mapper", None):
-            self.weight_mapper = lambda name: hf_to_vllm_mapper._map_name(name)
+            unstacked_mapper = hf_to_vllm_mapper.get_unstacked_mapper()
+            self.weight_mapper = lambda name, m=unstacked_mapper: m._map_name(name)
 
         self._get_bnb_target_modules(model)
         self._classify_module_sharding(model)

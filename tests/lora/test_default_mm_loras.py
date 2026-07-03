@@ -42,7 +42,11 @@ VLLM_RUNNER_BASE_KWARGS = {
 }
 
 
-def run_test(vllm_runner, audio_assets, lora_request, expected_suffix, **kwargs):
+def run_test(
+    vllm_runner, audio_assets, monkeypatch, lora_request, expected_suffix, **kwargs
+):
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
     inputs = [([AUDIO_PROMPT], [audio_assets[0].audio_and_sample_rate[0]])]
 
     # Apply any additional kwargs as overrides to the base kwargs
@@ -66,11 +70,13 @@ def run_test(vllm_runner, audio_assets, lora_request, expected_suffix, **kwargs)
 def test_active_default_mm_lora(
     vllm_runner: type[VllmRunner],
     audio_assets: AudioTestAssets,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Ensure that we can use the default audio lora."""
     run_test(
         vllm_runner,
         audio_assets,
+        monkeypatch,
         lora_request=None,
         default_mm_loras={"audio": AUDIO_LORA_PATH},
         expected_suffix=RESPONSE_SUFFIX_WITH_LORA,
@@ -84,12 +90,14 @@ def test_active_default_mm_lora(
 def test_inactive_default_mm_lora(
     vllm_runner: type[VllmRunner],
     audio_assets: AudioTestAssets,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Ensure that modalities are filtered properly."""
     # Default image lora won't be active since we only pass audio
     run_test(
         vllm_runner,
         audio_assets,
+        monkeypatch,
         lora_request=None,
         default_mm_loras={"image": IMAGE_LORA_PATH},
         expected_suffix=RESPONSE_SUFFIX_WITHOUT_LORA,
@@ -103,11 +111,13 @@ def test_inactive_default_mm_lora(
 def test_default_mm_lora_succeeds_with_redundant_lora_request(
     vllm_runner: type[VllmRunner],
     audio_assets: AudioTestAssets,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Ensure that redundantly providing the lora works."""
     run_test(
         vllm_runner,
         audio_assets,
+        monkeypatch,
         lora_request=LoRARequest("audio", 1, AUDIO_LORA_PATH),
         default_mm_loras={"audio": AUDIO_LORA_PATH},
         expected_suffix=RESPONSE_SUFFIX_WITH_LORA,
@@ -121,12 +131,14 @@ def test_default_mm_lora_succeeds_with_redundant_lora_request(
 def test_default_mm_lora_fails_with_overridden_lora_request(
     vllm_runner: type[VllmRunner],
     audio_assets: AudioTestAssets,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     """Ensure that if the lora_request conflicts with default_mm_loras,
     we use the lora_request."""
     run_test(
         vllm_runner,
         audio_assets,
+        monkeypatch,
         lora_request=LoRARequest("speech", 2, AUDIO_LORA_PATH),
         default_mm_loras={"audio": IMAGE_LORA_PATH},
         expected_suffix=RESPONSE_SUFFIX_WITH_LORA,
@@ -134,7 +146,10 @@ def test_default_mm_lora_fails_with_overridden_lora_request(
 
 
 @create_new_process_for_each_test()
-def test_default_mm_lora_does_not_expand_string_reqs(vllm_runner):
+def test_default_mm_lora_does_not_expand_string_reqs(vllm_runner, monkeypatch):
+    # See run_test: force spawn to avoid the forked-child CUDA re-init crash.
+    monkeypatch.setenv("VLLM_WORKER_MULTIPROC_METHOD", "spawn")
+
     class MockEngineException(Exception):
         pass
 

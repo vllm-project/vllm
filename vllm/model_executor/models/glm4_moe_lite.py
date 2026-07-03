@@ -184,7 +184,7 @@ class Glm4MoeLiteDecoderLayer(nn.Module):
     ) -> torch.Tensor:
         # Self Attention
         if residual is None:
-            residual = hidden_states.clone()
+            residual = hidden_states
             hidden_states = self.input_layernorm(hidden_states)
         else:
             hidden_states, residual = self.input_layernorm(hidden_states, residual)
@@ -573,8 +573,6 @@ class Glm4MoeLiteForCausalLM(
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
-        self.expert_weights = []
-
         self.num_expert_groups = getattr(self.config, "n_group", 1)
 
         self.moe_layers = []

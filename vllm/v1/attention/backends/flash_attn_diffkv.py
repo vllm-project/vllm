@@ -41,6 +41,30 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
     def set_head_size_v(cls, head_size_v: int) -> None:
         cls.head_size_v = head_size_v
 
+    @classmethod
+    def is_supported_on_current_device(
+        cls,
+        head_size: int,
+        head_size_v: int,
+        has_sinks: bool,
+    ) -> bool:
+        """Check whether FA3/4 with this DiffKV config is usable here.
+
+        DiffKV (hdim_qk != hdim_v) requires FA3 or FA4
+        """
+        if not is_flash_attn_varlen_func_available():
+            return False
+        try:
+            version = get_flash_attn_version(
+                requires_alibi=False,
+                head_size=head_size,
+                head_size_v=head_size_v,
+                has_sinks=has_sinks,
+            )
+        except Exception:
+            return False
+        return version in (3, 4)
+
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN_DIFFKV"
@@ -49,8 +73,6 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
     def get_impl_cls() -> type["FlashAttentionImpl"]:
         return FlashAttentionDiffKVImpl
 
-    # Do not modify the interface of get_kv_cache_shape,
-    # but consider head_size_v when returning result.
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,

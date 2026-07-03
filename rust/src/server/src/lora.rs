@@ -1,6 +1,6 @@
-use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use indexmap::IndexMap;
 use tokio::sync::{Mutex, RwLock};
 use vllm_engine_core_client::EngineCoreClient;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
@@ -15,8 +15,8 @@ pub(crate) struct LoraModelResolution {
 
 /// Runtime registry for dynamically loaded LoRA adapters.
 pub(crate) struct LoraManager {
-    /// Dynamically loaded LoRA adapters keyed by public model name.
-    requests: RwLock<BTreeMap<String, LoraRequest>>,
+    /// Dynamically loaded LoRA adapters keyed by public model name, in load order.
+    requests: RwLock<IndexMap<String, LoraRequest>>,
     /// Monotonic adapter id allocator. LoRA ids are one-indexed.
     id_counter: AtomicU64,
     /// Serialize dynamic LoRA registry updates around engine utility calls.
@@ -51,18 +51,15 @@ pub(crate) enum UnloadLoraError {
 impl LoraManager {
     pub fn new() -> Self {
         Self {
-            requests: RwLock::new(BTreeMap::new()),
+            requests: RwLock::new(IndexMap::new()),
             id_counter: AtomicU64::new(0),
             update_lock: Mutex::new(()),
         }
     }
 
-    /// Return base served model names plus dynamically loaded LoRA adapter
-    /// names.
-    pub async fn served_model_names(&self, base_model_names: &[String]) -> Vec<String> {
-        let mut names = base_model_names.to_vec();
-        names.extend(self.requests.read().await.keys().cloned());
-        names
+    /// Snapshot loaded LoRA adapters in load order.
+    pub async fn served_lora_requests(&self) -> Vec<LoraRequest> {
+        self.requests.read().await.values().cloned().collect()
     }
 
     /// Resolve the requested model against one consistent LoRA registry
@@ -163,6 +160,6 @@ impl LoraManager {
             });
         }
 
-        Ok(self.requests.write().await.remove(lora_name).unwrap_or(lora_request))
+        Ok(self.requests.write().await.shift_remove(lora_name).unwrap_or(lora_request))
     }
 }

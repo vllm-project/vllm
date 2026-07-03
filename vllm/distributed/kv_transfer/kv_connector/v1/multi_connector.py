@@ -492,12 +492,15 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
                 async_saves += 1
             if txfer_params is not None:
                 if kv_txfer_params is not None:
-                    # TODO we can probably change this to merge the dicts here,
-                    # checking for key clashes.
-                    raise RuntimeError(
-                        "Only one connector can produce KV transfer params"
-                    )
-                kv_txfer_params = txfer_params
+                    clashes = set(kv_txfer_params) & set(txfer_params)
+                    if clashes:
+                        raise RuntimeError(
+                            "Key clash in kv_transfer_params from multiple "
+                            f"connectors: {clashes}"
+                        )
+                    kv_txfer_params.update(txfer_params)
+                else:
+                    kv_txfer_params = txfer_params
         if async_saves > 1:
             self._extra_async_saves[request.request_id] = async_saves - 1
 
@@ -537,6 +540,9 @@ class MultiConnector(KVConnectorBase_V1, SupportsHMA):
     def take_events(self) -> Iterable["KVCacheEvent"]:
         for c in self._connectors:
             yield from c.take_events()
+
+    def has_pending_push_work(self) -> bool:
+        return any(c.has_pending_push_work() for c in self._connectors)
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:

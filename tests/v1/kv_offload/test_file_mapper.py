@@ -4,6 +4,14 @@
 
 from unittest.mock import MagicMock
 
+import torch
+
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    MLAAttentionSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.kv_offload.base import (
     OffloadingSpec,
     make_offload_key,
@@ -56,9 +64,10 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
         "dcp_size", 1
     )
     mock_vllm_config.parallel_config.rank = kwargs.get("rank", 0)
+    mock_vllm_config.use_v2_model_runner = kwargs.get("use_v2_model_runner", False)
 
     mock_kv_cache_config = MagicMock()
-    mock_kv_cache_config.kv_cache_groups = []
+    mock_kv_cache_config.kv_cache_groups = kwargs.get("kv_cache_groups", [])
 
     mock_offloading_spec = MagicMock(spec=OffloadingSpec)
     mock_offloading_spec.vllm_config = mock_vllm_config
@@ -69,6 +78,7 @@ def make_mapper_from_offloading_spec(**kwargs) -> FileMapper:
         root_dir=kwargs.get("root_dir", "/tmp/cache"),
         offloading_spec=mock_offloading_spec,
         gpu_blocks_per_file=mock_offloading_spec.block_size_factor,
+        parallel_agnostic=kwargs.get("parallel_agnostic", False),
     )
 
 
@@ -125,3 +135,92 @@ def test_get_config_file_path():
     fm = make_mapper_from_offloading_spec()
     config_path = fm.get_config_file_path()
     assert config_path == f"{fm.base_path}/config.json"
+
+
+# ---------------------------------------------------------------------------
+# parallel_agnostic: honored only for a single non-MLA full-attention group
+# ---------------------------------------------------------------------------
+
+
+def _full_attention_group() -> KVCacheGroupSpec:
+    return KVCacheGroupSpec(
+        layer_names=["layer0"],
+        kv_cache_spec=FullAttentionSpec(
+            block_size=16, num_kv_heads=4, head_size=128, dtype=torch.float32
+        ),
+    )
+
+
+def _sliding_window_group() -> KVCacheGroupSpec:
+    return KVCacheGroupSpec(
+        layer_names=["layer0"],
+        kv_cache_spec=SlidingWindowSpec(
+            block_size=16,
+            num_kv_heads=4,
+            head_size=128,
+            dtype=torch.float32,
+            sliding_window=128,
+        ),
+    )
+
+
+def test_parallel_agnostic_enabled_for_single_full_attention():
+    # tp/rank are collapsed out of the namespace so the cache is shared
+    # across tensor-parallel sizes.
+    fm = make_mapper_from_offloading_spec(
+        tp_size=2,
+        rank=1,
+        kv_cache_groups=[_full_attention_group()],
+        parallel_agnostic=True,
+    )
+    assert fm.fields["tp_size"] == 1
+    assert fm.rank == 0
+
+
+def test_parallel_agnostic_disabled_for_multiple_groups():
+    # More than one KV-cache group (hybrid model) => keep per-layout namespacing.
+    fm = make_mapper_from_offloading_spec(
+        tp_size=2,
+        kv_cache_groups=[_full_attention_group(), _full_attention_group()],
+        parallel_agnostic=True,
+    )
+    assert fm.fields["tp_size"] == 2
+
+
+def test_parallel_agnostic_disabled_for_non_full_attention():
+    # Single group but not full attention (sliding window) => keep namespacing.
+    fm = make_mapper_from_offloading_spec(
+        tp_size=2,
+        kv_cache_groups=[_sliding_window_group()],
+        parallel_agnostic=True,
+    )
+    assert fm.fields["tp_size"] == 2
+
+
+def test_parallel_agnostic_excludes_mla():
+    # MLA latent KV is replicated per rank, so its offloaded blocks are not
+    # parallelism-invariant: the opt-in must not collapse tp/rank.
+    group = KVCacheGroupSpec(
+        layer_names=["layer0"],
+        kv_cache_spec=MLAAttentionSpec(
+            block_size=16, num_kv_heads=1, head_size=576, dtype=torch.float32
+        ),
+    )
+    fm = make_mapper_from_offloading_spec(
+        tp_size=2, rank=1, kv_cache_groups=[group], parallel_agnostic=True
+    )
+    assert fm.fields["tp_size"] == 2
+    assert fm.rank == 1
+
+
+def test_parallel_agnostic_disabled_on_v2_model_runner():
+    # V2's KV layout is not known to be parallelism-invariant: don't collapse.
+    fm = make_mapper_from_offloading_spec(
+        tp_size=2,
+        rank=1,
+        kv_cache_groups=[_full_attention_group()],
+        use_v2_model_runner=True,
+        parallel_agnostic=True,
+    )
+    assert fm.fields["tp_size"] == 2
+    assert fm.rank == 1

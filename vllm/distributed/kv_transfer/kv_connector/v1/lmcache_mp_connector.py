@@ -589,7 +589,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             return
 
         with torch.cuda.stream(torch.cuda.current_stream()):
-            event = torch.cuda.Event(interprocess=True)
+            event = torch.Event(interprocess=True)
             event.record()
 
         self.worker_adapter.batched_submit_retrieve_requests(
@@ -663,7 +663,7 @@ class LMCacheMPConnectorUpstream(KVConnectorBase_V1):
             return
 
         with torch.cuda.stream(torch.cuda.current_stream()):
-            event = torch.cuda.Event(interprocess=True)
+            event = torch.Event(interprocess=True)
             event.record()
 
         self.worker_adapter.batched_submit_store_requests(

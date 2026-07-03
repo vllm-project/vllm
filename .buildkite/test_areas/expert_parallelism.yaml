@@ -14,6 +14,16 @@ steps:
   commands:
   - pytest -v -s distributed/test_eplb_algo.py
   - pytest -v -s distributed/test_eplb_utils.py
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/distributed/eplb
+      - tests/distributed/test_eplb_algo.py
+      - tests/distributed/test_eplb_utils.py
+      - vllm/platforms/rocm.py
 
 - label: EPLB Execution # 17min
   key: eplb-execution

@@ -19,6 +19,11 @@ TransferHandle = int
 ReqId = str
 
 GET_META_MSG = b"get_meta_msg"
+
+# Push-mode (WRITE-based) registration notification.
+# Sent worker-to-worker over NIXL: D worker -> P worker, encoded as
+# PUSH_REG_NOTIF_PREFIX + msgpack(registration_data).
+PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #
 # NIXL Connector Version
 #
@@ -160,6 +165,8 @@ class ReqMeta:
     local_physical_block_ids: BlockIds
     tp_size: int
     remote: RemoteMeta | None = None
+    # Remote block size, discovered during NIXL handshake (push mode).
+    remote_block_size: int | None = None
 
 
 class NixlConnectorMetadata(KVConnectorMetadata):
@@ -171,6 +178,12 @@ class NixlConnectorMetadata(KVConnectorMetadata):
         self.reqs_not_processed: set[ReqId] = set()
         # Heartbeat data grouped by remote engine, sent by D worker to P.
         self.heartbeat_by_engine: dict[EngineId, HeartbeatInfo] = {}
+        # Push mode (D side): registration data the D worker should send to
+        # P workers via NIXL notification on this step.
+        self.push_registrations: dict[ReqId, dict[str, Any]] = {}
+        # Push mode (P side): newly finished request blocks to be matched
+        # against pending D registrations on the P worker.
+        self.push_finished_blocks: dict[ReqId, BlockIds] = {}
 
     def _add_new_req(
         self,
@@ -182,6 +195,7 @@ class NixlConnectorMetadata(KVConnectorMetadata):
             local_physical_block_ids=local_block_ids,
             # P workers don't need to receive tp_size from proxy here.
             tp_size=kv_transfer_params.get("tp_size", 1),
+            remote_block_size=kv_transfer_params.get("remote_block_size"),
         )
 
     def add_new_req_to_save(

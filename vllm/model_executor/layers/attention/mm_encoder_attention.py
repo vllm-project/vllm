@@ -28,6 +28,7 @@ from vllm.utils.flashinfer import (
     is_flashinfer_cudnn_fp8_prefill_attn_supported,
 )
 from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.ops.vit_attn_wrappers import (
@@ -311,7 +312,7 @@ class MMEncoderAttention(CustomOp):
                 )
                 cu_seqlens = np.concatenate([cu_seqlens_qko, cu_seqlens_v])
 
-        cu_seqlens = torch.from_numpy(cu_seqlens).to(device, non_blocking=True)
+        cu_seqlens = async_tensor_h2d(cu_seqlens, device=device)
         return cu_seqlens
 
     def __init__(
@@ -396,8 +397,9 @@ class MMEncoderAttention(CustomOp):
         if not is_flashinfer_cudnn_fp8_prefill_attn_supported():
             raise ValueError(
                 "mm_encoder_attn_dtype='fp8' requires the FlashInfer "
-                "cuDNN backend with cuDNN >= 9.17.1 on a GPU with native "
-                "FP8 support."
+                "cuDNN backend with cuDNN >= 9.17.1 on Blackwell (SM 100) "
+                "or newer. cuDNN's FP8 SDPA path with bf16/fp16 output is "
+                "not available on Hopper (H100/H200) or earlier."
             )
 
         self.fp8_enabled = True

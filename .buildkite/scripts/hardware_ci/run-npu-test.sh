@@ -85,7 +85,7 @@ RUN pip config set global.index-url http://cache-service-vllm.nginx-pypi-cache.s
 
 # Install for pytest to make the docker build cache layer always valid
 RUN --mount=type=cache,target=/root/.cache/pip \
-    pip install pytest>=6.0  modelscope
+    pip install pytest>=6.0  'modelscope<1.38'
 
 WORKDIR /workspace/vllm
 

@@ -656,8 +656,6 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExpe
             self.model.make_empty_intermediate_tensors
         )
 
-        self.expert_weights = []
-
         # Set MoE hyperparameters
         moe_layers_indices = [
             i

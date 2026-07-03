@@ -57,13 +57,13 @@ VLLMDataTypeVLLMScalarTypeTag: dict[VLLMDataType | DataType, str] = {
 }
 
 VLLMDataTypeTorchDataTypeTag: dict[VLLMDataType | DataType, str] = {
-    DataType.u8: "at::ScalarType::Byte",
-    DataType.s8: "at::ScalarType::Char",
-    DataType.e4m3: "at::ScalarType::Float8_e4m3fn",
-    DataType.s32: "at::ScalarType::Int",
-    DataType.f16: "at::ScalarType::Half",
-    DataType.bf16: "at::ScalarType::BFloat16",
-    DataType.f32: "at::ScalarType::Float",
+    DataType.u8: "torch::headeronly::ScalarType::Byte",
+    DataType.s8: "torch::headeronly::ScalarType::Char",
+    DataType.e4m3: "torch::headeronly::ScalarType::Float8_e4m3fn",
+    DataType.s32: "torch::headeronly::ScalarType::Int",
+    DataType.f16: "torch::headeronly::ScalarType::Half",
+    DataType.bf16: "torch::headeronly::ScalarType::BFloat16",
+    DataType.f32: "torch::headeronly::ScalarType::Float",
 }
 
 VLLMKernelScheduleTag: dict[MixedInputKernelScheduleType | KernelScheduleType, str] = {

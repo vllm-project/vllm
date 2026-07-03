@@ -305,6 +305,7 @@ INPUT_TRANSCRIPTION_HTTP_BATCH = (
             "body": {
                 "model": SPEECH_LARGE_MODEL_NAME,
                 "file_url": AudioAsset("mary_had_lamb").url,
+                "language": "en",
                 "response_format": "json",
             },
         }

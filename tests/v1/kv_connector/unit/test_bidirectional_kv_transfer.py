@@ -32,7 +32,7 @@ from unittest.mock import patch
 import pytest
 
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorRole
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.connector import (
+from vllm.distributed.kv_transfer.kv_connector.v1.nixl import (
     NixlConnector,
     NixlConnectorMetadata,
 )
@@ -436,7 +436,7 @@ def test_build_connector_meta_multiple_requests():
 
 
 @patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
 def test_p_node_pull_kv_from_d(dist_init):
@@ -450,7 +450,7 @@ def test_p_node_pull_kv_from_d(dist_init):
 
 
 @patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
 def test_p_node_pull_then_send_kv(dist_init):
@@ -472,7 +472,7 @@ def test_p_node_pull_then_send_kv(dist_init):
 
 
 @patch(
-    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.worker.NixlWrapper",
+    "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
     FakeNixlWrapper,
 )
 def test_p_node_deferred_pull_on_no_handshake(dist_init):

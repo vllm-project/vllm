@@ -7,9 +7,11 @@ from pathlib import Path
 from unittest.mock import MagicMock, call, patch
 
 import pytest
+from huggingface_hub import _CACHED_NO_EXIST
 
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
+    get_hf_file_to_dict,
     is_mistral_model_repo,
     list_filtered_repo_files,
 )
@@ -113,6 +115,33 @@ def test_one_filtered_repo_files(allow_patterns: list[str], expected_bool: bool)
             repo_type="model",
             token="token",
         )
+
+
+@pytest.mark.parametrize(
+    ("cache_result", "should_download"),
+    [
+        # HF Hub recorded a prior 404: don't re-probe the Hub.
+        (_CACHED_NO_EXIST, False),
+        # File not in cache and existence unknown: preserve download behavior.
+        (None, True),
+    ],
+)
+def test_get_hf_file_to_dict_honors_no_exist_marker(
+    cache_result: object, should_download: bool
+):
+    with (
+        patch(
+            "vllm.transformers_utils.repo_utils.try_to_load_from_cache",
+            MagicMock(return_value=cache_result),
+        ),
+        patch(
+            "vllm.transformers_utils.repo_utils._try_download_from_hf_hub",
+            MagicMock(return_value=None),
+        ) as mock_download,
+    ):
+        result = get_hf_file_to_dict("processor_config.json", "some/repo")
+    assert result is None
+    assert mock_download.call_count == int(should_download)
 
 
 @pytest.mark.parametrize(
