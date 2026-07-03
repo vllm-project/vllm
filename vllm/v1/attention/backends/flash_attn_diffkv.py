@@ -15,8 +15,8 @@ from vllm.v1.attention.backends.fa_utils import (
     get_flash_attn_version,
     is_flash_attn_varlen_func_available,
 )
-from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-    triton_reshape_and_cache_flash_diffkv,
+from vllm.v1.attention.ops.reshape_and_cache_flash_diffkv import (
+    reshape_and_cache_flash_diffkv,
 )
 
 if is_flash_attn_varlen_func_available():
@@ -146,14 +146,14 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
         # DiffKV packs K and V into a single tensor along the last dim:
         #   kv_cache shape: [num_blocks, block_size, num_kv_heads,
         #                    head_size_k + head_size_v]
-        # The triton kernel handles this combined layout directly.
+        # The reshape-and-cache op handles this combined layout directly.
         #
         # NOTE(woosuk): key and value are padded while slot_mapping is
         # not padded. However, we don't need to do key[:num_actual_tokens]
         # and value[:num_actual_tokens] because the reshape_and_cache_flash
         # op uses the slot_mapping's shape to determine the number of
         # actual tokens.
-        triton_reshape_and_cache_flash_diffkv(
+        reshape_and_cache_flash_diffkv(
             key,
             value,
             kv_cache,

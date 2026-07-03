@@ -400,6 +400,54 @@ __global__ void reshape_and_cache_flash_kernel(
 }
 
 template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
+__global__ void reshape_and_cache_flash_diffkv_kernel(
+    const scalar_t* __restrict__ key,    // [num_tokens, num_heads, head_size_k]
+    const scalar_t* __restrict__ value,  // [num_tokens, num_heads, head_size_v]
+    cache_t* __restrict__ kv_cache,      // [num_blocks, block_size, num_heads,
+                                         //  head_size_k + head_size_v]
+    const int64_t* __restrict__ slot_mapping,  // [num_tokens]
+    const int64_t block_stride, const int64_t page_stride,
+    const int64_t key_stride, const int64_t value_stride, const int num_heads,
+    const int head_size_k, const int head_size_v, const int block_size,
+    const float* k_scale, const float* v_scale) {
+  const int64_t token_idx = blockIdx.x;
+  const int64_t slot_idx = slot_mapping[token_idx];
+  if (slot_idx < 0) {
+    return;
+  }
+
+  const int head_idx = blockIdx.y;
+  if (head_idx >= num_heads) {
+    return;
+  }
+
+  const int64_t block_idx = slot_idx / block_size;
+  const int64_t block_offset = slot_idx % block_size;
+  const int head_stride = head_size_k + head_size_v;
+
+  const scalar_t* __restrict__ key_src =
+      key + token_idx * key_stride + head_idx * head_size_k;
+  const scalar_t* __restrict__ value_src =
+      value + token_idx * value_stride + head_idx * head_size_v;
+
+  cache_t* __restrict__ kv_dst = kv_cache + block_idx * block_stride +
+                                 block_offset * page_stride +
+                                 head_idx * head_stride;
+
+  constexpr int VEC_SIZE = (sizeof(scalar_t) == 2) ? 8 : 4;
+  float k_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *k_scale;
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> k_op{k_scale_val};
+  float v_scale_val = (kv_dt == Fp8KVCacheDataType::kAuto) ? 0.f : *v_scale;
+  CopyWithScaleOp<cache_t, scalar_t, kv_dt> v_op{v_scale_val};
+
+  vectorize_with_alignment<VEC_SIZE>(key_src, kv_dst, head_size_k, threadIdx.x,
+                                     blockDim.x, k_op);
+  vectorize_with_alignment<VEC_SIZE>(value_src, kv_dst + head_size_k,
+                                     head_size_v, threadIdx.x, blockDim.x,
+                                     v_op);
+}
+
+template <typename scalar_t, typename cache_t, Fp8KVCacheDataType kv_dt>
 __global__ void concat_and_cache_mla_kernel(
     const scalar_t* __restrict__ kv_c,  // [num_tokens, kv_lora_rank]
     const scalar_t* __restrict__ k_pe,  // [num_tokens, pe_dim]
@@ -812,6 +860,85 @@ void reshape_and_cache_flash(
 
   DISPATCH_BY_KV_CACHE_DTYPE(key.scalar_type(), kv_cache_dtype,
                              CALL_RESHAPE_AND_CACHE_FLASH);
+}
+
+// KV_T is the data type of key and value tensors.
+// CACHE_T is the stored data type of kv-cache.
+// KV_DTYPE is the real data type of kv-cache.
+#define CALL_RESHAPE_AND_CACHE_FLASH_DIFFKV(KV_T, CACHE_T, KV_DTYPE)         \
+  vllm::reshape_and_cache_flash_diffkv_kernel<KV_T, CACHE_T, KV_DTYPE>       \
+      <<<grid, block, 0, stream>>>(                                          \
+          reinterpret_cast<KV_T*>(key.data_ptr()),                           \
+          reinterpret_cast<KV_T*>(value.data_ptr()),                         \
+          reinterpret_cast<CACHE_T*>(kv_cache.data_ptr()),                   \
+          slot_mapping.const_data_ptr<int64_t>(), block_stride, page_stride, \
+          key_stride, value_stride, num_heads, head_size_k, head_size_v,     \
+          block_size, reinterpret_cast<const float*>(k_scale.data_ptr()),    \
+          reinterpret_cast<const float*>(v_scale.data_ptr()));
+
+void reshape_and_cache_flash_diffkv(
+    torch::stable::Tensor& key,    // [num_tokens, num_heads, head_size_k]
+    torch::stable::Tensor& value,  // [num_tokens, num_heads, head_size_v]
+    torch::stable::Tensor&
+        kv_cache,  // [num_blocks, block_size, num_heads, head_size_k + v]
+    torch::stable::Tensor& slot_mapping,  // [num_tokens] or [num_actual_tokens]
+    const std::string& kv_cache_dtype,
+    torch::stable::Tensor& k_scale,    // [1]
+    torch::stable::Tensor& v_scale) {  // [1]
+  int num_tokens = slot_mapping.size(0);
+  int num_heads = key.size(1);
+  int head_size_k = key.size(2);
+  int head_size_v = value.size(2);
+  int block_size = kv_cache.size(1);
+  int head_stride = head_size_k + head_size_v;
+
+  STD_TORCH_CHECK(key.scalar_type() == value.scalar_type(),
+                  "key and value must have the same dtype");
+  if (vllm::get_fp8_kv_cache_data_type(kv_cache_dtype) ==
+      vllm::Fp8KVCacheDataType::kAuto) {
+    STD_TORCH_CHECK(kv_cache.scalar_type() == key.scalar_type(),
+                    "native diffkv CUDA cache dtype must match key dtype");
+    if (kv_cache_dtype == "float16") {
+      STD_TORCH_CHECK(
+          kv_cache.scalar_type() == torch::headeronly::ScalarType::Half,
+          "kv_cache_dtype=float16 requires a float16 kv_cache");
+    } else if (kv_cache_dtype == "bfloat16") {
+      STD_TORCH_CHECK(
+          kv_cache.scalar_type() == torch::headeronly::ScalarType::BFloat16,
+          "kv_cache_dtype=bfloat16 requires a bfloat16 kv_cache");
+    }
+  }
+  STD_TORCH_CHECK(key.size(0) >= num_tokens,
+                  "key must have at least slot_mapping.size(0) tokens");
+  STD_TORCH_CHECK(value.size(0) >= num_tokens,
+                  "value must have at least slot_mapping.size(0) tokens");
+  STD_TORCH_CHECK(value.size(1) == num_heads,
+                  "key and value must have the same number of heads");
+  STD_TORCH_CHECK(kv_cache.size(2) == num_heads,
+                  "kv_cache head dimension must match key/value");
+  STD_TORCH_CHECK(kv_cache.size(3) == head_stride,
+                  "kv_cache last dimension must equal head_size_k + "
+                  "head_size_v");
+  STD_TORCH_CHECK(kv_cache.stride(2) == head_stride,
+                  "diffkv reshape_and_cache_flash only supports contiguous "
+                  "heads in the packed kv_cache layout");
+  STD_TORCH_CHECK(k_scale.numel() == 1 && v_scale.numel() == 1,
+                  "diffkv reshape_and_cache_flash only supports per-tensor "
+                  "scales");
+
+  int64_t key_stride = key.stride(0);
+  int64_t value_stride = value.stride(0);
+  int64_t block_stride = kv_cache.stride(0);
+  int64_t page_stride = kv_cache.stride(1);
+
+  dim3 grid(num_tokens, num_heads);
+  dim3 block(std::min(std::max(head_size_k, head_size_v), 512));
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      key.get_device_index());
+  const cudaStream_t stream = get_current_cuda_stream();
+
+  DISPATCH_BY_KV_CACHE_DTYPE(key.scalar_type(), kv_cache_dtype,
+                             CALL_RESHAPE_AND_CACHE_FLASH_DIFFKV);
 }
 
 // KV_T is the data type of key and value tensors.

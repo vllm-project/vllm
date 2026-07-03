@@ -43,6 +43,8 @@ CUDA_DEVICES = [
 KV_CACHE_DTYPE = ["auto", "fp8"]
 
 RESHAPE_FLASH_IMPLEMENTATIONS = ["cuda", "triton"]
+DIFFKV_HEAD_SIZES = [(64, 128), (80, 96)]
+DIFFKV_DTYPES = [torch.float16, torch.bfloat16, torch.float]
 
 
 @pytest.mark.parametrize("num_tokens", NUM_TOKENS)
@@ -426,6 +428,115 @@ def test_reshape_and_cache_flash(
     else:
         torch.testing.assert_close(key_cache_compact, cloned_key_cache)
         torch.testing.assert_close(value_cache_compact, cloned_value_cache)
+
+
+@pytest.mark.parametrize("num_heads", [4])
+@pytest.mark.parametrize("head_size_k,head_size_v", DIFFKV_HEAD_SIZES)
+@pytest.mark.parametrize("block_size", [8, 16])
+@pytest.mark.parametrize("dtype", DIFFKV_DTYPES)
+@pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("kv_cache_dtype", KV_CACHE_DTYPE)
+@torch.inference_mode()
+def test_reshape_and_cache_flash_diffkv(
+    num_heads: int,
+    head_size_k: int,
+    head_size_v: int,
+    block_size: int,
+    dtype: torch.dtype,
+    device: str,
+    kv_cache_dtype: str,
+) -> None:
+    if dtype == torch.bfloat16 and not current_platform.has_device_capability(80):
+        pytest.skip("bfloat16 requires compute capability >= 8.0.")
+    if kv_cache_dtype == "fp8" and not current_platform.has_device_capability(89):
+        pytest.skip("fp8 requires compute capability >= 8.9.")
+
+    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+        triton_reshape_and_cache_flash_diffkv,
+    )
+
+    set_random_seed(0)
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    num_tokens = 17
+    padded_num_tokens = num_tokens + 3
+    num_blocks = 4
+    num_slots = block_size * num_blocks
+    slot_mapping_lst = random.sample(range(num_slots), num_tokens)
+    slot_mapping_lst[0] = -1
+    slot_mapping = torch.tensor(slot_mapping_lst, dtype=torch.long, device=device)
+
+    key = torch.randn(
+        padded_num_tokens, num_heads, head_size_k, dtype=dtype, device=device
+    )
+    value = torch.randn(
+        padded_num_tokens, num_heads, head_size_v, dtype=dtype, device=device
+    )
+
+    cache_dtype = torch.uint8 if kv_cache_dtype == "fp8" else dtype
+    cache_shape = (
+        num_blocks,
+        block_size,
+        num_heads,
+        head_size_k + head_size_v,
+    )
+    cuda_cache = torch.zeros(cache_shape, dtype=cache_dtype, device=device)
+    triton_cache = torch.zeros_like(cuda_cache)
+
+    k_scale = (key[:num_tokens].abs().amax() / 64.0).to(torch.float32)
+    v_scale = (value[:num_tokens].abs().amax() / 64.0).to(torch.float32)
+
+    ops.reshape_and_cache_flash_diffkv(
+        key,
+        value,
+        cuda_cache,
+        slot_mapping,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
+    triton_reshape_and_cache_flash_diffkv(
+        key,
+        value,
+        triton_cache,
+        slot_mapping,
+        kv_cache_dtype,
+        k_scale,
+        v_scale,
+    )
+
+    if kv_cache_dtype == "fp8":
+
+        def dequantize_diffkv(cache: torch.Tensor) -> torch.Tensor:
+            fp8_cache = cache.view(current_platform.fp8_dtype())
+            result = torch.empty_like(fp8_cache, dtype=torch.float16)
+            result[..., :head_size_k] = (
+                fp8_cache[..., :head_size_k].to(torch.float16) * k_scale
+            )
+            result[..., head_size_k:] = (
+                fp8_cache[..., head_size_k:].to(torch.float16) * v_scale
+            )
+            return result
+
+        cuda_dequant = dequantize_diffkv(cuda_cache)
+        triton_dequant = dequantize_diffkv(triton_cache)
+        # CUDA's fp8 intrinsic and Triton's fp8 store can differ by one
+        # quantization bin for values on rounding boundaries.
+        torch.testing.assert_close(
+            cuda_dequant[..., :head_size_k],
+            triton_dequant[..., :head_size_k],
+            atol=4 * k_scale.item(),
+            rtol=0.15,
+        )
+        torch.testing.assert_close(
+            cuda_dequant[..., head_size_k:],
+            triton_dequant[..., head_size_k:],
+            atol=4 * v_scale.item(),
+            rtol=0.15,
+        )
+    else:
+        torch.testing.assert_close(cuda_cache, triton_cache)
 
 
 @pytest.mark.parametrize("dtype", DTYPES)

@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Triton attention backend with different K/V head dimensions (DiffKV).
 
-The KV cache layout is identical to ``FlashAttentionDiffKVBackend`` — K
-and V are packed along the last dim:
+The KV cache layout is identical to ``FlashAttentionDiffKVBackend``: K and
+V are packed along the last dim:
 
     [num_blocks, block_size, num_kv_heads, head_size_qk + head_size_v]
-
-so existing helpers (``triton_reshape_and_cache_flash_diffkv``) are reused.
 """
 
 from typing import ClassVar
@@ -27,8 +25,8 @@ from vllm.v1.attention.backends.triton_attn import (
     TritonAttentionMetadataBuilder,
 )
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
-from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-    triton_reshape_and_cache_flash_diffkv,
+from vllm.v1.attention.ops.reshape_and_cache_flash_diffkv import (
+    reshape_and_cache_flash_diffkv,
 )
 from vllm.v1.attention.ops.triton_unified_attention_diffkv import (
     unified_attention_diffkv,
@@ -176,9 +174,9 @@ class TritonAttentionDiffKVImpl(TritonAttentionImpl):
         slot_mapping: torch.Tensor,
     ) -> None:
         # Cache is packed [..., head_size_qk + head_size_v]; the diffkv
-        # reshape kernel writes K to [..., :head_size_qk] and V to
+        # reshape op writes K to [..., :head_size_qk] and V to
         # [..., head_size_qk:hqk+hv].
-        triton_reshape_and_cache_flash_diffkv(
+        reshape_and_cache_flash_diffkv(
             key,
             value,
             kv_cache,

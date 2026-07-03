@@ -23,8 +23,8 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     subclass_attention_backend,
 )
-from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-    triton_reshape_and_cache_flash_diffkv,
+from vllm.v1.attention.ops.reshape_and_cache_flash_diffkv import (
+    reshape_and_cache_flash_diffkv,
 )
 from vllm.v1.attention.selector import get_attn_backend
 from vllm.v1.kv_cache_interface import (
@@ -200,7 +200,7 @@ class StaticSinkAttention(Attention, CustomOp):
             device=torch.accelerator.current_device_index(),
             dtype=torch.long,
         )
-        triton_reshape_and_cache_flash_diffkv(
+        reshape_and_cache_flash_diffkv(
             self.sink_key,
             self.sink_value,
             self_kv_cache,
