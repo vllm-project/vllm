@@ -6,21 +6,24 @@ These tests verify that ParsableContext correctly delegates to the unified
 Parser (via parse) and properly builds response output items.
 """
 
+import asyncio
 from collections.abc import Sequence
-from unittest.mock import MagicMock
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-
+from openai.types.responses import ResponseFunctionToolCall
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
 )
+from vllm.parser.abstract_parser import DelegatingParser
+
 from vllm.entrypoints.openai.responses.context import ParsableContext
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 from vllm.outputs import CompletionOutput, RequestOutput
-from vllm.parser.abstract_parser import DelegatingParser
 
 pytestmark = pytest.mark.skip_global_cleanup
 
@@ -312,6 +315,56 @@ def test_process_extracts_tool_calls():
     assert tool_item.name == "get_weather"
     assert tool_item.arguments == '{"location": "Paris"}'
     assert tool_item.status == "completed"
+
+
+def test_builtin_tool_output_reuses_function_call_id():
+    """Built-in tool outputs must keep the originating function call id."""
+    ctx = _make_context(None)
+    tool_session = MagicMock()
+    tool_session.call_tool = AsyncMock(
+        return_value=SimpleNamespace(
+            content=[SimpleNamespace(text="tool result")],
+        )
+    )
+
+    tool_calls = [
+        (
+            ctx.call_python_tool,
+            ResponseFunctionToolCall(
+                id="fc_python",
+                call_id="call_python",
+                type="function_call",
+                name="python",
+                arguments='{"code": "print(1)"}',
+            ),
+        ),
+        (
+            ctx.call_search_tool,
+            ResponseFunctionToolCall(
+                id="fc_search",
+                call_id="call_search",
+                type="function_call",
+                name="web_search_preview",
+                arguments='{"query": "vllm"}',
+            ),
+        ),
+        (
+            ctx.call_container_tool,
+            ResponseFunctionToolCall(
+                id="fc_container",
+                call_id="call_container",
+                type="function_call",
+                name="container",
+                arguments='{"cmd": ["echo", "ok"]}',
+            ),
+        ),
+    ]
+
+    for call_tool, tool_call in tool_calls:
+        output = asyncio.run(call_tool(tool_session, tool_call))
+
+        assert output[0].type == "function_call_output"
+        assert output[0].call_id == tool_call.call_id
 
 
 # ---------------------------------------------------------------------------

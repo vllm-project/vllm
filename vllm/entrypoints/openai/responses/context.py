@@ -428,7 +428,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"mcpo_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -454,7 +454,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"fco_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
@@ -497,7 +497,7 @@ class ParsableContext(ConversationContext):
         message = ResponseFunctionToolCallOutputItem(
             id=f"fco_{random_uuid()}",
             type="function_call_output",
-            call_id=f"call_{random_uuid()}",
+            call_id=last_msg.call_id,
             output=result_str,
             status="completed",
         )
