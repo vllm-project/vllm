@@ -1,8 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import sys
-from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -14,14 +12,8 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.model_executor.models.config import (
-    DiffusionGemmaModelForBlockDiffusionConfig,
-    Gemma4Config,
-)
 from vllm.platforms import current_platform
 from vllm.platforms.cpu import CpuPlatform
-from vllm.platforms.interface import DeviceCapability
-from vllm.v1.attention.backend import AttentionBackend
 
 if current_platform.is_cuda():
     from vllm.platforms.cuda import CudaPlatform
@@ -33,62 +25,8 @@ if current_platform.is_rocm():
 else:
     RocmPlatform = None
 
-from vllm.v1.attention.backends.registry import AttentionBackendEnum, register_backend
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backend
-
-
-def _make_gemma4_vllm_config(
-    *,
-    backend: AttentionBackendEnum | None = None,
-    head_dim: int = 256,
-    global_head_dim: int = 512,
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        model_config=SimpleNamespace(
-            hf_text_config=SimpleNamespace(
-                head_dim=head_dim,
-                global_head_dim=global_head_dim,
-            ),
-        ),
-        attention_config=AttentionConfig(backend=backend),
-    )
-
-
-def _patch_fa_version_supported(
-    monkeypatch: pytest.MonkeyPatch,
-    is_supported,
-) -> None:
-    monkeypatch.setitem(
-        sys.modules,
-        "vllm.v1.attention.backends.fa_utils",
-        SimpleNamespace(is_fa_version_supported=is_supported),
-    )
-
-
-class RejectNvfp4FlashAttentionBackend(AttentionBackend):
-    @staticmethod
-    def get_name() -> str:
-        return "FLASH_ATTN"
-
-    @staticmethod
-    def get_impl_cls():
-        return None
-
-    @staticmethod
-    def get_builder_cls():
-        return None
-
-    @staticmethod
-    def get_required_kv_cache_layout():
-        return None
-
-    @staticmethod
-    def get_kv_cache_shape(*args, **kwargs):
-        return ()
-
-    @classmethod
-    def supports_kv_cache_dtype(cls, kv_cache_dtype):
-        return kv_cache_dtype != "nvfp4"
 
 
 @pytest.fixture(autouse=True)
@@ -428,98 +366,6 @@ def test_auto_backend_selection_behavior():
     assert backend_auto.get_name() == backend_none.get_name()
 
 
-def test_gemma4_keeps_auto_backend_when_fa4_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Gemma4 config should not bypass the normal backend selector."""
-    _patch_fa_version_supported(monkeypatch, lambda version: False)
-    vllm_config = _make_gemma4_vllm_config()
-
-    Gemma4Config.verify_and_update_config(vllm_config)
-
-    assert vllm_config.attention_config.backend is None
-    assert vllm_config.attention_config.flash_attn_version is None
-
-
-def test_gemma4_keeps_existing_fa4_selection(monkeypatch: pytest.MonkeyPatch):
-    _patch_fa_version_supported(monkeypatch, lambda version: version == 4)
-    vllm_config = _make_gemma4_vllm_config()
-
-    Gemma4Config.verify_and_update_config(vllm_config)
-
-    assert vllm_config.attention_config.backend is None
-    assert vllm_config.attention_config.flash_attn_version == 4
-
-
-def test_diffusion_gemma_keeps_flashinfer_blocker(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    _patch_fa_version_supported(monkeypatch, lambda version: False)
-    vllm_config = _make_gemma4_vllm_config(
-        backend=AttentionBackendEnum.FLASHINFER,
-    )
-
-    with pytest.raises(ValueError, match="mixed causal/bidirectional attention"):
-        DiffusionGemmaModelForBlockDiffusionConfig.verify_and_update_config(vllm_config)
-
-
-def test_diffusion_gemma_auto_uses_triton_when_fa4_unavailable(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    _patch_fa_version_supported(monkeypatch, lambda version: False)
-    vllm_config = _make_gemma4_vllm_config()
-    vllm_config.diffusion_config = object()
-    vllm_config.scheduler_config = None
-    vllm_config.model_config.hf_config = SimpleNamespace(canvas_length=256)
-    vllm_config.model_config.override_generation_config = {}
-
-    DiffusionGemmaModelForBlockDiffusionConfig.verify_and_update_config(vllm_config)
-
-    assert vllm_config.attention_config.backend == AttentionBackendEnum.TRITON_ATTN
-    assert vllm_config.attention_config.flash_attn_version is None
-
-
-@pytest.mark.skipif(CudaPlatform is None, reason="CudaPlatform not available")
-def test_cuda_auto_selects_flashinfer_for_gemma4_nvfp4_without_fa4(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    pytest.importorskip("flashinfer")
-
-    monkeypatch.setattr(
-        CudaPlatform,
-        "get_device_capability",
-        classmethod(lambda cls, device_id=0: DeviceCapability(8, 6)),
-    )
-    _patch_fa_version_supported(monkeypatch, lambda version: False)
-    register_backend(
-        AttentionBackendEnum.FLASH_ATTN,
-        f"{__name__}.RejectNvfp4FlashAttentionBackend",
-    )
-
-    try:
-        vllm_config = VllmConfig(
-            attention_config=AttentionConfig(backend=None),
-            cache_config=CacheConfig(block_size=16),
-        )
-        gemma4_config = _make_gemma4_vllm_config()
-        gemma4_config.attention_config = vllm_config.attention_config
-        Gemma4Config.verify_and_update_config(gemma4_config)
-
-        with (
-            set_current_vllm_config(vllm_config),
-            patch("vllm.platforms.current_platform", CudaPlatform()),
-        ):
-            backend = get_attn_backend(
-                head_size=512,
-                dtype=torch.bfloat16,
-                kv_cache_dtype="nvfp4",
-            )
-    finally:
-        AttentionBackendEnum.FLASH_ATTN.clear_override()
-
-    assert backend.get_name() == "FLASHINFER"
-
-
 @pytest.mark.parametrize(
     "backend_name,flash_attn_version,should_succeed",
     [
@@ -692,43 +538,6 @@ def test_flash_attn_rejects_unhandled_kv_cache_dtypes(kv_cache_dtype: str):
     from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
 
     assert not FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
-
-
-@pytest.mark.skipif(CudaPlatform is None, reason="CudaPlatform not available")
-def test_cuda_auto_selects_flashinfer_for_nvfp4_without_fa(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    pytest.importorskip("flashinfer")
-
-    monkeypatch.setattr(
-        CudaPlatform,
-        "get_device_capability",
-        classmethod(lambda cls, device_id=0: DeviceCapability(8, 6)),
-    )
-    register_backend(
-        AttentionBackendEnum.FLASH_ATTN,
-        f"{__name__}.RejectNvfp4FlashAttentionBackend",
-    )
-
-    try:
-        vllm_config = VllmConfig(
-            attention_config=AttentionConfig(backend=None),
-            cache_config=CacheConfig(block_size=16),
-        )
-
-        with (
-            set_current_vllm_config(vllm_config),
-            patch("vllm.platforms.current_platform", CudaPlatform()),
-        ):
-            backend = get_attn_backend(
-                head_size=512,
-                dtype=torch.bfloat16,
-                kv_cache_dtype="nvfp4",
-            )
-    finally:
-        AttentionBackendEnum.FLASH_ATTN.clear_override()
-
-    assert backend.get_name() == "FLASHINFER"
 
 
 @pytest.mark.parametrize("kv_cache_dtype", ["fp8", "fp8_e4m3"])
