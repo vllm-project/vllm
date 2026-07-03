@@ -75,7 +75,12 @@ def _build_sparse_block_table_kernel(
 
     n_used = n_valid * PAGES_PER_BLOCK
     off_w = tl.arange(0, BLOCK_SIZE_T * PAGES_PER_BLOCK)
-    tl.store(sbt_row + off_w, tl.zeros_like(off_w), mask=off_w >= n_used)
+    row_width = max_topk * PAGES_PER_BLOCK
+    tl.store(
+        sbt_row + off_w,
+        tl.zeros_like(off_w),
+        mask=(off_w >= n_used) & (off_w < row_width),
+    )
 
     tail_tokens = seq_len - last_blk * SPARSE_BLOCK_SIZE_C
     has_tail = tl.sum(is_tail.to(tl.int32), axis=0) > 0
@@ -162,7 +167,12 @@ def _build_sparse_block_table_prefill_kernel(
 
     n_used = n_valid * PAGES_PER_BLOCK
     off_w = tl.arange(0, BLOCK_SIZE_T * PAGES_PER_BLOCK)
-    tl.store(sbt_row + off_w, tl.zeros_like(off_w), mask=off_w >= n_used)
+    row_width = max_topk * PAGES_PER_BLOCK
+    tl.store(
+        sbt_row + off_w,
+        tl.zeros_like(off_w),
+        mask=(off_w >= n_used) & (off_w < row_width),
+    )
 
     tail_tokens = causal_len - self_blk * SPARSE_BLOCK_SIZE_C
     has_tail = tl.sum(is_tail.to(tl.int32), axis=0) > 0
