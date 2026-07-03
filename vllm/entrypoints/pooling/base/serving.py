@@ -285,17 +285,20 @@ class PoolingServingBase(ABC):
             ctx.lora_request = self.models.lora_requests[request.model]
             return None
 
-        # Currently only support default modality specific loras
-        # if we have exactly one lora matched on the request.
-        if supports_default_mm_loras:
-            default_mm_lora = self._get_active_default_mm_loras(request)
-            if default_mm_lora is not None:
-                ctx.lora_request = default_mm_lora
+            # Currently only support default modality specific loras
+            # if we have exactly one lora matched on the request.
+            if supports_default_mm_loras:
+                default_mm_lora = self._get_active_default_mm_loras(request)
+                if default_mm_lora is not None:
+                    ctx.lora_request = default_mm_lora
+            return None
 
         if self._is_model_supported(request.model):
             return None
 
-        # if _check_model has been called earlier, this will be unreachable
+        # Reached when _check_model did not populate self.models.lora_requests
+        # (no static --lora-modules entry, no LoRAResolver plugin hit); the
+        # request model genuinely is not served by this engine.
         raise VLLMNotFoundError(f"The model `{request.model}` does not exist.")
 
     def _get_active_default_mm_loras(
