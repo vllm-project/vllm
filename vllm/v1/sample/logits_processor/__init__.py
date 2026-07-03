@@ -217,6 +217,36 @@ def build_logitsprocs(
     )
 
 
+def build_custom_logitsprocs(
+    vllm_config: "VllmConfig",
+    device: torch.device,
+    is_pin_memory: bool,
+    is_pooling_model: bool,
+    custom_logitsprocs: Sequence[str | type[LogitsProcessor]] = (),
+) -> LogitsProcessors:
+    """Build only custom (non-builtin) logits processors.
+
+    For model runners that implement the builtin sampling parameters
+    natively and only need the custom/plugin logits processors.
+    """
+    if is_pooling_model:
+        if custom_logitsprocs:
+            raise ValueError(STR_POOLING_REJECTS_LOGITSPROCS)
+        return LogitsProcessors()
+
+    if vllm_config.speculative_config:
+        if custom_logitsprocs:
+            raise ValueError(STR_SPEC_DEC_REJECTS_LOGITSPROCS)
+        # Match build_logitsprocs: installed plugins are not loaded when
+        # speculative decoding is enabled.
+        return LogitsProcessors()
+
+    return LogitsProcessors(
+        ctor(vllm_config, device, is_pin_memory)
+        for ctor in _load_custom_logitsprocs(custom_logitsprocs)
+    )
+
+
 cached_load_custom_logitsprocs = lru_cache(_load_custom_logitsprocs)
 
 
@@ -350,6 +380,7 @@ __all__ = [
     "BatchUpdateBuilder",
     "MoveDirectionality",
     "LogitsProcessors",
+    "build_custom_logitsprocs",
     "build_logitsprocs",
     "STR_POOLING_REJECTS_LOGITSPROCS",
     "LOGITSPROCS_GROUP",

@@ -17,6 +17,7 @@ from vllm.v1.worker.gpu.metrics.logits import get_num_nans
 from vllm.v1.worker.gpu.sample.bad_words import BadWordsState
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.sample.logit_bias import LogitBiasState
+from vllm.v1.worker.gpu.sample.logitsprocs import CustomLogitsprocs
 from vllm.v1.worker.gpu.sample.logprob import (
     LogprobTokenIdsState,
     compute_topk_logprobs,
@@ -37,6 +38,7 @@ class Sampler:
         logprobs_mode: LogprobsMode = "raw_logprobs",
         num_speculative_tokens: int = 1,
         use_fp64_gumbel: bool = False,
+        custom_logitsprocs: CustomLogitsprocs | None = None,
     ):
         if logprobs_mode not in ("processed_logprobs", "raw_logprobs"):
             raise NotImplementedError(f"Unsupported logprobs_mode: {logprobs_mode}")
@@ -50,6 +52,7 @@ class Sampler:
         self.logit_bias_state = LogitBiasState(max_num_reqs, device)
         self.bad_words_state = BadWordsState(req_states)
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
+        self.custom_logitsprocs = custom_logitsprocs
         self.num_speculative_tokens = num_speculative_tokens
         self.use_flashinfer = flashinfer_sampler_supported()
 
@@ -80,6 +83,11 @@ class Sampler:
         expanded_local_pos = input_batch.expanded_local_pos
         pos = input_batch.positions[input_batch.logits_indices]
         input_ids = input_batch.input_ids[input_batch.logits_indices]
+
+        if self.custom_logitsprocs is not None:
+            # Sync output token ids and batch makeup with the custom logits
+            # processors, once per step before the logits are processed.
+            self.custom_logitsprocs.update_state(input_batch)
 
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -179,10 +187,20 @@ class Sampler:
             expanded_local_pos,
         )
 
+        if self.custom_logitsprocs is not None:
+            # Custom logits processors that can affect greedy sampling.
+            logits = self.custom_logitsprocs.apply_non_argmax_invariant(logits)
+
         # Apply temperature in place.
         self.sampling_states.apply_temperature(
             logits, expanded_idx_mapping, idx_mapping_np
         )
+
+        if self.custom_logitsprocs is not None and not self.sampling_states.all_greedy(
+            idx_mapping_np
+        ):
+            # Custom logits processors that only affect random sampling.
+            logits = self.custom_logitsprocs.apply_argmax_invariant(logits)
 
         # Apply min_p in place.
         self.sampling_states.apply_min_p(logits, expanded_idx_mapping, idx_mapping_np)

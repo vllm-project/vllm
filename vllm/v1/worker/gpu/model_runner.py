@@ -51,6 +51,10 @@ from vllm.utils.torch_utils import PIN_MEMORY, STR_DTYPE_TO_TORCH_DTYPE
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
+from vllm.v1.sample.logits_processor import (
+    STR_POOLING_REJECTS_LOGITSPROCS,
+    build_custom_logitsprocs,
+)
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
 from vllm.v1.worker.gpu.attn_utils import (
@@ -98,6 +102,7 @@ from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu.model_states import init_model_state
 from vllm.v1.worker.gpu.pool.pooling_runner import PoolingRunner
 from vllm.v1.worker.gpu.pp_utils import PPHandler
+from vllm.v1.worker.gpu.sample.logitsprocs import CustomLogitsprocs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.prompt_logprob import PromptLogprobsWorker
 from vllm.v1.worker.gpu.sample.sampler import Sampler
@@ -233,6 +238,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Samplers and decode_query_len created in load_model() after
         # model_state exists (num_new_sampled_tokens_per_step from ModelState).
         self.sampler: Sampler | None = None
+        self.custom_logitsprocs: CustomLogitsprocs | None = None
         self.rejection_sampler: RejectionSampler | None = None
         self.prompt_logprobs_worker: PromptLogprobsWorker | None = None
         self.structured_outputs_worker: StructuredOutputsWorker | None = None
@@ -320,8 +326,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             + self.model_state.num_new_sampled_tokens_per_step
         )
 
+        if self.is_pooling_model and self.model_config.logits_processors:
+            raise ValueError(STR_POOLING_REJECTS_LOGITSPROCS)
+
         # Initialize samplers. Model states may override via custom_sampler().
         if self.is_last_pp_rank and not self.is_pooling_model:
+            logitsprocs = build_custom_logitsprocs(
+                self.vllm_config,
+                self.device,
+                PIN_MEMORY,
+                self.is_pooling_model,
+                tuple(self.model_config.logits_processors or ()),
+            )
+            if logitsprocs.argmax_invariant or logitsprocs.non_argmax_invariant:
+                self.custom_logitsprocs = CustomLogitsprocs(
+                    self.max_num_reqs, logitsprocs
+                )
             self.sampler = Sampler(
                 max_num_reqs=self.max_num_reqs,
                 vocab_size=self.vocab_size,
@@ -330,10 +350,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 logprobs_mode=self.model_config.logprobs_mode,
                 num_speculative_tokens=self.decode_query_len,
                 use_fp64_gumbel=self.model_config.use_fp64_gumbel,
+                custom_logitsprocs=self.custom_logitsprocs,
             )
             custom = self.model_state.custom_sampler(self.sampler)
 
             if custom:
+                if self.custom_logitsprocs is not None:
+                    raise ValueError(
+                        "Custom logits processors are not supported for "
+                        "models with a custom sampler."
+                    )
                 self.sampler, self.rejection_sampler = custom
             elif self.speculative_config is not None:
                 self.rejection_sampler = RejectionSampler(
@@ -732,6 +758,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
             return False
+        if self.custom_logitsprocs is not None:
+            self.custom_logitsprocs.remove_request(req_idx)
         if self.pp_handler is not None:
             self.pp_handler.on_req_idx_freed(req_idx)
         if self.encoder_cache is not None:
@@ -798,6 +826,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.sampler.add_request(
                     req_index, prompt_len, new_req_data.sampling_params
                 )
+                if self.custom_logitsprocs is not None:
+                    self.custom_logitsprocs.add_request(
+                        req_index,
+                        req_id,
+                        prompt_len,
+                        new_req_data.sampling_params,
+                        new_req_data.prompt_token_ids,
+                        new_req_data.prefill_token_ids,
+                    )
                 assert self.prompt_logprobs_worker is not None
                 self.prompt_logprobs_worker.add_request(
                     req_id, req_index, new_req_data.sampling_params
@@ -1428,6 +1465,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
         )
+
+        if self.custom_logitsprocs is not None:
+            # Reuse the AsyncOutput D2H copy to extend the custom logits
+            # processors' CPU output token lists in the next step.
+            self.custom_logitsprocs.register_step_output(
+                input_batch,
+                async_output.sampled_token_ids,
+                async_output.num_sampled_tokens_np,
+                async_output.copy_event,
+            )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
         if self.speculator is not None and self.speculator.supports_mm_inputs:
