@@ -461,6 +461,61 @@ def test_flashinfer_impl_caches_nvfp4_slot_mapping_writer(monkeypatch) -> None:
     assert impl._nvfp4_slot_writer is fake_slot_writer
 
 
+def test_flashinfer_impl_caches_nvfp4_kv_cache_views(monkeypatch) -> None:
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    def fake_slot_writer(*args, **kwargs):
+        pass
+
+    monkeypatch.setattr(
+        flashinfer_backend.flashinfer,
+        "nvfp4_quantize_append_paged_kv_cache_with_slot_mapping",
+        fake_slot_writer,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability_family",
+        lambda family: False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "can_use_trtllm_attention",
+        lambda num_heads, num_kv_heads: False,
+    )
+    monkeypatch.setattr(flashinfer_backend, "get_kv_cache_layout", lambda: "NHD")
+
+    head_size = 64
+    head_size_v = 128
+    impl = flashinfer_backend.FlashInferImpl(
+        num_heads=1,
+        head_size=head_size,
+        scale=1.0,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="nvfp4",
+        head_size_v=head_size_v,
+    )
+
+    full_dim = nvfp4_kv_cache_full_dim(head_size) + nvfp4_kv_cache_full_dim(head_size_v)
+    kv_cache = torch.empty((2, 4, 3, full_dim), dtype=torch.uint8)
+
+    views = impl._get_nvfp4_kv_cache_views(kv_cache)
+    cached_views = impl._get_nvfp4_kv_cache_views(kv_cache)
+
+    assert cached_views is views
+    assert cached_views.kv_cache is views.kv_cache
+    assert cached_views.data[0] is views.data[0]
+    assert cached_views.block_scales[0] is views.block_scales[0]
+
+    rebound_kv_cache = torch.empty_like(kv_cache)
+    rebound_views = impl._get_nvfp4_kv_cache_views(rebound_kv_cache)
+
+    assert rebound_views is not views
+    assert rebound_views.data[0].data_ptr() == rebound_kv_cache.data_ptr()
+
+
 def test_flashinfer_impl_requires_nvfp4_slot_mapping_writer(monkeypatch) -> None:
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 

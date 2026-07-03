@@ -92,6 +92,29 @@ logger = init_logger(__name__)
 trtllm_gen_workspace_buffer = None
 
 
+_NVFP4KVDataViews = tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor]
+
+
+@dataclass(frozen=True)
+class _NVFP4KVCacheViewKey:
+    data_ptr: int
+    storage_offset: int
+    shape: tuple[int, ...]
+    stride: tuple[int, ...]
+    dtype: torch.dtype
+    device: torch.device
+    head_size: int
+    head_size_v: int
+    stride_order: tuple[int, ...]
+
+
+@dataclass(frozen=True)
+class _NVFP4KVCacheViews:
+    kv_cache: torch.Tensor
+    data: _NVFP4KVDataViews
+    block_scales: _NVFP4KVDataViews
+
+
 def _get_trtllm_gen_workspace_buffer():
     global trtllm_gen_workspace_buffer
     if trtllm_gen_workspace_buffer is None:
@@ -1589,6 +1612,9 @@ class FlashInferImpl(AttentionImpl):
             self._nvfp4_fa2_cu_q = torch.zeros(2, device="cuda", dtype=torch.int32)
             self._nvfp4_fa2_cu_k = torch.zeros(2, device="cuda", dtype=torch.int32)
 
+        self._nvfp4_kv_cache_view_key: _NVFP4KVCacheViewKey | None = None
+        self._nvfp4_kv_cache_views: _NVFP4KVCacheViews | None = None
+
         dcp_a2a = (
             vllm_config is not None
             and vllm_config.parallel_config.decode_context_parallel_size > 1
@@ -1610,6 +1636,65 @@ class FlashInferImpl(AttentionImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
+
+    def _get_kv_cache_stride_order(self) -> tuple[int, ...]:
+        return FlashInferBackend.get_kv_cache_stride_order(
+            head_size=self.head_size,
+            head_size_v=self.head_size_v,
+            cache_dtype_str=self.kv_cache_dtype,
+        )
+
+    def _permute_kv_cache(
+        self, kv_cache: torch.Tensor, stride_order: tuple[int, ...]
+    ) -> torch.Tensor:
+        kv_cache_permute = kv_cache.permute(*stride_order)
+        # Fix degenerate strides on any size-1 dimension (e.g. num_kv_heads=1
+        # with TP=8). PyTorch permits non-canonical strides on size-1 dims;
+        # CUDA TMA requires ≥16-byte alignment on all non-outermost strides.
+        # canonicalize_singleton_dim_strides patches metadata via as_strided —
+        # zero-copy. See vllm.utils.torch_utils.
+        fixed = canonicalize_singleton_dim_strides(kv_cache_permute)
+        if fixed is not kv_cache_permute:
+            logger.debug(
+                "Canonicalized degenerate KV cache strides (FlashInfer): "
+                "shape=%s, strides before=%s, strides after=%s",
+                kv_cache_permute.shape,
+                kv_cache_permute.stride(),
+                fixed.stride(),
+            )
+        return fixed
+
+    def _get_nvfp4_kv_cache_views(self, kv_cache: torch.Tensor) -> _NVFP4KVCacheViews:
+        stride_order = self._get_kv_cache_stride_order()
+        key = _NVFP4KVCacheViewKey(
+            data_ptr=kv_cache.data_ptr(),
+            storage_offset=kv_cache.storage_offset(),
+            shape=tuple(kv_cache.shape),
+            stride=tuple(kv_cache.stride()),
+            dtype=kv_cache.dtype,
+            device=kv_cache.device,
+            head_size=self.head_size,
+            head_size_v=self.head_size_v,
+            stride_order=stride_order,
+        )
+        if (
+            key == self._nvfp4_kv_cache_view_key
+            and self._nvfp4_kv_cache_views is not None
+        ):
+            return self._nvfp4_kv_cache_views
+
+        fixed = self._permute_kv_cache(kv_cache, stride_order)
+        data, block_scales = nvfp4_kv_cache_split_views(
+            fixed, self.head_size, self.head_size_v
+        )
+        views = _NVFP4KVCacheViews(
+            kv_cache=fixed,
+            data=data,
+            block_scales=block_scales,
+        )
+        self._nvfp4_kv_cache_view_key = key
+        self._nvfp4_kv_cache_views = views
+        return views
 
     def _flash_attn_varlen(
         self,
@@ -1880,36 +1965,16 @@ class FlashInferImpl(AttentionImpl):
         num_decode_tokens = attn_metadata.num_decode_tokens
         num_prefill_tokens = attn_metadata.num_prefill_tokens
 
-        stride_order = FlashInferBackend.get_kv_cache_stride_order(
-            head_size=self.head_size,
-            head_size_v=self.head_size_v,
-            cache_dtype_str=self.kv_cache_dtype,
-        )
-        kv_cache_permute = kv_cache.permute(*stride_order)  # HND and contiguous
-        # Fix degenerate strides on any size-1 dimension (e.g. num_kv_heads=1
-        # with TP=8).  PyTorch permits non-canonical strides on size-1 dims;
-        # CUDA TMA requires ≥16-byte alignment on all non-outermost strides.
-        # canonicalize_singleton_dim_strides patches metadata via as_strided —
-        # zero-copy.  See vllm.utils.torch_utils.
-        fixed = canonicalize_singleton_dim_strides(kv_cache_permute)
-        if fixed is not kv_cache_permute:
-            logger.debug(
-                "Canonicalized degenerate KV cache strides (FlashInfer): "
-                "shape=%s, strides before=%s, strides after=%s",
-                kv_cache_permute.shape,
-                kv_cache_permute.stride(),
-                fixed.stride(),
-            )
-        kv_cache_permute = fixed
-
-        # For NVFP4, the kv_cache last dim is full_dim (data + scale packed).
-        # Split into correctly-strided data and scale views.
         nvfp4_kv_data = None
         nvfp4_kv_block_scales = None
         if self.is_kvcache_nvfp4:
-            nvfp4_kv_data, nvfp4_kv_block_scales = nvfp4_kv_cache_split_views(
-                kv_cache_permute, self.head_size, self.head_size_v
-            )
+            nvfp4_views = self._get_nvfp4_kv_cache_views(kv_cache)
+            kv_cache_permute = nvfp4_views.kv_cache
+            nvfp4_kv_data = nvfp4_views.data
+            nvfp4_kv_block_scales = nvfp4_views.block_scales
+        else:
+            stride_order = self._get_kv_cache_stride_order()
+            kv_cache_permute = self._permute_kv_cache(kv_cache, stride_order)
 
         use_dcp = self.dcp_world_size > 1
 
@@ -2240,15 +2305,9 @@ class FlashInferImpl(AttentionImpl):
             # op uses the slot_mapping's shape to determine the number of
             # actual tokens.
             if self.is_kvcache_nvfp4 and not self.use_native_nvfp4_kv_cache_update:
-                stride_order = FlashInferBackend.get_kv_cache_stride_order(
-                    head_size=self.head_size,
-                    head_size_v=self.head_size_v,
-                    cache_dtype_str=self.kv_cache_dtype,
-                )
-                kv_cache_permute = kv_cache.permute(*stride_order)
-                nvfp4_kv_data, nvfp4_kv_block_scales = nvfp4_kv_cache_split_views(
-                    kv_cache_permute, self.head_size, self.head_size_v
-                )
+                nvfp4_views = self._get_nvfp4_kv_cache_views(kv_cache)
+                nvfp4_kv_data = nvfp4_views.data
+                nvfp4_kv_block_scales = nvfp4_views.block_scales
                 nvfp4_slot_writer = self._nvfp4_slot_writer
                 assert nvfp4_slot_writer is not None
                 nvfp4_slot_writer(
