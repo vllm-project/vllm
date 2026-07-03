@@ -172,7 +172,7 @@ class MyConfig(PretrainedConfig):
 - `base_model_pp_plan` is a `dict` that maps direct child layer names to `tuple`s of `list`s of `str`s:
     - You only need to do this for layers which are not present on all pipeline stages
     - vLLM assumes that there will be only one `nn.ModuleList`, which is distributed across the pipeline stages
-    - When no `base_model_pp_plan` is provided, vLLM infers the split from the text model's sole `nn.ModuleList`, keeping the parameter-bearing modules around it (input embeddings, final norm) on the first/last stage and parameter-free modules (e.g. rotary embeddings) on every stage
+    - When no `base_model_pp_plan` is provided, the Transformers modelling backend infers the split from the text model's sole `nn.ModuleList`, keeping the parameter-bearing modules around it (input embeddings, final norm) on the first/last stage (depending on declaration order) and parameter-free modules (e.g. rotary embeddings) on every stage
     - The `list` in the first element of the `tuple` contains the names of the input arguments
     - The `list` in the last element of the `tuple` contains the names of the variables the layer outputs to in your modeling code
 
