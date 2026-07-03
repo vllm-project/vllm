@@ -6,6 +6,7 @@ use serde_json::Value;
 use serde_with::SerializeDisplay;
 use validator::Validate;
 use vllm_chat::ReasoningEffort;
+use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 
 use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
@@ -239,7 +240,7 @@ pub struct ChatCompletionRequest {
     pub vllm_xargs: Option<HashMap<String, Value>>,
 
     /// Parameters for detecting repetitive N-gram patterns in output tokens
-    pub repetition_detection: Option<Value>,
+    pub repetition_detection: Option<RepetitionDetectionParams>,
 }
 
 impl Default for ChatCompletionRequest {
