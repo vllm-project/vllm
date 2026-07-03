@@ -68,9 +68,32 @@ export PROXY_PING_PORT="${PROXY_PING_PORT:-36367}"
 export HANDSHAKE_PORT="${HANDSHAKE_PORT:-6301}"
 export NOTIFY_PORT="${NOTIFY_PORT:-61005}"
 
-# Path to the MoRIIO toy proxy (lives next to this file in the repo).
-# TODO: needs to be removed after PR #46482 is merged.
-export PROXY_SCRIPT="${PROXY_SCRIPT:-${_CLUSTER_SH_DIR}/moriio_toy_proxy_server.py}"
+# Path to the MoRIIO toy proxy. Uses the upstream example shipped in the image
+export PROXY_SCRIPT="${PROXY_SCRIPT:-/app/vllm/examples/disaggregated/disaggregated_serving/moriio_toy_proxy_server.py}"
+
+# MoRIIO KV transfer direction (injected into --kv-transfer-config by the launcher):
+#   0 -> omit read_mode     (default; MoRIIO write mode: prefill pushes to decode)
+#   1 -> "read_mode": true  (decode pulls KV from prefill; matches upstream disagg)
+export MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
+
+# ----------------------------------------------------------------- router / gateway
+# Selection for client (bench/accuracy) traffic:
+#   toy         -> the in-container MoRIIO toy proxy started by the launcher (default)
+#   vllm-router -> an external `vllm/vllm-router` container started by the SLURM job
+#                  on the rank-0 node
+# Both use the SAME MoRIIO discovery mechanism (prefill/decode register to
+# PROXY_IP:PROXY_PING_PORT=36367); only the client HTTP front door differs.
+export ROUTER_TYPE="${ROUTER_TYPE:-toy}"
+export ROUTER_PORT="${ROUTER_PORT:-30000}"
+export ROUTER_POLICY="${ROUTER_POLICY:-round_robin}"
+export VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
+# Single client-facing port bench/accuracy target: the router port when routing,
+# else the toy proxy port. Env override always wins.
+if [[ "${ROUTER_TYPE}" == "vllm-router" ]]; then
+    export GATEWAY_PORT="${GATEWAY_PORT:-${ROUTER_PORT}}"
+else
+    export GATEWAY_PORT="${GATEWAY_PORT:-${PROXY_PORT}}"
+fi
 
 # Where per-run logs / benchmark results are written. A $SLURM_JOB_ID subdir is
 # appended so each CI run is self-scoped (falls back to 'local' off-SLURM).  [site]

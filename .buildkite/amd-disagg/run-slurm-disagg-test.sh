@@ -21,7 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 JOB_SCRIPT="${JOB_SCRIPT:-${SCRIPT_DIR}/run_xPyD_disagg.slurm}"
 
 # ---- knobs (override from the Buildkite step env) --------------------------
-IMAGE="${IMAGE:-rocm/vllm-ci:${BUILDKITE_COMMIT:-latest}}"
+IMAGE="${IMAGE:-vllm/vllm-openai-rocm:nightly}"
 NODES="${NODES:-2}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 PARTITION="${SLURM_PARTITION:-amd-rccl}"
@@ -29,11 +29,17 @@ TIME_LIMIT="${SLURM_TIME_LIMIT:-01:30:00}"
 WIDE_EP_MODE="${WIDE_EP_MODE:-0}"
 xP="${xP:-1}"
 yD="${yD:-1}"
-RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-bench}"
+RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-accuracy}"
 HEALTH_TIMEOUT_S="${HEALTH_TIMEOUT_S:-5400}"   # P/D bring-up budget (big models load slowly)
 SHARED_MOUNT="${SHARED_MOUNT:-/shared_inference}"
 LOG_ROOT="${LOG_ROOT:-${SHARED_MOUNT}/${USER:-$(whoami)}/disagg_logs}"
 DRY_RUN="${DRY_RUN:-0}"
+MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
+
+# Front door: toy (in-container proxy, default) | vllm-router (external container).
+ROUTER_TYPE="${ROUTER_TYPE:-toy}"
+ROUTER_PORT="${ROUTER_PORT:-30000}"
+VLLM_ROUTER_IMAGE="${VLLM_ROUTER_IMAGE:-vllm/vllm-router:nightly}"
 # Dry-run only validates wiring; cap its walltime low so it never holds the queue.
 [[ "${DRY_RUN}" == "1" ]] && TIME_LIMIT="${SLURM_TIME_LIMIT:-00:10:00}"
 
@@ -52,6 +58,8 @@ EXPORTS+=",RUN_AFTER_HEALTH=${RUN_AFTER_HEALTH},HEALTH_TIMEOUT_S=${HEALTH_TIMEOU
 EXPORTS+=",SHARED_MOUNT=${SHARED_MOUNT},LOG_ROOT=${LOG_ROOT}"
 EXPORTS+=",DISAGG_SCRIPTS_DIR=${SCRIPT_DIR}"
 EXPORTS+=",DRY_RUN=${DRY_RUN}"
+EXPORTS+=",MORIIO_READ_MODE=${MORIIO_READ_MODE}"
+EXPORTS+=",ROUTER_TYPE=${ROUTER_TYPE},ROUTER_PORT=${ROUTER_PORT},VLLM_ROUTER_IMAGE=${VLLM_ROUTER_IMAGE}"
 
 SBATCH_ARGS=(
     --parsable
@@ -65,7 +73,7 @@ SBATCH_ARGS=(
 )
 [[ -n "${PARTITION}" ]] && SBATCH_ARGS+=(--partition="${PARTITION}")
 
-echo "[slurm-submit] image=${IMAGE} nodes=${NODES} gpus/node=${GPUS_PER_NODE} mode=$([[ ${WIDE_EP_MODE} == 0 ]] && echo tp || echo ep)"
+echo "[slurm-submit] image=${IMAGE} nodes=${NODES} gpus/node=${GPUS_PER_NODE} mode=$([[ ${WIDE_EP_MODE} == 0 ]] && echo tp || echo ep) router=${ROUTER_TYPE}"
 JOB_ID=$(sbatch "${SBATCH_ARGS[@]}" "${JOB_SCRIPT}")
 echo "[slurm-submit] submitted job ${JOB_ID}${PARTITION:+ on ${PARTITION}}"
 
