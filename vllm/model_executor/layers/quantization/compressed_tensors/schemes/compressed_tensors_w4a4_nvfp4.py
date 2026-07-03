@@ -97,9 +97,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         layer.weight = layer.weight_packed
         del layer.weight_packed
 
-        weight_global_scales = layer.weight_global_scale.detach().to(
-            torch.float32
-        )
+        weight_global_scales = layer.weight_global_scale.detach().to(torch.float32)
         has_non_uniform_scales = not torch.allclose(
             weight_global_scales,
             weight_global_scales[0].expand_as(weight_global_scales),
@@ -121,7 +119,7 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
             for width, partition_divisor in zip(
                 layer.logical_widths, weight_global_scales
             ):
-                output_partition_rescale[offset:offset + width] = (
+                output_partition_rescale[offset : offset + width] = (
                     base_divisor / partition_divisor
                 )
                 offset += width

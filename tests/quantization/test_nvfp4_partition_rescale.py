@@ -8,9 +8,6 @@ layers (e.g. gate_up_proj) have non-uniform weight_global_scale values.
 Run: pytest tests/quantization/test_nvfp4_partition_rescale.py -v
 """
 
-from unittest.mock import MagicMock
-
-import pytest
 import torch
 from torch.nn.parameter import Parameter
 
@@ -54,9 +51,7 @@ def _make_layer(logical_widths, weight_global_scale_values, use_a16=True):
 
     if not use_a16:
         layer.input_global_scale = Parameter(
-            torch.tensor(
-                [1.0] * len(logical_widths), dtype=torch.float32
-            ),
+            torch.tensor([1.0] * len(logical_widths), dtype=torch.float32),
             requires_grad=False,
         )
 
