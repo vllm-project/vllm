@@ -991,6 +991,16 @@ class SpecDecodeBaseProposer:
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[:total_num_tokens],
             causal=True,
+            # Carry sink-attention metadata so sink-attn draft models (e.g.
+            # Iquest MTP) keep seqused_k for their sink attention. sink_seq_lens
+            # is per-request; slice it to num_reqs so it stays aligned even if
+            # the request count ever shrinks on this path.
+            sink_seq_lens=(
+                None
+                if common_attn_metadata.sink_seq_lens is None
+                else common_attn_metadata.sink_seq_lens[: common_attn_metadata.num_reqs]
+            ),
+            max_sink_seq_len=common_attn_metadata.max_sink_seq_len,
             dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
         )
 
@@ -1270,6 +1280,16 @@ class SpecDecodeBaseProposer:
             block_table_tensor=common_attn_metadata.block_table_tensor,
             slot_mapping=common_attn_metadata.slot_mapping[token_indices],
             causal=True,
+            # Carry sink-attention metadata so sink-attn draft models (e.g.
+            # Iquest MTP) keep seqused_k for their sink attention. sink_seq_lens
+            # is per-request; slice it to num_reqs so it stays aligned even if
+            # the request count ever shrinks on this path.
+            sink_seq_lens=(
+                None
+                if common_attn_metadata.sink_seq_lens is None
+                else common_attn_metadata.sink_seq_lens[: common_attn_metadata.num_reqs]
+            ),
+            max_sink_seq_len=common_attn_metadata.max_sink_seq_len,
             dcp_local_seq_lens=common_attn_metadata.dcp_local_seq_lens,
         )
 

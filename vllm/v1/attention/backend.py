@@ -413,6 +413,10 @@ class CommonAttentionMetadata:
             block_table_tensor=self.block_table_tensor[:num_actual_reqs],
             slot_mapping=self.slot_mapping[:num_actual_tokens],
             causal=self.causal,
+            # Preserve sink-attention metadata; otherwise the draft model's
+            # sink attention (e.g. Iquest MTP) loses seqused_k and asserts.
+            sink_seq_lens=maybe_slice_reqs(self.sink_seq_lens),
+            max_sink_seq_len=self.max_sink_seq_len,
             logits_indices_padded=self.logits_indices_padded,
             num_logits_indices=self.num_logits_indices,
             encoder_seq_lens=maybe_slice_reqs(self.encoder_seq_lens),

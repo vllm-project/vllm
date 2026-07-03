@@ -44,6 +44,7 @@ MTPModelTypes = Literal[
     "mtp",
     "pangu_ultra_moe_mtp",
     "step3p5_mtp",
+    "iquest_mtp",
 ]
 EagleModelTypes = Literal["eagle", "eagle3", MTPModelTypes]
 SpeculativeMethod = Literal[
@@ -203,6 +204,18 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["OpenPanguMTPModel"]}
+            )
+
+        if hf_config.architectures[0] == "IquestMoeV13ForCausalLM":
+            hf_config.model_type = "iquest_mtp"
+            # Low-cost v1: materialize only mtp_layers.0. n_predict=1 makes K=1
+            # the default; explicit num_speculative_tokens > 1 is still allowed
+            # (K % n_predict == 0) and reuses this single MTP layer
+            # autoregressively, with lower expected acceptance for later draft
+            # tokens. num_hidden_layers is left unchanged so the draft's MTP
+            # layer registers a KV-cache name distinct from the target's layers.
+            hf_config.update(
+                {"n_predict": 1, "architectures": ["IquestMoeV13MTPModel"]}
             )
 
         if hf_config.architectures[0] == "MiMoForCausalLM":
