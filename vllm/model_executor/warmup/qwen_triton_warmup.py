@@ -24,7 +24,8 @@ _QWEN_MODEL_TYPES = frozenset(
     }
 )
 
-_ZERO_KV_N_BLOCKS = (1, 2)
+_ZERO_KV_ZEROER_N_BLOCKS = (1, 2)
+_ZERO_KV_KERNEL_N_BLOCKS = (1, 2, 16)
 
 _SLOT_MAPPING_KV_BLOCK_SIZE = 16
 _SLOT_MAPPING_CP_KV_CACHE_INTERLEAVE_SIZE = 1
@@ -174,7 +175,7 @@ def _warm_zero_kv_blocks_with_runner_zeroer(runner: object) -> bool:
     if not callable(zero_block_ids):
         return False
 
-    for n_blocks in _ZERO_KV_N_BLOCKS:
+    for n_blocks in _ZERO_KV_ZEROER_N_BLOCKS:
         zero_block_ids(list(range(n_blocks)))
     return True
 
@@ -184,7 +185,7 @@ def _warm_zero_kv_blocks_kernel(
 ) -> None:
     from vllm.v1.worker.utils import _zero_kv_blocks_kernel
 
-    max_n_blocks = max(_ZERO_KV_N_BLOCKS)
+    max_n_blocks = max(_ZERO_KV_KERNEL_N_BLOCKS)
     scratch = torch.empty(
         max_n_blocks * config.page_size_el,
         dtype=torch.int32,
@@ -196,7 +197,7 @@ def _warm_zero_kv_blocks_kernel(
         device=device,
     )
 
-    for n_blocks in _ZERO_KV_N_BLOCKS:
+    for n_blocks in _ZERO_KV_KERNEL_N_BLOCKS:
         block_ids = torch.arange(n_blocks, dtype=torch.int64, device=device)
         grid = (n_blocks * config.n_segs * (config.page_size_el // config.block_size),)
         _zero_kv_blocks_kernel[grid](
@@ -206,8 +207,6 @@ def _warm_zero_kv_blocks_kernel(
             N_SEGS=config.n_segs,
             PAGE_SIZE_EL=config.page_size_el,
             BLOCK_SIZE=config.block_size,
-            num_warps=4,
-            num_stages=3,
         )
 
 
@@ -372,11 +371,10 @@ def qwen_triton_warmup(
     logger.info("Warming up Qwen Triton kernels for model_type=%s.", model_type)
 
     zero_config = _zero_kv_warmup_config(runner)
-    if _warm_zero_kv_blocks_with_runner_zeroer(runner):
-        pass
-    elif zero_config is not None:
+    warmed_zeroer = _warm_zero_kv_blocks_with_runner_zeroer(runner)
+    if zero_config is not None:
         _warm_zero_kv_blocks_kernel(device, zero_config)
-    else:
+    elif not warmed_zeroer:
         logger.info("Skipping Qwen zero-kv warmup: no KVBlockZeroer metadata.")
 
     _warm_compute_slot_mapping_kernel(device)
