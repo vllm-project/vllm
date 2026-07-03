@@ -1,6 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+"""
+Paged shared memory manager with LRU eviction.
+
+Manages a fixed-size shared memory pool divided into equal-sized blocks.
+Items can be allocated, written, read (with reference counting), pinned,
+and deleted.  A block‑level LRU cache automatically evicts idle cacheable
+items when free blocks run low.
+"""
+
 from collections import deque
 from dataclasses import dataclass
 
@@ -11,7 +20,7 @@ from vllm.utils.cache import LRUCache
 class Item:
     uuid: str
     size: int
-    cached: bool
+    use_cache: bool  # whether the item should be cached after writing
 
 
 @dataclass
@@ -44,19 +53,21 @@ class PagedSHMManager:
         assert self.size > 0
         assert self.n_block > 0
 
-        # Initially all blocks are free
-        self.free_blocks = deque(range(self.n_block))
-        self.n_free_block = self.n_block
+        # uuid -> AllocatedItem
+        self._all_items: dict[str, AllocatedItem] = {}
 
-        # LRU cache capacity is measured in number of blocks, not items
-        self.lru_cache: LRUCache[str, AllocatedItem] = LRUCache(
+        # Initially all blocks are free
+        self._free_blocks = deque(range(self.n_block))
+        self._total_available_blocks = self.n_block
+
+        # LRU cache tracks idle cacheable items by their block count.
+        self._lru_cache: LRUCache[str, AllocatedItem] = LRUCache(
             capacity=self.n_block,
             getsizeof=lambda x: x.n_block(),
         )
+        self._pinned_items: set[str] = set()
 
-        self.all_items: dict[str, AllocatedItem] = {}
-
-    def allocate(self, items: list[Item]) -> list[AllocatedItem]:
+    def open_write(self, items: list[Item]) -> list[AllocatedItem]:
         """Allocate blocks for a batch of items for write.
 
         Note:
@@ -64,15 +75,15 @@ class PagedSHMManager:
             the allocation request as a single batch to avoid deadlock
             refer to the wiki:Dining philosophers problem.
         """
-        # 0. Confirm there are no UUID conflicts with existing items
+        # 0. Confirm there are no UUID conflicts with existing items.
         for item in items:
-            if item.uuid in self.all_items:
+            if item.uuid in self._all_items:
                 raise ValueError(f"UUID {item.uuid} already exists")
 
             if item.size <= 0:
                 raise ValueError(f"item size {item.size} must be greater than zero.")
 
-        # 1. Calculate required number of blocks for each item and total demand
+        # 1. Calculate required number of blocks for each item and total demand.
         needs = []
         total_need = 0
         for item in items:
@@ -81,7 +92,7 @@ class PagedSHMManager:
             total_need += need
 
         # 2. Confirm whether there is sufficient space to meet all requirements.
-        if self.n_free_block < total_need:
+        if self._total_available_blocks < total_need:
             raise MemoryError("No sufficient space to meet all requirements")
 
         # 3. Evict cached items until enough free blocks are available.
@@ -91,66 +102,128 @@ class PagedSHMManager:
         allocated: list[AllocatedItem] = []
         for idx, item in enumerate(items):
             need = needs[idx]
-            blocks = [self.free_blocks.popleft() for _ in range(need)]
+            blocks = [self._free_blocks.popleft() for _ in range(need)]
             new_item = AllocatedItem(
                 uuid=item.uuid,
                 size=item.size,
-                cached=item.cached,
+                use_cache=item.use_cache,
                 blocks=blocks,
                 ref_count=-1,  # Item is being written
             )
-            self.all_items[item.uuid] = new_item
+            self._all_items[item.uuid] = new_item
             allocated.append(new_item)
 
-        self.n_free_block -= total_need
+        # Total available blocks decrease by what we just handed out
+        self._total_available_blocks -= total_need
         return allocated
 
-    def borrow(self, uuid):
-        item: AllocatedItem = self.all_items.get(uuid, None)
+    def close_write(self, uuid: str):
+        item = self._all_items.get(uuid, None)
+        if item is None:
+            raise ValueError(f"UUID {uuid} not found")
+        if item.ref_count >= 0:
+            raise ValueError(f"UUID {uuid} not being written")
+
+        item.ref_count = 0
+
+        # Insert into LRU cache if caching is enabled and item is not pinned
+        if item.use_cache and uuid not in self._pinned_items:
+            self._total_available_blocks += item.n_block()
+            self._lru_cache.put(uuid, item)
+
+    def open_read(self, uuid):
+        item: AllocatedItem = self._all_items.get(uuid, None)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
         if item.ref_count < 0:
-            raise ValueError(f"UUID {uuid} is being written, cannot borrow")
+            raise ValueError(f"UUID {uuid} is being written")
 
-        # Pin the item if it is currently evictable
-        if item.ref_count == 0:
-            self.lru_cache.pin(uuid)
+        # If the item is idle and cacheable/pinned, take it out of the cache
+        update_cache = (
+            item.use_cache and item.ref_count == 0 and uuid not in self._pinned_items
+        )
+        if update_cache:
+            self._lru_cache.pop(uuid)
+            self._total_available_blocks -= len(item.blocks)
 
         item.ref_count += 1
-        self.lru_cache.touch(uuid)
-        self.n_free_block -= len(item.blocks)
 
-    def restore(self, uuid: str):
-        item = self.all_items.get(uuid, None)
+    def close_read(self, uuid: str):
+        item = self._all_items.get(uuid, None)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
+        if item.ref_count < 0:
+            raise ValueError(f"UUID {uuid} being written")
 
-        if not item.cached:
-            # Uncached items can be released only when no one is reading them
-            self.all_items.pop(uuid)
-            self.free_blocks.extend(item.blocks)
-            self.n_free_block += len(item.blocks)
-        else:
-            if item.ref_count < 0:
-                # Writing completed
-                item.ref_count = 0
-                self.lru_cache.put(uuid, item)
+        if item.ref_count > 0:
+            item.ref_count -= 1
 
-            elif item.ref_count > 0:
-                item.ref_count -= 1
+        # If the item is now idle and cacheable/pinned, put it back into the cache
+        update_cache = (
+            item.use_cache and item.ref_count == 0 and uuid not in self._pinned_items
+        )
+        if update_cache:
+            self._total_available_blocks += len(item.blocks)
+            self._lru_cache.put(uuid, item)
 
-                if item.ref_count == 0:
-                    self.lru_cache._unpin(uuid)
+    def pin(self, uuid: str):
+        item = self._all_items.get(uuid, None)
+        if item is None:
+            raise ValueError(f"UUID {uuid} not found")
+        if not item.use_cache:
+            raise ValueError("Can only pin use_cache items.")
 
-            if item.ref_count == 0:
-                self.n_free_block += len(item.blocks)
+        if uuid in self._pinned_items:
+            return
+
+        self._pinned_items.add(uuid)
+
+        # If the item is currently in the LRU cache, remove it
+        if item.ref_count == 0:
+            self._lru_cache.pop(uuid)
+            self._total_available_blocks -= len(item.blocks)
+
+    def unpin(self, uuid: str):
+        item = self._all_items.get(uuid, None)
+        if item is None:
+            raise ValueError(f"UUID {uuid} not found")
+        if not item.use_cache:
+            raise ValueError("Can only pin use_cache items.")
+
+        if uuid not in self._pinned_items:
+            return
+
+        self._pinned_items.discard(uuid)
+
+        # If the item is idle, re‑insert it into the LRU cache
+        if item.ref_count == 0:
+            self._total_available_blocks += len(item.blocks)
+            self._lru_cache.put(uuid, item)
+
+    def delete(self, uuid: str):
+        item = self._all_items.get(uuid, None)
+        if item is None:
+            raise ValueError(f"UUID {uuid} not found")
+        if item.ref_count != 0:
+            raise ValueError(f"UUID {uuid} is busy now")
+
+        # If the item was not cached (or was pinned) its blocks were counted
+        # as unavailable; now they become truly free.
+        if not item.use_cache or uuid in self._pinned_items:
+            self._total_available_blocks += item.n_block()
+
+        # Remove from all tracking structures.
+        self._lru_cache.pop(uuid, None)
+        self._pinned_items.discard(uuid)
+        self._all_items.pop(uuid)
+        self._free_blocks.extend(item.blocks)
 
     def _evict(self, needed: int) -> None:
-        while len(self.free_blocks) < needed:
-            if not self.lru_cache.can_evict():
-                raise MemoryError("No blocks can be freed (memory exhausted)")
+        while len(self._free_blocks) < needed:
+            uuid, victim = self._lru_cache.popitem()
 
-            uuid, victim = self.lru_cache.popitem()
-
-            self.all_items.pop(uuid)
-            self.free_blocks.extend(victim.blocks)
+            # Pinned items are never placed in the LRU cache, so they
+            # cannot appear here.  No change to _total_available_blocks;
+            # we just convert evictable blocks into physically free ones.
+            self._all_items.pop(uuid)
+            self._free_blocks.extend(victim.blocks)
