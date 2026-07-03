@@ -761,7 +761,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         reserved_before = torch.accelerator.memory_reserved(self.device)
         allocated_before = torch.accelerator.memory_allocated(self.device)
         requested_total = 0
-        builder_records: list[tuple[str, int, int, int, int | None]] = []
+        builder_records: list[
+            tuple[str, int, int, int, int | None, dict[str, int] | None]
+        ] = []
         for groups in self.attn_groups:
             for attn_group in groups:
                 for builder in attn_group.metadata_builders:
@@ -774,6 +776,12 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     requested_bytes = int(
                         builder.reserve_workspace_for_cudagraph_capture() or 0
                     )
+                    workspace_debug_info = None
+                    get_workspace_reserve_debug_info = getattr(
+                        builder, "get_workspace_reserve_debug_info", None
+                    )
+                    if callable(get_workspace_reserve_debug_info):
+                        workspace_debug_info = get_workspace_reserve_debug_info()
                     builder_reserved_after = torch.accelerator.memory_reserved(
                         self.device
                     )
@@ -803,6 +811,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                 0,
                             ),
                             workspace_buffer_ptr,
+                            workspace_debug_info,
                         )
                     )
         torch.accelerator.synchronize()
@@ -815,9 +824,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if builder_records:
             unique_workspace_buffers = {
                 buffer_ptr
-                for _, _, _, _, buffer_ptr in builder_records
+                for _, _, _, _, buffer_ptr, _ in builder_records
                 if buffer_ptr is not None
             }
+            workspace_debug_infos = [
+                workspace_debug_info
+                for _, _, _, _, _, workspace_debug_info in builder_records
+                if workspace_debug_info is not None
+            ]
             logger.debug(
                 "Reserved attention workspace before CUDA graph capture: "
                 "%.2f MiB allocator reserved delta, %.2f MiB allocated delta, "
@@ -830,12 +844,47 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 len(builder_records),
                 len(unique_workspace_buffers),
             )
+            if workspace_debug_infos:
+                actual_int_workspace_bytes = sum(
+                    info["actual_int_workspace_bytes"] for info in workspace_debug_infos
+                )
+                reserved_int_workspace_bytes = sum(
+                    info["reserved_int_workspace_bytes"]
+                    for info in workspace_debug_infos
+                )
+                int_workspace_over_reserved_bytes = sum(
+                    info["int_workspace_over_reserved_bytes"]
+                    for info in workspace_debug_infos
+                )
+                logger.debug(
+                    "Reserved attention workspace wrapper breakdown: "
+                    "%d wrappers, %d decode CUDA graph wrappers, "
+                    "%d default-or-larger int workspaces, "
+                    "%.2f MiB actual int workspace, %.2f MiB requested int "
+                    "workspace, %.2f MiB int workspace over request",
+                    sum(
+                        info["workspace_wrapper_count"]
+                        for info in workspace_debug_infos
+                    ),
+                    sum(
+                        info["decode_cudagraph_wrappers"]
+                        for info in workspace_debug_infos
+                    ),
+                    sum(
+                        info["default_int_workspace_wrappers"]
+                        for info in workspace_debug_infos
+                    ),
+                    actual_int_workspace_bytes / (1 << 20),
+                    reserved_int_workspace_bytes / (1 << 20),
+                    int_workspace_over_reserved_bytes / (1 << 20),
+                )
             for (
                 builder_name,
                 requested_bytes,
                 builder_reserved_delta,
                 builder_allocated_delta,
                 workspace_buffer_ptr,
+                workspace_debug_info,
             ) in builder_records:
                 logger.debug(
                     "Reserved attention workspace builder=%s requested=%.2f MiB "
@@ -847,6 +896,27 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     builder_allocated_delta / (1 << 20),
                     workspace_buffer_ptr,
                 )
+                if workspace_debug_info is not None:
+                    logger.debug(
+                        "Reserved attention workspace builder=%s wrappers=%d "
+                        "decode_cudagraph_wrappers=%d "
+                        "default_int_workspaces=%d actual_int=%.2f MiB "
+                        "requested_int=%.2f MiB int_over_request=%.2f MiB "
+                        "unique_int_buffers=%d unique_float_buffers=%d "
+                        "workspace_state_live_wrappers=%d",
+                        builder_name,
+                        workspace_debug_info["workspace_wrapper_count"],
+                        workspace_debug_info["decode_cudagraph_wrappers"],
+                        workspace_debug_info["default_int_workspace_wrappers"],
+                        workspace_debug_info["actual_int_workspace_bytes"] / (1 << 20),
+                        workspace_debug_info["reserved_int_workspace_bytes"]
+                        / (1 << 20),
+                        workspace_debug_info["int_workspace_over_reserved_bytes"]
+                        / (1 << 20),
+                        workspace_debug_info["unique_int_workspace_buffers"],
+                        workspace_debug_info["unique_float_workspace_buffers"],
+                        workspace_debug_info["workspace_state_live_wrappers"],
+                    )
 
         return reserved_delta
 

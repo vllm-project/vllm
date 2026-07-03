@@ -87,6 +87,7 @@ from vllm.v1.worker.workspace import (
 )
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
+FLASHINFER_DEFAULT_INT_WORKSPACE_BYTES = 8 * 1024 * 1024
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -675,6 +676,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.attention_config = vllm_config.attention_config
         self._workspace_buffer = None
         self._workspace_state = _FlashInferWorkspaceState()
+        self._last_reserved_workspace_sizes = WorkspaceSizes(0, 0)
         self._prefill_wrapper: (
             BatchPrefillWithPagedKVCacheWrapper | BatchDCPPrefillWrapper | None
         ) = None  # Wrapper for prefill/append
@@ -1040,6 +1042,87 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         object.__setattr__(wrapper, "_vllm_flashinfer_int_workspace_prepared", True)
         self._register_workspace_wrapper(wrapper)
 
+    def _iter_workspace_wrappers(self) -> list[tuple[str, object]]:
+        wrappers: list[tuple[str, object]] = []
+
+        def add_wrapper(kind: str, wrapper: object | None) -> None:
+            if wrapper is not None:
+                wrappers.append((kind, wrapper))
+
+        add_wrapper("prefill", getattr(self, "_prefill_wrapper", None))
+        add_wrapper(
+            "noncausal_prefill", getattr(self, "_noncausal_prefill_wrapper", None)
+        )
+        add_wrapper("decode", getattr(self, "_decode_wrapper", None))
+        add_wrapper("cascade", getattr(self, "_cascade_wrapper", None))
+
+        decode_wrappers_cudagraph = getattr(self, "_decode_wrappers_cudagraph", {})
+        for wrapper in decode_wrappers_cudagraph.values():
+            add_wrapper("decode_cudagraph", wrapper)
+
+        return wrappers
+
+    def get_workspace_reserve_debug_info(self) -> dict[str, int]:
+        wrappers = self._iter_workspace_wrappers()
+        unique_wrappers: dict[int, tuple[str, object]] = {}
+        for kind, wrapper in wrappers:
+            unique_wrappers.setdefault(id(wrapper), (kind, wrapper))
+
+        kind_counts: dict[str, int] = {}
+        actual_int_workspace_bytes = 0
+        default_int_workspace_wrappers = 0
+        unique_int_buffers: set[int] = set()
+        unique_float_buffers: dict[int, int] = {}
+
+        for kind, wrapper in unique_wrappers.values():
+            kind_counts[kind] = kind_counts.get(kind, 0) + 1
+
+            int_workspace = getattr(wrapper, "_int_workspace_buffer", None)
+            int_workspace_bytes = (
+                _buffer_nbytes(int_workspace)
+                if isinstance(int_workspace, torch.Tensor)
+                else 0
+            )
+            actual_int_workspace_bytes += int_workspace_bytes
+            if int_workspace_bytes >= FLASHINFER_DEFAULT_INT_WORKSPACE_BYTES:
+                default_int_workspace_wrappers += 1
+            if isinstance(int_workspace, torch.Tensor):
+                unique_int_buffers.add(int_workspace.data_ptr())
+
+            float_workspace = getattr(wrapper, "_float_workspace_buffer", None)
+            if isinstance(float_workspace, torch.Tensor):
+                unique_float_buffers[float_workspace.data_ptr()] = max(
+                    unique_float_buffers.get(float_workspace.data_ptr(), 0),
+                    _buffer_nbytes(float_workspace),
+                )
+
+        reserved_sizes = getattr(
+            self, "_last_reserved_workspace_sizes", WorkspaceSizes(0, 0)
+        )
+        workspace_state = getattr(self, "_workspace_state", None)
+        workspace_state_live_wrappers = (
+            len(workspace_state._live_wrappers()) if workspace_state is not None else 0
+        )
+
+        return {
+            "workspace_wrapper_count": len(unique_wrappers),
+            "prefill_wrappers": kind_counts.get("prefill", 0),
+            "noncausal_prefill_wrappers": kind_counts.get("noncausal_prefill", 0),
+            "decode_wrappers": kind_counts.get("decode", 0),
+            "decode_cudagraph_wrappers": kind_counts.get("decode_cudagraph", 0),
+            "cascade_wrappers": kind_counts.get("cascade", 0),
+            "workspace_state_live_wrappers": workspace_state_live_wrappers,
+            "actual_int_workspace_bytes": actual_int_workspace_bytes,
+            "reserved_int_workspace_bytes": reserved_sizes.int_bytes,
+            "int_workspace_over_reserved_bytes": max(
+                actual_int_workspace_bytes - reserved_sizes.int_bytes, 0
+            ),
+            "default_int_workspace_wrappers": default_int_workspace_wrappers,
+            "unique_int_workspace_buffers": len(unique_int_buffers),
+            "unique_float_workspace_buffers": len(unique_float_buffers),
+            "unique_float_workspace_bytes": sum(unique_float_buffers.values()),
+        }
+
     def _get_prefill_wrapper(
         self,
         causal: bool = True,
@@ -1355,6 +1438,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         return workspace_sizes
 
     def reserve_workspace_for_cudagraph_capture(self) -> int:
+        self._last_reserved_workspace_sizes = WorkspaceSizes(0, 0)
         if self.use_dcp or not self.use_vllm_workspace_manager_for_workspace_buffer():
             return 0
 
@@ -1465,6 +1549,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if reserved_sizes.total_bytes <= 0:
             return 0
 
+        self._last_reserved_workspace_sizes = reserved_sizes
         logger.debug(
             "Reserved FlashInfer workspace before CUDA graph lock: "
             "%.2f MiB float workspace, %.2f MiB dedicated int workspace",
