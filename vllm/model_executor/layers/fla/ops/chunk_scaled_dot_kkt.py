@@ -14,7 +14,10 @@ from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices
 from .op import exp
-from .utils import FLA_CHUNK_SIZE
+from .utils import FLA_CHUNK_SIZE, is_amd
+
+# num_stages=4 causes "LLVM ERROR: operation destroyed but still has uses" on ROCm.
+_num_stages = [2, 3] if is_amd else [2, 3, 4]
 
 
 @triton.heuristics(
@@ -28,7 +31,7 @@ from .utils import FLA_CHUNK_SIZE
         triton.Config({"BK": BK}, num_warps=num_warps, num_stages=num_stages)
         for BK in [32, 64, 128]
         for num_warps in [2, 4, 8]
-        for num_stages in [2, 3, 4]
+        for num_stages in _num_stages
     ],
     key=["H", "K", "BT", "IS_VARLEN"],
 )
