@@ -187,12 +187,29 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         device_capability: DeviceCapability,
     ) -> str | None:
         from vllm.config import get_current_vllm_config
-        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
+        from vllm.utils.flashinfer import (
+            flashinfer_mla_decode_supports_kv_scale_format,
+            has_flashinfer_sparse_mla_sm120,
+        )
 
         if not has_flashinfer_sparse_mla_sm120():
             return (
                 "FLASHINFER_MLA_SPARSE_SM120 requires FlashInfer's "
                 "sparse MLA decode API"
+            )
+        needs_packed_fp8_cache = kv_cache_dtype in (
+            "auto",
+            "fp8",
+            "fp8_e4m3",
+            "fp8_ds_mla",
+        )
+        if (
+            needs_packed_fp8_cache
+            and not flashinfer_mla_decode_supports_kv_scale_format()
+        ):
+            return (
+                "FLASHINFER_MLA_SPARSE_SM120 requires FlashInfer sparse MLA "
+                "decode support for fp8_ds_mla packed KV cache"
             )
         if dtype != torch.bfloat16:
             return "dtype not supported"
@@ -228,7 +245,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         head_size: int,
         cache_dtype_str: str = "auto",
     ) -> tuple[int, ...]:
-        if cache_dtype_str in ("auto", "fp8", "fp8_e4m3", "fp8_ds_mla"):
+        if cache_dtype_str == "fp8_ds_mla":
             # fp8_ds_mla packed layout: 512 NoPE + 16 scales + 128 RoPE.
             return (num_blocks, block_size, 656)
         return (num_blocks, block_size, head_size)

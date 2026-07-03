@@ -88,12 +88,20 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
             if indexer is not None
             else mla_args.get("topk_indices_buffer")
         )
-        from vllm.utils.flashinfer import has_flashinfer_sparse_mla_sm120
+        from vllm.utils.flashinfer import (
+            flashinfer_mla_decode_supports_kv_scale_format,
+            has_flashinfer_sparse_mla_sm120,
+        )
 
         if not has_flashinfer_sparse_mla_sm120():
             raise RuntimeError(
                 "FLASHINFER_MLA_SPARSE_SM120 requires FlashInfer's "
                 "sparse MLA decode API."
+            )
+        if not flashinfer_mla_decode_supports_kv_scale_format():
+            raise RuntimeError(
+                "FLASHINFER_MLA_SPARSE_SM120 requires FlashInfer sparse MLA "
+                "decode support for fp8_ds_mla packed KV cache."
             )
         assert self.topk_indices_buffer is not None
 
@@ -115,20 +123,22 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        topk_indices_physical = cast(
-            torch.Tensor,
+        topk_indices_physical, seq_lens = cast(
+            tuple[torch.Tensor, torch.Tensor],
             triton_convert_req_index_to_global_index(
                 attn_metadata.req_id_per_token[:num_actual_toks],
                 attn_metadata.block_table,
                 topk_indices,
                 BLOCK_SIZE=attn_metadata.block_size,
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=True,
             ),
         )
 
-        output = q.new_empty(
+        output = torch.empty(
             (num_actual_toks, self.num_heads, self.kv_lora_rank),
-            dtype=q.dtype,
+            dtype=torch.bfloat16,
+            device=q.device,
         )
 
         if self._workspace_buffer is None:
@@ -138,20 +148,22 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
             flashinfer_trtllm_batch_decode_with_kv_cache_mla,
         )
 
-        out = flashinfer_trtllm_batch_decode_with_kv_cache_mla(
-            query=q.unsqueeze(1),
-            kv_cache=kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(1),
-            workspace_buffer=self._workspace_buffer,
-            qk_nope_head_dim=self.qk_nope_head_dim,
-            kv_lora_rank=self.kv_lora_rank,
-            qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=topk_indices_physical.unsqueeze(1),
-            seq_lens=None,
-            max_seq_len=attn_metadata.topk_tokens,
-            out=output.unsqueeze(1),
-            bmm1_scale=self.scale,
-            bmm2_scale=1.0,
-            sparse_mla_top_k=attn_metadata.topk_tokens,
-            kv_scale_format=self.kv_scale_format,
-        )
+        kwargs = {
+            "query": q.unsqueeze(1),
+            "kv_cache": kv_c_and_k_pe_cache.view(torch.uint8).unsqueeze(1),
+            "workspace_buffer": self._workspace_buffer,
+            "qk_nope_head_dim": self.qk_nope_head_dim,
+            "kv_lora_rank": self.kv_lora_rank,
+            "qk_rope_head_dim": self.qk_rope_head_dim,
+            "block_tables": topk_indices_physical.unsqueeze(1),
+            "seq_lens": seq_lens,
+            "max_seq_len": attn_metadata.topk_tokens,
+            "out": output.unsqueeze(1),
+            "bmm1_scale": self.scale,
+            "bmm2_scale": 1.0,
+            "sparse_mla_top_k": attn_metadata.topk_tokens,
+            "kv_scale_format": self.kv_scale_format,
+        }
+
+        out = flashinfer_trtllm_batch_decode_with_kv_cache_mla(**kwargs)
         return out.squeeze(1), None

@@ -9,6 +9,7 @@ import contextlib
 import functools
 import importlib
 import importlib.util
+import inspect
 import os
 import shutil
 from collections.abc import Callable
@@ -230,6 +231,22 @@ def has_flashinfer_sparse_mla_sm120() -> bool:
         and callable(trtllm_batch_decode_with_kv_cache_mla)
         and callable(autotune)
     )
+
+
+@functools.cache
+def flashinfer_mla_decode_supports_kv_scale_format() -> bool:
+    """Return whether FlashInfer MLA decode accepts ``kv_scale_format``."""
+    if not has_flashinfer():
+        return False
+    try:
+        from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
+    except ImportError:
+        return False
+    try:
+        signature = inspect.signature(trtllm_batch_decode_with_kv_cache_mla)
+    except (TypeError, ValueError):
+        return False
+    return "kv_scale_format" in signature.parameters
 
 
 @functools.cache
@@ -1031,6 +1048,7 @@ __all__ = [
     "flashinfer_convert_sf_to_mma_layout",
     "trtllm_fp4_block_scale_moe",
     "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
+    "flashinfer_mla_decode_supports_kv_scale_format",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "autotune",
     "has_flashinfer_moe",
