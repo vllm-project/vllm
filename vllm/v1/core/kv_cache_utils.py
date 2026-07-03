@@ -1307,9 +1307,9 @@ def get_kv_cache_config_from_groups(
         kv_cache_tensors = []
         for i in range(group_size):
             shared_by = []
-            for j in range(len(kv_cache_groups)):
-                if i < len(kv_cache_groups[j].layer_names):
-                    shared_by.append(kv_cache_groups[j].layer_names[i])
+            for group in kv_cache_groups:
+                if i < len(group.layer_names):
+                    shared_by.append(group.layer_names[i])
             kv_cache_tensors.append(
                 KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by)
             )

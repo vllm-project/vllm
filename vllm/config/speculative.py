@@ -290,6 +290,14 @@ class SpeculativeConfig:
                 "eagle_aux_hidden_state_layer_ids",
                 None,
             )
+            if not layer_ids:
+                dflash_config = getattr(
+                    self.draft_model_config.hf_config, "dflash_config", None
+                )
+                if dflash_config and isinstance(dflash_config, dict):
+                    layer_ids = [
+                        i + 1 for i in dflash_config.get("target_layer_ids", [])
+                    ]
             if layer_ids is not None:
                 # Convert to tuple to make it hashable
                 factors.append(tuple(layer_ids))
@@ -1058,6 +1066,10 @@ class SpeculativeConfig:
 
     def use_eagle(self) -> bool:
         return self.method in ("eagle", "eagle3", "mtp", "dflash")
+
+    def requires_eagle_cache_drop(self) -> bool:
+        """Whether prefix cache hits must drop one block for hidden states."""
+        return self.use_eagle() and not self.use_dflash()
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"
