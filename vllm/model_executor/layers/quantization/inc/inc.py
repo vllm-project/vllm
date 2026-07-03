@@ -7,7 +7,10 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import UnquantizedFusedMoEMethod
+from vllm.model_executor.layers.fused_moe import (
+    RoutedExperts,
+    UnquantizedFusedMoEMethod,
+)
 from vllm.model_executor.layers.linear import (
     LinearBase,
     UnquantizedLinearMethod,
@@ -267,8 +270,6 @@ class INCConfig(QuantizationConfig):
             self.extra_config = hf_to_vllm_mapper.apply_dict(self.extra_config)
 
     def get_quant_method(self, layer: torch.nn.Module, prefix: str):
-        from vllm.model_executor.layers.fused_moe import RoutedExperts
-
         from .schemes.factory import resolve_scheme
 
         if prefix and self.extra_config:
