@@ -158,7 +158,7 @@ steps:
   commands:
   - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install "modelscope<1.38" &&
+      'pip install modelscope\<1.38 &&
       cd tests &&
       pytest -v -s test_regression.py'
 
