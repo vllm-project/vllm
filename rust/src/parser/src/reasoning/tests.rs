@@ -220,19 +220,19 @@ fn minimax_m3_uses_prompt_prefilled_end_marker() {
 }
 
 #[test]
-fn olmo3_without_prompt_markers_expects_start_token() {
+fn olmo3_without_prompt_markers_defaults_to_reasoning() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = Olmo3ReasoningParser::new(tokenizer).unwrap();
+    let mut parser = Olmo3ReasoningParser::new(tokenizer);
 
     let delta = parser.push("reason</think>answer").unwrap();
-    assert_eq!(delta.reasoning, None);
-    assert_eq!(delta.content.as_deref(), Some("reason</think>answer"));
+    assert_eq!(delta.reasoning.as_deref(), Some("reason"));
+    assert_eq!(delta.content.as_deref(), Some("answer"));
 }
 
 #[test]
 fn olmo3_prompt_end_marker_starts_in_content() {
     let tokenizer = Arc::new(fake_tokenizer());
-    let mut parser = Olmo3ReasoningParser::new(tokenizer).unwrap();
+    let mut parser = Olmo3ReasoningParser::new(tokenizer);
     parser.initialize(&[THINK_END_ID]).unwrap();
 
     let delta = parser.push("answer").unwrap();
@@ -244,12 +244,12 @@ fn olmo3_prompt_end_marker_starts_in_content() {
 fn olmo3_tolerates_old_and_new_formats() {
     let tokenizer = Arc::new(fake_tokenizer());
 
-    let mut old_parser = Olmo3ReasoningParser::new(tokenizer.clone()).unwrap();
+    let mut old_parser = Olmo3ReasoningParser::new(tokenizer.clone());
     let old = old_parser.push("<think>reason</think>answer").unwrap();
     assert_eq!(old.reasoning.as_deref(), Some("reason"));
     assert_eq!(old.content.as_deref(), Some("answer"));
 
-    let mut new_parser = Olmo3ReasoningParser::new(tokenizer).unwrap();
+    let mut new_parser = Olmo3ReasoningParser::new(tokenizer);
     new_parser.initialize(&[THINK_START_ID]).unwrap();
     let new = new_parser.push("reason</think>answer").unwrap();
     assert_eq!(new.reasoning.as_deref(), Some("reason"));

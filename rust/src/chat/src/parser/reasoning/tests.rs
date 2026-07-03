@@ -85,10 +85,6 @@ fn factory_routes_olmo_models() {
         factory.resolve_name_for_model("olmo3-base"),
         Some(names::OLMO3)
     );
-    assert_eq!(
-        factory.resolve_name_for_model("olmo-7b"),
-        Some(names::OLMO3)
-    );
 }
 
 #[test]

@@ -22,6 +22,7 @@ mod deepseek_r1;
 mod delimited;
 mod kimi;
 mod minimax_m3;
+mod olmo3;
 mod qwen3;
 mod seed_oss;
 mod step3p5;
@@ -34,6 +35,7 @@ pub use self::deepseek_r1::DeepSeekR1ReasoningParser;
 pub(crate) use self::delimited::{DelimitedReasoningParser, last_reasoning_boundary};
 pub use self::kimi::KimiReasoningParser;
 pub use self::minimax_m3::MiniMaxM3ReasoningParser;
+pub use self::olmo3::Olmo3ReasoningParser;
 pub use self::qwen3::Qwen3ReasoningParser;
 pub use self::seed_oss::SeedOssReasoningParser;
 pub use self::step3p5::Step3p5ReasoningParser;
@@ -54,8 +56,6 @@ pub type MiniMaxM2ReasoningParser = Qwen3ReasoningParser;
 pub type NemotronV3ReasoningParser = Qwen3ReasoningParser;
 /// Step3 currently shares the standard `<think>...</think>` parser.
 pub type Step3ReasoningParser = Qwen3ReasoningParser;
-/// olmo3 currently shares the standard `<think>...</think>` parser.
-pub type Olmo3ReasoningParser = Qwen3ReasoningParser;
 
 /// Result alias for reasoning parser operations.
 pub type Result<T> = std::result::Result<T, ReasoningError>;
