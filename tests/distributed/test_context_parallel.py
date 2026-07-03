@@ -47,9 +47,7 @@ MIN_ACCURACY = {
     "deepseek-ai/DeepSeek-V2-Lite-Chat": 0.64,
     # .buildkite/lm-eval-harness/configs/Qwen2.5-1.5B-Instruct.yaml
     "Qwen/Qwen2.5-1.5B-Instruct": 0.52,
-    # Qwen3.5-0.8B TP+DCP baseline is around 0.27 on this GSM8K smoke
-    # test; keep a small buffer for 256-question variance.
-    "Qwen/Qwen3.5-0.8B": 0.26,
+    "Qwen/Qwen3.5-0.8B": 0.33,
 }
 
 

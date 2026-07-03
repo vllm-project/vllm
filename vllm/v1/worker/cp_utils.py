@@ -150,7 +150,11 @@ def get_max_num_blocks_per_req(
         )
     if get_kv_cache_spec_kind(kv_cache_spec) != KVCacheSpecKind.MAMBA:
         max_len = max(max_model_len, max_encoder_len)
-        return cdiv(max_len, kv_cache_spec.block_size)
+        cp_size = (
+            vllm_config.parallel_config.decode_context_parallel_size
+            * vllm_config.parallel_config.prefill_context_parallel_size
+        )
+        return cdiv(max_len, kv_cache_spec.block_size * cp_size)
     return cdiv(
         kv_cache_spec.max_memory_usage_bytes(vllm_config),
         kv_cache_spec.page_size_bytes,
