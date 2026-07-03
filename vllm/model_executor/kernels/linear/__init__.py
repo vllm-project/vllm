@@ -509,7 +509,7 @@ def choose_scaled_mm_linear_kernel(
             scope="global",
         )
 
-    platform_kernels = possible_kernels[current_platform._enum]
+    platform_kernels = possible_kernels.get(current_platform._enum, [])
 
     # Apply --linear-backend filtering when set.
     linear_backend = _get_linear_backend()
@@ -673,7 +673,7 @@ def choose_mp_linear_kernel(
         if _cc is not None:
             compute_capability = _cc[0] * 10 + _cc[1]
 
-    platform_kernels = _POSSIBLE_KERNELS[current_platform._enum]
+    platform_kernels = _POSSIBLE_KERNELS.get(current_platform._enum, [])
 
     # Apply --linear-backend filtering when set.
     linear_backend = _get_linear_backend()
