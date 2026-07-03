@@ -242,4 +242,14 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -e tests/vllm_test_utils
 
-ENTRYPOINT ["vllm", "serve"]
+# Load the oneAPI enviroment before vllm serve
+RUN cat > /usr/local/bin/vllm-xpu-entrypoint.sh <<'EOF'
+#!/usr/bin/env bash
+set -e
+source /opt/intel/oneapi/setvars.sh --force
+exec vllm serve "$@"
+EOF
+
+RUN chmod +x /usr/local/bin/vllm-xpu-entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/vllm-xpu-entrypoint.sh"]
