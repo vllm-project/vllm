@@ -1,5 +1,5 @@
 {
-  "release_version": "0.20.1",
-  "upstream_version": "0.20.1rc0",
-  "upstream_commit": "cfd2573f239f8e5be370b0148809e25ea5bb0a3e"
+  "release_version": "0.23.1",
+  "upstream_version": "0.23.1rc0",
+  "upstream_commit": "6429d5f527f57d4a88b79b7fda2fcdd32f4a0e13"
 }
