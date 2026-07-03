@@ -190,12 +190,11 @@ class TrainModel:
 
 
 # Build platform-specific env vars for Ray
-ray_env_vars = {
-    # Prevent Ray from setting CUDA_VISIBLE_DEVICES
-    "RAY_EXPERIMENTAL_NOSET_CUDA_ENV_VAR": "1",
-}
+ray_env_vars = {}
 
 if current_platform.is_rocm():
+    # Workaround for RCCL bug. See https://github.com/ROCm/rocm-systems/issues/5756
+    ray_env_vars["RAY_EXPERIMENTAL_NOSET_HIP_VISIBLE_DEVICES"] = "1"
     # For ROCm, BATCH_INVARIANT vllm is not supported
     ray_env_vars["VLLM_ROCM_USE_SKINNY_GEMM"] = "0"
 else:
@@ -307,6 +306,8 @@ gen_futures = [
 
 ray.get(llm.pause_after_n_tokens.remote())
 
+ray.get(llm.start_weight_update.remote())
+
 inference_handle = llm.update_weights.remote(
     WeightTransferUpdateRequest(
         update_info=asdict(
@@ -321,6 +322,8 @@ inference_handle = llm.update_weights.remote(
 )
 train_handle = train_model.broadcast_weights.remote(packed=True)
 ray.get([train_handle, inference_handle])
+
+ray.get(llm.finish_weight_update.remote())
 
 ray.get(llm.resume_generation.remote())
 results = ray.get(gen_futures)

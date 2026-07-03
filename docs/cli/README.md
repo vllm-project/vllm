@@ -9,7 +9,7 @@ vllm --help
 Available Commands:
 
 ```bash
-vllm {chat,complete,serve,bench,collect-env,run-batch}
+vllm {chat,complete,serve,launch,bench,collect-env,run-batch}
 ```
 
 ## serve
@@ -37,23 +37,35 @@ vllm serve meta-llama/Llama-2-7b-hf --uds /tmp/vllm.sock
 Check with --help for more options:
 
 ```bash
-# To list all groups
-vllm serve --help=listgroup
+# To list all flags
+vllm serve --help=all
 
-# To view a argument group
+# To view an argument group
 vllm serve --help=ModelConfig
 
 # To view a single argument
 vllm serve --help=max-num-seqs
 
-# To search by keyword
+# To search by keyword or flag name
 vllm serve --help=max
-
-# To view full help with pager (less/more)
-vllm serve --help=page
 ```
 
 See [vllm serve](./serve.md) for the full reference of all available arguments.
+
+## launch
+
+Launch individual vLLM components.
+
+```bash
+# Launch the rendering server component
+vllm launch render meta-llama/Llama-3.2-1B-Instruct
+
+# Inspect all available flags for the render component
+vllm launch render --help=all
+```
+
+See [vllm launch render](./launch/render.md) for the current launch
+component reference.
 
 ## chat
 
@@ -68,6 +80,9 @@ vllm chat --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 
 # Quick chat with a single prompt
 vllm chat --quick "hi"
+
+# Print TTFT and throughput statistics after each response
+vllm chat --stats
 ```
 
 See [vllm chat](./chat.md) for the full reference of all available arguments.
@@ -85,6 +100,9 @@ vllm complete --url http://{vllm-serve-host}:{vllm-serve-port}/v1
 
 # Quick complete with a single prompt
 vllm complete --quick "The future of AI is"
+
+# Print TTFT and throughput statistics after each response
+vllm complete --stats
 ```
 
 See [vllm complete](./complete.md) for the full reference of all available arguments.

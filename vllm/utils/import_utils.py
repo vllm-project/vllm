@@ -12,12 +12,10 @@ import importlib.util
 import os
 import sys
 from functools import cache
-from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import regex as re
-import tomllib
 from typing_extensions import Never
 
 from vllm.logger import init_logger
@@ -113,46 +111,8 @@ def resolve_obj_by_qualname(qualname: str) -> Any:
 
 
 @cache
-def _load_vllm_optional_dependencies_from_pyproject() -> dict[str, list[str]]:
-    pyproject_path = Path(__file__).resolve().parents[2] / "pyproject.toml"
-
-    try:
-        with pyproject_path.open("rb") as file:
-            payload = tomllib.load(file)
-    except (OSError, tomllib.TOMLDecodeError):
-        return {}
-
-    project = payload.get("project")
-    if not isinstance(project, dict):
-        return {}
-
-    optional_dependencies = project.get("optional-dependencies")
-    if not isinstance(optional_dependencies, dict):
-        return {}
-
-    extras: dict[str, list[str]] = {}
-    for extra, requirements in optional_dependencies.items():
-        if not isinstance(extra, str) or not isinstance(requirements, list):
-            continue
-
-        extras[extra] = [
-            match.group(1)
-            for requirement in requirements
-            if isinstance(requirement, str)
-            for match in [re.match(r"\s*([A-Za-z0-9_.-]+)", requirement)]
-            if match is not None
-        ]
-
-    return extras
-
-
-@cache
 def get_vllm_optional_dependencies():
-    try:
-        metadata = importlib.metadata.metadata("vllm")
-    except importlib.metadata.PackageNotFoundError:
-        return _load_vllm_optional_dependencies_from_pyproject()
-
+    metadata = importlib.metadata.metadata("vllm")
     requirements = metadata.get_all("Requires-Dist", [])
     extras = metadata.get_all("Provides-Extra", [])
 
@@ -443,12 +403,8 @@ def _has_module(module_name: str) -> bool:
     try:
         if importlib.util.find_spec(module_name) is None:
             return False
-    except ModuleNotFoundError:
-        return False
-
-    try:
         importlib.import_module(module_name)
-    except ImportError:
+    except Exception:
         logger.warning(
             "Module %s was found but failed to import", module_name, exc_info=True
         )
@@ -459,6 +415,61 @@ def _has_module(module_name: str) -> bool:
 def has_deep_ep() -> bool:
     """Whether the optional `deep_ep` package is available."""
     return _has_module("deep_ep")
+
+
+DEEPEP_V2_MIN_NCCL_VERSION_RAW = 23004  # 2.30.4
+
+
+def _get_runtime_nccl_version() -> int | None:
+    """Get the runtime NCCL version by loading the actual library.
+
+    Returns the raw version int (e.g. 23004 for 2.30.4), or None on failure.
+    torch.cuda.nccl.version() is a compile-time constant from the PyTorch
+    wheel and does not reflect a separately installed NCCL.
+    """
+    import ctypes
+
+    try:
+        from vllm.utils.nccl import find_nccl_library
+
+        lib = ctypes.CDLL(find_nccl_library())
+        version = ctypes.c_int()
+        lib.ncclGetVersion(ctypes.byref(version))
+        return version.value
+    except Exception:
+        return None
+
+
+def _format_nccl_raw_version(raw: int) -> str:
+    s = str(raw)
+    return f"{s[0]}.{s[1:3].lstrip('0') or '0'}.{s[3:].lstrip('0') or '0'}"
+
+
+def has_deep_ep_v2() -> bool:
+    """Whether deep_ep with ElasticBuffer (v2 API) is available.
+
+    Requires both the ElasticBuffer class in the deep_ep module and
+    NCCL >= 2.30.4 (GIN backend), checked against the runtime library.
+    """
+    if not _has_module("deep_ep"):
+        return False
+    import deep_ep  # type: ignore[import-not-found]
+
+    if not hasattr(deep_ep, "ElasticBuffer"):
+        return False
+    try:
+        nccl_ver = _get_runtime_nccl_version()
+        if nccl_ver is None or nccl_ver < DEEPEP_V2_MIN_NCCL_VERSION_RAW:
+            logger.info_once(
+                "DeepEP v2 requires NCCL >= %s but found %s. "
+                "deepep_v2 backend will not be available.",
+                _format_nccl_raw_version(DEEPEP_V2_MIN_NCCL_VERSION_RAW),
+                _format_nccl_raw_version(nccl_ver) if nccl_ver else "unknown",
+            )
+            return False
+    except Exception:
+        return False
+    return True
 
 
 def has_deep_gemm() -> bool:
@@ -481,28 +492,12 @@ def has_triton_kernels() -> bool:
     is_available = _has_module("triton_kernels") or _has_module(
         "vllm.third_party.triton_kernels"
     )
-    if not is_available:
-        return False
-
-    if not _has_module("triton.language.target_info"):
-        logger.info_once(
-            "Disabling triton_kernels because `triton.language.target_info` "
-            "is unavailable in this Triton build."
-        )
-        return False
-
-    try:
+    if is_available:
         import_triton_kernels()
-    except Exception as exc:
-        logger.info_once(
-            "Disabling triton_kernels because they could not be imported: %s",
-            exc,
-        )
-        return False
-
-    return True
+    return is_available
 
 
+@cache
 def has_tilelang() -> bool:
     """Whether the optional `tilelang` package is available."""
     return _has_module("tilelang")
@@ -542,3 +537,13 @@ def has_mori() -> bool:
 def has_fbgemm_gpu() -> bool:
     """Whether the optional `fbgemm_gpu` package is available."""
     return _has_module("fbgemm_gpu")
+
+
+def has_cutedsl() -> bool:
+    """Whether the optional `cutelass` package is available."""
+    return _has_module("cutlass")
+
+
+def has_humming() -> bool:
+    """Whether the optional `humming` package is available."""
+    return _has_module("humming")

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import importlib.util
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -49,21 +48,6 @@ def test_placeholder_module_error_handling():
         _ = placeholder_attr.module
 
 
-def test_has_module_returns_false_for_missing_parent_package(monkeypatch):
-    original_find_spec = importlib.util.find_spec
-    _has_module.cache_clear()
-
-    def fake_find_spec(module_name):
-        if module_name == "triton.language.target_info":
-            raise ModuleNotFoundError("No module named 'triton'")
-        return original_find_spec(module_name)
-
-    monkeypatch.setattr(importlib.util, "find_spec", fake_find_spec)
-
-    assert _has_module("triton.language.target_info") is False
-    _has_module.cache_clear()
-
-
 class TestHasModule:
     """Tests for _has_module with trial import verification."""
 
@@ -95,18 +79,6 @@ class TestHasModule:
                 side_effect=ImportError(
                     "libcudart.so.12: cannot open shared object file"
                 ),
-            ),
-        ):
-            assert _has_module("fake_native_ext") is False
-
-    def test_returns_false_on_os_error_during_import(self):
-        """Some shared-library failures surface as ``OSError``."""
-        fake_spec = MagicMock()
-
-        with (
-            patch(
-                "vllm.utils.import_utils.importlib.util.find_spec",
-                return_value=fake_spec,
             ),
         ):
             assert _has_module("fake_native_ext") is False

@@ -1,20 +1,20 @@
 [build-system]
-# Should be mirrored in requirements/build.txt
+# Should be mirrored in requirements/build/cuda.txt
 requires = [
     "cmake>=3.26.1",
     "ninja",
     "packaging>=24.2",
     "setuptools>=77.0.3,<81.0.0",
     "setuptools-scm>=8.0",
-    "torch == 2.10.0; platform_machine == 'aarch64'",
-    "torch == 2.10.0; platform_machine != 'aarch64'",
+    "setuptools-rust>=1.9.0",
+    "torch == 2.11.0",
     "wheel",
     "jinja2",
 ]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "vllm-hust"
+name = "vllm"
 authors = [{name = "vLLM Team"}]
 license = "Apache-2.0"
 license-files = ["LICENSE"]
@@ -25,14 +25,15 @@ classifiers = [
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Intended Audience :: Developers",
     "Intended Audience :: Information Technology",
     "Intended Audience :: Science/Research",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: Scientific/Engineering :: Information Analysis",
 ]
-requires-python = ">=3.10,<3.14"
-dynamic = [ "version", "dependencies"]
+requires-python = ">=3.10,<3.15"
+dynamic = [ "version", "dependencies", "optional-dependencies"]
 
 [project.urls]
 Homepage="https://github.com/vllm-project/vllm"
@@ -41,38 +42,6 @@ Slack="https://slack.vllm.ai/"
 
 [project.scripts]
 vllm = "vllm.entrypoints.cli.main:main"
-vllm-hust = "vllm.entrypoints.cli.main:main"
-
-[project.optional-dependencies]
-zen = ["zentorch"]
-bench = ["pandas", "matplotlib", "seaborn", "datasets", "scipy", "plotly"]
-tensorizer = ["tensorizer==2.10.1"]
-fastsafetensors = ["fastsafetensors >= 0.2.2"]
-instanttensor = ["instanttensor >= 0.1.5"]
-runai = ["runai-model-streamer[s3,gcs,azure] >= 0.15.7"]
-audio = [
-    "av",
-    "resampy",
-    "scipy",
-    "soundfile",
-    "mistral_common[audio]",
-]
-video = []
-flashinfer = []
-petit-kernel = ["petit-kernel"]
-helion = ["helion==0.3.2"]
-grpc = ["smg-grpc-servicer[vllm] >= 0.5.0"]
-otel = [
-    "opentelemetry-sdk>=1.26.0",
-    "opentelemetry-api>=1.26.0",
-    "opentelemetry-exporter-otlp>=1.26.0",
-    "opentelemetry-semantic-conventions-ai>=0.4.1",
-]
-ci-smoke = [
-    "pytest",
-    "pytest-asyncio",
-    "tblib",
-]
 
 [project.entry-points."vllm.general_plugins"]
 lora_filesystem_resolver = "vllm.plugins.lora_resolvers.filesystem_resolver:register_filesystem_resolver"
@@ -153,12 +122,16 @@ python = "./.venv"
 [tool.typos.files]
 # these files may be written in non english words
 extend-exclude = ["tests/models/fixtures/*", "tests/prompts/*", "tests/tokenizers_/*",
-    "tests/models/language/pooling/test_jina_reranker_v3.py",
-    "benchmarks/sonnet.txt", "tests/lora/data/*", "examples/pooling/token_embed/*", "build/*",
-    "docs/assets/contributing/vllm_bench_serve_timeline.html",
-    "paper/allocator_state_accounting/.tectonic-cache/**/*",
-    "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*", "tests/entrypoints/openai/speech_to_text/test_transcription_validation.py",
-    "docs/governance/process.md", "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*"]
+    "benchmarks/sonnet.txt", "tests/lora/data/*", "build/*",
+    "examples/pooling/token_embed/*", "tests/models/language/pooling/*",
+    "vllm/third_party/*", "vllm/entrypoints/serve/instrumentator/static/*",
+    "tests/entrypoints/speech_to_text/transcription/test_transcription_validation.py",
+    "docs/governance/process.md", "docs/assets/contributing/vllm_bench_serve_timeline.html", 
+    "tests/v1/engine/test_fast_incdec_prefix_err.py", ".git/*", "csrc/cpu/sgl-kernels/*",
+    "rust/src/chat/src/renderer/deepseek_v32/fixtures/*",
+    "rust/src/parser/src/tool/gemma4.rs", "rust/src/parser/src/unified/gemma4.rs",
+    "rust/src/text/src/output/decoded.rs",
+    "rust/src/tokenizer/src/incremental.rs", "rust/src/parser/src/reasoning/tests.rs"]
 ignore-hidden = false
 
 [tool.typos.default]
@@ -169,6 +142,7 @@ bbc5b7ede = "bbc5b7ede"
 NOOPs = "NOOPs"
 nin_shortcut = "nin_shortcut"
 cudaDevAttrMaxSharedMemoryPerBlockOptin = "cudaDevAttrMaxSharedMemoryPerBlockOptin"
+sharedMemPerBlockOptin = "sharedMemPerBlockOptin"
 
 depthwise_seperable_out_channel = "depthwise_seperable_out_channel"
 pard_token = "pard_token"
@@ -181,17 +155,16 @@ view_seperator = "view_seperator"
 inverse_std_variences = "inverse_std_variences"
 
 [tool.typos.default.extend-words]
-CANN = "CANN"
 iy = "iy"
 indx = "indx"
-VALU = "VALU"
-WHT = "WHT"
 # intel cpu features
 tme = "tme"
 dout = "dout"
 Pn = "Pn"
 arange = "arange"
 thw = "thw"
+# temporal position ids (parallels hpos/wpos in vision RoPE)
+tpos = "tpos"
 subtile = "subtile"
 HSA = "HSA"
 setp = "setp"
@@ -208,6 +181,12 @@ eles = "eles"
 datas = "datas"
 ser = "ser"
 ure = "ure"
+VALU = "VALU"
+# Walsh-Hadamard Transform
+wht = "wht"
+WHT = "WHT"
+# Huawei Compute Architecture for Neural Networks
+CANN = "CANN"
 
 [tool.uv]
 no-build-isolation-package = ["torch"]

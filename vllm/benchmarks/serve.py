@@ -30,7 +30,7 @@ import ssl
 import time
 import uuid
 import warnings
-from collections.abc import AsyncGenerator, Iterable
+from collections.abc import AsyncGenerator, Iterable, Iterator
 from dataclasses import dataclass, replace
 from datetime import datetime
 from enum import Enum
@@ -52,33 +52,23 @@ from vllm.benchmarks.lib.endpoint_request_func import (
 from vllm.benchmarks.lib.ready_checker import wait_for_endpoint
 from vllm.benchmarks.lib.utils import convert_to_pytorch_benchmark_format, write_to_json
 from vllm.tokenizers import TokenizerLike, get_tokenizer
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 from vllm.utils.gc_utils import freeze_gc_heap
 from vllm.utils.network_utils import join_host_port
 
 MILLISECONDS_TO_SECONDS_CONVERSION = 1000
 
+
+def _merge_overrides(base: dict | None, override: dict | None) -> dict | None:
+    """Shallow merge; per-request wins. Returns None if both are empty."""
+    if not base and not override:
+        return None
+    return {**(base or {}), **(override or {})}
+
+
 TERM_PLOTLIB_AVAILABLE = (importlib.util.find_spec("termplotlib") is not None) and (
     shutil.which("gnuplot") is not None
 )
-
-DEFAULT_BENCHMARK_HOST = "127.0.0.1"
-DEFAULT_BENCHMARK_PORT = 8000
-LOCAL_BENCHMARK_BASE_URL_FALLBACKS = (
-    "http://127.0.0.1:8080",
-    "http://localhost:8080",
-)
-
-
-def _allow_local_benchmark_fallback(args: argparse.Namespace) -> bool:
-    if getattr(args, "allow_local_benchmark_fallback", False):
-        return True
-
-    return os.getenv("VLLM_BENCH_ALLOW_LOCAL_FALLBACK", "0").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
 
 
 async def _align_prompts_to_server_tokenizer(
@@ -140,6 +130,7 @@ async def _align_prompts_to_server_tokenizer(
         )
 
         async def _fix_one(req: SampleRequest) -> SampleRequest:
+            assert isinstance(req.prompt, str)
             tokens = await _tokenize(req.prompt)
             if len(tokens) <= req.prompt_len:
                 return req
@@ -185,151 +176,6 @@ async def get_first_model_from_server(
             ) from e
 
 
-def get_benchmark_ssl_context(
-    base_url: str,
-    insecure: bool,
-) -> ssl.SSLContext | bool | None:
-    if insecure:
-        return False
-    if base_url.startswith("https://"):
-        return True
-    return None
-
-
-def should_try_local_benchmark_fallback(args: argparse.Namespace) -> bool:
-    return (
-        _allow_local_benchmark_fallback(args)
-        and args.base_url is None
-        and args.host == DEFAULT_BENCHMARK_HOST
-        and args.port == DEFAULT_BENCHMARK_PORT
-        and args.backend in OPENAI_COMPATIBLE_BACKENDS
-    )
-
-
-def get_local_benchmark_base_url_candidates(current_base_url: str) -> list[str]:
-    candidates: list[str] = []
-
-    env_base_url = os.getenv("VLLM_HUST_BASE_URL", "").strip().rstrip("/")
-    if env_base_url and env_base_url != current_base_url:
-        candidates.append(env_base_url)
-
-    for candidate in LOCAL_BENCHMARK_BASE_URL_FALLBACKS:
-        if candidate != current_base_url and candidate not in candidates:
-            candidates.append(candidate)
-
-    return candidates
-
-
-async def resolve_benchmark_base_url(
-    args: argparse.Namespace,
-    base_url: str,
-    api_url: str,
-    headers: dict[str, str] | None,
-) -> tuple[str, str, tuple[str, str] | None]:
-    discovered_model: tuple[str, str] | None = None
-
-    if not should_try_local_benchmark_fallback(args):
-        return base_url, api_url, discovered_model
-
-    ssl_context = get_benchmark_ssl_context(base_url, args.insecure)
-    try:
-        discovered_model = await get_first_model_from_server(
-            base_url,
-            headers,
-            ssl_context,
-        )
-        return base_url, api_url, discovered_model
-    except RuntimeError as original_error:
-        for candidate_base_url in get_local_benchmark_base_url_candidates(base_url):
-            candidate_ssl_context = get_benchmark_ssl_context(
-                candidate_base_url,
-                args.insecure,
-            )
-            try:
-                discovered_model = await get_first_model_from_server(
-                    candidate_base_url,
-                    headers,
-                    candidate_ssl_context,
-                )
-            except RuntimeError:
-                continue
-
-            print(
-                "Default benchmark target "
-                f"{base_url} is unreachable; falling back to "
-                f"{candidate_base_url}."
-            )
-            return (
-                candidate_base_url,
-                f"{candidate_base_url}{args.endpoint}",
-                discovered_model,
-            )
-
-        raise original_error
-
-
-def try_get_cached_tokenizer_dir(tokenizer_id: str) -> str | None:
-    if Path(tokenizer_id).exists():
-        return None
-
-    try:
-        from huggingface_hub import snapshot_download
-
-        return snapshot_download(repo_id=tokenizer_id, local_files_only=True)
-    except Exception:
-        return None
-
-
-def resolve_preferred_tokenizer_id(
-    args: argparse.Namespace,
-    tokenizer_id: str,
-) -> str:
-    if args.tokenizer is not None:
-        return tokenizer_id
-    if not should_try_local_benchmark_fallback(args):
-        return tokenizer_id
-
-    cached_tokenizer_dir = try_get_cached_tokenizer_dir(tokenizer_id)
-    if cached_tokenizer_dir is None:
-        return tokenizer_id
-
-    print(
-        "Using cached tokenizer files for local benchmark target: "
-        f"{cached_tokenizer_dir}."
-    )
-    return cached_tokenizer_dir
-
-
-def initialize_benchmark_tokenizer(
-    tokenizer_id: str,
-    tokenizer_mode: str,
-    trust_remote_code: bool,
-) -> tuple[str, TokenizerLike]:
-    try:
-        tokenizer = get_tokenizer(
-            tokenizer_id,
-            tokenizer_mode=tokenizer_mode,
-            trust_remote_code=trust_remote_code,
-        )
-        return tokenizer_id, tokenizer
-    except Exception:
-        cached_tokenizer_dir = try_get_cached_tokenizer_dir(tokenizer_id)
-        if cached_tokenizer_dir is None:
-            raise
-
-        print(
-            "Tokenizer initialization failed for "
-            f"{tokenizer_id}; falling back to cached files at "
-            f"{cached_tokenizer_dir}."
-        )
-        tokenizer = get_tokenizer(
-            cached_tokenizer_dir,
-            tokenizer_mode=tokenizer_mode,
-            trust_remote_code=trust_remote_code,
-        )
-        return cached_tokenizer_dir, tokenizer
-
-
 @dataclass
 class SpecDecodeMetrics:
     """Speculative decoding metrics from the server's Prometheus endpoint."""
@@ -340,165 +186,6 @@ class SpecDecodeMetrics:
     accepted_per_pos: dict[int, int]
 
 
-@dataclass
-class BenchmarkLoadMetricsSnapshot:
-    num_requests_running: float | None = None
-    num_requests_waiting: float | None = None
-    kv_cache_usage_perc: float | None = None
-    available_kv_cache_memory_bytes: float | None = None
-    prefix_cache_queries: float | None = None
-    prefix_cache_hits: float | None = None
-    external_prefix_cache_queries: float | None = None
-    external_prefix_cache_hits: float | None = None
-
-
-async def _fetch_prometheus_metrics_text(
-    base_url: str, session: aiohttp.ClientSession
-) -> str | None:
-    metrics_url = f"{base_url}/metrics"
-    try:
-        async with session.get(metrics_url) as response:
-            if response.status != 200:
-                return None
-            return await response.text()
-    except (aiohttp.ClientError, asyncio.TimeoutError):
-        return None
-
-
-def _extract_prometheus_metric_name(line: str) -> str | None:
-    first_field = line.split(None, 1)[0].strip()
-    if not first_field:
-        return None
-    return first_field.split("{", 1)[0]
-
-
-def _parse_prometheus_metric_value(line: str) -> float | None:
-    parts = line.split()
-    if not parts:
-        return None
-    with contextlib.suppress(ValueError):
-        return float(parts[-1])
-    return None
-
-
-def _aggregate_prometheus_samples(
-    samples: list[float], *, aggregate: Literal["sum", "max"]
-) -> float | None:
-    if not samples:
-        return None
-    if aggregate == "sum":
-        return float(sum(samples))
-    if aggregate == "max":
-        return float(max(samples))
-    raise ValueError(f"Unsupported aggregate '{aggregate}'")
-
-
-def parse_benchmark_load_metrics(
-    text: str,
-) -> BenchmarkLoadMetricsSnapshot | None:
-    tracked_metrics: dict[str, list[float]] = {
-        "vllm:num_requests_running": [],
-        "vllm:num_requests_waiting": [],
-        "vllm:kv_cache_usage_perc": [],
-        "vllm:available_kv_cache_memory_bytes": [],
-        "vllm:prefix_cache_queries": [],
-        "vllm:prefix_cache_hits": [],
-        "vllm:external_prefix_cache_queries": [],
-        "vllm:external_prefix_cache_hits": [],
-    }
-
-    for raw_line in text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        metric_name = _extract_prometheus_metric_name(line)
-        if metric_name not in tracked_metrics:
-            continue
-        value = _parse_prometheus_metric_value(line)
-        if value is None:
-            continue
-        tracked_metrics[metric_name].append(value)
-
-    if not any(tracked_metrics.values()):
-        return None
-
-    return BenchmarkLoadMetricsSnapshot(
-        num_requests_running=_aggregate_prometheus_samples(
-            tracked_metrics["vllm:num_requests_running"], aggregate="sum"
-        ),
-        num_requests_waiting=_aggregate_prometheus_samples(
-            tracked_metrics["vllm:num_requests_waiting"], aggregate="sum"
-        ),
-        kv_cache_usage_perc=_aggregate_prometheus_samples(
-            tracked_metrics["vllm:kv_cache_usage_perc"], aggregate="max"
-        ),
-        available_kv_cache_memory_bytes=_aggregate_prometheus_samples(
-            tracked_metrics["vllm:available_kv_cache_memory_bytes"],
-            aggregate="max",
-        ),
-        prefix_cache_queries=_aggregate_prometheus_samples(
-            tracked_metrics["vllm:prefix_cache_queries"], aggregate="sum"
-        ),
-        prefix_cache_hits=_aggregate_prometheus_samples(
-            tracked_metrics["vllm:prefix_cache_hits"], aggregate="sum"
-        ),
-        external_prefix_cache_queries=_aggregate_prometheus_samples(
-            tracked_metrics["vllm:external_prefix_cache_queries"],
-            aggregate="sum",
-        ),
-        external_prefix_cache_hits=_aggregate_prometheus_samples(
-            tracked_metrics["vllm:external_prefix_cache_hits"],
-            aggregate="sum",
-        ),
-    )
-
-
-def _rate_or_none(numerator: float | None, denominator: float | None) -> float | None:
-    if numerator is None or denominator in (None, 0):
-        return None
-    return float(numerator) / float(denominator)
-
-
-def build_benchmark_load_result(
-    before: BenchmarkLoadMetricsSnapshot | None,
-    after: BenchmarkLoadMetricsSnapshot | None,
-) -> dict[str, float | None] | None:
-    if after is None:
-        return None
-
-    prefix_cache_hit_rate = None
-    external_prefix_cache_hit_rate = None
-    if before is not None:
-        prefix_cache_hit_rate = _rate_or_none(
-            None
-            if after.prefix_cache_hits is None or before.prefix_cache_hits is None
-            else after.prefix_cache_hits - before.prefix_cache_hits,
-            None
-            if after.prefix_cache_queries is None or before.prefix_cache_queries is None
-            else after.prefix_cache_queries - before.prefix_cache_queries,
-        )
-        external_prefix_cache_hit_rate = _rate_or_none(
-            None
-            if after.external_prefix_cache_hits is None
-            or before.external_prefix_cache_hits is None
-            else after.external_prefix_cache_hits - before.external_prefix_cache_hits,
-            None
-            if after.external_prefix_cache_queries is None
-            or before.external_prefix_cache_queries is None
-            else after.external_prefix_cache_queries
-            - before.external_prefix_cache_queries,
-        )
-
-    return {
-        "num_requests_running": after.num_requests_running,
-        "num_requests_waiting": after.num_requests_waiting,
-        "kv_cache_usage_perc": after.kv_cache_usage_perc,
-        "available_kv_cache_memory_bytes": after.available_kv_cache_memory_bytes,
-        "prefix_cache_hit_rate": prefix_cache_hit_rate,
-        "external_prefix_cache_hit_rate": external_prefix_cache_hit_rate,
-    }
-
-
 async def fetch_spec_decode_metrics(
     base_url: str, session: aiohttp.ClientSession
 ) -> SpecDecodeMetrics | None:
@@ -506,59 +193,123 @@ async def fetch_spec_decode_metrics(
 
     Returns None if speculative decoding is not enabled or metrics are not available.
     """
-    text = await _fetch_prometheus_metrics_text(base_url, session)
-    if text is None:
+    metrics_url = f"{base_url}/metrics"
+    try:
+        async with session.get(metrics_url) as response:
+            if response.status != 200:
+                return None
+            text = await response.text()
+
+            num_drafts = 0
+            num_draft_tokens = 0
+            num_accepted_tokens = 0
+            accepted_per_pos: dict[int, int] = {}
+            found_spec_decode = False
+
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                if line.startswith("vllm:spec_decode"):
+                    # Extract metric name (before labels) to avoid matching
+                    # substrings inside label values.
+                    parts = line.split(None, 1)
+                    metric_name = parts[0].split("{")[0]
+                    if not metric_name.endswith("_total"):
+                        continue
+                    found_spec_decode = True
+                    with contextlib.suppress(ValueError):
+                        if "num_drafts" in metric_name:
+                            num_drafts += int(float(parts[-1]))
+                        elif "num_draft_tokens" in metric_name:
+                            num_draft_tokens += int(float(parts[-1]))
+                        elif "num_accepted_tokens_per_pos" in metric_name:
+                            pos_label = 'position="'
+                            if pos_label in line:
+                                start = line.index(pos_label) + len(pos_label)
+                                end = line.index('"', start)
+                                pos = int(line[start:end])
+                                val = int(float(parts[-1]))
+                                accepted_per_pos[pos] = (
+                                    accepted_per_pos.get(pos, 0) + val
+                                )
+                        elif "num_accepted_tokens" in metric_name:
+                            num_accepted_tokens += int(float(parts[-1]))
+
+            if not found_spec_decode:
+                return None
+
+            return SpecDecodeMetrics(
+                num_drafts=num_drafts,
+                num_draft_tokens=num_draft_tokens,
+                num_accepted_tokens=num_accepted_tokens,
+                accepted_per_pos=accepted_per_pos,
+            )
+    except (aiohttp.ClientError, asyncio.TimeoutError):
         return None
 
-    num_drafts = 0
-    num_draft_tokens = 0
-    num_accepted_tokens = 0
-    accepted_per_pos: dict[int, int] = {}
-    found_spec_decode = False
 
-    for line in text.split("\n"):
-        line = line.strip()
-        if not line or line.startswith("#"):
-            continue
+@dataclass
+class DiffusionMetrics:
+    """Diffusion (dLLM) decoding metrics from the server's Prometheus endpoint."""
 
-        if line.startswith("vllm:spec_decode"):
-            found_spec_decode = True
-            parts = line.split()
-            if parts:
-                with contextlib.suppress(ValueError):
-                    if "num_drafts" in line:
-                        num_drafts += int(float(parts[-1]))
-                    elif "num_draft_tokens" in line:
-                        num_draft_tokens += int(float(parts[-1]))
-                    elif "num_accepted_tokens_per_pos" in line:
-                        pos_label = 'position="'
-                        if pos_label in line:
-                            start = line.index(pos_label) + len(pos_label)
-                            end = line.index('"', start)
-                            pos = int(line[start:end])
-                            val = int(float(parts[-1]))
-                            accepted_per_pos[pos] = accepted_per_pos.get(pos, 0) + val
-                    elif "num_accepted_tokens" in line:
-                        num_accepted_tokens += int(float(parts[-1]))
-
-    if not found_spec_decode:
-        return None
-
-    return SpecDecodeMetrics(
-        num_drafts=num_drafts,
-        num_draft_tokens=num_draft_tokens,
-        num_accepted_tokens=num_accepted_tokens,
-        accepted_per_pos=accepted_per_pos,
-    )
+    num_denoising_steps: int
+    num_canvas_positions: int
+    num_committed_tokens: int
 
 
-async def fetch_benchmark_load_metrics(
+async def fetch_diffusion_metrics(
     base_url: str, session: aiohttp.ClientSession
-) -> BenchmarkLoadMetricsSnapshot | None:
-    text = await _fetch_prometheus_metrics_text(base_url, session)
-    if text is None:
+) -> DiffusionMetrics | None:
+    """Fetch diffusion decoding metrics from the server's Prometheus endpoint.
+
+    Returns None if the model is not a diffusion model or metrics are not
+    available.
+    """
+    metrics_url = f"{base_url}/metrics"
+    try:
+        async with session.get(metrics_url) as response:
+            if response.status != 200:
+                return None
+            text = await response.text()
+
+            num_denoising_steps = 0
+            num_canvas_positions = 0
+            num_committed_tokens = 0
+            found_diffusion = False
+
+            for line in text.split("\n"):
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+
+                if line.startswith("vllm:diffusion"):
+                    # Extract metric name (before labels) to avoid matching
+                    # substrings inside label values.
+                    parts = line.split(None, 1)
+                    metric_name = parts[0].split("{")[0]
+                    if not metric_name.endswith("_total"):
+                        continue
+                    found_diffusion = True
+                    with contextlib.suppress(ValueError):
+                        if "num_denoising_steps" in metric_name:
+                            num_denoising_steps += int(float(parts[-1]))
+                        elif "num_canvas_positions" in metric_name:
+                            num_canvas_positions += int(float(parts[-1]))
+                        elif "num_committed_tokens" in metric_name:
+                            num_committed_tokens += int(float(parts[-1]))
+
+            if not found_diffusion:
+                return None
+
+            return DiffusionMetrics(
+                num_denoising_steps=num_denoising_steps,
+                num_canvas_positions=num_canvas_positions,
+                num_committed_tokens=num_committed_tokens,
+            )
+    except (aiohttp.ClientError, asyncio.TimeoutError):
         return None
-    return parse_benchmark_load_metrics(text)
 
 
 class TaskType(Enum):
@@ -595,10 +346,6 @@ class BenchmarkMetrics:
     median_e2el_ms: float
     std_e2el_ms: float
     percentiles_e2el_ms: list[tuple[float, float]]
-    p50_ttft_ms: float
-    p95_ttft_ms: float
-    p50_e2el_ms: float
-    p95_e2el_ms: float
     # Max output tokens per second and concurrent requests at that peak
     max_output_tokens_per_s: float
     max_concurrent_requests: int
@@ -615,7 +362,7 @@ class EmbedBenchmarkMetrics:
     mean_e2el_ms: float
     std_e2el_ms: float
     median_e2el_ms: float
-    percentiles_e2el_ms: float
+    percentiles_e2el_ms: list[tuple[float, float]]
 
 
 def _get_current_request_rate(
@@ -650,6 +397,7 @@ async def get_request(
     ramp_up_strategy: Literal["linear", "exponential"] | None = None,
     ramp_up_start_rps: int | None = None,
     ramp_up_end_rps: int | None = None,
+    self_timed: bool = False,
 ) -> AsyncGenerator[tuple[SampleRequest, float], None]:
     """
     Asynchronously generates requests at a specified rate
@@ -687,51 +435,64 @@ async def get_request(
     assert total_requests > 0, "No requests provided."
 
     # Precompute delays among requests to minimize request send laggings
-    request_rates = []
-    delay_ts = []
-    for request_index, request in enumerate(input_requests):
-        current_request_rate = _get_current_request_rate(
-            ramp_up_strategy,
-            ramp_up_start_rps,
-            ramp_up_end_rps,
-            request_index,
-            total_requests,
-            request_rate,
-        )
-        assert current_request_rate > 0.0, (
-            f"Obtained non-positive request rate {current_request_rate}."
-        )
-        request_rates.append(current_request_rate)
-        if current_request_rate == float("inf"):
-            delay_ts.append(0)
-        elif burstiness == float("inf"):
-            # when burstiness tends to infinity, the delay time becomes constant
-            # and tends to the inverse of the request rate
-            delay_ts.append(1.0 / current_request_rate)
-        else:
-            theta = 1.0 / (current_request_rate * burstiness)
+    request_rates: list[float] = []
+    delay_ts: list[float] = []
 
-            # Sample the request interval from the gamma distribution.
-            # If burstiness is 1, it follows exponential distribution.
-            delay_ts.append(np.random.gamma(shape=burstiness, scale=theta))
+    # if the traces have timing info then:
+    if not self_timed:
+        for request_index, request in enumerate(input_requests):
+            current_request_rate = _get_current_request_rate(
+                ramp_up_strategy,
+                ramp_up_start_rps,
+                ramp_up_end_rps,
+                request_index,
+                total_requests,
+                request_rate,
+            )
+            assert current_request_rate > 0.0, (
+                f"Obtained non-positive request rate {current_request_rate}."
+            )
+            request_rates.append(current_request_rate)
+            if current_request_rate == float("inf"):
+                delay_ts.append(0)
+            elif burstiness == float("inf"):
+                # when burstiness tends to infinity, the delay time becomes constant
+                # and tends to the inverse of the request rate
+                delay_ts.append(1.0 / current_request_rate)
+            else:
+                theta = 1.0 / (current_request_rate * burstiness)
 
-    # Calculate the cumulative delay time from the first sent out requests.
-    for i in range(1, len(delay_ts)):
-        delay_ts[i] += delay_ts[i - 1]
-    if ramp_up_strategy is None and delay_ts[-1] != 0:
-        # When ramp_up_strategy is not set, we assume the request rate is fixed
-        # and all requests should be sent in target_total_delay_s, the following
-        # logic would re-scale delay time to ensure the final delay_ts
-        # align with target_total_delay_s.
-        #
-        # NOTE: If we simply accumulate the random delta values
-        # from the gamma distribution, their sum would have 1-2% gap
-        # from target_total_delay_s. The purpose of the following logic is to
-        # close the gap for stabilizing the throughput data
-        # from different random seeds.
-        target_total_delay_s = total_requests / request_rate
-        normalize_factor = target_total_delay_s / delay_ts[-1]
-        delay_ts = [delay * normalize_factor for delay in delay_ts]
+                # Sample the request interval from the gamma distribution.
+                # If burstiness is 1, it follows exponential distribution.
+                delay_ts.append(np.random.gamma(shape=burstiness, scale=theta))
+
+        # Calculate the cumulative delay time from the first sent out requests.
+        for i in range(1, len(delay_ts)):
+            delay_ts[i] += delay_ts[i - 1]
+        if ramp_up_strategy is None and delay_ts[-1] != 0:
+            # When ramp_up_strategy is not set, we assume the request rate is fixed
+            # and all requests should be sent in target_total_delay_s, the following
+            # logic would re-scale delay time to ensure the final delay_ts
+            # align with target_total_delay_s.
+            #
+            # NOTE: If we simply accumulate the random delta values
+            # from the gamma distribution, their sum would have 1-2% gap
+            # from target_total_delay_s. The purpose of the following logic is to
+            # close the gap for stabilizing the throughput data
+            # from different random seeds.
+            target_total_delay_s = total_requests / request_rate
+            normalize_factor = target_total_delay_s / delay_ts[-1]
+            delay_ts = [delay * normalize_factor for delay in delay_ts]
+    else:
+        for request_index, request in enumerate(input_requests):
+            # this is cumulative running ts, from which sleep is calculated later
+            if request.timestamp is not None:
+                delay_ts.append(request.timestamp)
+            else:
+                delay_ts.append(0.0)
+            # TODO: there is no notion of RPS here, may be we can calculate
+            # from the trace.
+            request_rates.append(0.0)
 
     start_ts = time.time()
     for request_index, request in enumerate(input_requests):
@@ -843,7 +604,7 @@ def calculate_metrics(
                     )
             actual_output_lens.append(output_len)
             total_input += outputs[i].prompt_len
-            tpot = 0
+            tpot = 0.0
             if output_len > 1:
                 latency_minus_ttft = outputs[i].latency - outputs[i].ttft
                 tpot = latency_minus_ttft / (output_len - 1)
@@ -996,10 +757,6 @@ def calculate_metrics(
         percentiles_e2el_ms=[
             (p, np.percentile(e2els or 0, p) * 1000) for p in selected_percentiles
         ],
-        p50_ttft_ms=np.percentile(ttfts or 0, 50) * 1000,
-        p95_ttft_ms=np.percentile(ttfts or 0, 95) * 1000,
-        p50_e2el_ms=np.percentile(e2els or 0, 50) * 1000,
-        p95_e2el_ms=np.percentile(e2els or 0, 95) * 1000,
         max_output_tokens_per_s=max_output_tokens_per_s,
         max_concurrent_requests=max_concurrent_requests,
         rtfx=input_audio_duration / dur_s,
@@ -1037,6 +794,7 @@ async def benchmark(
     ramp_up_end_rps: int | None = None,
     ready_check_timeout_sec: int = 600,
     ssl_context: ssl.SSLContext | bool | None = None,
+    self_timed: bool = False,
 ):
     try:
         request_func = ASYNC_REQUEST_FUNCS[endpoint_type]
@@ -1070,6 +828,8 @@ async def benchmark(
         input_requests[0].expected_output_len,
         input_requests[0].multi_modal_data,
     )
+    test_extra_body = _merge_overrides(extra_body, input_requests[0].request_overrides)
+    test_chat_messages = input_requests[0].chat_messages
 
     assert (
         test_mm_content is None
@@ -1090,7 +850,8 @@ async def benchmark(
         multi_modal_content=test_mm_content,
         ignore_eos=ignore_eos,
         extra_headers=extra_headers,
-        extra_body=extra_body,
+        extra_body=test_extra_body,
+        chat_messages=test_chat_messages,
     )
 
     if ready_check_timeout_sec > 0:
@@ -1138,11 +899,12 @@ async def benchmark(
 
     print("Starting main benchmark run...")
 
+    lora_modules_iter: Iterator[str] | None = None
     if lora_modules:
         lora_modules_list = list(lora_modules)
         if lora_assignment == "round-robin":
             # Deterministic round-robin assignment across requests.
-            lora_modules = iter(
+            lora_modules_iter = iter(
                 [
                     lora_modules_list[i % len(lora_modules_list)]
                     for i in range(len(input_requests))
@@ -1150,7 +912,7 @@ async def benchmark(
             )
         else:
             # For each input request, choose a LoRA module at random.
-            lora_modules = iter(
+            lora_modules_iter = iter(
                 [random.choice(lora_modules_list) for _ in range(len(input_requests))]
             )
 
@@ -1167,7 +929,8 @@ async def benchmark(
             multi_modal_content=test_mm_content,
             ignore_eos=ignore_eos,
             extra_headers=extra_headers,
-            extra_body=extra_body,
+            extra_body=test_extra_body,
+            chat_messages=test_chat_messages,
         )
         profile_output = await request_func(
             request_func_input=profile_input, session=session
@@ -1176,23 +939,23 @@ async def benchmark(
             print("Profiler started")
 
     distribution = "Poisson process" if burstiness == 1.0 else "Gamma distribution"
+    if not self_timed:
+        if ramp_up_strategy is not None:
+            print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
+            print(
+                f"Will increase RPS from {ramp_up_start_rps} to "
+                f"{ramp_up_end_rps} RPS over the duration of the benchmark."
+            )
+        else:
+            print(f"Traffic request rate: {request_rate}")
 
-    if ramp_up_strategy is not None:
-        print(f"Traffic ramp-up strategy: {ramp_up_strategy}.")
-        print(
-            f"Will increase RPS from {ramp_up_start_rps} to "
-            f"{ramp_up_end_rps} RPS over the duration of the benchmark."
-        )
+        print(f"Burstiness factor: {burstiness} ({distribution})")
+        print(f"Maximum request concurrency: {max_concurrency}")
     else:
-        print(f"Traffic request rate: {request_rate}")
+        print("Self timing is set, using the timestamps from the trace file.")
 
-    print(f"Burstiness factor: {burstiness} ({distribution})")
-    print(f"Maximum request concurrency: {max_concurrency}")
-
-    benchmark_load_metrics_before = await fetch_benchmark_load_metrics(
-        base_url, session
-    )
     spec_decode_metrics_before = await fetch_spec_decode_metrics(base_url, session)
+    diffusion_metrics_before = await fetch_diffusion_metrics(base_url, session)
 
     pbar = None if disable_tqdm else tqdm(total=len(input_requests))
 
@@ -1229,6 +992,7 @@ async def benchmark(
         ramp_up_strategy,
         ramp_up_start_rps,
         ramp_up_end_rps,
+        self_timed,
     ):
         if ramp_up_strategy is not None:
             current_int_rps = int(current_request_rate)
@@ -1244,10 +1008,15 @@ async def benchmark(
             request.multi_modal_data,
             request.request_id,
         )
+        per_request_extra_body = _merge_overrides(extra_body, request.request_overrides)
         req_model_id, req_model_name = model_id, model_name
-        if lora_modules:
-            req_lora_module = next(lora_modules)
+        if lora_modules_iter:
+            req_lora_module = next(lora_modules_iter)
             req_model_id, req_model_name = req_lora_module, req_lora_module
+
+        mm_content_typed: dict[str, Any] | list[dict[str, Any]] | None = None
+        if isinstance(mm_content, (dict, list)):
+            mm_content_typed = mm_content
 
         request_func_input = RequestFuncInput(
             model=req_model_id,
@@ -1255,13 +1024,14 @@ async def benchmark(
             prompt=prompt,
             api_url=api_url,
             prompt_len=prompt_len,
-            output_len=output_len,
+            output_len=output_len or 0,
             logprobs=logprobs,
-            multi_modal_content=mm_content,
+            multi_modal_content=mm_content_typed,
             ignore_eos=ignore_eos,
             extra_headers=extra_headers,
-            extra_body=extra_body,
+            extra_body=per_request_extra_body,
             request_id=request_id,
+            chat_messages=request.chat_messages,
         )
         tasks.append(
             asyncio.create_task(
@@ -1277,12 +1047,7 @@ async def benchmark(
 
     benchmark_duration = time.perf_counter() - benchmark_start_time
 
-    benchmark_load_metrics_after = await fetch_benchmark_load_metrics(base_url, session)
     spec_decode_metrics_after = await fetch_spec_decode_metrics(base_url, session)
-    benchmark_load_result = build_benchmark_load_result(
-        benchmark_load_metrics_before,
-        benchmark_load_metrics_after,
-    )
     spec_decode_stats: dict[str, Any] | None = None
     if spec_decode_metrics_before is not None and spec_decode_metrics_after is not None:
         delta_drafts = (
@@ -1324,6 +1089,36 @@ async def benchmark(
                 "per_position_acceptance_rates": per_pos_rates,
             }
 
+    diffusion_metrics_after = await fetch_diffusion_metrics(base_url, session)
+    diffusion_stats: dict[str, Any] | None = None
+    if diffusion_metrics_before is not None and diffusion_metrics_after is not None:
+        delta_steps = (
+            diffusion_metrics_after.num_denoising_steps
+            - diffusion_metrics_before.num_denoising_steps
+        )
+        delta_positions = (
+            diffusion_metrics_after.num_canvas_positions
+            - diffusion_metrics_before.num_canvas_positions
+        )
+        delta_committed = (
+            diffusion_metrics_after.num_committed_tokens
+            - diffusion_metrics_before.num_committed_tokens
+        )
+        if delta_steps > 0 and delta_committed > 0:
+            block_size = delta_positions / delta_steps  # canvas length (CL)
+            num_canvases = delta_committed / block_size  # = number of commit steps
+            denoising_steps = delta_steps - num_canvases  # exclude commit steps
+            diffusion_stats = {
+                "denoising_steps": denoising_steps,
+                "canvas_positions": delta_positions,
+                "committed_tokens": delta_committed,
+                "committed_throughput": delta_committed / benchmark_duration,
+                "steps_per_canvas": denoising_steps / num_canvases,
+                "committed_per_step": delta_committed / denoising_steps,
+            }
+
+    metrics: BenchmarkMetrics | EmbedBenchmarkMetrics
+    actual_output_lens: list[int] | int
     if task_type == TaskType.GENERATION:
         metrics, actual_output_lens = calculate_metrics(
             input_requests=input_requests,
@@ -1357,7 +1152,7 @@ async def benchmark(
             "Request throughput (req/s):", metrics.request_throughput
         )
     )
-    if goodput_config_dict:
+    if goodput_config_dict and isinstance(metrics, BenchmarkMetrics):
         print(
             "{:<40} {:<10.2f}".format(
                 "Request goodput (req/s):", metrics.request_goodput
@@ -1394,31 +1189,18 @@ async def benchmark(
             )
         )
 
+    result: dict[str, Any]
     if isinstance(metrics, BenchmarkMetrics):
-        total_requests = metrics.completed + metrics.failed
-        reject_rate = metrics.failed / total_requests if total_requests else None
-        slo_violation_rate = None
-        if goodput_config_dict and metrics.request_throughput > 0:
-            slo_violation_rate = max(
-                0.0,
-                1.0 - (metrics.request_goodput / metrics.request_throughput),
-            )
         result = {
             "duration": benchmark_duration,
             "completed": metrics.completed,
             "failed": metrics.failed,
-            "reject_rate": reject_rate,
-            "slo_violation_rate": slo_violation_rate,
             "total_input_tokens": metrics.total_input,
             "total_output_tokens": metrics.total_output,
             "request_throughput": metrics.request_throughput,
             "request_goodput": metrics.request_goodput if goodput_config_dict else None,
             "output_throughput": metrics.output_throughput,
             "total_token_throughput": metrics.total_token_throughput,
-            "p50_ttft_ms": metrics.p50_ttft_ms,
-            "p95_ttft_ms": metrics.p95_ttft_ms,
-            "p50_e2el_ms": metrics.p50_e2el_ms,
-            "p95_e2el_ms": metrics.p95_e2el_ms,
             "input_lens": [output.prompt_len for output in outputs],
             "output_lens": actual_output_lens,
             "ttfts": [output.ttft for output in outputs],
@@ -1444,9 +1226,6 @@ async def benchmark(
     if rps_change_events:
         result["rps_change_events"] = rps_change_events
 
-    if benchmark_load_result is not None:
-        result.update(benchmark_load_result)
-
     if spec_decode_stats is not None:
         result["spec_decode_acceptance_rate"] = spec_decode_stats["acceptance_rate"]
         result["spec_decode_acceptance_length"] = spec_decode_stats["acceptance_length"]
@@ -1458,6 +1237,16 @@ async def benchmark(
         result["spec_decode_per_position_acceptance_rates"] = spec_decode_stats.get(
             "per_position_acceptance_rates", []
         )
+
+    if diffusion_stats is not None:
+        result["diffusion_committed_throughput"] = diffusion_stats[
+            "committed_throughput"
+        ]
+        result["diffusion_steps_per_canvas"] = diffusion_stats["steps_per_canvas"]
+        result["diffusion_committed_per_step"] = diffusion_stats["committed_per_step"]
+        result["diffusion_committed_tokens"] = int(diffusion_stats["committed_tokens"])
+        result["diffusion_denoising_steps"] = int(diffusion_stats["denoising_steps"])
+        result["diffusion_canvas_positions"] = int(diffusion_stats["canvas_positions"])
 
     def process_one_metric(
         # E.g., "ttft"
@@ -1504,7 +1293,22 @@ async def benchmark(
         process_one_metric("itl", "ITL", "Inter-token Latency")
     process_one_metric("e2el", "E2EL", "End-to-end Latency")
 
-    if spec_decode_stats is not None:
+    if diffusion_stats is not None:
+        print("{s:{c}^{n}}".format(s="Diffusion Decoding", n=50, c="-"))
+        for label, key, value_fmt in (
+            ("Committed throughput (tok/s):", "committed_throughput", "{:<10.2f}"),
+            ("Denoising steps per canvas:", "steps_per_canvas", "{:<10.2f}"),
+            ("Committed per denoising step:", "committed_per_step", "{:<10.2f}"),
+            ("Committed tokens:", "committed_tokens", "{:<10d}"),
+            ("Denoising steps:", "denoising_steps", "{:<10d}"),
+            ("Canvas positions evaluated:", "canvas_positions", "{:<10d}"),
+        ):
+            value = diffusion_stats[key]
+            if value_fmt.endswith("d}"):
+                value = int(value)
+            print("{:<40} ".format(label) + value_fmt.format(value))
+
+    if spec_decode_stats is not None and diffusion_stats is None:
         print("{s:{c}^{n}}".format(s="Speculative Decoding", n=50, c="-"))
         print(
             "{:<40} {:<10.2f}".format(
@@ -1671,7 +1475,7 @@ def compute_result_filename(
     return file_name
 
 
-def add_cli_args(parser: argparse.ArgumentParser):
+def add_cli_args(parser: FlexibleArgumentParser):
     add_dataset_parser(parser)
     parser.add_argument(
         "--label",
@@ -1692,16 +1496,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         type=str,
         default=None,
         help="Server or API base url if not using http host and port.",
-    )
-    parser.add_argument(
-        "--allow-local-benchmark-fallback",
-        action="store_true",
-        help=(
-            "Allow falling back to VLLM_HUST_BASE_URL or local workstation "
-            "defaults when the default local benchmark target is unreachable. "
-            "Disabled by default to avoid silently benchmarking the wrong "
-            "endpoint."
-        ),
     )
     # Use 127.0.0.1 here instead of localhost to force the use of ipv4
     parser.add_argument("--host", type=str, default="127.0.0.1")
@@ -1775,7 +1569,6 @@ def add_cli_args(parser: argparse.ArgumentParser):
         - "slow" will always use the slow tokenizer.\n
         - "mistral" will always use the tokenizer from `mistral_common`.\n
         - "deepseek_v32" will always use the tokenizer from `deepseek_v32`.\n
-        - "qwen_vl" will always use the tokenizer from `qwen_vl`.\n
         - Other custom values can be supported via plugins.""",
     )
     parser.add_argument("--use-beam-search", action="store_true")
@@ -1873,6 +1666,16 @@ def add_cli_args(parser: argparse.ArgumentParser):
         action="store_true",
         help="Set ignore_eos flag when sending the benchmark request."
         "Warning: ignore_eos is not supported in deepspeed_mii and tgi.",
+    )
+    parser.add_argument(
+        "--self-timed",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Use timing information from the traces instead of the configuration. "
+        "This is useful when replaying traces faithfully based on their timestamps. "
+        "When unset, defaults to False, except for --dataset-name=timed_trace where "
+        "it defaults to True. Use --no-self-timed to force off. When off, user "
+        "defined generation rates are used and in trace timing info is ignored.",
     )
     parser.add_argument(
         "--percentile-metrics",
@@ -2140,25 +1943,21 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
             else:
                 raise ValueError("Invalid header format. Please use KEY=VALUE format.")
 
-    base_url, api_url, discovered_model = await resolve_benchmark_base_url(
-        args,
-        base_url,
-        api_url,
-        headers,
-    )
-
     # SSL context configuration
-    ssl_context = get_benchmark_ssl_context(base_url, args.insecure)
+    ssl_context: ssl.SSLContext | bool | None = None
+    if args.insecure:
+        # Disable SSL certificate verification
+        ssl_context = False
+    elif "https://" in base_url:
+        # Use default SSL context for HTTPS
+        ssl_context = True
 
     # Fetch model from server if not specified
     if args.model is None:
         print("Model not specified, fetching first model from server...")
-        if discovered_model is not None:
-            model_name, model_id = discovered_model
-        else:
-            model_name, model_id = await get_first_model_from_server(
-                base_url, headers, ssl_context
-            )
+        model_name, model_id = await get_first_model_from_server(
+            base_url, headers, ssl_context
+        )
         print(f"First model name: {model_name}, first model id: {model_id}")
     else:
         model_name = args.served_model_name
@@ -2170,12 +1969,11 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         tokenizer = None
     else:
         tokenizer_id = args.tokenizer if args.tokenizer is not None else model_id
-        tokenizer_id = resolve_preferred_tokenizer_id(args, tokenizer_id)
         tokenizer_mode = args.tokenizer_mode
-        tokenizer_id, tokenizer = initialize_benchmark_tokenizer(
+        tokenizer = get_tokenizer(
             tokenizer_id,
-            tokenizer_mode,
-            args.trust_remote_code,
+            tokenizer_mode=tokenizer_mode,
+            trust_remote_code=args.trust_remote_code,
         )
 
     # Validate dataset name/path
@@ -2219,7 +2017,26 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
     ):
         args.ignore_eos = True
 
+    if args.dataset_name == "timed_trace":
+        # timed_trace carries per-request timestamps;
+        # ignore EOS so generation runs to the trace's specified output length,
+        # and default to using those timestamps for scheduling unless the user
+        # opted out.
+        args.ignore_eos = True
+        if args.self_timed is None:
+            args.self_timed = True
+    else:
+        # if this is set for anything else, it is an error
+        if args.self_timed is not None:
+            raise ValueError(
+                "--self-timed/--no-self-timed is only supported with "
+                "--dataset-name=timed_trace"
+            )
+        # for any non self-timed trace, this is False
+        args.self_timed = False
+
     # Load the dataset.
+    assert tokenizer is not None, "Tokenizer must be initialized before loading dataset"
     input_requests = get_samples(args, tokenizer)
 
     if args.dataset_name in ("random", "prefix_repetition"):
@@ -2304,6 +2121,7 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
         ramp_up_end_rps=args.ramp_up_end_rps,
         ready_check_timeout_sec=args.ready_check_timeout_sec,
         ssl_context=ssl_context,
+        self_timed=args.self_timed,
     )
 
     # Save config and results to json
@@ -2350,6 +2168,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Generate timeline plot if requested
     if args.plot_timeline:
+        assert file_name is not None, (
+            "file_name must be set when plot_timeline is enabled"
+        )
         try:
             from vllm.benchmarks.plot import generate_timeline_plot
 
@@ -2396,6 +2217,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Generate dataset statistics plot if requested
     if args.plot_dataset_stats:
+        assert file_name is not None, (
+            "file_name must be set when plot_dataset_stats is enabled"
+        )
         try:
             from vllm.benchmarks.plot import generate_dataset_stats_plot
 
@@ -2445,6 +2269,9 @@ async def main_async(args: argparse.Namespace) -> dict[str, Any]:
 
     # Save to file
     if args.save_result or args.append_result:
+        assert file_name is not None, (
+            "file_name must be set when save_result or append_result is enabled"
+        )
         with open(
             file_name, mode="a+" if args.append_result else "w", encoding="utf-8"
         ) as outfile:

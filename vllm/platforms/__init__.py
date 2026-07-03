@@ -9,19 +9,36 @@ from typing import TYPE_CHECKING
 from vllm import envs
 from vllm.plugins import PLATFORM_PLUGINS_GROUP, load_plugins_by_group
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.utils.torch_utils import supports_xccl
-from vllm.version import __version__ as VLLM_VERSION
 
 from .interface import CpuArchEnum, Platform, PlatformEnum
 
 logger = logging.getLogger(__name__)
 
 
+def supports_xccl() -> bool:
+    try:
+        import torch
+
+        return torch.distributed.is_xccl_available()
+    except AttributeError:
+        return False
+
+
 def vllm_version_matches_substr(substr: str) -> bool:
     """
     Check to see if the vLLM version matches a substring.
     """
-    return substr in VLLM_VERSION
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        vllm_version = version("vllm")
+    except PackageNotFoundError as e:
+        logger.warning(
+            "The vLLM package was not found, so its version could not be "
+            "inspected. This may cause platform detection to fail."
+        )
+        raise e
+    return substr in vllm_version
 
 
 def tpu_platform_plugin() -> str | None:
@@ -178,7 +195,7 @@ def cpu_platform_plugin() -> str | None:
         try:
             import zentorch  # noqa: F401
 
-            logger.debug(
+            logger.info(
                 "AMD Zen CPU detected with zentorch installed, using ZenCpuPlatform."
             )
             return "vllm.platforms.zen_cpu.ZenCpuPlatform"

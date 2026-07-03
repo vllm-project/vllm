@@ -40,10 +40,15 @@ Then, configure your Python virtual environment.
 If you are only developing vLLM's Python code, install vLLM using:
 
 ```bash
-uv pip install -e .
+VLLM_USE_PRECOMPILED=1 uv pip install -e .
 ```
 
-This path now defaults to the precompiled wheel workflow. Set `VLLM_USE_PRECOMPILED=0` only when you intentionally want a local compiled build.
+To rebuild only the Rust frontend binary:
+
+```bash
+./build_rust.sh          # release build
+./build_rust.sh --debug  # faster build for development
+```
 
 If you are developing vLLM's Python and CUDA/C++ code, install Pytorch first:
 
@@ -68,9 +73,9 @@ For more details about installing from source and installing for other hardware,
 For an optimized workflow when iterating on C++/CUDA kernels, see the [Incremental Compilation Workflow](./incremental_build.md) for recommendations.
 
 !!! tip
-    vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.11 and tests in CI (except `mypy`) are run with Python 3.11.
+    vLLM is compatible with Python versions 3.10 to 3.13. However, vLLM's default [Dockerfile](../../docker/Dockerfile) ships with Python 3.12 and tests in CI (except `mypy`) are run with Python 3.12.
 
-    Therefore, we recommend developing with Python 3.11 to minimise the chance of your local environment clashing with our CI environment.
+    Therefore, we recommend developing with Python 3.12 to minimise the chance of your local environment clashing with our CI environment.
 
 ### Linting
 
@@ -96,7 +101,7 @@ vLLM's `pre-commit` hooks will now run automatically every time you commit.
     Some `pre-commit` hooks only run in CI. If you need to, you can run them locally with:
 
     ```bash
-    pre-commit run --hook-stage manual mypy-3.10
+    pre-commit run --hook-stage manual mypy-3.11
     ```
 
 ### Documentation
@@ -298,6 +303,24 @@ review process:
 - Note that not all CI checks will be executed due to limited computational
   resources. The reviewer will add `ready` label to the PR when the PR is
   ready to merge or a full CI run is needed.
+
+### Pull Request Limits and Escalation
+
+vLLM uses GitHub's [pull request limit](https://github.blog/open-source/maintainers/how-pull-request-limits-are-cutting-down-the-noise/)
+for contributors without write access. The current cap is 6 open PRs. If this
+blocks well-intentioned critical work, contact a committer to request bypass
+list access.
+
+If you need an expedited review for an important contribution, please email us
+at:
+
+<pr-review-request@vllm.ai>
+
+Using a verifiable company or university email, include:
+
+- your production or research use case
+- the problem you encountered
+- how your contribution addresses it
 
 ## Thank You
 

@@ -1,7 +1,7 @@
 include(FetchContent)
 
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_EXTENSIONS ON)
 set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 
@@ -24,7 +24,10 @@ set (ENABLE_NUMA TRUE)
 # Check the compile flags
 #
 if(MACOSX_FOUND)
+    # Apple clang needs -Xpreprocessor to enable OpenMP. No runtime link is
+    # needed: _C is a dynamic_lookup bundle and resolves libomp from torch.
     list(APPEND CXX_COMPILE_FLAGS
+        "-Xpreprocessor" "-fopenmp"
         "-DVLLM_CPU_EXTENSION")
 else()
     list(APPEND CXX_COMPILE_FLAGS
@@ -32,18 +35,23 @@ else()
         "-DVLLM_CPU_EXTENSION")
 
     # locate PyTorch's libgomp (e.g. site-packages/torch.libs/libgomp-947d5fa1.so.1.0.0)
-    # and create a local shim dir with it
+    # and create a local shim dir with it. When PyTorch is built from source or packaged
+    # by a distro (common on RISC-V, s390x, Fedora/RHEL aarch64), no vendored libgomp
+    # exists and the shim dir is empty; fall back to the system libgomp in that case.
     vllm_prepare_torch_gomp_shim(VLLM_TORCH_GOMP_SHIM_DIR)
 
-    find_library(OPEN_MP
-        NAMES gomp
-        PATHS ${VLLM_TORCH_GOMP_SHIM_DIR}
-        NO_DEFAULT_PATH
-        REQUIRED
-    )
-    # Set LD_LIBRARY_PATH to include the shim dir at build time to use the same libgomp as PyTorch
-    if (OPEN_MP)
+    if(VLLM_TORCH_GOMP_SHIM_DIR)
+        find_library(OPEN_MP
+            NAMES gomp
+            PATHS "${VLLM_TORCH_GOMP_SHIM_DIR}"
+            NO_DEFAULT_PATH
+            REQUIRED
+        )
+        # Use the same libgomp as PyTorch at runtime
         set(ENV{LD_LIBRARY_PATH} "${VLLM_TORCH_GOMP_SHIM_DIR}:$ENV{LD_LIBRARY_PATH}")
+    else()
+        # Fall back to system / toolchain libgomp
+        find_library(OPEN_MP NAMES gomp REQUIRED)
     endif()
 endif()
 
@@ -161,8 +169,13 @@ elseif (S390_FOUND)
         "-mtune=native")
 elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
     message(STATUS "RISC-V detected")
+    if(DEFINED VLLM_RVV_VLEN AND VLLM_RVV_VLEN LESS 0)
+        message(FATAL_ERROR
+            "VLLM_RVV_VLEN must be zero or a positive integer; got '${VLLM_RVV_VLEN}'")
+    endif()
     # VLLM_RVV_VLEN selects the target VLEN. Auto-detected from /proc/cpuinfo
-    # by default; override with -DVLLM_RVV_VLEN=128 or -DVLLM_RVV_VLEN=256.
+    # by default; set -DVLLM_RVV_VLEN=0 to force scalar RISC-V build.
+    # Override with -DVLLM_RVV_VLEN=128 or -DVLLM_RVV_VLEN=256 for RVV.
     if(NOT DEFINED VLLM_RVV_VLEN)
         # Auto-detect: find the largest zvl<N>b in /proc/cpuinfo isa line.
         if(EXISTS /proc/cpuinfo)
@@ -184,16 +197,17 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
                 "RISC-V RVV is available but VLEN could not be auto-detected. "
                 "Please specify VLEN explicitly:\n"
                 "  -DVLLM_RVV_VLEN=128   (for VLEN=128 hardware)\n"
-                "  -DVLLM_RVV_VLEN=256   (for VLEN=256 hardware, e.g. Spacemit X100)\n"
-                "  -DVLLM_RVV_VLEN=0     (force scalar, no RVV)")
+                "  -DVLLM_RVV_VLEN=256   (for VLEN=256 hardware, e.g. Spacemit X100)")
         endif()
     endif()
     if(VLLM_RVV_VLEN AND VLLM_RVV_VLEN GREATER 0)
         message(STATUS "RISC-V RVV VLEN=${VLLM_RVV_VLEN}")
+        # Sources gate FP16/BF16 paths on the compiler-provided
+        # __riscv_zvfh / __riscv_zvfbfmin macros, which GCC and clang
+        # define automatically when those extensions appear in -march.
         if(RVV_BF16_FOUND)
             message(STATUS "BF16 extension detected")
             set(MARCH_FLAGS -march=rv64gcv_zvfh_zfbfmin_zvfbfmin_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
-            add_compile_definitions(RISCV_BF16_SUPPORT)
         elseif(RVV_FP16_FOUND)
             message(WARNING "BF16 functionality is not available")
             set(MARCH_FLAGS -march=rv64gcv_zvfh_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
@@ -212,7 +226,7 @@ endif()
 
 
 # Build oneDNN for GEMM kernels
-if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)
+if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND OR RVV_FP16_FOUND OR RVV_BF16_FOUND)
     # Fetch and build Arm Compute Library (ACL) as oneDNN's backend for AArch64
     # TODO [fadara01]: remove this once ACL can be fetched and built automatically as a dependency of oneDNN
     set(ONEDNN_AARCH64_USE_ACL OFF CACHE BOOL "")
@@ -315,19 +329,11 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
     set(ONEDNN_ENABLE_PRIMITIVE "MATMUL;REORDER")
     set(ONEDNN_BUILD_GRAPH "OFF")
     set(ONEDNN_ENABLE_JIT_PROFILING "ON")
-    set(ONEDNN_ENABLE_ITT_TASKS "OFF")
+    set(ONEDNN_ENABLE_ITT_TASKS "ON")
     set(ONEDNN_ENABLE_MAX_CPU_ISA "ON")
     set(ONEDNN_ENABLE_CPU_ISA_HINTS "ON")
     set(ONEDNN_VERBOSE "ON")
     set(CMAKE_POLICY_DEFAULT_CMP0077 NEW)
-
-    # TODO: Refactor this
-    if (ENABLE_X86_ISA)
-        # Note: only enable oneDNN for AVX512
-        list(APPEND DNNL_COMPILE_FLAGS ${CXX_COMPILE_FLAGS_AVX512})
-    else()
-        list(APPEND DNNL_COMPILE_FLAGS ${CXX_COMPILE_FLAGS})
-    endif()
 
     set(VLLM_BUILD_TYPE ${CMAKE_BUILD_TYPE})
     set(CMAKE_BUILD_TYPE "Release") # remove oneDNN debug symbols to reduce size
@@ -341,8 +347,14 @@ if (ENABLE_X86_ISA OR (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND) OR POWER9_FOUND 
         PRIVATE ${oneDNN_SOURCE_DIR}/src
     )
     target_link_libraries(dnnl_ext dnnl torch)
-    target_compile_options(dnnl_ext PRIVATE ${DNNL_COMPILE_FLAGS} -fPIC)
+    if (ENABLE_X86_ISA)
+        target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS_AVX2} -fPIC)
+    else()
+        target_compile_options(dnnl_ext PRIVATE ${CXX_COMPILE_FLAGS} -fPIC)
+    endif()
     list(APPEND LIBS dnnl_ext)
+
+
     set(USE_ONEDNN ON)
 else()
     set(USE_ONEDNN OFF)
@@ -364,6 +376,18 @@ else()
     add_compile_definitions(-DVLLM_NUMA_DISABLED)
 endif()
 
+# check if the pytorch wheel ships libopenblas.so.
+set(VLLM_OPENBLAS_LIB "")
+if (NOT ENABLE_X86_ISA)
+    file(GLOB _VLLM_TORCH_OPENBLAS_LIBS
+        "${TORCH_INSTALL_PREFIX}/lib/libopenblas*.so*")
+    # Note: we don't link openblas directly to _C extension, as it's available through libtorch.so 
+    if (_VLLM_TORCH_OPENBLAS_LIBS)
+        list(GET _VLLM_TORCH_OPENBLAS_LIBS 0 VLLM_OPENBLAS_LIB)
+        message(STATUS "CPU OpenBLAS library: ${VLLM_OPENBLAS_LIB}")
+    endif()
+endif()
+
 #
 # Generate CPU attention dispatch header
 #
@@ -382,6 +406,7 @@ endif()
 #
 set(VLLM_EXT_SRC
     "csrc/cpu/activation.cpp"
+    "csrc/cpu/sgl-kernels/fla.cpp"
     "csrc/cpu/utils.cpp"
     "csrc/cpu/spec_decode_utils.cpp"
     "csrc/cpu/layernorm.cpp"
@@ -391,10 +416,25 @@ set(VLLM_EXT_SRC
     "csrc/cpu/cpu_attn.cpp"
     "csrc/cpu/torch_bindings.cpp")
 
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64" AND VLLM_RVV_VLEN AND
+        VLLM_RVV_VLEN GREATER 0 AND (RVV_FP16_FOUND OR RVV_BF16_FOUND))
+    set(VLLM_EXT_SRC
+        "csrc/cpu/cpu_wna16.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
 if (ASIMD_FOUND AND NOT APPLE_SILICON_FOUND)
     set(VLLM_EXT_SRC
         "csrc/cpu/shm.cpp"
         "csrc/cpu/activation_lut_bf16.cpp"
+        "csrc/cpu/cpu_tanhf_neon.hpp"
+        "csrc/cpu/cpu_fused_moe.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
+if (POWER9_FOUND OR POWER10_FOUND OR POWER11_FOUND)	
+    set(VLLM_EXT_SRC
+        "csrc/cpu/shm.cpp"
         ${VLLM_EXT_SRC})
 endif()
 
@@ -404,17 +444,26 @@ if(USE_ONEDNN)
         ${VLLM_EXT_SRC})
 endif()
 
+if (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
+    set(VLLM_EXT_SRC
+        "csrc/cpu/sgl-kernels/gemm_int4.cpp"
+        ${VLLM_EXT_SRC})
+endif()
+
 if (ENABLE_X86_ISA)
     set(VLLM_EXT_SRC_SGL
+        "csrc/cpu/sgl-kernels/conv.cpp"
         "csrc/cpu/sgl-kernels/gemm.cpp"
         "csrc/cpu/sgl-kernels/gemm_int8.cpp"
         "csrc/cpu/sgl-kernels/gemm_fp8.cpp"
         "csrc/cpu/sgl-kernels/gemm_int4.cpp"
         "csrc/cpu/sgl-kernels/moe.cpp"
         "csrc/cpu/sgl-kernels/moe_int8.cpp"
+        "csrc/cpu/sgl-kernels/moe_int4.cpp"
         "csrc/cpu/sgl-kernels/moe_fp8.cpp")
 
     set(VLLM_EXT_SRC_AVX512
+        "csrc/cpu/sgl-kernels/fla.cpp"
         "csrc/cpu/shm.cpp"
         "csrc/cpu/cpu_wna16.cpp"
         "csrc/cpu/cpu_fused_moe.cpp"
@@ -430,10 +479,12 @@ if (ENABLE_X86_ISA)
         "csrc/cpu/pos_encoding.cpp"
         "csrc/moe/dynamic_4bit_int_moe_cpu.cpp") 
 
-    set(VLLM_EXT_SRC_AVX2 
+    set(VLLM_EXT_SRC_AVX2
+        "csrc/cpu/sgl-kernels/fla.cpp"
         "csrc/cpu/utils.cpp"
         "csrc/cpu/spec_decode_utils.cpp"
         "csrc/cpu/cpu_attn.cpp"
+        "csrc/cpu/dnnl_kernels.cpp"
         "csrc/cpu/torch_bindings.cpp"
         # TODO: Remove these files
         "csrc/cpu/activation.cpp"
@@ -448,7 +499,7 @@ if (ENABLE_X86_ISA)
 
     set(_C_LIBS numa dnnl_ext)
     set(_C_AVX512_LIBS numa dnnl_ext)
-    set(_C_AVX2_LIBS numa)
+    set(_C_AVX2_LIBS numa dnnl_ext)
 
     # AMX + AVX512F + AVX512BF16 + AVX512VNNI
     define_extension_target(
@@ -503,6 +554,9 @@ else()
         USE_SABI 3
         WITH_SOABI
     )
+    if (VLLM_OPENBLAS_LIB)
+        target_compile_definitions(_C PRIVATE VLLM_HAS_OPENBLAS)
+    endif()
 endif()
 
 message(STATUS "Enabling C extension.")

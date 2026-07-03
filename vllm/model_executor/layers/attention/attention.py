@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -165,7 +166,21 @@ def _init_kv_cache_quant(
         # TODO (mgoin): kv cache dtype should be specified in the FP8
         # checkpoint config and become the "auto" behavior
         if layer.kv_cache_dtype == "fp8_e5m2":
-            raise ValueError("fp8_e5m2 kv-cache is not supported with fp8 checkpoints.")
+            # A compressed-tensors checkpoint stores fp8 KV scales only when it
+            # declares a kv_cache_scheme; weight-only ones declare none and must
+            # keep fp8_e5m2, the only fp8 KV dtype usable on Ampere.
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+                CompressedTensorsConfig,
+                CompressedTensorsKVCacheMethod,
+            )
+
+            if not isinstance(quant_method, CompressedTensorsKVCacheMethod) or (
+                cast(CompressedTensorsConfig, quant_method.quant_config).kv_cache_scheme
+                is not None
+            ):
+                raise ValueError(
+                    "fp8_e5m2 kv-cache is not supported with fp8 checkpoints."
+                )
         # If quantization is enabled, we make "k_scale" and "v_scale"
         # parameters so that it can be loaded from the model checkpoint.
         # The k/v_scale will then be converted back to native float32
@@ -201,6 +216,7 @@ class Attention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
+        mm_prefix_clamp_sliding_window: bool = False,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
         **extra_impl_args,
@@ -228,9 +244,14 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             calculate_kv_scales = False
 
-        # llm-compressor mdls need to set cache_dtype to "fp8" manually.
+        # llm-compressor models declare an FP8 KV-cache scheme in their
+        # checkpoint config. Honor it only when the user did not explicitly
+        # pick a kv_cache_dtype; an explicit choice (e.g. bfloat16) must win.
+        # The "auto" case is normally resolved upstream in
+        # resolve_kv_cache_dtype_string, but we re-apply here defensively in
+        # case anything bypassed that path.
         kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
-        if kv_cache_scheme is not None:
+        if kv_cache_scheme is not None and kv_cache_dtype == "auto":
             kv_cache_dtype = "fp8"
             calculate_kv_scales = False
             if cache_config is not None:
@@ -341,6 +362,29 @@ class Attention(nn.Module, AttentionLayerBase):
                 f"but got {self.attn_backend.get_name()}."
             )
 
+        if self.attn_backend.get_name() == "FLEX_ATTENTION":
+            block_m = vllm_config.attention_config.flex_attn_block_m
+            block_n = vllm_config.attention_config.flex_attn_block_n
+
+            if envs.VLLM_BATCH_INVARIANT and cache_config is not None:
+                if block_m is not None and block_m > cache_config.block_size:
+                    raise ValueError(
+                        f"flex_attn_block_m ({block_m}) must be "
+                        f"<= cache block size ({cache_config.block_size}) for "
+                        f"batch invariance"
+                    )
+                if block_n is not None and block_n > cache_config.block_size:
+                    raise ValueError(
+                        f"flex_attn_block_n ({block_n}) must be "
+                        f"<= cache block size ({cache_config.block_size}) for "
+                        f"batch invariance"
+                    )
+
+            if block_m is not None:
+                extra_impl_args.setdefault("block_m", block_m)
+            if block_n is not None:
+                extra_impl_args.setdefault("block_n", block_n)
+
         impl_cls = self.attn_backend.get_impl_cls()
         self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
             num_heads,
@@ -377,6 +421,9 @@ class Attention(nn.Module, AttentionLayerBase):
                 compilation_config.static_forward_context,
             )
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
+        # (read by the Triton backend impl). Default False for all other models.
+        self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window
 
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
@@ -415,6 +462,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -429,7 +477,8 @@ class Attention(nn.Module, AttentionLayerBase):
             torch.ops.vllm.maybe_calc_kv_scales(
                 query, key, value, _encode_layer_name(self.layer_name)
             )
-        output_dtype = query.dtype
+        if output_dtype is None:
+            output_dtype = query.dtype
         if self.query_quant is not None:
             # quantizing with a simple torch operation enables
             # torch.compile to fuse this into previous ops
@@ -543,7 +592,14 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
-        # Should not be called for enc-dec or encoder-only attention.
+        # Encoder-only attention is prefill-only and keeps no autoregressive KV
+        # cache. In hybrid models (e.g. Qwen3.5 / ColQwen3.5: GatedDeltaNet
+        # linear_attention interleaved with full_attention) the runner iterates
+        # every attention module to build the KV-cache spec, so an ENCODER_ONLY
+        # full_attention layer reaches here; it contributes no KV cache group.
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            return None
+        # Should not be called for enc-dec attention.
         assert self.attn_type == AttentionType.DECODER
         quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
         if self.sliding_window is not None:
@@ -707,6 +763,7 @@ direct_register_custom_op(
 )
 
 
+@eager_break_during_capture
 @maybe_transfer_kv_layer
 def unified_attention_with_output(
     query: torch.Tensor,
