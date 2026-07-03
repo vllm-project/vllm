@@ -1314,6 +1314,9 @@ class SpeculativeConfig:
                 "are only valid with rejection_sample_method='synthetic'."
             )
 
+        if self.method == "dspark" and self.rejection_sample_method == "standard":
+            self.draft_sample_method = "probabilistic"
+
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(
                 self.draft_parallel_config

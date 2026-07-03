@@ -103,6 +103,7 @@ class RejectionSampler:
         logits: torch.Tensor,
         input_batch: InputBatch,
         draft_logits: torch.Tensor | None = None,
+        draft_logits_index_mapping: torch.Tensor | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -130,6 +131,7 @@ class RejectionSampler:
             self.sampler.sampling_states.temperature.gpu,
             self.sampler.sampling_states.seeds.gpu,
             self.num_speculative_steps,
+            draft_logits_index_mapping,
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,

@@ -637,6 +637,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=mm_inputs,
                 is_profile=is_profile,
             )
+            clear_runtime_draft_logits = getattr(
+                self.speculator,
+                "clear_runtime_draft_logits",
+                None,
+            )
+            if clear_runtime_draft_logits is not None:
+                clear_runtime_draft_logits()
 
         assert hidden_states is not None  # Last PP rank always has hidden_states
         sample_hidden_states = hidden_states[input_batch.logits_indices]
@@ -741,6 +748,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
             if self.speculator is not None:
                 self.speculator.capture()
+                clear_runtime_draft_logits = getattr(
+                    self.speculator,
+                    "clear_runtime_draft_logits",
+                    None,
+                )
+                if clear_runtime_draft_logits is not None:
+                    clear_runtime_draft_logits()
 
         end_time = time.perf_counter()
         end_free_gpu_memory = torch.accelerator.get_memory_info()[0]
@@ -1106,12 +1120,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
             assert self.speculator is not None
-            sampler_output = self.rejection_sampler(
-                logits,
-                input_batch,
-                # Draft logits are needed for probabilistic rejection sampling.
-                self.speculator.draft_logits,
-            )
+            try:
+                sampler_output = self.rejection_sampler(
+                    logits,
+                    input_batch,
+                    # Draft logits are needed for probabilistic rejection sampling.
+                    self.speculator.draft_logits,
+                    getattr(self.speculator, "draft_logits_index_mapping", None),
+                )
+            finally:
+                clear_runtime_draft_logits = getattr(
+                    self.speculator,
+                    "clear_runtime_draft_logits",
+                    None,
+                )
+                if clear_runtime_draft_logits is not None:
+                    clear_runtime_draft_logits()
 
         return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 

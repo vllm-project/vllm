@@ -127,7 +127,10 @@ class DraftModelSpeculator(BaseSpeculator):
         )
 
         self.draft_logits: torch.Tensor | None = None
-        if self.speculative_config.draft_sample_method == "probabilistic":
+        if (
+            self.speculative_config.draft_sample_method == "probabilistic"
+            and self.method != "dspark"
+        ):
             self.draft_logits = torch.zeros(
                 self.max_num_reqs,
                 self.num_speculative_steps,
