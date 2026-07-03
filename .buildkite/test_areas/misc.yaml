@@ -188,7 +188,7 @@ steps:
   - vllm/v1/
   - tests/test_regression
   commands:
-  - pip install modelscope
+  - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
