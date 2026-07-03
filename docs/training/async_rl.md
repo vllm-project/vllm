@@ -42,7 +42,7 @@ When using the vLLM HTTP server, the same functionality is available via:
 
 - `POST /pause?mode=keep` - Pause generation
 - `POST /resume` - Resume generation
-- `POST /abort_requests` - Abort in-flight requests without pausing the scheduler (empty body aborts all; or pass `{"request_ids": [...]}`)
+- `POST /abort_requests` - Abort in-flight requests without pausing the scheduler (send `{}` to abort all, or `{"request_ids": [...]}`)
 
 !!! note "Data Parallelism"
     When using data parallelism with vLLM's **internal load balancer** (i.e. `data_parallel_backend="ray"`), pause and resume are handled automatically across all DP ranks -- a single call is sufficient. When using an **external load balancer** (i.e. multiple independent vLLM instances behind a proxy), you must send pause and resume requests to **every** engine instance individually before and after the weight update.

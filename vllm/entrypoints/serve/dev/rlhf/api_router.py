@@ -102,8 +102,8 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
 
     try:
         body = await raw_request.json()
-    except json.JSONDecodeError:
-        body = {}
+    except json.JSONDecodeError as e:
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
 
     request_ids = body.get("request_ids")
 
