@@ -18,15 +18,15 @@ from vllm.model_executor.layers.quantization.inc import INCConfig
 from vllm.model_executor.layers.quantization.inc.config_parser import INCLayerConfig
 from vllm.model_executor.layers.quantization.inc.inc_linear import INCLinearMethod
 from vllm.model_executor.layers.quantization.inc.schemes import (
-    INCWna16Scheme,
     INCFp8Scheme,
+    INCWna16Scheme,
     resolve_scheme,
-)
-from vllm.model_executor.layers.quantization.inc.schemes.inc_scheme import (
-    INCLinearScheme,
 )
 from vllm.model_executor.layers.quantization.inc.schemes.inc_fp8_linear import (
     INCFp8LinearScheme,
+)
+from vllm.model_executor.layers.quantization.inc.schemes.inc_scheme import (
+    INCLinearScheme,
 )
 from vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear import (
     INCARKLinearMethod,
@@ -130,7 +130,7 @@ def make_block_fp8_raw_config(**overrides) -> dict[str, object]:
         "act_dynamic": True,
         "activation_scheme": "dynamic",
         "fmt": "e4m3",
-       "enable_quanted_input": False,
+        "enable_quanted_input": False,
         "weight_block_size": [128, 128],
     }
     kwargs.update(overrides)
@@ -305,6 +305,7 @@ def test_inc_config_accepts_block_fp8() -> None:
     assert config.sym is True
     assert config.data_type == "fp"
     assert config.packing_format == "auto_round:fp8"
+
 
 def test_inc_config_rejects_invalid_block_fp8_activation_config() -> None:
     with pytest.raises(ValueError, match="act_dynamic=True"):
