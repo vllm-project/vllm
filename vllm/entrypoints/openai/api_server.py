@@ -92,7 +92,7 @@ def _attach_endpoint_plugins(
 
 
 async def _init_endpoint_plugins_state(
-    engine_client: EngineClient, state: State, args: Namespace
+    engine_client: EngineClient | None, state: State, args: Namespace
 ) -> None:
     """Phase B of endpoint plugin wiring: initialize per app plugin state.
 
@@ -100,6 +100,10 @@ async def _init_endpoint_plugins_state(
     in `build_app`. Some `init_app_state` callers (e.g. `run_batch.py`)
     build their own bare `State` without going through `build_app`. As a result
     `endpoint_plugins` may be absent and are treated that the same as "none attached".
+
+    `engine_client` is `None` for the CPU only render server which has no
+    engine (see `init_render_app_state`). Plugins must handle a `None`
+    `engine_client` themselves (see `EndpointPlugin.init_state`).
     """
     for plugin in getattr(state, "endpoint_plugins", []):
         await plugin.init_state(engine_client, state, args)
@@ -189,8 +193,6 @@ def build_app(
     args: Namespace,
     supported_tasks: tuple["SupportedTask", ...] | None = None,
     model_config: ModelConfig | None = None,
-    *,
-    attach_endpoint_plugins: bool = True,
 ) -> FastAPI:
     if supported_tasks is None:
         warnings.warn(
@@ -264,12 +266,10 @@ def build_app(
         register_pooling_api_routers(app, supported_tasks, model_config)
 
     # Endpoint plugins are attached last so their routes are registered after all core
-    # routers. Skipped for the CPU only render server (`attach_endpoint_plugins=False`)
-    # as it has no `EngineClient`and therefore `init_render_app_state` can never run
-    # Phase B (`_init_endpoint_plugins_state`). It is skipped because the route that
-    # can never be initialized is worse than an absent one.
-    if attach_endpoint_plugins:
-        _attach_endpoint_plugins(app, supported_tasks)
+    # routers. This runs even for the CPU only render server. A plugin eligible for
+    # the `render` task still gets its routes registered. It receives
+    # `engine_client=None` at Phase B (see `_init_endpoint_plugins_state`).
+    _attach_endpoint_plugins(app, supported_tasks)
 
     app.root_path = args.root_path
     app.add_middleware(
@@ -551,6 +551,10 @@ async def init_render_app_state(
     state.enable_server_load_tracking = False
     state.server_load_metrics = 0
 
+    # No `EngineClient` exists for the render server, so plugins get `None` and
+    # must handle it themselves (see `EndpointPlugin.init_state`).
+    await _init_endpoint_plugins_state(None, state, args)
+
 
 def create_server_socket(
     addr: tuple[str, int],
@@ -698,9 +702,7 @@ async def build_and_serve_renderer(
     if log_config is not None:
         uvicorn_kwargs["log_config"] = log_config
 
-    # Endpoint plugins are not supported on the render server because it has no
-    # `EngineClient` for Phase B initialization (see `build_app`).
-    app = build_app(args, ("render",), attach_endpoint_plugins=False)
+    app = build_app(args, ("render",))
     await init_render_app_state(vllm_config, app.state, args)
 
     logger.info("Starting vLLM server on %s", listen_address)

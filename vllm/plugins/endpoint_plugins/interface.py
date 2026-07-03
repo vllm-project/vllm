@@ -19,10 +19,13 @@ Plugins are opt-in. See `load_endpoint_plugins` in `vllm/plugins/__init__.py`
 for the loading/gating rules and `docs/usage/security.md` for the security
 posture of exposing plugin defined routes.
 
-Endpoint plugins are not supported on the CPU only render server (see
-`build_and_serve_renderer` in `vllm/entrypoints/openai/api_server.py`).
-This is because it has no `EngineClient`, so `init_state` below has nothing
-to receive.
+The CPU only render server (see `build_and_serve_renderer` in
+`vllm/entrypoints/openai/api_server.py`) has no `EngineClient`. A plugin
+eligible for the `render` task (`required_tasks` is `None` or includes
+`"render"`) still gets `attach_router` called but `init_state` receives
+`engine_client=None`. Plugins that cannot function without an engine should
+either exclude `"render"` from `required_tasks` or check for `None` in
+`init_state`/their route handlers and degrade gracefully.
 """
 
 from argparse import Namespace
@@ -66,12 +69,19 @@ class EndpointPlugin(Protocol):
         ...
 
     async def init_state(
-        self, engine_client: "EngineClient", state: State, args: Namespace
+        self, engine_client: "EngineClient | None", state: State, args: Namespace
     ) -> None:
         """Initialize per app state consumed by this plugin's routes.
 
         Called once during `init_app_state()` after core state has been
         initialized. Use `engine_client` (e.g. `collective_rpc`) to reach
         the engine. Do not open new engine access paths.
+
+        `engine_client` is `None` on the CPU only render server which has
+        no engine. This only happens for plugins eligible for the `render`
+        task (`required_tasks` is `None` or includes `"render"`). Handle
+        `None` explicitly (e.g. skip engine dependent setup, or have route
+        handlers return an error) if the plugin is loadable for `render` but
+        cannot function without an engine.
         """
         ...

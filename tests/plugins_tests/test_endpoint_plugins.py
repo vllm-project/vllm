@@ -177,24 +177,34 @@ async def test_init_state_is_noop_without_phase_a(monkeypatch: pytest.MonkeyPatc
     assert not hasattr(state, "dummy_engine_client")
 
 
-def test_render_server_does_not_attach_endpoint_plugins(
+@pytest.mark.asyncio
+async def test_render_server_attaches_endpoint_plugins_with_no_engine_client(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """`build_and_serve_renderer` passes `attach_endpoint_plugins=False`
-    because the CPU only render server has no `EngineClient`. As a result
-    `init_render_app_state` can never run Phase B
-    (`_init_endpoint_plugins_state`). A plugin route that can never be
-    initialized must not be attached even when allowlisted and eligible."""
+    """The CPU only render server has no `EngineClient` but a plugin eligible
+    for the `render` task (`required_tasks` is `None` or includes `"render"`)
+    still gets its routes attached at Phase A. Phase B passes `None` for
+    `engine_client` and it's up to the plugin to handle that."""
     monkeypatch.setenv("VLLM_PLUGINS", "dummy_admin_endpoint_plugin")
 
     args = _build_args()
-    app = build_app(args, ("render",), attach_endpoint_plugins=False)
+    app = build_app(args, ("render",))
 
-    assert not hasattr(app.state, "endpoint_plugins")
-    assert not any(
+    assert len(app.state.endpoint_plugins) == 1
+    assert any(
         getattr(route, "path", None) == "/v1/admin/scheduler_config"
         for route in app.routes
     )
+
+    await _init_endpoint_plugins_state(None, app.state, args)
+
+    assert app.state.dummy_engine_client is None
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/v1/admin/scheduler_config")
+
+    assert response.status_code == 503
 
 
 @pytest.mark.asyncio

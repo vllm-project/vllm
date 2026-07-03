@@ -18,7 +18,7 @@ class EndpointPlugin(Protocol):
     def attach_router(self, app: FastAPI) -> None: ...
 
     async def init_state(
-        self, engine_client: EngineClient, state: State, args: Namespace
+        self, engine_client: EngineClient | None, state: State, args: Namespace
     ) -> None: ...
 ```
 
@@ -34,13 +34,26 @@ Routes are registered before the engine exists. This means the interface has to 
 | Phase | Called from | `engine_client` available? | Work |
 | --- | --- | --- | --- |
 | A. Route registration | `build_app()` | No | `attach_router(app)` add routes. Do not touch the engine here. |
-| B. State init | `init_app_state()` | Yes | `init_state(engine_client, state, args)` build a serving handler holding `engine_client` and store it on `state`. |
+| B. State init | `init_app_state()` | Usually but `None` on the CPU only render server | `init_state(engine_client, state, args)` build a serving handler holding `engine_client` and store it on `state`. |
 
 Because `app.state` *is* the `state` object passed to `init_app_state()`, an object stored during phase A is visible in phase B and an object stored in phase B is visible to route handlers at request time via `request.app.state`. This is the same pattern in-tree endpoints already use.
 
+### Engine less servers (the render server)
+
+The CPU only render server (`init_render_app_state()`) has no `EngineClient`. It still runs both phases for any plugin eligible for the `render` task (`required_tasks` is `None` or includes `"render"`). `attach_router` is called as usual but `init_state` is called with `engine_client=None`.
+
+A plugin that needs an engine to function has two options:
+
+- Exclude `"render"` from `required_tasks` so it is never loaded on the render server in the first place
+- Accept being loaded on `render` and check for `None` in `init_state` or in the route handler returning an error response (e.g. HTTP 503) instead of dereferencing a client that doesn't exist
+
+`tests/plugins/vllm_add_dummy_endpoint_plugin` demonstrates the second option. Its route handler returns a 503 when `state.dummy_engine_client` is `None`.
+
 ### Reaching the engine from a route handler
 
-`init_state` is where a plugin captures `engine_client` into a small serving handler and stashes it on `state`. The route added in `attach_router` reads that handler off `request.app.state` at request time and calls the engine through it, typically via `engine_client.collective_rpc(...)`:
+`init_state` is where a plugin captures `engine_client` into a small serving handler and stashes it on `state`. The route added in `attach_router` reads that handler off `request.app.state` at request time and calls the engine through it, typically via `engine_client.collective_rpc(...)`.
+
+This minimal example omits the `None` check from the previous section for brevity since `required_tasks` is `None` here. It is in fact eligible for `render` and should handle `engine_client=None` the way `tests/plugins/vllm_add_dummy_endpoint_plugin` does before shipping it:
 
 ```python
 from fastapi import FastAPI, Request
