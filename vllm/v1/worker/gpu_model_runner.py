@@ -2200,10 +2200,7 @@ class GPUModelRunner(
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 draft_len = len(draft_token_ids)
                 num_draft_tokens[req_idx] = draft_len
-                if (
-                    self.input_batch.num_computed_tokens_cpu[req_idx]
-                    >= self.input_batch.num_prompt_tokens[req_idx]
-                ):
+                if num_scheduled_tokens[req_idx] == draft_len + 1:
                     num_decode_draft_tokens[req_idx] = draft_len
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens

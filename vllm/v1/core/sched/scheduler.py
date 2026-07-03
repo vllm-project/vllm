@@ -808,7 +808,6 @@ class Scheduler(SchedulerInterface):
                     if (
                         (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
                         and num_new_tokens == 1
-                        and num_computed_tokens >= request.num_prompt_tokens
                         and (scheduled_running_reqs and not prefill_scheduled)
                     ):
                         num_new_tokens = 1 + self.num_spec_tokens
