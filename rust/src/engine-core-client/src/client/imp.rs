@@ -17,7 +17,7 @@ use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
 use crate::metrics::{LoraInfoExporter, record_scheduler_stats};
 use crate::protocol::encode_msgpack;
-use crate::protocol::output::{ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs};
+use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::EngineCoreRequestType;
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
@@ -351,8 +351,8 @@ pub(crate) async fn run_output_dispatcher_loop(
                 )),
             }?;
 
-            match outputs.classify() {
-                ClassifiedEngineCoreOutputs::RequestBatch(batch) => {
+            match outputs {
+                EngineCoreOutputs::RequestBatch(batch) => {
                     let senders = inner.take_senders_for_outputs(&batch.outputs);
                     for (output, sender) in batch.outputs.into_iter().zip(senders) {
                         let request_id = output.request_id.clone();
@@ -403,7 +403,7 @@ pub(crate) async fn run_output_dispatcher_loop(
                     let (running, waiting) = inner.lora_adapter_states();
                     lora_info.update(&METRICS.scheduler, running, waiting);
                 }
-                ClassifiedEngineCoreOutputs::Utility(utility) => {
+                EngineCoreOutputs::Utility(utility) => {
                     let call_id = utility.output.call_id;
                     if inner.resolve_utility_output(utility.output) {
                         trace!(
@@ -419,8 +419,7 @@ pub(crate) async fn run_output_dispatcher_loop(
                         );
                     }
                 }
-                other @ (ClassifiedEngineCoreOutputs::DpControl { .. }
-                | ClassifiedEngineCoreOutputs::Other(_)) => {
+                other => {
                     Err::<(), _>(unexpected_dispatcher_output!(
                         "received unexpected output on main dispatcher path: {other:?}"
                     ))?;
