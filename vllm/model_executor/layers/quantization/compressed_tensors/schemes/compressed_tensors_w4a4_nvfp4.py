@@ -97,46 +97,61 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         layer.weight = layer.weight_packed
         del layer.weight_packed
 
-        # Handle per-half weight global scales for fused gate_up_proj layers.
-        # When gate_proj and up_proj have independent global scales (e.g. from
-        # llmcompressor with per-tensor observers), using a single max() would
-        # over-scale one half. We pre-compute a rescale vector instead.
-        ws2 = layer.weight_global_scale.data.float()
-        num_partitions = len(layer.logical_widths)
+        weight_global_scales = layer.weight_global_scale.detach().to(
+            torch.float32
+        )
+        has_non_uniform_scales = not torch.allclose(
+            weight_global_scales,
+            weight_global_scales[0].expand_as(weight_global_scales),
+        )
 
-        if num_partitions == 2 and not torch.allclose(ws2[0:1], ws2[1:2]):
-            # CT stores divisors: min(divisor) corresponds to max(absmax),
-            # which is the correct unified base for the fused GEMM alpha.
-            weight_global_scale = ws2.min().to(torch.float32)
-            gate_size = layer.logical_widths[0]
-            up_size = layer.logical_widths[1]
-            rescale = torch.ones(
-                gate_size + up_size,
+        output_partition_rescale = None
+
+        if len(layer.logical_widths) == 2 and has_non_uniform_scales:
+            # Use the minimum divisor as the common base so that all
+            # post-GEMM correction factors are <= 1.
+            base_divisor = weight_global_scales.min()
+
+            output_partition_rescale = torch.empty(
+                sum(layer.logical_widths),
                 dtype=torch.float32,
-                device=layer.weight_global_scale.device,
+                device=weight_global_scales.device,
             )
-            rescale[:gate_size] = ws2.min() / ws2[0]
-            rescale[gate_size:gate_size + up_size] = ws2.min() / ws2[1]
-            layer._per_half_rescale = Parameter(rescale, requires_grad=False)
-            logger.info(
-                "NVFP4 per-half scale detected: gate_s2=%.1f, up_s2=%.1f, "
-                "rescale factors=[%.4f, %.4f]",
-                ws2[0].item(),
-                ws2[1].item(),
-                rescale[0].item(),
-                rescale[gate_size].item(),
-            )
-        else:
-            if torch.unique(ws2).numel() != 1:
-                logger.warning_once(
-                    "In NVFP4 linear, the weight global scale is different"
-                    " for parallel layers (e.g. q_proj, k_proj, v_proj). This"
-                    " will likely result in reduced accuracy. Please verify the"
-                    " model accuracy. Consider using a checkpoint with a shared"
-                    " global NVFP4 scale for fused layers."
+            offset = 0
+            for width, partition_divisor in zip(
+                layer.logical_widths, weight_global_scales
+            ):
+                output_partition_rescale[offset:offset + width] = (
+                    base_divisor / partition_divisor
                 )
-            weight_global_scale = ws2.max().to(torch.float32)
-            layer._per_half_rescale = None
+                offset += width
+
+            logger.warning_once(
+                "Detected non-uniform NVFP4 weight global scales in a "
+                "two-partition fused linear layer. Applying per-partition "
+                "output rescaling."
+            )
+            logger.debug(
+                "NVFP4 partition scales=%s, rescale=%s",
+                weight_global_scales.tolist(),
+                output_partition_rescale.tolist(),
+            )
+
+            weight_global_scale = base_divisor
+        else:
+            if has_non_uniform_scales:
+                logger.warning_once(
+                    "In NVFP4 linear, the weight global scale differs "
+                    "across fused logical partitions. This may reduce "
+                    "model accuracy."
+                )
+            weight_global_scale = weight_global_scales.max()
+
+        layer._output_partition_rescale = (
+            Parameter(output_partition_rescale, requires_grad=False)
+            if output_partition_rescale is not None
+            else None
+        )
 
         # Process weight global scale (CT stores as divisors, i.e. 1/scale)
         layer.weight_global_scale = Parameter(
@@ -176,10 +191,10 @@ class CompressedTensorsW4A4Fp4(CompressedTensorsScheme):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        rescale = getattr(layer, "_per_half_rescale", None)
+        rescale = getattr(layer, "_output_partition_rescale", None)
         if rescale is not None:
             out = self.kernel.apply_weights(layer=layer, x=x, bias=None)
-            out = out * rescale.to(out.dtype)
+            out = out * rescale.to(dtype=out.dtype)
             if bias is not None:
                 out = out + bias
             return out
