@@ -1081,12 +1081,19 @@ class ModelConfig:
         # CUDAGraph capture not supported for encoder-decoder models on ROCm
         unsupported_rocm = self.is_encoder_decoder
         if unsupported_rocm and not self.enforce_eager and current_platform.is_rocm():
-            logger.warning(
-                "CUDA graph is not supported for %s on ROCm yet, fallback "
-                "to eager mode.",
-                self.model_arch_config.model_type,
-            )
-            self.enforce_eager = True
+            if envs.VLLM_ROCM_ENABLE_CUDAGRAPH:
+                logger.warning(
+                    "CUDA graph is not officially supported for %s on ROCm "
+                    "but user overwrites it, use it at own risk.",
+                    self.model_arch_config.model_type,
+                )
+            else:
+                logger.warning(
+                    "CUDA graph is not supported for %s on ROCm yet, fallback "
+                    "to eager mode.",
+                    self.model_arch_config.model_type,
+                )
+                self.enforce_eager = True
 
     def _verify_bnb_config(self) -> None:
         """
