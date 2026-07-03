@@ -183,7 +183,7 @@ fn decodes_inline_new_logprobs() {
         Some(inline_logprobs_value()),
         None,
     )))];
-    let decoded = decode_engine_core_outputs(&frames).unwrap();
+    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
 
     let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(logprobs, expected_sample_logprobs());
@@ -214,7 +214,7 @@ fn decodes_multipart_new_logprobs() {
         ]),
         Bytes::from_static(&[1, 0, 0, 0, 0, 0, 0, 0, 2, 0, 0, 0, 0, 0, 0, 0]),
     ];
-    let decoded = decode_engine_core_outputs(&frames).unwrap();
+    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
 
     let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(logprobs, expected_sample_logprobs());
@@ -226,7 +226,7 @@ fn decodes_inline_prompt_logprobs() {
         None,
         Some(inline_prompt_logprobs_value()),
     )))];
-    let decoded = decode_engine_core_outputs(&frames).unwrap();
+    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
 
     let logprobs = decoded.outputs[0]
         .new_prompt_logprobs_tensors
@@ -252,7 +252,7 @@ fn decodes_big_endian_payloads() {
         ])),
         None,
     )))];
-    let decoded = decode_engine_core_outputs(&frames).unwrap();
+    let decoded = decode_engine_core_outputs(&frames).unwrap().into_request_batch().unwrap();
     let logprobs = decoded.outputs[0].new_logprobs.clone().unwrap().into_direct().unwrap();
     assert_eq!(
         logprobs,
