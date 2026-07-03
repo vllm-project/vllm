@@ -1213,6 +1213,46 @@ class GroupCoordinator:
         if self.mq_broadcaster is not None:
             self.mq_broadcaster = None
 
+    def prepare_for_suspend(self) -> None:
+        """Tear down communicator state that cannot survive a process
+        suspend (peer mappings, RDMA connections, IPC handles).
+
+        Called by the GPU worker before ``SleepModeBackend.suspend`` when
+        the selected backend reports ``preserves_communicators() == False``
+        (see ``vllm/device_allocator/sleep_mode_backend.py``). Each
+        communicator owns its own teardown and rebuild; the worker only
+        sequences the calls.
+
+        Single-member groups hold no peer state and no-op. Multi-member
+        teardown/rebuild requires checkpoint support inside the comms
+        library itself (e.g. NCCL's ``contrib/nccl_checkpoint``), so until
+        a communicator implements it, suspending a multi-member group
+        fails loudly here instead of resuming into corrupt comm state.
+        """
+        if self.world_size == 1:
+            return
+        raise NotImplementedError(
+            f"Communicator group '{self.unique_name}' (world_size="
+            f"{self.world_size}) cannot be suspended yet: multi-member "
+            "communicator teardown/rebuild requires checkpoint support in "
+            "the comms library (RFC #34303; NCCL contrib/nccl_checkpoint)."
+        )
+
+    def reinit_after_resume(self) -> None:
+        """Recreate communicator state after ``SleepModeBackend.resume``.
+
+        Mirror of ``prepare_for_suspend``; see its docstring for the
+        contract and the single- vs multi-member behavior.
+        """
+        if self.world_size == 1:
+            return
+        raise NotImplementedError(
+            f"Communicator group '{self.unique_name}' (world_size="
+            f"{self.world_size}) cannot be rebuilt after resume yet: "
+            "requires checkpoint support in the comms library "
+            "(RFC #34303; NCCL contrib/nccl_checkpoint)."
+        )
+
     def prepare_communication_buffer_for_model(self, model: torch.nn.Module):
         if self.device_communicator is not None:
             self.device_communicator.prepare_communication_buffer_for_model(model)
@@ -2081,6 +2121,39 @@ def destroy_model_parallel():
     if _EPLB:
         _EPLB.destroy()
     _EPLB = None
+
+
+def _live_parallel_groups() -> list[GroupCoordinator]:
+    """The model-parallel subgroups currently initialized, in the order
+    ``destroy_model_parallel`` handles them. Excludes the world group."""
+    return [g for g in (_TP, _DCP, _PCP, _PP, _DP, _EP, _EPLB) if g is not None]
+
+
+def prepare_communicators_for_suspend() -> None:
+    """Prepare every live communicator group for a process suspend.
+
+    Consumed by the GPU worker when the selected sleep-mode backend
+    reports ``preserves_communicators() == False``: teardown is owned by
+    each communicator (``GroupCoordinator.prepare_for_suspend``), and this
+    function only sequences it — subgroups first, world group last.
+    ``reinit_communicators_after_resume`` rebuilds in the opposite order.
+    """
+    for group in _live_parallel_groups():
+        group.prepare_for_suspend()
+    if _WORLD is not None:
+        _WORLD.prepare_for_suspend()
+
+
+def reinit_communicators_after_resume() -> None:
+    """Rebuild every live communicator group after a process resume.
+
+    Counterpart of ``prepare_communicators_for_suspend``: world group
+    first, then the model-parallel subgroups.
+    """
+    if _WORLD is not None:
+        _WORLD.reinit_after_resume()
+    for group in _live_parallel_groups():
+        group.reinit_after_resume()
 
 
 def destroy_distributed_environment():

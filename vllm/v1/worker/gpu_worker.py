@@ -43,6 +43,8 @@ from vllm.distributed.parallel_state import (
     Handle,
     get_pp_group,
     get_tp_group,
+    prepare_communicators_for_suspend,
+    reinit_communicators_after_resume,
 )
 from vllm.distributed.weight_transfer import (
     WeightTransferEngine,
@@ -199,7 +201,13 @@ class Worker(WorkerBase):
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
 
-        self._get_sleep_mode_backend().suspend(level)
+        backend = self._get_sleep_mode_backend()
+        if not backend.preserves_communicators():
+            # Communicator-owned teardown must complete before the backend
+            # snapshots/frees GPU state (peer mappings and RDMA connections
+            # cannot survive a suspend). See prepare_communicators_for_suspend.
+            prepare_communicators_for_suspend()
+        backend.suspend(level)
 
         torch.accelerator.synchronize()
         deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
@@ -219,7 +227,15 @@ class Worker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        self._get_sleep_mode_backend().resume(tags)
+        backend = self._get_sleep_mode_backend()
+        backend.resume(tags)
+
+        if not backend.preserves_communicators():
+            # Mirror of the suspend-side teardown: rebuild is owned by each
+            # communicator, sequenced world-group-first.
+            reinit_communicators_after_resume()
+            if not backend.preserves_graphs_with_communicators():
+                self._invalidate_captured_graphs()
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
@@ -231,6 +247,21 @@ class Worker(WorkerBase):
 
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
+
+    def _invalidate_captured_graphs(self) -> None:
+        """Captured CUDA graphs embed communicator handles; once communicators
+        are rebuilt on resume (``preserves_graphs_with_communicators() ==
+        False``), replaying a captured graph would launch into destroyed comm
+        state. The safe sequel is discard + recapture — an init-time-style
+        operation, since a suspended engine is not serving traffic — but the
+        discard half has no in-tree mechanism yet, so this fails loudly
+        instead of resuming with stale graphs (RFC #34303).
+        """
+        raise NotImplementedError(
+            "The sleep-mode backend rebuilt communicators on resume, which "
+            "invalidates captured CUDA graphs; discard+recapture after resume "
+            "is not implemented yet (RFC #34303)."
+        )
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
         if (
