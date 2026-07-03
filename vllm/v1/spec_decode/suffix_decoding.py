@@ -34,12 +34,14 @@ class SuffixDecodingProposer:
 
     def propose(
         self,
+        num_speculative_tokens: int,
         input_batch: InputBatch,
         sampled_token_ids: list[list[int]],
         slot_mappings: dict[str, torch.Tensor]
         | list[dict[str, torch.Tensor]]
         | None = None,  # unused
     ) -> list[list[int]]:
+        assert num_speculative_tokens == self.num_speculative_tokens
         """
         Propose speculative tokens for each request in the input batch. Suffix Decoding
         will speculate a dynamic number of tokens for each request every decoding step,

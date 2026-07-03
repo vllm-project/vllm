@@ -64,6 +64,8 @@ pub enum Error {
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error("tool call stream state is inconsistent: {message}")]
     ToolCallStreamInvariant { message: String },
+    #[error("failed to build structural tag: {message}")]
+    StructuralTag { message: String },
     #[error(transparent)]
     Text(#[from] vllm_text::Error),
     #[error(transparent)]
@@ -71,6 +73,17 @@ pub enum Error {
 }
 
 pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    /// Whether this error represents invalid user request parameters.
+    pub fn is_request_validation_error(&self) -> bool {
+        match self {
+            Self::PromptTooLong { .. } => true,
+            Self::Text(error) => error.is_request_validation_error(),
+            _ => false,
+        }
+    }
+}
 
 /// Format the available-parser suffix used in user-facing error messages.
 fn available_parser_hint(available_names: &[String]) -> String {
