@@ -404,6 +404,28 @@ steps:
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
+#-----------------------------------------------------------  mi250 · docker  ----------------------------------------------------------#
+
+- label: Docker Build Metadata (ROCm) # TBD
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - .buildkite/scripts/docker-build-metadata-args.sh
+  - .buildkite/scripts/ci-bake-rocm.sh
+  - docker/Dockerfile
+  - docker/Dockerfile.cpu
+  - docker/Dockerfile.rocm
+  - docker/Dockerfile.rocm_base
+  - docker/ci-rocm.hcl
+  - docker/docker-bake.hcl
+  - docker/docker-bake-rocm.hcl
+  - tests/tools/test_docker_build_metadata_args.py
+  commands:
+  - pytest -v -s tools/test_docker_build_metadata_args.py
+
 #########################################################################################################################################
 #                                                                                                                                       #
 #                                                         MI300 (gfx942) tests                                                          #
