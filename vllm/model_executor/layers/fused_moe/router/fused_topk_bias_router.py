@@ -102,6 +102,26 @@ def _topk_softplus_sqrt_torch(
     return topk_weights, topk_indices
 
 
+def _use_topk_softplus_sqrt_fast(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool,
+) -> bool:
+    """Whether the TRT-LLM fused gate (topk_softplus_sqrt_fast) is applicable.
+
+    It requires CUDA, int32 indices, topk==6, n_experts in {256, 384}, and
+    always renormalizes. Anything else falls back to topk_hash_softplus_sqrt.
+    """
+    return (
+        renormalize
+        and gating_output.is_cuda
+        and topk_indices.dtype == torch.int32
+        and topk_weights.shape[-1] == 6
+        and gating_output.shape[-1] in (256, 384)
+    )
+
+
 def vllm_topk_softplus_sqrt(
     topk_weights: torch.Tensor,
     topk_indices: torch.Tensor,
@@ -127,6 +147,24 @@ def vllm_topk_softplus_sqrt(
             hash_indices_table,
             routed_scaling_factor,
         )
+
+    if _use_topk_softplus_sqrt_fast(
+        topk_weights, topk_indices, gating_output, renormalize
+    ):
+        # Fused TRT-LLM gate kernel; requires fp32 scores (no-op if already
+        # fp32). Same drop-in signature as topk_hash_softplus_sqrt.
+        ops.topk_softplus_sqrt_fast(
+            topk_weights,
+            topk_indices,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            routed_scaling_factor,
+            e_score_correction_bias,
+            input_tokens,
+            hash_indices_table,
+        )
+        return topk_weights, topk_indices
 
     ops.topk_hash_softplus_sqrt(
         topk_weights,

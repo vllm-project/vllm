@@ -2373,6 +2373,38 @@ def topk_hash_softplus_sqrt(
     )
 
 
+def topk_softplus_sqrt_fast(
+    topk_weights: torch.Tensor,
+    topk_indices: torch.Tensor,
+    token_expert_indices: torch.Tensor,
+    gating_output: torch.Tensor,
+    renormalize: bool = False,
+    routed_scaling_factor: float = 1.0,
+    e_score_correction_bias: torch.Tensor | None = None,
+    input_tokens: torch.Tensor | None = None,
+    hash_indices_table: torch.Tensor | None = None,
+) -> None:
+    """TRT-LLM fused sqrt-softplus routing gate (ported from TRT-LLM #15402).
+
+    Drop-in replacement for :func:`topk_hash_softplus_sqrt`: same signature.
+    Constraints: gating_output/topk_weights float32, topk_indices int32,
+    topk (=topk_weights.shape[-1]) must be 6, n_experts in {256, 384}, and it
+    always renormalizes (``renormalize`` must be True). Hash mode is inferred
+    from ``hash_indices_table``; ``token_expert_indices`` is unused.
+    """
+    torch.ops._moe_C.topk_softplus_sqrt_fast(
+        topk_weights,
+        topk_indices,
+        token_expert_indices,
+        gating_output,
+        renormalize,
+        routed_scaling_factor,
+        e_score_correction_bias,
+        input_tokens,
+        hash_indices_table,
+    )
+
+
 def grouped_topk(
     scores: torch.Tensor,
     num_expert_group: int,

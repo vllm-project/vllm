@@ -75,6 +75,22 @@ void shuffle_rows(const torch::stable::Tensor& input_tensor,
                   torch::stable::Tensor& output_tensor);
 
 #ifndef USE_ROCM
+// TRT-LLM fused sqrt-softplus routing gate (top-k, renormalize). Ported from
+// NVIDIA/TensorRT-LLM PR #15402 (customMoeRoutingKernels.cu). Signature mirrors
+// topk_softplus_sqrt for drop-in use: gating_output/topk_weights are float32,
+// topk_indices is int32, topk (=topk_weights.size(-1)) must be 6, n_experts in
+// {256, 384}, always renormalizes. Hash mode is inferred from tid2eid.
+void topk_softplus_sqrt_fast(
+    torch::stable::Tensor& topk_weights, torch::stable::Tensor& topk_indices,
+    torch::stable::Tensor& token_expert_indices,
+    torch::stable::Tensor& gating_output, bool renormalize,
+    double routed_scaling_factor,
+    const std::optional<torch::stable::Tensor>& correction_bias,
+    const std::optional<torch::stable::Tensor>& input_ids,
+    const std::optional<torch::stable::Tensor>& tid2eid);
+#endif
+
+#ifndef USE_ROCM
 // DeepSeek V3 optimized router GEMM kernel for SM90+
 // Computes output = mat_a @ mat_b.T where:
 //   mat_a: [num_tokens, hidden_dim] in bf16

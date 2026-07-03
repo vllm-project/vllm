@@ -1143,7 +1143,8 @@ set(VLLM_MOE_EXT_SRC
 if(VLLM_GPU_LANG STREQUAL "CUDA")
   list(APPEND VLLM_MOE_EXT_SRC
     "csrc/libtorch_stable/moe/moe_wna16.cu"
-    "csrc/libtorch_stable/moe/grouped_topk_kernels.cu")
+    "csrc/libtorch_stable/moe/grouped_topk_kernels.cu"
+    "csrc/libtorch_stable/moe/topk_softplus_sqrt_kernels_fast.cu")
 endif()
 
 if(VLLM_GPU_LANG STREQUAL "CUDA")

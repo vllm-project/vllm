@@ -122,6 +122,14 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_moe_C, m) {
       "routed_scaling_factor, Tensor bias, int scoring_func) -> (Tensor, "
       "Tensor)");
 
+  // TRT-LLM fused sqrt-softplus routing gate. Signature mirrors
+  // topk_softplus_sqrt for drop-in use (topk fixed at 6, always renormalizes).
+  m.def(
+      "topk_softplus_sqrt_fast(Tensor! topk_weights, Tensor! topk_indices, "
+      "Tensor! token_expert_indices, Tensor gating_output, bool renormalize, "
+      "float routed_scaling_factor, Tensor? bias, Tensor? input_ids, Tensor? "
+      "tid2eid) -> ()");
+
   // DeepSeek V3 optimized router GEMM for SM90+
   m.def("dsv3_router_gemm(Tensor! output, Tensor mat_a, Tensor mat_b) -> ()");
   // conditionally compiled so impl registration is in source file
@@ -141,6 +149,7 @@ STABLE_TORCH_LIBRARY_IMPL(_moe_C, CUDA, m) {
   m.impl("moe_wna16_gemm", TORCH_BOX(&moe_wna16_gemm));
   m.impl("shuffle_rows", TORCH_BOX(&shuffle_rows));
   m.impl("grouped_topk", TORCH_BOX(&grouped_topk));
+  m.impl("topk_softplus_sqrt_fast", TORCH_BOX(&topk_softplus_sqrt_fast));
 #endif
 }
 
