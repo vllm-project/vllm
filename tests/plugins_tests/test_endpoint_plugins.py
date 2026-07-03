@@ -76,6 +76,17 @@ def test_no_plugins_loaded_when_allowlist_unset(monkeypatch: pytest.MonkeyPatch)
     assert load_endpoint_plugins(("generate",)) == []
 
 
+def test_no_plugins_loaded_when_allowlist_is_empty_string(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """`VLLM_PLUGINS=""` parses to `[""]`, not `None` (see `vllm.envs`), so it
+    must be treated as a (non strict) allowlist matching no plugin name, not
+    as "unset"."""
+    monkeypatch.setenv("VLLM_PLUGINS", "")
+
+    assert load_endpoint_plugins(("generate",)) == []
+
+
 def test_plugin_loaded_when_allowlisted_and_task_matches(
     monkeypatch: pytest.MonkeyPatch,
 ):
