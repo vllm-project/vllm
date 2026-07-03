@@ -34,8 +34,7 @@ if njit is not None:
         padded_h: int,
         padded_w: int,
         patch_size: int,
-        mean: np.ndarray,
-        std_inv: np.ndarray,
+        normalize_lut: np.ndarray,
     ) -> None:
         # frames: [T, new_h, new_w, 3] uint8, without padding.
         # out: [total_patches, 3, patch_size, patch_size] float32.
@@ -62,9 +61,7 @@ if njit is not None:
                 + (y // patch_size) * patch_w
                 + (x // patch_size)
             )
-            out[patch_idx, c, y % patch_size, x % patch_size] = (
-                value / 255.0 - mean[c]
-            ) * std_inv[c]
+            out[patch_idx, c, y % patch_size, x % patch_size] = normalize_lut[value, c]
 
 else:
 
@@ -79,6 +76,10 @@ def _load_media_proc_cfg(model: str, revision: str | None = None) -> dict[str, A
     if isinstance(merge_kernel_size, (list, tuple)):
         cfg["merge_kernel_size"] = int(merge_kernel_size[0])
     return cfg
+
+
+def is_numba_available() -> bool:
+    return njit is not None
 
 
 def navit_resize_image(
@@ -191,6 +192,12 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
         super().__init__(**kwargs)
         self.media_proc_cfg = media_proc_cfg
         self.num_frames_per_chunk = media_proc_cfg["temporal_merge_kernel_size"]
+        values = np.arange(256, dtype=np.float32)[:, None]
+        image_mean = np.asarray(media_proc_cfg["image_mean"], dtype=np.float32)
+        image_std_inv = 1.0 / np.asarray(media_proc_cfg["image_std"], dtype=np.float32)
+        self.normalize_lut = (values / 255.0 - image_mean[None, :]) * image_std_inv[
+            None, :
+        ]
 
     @classmethod
     def from_model(
@@ -262,11 +269,6 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
             raise RuntimeError("numba is required for fused Kimi image preprocessing")
 
         patch_size = int(self.media_proc_cfg["patch_size"])
-        image_std_inv = 1.0 / np.asarray(
-            self.media_proc_cfg["image_std"], dtype=np.float32
-        )
-        image_mean = np.asarray(self.media_proc_cfg["image_mean"], dtype=np.float32)
-
         prepared = []
         grid_thws_np = np.empty((len(medias), 3), dtype=np.int64)
         total_patches = 0
@@ -336,8 +338,7 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
                 padded_height,
                 padded_width,
                 patch_size,
-                image_mean,
-                image_std_inv,
+                self.normalize_lut,
             )
             out_offset += num_patches
 
