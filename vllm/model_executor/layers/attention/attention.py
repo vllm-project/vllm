@@ -245,6 +245,7 @@ class Attention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
+        mm_prefix_clamp_sliding_window: bool = False,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
         **extra_impl_args,
@@ -449,6 +450,9 @@ class Attention(nn.Module, AttentionLayerBase):
                 compilation_config.static_forward_context,
             )
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
+        # (read by the Triton backend impl). Default False for all other models.
+        self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window
 
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
