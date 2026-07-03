@@ -114,10 +114,14 @@ class WorkspaceSizes(NamedTuple):
         return self.float_bytes + self.int_bytes
 
 
-def _int_workspace_allocation_bytes(required_bytes: int) -> int:
+def _int_workspace_allocation_bytes(
+    required_bytes: int, *, round_up: bool = True
+) -> int:
     required_bytes = max(int(required_bytes), 0)
     if required_bytes == 0:
         return 1
+    if not round_up:
+        return required_bytes
     return cdiv(required_bytes, FLASHINFER_INT_WORKSPACE_GRANULARITY_BYTES) * (
         FLASHINFER_INT_WORKSPACE_GRANULARITY_BYTES
     )
@@ -987,13 +991,16 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         current_bytes = _buffer_nbytes(int_workspace)
         finalized = getattr(wrapper, "_vllm_flashinfer_int_workspace_finalized", False)
         prepared = getattr(wrapper, "_vllm_flashinfer_int_workspace_prepared", False)
+        exact_size = finalized or bool(getattr(wrapper, "is_cuda_graph_enabled", False))
 
         if not has_required_bytes:
             if current_bytes >= required_bytes:
                 return int_workspace, False
             target_bytes = max(required_bytes, 1)
         else:
-            target_bytes = _int_workspace_allocation_bytes(required_bytes)
+            target_bytes = _int_workspace_allocation_bytes(
+                required_bytes, round_up=not exact_size
+            )
             if finalized:
                 if current_bytes < required_bytes:
                     raise AssertionError(
@@ -1002,7 +1009,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         f"allocated, {required_bytes} bytes required."
                     )
                 return int_workspace, False
-            if prepared and current_bytes >= required_bytes:
+            if prepared and not exact_size and current_bytes >= required_bytes:
                 return int_workspace, False
             if current_bytes == target_bytes:
                 return int_workspace, False
@@ -1014,7 +1021,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 f"allocated, {required_bytes} bytes required."
             )
 
-        if prepared:
+        if prepared and target_bytes > current_bytes:
             logger.warning(
                 "Growing FlashInfer int workspace after initial preparation: "
                 "%.2f MiB -> %.2f MiB. This is allowed for non-captured "

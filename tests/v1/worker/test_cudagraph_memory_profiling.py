@@ -102,7 +102,30 @@ def test_flashinfer_workspace_size_float_only_keeps_default_int_workspace():
     assert wrapper._int_workspace_buffer.numel() == 64
 
 
-def test_flashinfer_workspace_size_explicit_int_shrinks_default_workspace():
+def test_flashinfer_workspace_size_explicit_int_shrinks_cudagraph_workspace():
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    WorkspaceSizes = flashinfer_backend.WorkspaceSizes
+    mib = 1 << 20
+    builder = _make_flashinfer_builder(flashinfer_backend)
+    wrapper = _FakeFlashInferWrapper(int_workspace_bytes=8 * mib)
+    wrapper.is_cuda_graph_enabled = True
+
+    reset_workspace_manager()
+    init_workspace_manager(torch.device("cpu"))
+    try:
+        builder._ensure_flashinfer_wrapper_workspace(
+            wrapper, WorkspaceSizes(1024, 64 * 1024, True)
+        )
+    finally:
+        reset_workspace_manager()
+
+    assert wrapper._float_workspace_buffer.numel() == 1024
+    assert wrapper._int_workspace_buffer.numel() == 64 * 1024
+
+
+def test_flashinfer_workspace_size_explicit_int_rounds_non_cudagraph_workspace():
     pytest.importorskip("flashinfer")
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
@@ -422,7 +445,7 @@ def test_flashinfer_reserves_decode_cudagraph_int_workspace(monkeypatch):
 
     assert sizes == WorkspaceSizes(128, 32, True)
     assert wrapper._float_workspace_buffer.numel() == 128
-    assert wrapper._int_workspace_buffer.numel() == 1 << 20
+    assert wrapper._int_workspace_buffer.numel() == 32
     assert wrapper.reset_calls == 1
     assert wrapper._vllm_flashinfer_int_workspace_finalized
 
@@ -814,7 +837,7 @@ def test_v2_attention_workspace_reserve_logs_breakdown(monkeypatch):
     from vllm.v1.worker.gpu.model_runner import GPUModelRunner
 
     mib = 1 << 20
-    workspace_buffer = torch.empty(1)
+    workspace_buffer = torch.empty(mib, dtype=torch.uint8)
 
     class Builder:
         def __init__(self, requested_bytes, debug_info):
@@ -847,6 +870,7 @@ def test_v2_attention_workspace_reserve_logs_breakdown(monkeypatch):
                             "int_workspace_over_reserved_bytes": 23 * mib,
                             "unique_int_workspace_buffers": 4,
                             "unique_float_workspace_buffers": 1,
+                            "unique_float_workspace_bytes": 24 * mib,
                             "workspace_state_live_wrappers": 4,
                         },
                     ),
@@ -861,6 +885,7 @@ def test_v2_attention_workspace_reserve_logs_breakdown(monkeypatch):
                             "int_workspace_over_reserved_bytes": 7 * mib,
                             "unique_int_workspace_buffers": 2,
                             "unique_float_workspace_buffers": 1,
+                            "unique_float_workspace_bytes": 8 * mib,
                             "workspace_state_live_wrappers": 2,
                         },
                     ),
@@ -904,11 +929,14 @@ def test_v2_attention_workspace_reserve_logs_breakdown(monkeypatch):
     assert any("96.00 MiB requested by builders" in log for log in debug_logs)
     assert any("64.00 MiB unexplained" in log for log in debug_logs)
     assert any("1 unique workspace buffers" in log for log in debug_logs)
+    assert any("1.00 MiB unique workspace bytes" in log for log in debug_logs)
     assert any("6 wrappers" in log for log in debug_logs)
     assert any("32.00 MiB actual int workspace" in log for log in debug_logs)
     assert any("2.00 MiB requested int workspace" in log for log in debug_logs)
     assert any("30.00 MiB int workspace over request" in log for log in debug_logs)
+    assert any("24.00 MiB max unique float workspace" in log for log in debug_logs)
     assert any("default_int_workspaces=3" in log for log in debug_logs)
+    assert any("unique_float=24.00 MiB" in log for log in debug_logs)
     assert (
         sum(
             "Reserved attention workspace builder=Builder requested=" in log

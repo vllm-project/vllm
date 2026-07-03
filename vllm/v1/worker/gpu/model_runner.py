@@ -762,7 +762,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         allocated_before = torch.accelerator.memory_allocated(self.device)
         requested_total = 0
         builder_records: list[
-            tuple[str, int, int, int, int | None, dict[str, int] | None]
+            tuple[str, int, int, int, int | None, int, dict[str, int] | None]
         ] = []
         for groups in self.attn_groups:
             for attn_group in groups:
@@ -790,6 +790,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     )
                     requested_total += max(requested_bytes, 0)
                     workspace_buffer_ptr = None
+                    workspace_buffer_bytes = 0
                     get_workspace_buffer_state = getattr(
                         builder, "get_workspace_buffer_state", None
                     )
@@ -798,6 +799,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         workspace_buffer = getattr(workspace_state, "buffer", None)
                         if isinstance(workspace_buffer, torch.Tensor):
                             workspace_buffer_ptr = workspace_buffer.data_ptr()
+                            workspace_buffer_bytes = (
+                                workspace_buffer.numel()
+                                * workspace_buffer.element_size()
+                            )
                     builder_records.append(
                         (
                             type(builder).__name__,
@@ -811,6 +816,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                                 0,
                             ),
                             workspace_buffer_ptr,
+                            workspace_buffer_bytes,
                             workspace_debug_info,
                         )
                     )
@@ -822,27 +828,39 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         allocated_delta = max(allocated_after - allocated_before, 0)
 
         if builder_records:
-            unique_workspace_buffers = {
-                buffer_ptr
-                for _, _, _, _, buffer_ptr, _ in builder_records
-                if buffer_ptr is not None
-            }
+            unique_workspace_buffers: dict[int, int] = {}
+            for (
+                _builder_name,
+                _requested_bytes,
+                _builder_reserved_delta,
+                _builder_allocated_delta,
+                buffer_ptr,
+                buffer_bytes,
+                _workspace_debug_info,
+            ) in builder_records:
+                if buffer_ptr is not None:
+                    unique_workspace_buffers[buffer_ptr] = max(
+                        unique_workspace_buffers.get(buffer_ptr, 0), buffer_bytes
+                    )
+            unique_workspace_buffer_bytes = sum(unique_workspace_buffers.values())
             workspace_debug_infos = [
                 workspace_debug_info
-                for _, _, _, _, _, workspace_debug_info in builder_records
+                for _, _, _, _, _, _, workspace_debug_info in builder_records
                 if workspace_debug_info is not None
             ]
             logger.debug(
                 "Reserved attention workspace before CUDA graph capture: "
                 "%.2f MiB allocator reserved delta, %.2f MiB allocated delta, "
                 "%.2f MiB requested by builders, %.2f MiB unexplained "
-                "(%d builders, %d unique workspace buffers)",
+                "(%d builders, %d unique workspace buffers, %.2f MiB unique "
+                "workspace bytes)",
                 reserved_delta / (1 << 20),
                 allocated_delta / (1 << 20),
                 requested_total / (1 << 20),
                 max(reserved_delta - requested_total, 0) / (1 << 20),
                 len(builder_records),
                 len(unique_workspace_buffers),
+                unique_workspace_buffer_bytes / (1 << 20),
             )
             if workspace_debug_infos:
                 actual_int_workspace_bytes = sum(
@@ -856,12 +874,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     info["int_workspace_over_reserved_bytes"]
                     for info in workspace_debug_infos
                 )
+                unique_wrapper_float_workspace_bytes = max(
+                    (
+                        info.get("unique_float_workspace_bytes", 0)
+                        for info in workspace_debug_infos
+                    ),
+                    default=0,
+                )
                 logger.debug(
                     "Reserved attention workspace wrapper breakdown: "
                     "%d wrappers, %d decode CUDA graph wrappers, "
                     "%d default-or-larger int workspaces, "
                     "%.2f MiB actual int workspace, %.2f MiB requested int "
-                    "workspace, %.2f MiB int workspace over request",
+                    "workspace, %.2f MiB int workspace over request, "
+                    "%.2f MiB max unique float workspace",
                     sum(
                         info["workspace_wrapper_count"]
                         for info in workspace_debug_infos
@@ -877,6 +903,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     actual_int_workspace_bytes / (1 << 20),
                     reserved_int_workspace_bytes / (1 << 20),
                     int_workspace_over_reserved_bytes / (1 << 20),
+                    unique_wrapper_float_workspace_bytes / (1 << 20),
                 )
             for (
                 builder_name,
@@ -884,17 +911,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 builder_reserved_delta,
                 builder_allocated_delta,
                 workspace_buffer_ptr,
+                workspace_buffer_bytes,
                 workspace_debug_info,
             ) in builder_records:
                 logger.debug(
                     "Reserved attention workspace builder=%s requested=%.2f MiB "
                     "reserved_delta=%.2f MiB allocated_delta=%.2f MiB "
-                    "workspace_buffer_ptr=%s",
+                    "workspace_buffer_ptr=%s workspace_buffer=%.2f MiB",
                     builder_name,
                     requested_bytes / (1 << 20),
                     builder_reserved_delta / (1 << 20),
                     builder_allocated_delta / (1 << 20),
                     workspace_buffer_ptr,
+                    workspace_buffer_bytes / (1 << 20),
                 )
                 if workspace_debug_info is not None:
                     logger.debug(
@@ -903,6 +932,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         "default_int_workspaces=%d actual_int=%.2f MiB "
                         "requested_int=%.2f MiB int_over_request=%.2f MiB "
                         "unique_int_buffers=%d unique_float_buffers=%d "
+                        "unique_float=%.2f MiB "
                         "workspace_state_live_wrappers=%d",
                         builder_name,
                         workspace_debug_info["workspace_wrapper_count"],
@@ -915,6 +945,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                         / (1 << 20),
                         workspace_debug_info["unique_int_workspace_buffers"],
                         workspace_debug_info["unique_float_workspace_buffers"],
+                        workspace_debug_info.get("unique_float_workspace_bytes", 0)
+                        / (1 << 20),
                         workspace_debug_info["workspace_state_live_wrappers"],
                     )
 
