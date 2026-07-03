@@ -22,6 +22,9 @@ from vllm.v1.outputs import (
     KVConnectorOutput,
     ModelRunnerOutput,
 )
+from vllm.v1.worker.gpu.attn_utils import (
+    get_attention_kv_cache_shape_and_stride_order,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 if TYPE_CHECKING:
@@ -206,45 +209,17 @@ class KVConnectorModelRunnerMixin:
         kernel_num_blocks = num_blocks * num_blocks_per_kv_block
 
         attn_backend = attn_group.backend
-        head_size_v = None
-        if cache_dtype == "nvfp4" and attn_backend.get_name() == "FLASHINFER":
-            head_size_v = getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
-        if head_size_v is None:
-            kv_cache_shape = attn_backend.get_kv_cache_shape(
+        kv_cache_shape, kv_cache_stride_order = (
+            get_attention_kv_cache_shape_and_stride_order(
+                attn_backend,
+                kv_cache_spec,
                 kernel_num_blocks,
                 kernel_block_size,
-                kv_cache_spec.num_kv_heads,
-                kv_cache_spec.head_size,
-                cache_dtype_str=cache_dtype,
+                cache_dtype,
+                kv_cache_shape_prefix=(num_layers,),
+                include_num_layers_dimension=True,
             )
-        else:
-            kv_cache_shape = attn_backend.get_kv_cache_shape(  # type: ignore[call-arg]
-                kernel_num_blocks,
-                kernel_block_size,
-                kv_cache_spec.num_kv_heads,
-                kv_cache_spec.head_size,
-                cache_dtype_str=cache_dtype,
-                head_size_v=head_size_v,
-            )
-
-        # prepend a num_layers dimension into the shape
-        kv_cache_shape = (num_layers,) + kv_cache_shape
-
-        try:
-            if head_size_v is not None:
-                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(  # type: ignore[call-arg]
-                    include_num_layers_dimension=True,
-                    head_size=kv_cache_spec.head_size,
-                    head_size_v=head_size_v,
-                    cache_dtype_str=cache_dtype,
-                )
-            else:
-                kv_cache_stride_order = attn_backend.get_kv_cache_stride_order(
-                    include_num_layers_dimension=True
-                )
-            assert len(kv_cache_stride_order) == len(kv_cache_shape)
-        except (AttributeError, NotImplementedError):
-            kv_cache_stride_order = tuple(range(len(kv_cache_shape)))
+        )
 
         kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
 
