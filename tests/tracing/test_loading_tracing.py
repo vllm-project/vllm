@@ -3,10 +3,17 @@
 import asyncio
 
 import pytest
+from opentelemetry import trace
 from opentelemetry.sdk.environment_variables import OTEL_EXPORTER_OTLP_TRACES_INSECURE
 
 from tests.tracing.conftest import FAKE_TRACE_SERVER_ADDRESS, FakeTraceService
-from vllm.tracing import init_tracer, instrument, is_otel_available
+from vllm.tracing import (
+    extract_trace_context,
+    init_tracer,
+    inject_current_trace_headers,
+    instrument,
+    is_otel_available,
+)
 
 # Skip everything if OTel is missing
 pytestmark = pytest.mark.skipif(not is_otel_available(), reason="OTel required")
@@ -62,6 +69,31 @@ class TestCoreInstrumentation:
 
 class TestInterProcessPropagation:
     """Test the propagation of trace context between processes."""
+
+    def test_inject_current_trace_headers(
+        self, monkeypatch, trace_service: FakeTraceService
+    ):
+        """Test that the active span can be serialized and later reattached."""
+        monkeypatch.setenv(OTEL_EXPORTER_OTLP_TRACES_INSECURE, "true")
+        init_tracer("test.inject", FAKE_TRACE_SERVER_ADDRESS)
+
+        tracer = trace.get_tracer("test.inject")
+
+        with tracer.start_as_current_span("server"):
+            headers = inject_current_trace_headers()
+            assert headers is not None
+            assert "traceparent" in headers
+
+            ctx = extract_trace_context(headers)
+            with tracer.start_as_current_span("child", context=ctx):
+                pass
+
+        assert trace_service.wait_for_spans(count=2)
+        spans = trace_service.get_all_spans()
+        server_span = next(s for s in spans if s["name"] == "server")
+        child_span = next(s for s in spans if s["name"] == "child")
+
+        assert child_span["parent_span_id"] == server_span["span_id"]
 
     def test_pickup_external_context(self, monkeypatch, trace_service):
         """Test that vLLM attaches to an existing trace ID if in environment."""
