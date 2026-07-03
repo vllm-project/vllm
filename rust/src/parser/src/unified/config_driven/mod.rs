@@ -71,14 +71,14 @@ pub trait ParserFormat: 'static {
     /// End marker of one tool call. Scan target of [`ParserFormat::ArgsScan`].
     const CALL_END: &'static str;
 
-    /// Wrapper markers around consecutive tool calls (e.g. Qwen3's
+    /// Section markers around consecutive tool calls (e.g. Qwen3's
     /// `<tool_call>`/`</tool_call>` around `<function=...>` blocks), or `None`
     /// when each `CALL_START`..`CALL_END` stands alone.
-    const WRAPPER: Option<(&'static str, &'static str)> = None;
+    const SECTION: Option<(&'static str, &'static str)> = None;
 
-    /// Swallow all output after the wrapper closes, like the `IgnoredRest`
-    /// event in standalone parsers. Only meaningful with `WRAPPER`.
-    const SUPPRESS_TEXT_AFTER_WRAPPER: bool = false;
+    /// Swallow all output after the section closes, like the `IgnoredRest`
+    /// event in standalone parsers. Only meaningful with `SECTION`.
+    const SUPPRESS_TEXT_AFTER_SECTION: bool = false;
 
     /// Token texts of the reasoning boundary markers, used only to derive the
     /// initial parser state from prompt token IDs (never for stream matching).
@@ -127,8 +127,8 @@ impl ArgsEndScan for PlainArgsScan {
 enum Boundary {
     ReasoningStart,
     ReasoningEnd,
-    WrapperStart,
-    WrapperEnd,
+    SectionStart,
+    SectionEnd,
     CallStart,
 }
 
@@ -157,7 +157,7 @@ enum Mode<F: ParserFormat> {
     Text,
     /// Inside a reasoning block.
     Reasoning,
-    /// Inside the wrapper, between tool calls. Unreachable without `WRAPPER`.
+    /// Inside the section, between tool calls. Unreachable without `SECTION`.
     ToolBetween,
     /// After `CALL_START`, parsing the tool-call header.
     ToolHeader,
@@ -168,7 +168,7 @@ enum Mode<F: ParserFormat> {
         raw_header: String,
         scan: F::ArgsScan,
     },
-    /// Wrapper closed with `SUPPRESS_TEXT_AFTER_WRAPPER`: swallow the rest.
+    /// Section closed with `SUPPRESS_TEXT_AFTER_SECTION`: swallow the rest.
     Done,
 }
 
@@ -198,19 +198,19 @@ struct ModeMarkerSet {
 impl ModeMarkerSet {
     fn of<F: ParserFormat>() -> Self {
         // The tool-entry marker watched in text and reasoning modes: the
-        // wrapper opener when the format has one, the call start otherwise.
-        let tool_entry = match F::WRAPPER {
-            Some((wrapper_start, _)) => (wrapper_start, Boundary::WrapperStart),
+        // section opener when the format has one, the call start otherwise.
+        let tool_entry = match F::SECTION {
+            Some((section_start, _)) => (section_start, Boundary::SectionStart),
             None => (F::CALL_START, Boundary::CallStart),
         };
         let reasoning_start = F::REASONING_START.map(|marker| (marker, Boundary::ReasoningStart));
         // Tool entry inside reasoning implicitly ends it: the transition to a
         // tool state simply stops routing text to the reasoning channel.
         let reasoning_end = F::REASONING_END.map(|marker| (marker, Boundary::ReasoningEnd));
-        let between = F::WRAPPER.map(|(_, wrapper_end)| {
+        let between = F::SECTION.map(|(_, section_end)| {
             [
                 (F::CALL_START, Boundary::CallStart),
-                (wrapper_end, Boundary::WrapperEnd),
+                (section_end, Boundary::SectionEnd),
             ]
         });
 
@@ -279,9 +279,9 @@ impl<F: ParserFormat> ConfigDrivenParser<F> {
             Event::Boundary(boundary) => match boundary {
                 Boundary::ReasoningStart => self.mode = Mode::Reasoning,
                 Boundary::ReasoningEnd => self.mode = Mode::Text,
-                Boundary::WrapperStart => self.mode = Mode::ToolBetween,
-                Boundary::WrapperEnd => {
-                    self.mode = if F::SUPPRESS_TEXT_AFTER_WRAPPER {
+                Boundary::SectionStart => self.mode = Mode::ToolBetween,
+                Boundary::SectionEnd => {
+                    self.mode = if F::SUPPRESS_TEXT_AFTER_SECTION {
                         Mode::Done
                     } else {
                         Mode::Text
@@ -313,7 +313,7 @@ impl<F: ParserFormat> ConfigDrivenParser<F> {
                     arguments,
                 });
                 self.emitted_tool_count += 1;
-                self.mode = if F::WRAPPER.is_some() {
+                self.mode = if F::SECTION.is_some() {
                     Mode::ToolBetween
                 } else {
                     Mode::Text
@@ -344,7 +344,7 @@ impl<F: ParserFormat> ConfigDrivenParser<F> {
                 let start = F::REASONING_START.unwrap_or("");
                 format!("{}{}", start, std::mem::take(&mut self.buffer))
             }
-            // The wrapper opener was already consumed alongside previously
+            // The section opener was already consumed alongside previously
             // emitted calls, so only the unconsumed buffer remains.
             Mode::ToolBetween => std::mem::take(&mut self.buffer),
             Mode::ToolHeader => {
@@ -405,7 +405,7 @@ impl<F: ParserFormat> UnifiedParser for ConfigDrivenParser<F> {
         match &self.mode {
             Mode::Text => output.push_text(std::mem::take(&mut self.buffer)),
             Mode::Reasoning => output.push_reasoning(std::mem::take(&mut self.buffer)),
-            // All calls were emitted; an unclosed wrapper at end of stream is
+            // All calls were emitted; an unclosed section at end of stream is
             // tolerated and any buffered between-call noise is dropped.
             Mode::ToolBetween | Mode::Done => {}
             Mode::ToolHeader | Mode::ToolArgs { .. } => {
@@ -459,7 +459,7 @@ fn boundary_or_content(
     content: Event,
 ) -> ModalResult<Event> {
     // Engine invariant: every reachable mode watches at least one marker
-    // (`ToolBetween` without `WRAPPER` is unreachable).
+    // (`ToolBetween` without `SECTION` is unreachable).
     debug_assert!(!markers.texts.is_empty());
     for (marker, boundary) in markers.texts.iter().zip(&markers.boundaries) {
         let matched: ModalResult<&str> = literal(*marker).parse_next(input);
