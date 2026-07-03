@@ -190,6 +190,23 @@ class Worker(WorkerBase):
         return self._sleep_mode_backend
 
     def sleep(self, level: int = 1) -> None:
+        backend = self._get_sleep_mode_backend()
+        if (
+            not backend.preserves_communicators()
+            and self.parallel_config.world_size_across_dp > 1
+        ):
+            # Fail loudly before any state is destroyed. #46877 owns the
+            # checkpoint lifecycle itself; this only refuses the case it
+            # cannot cover, since the communicator hooks remain no-ops for
+            # NCCL pending an NCCLCheckpoint shim (RFC #34303).
+            raise NotImplementedError(
+                "This sleep-mode backend does not preserve communicators, "
+                "and multi-process suspend (world_size_across_dp="
+                f"{self.parallel_config.world_size_across_dp}) needs "
+                "checkpoint support in the comms library, which is still a "
+                "no-op for NCCL (RFC #34303)."
+            )
+
         torch.accelerator.synchronize()
         free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
@@ -205,7 +222,7 @@ class Worker(WorkerBase):
                 inner, "_build_fused_kv_buffers"
             )
 
-        self._get_sleep_mode_backend().suspend(level)
+        backend.suspend(level)
 
         torch.accelerator.synchronize()
         deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
