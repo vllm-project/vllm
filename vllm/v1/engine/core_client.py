@@ -1222,9 +1222,7 @@ class AsyncMPClient(MPClient):
         return {
             "schema_version": 1,
             "total_engines": len(self.engine_ranks_managed),
-            "engines": [
-                {"id": res["engine_id"], "status": res["status"]},
-            ],
+            "engines": [res],
         }
 
 

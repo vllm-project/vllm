@@ -20,6 +20,10 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+# All2all backends that support fault-tolerant timeout + rank masking,
+# required for FT under DP+EP MoE deployments.
+FT_BACKEND_SET = frozenset({"deepep_low_latency", "nixl_ep"})
+
 
 class WorkerSentinel:
     """Holds FT state for a single worker (mask tensors, DP config).
@@ -33,6 +37,11 @@ class WorkerSentinel:
         self.dp_rank = worker.parallel_config.data_parallel_rank
         self.dp_size = worker.parallel_config.data_parallel_size
         self.data_parallel_master_ip = worker.parallel_config.data_parallel_master_ip
+        all2all_backend = worker.parallel_config.all2all_backend
+        assert all2all_backend in FT_BACKEND_SET, (
+            f"Fault tolerance requires an FT-capable all2all backend "
+            f"(one of {sorted(FT_BACKEND_SET)}), but got '{all2all_backend}'."
+        )
 
     def handle_command(self, ft_request: FaultToleranceRequest):
         """Dispatch an FT command by instruction name."""

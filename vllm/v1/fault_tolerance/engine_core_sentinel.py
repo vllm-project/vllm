@@ -37,6 +37,7 @@ class EngineCoreSentinel:
         self.resumed = threading.Event()
         self.resumed.set()
         self.status_type = EngineStatusType.HEALTHY
+        self.fault_info: str | None = None
         self._dp_reinit_epoch = 0
 
     def handle_command(self, client_idx: int, call_id: int, ft_args: dict):
@@ -72,17 +73,19 @@ class EngineCoreSentinel:
             engine.batch_queue.clear()
 
         self.status_type = EngineStatusType.UNHEALTHY
+        self.fault_info = f"{type(exc).__name__}: {exc}"
         logger.info(
             "[FT] Engine %d status -> UNHEALTHY:", self.engine_index, exc_info=exc
         )
 
     def status(self, ft_request: FaultToleranceRequest) -> dict:
-        return {
-            "request_id": ft_request.request_id,
-            "success": True,
-            "engine_id": self.engine_index,
+        result = {
+            "id": self.engine_index,
             "status": self.status_type.name.lower(),
         }
+        if self.status_type == EngineStatusType.UNHEALTHY:
+            result["fault_info"] = self.fault_info
+        return result
 
     def retry(self, ft_request: FaultToleranceRequest) -> dict:
         engine = self.engine
