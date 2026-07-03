@@ -46,6 +46,7 @@ from vllm.models.deepseek_v4.common.ops import (
     mtp_shared_head_rmsnorm,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
 
 from .model import (
     DeepseekV4DecoderLayer,
@@ -262,6 +263,7 @@ class DeepSeekV4MTP(nn.Module):
         super().__init__()
         self.config = vllm_config.model_config.hf_config
         self.quant_config = vllm_config.quant_config
+        self.parallel_config = vllm_config.parallel_config
         self.model = DeepSeekV4MultiTokenPredictor(
             vllm_config=vllm_config, prefix=maybe_prefix(prefix, "model")
         )
@@ -358,7 +360,20 @@ class DeepSeekV4MTP(nn.Module):
             else ".weight_scale_inv"
         )
 
+        # Block-FP8 shared experts: the MTP block builds them (via the shared
+        # ``DeepseekV4MLP``) with a TP-padded intermediate so the even TP split
+        # stays block-aligned. Pad the checkpoint tensors to match before the
+        # standard loaders slice them (trailing ranks land on the zero pad).
+        # Mirrors ``DeepseekV4Model.load_weights``; SP / unquantized ones need
+        # no padding.
+        pad_shared_expert = (
+            getattr(self.quant_config, "weight_block_size", None) is not None
+            and not self.parallel_config.use_sequence_parallel_moe
+        )
+
         for name, loaded_weight in weights:
+            if pad_shared_expert and ".shared_experts." in name:
+                loaded_weight = self._pad_shared_expert_weight(name, loaded_weight)
             mtp_layer_idx = _find_mtp_layer_idx(name)
             # V4 checkpoints store MTP weights as `mtp.{i}.*`; remap to
             # `model.layers.{num_hidden_layers + i}.*` so that
@@ -482,6 +497,30 @@ class DeepSeekV4MTP(nn.Module):
     def finalize_mega_moe_weights(self) -> None:
         for layer in self.model.layers.values():
             layer.mtp_block.ffn.finalize_mega_moe_weights()
+
+    def _pad_shared_expert_weight(
+        self, name: str, loaded_weight: torch.Tensor
+    ) -> torch.Tensor:
+        """Zero-pad a block-FP8 shared-expert weight/scale on its intermediate
+        axis so the standard TP loaders split it into even, block-aligned shards
+        (trailing ranks get the zero pad). Mirrors ``DeepseekV4Model`` but keys
+        off the raw checkpoint names the MTP loader sees before its inline
+        renames: gate (w1)/up (w3) ``[I, H]`` pad dim 0; down (w2) ``[H, I]``
+        pads dim 1; ``.scale`` axes are already in blocks.
+        """
+        block_size = getattr(self.quant_config, "weight_block_size", None)
+        assert block_size is not None
+        # The intermediate axis is in elements for weights (step = block) and
+        # in blocks for scales.
+        step = 1 if name.endswith(".scale") else block_size[0]
+        dim = 1 if ".shared_experts.w2" in name else 0
+        mult = get_tensor_model_parallel_world_size() * step
+        pad = cdiv(loaded_weight.shape[dim], mult) * mult - loaded_weight.shape[dim]
+        if pad == 0:
+            return loaded_weight
+        pad_shape = list(loaded_weight.shape)
+        pad_shape[dim] = pad
+        return torch.cat([loaded_weight, loaded_weight.new_zeros(pad_shape)], dim=dim)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         """
