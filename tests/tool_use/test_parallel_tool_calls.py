@@ -121,21 +121,29 @@ async def test_parallel_tool_calls(
         for tool_call in streamed_tool_calls or []:
             # deltas arrive in non-decreasing index order
             assert tool_call.index >= tool_call_idx
+
+            # if a new tool is being called, set up empty arguments
             if tool_call.index != tool_call_idx:
                 tool_call_idx = tool_call.index
                 tool_call_args.append("")
 
+            # if a tool call ID is streamed, make sure one hasn't been already
             if tool_call.id:
                 tool_call_id_count += 1
                 assert isinstance(tool_call.id, str) and (len(tool_call.id) >= 9)
 
+            # if parts of the function start being streamed
             if tool_call.function:
+                # if the function name is defined, set it. it should be streamed
+                # IN ENTIRETY, exactly one time.
                 if tool_call.function.name:
                     assert isinstance(tool_call.function.name, str)
                     tool_call_names.append(tool_call.function.name)
 
                 if tool_call.function.arguments:
+                    # make sure they're a string and then add them to the list
                     assert isinstance(tool_call.function.arguments, str)
+
                     tool_call_args[tool_call.index] += tool_call.function.arguments
 
     assert finish_reason_count == 1
