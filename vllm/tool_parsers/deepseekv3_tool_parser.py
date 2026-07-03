@@ -47,15 +47,15 @@ class DeepSeekV3ToolParser(ToolParser):
         self.tool_call_end_token: str = "<｜tool▁call▁end｜>"
 
         self.tool_call_regex = re.compile(
-            r"<｜tool▁call▁begin｜>(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>.*)\n```<｜tool▁call▁end｜>"
+            r"<｜tool▁call▁begin｜>(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n?```json\n(?P<function_arguments>.*)\n```<｜tool▁call▁end｜>"
         )
 
         self.stream_tool_call_portion_regex = re.compile(
-            r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n```json\n(?P<function_arguments>.*[^\n`])"
+            r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n?```json\n(?P<function_arguments>.*[^\n`])"
         )
 
         self.stream_tool_call_name_regex = re.compile(
-            r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*)\n"
+            r"(?P<type>.*)<｜tool▁sep｜>(?P<function_name>.*?)(?:\n|```json)"
         )
 
         if not self.model_tokenizer:
