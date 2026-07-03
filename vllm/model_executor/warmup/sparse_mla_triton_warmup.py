@@ -29,6 +29,8 @@ _GENERIC_SPARSE_MLA_BACKENDS = frozenset(
     }
 )
 
+_INDEXER_PREFILL_CHUNK_METADATA_BACKENDS = frozenset({"DEEPSEEK_V32_INDEXER"})
+
 
 def _attention_backend_name(backend: object) -> str | None:
     get_name = getattr(backend, "get_name", None)
@@ -91,13 +93,6 @@ def _compile_combine_topk_swa_indices_kernel(
         _COMBINE_TOPK_SWA_INDICES_KERNEL.compile(compile_key)
 
 
-def _compile_sparse_mla_triton_kernels(
-    runner: "GPUModelRunner",
-) -> None:
-    _compile_sparse_swa_prefill_metadata_kernel(runner.vllm_config)
-    _compile_prefill_chunk_metadata_kernel(runner.vllm_config)
-
-
 def sparse_mla_triton_warmup(worker: "Worker") -> None:
     runner = worker.model_runner
     if runner.is_pooling_model:
@@ -108,15 +103,21 @@ def sparse_mla_triton_warmup(worker: "Worker") -> None:
     if max_tokens <= 0 or max_num_prefills <= 0:
         return
 
+    vllm_config = runner.vllm_config
     try:
-        has_dsv4_sparse_mla_backend = _has_attention_backend(
-            runner, _DEEPSEEK_V4_SPARSE_MLA_BACKENDS
-        )
-        if has_dsv4_sparse_mla_backend or _has_attention_backend(
+        if _has_attention_backend(runner, _DEEPSEEK_V4_SPARSE_MLA_BACKENDS):
+            _compile_sparse_swa_prefill_metadata_kernel(vllm_config)
+            _compile_prefill_chunk_metadata_kernel(vllm_config)
+            _compile_combine_topk_swa_indices_kernel(vllm_config)
+        elif _has_attention_backend(
             runner, _GENERIC_SPARSE_MLA_BACKENDS
         ):
-            _compile_sparse_mla_triton_kernels(runner)
-        if has_dsv4_sparse_mla_backend:
-            _compile_combine_topk_swa_indices_kernel(runner.vllm_config)
+            _compile_sparse_swa_prefill_metadata_kernel(vllm_config)
+            _compile_prefill_chunk_metadata_kernel(vllm_config)
+        elif _has_attention_backend(
+            runner, _INDEXER_PREFILL_CHUNK_METADATA_BACKENDS
+        ):
+            _compile_prefill_chunk_metadata_kernel(vllm_config)
+
     except Exception:
         logger.warning("Skipping sparse MLA Triton warmup.", exc_info=True)
