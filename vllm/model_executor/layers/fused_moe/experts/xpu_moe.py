@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import inspect
 
 import torch
 
@@ -150,12 +149,6 @@ class XPUExperts(mk.FusedMoEExpertsModular):
     ):
         if self.fused_moe_impl is None:
             topk = topk_ids.size(-1)
-            if (
-                self.quant_config is not None
-                and self.quant_config.weight_quant_dtype == "mxfp4"
-            ):
-                w1 = w1.view(torch.float4_e2m1fn_x2)
-                w2 = w2.view(torch.float4_e2m1fn_x2)
             self.fused_moe_impl = XpuFusedMoe(
                 w13=w1,
                 w13_scales=self.w1_scale,
@@ -171,14 +164,13 @@ class XPUExperts(mk.FusedMoEExpertsModular):
                 gemm1_clamp_limit=self.gemm1_clamp_limit,
             )
         assert self.fused_moe_impl is not None
-        apply_kwargs: dict = {
-            "output": output,
-            "hidden_states": hidden_states,
-            "topk_weights": topk_weights,
-            "topk_ids": topk_ids,
-            "a1q_scale": a1q_scale,
-        }
-        self.fused_moe_impl.apply(**apply_kwargs)
+        self.fused_moe_impl.apply(
+            output=output,
+            hidden_states=hidden_states,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            a1q_scale=a1q_scale,
+        )
 
 
 class XPUExpertsFp8(XPUExperts):
