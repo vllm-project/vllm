@@ -189,7 +189,6 @@ def make_int8_moe_quant_config(
             gemm1_alpha=gemm1_alpha,
             gemm1_beta=gemm1_beta,
             gemm1_clamp_limit=gemm1_clamp_limit,
-
         )
 
     return int8_w8a8_moe_quant_config(
