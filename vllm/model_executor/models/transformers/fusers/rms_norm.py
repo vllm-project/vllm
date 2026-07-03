@@ -8,6 +8,13 @@ from typing import TYPE_CHECKING
 import torch
 from torch import fx, nn
 
+from vllm.distributed import (
+    get_tensor_model_parallel_rank,
+    get_tensor_model_parallel_world_size,
+    tensor_model_parallel_all_gather,
+)
+from vllm.distributed.parallel_state import model_parallel_is_initialized
+from vllm.distributed.utils import split_tensor_along_last_dim
 from vllm.model_executor.layers.layernorm import GemmaRMSNorm, RMSNorm
 from vllm.model_executor.models.transformers.fusers.base import BaseFuser
 from vllm.model_executor.models.transformers.fx_utils import find_node, is_op, peel
@@ -54,6 +61,42 @@ def _is_one_plus(node: object) -> bool:
     if not is_op(node, "add"):
         return False
     return any(isinstance(a, (int, float)) and a == 1 for a in node.args)
+
+
+class TPAwareNormMixin(nn.Module):
+    """Mixin for RMSNorms that reconstructs a TP-sharded input before normalizing."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if model_parallel_is_initialized():
+            self.tp_size = get_tensor_model_parallel_world_size()
+            self.tp_rank = get_tensor_model_parallel_rank()
+        else:
+            self.tp_size, self.tp_rank = 1, 0
+
+    def forward(
+        self, x: torch.Tensor, residual: torch.Tensor | None = None
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        if self.tp_size > 1 and x.shape[-1] < (full := self.weight.shape[0]):
+            if x.shape[-1] * self.tp_size != full:
+                raise ValueError(
+                    f"Cannot gather norm of width {full}: a TP-sharded input of "
+                    f"width {x.shape[-1]} does not tile it evenly across "
+                    f"{self.tp_size} ranks (replicated or uneven sharding)."
+                )
+            x = tensor_model_parallel_all_gather(x.contiguous())
+            x = super().forward(x)
+            splits = split_tensor_along_last_dim(x, num_partitions=self.tp_size)
+            return splits[self.tp_rank]
+        return super().forward(x, residual)
+
+
+class TPAwareRMSNorm(TPAwareNormMixin, RMSNorm):
+    """`RMSNorm` that reconstructs a TP-sharded input before normalizing."""
+
+
+class TPAwareGemmaRMSNorm(TPAwareNormMixin, GemmaRMSNorm):
+    """`GemmaRMSNorm` that reconstructs a TP-sharded input before normalizing."""
 
 
 @dataclass
@@ -145,9 +188,9 @@ class RMSNormFuser(BaseFuser):
             dtype = weight.dtype if weight is not None else model_config.dtype
             eps = torch.finfo(dtype).eps
         if self.zero_centered:
-            return GemmaRMSNorm(hidden_size=hidden_size, eps=eps)
+            return TPAwareGemmaRMSNorm(hidden_size=hidden_size, eps=eps)
         has_weight = self.has_weight and weight is not None
-        return RMSNorm(
+        return TPAwareRMSNorm(
             hidden_size=hidden_size,
             eps=eps,
             has_weight=has_weight,
