@@ -117,6 +117,19 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _get_moe_router_dtype(
+    config: DeepseekV2Config | DeepseekV3Config,
+) -> torch.dtype | None:
+    router_dtype = getattr(config, "moe_router_dtype", None)
+    if getattr(config, "model_type", None) == "glm_moe_dsa":
+        # Older GLM-5/5.2 configs require fp32 routing but do not expose
+        # moe_router_dtype yet.
+        return torch.float32
+    if router_dtype == "float32":
+        return torch.float32
+    return None
+
+
 class DeepseekAttention(nn.Module):
     """Normal MHA implementation used by Deepseek v1."""
 
@@ -288,9 +301,13 @@ class DeepseekV2MoE(nn.Module):
                 "Only silu is supported for now."
             )
 
+        self.router_dtype = _get_moe_router_dtype(config)
         self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
+            params_dtype=self.router_dtype,
+            out_dtype=self.router_dtype,
+            force_fp32_compute=self.router_dtype == torch.float32,
             prefix=f"{prefix}.gate",
         )
         if getattr(config, "topk_method", None) == "noaux_tc":
@@ -321,6 +338,7 @@ class DeepseekV2MoE(nn.Module):
         if (
             self.is_rocm_aiter_moe_enabled
             and self.gate.e_score_correction_bias is not None
+            and self.gate.out_dtype is None
         ):
             # Accumulates in fp32; avoids bf16->fp32 cast.
             self.gate.set_out_dtype(self.gate.weight.dtype)
@@ -1445,6 +1463,8 @@ class DeepseekV2Model(nn.Module):
                 hidden_states, residual = combined_states.split(
                     [self.hidden_size, self.hidden_size], dim=-1
                 )
+                # fused_add_rms_norm requires a contiguous residual
+                residual = residual.contiguous()
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states + residual
                 if aux_hidden_state.shape[0] != positions.shape[0]:
@@ -1469,6 +1489,8 @@ class DeepseekV2Model(nn.Module):
             hidden_states, residual = combined_states.split(
                 [self.hidden_size, self.hidden_size], dim=-1
             )
+            # fused_add_rms_norm requires a contiguous residual
+            residual = residual.contiguous()
 
         if self.end_layer in self.aux_hidden_state_layers:
             aux_hidden_states.append(hidden_states + residual)
