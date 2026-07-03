@@ -2,10 +2,11 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Attention layer with FlashInfer."""
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass
 from functools import partial
-from typing import ClassVar
+from typing import ClassVar, cast
 
 import flashinfer
 import numpy as np
@@ -882,9 +883,23 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             self.num_kv_heads,
             self.head_dim_v,
         )
+        dtype = cast(torch.dtype, self.model_config.dtype)
+        scratch_bytes = (
+            math.prod(scratch_shape) + math.prod(scratch_shape_v)
+        ) * dtype.itemsize
+        # Sliding-window layers currently reserve full-context scratch. A future
+        # window clamp can reduce this to the active window.
         current_workspace_manager().get_simultaneous(
-            (scratch_shape, self.model_config.dtype),
-            (scratch_shape_v, self.model_config.dtype),
+            (scratch_shape, dtype),
+            (scratch_shape_v, dtype),
+        )
+        logger.info(
+            "Reserved %.2f MiB for NVFP4 FA2 prefill scratch workspace: "
+            "k_shape=%s, v_shape=%s, dtype=%s",
+            scratch_bytes / (1024 * 1024),
+            scratch_shape,
+            scratch_shape_v,
+            dtype,
         )
 
     @override  # type: ignore[misc]
