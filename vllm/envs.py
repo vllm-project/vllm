@@ -148,6 +148,7 @@ if TYPE_CHECKING:
     VLLM_USE_RUST_FRONTEND: bool = False
     VLLM_RUST_FRONTEND_PATH: str | None = "auto"
     VLLM_SERVER_DEV_MODE: bool = False
+    VLLM_INCREMENTAL_ENCODING: bool = False
     VLLM_V1_OUTPUT_PROC_CHUNK_SIZE: int = 128
     VLLM_MLA_DISABLE: bool = False
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
@@ -1307,6 +1308,12 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # some additional endpoints for developing and debugging,
     # e.g. `/reset_prefix_cache`
     "VLLM_SERVER_DEV_MODE": lambda: bool(int(os.getenv("VLLM_SERVER_DEV_MODE", "0"))),
+    # If set, enables exact incremental prompt encoding for multi-turn
+    # conversations in the renderer. Fallback for the
+    # `--enable-incremental-encoding` engine argument.
+    "VLLM_INCREMENTAL_ENCODING": lambda: bool(
+        int(os.getenv("VLLM_INCREMENTAL_ENCODING", "0"))
+    ),
     # Controls the maximum number of requests to handle in a
     # single asyncio task when processing per-token outputs in the
     # V1 AsyncLLM interface. It is applicable when handling a high

@@ -327,6 +327,14 @@ class ModelConfig:
     The offline `LLM` entrypoint uses the synchronous renderer path and
     processes prompts (including multimodal preprocessing) serially, so
     this setting has no effect there."""
+    enable_incremental_encoding: bool = False
+    """Enable exact incremental prompt encoding for long multi-turn
+    conversations. The renderer keeps a small LRU of recently encoded
+    (text, token_ids) pairs; when a new prompt extends a cached one, only
+    the tail is re-tokenized and spliced at a verified pre-token boundary,
+    which is token-exact with respect to a full re-encode. Only takes
+    effect for HF fast tokenizers; requests that cannot be served exactly
+    fall back to a full encode."""
 
     # Pooler config
     pooler_config: PoolerConfig | None = None

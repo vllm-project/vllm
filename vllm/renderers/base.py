@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Generic, overload
 
 from typing_extensions import TypeVar
 
+import vllm.envs as envs
 from vllm.inputs import (
     EmbedsInput,
     EmbedsPrompt,
@@ -39,6 +40,7 @@ from vllm.multimodal.processing import BaseMultiModalProcessor
 from vllm.multimodal.processing import ProcessorInputs as MMProcessorInputs
 from vllm.multimodal.registry import MultiModalTimingRegistry
 from vllm.tokenizers import TokenizerLike
+from vllm.tokenizers.incremental_encode import IncrementalEncodeCache
 from vllm.utils.async_utils import make_async
 from vllm.utils.counter import AtomicCounter
 from vllm.utils.torch_utils import set_default_torch_num_threads
@@ -78,6 +80,18 @@ class BaseRenderer(ABC, Generic[_T]):
         self.api_process_rank = config.parallel_config._api_process_rank
 
         self.tokenizer = tokenizer
+
+        # Opt-in exact prefix reuse for long multi-turn prompts. Shared
+        # across requests (renderer-level, above the tokenizer pool);
+        # requests it cannot serve exactly fall through to the regular
+        # encode path, so it is silently inert for tokenizers without an
+        # HF fast backend.
+        self._incremental_encoder: IncrementalEncodeCache | None = None
+        if tokenizer is not None and (
+            config.model_config.enable_incremental_encoding
+            or envs.VLLM_INCREMENTAL_ENCODING
+        ):
+            self._incremental_encoder = IncrementalEncodeCache()
 
         # Shared thread pool executor for blocking tokenizer and
         # multimodal preprocessing operations.  The multimodal processor
@@ -476,6 +490,15 @@ class BaseRenderer(ABC, Generic[_T]):
         tokenizer = self.get_tokenizer()
         want_offsets = self._wants_offsets(prompt, params)
         kwargs = params.get_encode_kwargs()
+        if self._incremental_encoder is not None and not want_offsets:
+            token_ids = self._incremental_encoder.encode(
+                tokenizer,  # type: ignore[arg-type]
+                prompt["prompt"],
+                cache_salt=prompt.get("cache_salt"),
+                **kwargs,
+            )
+            if token_ids is not None:
+                return self._build_tokens_prompt(token_ids, prompt)
         if want_offsets:
             kwargs = {**kwargs, "return_offsets_mapping": True}
         encoding = tokenizer(prompt["prompt"], **kwargs)
