@@ -88,6 +88,7 @@ from vllm.v1.worker.workspace import (
 
 FLASHINFER_WORKSPACE_BUFFER_SIZE_BATCH_INVARIANT = 2048 * 1024 * 1024
 FLASHINFER_DEFAULT_INT_WORKSPACE_BYTES = 8 * 1024 * 1024
+FLASHINFER_INT_WORKSPACE_GRANULARITY_BYTES = 1 << 20
 
 FP8_DTYPE = current_platform.fp8_dtype()
 FP4_DTYPE = torch.uint8
@@ -106,10 +107,20 @@ def _buffer_nbytes(buffer: torch.Tensor | None) -> int:
 class WorkspaceSizes(NamedTuple):
     float_bytes: int
     int_bytes: int = 0
+    has_int_bytes: bool = False
 
     @property
     def total_bytes(self) -> int:
         return self.float_bytes + self.int_bytes
+
+
+def _int_workspace_allocation_bytes(required_bytes: int) -> int:
+    required_bytes = max(int(required_bytes), 0)
+    if required_bytes == 0:
+        return 1
+    return cdiv(required_bytes, FLASHINFER_INT_WORKSPACE_GRANULARITY_BYTES) * (
+        FLASHINFER_INT_WORKSPACE_GRANULARITY_BYTES
+    )
 
 
 def _parse_workspace_sizes(workspace_size: Any) -> WorkspaceSizes:
@@ -127,10 +138,11 @@ def _parse_workspace_sizes(workspace_size: Any) -> WorkspaceSizes:
                     "(float_bytes, int_bytes) pair"
                 )
             float_bytes = int(workspace_size[0])
-            int_bytes = int(workspace_size[1]) if workspace_size_len == 2 else 0
-            return WorkspaceSizes(float_bytes, int_bytes)
+            if workspace_size_len == 2:
+                return WorkspaceSizes(float_bytes, int(workspace_size[1]), True)
+            return WorkspaceSizes(float_bytes, 0, False)
 
-    return WorkspaceSizes(int(workspace_size), 0)
+    return WorkspaceSizes(int(workspace_size), 0, False)
 
 
 def _is_float8_dtype(dtype: torch.dtype) -> bool:
@@ -956,43 +968,64 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self, workspace_size: WorkspaceSizes | int | None
     ) -> WorkspaceSizes:
         if workspace_size is None:
-            return WorkspaceSizes(self._default_workspace_buffer_size(), 0)
+            return WorkspaceSizes(self._default_workspace_buffer_size(), 0, False)
         if isinstance(workspace_size, WorkspaceSizes):
             return workspace_size
-        return WorkspaceSizes(int(workspace_size), 0)
+        return WorkspaceSizes(int(workspace_size), 0, False)
 
     def _ensure_flashinfer_wrapper_int_workspace(
         self,
         wrapper: object,
         required_bytes: int,
+        has_required_bytes: bool,
     ) -> tuple[torch.Tensor | None, bool]:
         int_workspace = getattr(wrapper, "_int_workspace_buffer", None)
         if int_workspace is None:
             return None, False
 
         required_bytes = max(int(required_bytes), 0)
-        if _buffer_nbytes(int_workspace) >= required_bytes:
-            return int_workspace, False
+        current_bytes = _buffer_nbytes(int_workspace)
+        finalized = getattr(wrapper, "_vllm_flashinfer_int_workspace_finalized", False)
+        prepared = getattr(wrapper, "_vllm_flashinfer_int_workspace_prepared", False)
 
-        if getattr(wrapper, "_vllm_flashinfer_int_workspace_finalized", False):
+        if not has_required_bytes:
+            if current_bytes >= required_bytes:
+                return int_workspace, False
+            target_bytes = max(required_bytes, 1)
+        else:
+            target_bytes = _int_workspace_allocation_bytes(required_bytes)
+            if finalized:
+                if current_bytes < required_bytes:
+                    raise AssertionError(
+                        "FlashInfer CUDA graph int workspace is finalized but a "
+                        f"larger buffer is required: {current_bytes} bytes "
+                        f"allocated, {required_bytes} bytes required."
+                    )
+                return int_workspace, False
+            if prepared and current_bytes >= required_bytes:
+                return int_workspace, False
+            if current_bytes == target_bytes:
+                return int_workspace, False
+
+        if finalized:
             raise AssertionError(
                 "FlashInfer CUDA graph int workspace is finalized but a larger "
-                f"buffer is required: {_buffer_nbytes(int_workspace)} bytes "
+                f"buffer is required: {current_bytes} bytes "
                 f"allocated, {required_bytes} bytes required."
             )
 
-        if getattr(wrapper, "_vllm_flashinfer_int_workspace_prepared", False):
+        if prepared:
             logger.warning(
                 "Growing FlashInfer int workspace after initial preparation: "
                 "%.2f MiB -> %.2f MiB. This is allowed for non-captured "
                 "wrappers, but frequent growth means workspace reserve "
                 "candidates are too small.",
-                _buffer_nbytes(int_workspace) / (1 << 20),
-                required_bytes / (1 << 20),
+                current_bytes / (1 << 20),
+                target_bytes / (1 << 20),
             )
 
         int_workspace = torch.empty(
-            (max(required_bytes, 1),), dtype=torch.uint8, device=self.device
+            (target_bytes,), dtype=torch.uint8, device=self.device
         )
         object.__setattr__(wrapper, "_int_workspace_buffer", int_workspace)
         return int_workspace, True
@@ -1025,7 +1058,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ) -> None:
         sizes = self._normalize_workspace_sizes(workspace_size)
         int_workspace, int_workspace_changed = (
-            self._ensure_flashinfer_wrapper_int_workspace(wrapper, sizes.int_bytes)
+            self._ensure_flashinfer_wrapper_int_workspace(
+                wrapper, sizes.int_bytes, sizes.has_int_bytes
+            )
         )
         float_workspace = self._get_workspace_buffer(sizes.float_bytes)
         if (
@@ -1504,6 +1539,10 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         max_prefill_workspace_size.int_bytes,
                         workspace_sizes.int_bytes,
                     ),
+                    (
+                        max_prefill_workspace_size.has_int_bytes
+                        or workspace_sizes.has_int_bytes
+                    ),
                 )
 
         reserved_sizes = max_prefill_workspace_size
@@ -1529,6 +1568,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             reserved_sizes = WorkspaceSizes(
                 max(reserved_sizes.float_bytes, decode_sizes.float_bytes),
                 reserved_sizes.int_bytes + decode_sizes.int_bytes,
+                reserved_sizes.has_int_bytes or decode_sizes.has_int_bytes,
             )
 
         if self.enable_cuda_graph:
@@ -1544,6 +1584,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 reserved_sizes = WorkspaceSizes(
                     max(reserved_sizes.float_bytes, decode_sizes.float_bytes),
                     reserved_sizes.int_bytes + decode_sizes.int_bytes,
+                    reserved_sizes.has_int_bytes or decode_sizes.has_int_bytes,
                 )
 
         if reserved_sizes.total_bytes <= 0:

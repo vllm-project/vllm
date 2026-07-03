@@ -80,7 +80,7 @@ def test_flashinfer_workspace_size_parses_sequence_like_array():
 
     assert flashinfer_backend._parse_workspace_sizes(
         _FakeWorkspaceSizeArray([1024, 64])
-    ) == WorkspaceSizes(1024, 64)
+    ) == WorkspaceSizes(1024, 64, True)
 
 
 def test_flashinfer_workspace_size_float_only_keeps_default_int_workspace():
@@ -100,6 +100,28 @@ def test_flashinfer_workspace_size_float_only_keeps_default_int_workspace():
 
     assert wrapper._float_workspace_buffer.numel() == 1024
     assert wrapper._int_workspace_buffer.numel() == 64
+
+
+def test_flashinfer_workspace_size_explicit_int_shrinks_default_workspace():
+    pytest.importorskip("flashinfer")
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    WorkspaceSizes = flashinfer_backend.WorkspaceSizes
+    mib = 1 << 20
+    builder = _make_flashinfer_builder(flashinfer_backend)
+    wrapper = _FakeFlashInferWrapper(int_workspace_bytes=8 * mib)
+
+    reset_workspace_manager()
+    init_workspace_manager(torch.device("cpu"))
+    try:
+        builder._ensure_flashinfer_wrapper_workspace(
+            wrapper, WorkspaceSizes(1024, 64 * 1024, True)
+        )
+    finally:
+        reset_workspace_manager()
+
+    assert wrapper._float_workspace_buffer.numel() == 1024
+    assert wrapper._int_workspace_buffer.numel() == mib
 
 
 def test_flashinfer_workspace_size_rejects_invalid_sequence_length():
@@ -179,18 +201,22 @@ def test_flashinfer_workspace_buffer_growth_resets_registered_wrappers():
             )
         )
         builder._register_workspace_wrapper(wrapper)
-        builder._ensure_flashinfer_wrapper_workspace(wrapper, WorkspaceSizes(1024, 16))
+        builder._ensure_flashinfer_wrapper_workspace(
+            wrapper, WorkspaceSizes(1024, 16, True)
+        )
 
         assert builder._workspace_buffer.numel() == 1024
         assert wrapper._float_workspace_buffer.data_ptr() == (
             builder._workspace_buffer.data_ptr()
         )
         assert wrapper._float_workspace_buffer.numel() == 1024
-        assert wrapper._int_workspace_buffer.numel() == 16
+        assert wrapper._int_workspace_buffer.numel() == 1 << 20
         reset_calls = wrapper.reset_calls
         assert reset_calls >= 1
 
-        builder._ensure_flashinfer_wrapper_workspace(wrapper, WorkspaceSizes(1024, 16))
+        builder._ensure_flashinfer_wrapper_workspace(
+            wrapper, WorkspaceSizes(1024, 16, True)
+        )
         assert wrapper.reset_calls == reset_calls
 
         wrapper_ref = weakref.ref(wrapper)
@@ -217,8 +243,12 @@ def test_flashinfer_int_workspace_is_per_wrapper():
         first = _FakeFlashInferWrapper()
         second = _FakeFlashInferWrapper()
 
-        builder._ensure_flashinfer_wrapper_workspace(first, WorkspaceSizes(1024, 32))
-        builder._ensure_flashinfer_wrapper_workspace(second, WorkspaceSizes(1024, 32))
+        builder._ensure_flashinfer_wrapper_workspace(
+            first, WorkspaceSizes(1024, 32, True)
+        )
+        builder._ensure_flashinfer_wrapper_workspace(
+            second, WorkspaceSizes(1024, 32, True)
+        )
 
         assert first._float_workspace_buffer.data_ptr() == (
             second._float_workspace_buffer.data_ptr()
@@ -226,8 +256,8 @@ def test_flashinfer_int_workspace_is_per_wrapper():
         assert first._int_workspace_buffer.data_ptr() != (
             second._int_workspace_buffer.data_ptr()
         )
-        assert first._int_workspace_buffer.numel() == 32
-        assert second._int_workspace_buffer.numel() == 32
+        assert first._int_workspace_buffer.numel() == 1 << 20
+        assert second._int_workspace_buffer.numel() == 1 << 20
     finally:
         reset_workspace_manager()
 
@@ -246,7 +276,7 @@ def test_flashinfer_finalized_int_workspace_cannot_grow():
     try:
         with pytest.raises(AssertionError, match="int workspace is finalized"):
             builder._ensure_flashinfer_wrapper_workspace(
-                wrapper, WorkspaceSizes(1024, 16)
+                wrapper, WorkspaceSizes(1024, 16, True)
             )
     finally:
         reset_workspace_manager()
@@ -270,10 +300,14 @@ def test_flashinfer_non_cudagraph_int_workspace_can_grow(monkeypatch):
     reset_workspace_manager()
     init_workspace_manager(torch.device("cpu"))
     try:
-        builder._ensure_flashinfer_wrapper_workspace(wrapper, WorkspaceSizes(1024, 8))
-        builder._ensure_flashinfer_wrapper_workspace(wrapper, WorkspaceSizes(1024, 16))
+        builder._ensure_flashinfer_wrapper_workspace(
+            wrapper, WorkspaceSizes(1024, 8, True)
+        )
+        builder._ensure_flashinfer_wrapper_workspace(
+            wrapper, WorkspaceSizes(1024, 2 << 20, True)
+        )
 
-        assert wrapper._int_workspace_buffer.numel() == 16
+        assert wrapper._int_workspace_buffer.numel() == 2 << 20
         assert wrapper.reset_calls == 2
         assert any("Growing FlashInfer int workspace" in msg for msg in warnings)
     finally:
@@ -316,7 +350,11 @@ def test_flashinfer_reserves_prefill_tail_workspace(monkeypatch):
         qo_indptr = kwargs["qo_indptr_cpu"]
         query_lens = torch.diff(qo_indptr).tolist()
         observed_query_lens.extend(query_lens)
-        return WorkspaceSizes(4096, 64) if query_lens == [3] else WorkspaceSizes(0, 0)
+        return (
+            WorkspaceSizes(4096, 64, True)
+            if query_lens == [3]
+            else WorkspaceSizes(0, 0)
+        )
 
     monkeypatch.setattr(
         builder,
@@ -346,7 +384,7 @@ def test_flashinfer_reserves_prefill_tail_workspace(monkeypatch):
     finally:
         reset_workspace_manager()
 
-    assert ensured == [WorkspaceSizes(4096, 64)]
+    assert ensured == [WorkspaceSizes(4096, 64, True)]
     assert 3 in observed_query_lens
     assert 8 in observed_query_lens
 
@@ -367,7 +405,7 @@ def test_flashinfer_reserves_decode_cudagraph_int_workspace(monkeypatch):
     monkeypatch.setattr(
         builder,
         "_get_decode_workspace_size",
-        lambda **kwargs: WorkspaceSizes(128, 32),
+        lambda **kwargs: WorkspaceSizes(128, 32, True),
     )
 
     reset_workspace_manager()
@@ -382,9 +420,9 @@ def test_flashinfer_reserves_decode_cudagraph_int_workspace(monkeypatch):
     finally:
         reset_workspace_manager()
 
-    assert sizes == WorkspaceSizes(128, 32)
+    assert sizes == WorkspaceSizes(128, 32, True)
     assert wrapper._float_workspace_buffer.numel() == 128
-    assert wrapper._int_workspace_buffer.numel() == 32
+    assert wrapper._int_workspace_buffer.numel() == 1 << 20
     assert wrapper.reset_calls == 1
     assert wrapper._vllm_flashinfer_int_workspace_finalized
 
