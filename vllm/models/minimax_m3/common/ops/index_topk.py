@@ -373,7 +373,10 @@ def _decode_index_score_kernel(
             + off_k[:, None] * stride_ik_pos
             + off_d * stride_ik_d,
         )  # [N,D]
-        kq = tl.dot(k, q)  # [N,HQ]
+        # fp32 accumulation is required for the fp8 (e4m3) index cache: q/k are
+        # loaded in their stored dtype (bf16 or e4m3) and the MMA accumulates in
+        # fp32 so the per-block max score is exact for the fp8 indexer too.
+        kq = tl.dot(k, q, out_dtype=tl.float32)  # [N,HQ]
         kq = tl.where(pos_mask & q_mask[None, :], kq, float("-inf"))
         score = tl.max(kq, axis=0)  # [HQ]
         is_visible_block = blk < num_blocks_q
@@ -709,16 +712,25 @@ def minimax_m3_index_topk(
     topk: int,
     init_blocks: int,
     local_blocks: int,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """Select index top-k from a precomputed score tensor."""
+    """Select index top-k from a precomputed score tensor.
+
+    When ``out`` is provided (a ``[num_idx_heads, >=total_q, topk]`` buffer), the
+    result is written into ``out[:, :total_q, :]`` instead of a fresh tensor --
+    used to keep the top-k output at a stable address for cudagraph capture.
+    """
     num_idx_heads = score.shape[0]
     batch = cu_seqlens_q.shape[0] - 1
     total_q = score.shape[1]
-    topk_idx = torch.empty(
-        (num_idx_heads, total_q, topk),
-        dtype=torch.int32,
-        device=score.device,
-    )
+    if out is not None:
+        topk_idx = out[:, :total_q, :]
+    else:
+        topk_idx = torch.empty(
+            (num_idx_heads, total_q, topk),
+            dtype=torch.int32,
+            device=score.device,
+        )
     # block_size_q == 1 -> query blocks coincide with query tokens.
     grid_topk = (max_query_len, batch, num_idx_heads)
     _topk_index_kernel[grid_topk](
@@ -757,10 +769,13 @@ def minimax_m3_index_decode(
     num_kv_heads: int,
     decode_query_len: int,
     max_decode_query_len: int,
+    out: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Decode index block-score + top-k, both split-K (cudagraph-safe).
 
     Returns topk_idx [num_kv_heads, total_q, topk] (0-indexed block ids, -1 pad).
+    When ``out`` ([num_kv_heads, >=total_q, topk]) is given, writes into
+    ``out[:, :total_q, :]`` (stable address for cudagraph) instead of allocating.
     """
     total_q, num_idx_heads, head_dim = idx_q.shape
     assert num_idx_heads == num_kv_heads, (
@@ -834,11 +849,14 @@ def minimax_m3_index_decode(
         **score_kwargs,
     )
 
-    topk_idx = torch.empty(
-        (num_idx_heads, total_q, topk),
-        dtype=torch.int32,
-        device=idx_q.device,
-    )
+    if out is not None:
+        topk_idx = out[:, :total_q, :]
+    else:
+        topk_idx = torch.empty(
+            (num_idx_heads, total_q, topk),
+            dtype=torch.int32,
+            device=idx_q.device,
+        )
     # Chunk count is shape-constant (cudagraph-safe), capped so the merge sorts
     # pow2(num_topk_chunks * pow2(topk)) candidates.
     TOPK_TARGET_GRID = 64

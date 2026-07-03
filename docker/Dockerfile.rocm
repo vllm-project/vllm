@@ -231,7 +231,13 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm_base /docker/Dockerfile.rocm_base
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/ci-rocm.hcl /docker/ci-rocm.hcl
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/docker-bake.hcl /docker/docker-bake.hcl
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/docker-bake-rocm.hcl /docker/docker-bake-rocm.hcl
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/pyproject.toml /pyproject.toml
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
@@ -516,7 +522,13 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/benchmarks /benchmar
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm_base /docker/Dockerfile.rocm_base
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/ci-rocm.hcl /docker/ci-rocm.hcl
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/docker-bake.hcl /docker/docker-bake.hcl
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/docker-bake-rocm.hcl /docker/docker-bake-rocm.hcl
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/pyproject.toml /pyproject.toml
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
@@ -574,6 +586,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Enable fast and less brittle model downloads in tests.
 ENV HF_XET_HIGH_PERFORMANCE=1
 ENV HF_HUB_DOWNLOAD_TIMEOUT=60
+
+# Keep torch.cuda.is_available() fork-safe (see vllm/env_override.py).
+ENV PYTORCH_NVML_BASED_CUDA_CHECK=1
 
 # Pre-install vLLM test dependencies.
 COPY requirements/test/rocm.txt /tmp/rocm-test-reqs.txt
@@ -694,6 +709,9 @@ ENV SAFETENSORS_FAST_GPU=1
 
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
+
+# Keep torch.cuda.is_available() fork-safe (see vllm/env_override.py).
+ENV PYTORCH_NVML_BASED_CUDA_CHECK=1
 
 # Workaround for ROCm profiler limits
 RUN echo "ROCTRACER_MAX_EVENTS=10000000" > ${COMMON_WORKDIR}/libkineto.conf

@@ -3,15 +3,15 @@ use std::collections::BTreeSet;
 pub(crate) mod logprobs;
 pub(crate) mod token_ids;
 
-use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
+use logprobs::validate_logprobs;
+use token_ids::{validate_prompt_token_ids, validate_vocab_range};
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 use vllm_llm::GenerateRequest;
 use vllm_tokenizer::Tokenizer;
 
 use crate::backend::{SamplingHints, SamplingLimits};
 use crate::error::{Error, Result};
 use crate::request::{SamplingParams, TextRequest};
-use logprobs::validate_logprobs;
-use token_ids::{validate_prompt_token_ids, validate_vocab_range};
 
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
@@ -49,11 +49,10 @@ pub fn lower_text_request(
         cache_salt: request.cache_salt.clone(),
         priority: request.priority,
         data_parallel_rank: request.data_parallel_rank,
+        reasoning_parser_kwargs: request.reasoning_parser_kwargs.clone(),
         lora_request: request.lora_request.clone(),
-        // Fields below are currently placeholders.
         arrival_time: None,
         trace_headers: None,
-        reasoning_ended: None,
     };
 
     Ok(PreparedTextRequest {
@@ -129,6 +128,12 @@ pub fn lower_sampling_params(
         prompt_len,
     )?;
     let min_tokens = min_tokens.unwrap_or(0);
+    if min_tokens > max_tokens {
+        return Err(Error::MinTokensExceedsMaxTokens {
+            min_tokens,
+            max_tokens,
+        });
+    }
     let thinking_token_budget = normalize_thinking_token_budget(thinking_token_budget)?;
     let frequency_penalty = frequency_penalty.unwrap_or(0.0);
     let presence_penalty = presence_penalty.unwrap_or(0.0);
@@ -164,6 +169,7 @@ pub fn lower_sampling_params(
         logit_bias,
         allowed_token_ids,
         bad_words_token_ids: tokenize_bad_words(bad_words.as_deref(), tokenizer)?,
+        // TODO: Validate structured-output schemas and regexes before submitting requests to engine-core.
         structured_outputs,
         logprob_token_ids,
         skip_reading_prefix_cache,
@@ -269,67 +275,16 @@ mod tests {
     use std::collections::{BTreeSet, HashMap};
 
     use serial_test::file_serial;
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
     use crate::backend::hf::HfTextBackend;
     use crate::backend::{SamplingHints, TextBackend as _};
-    use crate::error::{LogprobsError, OutOfVocabError};
+    use crate::error::{LogprobsError, TokenIdsError};
     use crate::request::{Prompt, TextRequest};
 
-    /// Stub tokenizer that returns empty token IDs — sufficient for tests that
-    /// don't exercise bad-words tokenization.
-    struct StubTokenizer;
-
-    impl Tokenizer for StubTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(vec![])
-        }
-
-        fn decode(
-            &self,
-            _token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(String::new())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
-    }
-
-    fn stub_tokenizer() -> StubTokenizer {
-        StubTokenizer
-    }
-
-    struct FixedTokenizer {
-        token_ids: Vec<u32>,
-    }
-
-    impl Tokenizer for FixedTokenizer {
-        fn encode(
-            &self,
-            _text: &str,
-            _add_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<Vec<u32>> {
-            Ok(self.token_ids.clone())
-        }
-
-        fn decode(
-            &self,
-            _token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> vllm_tokenizer::Result<String> {
-            Ok(String::new())
-        }
-
-        fn token_to_id(&self, _token: &str) -> Option<u32> {
-            None
-        }
+    fn stub_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
     }
 
     fn sample_request() -> TextRequest {
@@ -411,6 +366,27 @@ mod tests {
         assert!(matches!(
             lower(Some(-2)),
             Err(Error::InvalidThinkingTokenBudget)
+        ));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_min_tokens_above_resolved_max_tokens() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                max_tokens: Some(4),
+                min_tokens: Some(5),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::MinTokensExceedsMaxTokens {
+                min_tokens: 5,
+                max_tokens: 4,
+            }
         ));
     }
 
@@ -554,7 +530,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::OutOfVocab(OutOfVocabError {
+            Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "prompt",
                 token_ids,
                 vocab_size: 2000,
@@ -856,7 +832,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::OutOfVocab(OutOfVocabError {
+            Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "logprob_token_ids",
                 token_ids,
                 vocab_size: 1000,
@@ -877,7 +853,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::OutOfVocab(OutOfVocabError {
+            Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "stop_token_ids",
                 token_ids,
                 vocab_size: 1000,
@@ -898,7 +874,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::OutOfVocab(OutOfVocabError {
+            Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "allowed_token_ids",
                 token_ids,
                 vocab_size: 2000,
@@ -907,10 +883,25 @@ mod tests {
     }
 
     #[test]
+    fn lower_sampling_params_rejects_empty_allowed_token_ids() {
+        let error = lower_sampling_params_with_limits(
+            SamplingParams {
+                allowed_token_ids: Some(vec![]),
+                ..Default::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            Error::TokenIds(TokenIdsError::EmptyAllowedTokenIds)
+        ));
+    }
+
+    #[test]
     fn lower_sampling_params_rejects_out_of_vocab_bad_words() {
-        let tokenizer = FixedTokenizer {
-            token_ids: vec![1999, 2000],
-        };
+        let tokenizer = TestTokenizer::new().with_regular_token("blocked", 2000);
         let error = lower_sampling_params(
             SamplingParams {
                 bad_words: Some(vec!["blocked".to_string()]),
@@ -925,7 +916,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::OutOfVocab(OutOfVocabError {
+            Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "bad_words",
                 token_ids,
                 vocab_size: 2000,
@@ -946,7 +937,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            Error::OutOfVocab(OutOfVocabError {
+            Error::TokenIds(TokenIdsError::OutOfVocab {
                 parameter: "logit_bias",
                 token_ids,
                 vocab_size: 1000,
