@@ -113,11 +113,16 @@ async def abort_requests(raw_request: Request) -> JSONResponse:
             await engine.abort(request_ids)
         else:
             # The dev RL server runs AsyncLLM; abort everything it is tracking.
-            # request_states is keyed by internal ids, so abort as internal.
+            # request_states is keyed by internal ids; parent_requests holds
+            # parallel-sampling parents. Abort both as internal ids.
             from vllm.v1.engine.async_llm import AsyncLLM
 
             assert isinstance(engine, AsyncLLM)
-            request_ids = list(engine.output_processor.request_states.keys())
+            op = engine.output_processor
+            request_ids = [
+                *op.request_states.keys(),
+                *op.parent_requests.keys(),
+            ]
             await engine.abort(request_ids, internal=True)
         return JSONResponse(
             content={"status": "aborted", "aborted": len(request_ids)},
