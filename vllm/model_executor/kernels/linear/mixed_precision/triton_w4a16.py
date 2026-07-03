@@ -242,6 +242,10 @@ def triton_w4a16_gemm(
     # scale group per tile.
     if group_size < BLOCK_K:
         BLOCK_K = group_size
+      
+    assert group_size % BLOCK_K == 0, (
+        f"Each K iteration must share a group."
+    )
 
     grid = (triton.cdiv(M, BLOCK_M), triton.cdiv(N, BLOCK_N))
 
