@@ -551,3 +551,28 @@ def test_flash_attn_accepts_handled_fp8_variants(
 
     monkeypatch.setattr(fa_mod.current_platform, "is_xpu", lambda: True)
     assert FlashAttentionBackend.supports_kv_cache_dtype(kv_cache_dtype)
+
+
+@pytest.mark.parametrize(
+    "major, minor, supported",
+    [
+        (7, 0, False),  # Volta: below FlashInfer's SM75 floor
+        (7, 5, True),  # Turing (T4, RTX 20xx, Quadro RTX): must stay supported
+        (8, 0, True),  # Ampere
+        (9, 0, True),  # Hopper
+        (12, 1, True),  # Upper bound
+        (12, 2, False),  # Above the supported ceiling
+    ],
+)
+def test_flashinfer_supports_sm75_turing(major: int, minor: int, supported: bool):
+    """FlashInfer must remain available on SM75 (Turing) so FP8 KV cache is not
+    silently dropped there. Regression test for
+    https://github.com/vllm-project/vllm/issues/47549."""
+    pytest.importorskip("flashinfer")
+    from vllm.platforms.interface import DeviceCapability
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    assert (
+        FlashInferBackend.supports_compute_capability(DeviceCapability(major, minor))
+        is supported
+    )
