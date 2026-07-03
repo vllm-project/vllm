@@ -23,6 +23,14 @@ try:
 except ImportError:
     pd = PlaceholderModule("pandas")
 
+# Upper token-count bound for using AITER's fused post+pre kernel. Above this we
+# fall back to unfused aiter (mhc_post + mhc_pre): on gfx950 the fused kernel
+# regresses ~14% in a bubble near m~=768 (aiter fuses up to m<1024), and this
+# also matches the max decode CUDA-graph size (512), so every captured decode
+# step fuses while larger mixed/prefill steps take the faster unfused path.
+AITER_MHC_FUSED_MAX_M = 512
+
+
 # fp8_dtype is not cached.
 # on ROCm the fp8_dtype always calls is_fp8_fnuz
 # which is a host op, so we cache it once here.
@@ -3088,6 +3096,78 @@ class rocm_aiter_ops:
             comb_res_mix.view(num_tokens, hc_mult, hc_mult),
         )
         return out.view_as(residual)
+
+    @staticmethod
+    def mhc_fused_post_pre(
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        post_layer_mix: torch.Tensor,
+        comb_res_mix: torch.Tensor,
+        fn: torch.Tensor,
+        hc_scale: torch.Tensor,
+        hc_base: torch.Tensor,
+        rms_eps: float,
+        hc_pre_eps: float,
+        hc_sinkhorn_eps: float,
+        hc_post_mult_value: float,
+        sinkhorn_repeat: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Fused mHC post (layer N) + pre (layer N+1).
+
+        For m <= ``AITER_MHC_FUSED_MAX_M`` uses AITER's fused kernel; above that
+        (the gfx950 fused-kernel bubble and prefill/mixed steps) falls back to the
+        faster unfused aiter ``mhc_post`` + ``mhc_pre``. Either way returns
+        ``(next_residual, post_mix, comb_mix, layer_input)`` (AITER's fused call
+        returns ``(post_mix, comb_mix, layer_input, next_residual)``; we reorder).
+        """
+        hc_mult = residual.shape[-2]
+        hidden_size = residual.shape[-1]
+        outer_shape = residual.shape[:-2]
+        residual_flat = residual.view(-1, hc_mult, hidden_size)
+        num_tokens = residual_flat.shape[0]
+
+        if num_tokens == 0 or num_tokens > AITER_MHC_FUSED_MAX_M:
+            # Unfused aiter: post then next-layer pre (same 4-tuple contract).
+            next_residual = rocm_aiter_ops.mhc_post(
+                x, residual, post_layer_mix, comb_res_mix
+            )
+            post_mix, comb_mix, layer_input = rocm_aiter_ops.mhc_pre(
+                next_residual,
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+            )
+            return next_residual, post_mix, comb_mix, layer_input
+
+        from aiter.ops.mhc import mhc_fused_post_pre
+
+        # AITER's wrapper allocates without explicit device args; scope it.
+        with torch.device(residual_flat.device):
+            post_mix, comb_mix, layer_input, next_residual = mhc_fused_post_pre(
+                x.view(num_tokens, hidden_size),
+                residual_flat,
+                post_layer_mix.view(num_tokens, hc_mult, 1),
+                comb_res_mix.view(num_tokens, hc_mult, hc_mult),
+                fn,
+                hc_scale,
+                hc_base,
+                rms_eps,
+                hc_pre_eps,
+                hc_sinkhorn_eps,
+                hc_post_mult_value,
+                sinkhorn_repeat,
+            )
+        return (
+            next_residual.view(*outer_shape, hc_mult, hidden_size),
+            post_mix.view(*outer_shape, hc_mult, 1),
+            comb_mix.view(*outer_shape, hc_mult, hc_mult),
+            layer_input.view(*outer_shape, hidden_size),
+        )
 
 
 rocm_aiter_ops.register_ops_once()
