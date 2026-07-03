@@ -62,10 +62,10 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         self.out_dtype = moe_config.in_dtype
         self.num_local_experts = moe_config.num_local_experts
         self.ep_rank = moe_config.moe_parallel_config.ep_rank
-        # FC2 input scale tensor bound in process_weights_after_loading: the
-        # calibrated (now-zeroed) a2_gscale for static-quant checkpoints, or
-        # a synthesized uniform-1.0 tensor for W4A16 checkpoints that lack
-        # one. Holding it on the instance keeps apply() alloc-free.
+        # FC2 input scale tensor bound in process_weights_after_loading. For
+        # W4A4 checkpoints this is the checkpoint's small activation input
+        # scale; W4A16 checkpoints use a synthesized uniform-1.0 tensor.
+        # Holding it on the instance keeps apply() alloc-free.
         self._fc2_input_scale: torch.Tensor | None = None
 
         # Shape params for B12xMoEWrapper construction.
@@ -102,120 +102,73 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
         self.w1_sf_mma: torch.Tensor | None = None
         self.w2_sf_mma: torch.Tensor | None = None
 
-        # CUTLASS-format scales saved before the in-place B12x rewrite in
-        # process_weights_after_loading. Only populated when
-        # cutlass_prefill_threshold > 0.
-        self._cutlass_w13_scale: torch.Tensor | None = None
-        self._cutlass_w2_scale: torch.Tensor | None = None
-        self._cutlass_a1_gscale: torch.Tensor | None = None
-        self._cutlass_a2_gscale: torch.Tensor | None = None
-        self._cutlass_g1_alphas: torch.Tensor | None = None
-        self._cutlass_g2_alphas: torch.Tensor | None = None
+        # Frozen CUTLASS-format scales saved before the live tensors are
+        # converted in-place to B12x's scale convention. Only populated when
+        # hybrid dispatch is enabled.
+        self._cutlass_quant_scales: list[torch.Tensor] | None = None
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        # When hybrid CUTLASS prefill is enabled, save copies of the
-        # CUTLASS-format scales BEFORE the in-place B12x rewrite below
-        # destroys them. The FP4 weight bytes themselves are reusable —
-        # prepare_nvfp4_moe_layer_for_fi_or_cutlass produces the same
-        # [w3, w1] reorder + swizzled SF for both FLASHINFER_CUTLASS and
-        # FLASHINFER_B12X — so we only need to clone the scales.
-        #
-        # g_alphas: B12x leaves g1_alphas = 1/w_gs (does NOT fold
-        # a_input_scale). CUTLASS wants 1/(a_gs * w_gs) = (1/w_gs) / a_gs,
-        # hence the division.
-        #
-        # The clones are registered as nn.Parameter on the layer so
-        # FusedMoE.get_expert_weights picks them up and EPLB rearranges
-        # them in lockstep with the live b12x scales.
+        w13_input_scale = getattr(layer, "w13_input_scale", None)
+        w2_input_scale = getattr(layer, "w2_input_scale", None)
+        has_activation_scales = (
+            w13_input_scale is not None
+            and w2_input_scale is not None
+            and self.a1_gscale is not None
+            and self.a2_gscale is not None
+        )
+
+        # CUTLASS and B12x share the packed FP4 bytes but consume different
+        # scale conventions. Preserve CUTLASS's normalized representation
+        # before rewriting the live tensors for B12x:
+        #   [1/a1, normalized_w1_sf, weight_alpha1*a1,
+        #    1/a2, normalized_w2_sf, weight_alpha2*a2]
+        # where a1/a2 are the checkpoint's small activation input scales.
         if self.cutlass_prefill_threshold > 0:
-            assert layer.w13_weight_scale.dtype == torch.float8_e4m3fn, (
-                "Expected swizzled FP8 SF before B12x rewrite, got "
-                f"{layer.w13_weight_scale.dtype}"
-            )
-            cutlass_w13_scale = layer.w13_weight_scale.clone()
-            cutlass_w2_scale = layer.w2_weight_scale.clone()
-            cutlass_a1_gscale = self.a1_gscale.clone()
-            cutlass_a2_gscale = self.a2_gscale.clone()
-            cutlass_g1_alphas = (
-                self.g1_alphas.float() / self.a1_gscale
-            ).contiguous()
-            cutlass_g2_alphas = (
-                self.g2_alphas.float() / self.a2_gscale
-            ).contiguous()
+            if not has_activation_scales:
+                raise RuntimeError(
+                    "Hybrid B12x/CUTLASS dispatch requires an NVFP4 W4A4 "
+                    "checkpoint with w13_input_scale and w2_input_scale."
+                )
+            assert self.a1_gscale is not None and self.a2_gscale is not None
+            assert w13_input_scale is not None and w2_input_scale is not None
+            self._cutlass_quant_scales = [
+                self.a1_gscale.detach().clone(),
+                layer.w13_weight_scale.detach().clone().view(torch.int32),
+                (layer.w13_weight_scale_2.float() * w13_input_scale.float()).detach(),
+                self.a2_gscale.detach().clone(),
+                layer.w2_weight_scale.detach().clone().view(torch.int32),
+                (layer.w2_weight_scale_2.float() * w2_input_scale.float()).detach(),
+            ]
 
-            layer.register_parameter(
-                "w13_cutlass_weight_scale",
-                torch.nn.Parameter(cutlass_w13_scale, requires_grad=False),
-            )
-            layer.register_parameter(
-                "w2_cutlass_weight_scale",
-                torch.nn.Parameter(cutlass_w2_scale, requires_grad=False),
-            )
-            layer.register_parameter(
-                "w13_cutlass_a_gscale",
-                torch.nn.Parameter(cutlass_a1_gscale, requires_grad=False),
-            )
-            layer.register_parameter(
-                "w2_cutlass_a_gscale",
-                torch.nn.Parameter(cutlass_a2_gscale, requires_grad=False),
-            )
-            layer.register_parameter(
-                "w13_cutlass_g_alphas",
-                torch.nn.Parameter(cutlass_g1_alphas, requires_grad=False),
-            )
-            layer.register_parameter(
-                "w2_cutlass_g_alphas",
-                torch.nn.Parameter(cutlass_g2_alphas, requires_grad=False),
-            )
-
-            # Hold references on the experts class so _ensure_wrapper can
-            # build the quant_scales list without re-fetching from layer.
-            # These alias the registered Parameters' storage, so EPLB
-            # rearrangement of the parameters is observed here too.
-            self._cutlass_w13_scale = layer.w13_cutlass_weight_scale.data
-            self._cutlass_w2_scale = layer.w2_cutlass_weight_scale.data
-            self._cutlass_a1_gscale = layer.w13_cutlass_a_gscale.data
-            self._cutlass_a2_gscale = layer.w2_cutlass_a_gscale.data
-            self._cutlass_g1_alphas = layer.w13_cutlass_g_alphas.data
-            self._cutlass_g2_alphas = layer.w2_cutlass_g_alphas.data
-
-        # Normalise block scales to absorb the per-expert weight global scale
-        # (w_gs).  vLLM's NVFP4 convention stores:
-        #   block_scale = max_abs * w_gs / fp4_max,  g1_alphas = 1/w_gs
-        # The SM12x kernel treats w1_alpha (= g1_alphas) as a per-expert weight
-        # dequant multiplier separate from input_gs (activation scale).  We bake
-        # w_gs into the block scales so that w1_alpha = 1.0 and the kernel sees
-        # the simpler form:
-        #   block_scale = max_abs / fp4_max,  w1_alpha = 1.0
-        # The FP4-packed values and dequantised results are identical in both
-        # representations.  We set scale_2 = 1.0 to signal that the bake-in is
-        # already done.
+        # B12x consumes unnormalized weight SFs and the checkpoint's small
+        # activation scales as w1/w2 alphas. Fold only the per-expert weight
+        # multiplier into each block SF. Folding the activation scale into the
+        # SF as well (or replacing the alpha with 1) changes model numerics.
         layer.w13_weight_scale.data = (
-            layer.w13_weight_scale.float() * layer.w13_weight_scale_2.view(-1, 1, 1)
+            layer.w13_weight_scale.float()
+            * layer.w13_weight_scale_2.float().view(-1, 1, 1)
         ).to(layer.w13_weight_scale.dtype)
-        layer.w13_weight_scale_2.data.fill_(1.0)
-
         layer.w2_weight_scale.data = (
-            layer.w2_weight_scale.float() * layer.w2_weight_scale_2.view(-1, 1, 1)
+            layer.w2_weight_scale.float()
+            * layer.w2_weight_scale_2.float().view(-1, 1, 1)
         ).to(layer.w2_weight_scale.dtype)
-        layer.w2_weight_scale_2.data.fill_(1.0)
 
-        # The SM12x kernel uses dynamic per-block quantization for FC2 input
-        # activations (the SwiGLU output before the down projection).  The
-        # calibrated a2_gscale from the modelopt checkpoint (~tens to hundreds)
-        # is intended for static-quantisation backends (TRTLLM/CUTLASS) and
-        # causes every intermediate activation to saturate at max FP4 when
-        # multiplied by values that large.  Force to 1.0 so the kernel uses
-        # its own per-block dynamic scale.
-        if self.a2_gscale is not None:
-            self.a2_gscale.fill_(1.0)
-            self._fc2_input_scale = self.a2_gscale
+        if has_activation_scales:
+            assert w13_input_scale is not None and w2_input_scale is not None
+            layer.w13_weight_scale_2.data.copy_(
+                w13_input_scale.expand_as(layer.w13_weight_scale_2)
+            )
+            layer.w2_weight_scale_2.data.copy_(
+                w2_input_scale.expand_as(layer.w2_weight_scale_2)
+            )
+            self._fc2_input_scale = w2_input_scale
         else:
             # W4A16 NVFP4 checkpoints have no calibrated a2_gscale; b12x
-            # performs dynamic per-block FC2-input quantization, so a uniform
-            # 1.0 scale per expert is equivalent to the bake-in above for
-            # static-quant checkpoints. Allocate once here so apply() stays
-            # alloc-free.
+            # performs dynamic per-block activation quantization. Keep its
+            # existing unit-alpha behavior and allocate once here so apply()
+            # stays allocation-free.
+            layer.w13_weight_scale_2.data.fill_(1.0)
+            layer.w2_weight_scale_2.data.fill_(1.0)
             self._fc2_input_scale = torch.ones(
                 self.num_local_experts,
                 device=layer.w13_weight.device,
@@ -338,9 +291,10 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             # cutlass_prefill_threshold is gated on a FlashInfer build that
             # exposes the kwarg. Skip silently if absent and threshold is 0;
             # error cleanly if the user is asking for the hybrid path.
-            if "cutlass_prefill_threshold" in inspect.signature(
-                B12xMoEWrapper.__init__
-            ).parameters:
+            if (
+                "cutlass_prefill_threshold"
+                in inspect.signature(B12xMoEWrapper.__init__).parameters
+            ):
                 b12x_kwargs["cutlass_prefill_threshold"] = (
                     self.cutlass_prefill_threshold
                 )
@@ -354,7 +308,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             self._wrapper = B12xMoEWrapper(**b12x_kwargs)
 
         if self.cutlass_prefill_threshold > 0 and not self._cutlass_registered:
-            assert self._cutlass_w13_scale is not None, (
+            assert self._cutlass_quant_scales is not None, (
                 "cutlass_prefill_threshold > 0 but CUTLASS scales were "
                 "not saved in process_weights_after_loading"
             )
@@ -366,14 +320,7 @@ class FlashInferB12xExperts(mk.FusedMoEExpertsModular):
             self._wrapper.register_cutlass_prefill_weights(
                 w1_q=w1,
                 w2_q=w2,
-                quant_scales=[
-                    self._cutlass_a1_gscale,
-                    self._cutlass_w13_scale.view(torch.int32),
-                    self._cutlass_g1_alphas,
-                    self._cutlass_a2_gscale,
-                    self._cutlass_w2_scale.view(torch.int32),
-                    self._cutlass_g2_alphas,
-                ],
+                quant_scales=self._cutlass_quant_scales,
             )
             self._cutlass_registered = True
 
