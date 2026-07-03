@@ -21,7 +21,7 @@ conch-triton-kernels==1.2.1
 timm>=1.0.17
 # amd-quark: required for Quark quantization on ROCm
 # To be consistent with test_quark.py
-amd-quark==0.12.rc4
+amd-quark==0.12rc4
 tilelang==0.1.10
 # Required apache-tvm-ffi matching tilelang version
 apache-tvm-ffi==0.1.10 
