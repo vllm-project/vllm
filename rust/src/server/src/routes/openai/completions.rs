@@ -14,9 +14,11 @@ use axum::http::HeaderMap;
 use axum::response::sse::{Event, Sse};
 use axum::response::{IntoResponse, Response};
 use futures::{Stream, StreamExt as _, pin_mut};
+use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
+use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_text::{
     DecodedPromptLogprobs, DecodedTextEvent, FinishReason, TextOutputStream,
     TextOutputStreamExt as _,
@@ -142,9 +144,7 @@ async fn collect_completion(
         .await
         .map_err(|error| server_error!("completion stream failed: {}", error.to_report_string()))?;
     let finish_reason = collected.finish_reason.clone();
-    let stop_reason = finish_reason
-        .as_stop_reason()
-        .map(|sr| serde_json::to_value(sr).expect("StopReason must serialize to JSON"));
+    let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
 
     let prompt_char_count = echo.as_ref().map(|prompt| text_len(prompt)).unwrap_or_default();
     let logprobs = if requested_logprobs.is_some() && prompt_only {
@@ -181,7 +181,7 @@ async fn collect_completion(
         Some(prompt) if prompt_only => prompt.clone(),
         Some(prompt) => format!("{prompt}{}", collected.text),
     };
-    let finish_reason = completion_finish_reason_to_openai(finish_reason)?.to_string();
+    let finish_reason = completion_finish_reason_to_openai(&finish_reason)?.to_string();
     let usage = Usage::from_token_usage(collected.usage, enable_prompt_tokens_details);
 
     if enable_log_requests {
@@ -441,18 +441,20 @@ fn final_chunk(
     created: u64,
     finish_reason: FinishReason,
 ) -> Result<CompletionStreamResponse, ApiError> {
-    let finish_reason = completion_finish_reason_to_openai(finish_reason)?;
+    let stop_reason = finish_reason.as_stop_reason().map(stop_reason_to_json);
+    let finish_reason = completion_finish_reason_to_openai(&finish_reason)?;
 
     let mut chunk = CompletionStreamResponse::new(request_id, response_model, created);
     chunk.choices.push(CompletionStreamChoice {
         finish_reason: Some(finish_reason.to_string()),
+        stop_reason,
         ..Default::default()
     });
     Ok(chunk)
 }
 
 fn completion_finish_reason_to_openai(
-    finish_reason: FinishReason,
+    finish_reason: &FinishReason,
 ) -> Result<&'static str, ApiError> {
     match finish_reason {
         FinishReason::Stop(_) => Ok("stop"),
@@ -463,6 +465,10 @@ fn completion_finish_reason_to_openai(
             bail_server_error!("Internal server error");
         }
     }
+}
+
+fn stop_reason_to_json(stop_reason: &StopReason) -> Value {
+    serde_json::to_value(stop_reason).expect("StopReason must serialize to JSON")
 }
 
 fn prompt_only_logprobs_to_openai(
@@ -578,6 +584,7 @@ fn done_sse_event() -> Event {
 mod tests {
     use futures::{StreamExt as _, stream};
     use itertools::Itertools as _;
+    use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{
         DecodedLogprobs, DecodedPositionLogprobs, DecodedPromptLogprobs, DecodedTextEvent,
         DecodedTokenLogprob, FinishReason, Finished,
@@ -671,7 +678,9 @@ mod tests {
                         output_token_count: 2,
                         cached_token_count: 3,
                     },
-                    finish_reason: FinishReason::stop_eos(),
+                    finish_reason: FinishReason::Repetition(Some(StopReason::Text(
+                        "repetition_detected".to_string(),
+                    ))),
                     kv_transfer_params: None,
                 }),
             }),
@@ -722,6 +731,20 @@ mod tests {
                 assert_eq!(
                     chunk.choices[0].logprobs.as_ref().expect("logprobs").text_offset,
                     vec![1]
+                );
+            }
+            CompletionSseChunk::Usage(_) => panic!("expected regular chunk"),
+        }
+
+        match &chunks[2] {
+            CompletionSseChunk::Chunk(chunk) => {
+                assert_eq!(
+                    chunk.choices[0].finish_reason.as_deref(),
+                    Some("repetition")
+                );
+                assert_eq!(
+                    chunk.choices[0].stop_reason,
+                    Some(serde_json::json!("repetition_detected"))
                 );
             }
             CompletionSseChunk::Usage(_) => panic!("expected regular chunk"),

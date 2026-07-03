@@ -45,7 +45,6 @@ impl RepetitionDetectionParams {
     }
 }
 
-
 /// Engine-core-facing sampling parameters for text generation.
 ///
 /// This is the normalized southbound subset used by the Rust frontend when it
