@@ -21,7 +21,7 @@ _CLUSTER_SH_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # MODEL_NAME indexes into models.yaml; MODEL_DIR is the parent dir holding it.
 # MODEL_PATH (resolved by the launcher) = ${MODEL_DIR}/${MODEL_NAME}.   [site]
 export MODEL_NAME="${MODEL_NAME:-DeepSeek-V3}"
-export MODEL_DIR="${MODEL_DIR:-/data/models}"
+export MODEL_DIR="${MODEL_DIR:-/data/models2}"
 
 # Shared NFS root (5 TB, visible on every node): model weights + per-run logs. [site]
 export SHARED_MOUNT="${SHARED_MOUNT:-/data}"
@@ -74,7 +74,7 @@ export PROXY_SCRIPT="${PROXY_SCRIPT:-${_CLUSTER_SH_DIR}/moriio_toy_proxy_server.
 
 # Where per-run logs / benchmark results are written. A $SLURM_JOB_ID subdir is
 # appended so each CI run is self-scoped (falls back to 'local' off-SLURM).  [site]
-_LOG_BASE="${LOG_BASE:-/data/${USER:-csrikris}/disagg_logs}"
+_LOG_BASE="${LOG_BASE:-/data/${USER:-$(id -un)}/disagg_logs}"
 export LOG_PATH="${LOG_PATH:-${_LOG_BASE}/${SLURM_JOB_ID:-local}}"
 
 # ----------------------------------------------------------------- vLLM runtime
@@ -82,6 +82,13 @@ export LOG_PATH="${LOG_PATH:-${_LOG_BASE}/${SLURM_JOB_ID:-local}}"
 # AITER kernel toggles live in models.yaml under each model's `env:` block.
 export VLLM_USE_V1="${VLLM_USE_V1:-1}"
 export HSA_NO_SCRATCH_RECLAIM="${HSA_NO_SCRATCH_RECLAIM:-1}"
+
+#export HF_HUB_OFFLINE="${HF_HUB_OFFLINE:-1}"
+#export TRANSFORMERS_OFFLINE="${TRANSFORMERS_OFFLINE:-1}"
+#
+#export HOME=/tmp
+#export HF_HOME="${HF_HOME:-/tmp/hf_home}"
+#export XDG_CACHE_HOME="${XDG_CACHE_HOME:-/tmp/.cache}"
 # MoRIIO read-mode: decode pulls KV from prefill (matches the toy proxy READ path).
 export VLLM_MORIIO_CONNECTOR_READ_MODE="${VLLM_MORIIO_CONNECTOR_READ_MODE:-1}"
 export VLLM_ENGINE_READY_TIMEOUT_S="${VLLM_ENGINE_READY_TIMEOUT_S:-3600}"

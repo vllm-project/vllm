@@ -3,7 +3,7 @@
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=1
 #SBATCH --gres=gpu:8
-#SBATCH --time=01:30:00
+#SBATCH --time=08:00:00
 #SBATCH --chdir=/tmp
 #SBATCH --output=/tmp/spur-%j.out
 #SBATCH --error=/tmp/spur-%j.err
@@ -17,15 +17,17 @@ WIDE_EP_MODE="${WIDE_EP_MODE:-0}"
 xP="${xP:-1}"
 yD="${yD:-1}"
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
-SHARED_MOUNT="${SHARED_MOUNT:-/data/csrikris}"
-LOG_ROOT="${LOG_ROOT:-${SHARED_MOUNT}/disagg_logs}"
+
+SHARED_MOUNT="${SHARED_MOUNT:-/data}"
+LOG_ROOT="${LOG_ROOT:-/data/${USER:-$(id -un)}/disagg_logs}"
 RUN_AFTER_HEALTH="${RUN_AFTER_HEALTH:-accuracy}"   # bench | accuracy
 DRY_RUN="${DRY_RUN:-0}"
 
 exec > "$LOG_ROOT/${SLURM_JOB_NAME}-${SLURM_JOB_ID}.log" 2>&1
 
-# Where the disagg scripts live ON THE HOST (this dir, i.e. the sbatch submit
-# dir)
+# Where the disagg scripts live ON THE HOST (bind-mounted into the container).
+# Spur runs the job body from /tmp, so $(pwd)/SLURM_SUBMIT_DIR aren't reliable;
+# default to the known host scripts dir. Override via env if you relocate it.
 DISAGG_SCRIPTS_DIR="${DISAGG_SCRIPTS_DIR:-${SLURM_SUBMIT_DIR:-$(pwd)}}"
 echo "DISAGG SCRIPTS DIR is ----"
 echo $DISAGG_SCRIPTS_DIR
@@ -234,7 +236,7 @@ run_node_container() {
         IONIC_MOUNTS+=(-v "/etc/libibverbs.d/ionic.driver:/etc/libibverbs.d/ionic.driver:ro")
     echo "Rank $rank ionic mounts: ${IONIC_MOUNTS[*]:-<none>}"
     docker run --rm \
-        --user "$(id -u):$(id -g)" \
+	--user $(id -u):$(id -g) \
         --device /dev/dri \
         --device /dev/kfd \
         --device /dev/infiniband \
@@ -249,10 +251,13 @@ run_node_container() {
         --ulimit nofile=1048576:1048576 \
         -v "$SHARED_MOUNT":"$SHARED_MOUNT" \
         -v "$DISAGG_SCRIPTS_DIR":"$CONTAINER_SCRIPTS" \
+        -v "/data/$(id -un):/workspace" \
         "${IONIC_MOUNTS[@]}" \
         --ulimit memlock=-1:-1 \
-        -e USER="$(id -un)" \
         -e HF_TOKEN \
+	-e HOME=/workspace \
+        -e USER="$(id -un)" \
+        -e LOGNAME="$(id -un)" \
         -e SLURM_JOB_ID="$SLURM_JOB_ID" \
         -e SLURM_JOB_NODELIST="$SLURM_JOB_NODELIST" \
         -e NODE_RANK="$rank" \
@@ -269,8 +274,6 @@ run_node_container() {
         --entrypoint /bin/bash \
         "$IMAGE" -c "bash $CONTAINER_SCRIPTS/vllm_disagg.sh node" \
       2>&1 | tee "$LOG_PATH/main_NODE${rank}.log"
-        #-v "$HOME":"$HOME" \
-        #-e HOME="$HOME" \
 }
 
 RC=0

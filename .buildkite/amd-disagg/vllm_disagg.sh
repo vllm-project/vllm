@@ -174,7 +174,10 @@ run_accuracy() {
     # --output_path makes lm_eval persist a results_*.json for scraping. 
     local eval_rc=0
     ( set -o pipefail
-      lm_eval --model local-completions \
+      # Model weights are already served (loaded offline in a separate process);
+      # allow the Hub only here so lm_eval can fetch the eval dataset (e.g. gsm8k).
+      export HF_HUB_OFFLINE=0 HF_DATASETS_OFFLINE=0
+      python3 -m lm_eval --model local-completions \
         --tasks "${ACCURACY_TASKS}" \
         --model_args "model=${MODEL_PATH},base_url=${base_url},num_concurrent=${ACCURACY_NUM_CONCURRENT},max_retries=${ACCURACY_MAX_RETRIES},tokenized_requests=False" \
         --output_path "${outdir}" \

@@ -33,7 +33,7 @@ models:
   - model: DeepSeek-V3
     env:
       VLLM_ROCM_USE_AITER: "1"
-      VLLM_ROCM_USE_AITER_MLA: "0"
+      VLLM_ROCM_USE_AITER_MLA: "1"
       VLLM_ROCM_USE_AITER_MOE: "1"
       VLLM_ROCM_USE_AITER_RMSNORM: "1"
       VLLM_ROCM_USE_AITER_PAGED_ATTN: "0"
@@ -41,8 +41,8 @@ models:
       VLLM_USE_AITER_TRITON_SILU_MUL: "0"
     base_flags: "--trust-remote-code --kv-cache-dtype fp8"
     prefill:
-      tp: "--gpu-memory-utilization 0.95"
+      tp: "--gpu-memory-utilization 0.85"
       ep: "--gpu-memory-utilization 0.85 --enforce-eager"
     decode:
-      tp: "--gpu-memory-utilization 0.95"
+      tp: "--gpu-memory-utilization 0.85"
       ep: '--gpu-memory-utilization 0.75 --compilation-config {"cudagraph_mode":"PIECEWISE","custom_ops":["+quant_fp8"]}'
