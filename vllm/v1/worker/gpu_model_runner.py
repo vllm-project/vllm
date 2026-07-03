@@ -6905,7 +6905,7 @@ class GPUModelRunner(
             min_cg_support,
             min_cg_attn_backend,
             self.uniform_decode_query_len,
-            use_v2_model_runner=self.vllm_config.use_v2_model_runner,
+            use_v2_model_runner=False,
             tensor_parallel_size=self.parallel_config.tensor_parallel_size,
             kv_cache_config=self.kv_cache_config,
             max_num_reqs=self.max_num_reqs,
