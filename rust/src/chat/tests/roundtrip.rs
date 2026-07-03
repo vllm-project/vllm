@@ -281,7 +281,7 @@ async fn run_roundtrip_reasoning_and_content_inner(
         });
         AssistantMessage { content }
     };
-    let result = run_roundtrip(&case, &backends, &request, assistant).await?;
+    let result = run_roundtrip(case, backends, &request, assistant).await?;
 
     assert_eq!(
         result.parsed_message.reasoning().as_deref().map(str::trim),
@@ -316,8 +316,8 @@ async fn run_roundtrip_tool_call_mix(
     let expected_text = "I will call the tools.";
 
     let result = run_roundtrip(
-        &case,
-        &backends,
+        case,
+        backends,
         &request,
         AssistantMessage {
             content: vec![
@@ -361,12 +361,12 @@ async fn run_roundtrip_tool_call_mix(
     assert_eq!(tool_calls[0].name, "get_weather");
     assert_eq!(
         tool_calls[0].arguments,
-        expected_arguments(&case, r#"{"location": "Shanghai"}"#)?,
+        expected_arguments(case, r#"{"location": "Shanghai"}"#)?,
     );
     assert_eq!(tool_calls[1].name, "add");
     assert_eq!(
         tool_calls[1].arguments,
-        expected_arguments(&case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
+        expected_arguments(case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
     );
 
     assert_eq!(
