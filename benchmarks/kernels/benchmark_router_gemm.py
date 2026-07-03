@@ -4,6 +4,7 @@
 import torch
 import torch.nn.functional as F
 
+import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
@@ -18,9 +19,10 @@ DSV3_SUPPORTED_HIDDEN_SIZES = [7168]
 GPT_OSS_SUPPORTED_NUM_EXPERTS = [32, 128]
 GPT_OSS_SUPPORTED_HIDDEN_SIZES = [2880]
 
-# Dimensions supported by the fp32 specialized kernel (MiniMax-M2)
+# Dimensions supported by the fp32 specialized kernel
+#   (3072, 256) -> MiniMax-M2/M2.5,  (6144, 256) -> GLM-5
 FP32_SUPPORTED_NUM_EXPERTS = [256]
-FP32_SUPPORTED_HIDDEN_SIZES = [3072]
+FP32_SUPPORTED_HIDDEN_SIZES = [3072, 6144]
 FP32_MAX_TOKENS = 32
 
 
@@ -33,6 +35,7 @@ def get_model_params(config):
         "DeepseekV2ForCausalLM",
         "DeepseekV3ForCausalLM",
         "DeepseekV32ForCausalLM",
+        "GlmMoeDsaForCausalLM",
     ):
         num_experts = config.n_routed_experts
         hidden_size = config.hidden_size
@@ -107,7 +110,8 @@ def get_benchmark(model, max_batch_size, trust_remote_code):
         if provider == "torch":
 
             def runner():
-                if allow_fp32_router_gemm:
+                if is_fp32_router_model:
+                    # fp32 weights: reference always computes in fp32
                     F.linear(mat_a.float(), mat_b)
                 elif has_bias:
                     F.linear(mat_a, mat_b, bias)
