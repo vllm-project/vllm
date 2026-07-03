@@ -75,6 +75,9 @@ ResponseType: TypeAlias = (
 
 logger = init_logger(__name__)
 
+# Formats require Whisper style segment timestamps.
+_SEGMENT_TIMESTAMP_FORMATS = frozenset({"verbose_json", "srt", "vtt"})
+
 
 def asr_inter_chunk_separator(
     language: str | None, no_space_languages: Set[str]
@@ -85,6 +88,28 @@ def asr_inter_chunk_separator(
     separator; others use a single ASCII space.
     """
     return "" if language and language.lower() in no_space_languages else " "
+
+
+# formatting verbose json start,end time to SRT timing format
+def _format_srt_time(seconds: float) -> str:
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    ms = int(round((seconds % 1) * 1000))
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+# converting segments into SRT format
+def _to_srt(segments: list[SpeechToTextSegment], response_format: str) -> str:
+    lines = []
+    for seg in segments:
+        lines.append(str(seg.id + 1))
+        lines.append(f"{_format_srt_time(seg.start)} --> {_format_srt_time(seg.end)}")
+        lines.append(seg.text.strip())
+
+        # blank line separator
+        lines.append("")
+    return "\n".join(lines)
 
 
 class OpenAISpeechToText(OpenAIServing):
@@ -293,7 +318,7 @@ class OpenAISpeechToText(OpenAIServing):
             prompt = self.model_cls.get_generation_prompt(stt_params)
 
             parsed_prompt: DictPrompt
-            if request.response_format == "verbose_json":
+            if request.response_format in _SEGMENT_TIMESTAMP_FORMATS:
                 parsed_prompt = parse_enc_dec_prompt(prompt)
                 parsed_prompt = self._preprocess_verbose_prompt(parsed_prompt)
             else:
@@ -417,7 +442,7 @@ class OpenAISpeechToText(OpenAIServing):
         raw_request: Request,
         response_class: type[ResponseType],
         stream_generator_method: Callable[..., AsyncGenerator[str, None]],
-    ) -> T | V | AsyncGenerator[str, None] | ErrorResponse:
+    ) -> T | V | str | AsyncGenerator[str, None] | ErrorResponse:
         """Base method for speech-to-text operations like transcription and
         translation."""
         if request.stream and request.use_beam_search:
@@ -438,23 +463,24 @@ class OpenAISpeechToText(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        if request.response_format not in ["text", "json", "verbose_json"]:
+        if request.response_format not in ["text", "json", "verbose_json", "srt"]:
             return self.create_error_response(
                 "Currently only support response_format: "
-                "`text`, `json` or `verbose_json`"
+                "`text`, `json` or `verbose_json` or `srt`"
             )
 
         if (
-            request.response_format == "verbose_json"
+            request.response_format in _SEGMENT_TIMESTAMP_FORMATS
             and not self.model_cls.supports_segment_timestamp
         ):
             return self.create_error_response(
-                f"Currently do not support verbose_json for {request.model}"
+                f"Currently do not support {request.response_format} "
+                f"for {request.model}"
             )
 
-        if request.response_format == "verbose_json" and request.stream:
+        if request.response_format in _SEGMENT_TIMESTAMP_FORMATS and request.stream:
             return self.create_error_response(
-                "verbose_json format doesn't support streaming case"
+                f"{request.response_format} format doesn't support streaming case"
             )
         request_id = f"{self.task_type}-{self._base_request_id(raw_request)}"
 
@@ -501,7 +527,7 @@ class OpenAISpeechToText(OpenAIServing):
                 self.default_sampling_params,
             )
 
-        if request.response_format == "verbose_json":
+        if request.response_format in _SEGMENT_TIMESTAMP_FORMATS:
             sampling_params.logprobs = 1
 
         engine_request_ids = [
@@ -589,7 +615,7 @@ class OpenAISpeechToText(OpenAIServing):
                 start_time = (
                     float(idx * chunk_size_in_s) if chunk_size_in_s is not None else 0.0
                 )
-                if request.response_format == "verbose_json":
+                if request.response_format in _SEGMENT_TIMESTAMP_FORMATS:
                     assert op.outputs[0].logprobs
                     segments: list[SpeechToTextSegment] = self._get_verbose_segments(
                         tokens=tuple(op.outputs[0].token_ids),
@@ -613,6 +639,10 @@ class OpenAISpeechToText(OpenAIServing):
             ]
             text_parts = [text for text_part in chunk_text_parts for text in text_part]
             text = separator.join(text_parts)
+
+            if request.response_format == "srt":
+                return _to_srt(total_segments, request.response_format)
+
             if self.task_type == "transcribe":
                 final_response: ResponseType
                 # add usage in TranscriptionResponse.
