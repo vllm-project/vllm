@@ -22,6 +22,9 @@ from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
 )
+from vllm.model_executor.layers.fused_qkv_norm_rope_cache import (
+    can_use_aiter_fused_qkv_norm_rope_cache,
+)
 from vllm.model_executor.layers.fused_qk_norm_rope import fused_qk_rmsnorm_rope_gate
 from vllm.model_executor.layers.layernorm import (
     GemmaRMSNorm as Qwen3NextRMSNorm,
@@ -321,6 +324,15 @@ class Qwen3NextAttention(nn.Module):
             and current_platform.is_cuda()
             and text_only
         )
+        self.use_aiter_fused_qkv_norm_rope_cache = (
+            can_use_aiter_fused_qkv_norm_rope_cache(
+                attn_output_gate=self.attn_output_gate,
+                rotary_emb=self.rotary_emb,
+                attn=self.attn,
+                text_only=text_only,
+                attn_type=attn_type,
+            )
+        )
 
     def _project_qkv_gate(
         self,
@@ -385,8 +397,29 @@ class Qwen3NextAttention(nn.Module):
         hidden_states: torch.Tensor,
     ):
         qkv, _ = self.qkv_proj(hidden_states)
-        q, k, v, gate = self._project_qkv_gate(qkv, positions)
-        attn_output = self.attn(q, k, v)
+        if self.use_aiter_fused_qkv_norm_rope_cache:
+            kv_cache_dummy, q, k, v, gate = (
+                torch.ops.vllm.qwen3_aiter_fused_qkv_norm_rope_cache(
+                    qkv,
+                    positions,
+                    # AITER's fused kernel implements GemmaRMSNorm internally as
+                    # x * rsqrt(var + eps) * (1 + weight), so pass stored weights.
+                    self.q_norm.weight,
+                    self.k_norm.weight,
+                    self.rotary_emb.cos_sin_cache,
+                    self.attn.layer_name,
+                    self.num_heads,
+                    self.num_kv_heads,
+                    self.head_dim,
+                    self.rotary_emb.rotary_dim,
+                    self.q_norm.variance_epsilon,
+                    self.rotary_emb.is_neox_style,
+                )
+            )
+            attn_output = self.attn(q, k, v, kv_cache_dummy_dep=kv_cache_dummy)
+        else:
+            q, k, v, gate = self._project_qkv_gate(qkv, positions)
+            attn_output = self.attn(q, k, v)
         if gate is not None:
             attn_output = attn_output * torch.sigmoid(gate)
         output[:], _ = self.o_proj(attn_output)
