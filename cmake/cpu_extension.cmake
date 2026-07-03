@@ -178,7 +178,10 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
     # Override with -DVLLM_RVV_VLEN=128 or -DVLLM_RVV_VLEN=256 for RVV.
     if(NOT DEFINED VLLM_RVV_VLEN)
         # Auto-detect: find the largest zvl<N>b in /proc/cpuinfo isa line.
-        if(EXISTS /proc/cpuinfo)
+        # Skip when cross-compiling — /proc/cpuinfo describes the build host.
+        if(CMAKE_CROSSCOMPILING)
+            message(STATUS "Cross-compiling: skipping VLEN auto-detection from /proc/cpuinfo")
+        elseif(EXISTS /proc/cpuinfo)
             file(READ /proc/cpuinfo _cpuinfo)
             set(_best 0)
             foreach(_n IN ITEMS 128 256 512 1024)
@@ -186,6 +189,13 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
                     set(_best ${_n})
                 endif()
             endforeach()
+            # Only VLEN=128 and VLEN=256 are supported by the RVV kernels.
+            if(_best GREATER 256)
+                message(WARNING
+                    "Detected VLEN=${_best} but only 128/256 are supported; "
+                    "clamping to 256")
+                set(_best 256)
+            endif()
             if(_best GREATER 0)
                 set(VLLM_RVV_VLEN ${_best})
             endif()
