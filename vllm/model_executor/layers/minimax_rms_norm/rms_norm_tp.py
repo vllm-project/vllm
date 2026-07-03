@@ -295,6 +295,10 @@ class MiniMaxText01RMSNormTP(CustomOp):
 
         self.workspace = None
         if _MINIMAX_FUSED_AR_RMS_QK is not None and self.tp_world > 1:
+            from vllm.distributed.device_communicators.custom_all_reduce import (
+                _can_p2p,
+            )
+
             from .lamport_workspace import (
                 get_allreduce_workspace,
             )
@@ -304,13 +308,31 @@ class MiniMaxText01RMSNormTP(CustomOp):
             # available; on topologies where it is not (e.g. consumer PCIe cards
             # with P2P disabled in the driver), allocation raises. Fall back to
             # the eager allreduce + RMSNorm path instead of failing model load.
+            #
+            # Note that the driver may report P2P as available
+            # (can_device_access_peer() returns True and the IPC handle
+            # exchange succeeds) while actual peer writes silently never
+            # arrive. On such topologies the Lamport spin-wait loops forever
+            # waiting for flags that are never delivered, hanging startup with
+            # all ranks at 100% GPU. Guard with the same functional P2P write
+            # check used by the custom allreduce instead of trusting the
+            # driver's report.
             try:
-                self.workspace = get_allreduce_workspace(
-                    rank=self.tp_rank,
-                    world_size=self.tp_world,
-                    max_tokens=MINIMAX_QK_NORM_MAX_TOKEN_NUM,
-                    process_group=get_tp_group().cpu_group,
-                )
+                if not _can_p2p(self.tp_rank, self.tp_world):
+                    logger.warning_once(
+                        "MiniMax fused allreduce+RMSNorm disabled: functional "
+                        "P2P access check failed (the driver may report P2P "
+                        "as available even though peer writes do not work, "
+                        "e.g. on consumer PCIe multi-GPU boards). Falling "
+                        "back to the eager allreduce + RMSNorm path."
+                    )
+                else:
+                    self.workspace = get_allreduce_workspace(
+                        rank=self.tp_rank,
+                        world_size=self.tp_world,
+                        max_tokens=MINIMAX_QK_NORM_MAX_TOKEN_NUM,
+                        process_group=get_tp_group().cpu_group,
+                    )
             except Exception as e:
                 logger.warning_once(
                     "Failed to initialize MiniMax fused allreduce+RMSNorm "
