@@ -23,8 +23,8 @@ from vllm.entrypoints.openai.api_server import (
     build_app,
 )
 from vllm.entrypoints.openai.cli_args import make_arg_parser
-from vllm.entrypoints.serve.endpoint_plugin import EndpointPlugin
 from vllm.plugins import load_endpoint_plugins
+from vllm.plugins.endpoint_plugins.interface import EndpointPlugin
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
