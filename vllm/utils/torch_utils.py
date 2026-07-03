@@ -479,18 +479,6 @@ def _nvfp4_split_data_scale(
             f"data/scale split: shape={kv_side.shape}, "
             f"strides={kv_side.stride()}, full_dim={full_dim}"
         )
-    if (
-        stride_1 * data_dim % full_dim != 0
-        or stride_2 * data_dim % full_dim != 0
-        or stride_1 * scale_dim % full_dim != 0
-        or stride_2 * scale_dim % full_dim != 0
-    ):
-        raise ValueError(
-            "NVFP4 KV cache strides are not compatible with packed "
-            f"data/scale split: strides={kv_side.stride()}, "
-            f"full_dim={full_dim}, data_dim={data_dim}, "
-            f"scale_dim={scale_dim}"
-        )
     s1 = stride_1 * data_dim // full_dim
     s2 = stride_2 * data_dim // full_dim
     data_shape = (num_pages, dim_1, dim_2, data_dim)
@@ -536,9 +524,20 @@ def _nvfp4_split_mixed_data_scale(
             "Mixed NVFP4 KV cache last dimension must be contiguous: "
             f"strides={kv_cache.stride()}"
         )
+    mixed_full_dim = k_full_dim + v_full_dim
+    stride_1 = kv_cache.stride(1)
+    stride_2 = kv_cache.stride(2)
+    if (dim_2 > 1 and stride_2 != mixed_full_dim) or (
+        dim_1 > 1 and stride_1 != dim_2 * mixed_full_dim
+    ):
+        raise ValueError(
+            "Mixed NVFP4 KV cache strides are not compatible with compact "
+            f"data/scale split: shape={kv_cache.shape}, "
+            f"strides={kv_cache.stride()}, full_dim={mixed_full_dim}"
+        )
 
     page_bytes = kv_cache.stride(0)
-    elements_per_page = dim_1 * dim_2 * (k_full_dim + v_full_dim)
+    elements_per_page = dim_1 * dim_2 * mixed_full_dim
     if page_bytes < elements_per_page:
         raise ValueError(
             "Mixed NVFP4 KV cache page stride is smaller than one page: "

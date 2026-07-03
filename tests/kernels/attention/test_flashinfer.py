@@ -347,6 +347,39 @@ def test_nvfp4_kv_cache_split_views_rejects_incompatible_strides() -> None:
         nvfp4_kv_cache_split_views(kv_side, head_size)
 
 
+def test_nvfp4_kv_cache_split_views_accepts_size_one_strides() -> None:
+    head_size = 64
+    full_dim = nvfp4_kv_cache_full_dim(head_size)
+    storage = torch.empty(256, dtype=torch.uint8)
+    kv_side = torch.as_strided(
+        storage,
+        (2, 1, 3, full_dim),
+        (128, 7, full_dim, 1),
+    )
+
+    (data,), (scale,) = nvfp4_kv_cache_split_views(kv_side, head_size)
+
+    assert data.shape == (2, 1, 3, head_size // 2)
+    assert scale.shape == (2, 1, 3, head_size // 16)
+
+
+def test_nvfp4_kv_cache_split_views_rejects_mixed_incompatible_strides() -> None:
+    head_size = 64
+    head_size_v = 128
+    k_full_dim = nvfp4_kv_cache_full_dim(head_size)
+    v_full_dim = nvfp4_kv_cache_full_dim(head_size_v)
+    full_dim = k_full_dim + v_full_dim
+    storage = torch.empty(1000, dtype=torch.uint8)
+    kv_cache = torch.as_strided(
+        storage,
+        (2, 4, 3, full_dim),
+        (500, 100, 37, 1),
+    )
+
+    with pytest.raises(ValueError, match="strides are not compatible"):
+        nvfp4_kv_cache_split_views(kv_cache, head_size, head_size_v)
+
+
 def test_nvfp4_kv_cache_split_views_rejects_mixed_side_slice() -> None:
     head_size = 64
     head_size_v = 128
