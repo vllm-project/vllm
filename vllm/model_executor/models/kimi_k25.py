@@ -56,6 +56,10 @@ from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.kimi_k25 import KimiK25Config
 from vllm.transformers_utils.processor import cached_get_image_processor
 from vllm.transformers_utils.processors.kimi_k25 import KimiK25Processor
+from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
+    KimiK25FusedVisionProcessor,
+)
+from vllm.utils.import_utils import is_numba_available
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .utils import (
@@ -108,29 +112,17 @@ class KimiK25ProcessingInfo(BaseProcessingInfo):
         self.hf_config = hf_config = self.get_hf_config()
 
         tokenizer = self.get_tokenizer()
-        from vllm.transformers_utils.processors.kimi_k25_vision_fused import (
-            KimiK25FusedVisionProcessor,
-            is_numba_available,
+        processor_cls = KimiK25FusedVisionProcessor if is_numba_available() else None
+        logger.info_once(
+            "Using %s image preprocessing for Kimi-K2.5/K2.6 vision chunks.",
+            "fused CPU" if processor_cls is not None else "remote HF",
         )
-
-        if is_numba_available():
-            logger.info_once(
-                "Using fused CPU image preprocessing for Kimi-K2.5/K2.6 vision chunks."
-            )
-            image_processor = KimiK25FusedVisionProcessor.from_model(
-                self.ctx.model_config.model,
-                revision=self.ctx.model_config.revision,
-            )
-        else:
-            logger.info_once(
-                "Numba is not available; using the remote HF image processor for "
-                "Kimi-K2.5/K2.6 vision chunks."
-            )
-            image_processor = cached_get_image_processor(
-                self.ctx.model_config.model,
-                revision=self.ctx.model_config.revision,
-                trust_remote_code=self.ctx.model_config.trust_remote_code,
-            )
+        image_processor = cached_get_image_processor(
+            self.ctx.model_config.model,
+            revision=self.ctx.model_config.revision,
+            trust_remote_code=self.ctx.model_config.trust_remote_code,
+            processor_cls_overrides=processor_cls,
+        )
 
         # Resolve token ID from the tokenizer because transformers v5
         # may remap token IDs vs config.json.

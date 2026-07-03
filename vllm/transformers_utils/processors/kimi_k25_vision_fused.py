@@ -13,8 +13,6 @@ from PIL import Image
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.utils import TensorType
 
-from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
-
 try:
     from numba import njit, prange
 except ImportError:
@@ -67,19 +65,6 @@ else:
 
     def _write_fused_patches(*args: Any, **kwargs: Any) -> None:
         raise RuntimeError("numba is required for fused Kimi image preprocessing")
-
-
-def _load_media_proc_cfg(model: str, revision: str | None = None) -> dict[str, Any]:
-    raw = get_hf_file_to_dict("preprocessor_config.json", model, revision) or {}
-    cfg = dict(raw["media_proc_cfg"])
-    merge_kernel_size = cfg["merge_kernel_size"]
-    if isinstance(merge_kernel_size, (list, tuple)):
-        cfg["merge_kernel_size"] = int(merge_kernel_size[0])
-    return cfg
-
-
-def is_numba_available() -> bool:
-    return njit is not None
 
 
 def navit_resize_image(
@@ -190,6 +175,10 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
 
     def __init__(self, media_proc_cfg: dict[str, Any], **kwargs: Any) -> None:
         super().__init__(**kwargs)
+        media_proc_cfg = dict(media_proc_cfg)
+        merge_kernel_size = media_proc_cfg["merge_kernel_size"]
+        if isinstance(merge_kernel_size, (list, tuple)):
+            media_proc_cfg["merge_kernel_size"] = int(merge_kernel_size[0])
         self.media_proc_cfg = media_proc_cfg
         self.num_frames_per_chunk = media_proc_cfg["temporal_merge_kernel_size"]
         values = np.arange(256, dtype=np.float32)[:, None]
@@ -198,14 +187,6 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
         self.normalize_lut = (values / 255.0 - image_mean[None, :]) * image_std_inv[
             None, :
         ]
-
-    @classmethod
-    def from_model(
-        cls,
-        model: str,
-        revision: str | None = None,
-    ) -> "KimiK25FusedVisionProcessor":
-        return cls(media_proc_cfg=_load_media_proc_cfg(model, revision))
 
     def media_tokens_calculator(self, media: dict[str, Any]) -> int:
         media = _ensure_media_type(media)
