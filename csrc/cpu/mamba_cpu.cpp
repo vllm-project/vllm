@@ -225,3 +225,73 @@ void selective_state_update_cpu_impl(
 }
 
 
+// ---------------------------------------------------------------------------
+// mamba_chunk_scan_fwd_cpu
+// ---------------------------------------------------------------------------
+void mamba_chunk_scan_fwd_cpu_impl(
+    at::Tensor& out,          // [seqlen, nheads, headdim] — pre-allocated by caller
+    at::Tensor& final_states, // [batch, nheads, headdim, dstate] float32 contiguous
+    const at::Tensor& x,      // [seqlen, nheads, headdim]
+    const at::Tensor& dt,     // [seqlen, nheads] float32 (preprocessed: bias+softplus+clamp)
+    const at::Tensor& A,      // [nheads] float32
+    const at::Tensor& B,      // [seqlen, ngroups, dstate]
+    const at::Tensor& C,      // [seqlen, ngroups, dstate]
+    const c10::optional<at::Tensor>& D,    // [nheads] float32 (optional)
+    const c10::optional<at::Tensor>& z,    // [seqlen, nheads, headdim] (optional)
+    const at::Tensor& cu_seqlens           // [batch+1] int32
+) {
+  const at::ScalarType input_type = x.scalar_type();
+
+  auto ensure_contig = [input_type](const at::Tensor& t) -> at::Tensor {
+    at::Tensor r = (t.scalar_type() != input_type) ? t.to(input_type) : t;
+    return r.is_contiguous() ? r : r.contiguous();
+  };
+  at::Tensor x_in = ensure_contig(x);
+  at::Tensor B_in = ensure_contig(B);
+  at::Tensor C_in = ensure_contig(C);
+  at::Tensor z_in;
+  if (z.has_value() && z.value().defined()) z_in = ensure_contig(z.value());
+
+  // A and D are float32 model parameters, potentially broadcast-expanded.
+  // Strip trailing broadcast dims to get a contiguous (nheads,) array.
+  auto to_per_head_f32 = [](const at::Tensor& t) -> at::Tensor {
+    at::Tensor r = t;
+    while (r.dim() > 1) r = r.select(r.dim() - 1, 0);
+    if (r.scalar_type() != at::kFloat) r = r.to(at::kFloat);
+    return r.is_contiguous() ? r : r.contiguous();
+  };
+  at::Tensor A_f32 = to_per_head_f32(A);
+  at::Tensor D_f32;
+  if (D.has_value() && D.value().defined()) D_f32 = to_per_head_f32(D.value());
+
+  // dt: [seqlen, nheads] float32 — caller has applied bias+softplus+clamp in Python.
+  at::Tensor dt_c = dt.is_contiguous() ? dt : dt.contiguous();
+  if (dt_c.scalar_type() != at::kFloat) dt_c = dt_c.to(at::kFloat);
+
+  at::Tensor cu_int = cu_seqlens.to(at::kInt).contiguous();
+
+  const int64_t batch   = final_states.size(0);
+  const int64_t nheads  = final_states.size(1);
+  const int64_t headdim = final_states.size(2);
+  const int64_t dstate  = final_states.size(3);
+  const int64_t ngroups = B_in.size(1);
+
+  TORCH_CHECK(final_states.is_contiguous(),
+      "mamba_chunk_scan_fwd_cpu: final_states must be contiguous");
+
+  VLLM_DISPATCH_FLOATING_TYPES(input_type, "mamba_chunk_scan_fwd_cpu", [&] {
+    mamba_cpu::mamba_chunk_scan_fwd_kernel<scalar_t>(
+        final_states.data_ptr<float>(),
+        x_in.data_ptr<scalar_t>(),
+        dt_c.data_ptr<float>(),
+        A_f32.data_ptr<float>(),
+        B_in.data_ptr<scalar_t>(),
+        C_in.data_ptr<scalar_t>(),
+        D_f32.defined() ? D_f32.data_ptr<float>() : nullptr,
+        z_in.defined() ? z_in.data_ptr<scalar_t>() : nullptr,
+        out.data_ptr<scalar_t>(),
+        cu_int.data_ptr<int32_t>(),
+        batch, nheads, ngroups, headdim, dstate);
+  });
+}
+

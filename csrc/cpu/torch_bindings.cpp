@@ -223,6 +223,13 @@ void selective_state_update_cpu_impl(
     const c10::optional<at::Tensor>& num_accepted_tokens,
     const c10::optional<at::Tensor>& cu_seqlens);
 
+void mamba_chunk_scan_fwd_cpu_impl(
+    at::Tensor& out, at::Tensor& final_states,
+    const at::Tensor& x, const at::Tensor& dt, const at::Tensor& A,
+    const at::Tensor& B, const at::Tensor& C,
+    const c10::optional<at::Tensor>& D, const c10::optional<at::Tensor>& z,
+    const at::Tensor& cu_seqlens);
+
 void init_cpu_memory_env(std::vector<int64_t> node_ids);
 
 namespace cpu_utils {
@@ -611,6 +618,13 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor? num_accepted_tokens, Tensor? cu_seqlens) -> ()",
       &selective_state_update_cpu_impl);
 
+  ops.def(
+      "mamba_chunk_scan_fwd_cpu("
+      "Tensor(a0!) out, Tensor(a1!) final_states, "
+      "Tensor x, Tensor dt, Tensor A, Tensor B, Tensor C, "
+      "Tensor? D, Tensor? z, Tensor cu_seqlens) -> ()",
+      &mamba_chunk_scan_fwd_cpu_impl);
+
   ops.def("init_cpu_memory_env(SymInt[] node_ids) -> ()", &init_cpu_memory_env);
 
   // Speculative decoding kernels
@@ -692,3 +706,4 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
 }
 
 REGISTER_EXTENSION(TORCH_EXTENSION_NAME)
+

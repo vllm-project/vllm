@@ -3,6 +3,7 @@
 
 import torch
 
+import vllm._custom_ops as ops
 from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 
 
@@ -325,11 +326,12 @@ def _mamba_chunk_scan_combined_fwd_cpu(
 ):
     seqlen, nheads, headdim = x.shape
     _, ngroups, dstate = B.shape
-    nheads_per_group = nheads // ngroups
 
     assert cu_seqlens is not None
     batch = cu_seqlens.size(0) - 1
 
+    # Preprocess dt: apply bias, softplus, and clamp.
+    # Kept in Python to avoid duplicating this logic in C++.
     dt_f = dt.float()
     if dt_bias is not None:
         dt_f = dt_f + dt_bias.float().unsqueeze(0)
@@ -338,53 +340,83 @@ def _mamba_chunk_scan_combined_fwd_cpu(
     if dt_limit[0] > 0.0 or dt_limit[1] < float("inf"):
         dt_f = dt_f.clamp(min=dt_limit[0], max=dt_limit[1])
 
+    # Allocate state output buffer (float32, contiguous — required by kernel).
     all_states = torch.zeros(
         batch, nheads, headdim, dstate, dtype=torch.float32, device=x.device
     )
+    if initial_states is not None:
+        all_states.copy_(initial_states.float())
 
-    for b_idx in range(batch):
-        seq_start = cu_seqlens[b_idx].item()
-        seq_end = cu_seqlens[b_idx + 1].item()
+    # Use the C++ kernel when available (CPU build with mamba kernels compiled).
+    # Falls back to the pure-Python loop below if the op is not registered.
+    _use_cpp_kernel = hasattr(torch.ops._C, "mamba_chunk_scan_fwd_cpu")
 
-        if initial_states is not None:
-            state = initial_states[b_idx].float()
-        else:
-            state = torch.zeros(
-                nheads, headdim, dstate, dtype=torch.float32, device=x.device
-            )
+    if _use_cpp_kernel:
+        # Ensure out is writable and contiguous.
+        if not out.is_contiguous():
+            out = out.contiguous()
 
-        for t in range(seq_start, seq_end):
-            x_t = x[t].float()
-            dt_t = dt_f[t]
-            A_val = A.float()
+        # D: strip broadcast dims so the kernel sees (nheads,) float32.
+        D_1d = None
+        if D is not None:
+            d = D.float()
+            while d.dim() > 1:
+                d = d.select(d.dim() - 1, 0)
+            D_1d = d.contiguous()
 
-            dA = torch.exp(A_val * dt_t).unsqueeze(-1).unsqueeze(-1)
+        ops.mamba_chunk_scan_fwd_cpu(
+            out,
+            all_states,
+            x,
+            dt_f,
+            A,
+            B,
+            C,
+            D_1d,
+            z,
+            cu_seqlens.to(torch.int32),
+        )
+    else:
+        # Pure-Python fallback (no compiled extension available).
+        for b_idx in range(batch):
+            seq_start = cu_seqlens[b_idx].item()
+            seq_end = cu_seqlens[b_idx + 1].item()
 
-            B_expanded = B[t].float().repeat_interleave(nheads_per_group, dim=0)
-            C_expanded = C[t].float().repeat_interleave(nheads_per_group, dim=0)
+            state = all_states[b_idx]  # shares storage — updated in-place
 
-            xdt = x_t * dt_t.unsqueeze(-1)
-            dBx = xdt.unsqueeze(-1) * B_expanded.unsqueeze(1)
-            state = state * dA + dBx
+            for t in range(seq_start, seq_end):
+                x_t = x[t].float()
+                dt_t = dt_f[t]
+                A_val = A.float()
 
-            y = (state * C_expanded.unsqueeze(1)).sum(dim=-1)
+                dA = torch.exp(A_val * dt_t).unsqueeze(-1).unsqueeze(-1)
 
-            if D is not None:
-                y = (
-                    y + x_t * D.float().unsqueeze(-1)
-                    if D.dim() == 1
-                    else y + x_t * D.float()
-                )
+                B_expanded = B[t].float().repeat_interleave(nheads // ngroups, dim=0)
+                C_expanded = C[t].float().repeat_interleave(nheads // ngroups, dim=0)
 
-            if z is not None:
-                z_t = z[t].float()
-                y = y * z_t * torch.sigmoid(z_t)
+                xdt = x_t * dt_t.unsqueeze(-1)
+                dBx = xdt.unsqueeze(-1) * B_expanded.unsqueeze(1)
+                state = state * dA + dBx
 
-            out[t] = y.to(out.dtype)
+                y = (state * C_expanded.unsqueeze(1)).sum(dim=-1)
 
-        all_states[b_idx] = state.to(all_states.dtype)
+                if D is not None:
+                    y = (
+                        y + x_t * D.float().unsqueeze(-1)
+                        if D.dim() == 1
+                        else y + x_t * D.float()
+                    )
+
+                if z is not None:
+                    z_t = z[t].float()
+                    y = y * z_t * torch.sigmoid(z_t)
+
+                out[t] = y.to(out.dtype)
+
+            all_states[b_idx] = state.to(all_states.dtype)
 
     out_dtype = state_dtype if state_dtype is not None else x.dtype
     all_states = all_states.to(out_dtype)
 
     return all_states
+

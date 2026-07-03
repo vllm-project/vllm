@@ -2189,6 +2189,33 @@ def selective_state_update_cpu(
     )
 
 
+def mamba_chunk_scan_fwd_cpu(
+    out: torch.Tensor,
+    final_states: torch.Tensor,
+    x: torch.Tensor,
+    dt: torch.Tensor,
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    D: torch.Tensor | None,
+    z: torch.Tensor | None,
+    cu_seqlens: torch.Tensor,
+) -> None:
+    """Prefill SSM scan kernel. out and final_states are written in-place."""
+    torch.ops._C.mamba_chunk_scan_fwd_cpu(
+        out,
+        final_states,
+        x,
+        dt,
+        A,
+        B,
+        C,
+        D,
+        z,
+        cu_seqlens,
+    )
+
+
 # ROCm skinny gemms
 def LLMM1(a: torch.Tensor, b: torch.Tensor, rows_per_block: int) -> torch.Tensor:
     return torch.ops._rocm_C.LLMM1(a, b, rows_per_block)

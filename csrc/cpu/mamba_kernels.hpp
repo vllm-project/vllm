@@ -259,5 +259,129 @@ inline void selective_state_update_kernel(
   }
 }
 
+// ---------------------------------------------------------------------------
+// mamba_chunk_scan_fwd
+//
+// Prefill SSM recurrence for Mamba2 / SSD models.
+//
+// Key difference from selective_state_update_kernel (decode path):
+//   - #pragma omp parallel for collapse(2) is OUTSIDE the time loop.
+//     Each thread owns a (batch, head) slice and runs the entire token
+//     sequence without any per-token OpenMP synchronisation overhead.
+//     For seqlen=256, this eliminates 256 thread-barrier launches per batch.
+//
+// `dt` arrives already processed (float32, after bias + softplus + clamp)
+// to keep this kernel simple. Preprocessing is done in the Python wrapper.
+//
+// `states_ptr` points to the [batch, nheads, headdim, dstate] float32 output
+// tensor, pre-initialised by the caller (zero or from initial_states).
+// Each (b, h) slice is private to exactly one thread via collapse(2), so
+// there are no write conflicts.
+//
+// D is treated as a scalar per head ([nheads] float32).
+// ---------------------------------------------------------------------------
+template <typename input_t>
+inline void mamba_chunk_scan_fwd_kernel(
+    float*         __restrict__ states_ptr,  // [batch, nheads, headdim, dstate] f32
+    const input_t* __restrict__ x_ptr,       // [seqlen, nheads, headdim]
+    const float*   __restrict__ dt_ptr,      // [seqlen, nheads] f32 (preprocessed)
+    const float*   __restrict__ A_ptr,       // [nheads] f32
+    const input_t* __restrict__ B_ptr,       // [seqlen, ngroups, dstate]
+    const input_t* __restrict__ C_ptr,       // [seqlen, ngroups, dstate]
+    const float*   __restrict__ D_ptr,       // [nheads] f32 (nullable)
+    const input_t* __restrict__ z_ptr,       // [seqlen, nheads, headdim] (nullable)
+    input_t*       __restrict__ out_ptr,     // [seqlen, nheads, headdim]
+    const int32_t* __restrict__ cu_seqlens,  // [batch+1] int32
+    int64_t batch, int64_t nheads, int64_t ngroups,
+    int64_t headdim, int64_t dstate) {
+
+  using input_vec_t = vec_op::vec_t<input_t>;
+  constexpr int VEC_ELEM_NUM = 8;
+
+  const int64_t nheads_per_group = nheads / ngroups;
+  // states layout: [batch, nheads, headdim, dstate] contiguous (caller guarantee)
+  const int64_t stride_s_b = nheads * headdim * dstate;
+  const int64_t stride_s_h = headdim * dstate;
+  // stride_s_d = dstate, stride_s_n = 1
+
+#pragma omp parallel for collapse(2) schedule(dynamic)
+  for (int64_t b = 0; b < batch; ++b) {
+    for (int64_t h = 0; h < nheads; ++h) {
+      const int64_t seq_start = cu_seqlens[b];
+      const int64_t seq_end   = cu_seqlens[b + 1];
+      const int64_t g         = h / nheads_per_group;
+
+      const float A_val = A_ptr[h];
+      const float D_val = (D_ptr != nullptr) ? D_ptr[h] : 0.0f;
+
+      // Working state slice: states[b, h, :, :] — float32, headdim * dstate.
+      // Fits in L1/L2 for typical dims (e.g. 64*128*4 = 32 KB).
+      float* s_bh = states_ptr + b * stride_s_b + h * stride_s_h;
+
+      for (int64_t t = seq_start; t < seq_end; ++t) {
+        const input_t* x_h  = x_ptr  + t * nheads * headdim + h * headdim;
+        const float*   dt_h = dt_ptr + t * nheads + h;
+        const input_t* B_g  = B_ptr  + t * ngroups * dstate  + g * dstate;
+        const input_t* C_g  = C_ptr  + t * ngroups * dstate  + g * dstate;
+        const input_t* z_h  = (z_ptr != nullptr) ?
+            z_ptr + t * nheads * headdim + h * headdim : nullptr;
+        input_t* out_h = out_ptr + t * nheads * headdim + h * headdim;
+
+        const float dt_val = *dt_h;
+        const float dA_val = std::exp(A_val * dt_val);
+        const vec_op::FP32Vec8 dA_vec(dA_val);  // broadcast scalar
+        const vec_op::FP32Vec8 dt_vec(dt_val);
+
+        for (int64_t d = 0; d < headdim; ++d) {
+          const float x_val = static_cast<float>(x_h[d]);
+          float* s_bhd = s_bh + d * dstate;  // [dstate] contiguous float32
+
+          // Vectorised SSM update + readout over dstate:
+          //   s_new = s * dA + x * dt * B
+          //   y    += s_new * C
+          int64_t n = 0;
+          vec_op::FP32Vec8 y_vec(0.0f);
+          const vec_op::FP32Vec8 x_vec(x_val);
+
+          for (; n <= dstate - VEC_ELEM_NUM; n += VEC_ELEM_NUM) {
+            const vec_op::FP32Vec8 B_v((input_vec_t(B_g + n)));
+            const vec_op::FP32Vec8 C_v((input_vec_t(C_g + n)));
+            const vec_op::FP32Vec8 s_v(s_bhd + n);
+
+            const vec_op::FP32Vec8 s_new = s_v * dA_vec + x_vec * dt_vec * B_v;
+            s_new.save(s_bhd + n);
+            y_vec = y_vec + s_new * C_v;
+          }
+
+          float y_val = y_vec.reduce_sum();
+
+          // Scalar tail for remaining dstate elements
+          for (; n < dstate; ++n) {
+            const float B_n   = static_cast<float>(B_g[n]);
+            const float C_n   = static_cast<float>(C_g[n]);
+            const float s_new = s_bhd[n] * dA_val + x_val * dt_val * B_n;
+            s_bhd[n] = s_new;
+            y_val += s_new * C_n;
+          }
+
+          // D skip connection (scalar per head)
+          if (D_ptr != nullptr) y_val += x_val * D_val;
+
+          // z gating: out = y * z * sigmoid(z)  (SiLU)
+          if (z_h != nullptr) {
+            const float z_val = static_cast<float>(z_h[d]);
+            const float sigmoid = (z_val >= 0.0f) ?
+                1.0f / (1.0f + std::exp(-z_val)) :
+                std::exp(z_val) / (1.0f + std::exp(z_val));
+            y_val *= z_val * sigmoid;
+          }
+
+          out_h[d] = static_cast<input_t>(y_val);
+        }
+      }
+    }
+  }
+}
+
 } // namespace mamba_cpu
 
