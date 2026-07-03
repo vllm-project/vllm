@@ -115,21 +115,24 @@ async def test_single_chat_session_image_base64encoded(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model_name", [MODEL_NAME])
+@pytest.mark.parametrize("part_type", ["input_image", "image_url"])
 @pytest.mark.parametrize("raw_image_url", TEST_IMAGE_ASSETS)
 async def test_single_chat_session_image_chat_completions_format(
     client: openai.AsyncOpenAI,
     model_name: str,
+    part_type: str,
     raw_image_url: str,
     url_encoded_image: dict[str, str],
 ):
-    # #46631: accept chat-completions image shape (nested image_url, no detail)
+    # #46631: accept chat-completions image shapes (image_url type or
+    # input_image with nested image_url, no detail)
     content_text = "What's in this image?"
     messages = [
         {
             "role": "user",
             "content": [
                 {
-                    "type": "input_image",
+                    "type": part_type,
                     "image_url": {"url": url_encoded_image[raw_image_url]},
                 },
                 {"type": "input_text", "text": content_text},

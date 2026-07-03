@@ -134,12 +134,20 @@ ResponseInputOutputItem: TypeAlias = ResponseInputItemParam | ResponseOutputItem
 
 
 def _normalize_chat_completions_image_parts(content: list) -> list:
-    """Flatten chat-style ``input_image`` parts (nested ``image_url``, no
-    ``detail``) to the flat ResponseInputImageParam schema (#46631)."""
+    """Normalize chat-completions image parts to the flat
+    ResponseInputImageParam schema (#46631).
+
+    Accepts the chat-style ``image_url`` type, nested ``image_url``
+    (``{"url": ...}``), and a missing ``detail``.
+    """
     normalized = []
     for part in content:
-        if isinstance(part, dict) and part.get("type") == "input_image":
+        if isinstance(part, dict) and part.get("type") in (
+            "input_image",
+            "image_url",
+        ):
             part = dict(part)
+            part["type"] = "input_image"
             image_url = part.get("image_url")
             if isinstance(image_url, dict) and "url" in image_url:
                 part["image_url"] = image_url["url"]
