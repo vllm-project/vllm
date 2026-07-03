@@ -21,6 +21,9 @@ pull_request_rules:
     - check-failure=pre-commit
     - -closed
     - -draft
+    - or:
+      - label=ready
+      - label=verified
   actions:
     comment:
       message: |
@@ -141,12 +144,12 @@ pull_request_rules:
     - label != stale
     - or:
       - files~=^examples/.*mistral.*\.py
-      - files~=^tests/.*mistral.*\.py
-      - files~=^vllm/model_executor/models/.*mistral.*\.py
+      - files~=^tests/.*(?:mistral|voxtral|mixtral|pixtral).*\.py
+      - files~=^vllm/model_executor/models/.*(?:mistral|voxtral|mixtral|pixtral).*\.py
       - files~=^vllm/reasoning/.*mistral.*\.py
       - files~=^vllm/tool_parsers/.*mistral.*\.py
-      - files~=^vllm/transformers_utils/.*mistral.*\.py
-      - title~=(?i)Mistral
+      - files~=^vllm/transformers_utils/.*(?:mistral|voxtral|pixtral).*\.py
+      - title~=(?i)(?:mistral|ministral|voxtral|mixtral|pixtral)
   actions:
     label:
       add:
@@ -385,9 +388,13 @@ pull_request_rules:
     - or:
       - files~=^tests/tool_use/
       - files~=^tests/tool_parsers/
+      - files~=^tests/parser/
+      - files~=^tests/reasoning/
       - files~=^tests/entrypoints/openai/.*tool.*
       - files~=^tests/entrypoints/anthropic/.*tool.*
       - files~=^vllm/tool_parsers/
+      - files~=^vllm/parser/
+      - files~=^vllm/reasoning/
       - files=docs/features/tool_calling.md
       - files~=^examples/tool_calling/
   actions:

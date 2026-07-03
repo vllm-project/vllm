@@ -173,6 +173,8 @@ void run_get_group_gemm_starts(const torch::stable::Tensor& a_starts,
                                torch::stable::Tensor const& problem_sizes,
                                int M, int N, int K) {
   int num_experts = (int)expert_offsets.size(0);
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a_tensors.get_device_index());
   auto stream = get_current_cuda_stream(a_tensors.get_device_index());
 
   STD_TORCH_CHECK(out_tensors.size(1) == N,
@@ -206,6 +208,8 @@ void run_fp4_blockwise_scaled_group_mm_sm100(
     const torch::stable::Tensor& problem_sizes,
     const torch::stable::Tensor& expert_offsets,
     const torch::stable::Tensor& sf_offsets, int M, int N, int K) {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a.get_device_index());
   using ProblemShape =
       cutlass::gemm::GroupProblemShape<Shape<int32_t, int32_t, int32_t>>;
   using ElementType = cutlass::float_e2m1_t;
@@ -420,6 +424,8 @@ void run_fp4_blockwise_scaled_group_mm_sm120(
     const torch::stable::Tensor& problem_sizes,
     const torch::stable::Tensor& expert_offsets,
     const torch::stable::Tensor& sf_offsets, int M, int N, int K) {
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      a.get_device_index());
   using ProblemShape =
       cutlass::gemm::GroupProblemShape<Shape<int32_t, int32_t, int32_t>>;
   using ElementType = cutlass::float_e2m1_t;

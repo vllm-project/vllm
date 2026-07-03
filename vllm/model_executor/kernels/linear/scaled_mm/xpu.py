@@ -100,6 +100,21 @@ class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
             "weight_scale_inv" if hasattr(layer, "weight_scale_inv") else "weight_scale"
         )
         scale = getattr(layer, scale_attr)
+        # Models with scale_fmt=ue8m0 (e.g. DeepSeek-V4) store weight scales
+        # as float8_e8m0fnu. The oneDNN fp8_gemm kernel dispatches to its
+        # "block quant" path only when NEITHER scale is e8m0:
+        #
+        #   is_block_quant = (m1_sc != e8m0) && (m2_sc != e8m0) && ...
+        #
+        # Since activation scales are always float32 (use_ue8m0=False on XPU,
+        # DeepGEMM requires Hopper/Blackwell), an e8m0 weight scale causes
+        # is_block_quant=false and falls into the wrong per-channel path,
+        # producing NaN. Converting e8m0→float32 here at load time (one-time,
+        # negligible overhead for small scale tensors) ensures the kernel sees
+        # matching dtypes and correctly enters the block-quant path with the
+        # actual group_size derived from scale tensor shapes.
+        if scale.dtype == torch.float8_e8m0fnu:
+            scale = scale.to(torch.float32)
         replace_parameter(layer, scale_attr, scale.data.t().contiguous())
 
     def apply_block_scaled_mm(

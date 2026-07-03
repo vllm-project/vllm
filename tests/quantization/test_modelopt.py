@@ -18,6 +18,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptMixedPrecisionConfig,
+    ModelOptMxFp8Config,
     ModelOptNvFp4Config,
     ModelOptNvFp4LinearMethod,
 )
@@ -25,6 +26,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
+from vllm.platforms import current_platform
 
 
 @pytest.fixture(scope="function", autouse=True)
@@ -80,6 +82,11 @@ def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionCon
         w4a16_nvfp4_config=ModelOptNvFp4Config(
             quant_method="W4A16_NVFP4",
             is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        ),
+        mxfp8_config=ModelOptMxFp8Config(
+            is_checkpoint_mxfp8_serialized=True,
             kv_cache_quant_algo=None,
             exclude_modules=[],
         ),
@@ -466,6 +473,12 @@ def test_modelopt_mixed_precision_dispatches_w4a16_layer(
     """
     from vllm.model_executor.layers.linear import LinearBase
     from vllm.model_executor.layers.quantization import modelopt as m
+
+    if (
+        expected_linear_cls_name == "ModelOptNvFp4W4A16LinearMethod"
+        and current_platform.is_rocm()
+    ):
+        pytest.skip("ModelOptNvFp4W4A16LinearMethod is not supported with rocm")
 
     hf_quant_config: dict[str, Any] = {
         "quantization": {

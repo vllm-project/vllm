@@ -50,7 +50,7 @@ class ModelArchConfigConvertorBase:
             # special case for deepseek_v4
             if hasattr(self.hf_text_config, "compress_ratios"):
                 return self.hf_text_config.head_dim
-            qk_rope_head_dim = getattr(self.hf_text_config, "qk_rope_head_dim", 0)
+            qk_rope_head_dim = self._get_qk_rope_head_dim()
             if not envs.VLLM_MLA_DISABLE:
                 return self.hf_text_config.kv_lora_rank + qk_rope_head_dim
             else:
@@ -58,9 +58,12 @@ class ModelArchConfigConvertorBase:
                 if qk_rope_head_dim and qk_nope_head_dim:
                     return qk_rope_head_dim + qk_nope_head_dim
 
-        # NOTE: Some configs may set head_dim=None in the config
-        if getattr(self.hf_text_config, "head_dim", None) is not None:
-            return self.hf_text_config.head_dim
+        # NOTE: Some config classes may set head_dim=None or materialize a missing
+        # head_dim as 0 (for example, DeepseekVLV2TextConfig).
+        if (
+            head_dim := getattr(self.hf_text_config, "head_dim", None)
+        ) is not None and head_dim > 0:
+            return head_dim
 
         # NOTE: Some models (such as PLaMo2.1) use `hidden_size_per_head`
         if getattr(self.hf_text_config, "hidden_size_per_head", None) is not None:
@@ -70,6 +73,38 @@ class ModelArchConfigConvertorBase:
             return 0
         # FIXME(woosuk): This may not be true for all models.
         return self.get_hidden_size() // total_num_attention_heads
+
+    def _get_qk_rope_head_dim(self) -> int:
+        """Get qk_rope_head_dim, fixing the transformers v5.4+ attribute_map bug."""
+        cfg = self.hf_text_config
+        qk_rope_head_dim = getattr(cfg, "qk_rope_head_dim", 0)
+        qk_nope_head_dim = getattr(cfg, "qk_nope_head_dim", 0)
+
+        # In valid MLA configs, qk_rope_head_dim != qk_nope_head_dim.
+        if qk_rope_head_dim == 0 or qk_rope_head_dim != qk_nope_head_dim:
+            return qk_rope_head_dim  # not corrupted
+
+        # Read the correct value from raw config.json.
+        from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
+
+        model_path = self.hf_config.name_or_path
+        if not model_path:
+            return qk_rope_head_dim
+        raw = get_hf_file_to_dict("config.json", model_path)
+        if raw and "qk_rope_head_dim" in raw:
+            correct = raw["qk_rope_head_dim"]
+            if correct != qk_rope_head_dim:
+                logger.info(
+                    "Fixing qk_rope_head_dim: %d -> %d "
+                    "(transformers v5.4+ attribute_map bug)",
+                    qk_rope_head_dim,
+                    correct,
+                )
+                # Patch the config so downstream model layers also get
+                # the correct value.
+                cfg.qk_rope_head_dim = correct
+                return correct
+        return qk_rope_head_dim
 
     def get_total_num_kv_heads(self) -> int:
         attributes = [
@@ -275,6 +310,12 @@ class ModelArchConfigConvertorBase:
             return False
         return self.hf_config.model_type in MM_PREFIX_LM_MODELS
 
+    def rswa_window(self) -> int | None:
+        value = getattr(self.hf_config, "rswa_window", None)
+        if value is None:
+            return None
+        return int(value)
+
     def derive_max_model_len_and_key(self) -> tuple[float, str | None]:
         derived_max_model_len = float("inf")
         possible_keys = [
@@ -304,7 +345,7 @@ class ModelArchConfigConvertorBase:
                     max_len_key = key
                 derived_max_model_len = min(derived_max_model_len, max_len)
 
-        # For Command-R / Cohere, Cohere2 / Aya Vision models
+        # For Command-R / Cohere, Cohere2 models
         if tmp_max_len := getattr(self.hf_text_config, "model_max_length", None):
             max_len_key = "model_max_length"
             derived_max_model_len = tmp_max_len
@@ -325,6 +366,7 @@ class ModelArchConfigConvertorBase:
             quantization_config=self.get_quantization_config(),
             is_deepseek_mla=self.is_deepseek_mla(),
             is_mm_prefix_lm=self.is_mm_prefix_lm(),
+            rswa_window=self.rswa_window(),
             derived_max_model_len_and_key=self.derive_max_model_len_and_key(),
         )
 
@@ -545,11 +587,56 @@ class Gemma4ModelArchConfigConvertor(ModelArchConfigConvertorBase):
         return max(head_dim, global_head_dim) or super().get_head_size()
 
 
+class MossAudioModelArchConfigConvertor(ModelArchConfigConvertorBase):
+    def _language_config(self) -> PretrainedConfig:
+        return self.hf_config.language_config
+
+    def get_num_hidden_layers(self) -> int:
+        return getattr(self._language_config(), "num_hidden_layers", 0)
+
+    def get_total_num_attention_heads(self) -> int:
+        return getattr(self._language_config(), "num_attention_heads", 0)
+
+    def get_vocab_size(self) -> int:
+        return getattr(self._language_config(), "vocab_size", 0)
+
+    def get_hidden_size(self) -> int:
+        return getattr(self._language_config(), "hidden_size", 0)
+
+    def get_head_size(self) -> int:
+        head_dim = getattr(self._language_config(), "head_dim", None)
+        if head_dim is not None:
+            return head_dim
+        total_num_attention_heads = self.get_total_num_attention_heads()
+        if total_num_attention_heads == 0:
+            return 0
+        return self.get_hidden_size() // total_num_attention_heads
+
+    def get_total_num_kv_heads(self) -> int:
+        return getattr(
+            self._language_config(),
+            "num_key_value_heads",
+            self.get_total_num_attention_heads(),
+        )
+
+    def derive_max_model_len_and_key(self) -> tuple[float, str | None]:
+        language_config = self._language_config()
+        max_position_embeddings = getattr(
+            language_config,
+            "max_position_embeddings",
+            None,
+        )
+        if max_position_embeddings is None:
+            return super().derive_max_model_len_and_key()
+        return max_position_embeddings, "language_config.max_position_embeddings"
+
+
 # hf_config.model_type -> convertor class
 MODEL_ARCH_CONFIG_CONVERTORS = {
     "cohere_asr": CohereAsrModelArchConfigConvertor,
     "dbrx": DbrxModelArchConfigConvertor,
     "deepseek_mtp": DeepSeekMTPModelArchConfigConvertor,
+    "diffusion_gemma_text": Gemma4ModelArchConfigConvertor,
     "ernie_mtp": ErnieMTPModelArchConfigConvertor,
     "falcon": FalconModelArchConfigConvertor,
     "falcon_mamba": MambaModelArchConfigConvertor,
@@ -568,6 +655,7 @@ MODEL_ARCH_CONFIG_CONVERTORS = {
     "mimo_v2_flash": MimoV2ModelArchConfigConvertor,
     "mimo_v2_mtp": MimoV2MTPModelArchConfigConvertor,
     "mimo_v2_omni_mtp": MimoV2MTPModelArchConfigConvertor,
+    "moss_audio": MossAudioModelArchConfigConvertor,
     "mpt": MPTModelArchConfigConvertor,
     "nemotron-nas": NemotronNasModelArchConfigConvertor,
     "pangu_ultra_moe_mtp": PanguUltraMoeMTPModelArchConfigConvertor,

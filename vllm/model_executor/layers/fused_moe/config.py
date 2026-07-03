@@ -603,6 +603,8 @@ def fp8_w8a8_moe_quant_config(
     a2_gscale: torch.Tensor | None = None,
     g1_alphas: torch.Tensor | None = None,
     g2_alphas: torch.Tensor | None = None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
     gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
@@ -623,6 +625,8 @@ def fp8_w8a8_moe_quant_config(
         per_act_token_quant=per_act_token_quant,
         per_out_ch_quant=per_out_ch_quant,
         block_shape=block_shape,
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
         gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
@@ -857,6 +861,7 @@ def nvfp4_w4a16_moe_quant_config(
     g2_alphas: torch.Tensor,
     w1_scale: torch.Tensor,
     w2_scale: torch.Tensor,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-but activations and nvp4 weights.
@@ -868,6 +873,7 @@ def nvfp4_w4a16_moe_quant_config(
         g1_alphas=g1_alphas,
         g2_alphas=g2_alphas,
         weight_dtype="nvfp4",
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -900,6 +906,9 @@ def fp8_w8a16_moe_quant_config(
     w1_bias: torch.Tensor | None = None,
     w2_bias: torch.Tensor | None = None,
     block_shape: list[int] | None = None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for 16-bit float activations and fp8 weights.
@@ -925,6 +934,9 @@ def fp8_w8a16_moe_quant_config(
             None,
             w2_bias,
         ),
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -979,15 +991,24 @@ def int4_w4afp8_moe_quant_config(
 def biased_moe_quant_config(
     w1_bias: torch.Tensor | None,
     w2_bias: torch.Tensor | None,
+    gemm1_alpha: float | None = None,
+    gemm1_beta: float | None = None,
+    gemm1_clamp_limit: float | None = None,
 ) -> FusedMoEQuantConfig:
     """
     Construct a quant config for unquantized activations with biases.
+
+    gemm1_alpha/gemm1_beta/gemm1_clamp_limit carry the SwiGLU gate params
+    through to the fused activation kernel (e.g. swigluoai_uninterleave).
     """
     return FusedMoEQuantConfig(
         _a1=FusedMoEQuantDesc(),
         _a2=FusedMoEQuantDesc(),
         _w1=FusedMoEQuantDesc(bias=w1_bias),
         _w2=FusedMoEQuantDesc(bias=w2_bias),
+        gemm1_alpha=gemm1_alpha,
+        gemm1_beta=gemm1_beta,
+        gemm1_clamp_limit=gemm1_clamp_limit,
     )
 
 
@@ -1069,6 +1090,10 @@ class FusedMoEParallelConfig:
     @property
     def use_nixl_ep_kernels(self):
         return self.use_all2all_kernels and self.all2all_backend == "nixl_ep"
+
+    @property
+    def use_deepep_v2_kernels(self):
+        return self.use_all2all_kernels and self.all2all_backend == "deepep_v2"
 
     @staticmethod
     def flatten_tp_across_dp_and_pcp(
@@ -1236,7 +1261,7 @@ class FusedMoEConfig:
     num_experts: int
     experts_per_token: int
     hidden_dim: int
-    intermediate_size_per_partition: int
+    intermediate_size: int
     num_local_experts: int
     num_logical_experts: int
     activation: MoEActivation
@@ -1254,19 +1279,41 @@ class FusedMoEConfig:
     hidden_dim_unpadded: int | None = None
     # Defaults to intermediate_size_per_partition if not specified.
     intermediate_size_per_partition_unpadded: int | None = None
+    # Model specific override
+    intermediate_pad: int | None = None
 
     moe_backend: MoEBackend = "auto"
     max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     has_bias: bool = False
-    is_act_and_mul: bool = True
     is_lora_enabled: bool = False
+
+    # When True, the MoE skips its final cross-rank all-reduce (and the separate
+    # shared-expert reduce), returning the partial per-rank sum. The caller is
+    # then responsible for the reduction (e.g. fusing it into the next RMSNorm).
+    # Only honored on the non-reduced (late-AR) TP path. Default False.
+    skip_final_all_reduce: bool = False
 
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
     # cannot silently select one and drop the clamp.
     swiglu_limit: float | None = None
+    swiglu_alpha: float | None = None
+    swiglu_beta: float | None = None
+
+    max_capture_size: int = 0
+
+    # Set by __post_init__
+    intermediate_size_per_partition: int = -1
+    rocm_aiter_fmoe_enabled: bool = False
+    aiter_fmoe_shared_expert_enabled: bool = False
 
     def __post_init__(self):
+        from vllm._aiter_ops import rocm_aiter_ops
+
+        tp_size = self.moe_parallel_config.tp_size
+        assert self.intermediate_size % tp_size == 0
+        self.intermediate_size_per_partition = self.intermediate_size // tp_size
+
         if self.dp_size > 1:
             logger.debug_once(
                 "Using FusedMoEConfig::max_num_tokens=%d", self.max_num_tokens
@@ -1283,6 +1330,32 @@ class FusedMoEConfig:
             self.intermediate_size_per_partition_unpadded = (
                 self.intermediate_size_per_partition
             )
+
+        if self.is_act_and_mul:
+            self.rocm_aiter_fmoe_enabled = rocm_aiter_ops.is_fused_moe_enabled()
+            self.aiter_fmoe_shared_expert_enabled = (
+                rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
+            )
+
+        if self.use_mori_kernels:
+            assert self.rocm_aiter_fmoe_enabled, (
+                "Mori needs to be used with aiter fused_moe for now."
+            )
+            assert not self.aiter_fmoe_shared_expert_enabled, (
+                "Mori does not support fusion shared expert now. "
+                "Turn it off by setting VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS=0"
+            )
+
+        if not self.is_act_and_mul and not (
+            current_platform.is_cuda_alike() or current_platform.is_xpu()
+        ):
+            raise NotImplementedError(
+                "is_act_and_mul=False is supported only for CUDA, XPU and ROCm for now"
+            )
+
+    @property
+    def is_act_and_mul(self) -> bool:
+        return self.activation.is_gated
 
     @property
     def tp_size(self):
@@ -1355,6 +1428,10 @@ class FusedMoEConfig:
     @property
     def use_nixl_ep_kernels(self):
         return self.moe_parallel_config.use_nixl_ep_kernels
+
+    @property
+    def use_deepep_v2_kernels(self):
+        return self.moe_parallel_config.use_deepep_v2_kernels
 
     @property
     def needs_round_robin_routing_tables(self):
