@@ -215,9 +215,7 @@ def _ragged_dispatch_padding_worker(
 ):
     """VLLM_MOE_SKIP_PADDING gather propagation: an is_padding mask set in
     this rank's forward context before dispatch_router_logits() must arrive,
-    gathered and thresholded, in additional_kwargs["cpu_gathered_is_padding"]
-    on every rank -- exercising the same path CPUExpertsFp8.apply reads from
-    (see CpuCommunicator.dispatch_router_logits)."""
+    gathered and thresholded, in forward_context.is_padding on every rank."""
     try:
         os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_ep_comm_pad_{port}")
         _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
@@ -250,9 +248,7 @@ def _ragged_dispatch_padding_worker(
                     for r, size in enumerate(sizes)
                 ]
             )
-            gathered_mask = get_forward_context().additional_kwargs[
-                "cpu_gathered_is_padding"
-            ]
+            gathered_mask = get_forward_context().is_padding
             torch.testing.assert_close(gathered_mask, expected_mask)
 
         dist.barrier()

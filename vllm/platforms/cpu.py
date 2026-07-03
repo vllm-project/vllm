@@ -144,6 +144,12 @@ class CpuPlatform(Platform):
         scheduler_config.async_scheduling = False
 
         parallel_config = vllm_config.parallel_config
+        # TP>1 + DP>1 + EP on CPU is not supported yet.
+        if parallel_config.use_sequence_parallel_moe:
+            raise NotImplementedError(
+                "CPU expert parallelism does not support tensor_parallel_size > 1 "
+                "with data_parallel_size > 1 yet."
+            )
         if (
             os.environ.get("VLLM_ENABLE_V1_MULTIPROCESSING", "1") == "1"
             and parallel_config.distributed_executor_backend == "uni"

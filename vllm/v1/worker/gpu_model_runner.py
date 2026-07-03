@@ -4331,6 +4331,10 @@ class GPUModelRunner(
                 num_tokens_unpadded,
                 ubatch_slices_padded,
             )
+        is_padding = None
+        if current_platform.is_cpu() and envs.VLLM_MOE_SKIP_PADDING:
+            is_padding = torch.zeros(num_tokens_padded, dtype=torch.bool, device="cpu")
+            is_padding[num_tokens_unpadded:] = True
         with (
             set_forward_context(
                 attn_metadata,
@@ -4342,6 +4346,7 @@ class GPUModelRunner(
                 ubatch_slices=ubatch_slices_padded,
                 slot_mapping=slot_mappings,
                 skip_compiled=has_encoder_input,
+                is_padding=is_padding,
             ),
             record_function_or_nullcontext("gpu_model_runner: forward"),
             self.maybe_get_kv_connector_output(
@@ -5993,6 +5998,12 @@ class GPUModelRunner(
                 if num_tokens_across_dp is not None:
                     num_tokens_across_dp[:] = num_tokens_padded
 
+            is_padding = None
+            if current_platform.is_cpu() and envs.VLLM_MOE_SKIP_PADDING:
+                # The entire dummy batch is padding (no real tokens on this rank).
+                is_padding = torch.ones(
+                    num_tokens_padded, dtype=torch.bool, device="cpu"
+                )
             with (
                 self.maybe_randomize_inputs(input_ids, inputs_embeds),
                 set_forward_context(
@@ -6004,6 +6015,7 @@ class GPUModelRunner(
                     batch_descriptor=batch_desc,
                     ubatch_slices=ubatch_slices_padded,
                     slot_mapping=slot_mappings,
+                    is_padding=is_padding,
                 ),
             ):
                 outputs = self.model(

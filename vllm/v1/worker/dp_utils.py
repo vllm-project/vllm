@@ -7,12 +7,19 @@ import torch.distributed as dist
 from vllm.config import ParallelConfig
 from vllm.distributed.parallel_state import get_dp_group
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 from vllm.v1.worker.ubatch_utils import (
     check_ubatch_thresholds,
     is_last_ubatch_empty,
 )
 
 logger = init_logger(__name__)
+
+# Conservative decode-only gate for CPU DP padding (see _cpu_dp_pad_worthwhile):
+# only pad when every rank's batch is already small and the ranks are close in
+# size, so padding to max adds at most a couple of GEMM rows per rank.
+CPU_DP_PAD_MAX_TOKENS = 4
+CPU_DP_PAD_MAX_SPREAD = 2
 
 
 def _get_device_and_group(parallel_config: ParallelConfig):
@@ -42,13 +49,31 @@ def _run_ar(
 ) -> torch.Tensor:
     dp_size = parallel_config.data_parallel_size
     dp_rank = parallel_config.data_parallel_rank
-    device, group = _get_device_and_group(parallel_config)
     # Populate this rank's contribution on CPU to reduce GPU syncs.
     tensor_cpu = torch.zeros(4, dp_size, dtype=torch.int32)
     tensor_cpu[0][dp_rank] = orig_num_tokens_per_ubatch
     tensor_cpu[1][dp_rank] = padded_num_tokens_per_ubatch
     tensor_cpu[2][dp_rank] = 1 if should_ubatch else 0
     tensor_cpu[3][dp_rank] = cudagraph_mode
+
+    # On CPU, route through the DP group's SHM all-reduce when available to
+    # avoid a per-step gloo round-trip. The SHM kernel is float-only and
+    # reduces in FP32, so round-trip via fp32: the coordination values are
+    # tiny integers (< 2^24) and each rank writes only its own column, so the
+    # SUM stays exact per column.
+    dp_group = get_dp_group()
+    comm = dp_group.device_communicator
+    use_shm = (
+        current_platform.is_cpu()
+        and comm is not None
+        and getattr(comm, "supports_tensor_dict", False)
+    )
+    if use_shm:
+        tensor_fp32 = tensor_cpu.to(torch.float32)
+        dp_group.all_reduce(tensor_fp32)  # in place -> shm_allreduce
+        return tensor_fp32.round().to(torch.int32)
+
+    device, group = _get_device_and_group(parallel_config)
     tensor = tensor_cpu.to(device, non_blocking=True)
     dist.all_reduce(tensor, group=group)
     return tensor
@@ -77,8 +102,7 @@ def _post_process_ubatch(tensor: torch.Tensor, num_ubatches: int) -> bool:
 def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch.Tensor:
     num_tokens_across_dp = tensor[1, :]
     if should_dp_pad:
-        # If DP padding is enabled, ensure that each rank is processing the same number
-        # of tokens
+        # Pad every rank up to the synchronized max token count.
         max_num_tokens = int(num_tokens_across_dp.max().item())
         return torch.tensor(
             [max_num_tokens] * len(num_tokens_across_dp),
@@ -90,12 +114,19 @@ def _post_process_dp_padding(tensor: torch.Tensor, should_dp_pad: bool) -> torch
 
 
 def _post_process_cudagraph_mode(tensor: torch.Tensor) -> int:
-    """
-    Synchronize cudagraph_mode across DP ranks by taking the minimum.
-    If any rank has NONE (0), all ranks use NONE.
-    This ensures all ranks send consistent values (all padded or all unpadded).
-    """
+    """Synchronize cudagraph_mode across DP ranks by taking the minimum."""
     return int(tensor[3, :].min().item())
+
+
+def _cpu_dp_pad_worthwhile(tensor: torch.Tensor) -> bool:
+    # Decode-only, near-uniform gate: pad to max ONLY when every rank's batch
+    # is already small and the ranks are close in size, so padding to max adds
+    # at most a couple of GEMM rows per rank. Never pad ragged prefill batches
+    # (large max, wide spread) where padding would add real GEMM work.
+    counts = tensor[1, :]
+    mx = int(counts.max().item())
+    mn = int(counts.min().item())
+    return mx <= CPU_DP_PAD_MAX_TOKENS and (mx - mn) <= CPU_DP_PAD_MAX_SPREAD
 
 
 def _synchronize_dp_ranks(
@@ -125,9 +156,7 @@ def _synchronize_dp_ranks(
     """
     assert num_tokens_padded >= num_tokens_unpadded
 
-    # Coordinate between the DP ranks via an All Reduce
-    # to determine the total number of tokens that each rank
-    # will run and if we are using ubatching or not.
+    # Coordinate token counts, ubatching, and cudagraph mode across DP ranks.
     tensor = _run_ar(
         should_ubatch=should_attempt_ubatching,
         orig_num_tokens_per_ubatch=num_tokens_unpadded,
@@ -144,15 +173,17 @@ def _synchronize_dp_ranks(
     # Check conditions for microbatching
     should_ubatch = _post_process_ubatch(tensor, parallel_config.num_ubatches)
 
-    # DP padding is needed when cudagraph is enabled (synced across ranks)
-    # or when ubatching/DBO is active (ubatching requires uniform batch
-    # sizes across DP ranks currently).
-    # Use the synced runtime cudagraph mode rather than the compilation config
-    # so we can avoid padding when cudagraph is not enabled for this step.
-    should_dp_pad = synced_cudagraph_mode != 0 or should_ubatch
+    # DP padding is required for synced cudagraph execution and for ubatching,
+    # which still assumes uniform per-rank token counts. On CPU, also pad when
+    # it's cheap (small, near-uniform decode batches) to unlock the uniform
+    # all-gather fast path and skip the ragged trim.
+    should_dp_pad = (
+        synced_cudagraph_mode != 0
+        or should_ubatch
+        or (current_platform.is_cpu() and _cpu_dp_pad_worthwhile(tensor))
+    )
 
-    # Pad all DP ranks up to the maximum token count across ranks if
-    # should_dp_pad is True
+    # Return either the synchronized max or the unpadded per-rank counts.
     num_tokens_after_padding = _post_process_dp_padding(
         tensor,
         should_dp_pad,
