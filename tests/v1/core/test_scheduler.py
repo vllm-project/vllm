@@ -1319,11 +1319,12 @@ def _model_output(scheduler, output, sampled):
     )
 
 
-def test_spec_decode_padding_first_decode_step():
-    """A request taking its first decode step (whole prompt already computed via
-    a prefix-cache hit) is padded with placeholder (-1) spec tokens so it enters
-    the worker with the same 1 + num_spec_tokens shape as the other speculative
-    decodes, keeping the batch uniform.
+def test_spec_decode_padding_skipped_before_prompt_complete():
+    """Do not pad a one-token prompt tail with placeholder spec tokens.
+
+    A prefix-cache hit can leave exactly one prompt token to compute. Although
+    this has the same shape as a one-token decode request, the prompt is not
+    complete yet, so the token must keep prefill-tail semantics.
     """
     num_spec = 3
     scheduler = create_scheduler(
@@ -1345,15 +1346,16 @@ def test_spec_decode_padding_first_decode_step():
     _model_output(scheduler, out, [[100]])
     scheduler.update_draft_token_ids(DraftTokenIds([r1.request_id], [[1, 2, 3]]))
 
-    # r2 arrives; its whole prompt is a prefix-cache hit -> first decode step.
+    # r2 arrives; all but the prompt tail is a prefix-cache hit.
     scheduler.add_request(r2)
     out = scheduler.schedule()
 
     # r1 verifies its real drafts.
     assert out.scheduled_spec_decode_tokens[r1.request_id] == [1, 2, 3]
-    # r2 is padded to the 1 + num_spec shape with placeholder (-1) drafts.
-    assert out.num_scheduled_tokens[r2.request_id] == 1 + num_spec
-    assert out.scheduled_spec_decode_tokens[r2.request_id] == [-1] * num_spec
+    # r2 still has one prompt token to compute, so it must not be padded as
+    # speculative decode.
+    assert out.num_scheduled_tokens[r2.request_id] == 1
+    assert r2.request_id not in out.scheduled_spec_decode_tokens
 
 
 def test_spec_decode_padding_skipped_with_prefill_in_batch():
