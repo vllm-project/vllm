@@ -59,6 +59,14 @@ def _deepseek_v4_sm12x_fp8_einsum_kernel(
     BLOCK_OUT: tl.constexpr,
     BLOCK_HIDDEN: tl.constexpr,
 ) -> None:
+    # Keep the group strides runtime (avoids per-shape Triton recompile /
+    # host-memory leak on unified memory) but restore alignment: both are
+    # provably divisible by 16 -- a_stride_group = num_tokens * hidden_size
+    # (hidden_size % 128 == 0), a_scale_stride_group = num_tokens * 32. Without
+    # the hint Triton drops them to divisibility=1 and narrows the load, costing
+    # ~24% single-stream decode (reported by GanyX19, PR#41834).
+    a_stride_group = tl.multiple_of(a_stride_group, 16)
+    a_scale_stride_group = tl.multiple_of(a_scale_stride_group, 16)
     token_block = tl.program_id(0)
     out_block = tl.program_id(1)
     group = tl.program_id(2)
@@ -169,6 +177,12 @@ def _deepseek_v4_sm12x_fp8_einsum_quant_kernel(
     ``per_token_group_quant_fp8`` kernel launch that would otherwise quantize
     this same accumulator's BF16 store right back down to FP8 one step later.
     """
+    # Same alignment restoration as the BF16 einsum kernel above: both group
+    # strides are provably divisible by 16, so hint them while keeping them
+    # runtime (no per-shape recompile). Without this the runtime strides drop to
+    # divisibility=1 and narrow the load.
+    a_stride_group = tl.multiple_of(a_stride_group, 16)
+    a_scale_stride_group = tl.multiple_of(a_scale_stride_group, 16)
     token_block = tl.program_id(0)
     out_block = tl.program_id(1)
     group = tl.program_id(2)
