@@ -55,6 +55,14 @@ logger = init_logger(__name__)
 MIN_LAUNCH_GRID_SIZE_2D = 128  # Minimum launch grid size of 2D kernel
 NUM_PAR_SOFTMAX_SEGMENTS = 16  # Number of parallel tiled softmax segments
 
+# Long-context bias for the 2D/3D split-KV threshold (see the metadata builder).
+# 3D (split-KV / flash-decoding) keeps winning past the launch-grid occupancy
+# point when the KV is long, because the 2D kernel reduces the whole KV serially
+# per CTA. For long-context deployments the effective launch-grid target is scaled
+# up by envs.VLLM_TRITON_ATTN_LONGCTX_3D_MULT; set it to 1 to disable the bias.
+SEQ_THRESHOLD_3D_LONG_CTX_MIN_MODEL_LEN = 8192
+SEQ_THRESHOLD_3D_CAP = 64  # bounds the softmax_segm_* scratch buffers
+
 
 @dataclass
 class TritonAttentionMetadata:
@@ -128,13 +136,32 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             )
         )
 
-        # The launch grid for the 2D kernel is defined as (num_q_blocks, num_heads_kv).
-        # A lower bound for num_q_blocks is the number of sequences.
-        # To ensure the minimum launch grid size is achieved, the number of sequences
-        # must be at least equal to the threshold below.
-        # If this threshold is not reached (i.e., the batch size is not large enough),
-        # the 3D kernel will be selected instead.
-        self.seq_threshold_3D = MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv
+        # Sequence-count threshold below which the unified-attention kernel takes
+        # the 3D (split-KV / flash-decoding) path instead of the 2D path. Two
+        # effects set it, and both are folded into the value computed here:
+        #   1. Launch-grid occupancy: the 2D grid is (num_q_blocks, num_heads_kv)
+        #      and num_q_blocks is lower-bounded by the number of sequences, so at
+        #      least this many sequences are needed to fill the device. The target
+        #      is sized off the *actual* SM count rather than a fixed 128-CTA grid.
+        #   2. Serial KV reduction: for long-context decode the 2D kernel reduces
+        #      the entire KV serially per CTA, so split-KV keeps winning well past
+        #      the occupancy point. For long-context deployments (max_model_len >=
+        #      SEQ_THRESHOLD_3D_LONG_CTX_MIN_MODEL_LEN) the target is biased further
+        #      toward 3D by envs.VLLM_TRITON_ATTN_LONGCTX_3D_MULT.
+        # Capped at SEQ_THRESHOLD_3D_CAP to bound the softmax_segm_* scratch, and
+        # clamped to never fall below the stock value so short-context / small-GPU
+        # shapes never regress. Init-time only (the 2D/3D choice must be fixed per
+        # CUDA-graph capture; see the capture-size snap below).
+        stock_threshold = MIN_LAUNCH_GRID_SIZE_2D // self.num_heads_kv
+        grid_target = max(
+            MIN_LAUNCH_GRID_SIZE_2D, current_platform.num_compute_units(device.index)
+        )
+        if model_config.max_model_len >= SEQ_THRESHOLD_3D_LONG_CTX_MIN_MODEL_LEN:
+            grid_target *= envs.VLLM_TRITON_ATTN_LONGCTX_3D_MULT
+        self.seq_threshold_3D = max(
+            stock_threshold,
+            min(grid_target // self.num_heads_kv, SEQ_THRESHOLD_3D_CAP),
+        )
 
         # Modify the threshold if needed.
         if self.decode_cudagraph_enabled:
