@@ -84,9 +84,15 @@ class QKVFuser(StackedFuser):
             return None
         q, k, v = qkv_nodes
         names = dict(q_name=q.target, k_name=k.target, v_name=v.target)
-        predicate = lambda n, c: isinstance(c, nn.Linear) and n not in names.values()
-        others = [n for n, c in module.named_children() if predicate(n, c)]
-        names["o_name"] = others[0] if len(others) == 1 else None
+        attn_width = module.get_submodule(q.target).out_features
+        candidates = [
+            name
+            for name, child in module.named_children()
+            if isinstance(child, nn.Linear)
+            and name not in names.values()
+            and child.in_features == attn_width
+        ]
+        names["o_name"] = candidates[0] if len(candidates) == 1 else None
         return cls(source_cls=type(module).__name__, **names)
 
     def update_forward(self, module: nn.Module) -> None:
