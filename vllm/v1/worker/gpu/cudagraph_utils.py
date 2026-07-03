@@ -201,11 +201,26 @@ class CudaGraphManager:
         # When using Dynamic SD, num_speculative_tokens is the max number of
         # draft tokens. The scheduler might use a smaller number so we need
         # to capture graphs for all possible values during decode.
+        speculative_config = self.vllm_config.speculative_config
         if (
-            self.vllm_config.speculative_config
-            and self.vllm_config.speculative_config.uses_dynamic_speculative_decoding()
+            speculative_config
+            and speculative_config.uses_dynamic_speculative_decoding()
         ):
-            decode_query_lens = list(range(1, self.decode_query_len + 1))
+            num_spec_per_batch_size = (
+                speculative_config.num_speculative_tokens_per_batch_size
+            )
+            # uses_dynamic_speculative_decoding() guarantees this is set.
+            assert num_spec_per_batch_size is not None
+            # decode_query_len = num_speculative_steps + num_new_sampled_tokens
+            # _per_step. Recover num_new_sampled_tokens_per_step
+            # from the values the manager already has.
+            num_new_sampled_tokens_per_step = (
+                self.decode_query_len - self.vllm_config.num_speculative_tokens
+            )
+            # Each entry is (range_start, range_end, num_speculative_tokens).
+            decode_query_lens = [
+                x[2] + num_new_sampled_tokens_per_step for x in num_spec_per_batch_size
+            ]
         else:
             decode_query_lens = [self.decode_query_len]
 

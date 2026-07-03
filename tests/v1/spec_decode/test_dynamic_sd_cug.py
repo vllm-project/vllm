@@ -26,11 +26,17 @@ def _create_vllm_config_for_dsd(
     *,
     cudagraph_mode: str = "FULL_AND_PIECEWISE",
     use_dynamic_sd: bool = True,
+    num_spec_per_batch_size: list[tuple[int, int, int]] | None = None,
 ) -> MagicMock:
     """Create a minimal config that exercises DSD cudagraph dispatch.
 
     The test uses an exact capture-size grid so that every valid uniform decode
     shape has a directly matching FULL graph candidate.
+
+    ``num_spec_per_batch_size`` lets a test supply an explicit DSD schedule of
+    ``(range_start, range_end, num_speculative_tokens)`` tuples. When omitted,
+    a schedule covering every query length in ``[1, max_decode_query_len]`` is
+    generated.
     """
 
     max_decode_query_len = max_spec_tokens + 1
@@ -49,9 +55,29 @@ def _create_vllm_config_for_dsd(
         max_num_seqs=max_num_seqs,
     )
     vllm_config.parallel_config = ParallelConfig()
+    # num_speculative_tokens is the max K (num_speculative_steps). The manager
+    # recovers num_new_sampled_tokens_per_step as
+    # decode_query_len - num_speculative_tokens; with decode_query_len =
+    # max_spec_tokens + 1 this yields the normal per-step bonus of 1.
+    vllm_config.num_speculative_tokens = max_spec_tokens
 
     speculative_config = MagicMock()
     speculative_config.uses_dynamic_speculative_decoding.return_value = use_dynamic_sd
+    if use_dynamic_sd:
+        # DSD reads the per-batch-size schedule; a schedule entry with K
+        # speculative tokens maps to decode query length K + 1. By default
+        # provide every query length in [1, max_decode_query_len] (i.e. K in
+        # [0, max_spec_tokens]) so the manager captures a FULL decode graph for
+        # each uniform shape.
+        if num_spec_per_batch_size is None:
+            num_spec_per_batch_size = [
+                (qlen, qlen, qlen - 1) for qlen in range(1, max_decode_query_len + 1)
+            ]
+        speculative_config.num_speculative_tokens_per_batch_size = (
+            num_spec_per_batch_size
+        )
+    else:
+        speculative_config.num_speculative_tokens_per_batch_size = None
     vllm_config.speculative_config = speculative_config
 
     return vllm_config
@@ -225,4 +251,78 @@ def test_basic_sd_does_not_capture_shorter_full_decode_shapes(monkeypatch):
             assert desc.uniform_token_count is None
             assert desc.num_tokens == num_tokens
             assert desc.num_reqs is None
+            assert desc.num_active_loras == 0
+
+
+def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
+    """DSD should only capture FULL graphs for query lengths in the schedule.
+
+    With a partial schedule of ``(1, 32, 4)`` and ``(32, 128, 3)``, only the
+    scheduled speculative-token counts (K = 4 and K = 3) become decode query
+    lengths (K + 1 = 5 and 4). Uniform batches at those query lengths should get
+    FULL graphs, while every other query length (e.g. the lower values 1, 2, 3)
+    must fall back to the mixed-batch PIECEWISE graph.
+    """
+
+    max_num_seqs = 128
+    max_spec_tokens = 7
+    max_decode_query_len = max_spec_tokens + 1
+
+    # (range_start, range_end, num_speculative_tokens): K = 4 and K = 3 are
+    # scheduled, so FULL decode graphs should exist for query lengths K + 1,
+    # i.e. exactly {5, 4}.
+    num_spec_per_batch_size = [(1, 32, 4), (32, 128, 3)]
+    scheduled_query_lens = {entry[2] + 1 for entry in num_spec_per_batch_size}
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+
+    vllm_config = _create_vllm_config_for_dsd(
+        max_num_seqs=max_num_seqs,
+        max_spec_tokens=max_spec_tokens,
+        cudagraph_mode="FULL_AND_PIECEWISE",
+        use_dynamic_sd=True,
+        num_spec_per_batch_size=num_spec_per_batch_size,
+    )
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=max_decode_query_len,
+    )
+    manager._graphs_captured = True
+
+    for num_reqs in range(1, max_num_seqs + 1):
+        for max_query_len in range(1, max_decode_query_len + 1):
+            num_tokens = num_reqs * max_query_len
+            uniform_tok_count = gpu_cudagraph_utils.get_uniform_token_count(
+                num_reqs,
+                num_tokens,
+                max_query_len,
+            )
+            assert uniform_tok_count == max_query_len
+
+            desc = manager.dispatch(
+                num_reqs=num_reqs,
+                num_tokens=num_tokens,
+                uniform_token_count=uniform_tok_count,
+                num_active_loras=0,
+            )
+
+            if max_query_len in scheduled_query_lens:
+                # Scheduled query lengths get a dedicated FULL decode graph.
+                assert desc.cg_mode == CUDAGraphMode.FULL
+                assert desc.uniform_token_count == max_query_len
+                assert desc.num_tokens == num_tokens
+                assert desc.num_reqs == num_reqs
+            else:
+                # Unscheduled query lengths (including the lower values 1 and 2)
+                # have no FULL candidate and must fall back to PIECEWISE.
+                assert desc.cg_mode == CUDAGraphMode.PIECEWISE
+                assert desc.uniform_token_count is None
+                assert desc.num_tokens == num_tokens
+                assert desc.num_reqs is None
             assert desc.num_active_loras == 0
