@@ -267,9 +267,12 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         EmulationMxfp8LinearKernel,
         EmulationNvFp4LinearKernel,
     },
-    "xpu_w8a8_fp8": {
+    "xpu": {
         XPUW8A8FP8LinearKernel,
         XPUFp8BlockScaledMMKernel,
+    },
+    "xpu_woq": {
+        XPUW8A16FP8LinearKernel,
     },
 }
 

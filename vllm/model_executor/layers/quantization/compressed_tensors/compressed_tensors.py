@@ -749,12 +749,12 @@ class CompressedTensorsConfig(QuantizationConfig):
         if act_quant_format:
             if self._is_fp8_w8a8(weight_quant, input_quant):
                 if current_platform.is_xpu():
-                    # On XPU, --linear-backend xpu_w8a8_fp8 explicitly opts into
-                    # W8A8 FP8 linear kernel; otherwise we keep the W8A16 fallback.
+                    # On XPU, --linear-backend xpu opts into W8A8 FP8
+                    # linear kernel; otherwise default to W8A16.
                     config = get_current_vllm_config_or_none()
                     is_fp8_w8a8_supported = (
                         config is not None
-                        and config.kernel_config.linear_backend == "xpu_w8a8_fp8"
+                        and config.kernel_config.linear_backend == "xpu"
                     )
                 else:
                     is_fp8_w8a8_supported = self._check_scheme_supported(
