@@ -7,11 +7,11 @@ import torch
 from vllm.config import set_current_vllm_config
 from vllm.distributed import (
     get_dp_group,
-    get_ep_group,
     stateless_destroy_torch_distributed_process_group,
     stateless_init_torch_distributed_process_group,
 )
 from vllm.logger import init_logger
+from vllm.model_executor.layers.fused_moe.all2all_utils import get_ep_all2all_manager
 from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
 from vllm.v1.serial_utils import run_method
 
@@ -63,12 +63,7 @@ class WorkerSentinel:
                 self.dp_size,
                 backend="gloo",
             )
-            self._get_all2all_manager().clean_buffers()
-
-    def _get_all2all_manager(self):
-        comm = get_ep_group().device_communicator
-        assert comm and comm.all2all_manager
-        return comm.all2all_manager
+            get_ep_all2all_manager().clean_buffers()
 
     def _clean_worker_state(self):
         self.worker.model_runner.execute_model_state = None
