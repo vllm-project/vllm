@@ -298,6 +298,10 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
   ops.def("gelu_tanh_and_mul(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_tanh_and_mul", torch::kCPU, &gelu_tanh_and_mul);
 
+  // GELU tanh implementation.
+  ops.def("gelu_tanh(Tensor! out, Tensor input) -> ()");
+  ops.impl("gelu_tanh", torch::kCPU, &gelu_tanh);
+
   // GELU implementation used in GPT-2.
   ops.def("gelu_new(Tensor! out, Tensor input) -> ()");
   ops.impl("gelu_new", torch::kCPU, &gelu_new);
