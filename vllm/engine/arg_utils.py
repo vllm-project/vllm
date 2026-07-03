@@ -721,8 +721,7 @@ class EngineArgs:
     optimization_level: OptimizationLevel = VllmConfig.optimization_level
     performance_mode: PerformanceMode = VllmConfig.performance_mode
 
-    # fault tolerance fields (`None` means not explicitly provided).
-    fault_tolerance_config: FaultToleranceConfig | None = get_field(
+    fault_tolerance_config: FaultToleranceConfig = get_field(
         ParallelConfig, "fault_tolerance_config"
     )
     enable_fault_tolerance: bool = ParallelConfig.enable_fault_tolerance
@@ -760,6 +759,7 @@ class EngineArgs:
                 **self.weight_transfer_config
             )
         if isinstance(self.fault_tolerance_config, dict):
+            self.enable_fault_tolerance = True
             self.fault_tolerance_config = FaultToleranceConfig(
                 **self.fault_tolerance_config
             )
@@ -1164,11 +1164,7 @@ class EngineArgs:
             "--enable-fault-tolerance", **parallel_kwargs["enable_fault_tolerance"]
         )
         parallel_group.add_argument(
-            "--fault-tolerance-config",
-            **{
-                **parallel_kwargs["fault_tolerance_config"],
-                "default": None,
-            },
+            "--fault-tolerance-config", **parallel_kwargs["fault_tolerance_config"]
         )
 
         # KV cache arguments
@@ -1632,12 +1628,6 @@ class EngineArgs:
     def from_cli_args(cls, args: argparse.Namespace):
         # Get the list of attributes of this dataclass.
         attrs = [attr.name for attr in dataclasses.fields(cls)]
-
-        # If --fault-tolerance-config is provided, enable fault tolerance by default.
-        if args.fault_tolerance_config is not None:
-            args.enable_fault_tolerance = True
-        if args.enable_fault_tolerance and args.fault_tolerance_config is None:
-            args.fault_tolerance_config = FaultToleranceConfig()
 
         # Set the attributes from the parsed arguments.
         engine_args = cls(
@@ -2177,9 +2167,7 @@ class EngineArgs:
             _api_process_rank=self._api_process_rank,
             assigned_physical_gpu_ids=self._resolve_device_ids(),
             enable_fault_tolerance=self.enable_fault_tolerance,
-            fault_tolerance_config=(
-                self.fault_tolerance_config or FaultToleranceConfig()
-            ),
+            fault_tolerance_config=self.fault_tolerance_config,
             numa_bind=self.numa_bind,
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,
