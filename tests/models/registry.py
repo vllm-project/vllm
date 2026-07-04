@@ -296,7 +296,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GlmMoeDsaForCausalLM": _HfExamplesInfo(
         "zai-org/GLM-5", min_transformers_version="5.0.1", is_available_online=False
     ),
-    "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
+    "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2"),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
         extras={
