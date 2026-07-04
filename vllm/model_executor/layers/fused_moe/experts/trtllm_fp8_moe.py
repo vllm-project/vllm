@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import functools
+import inspect
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -31,6 +34,40 @@ from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
 
 logger = init_logger(__name__)
+
+
+@functools.cache
+def _flashinfer_moe_supports_swiglu_params(fn_name: str) -> bool:
+    try:
+        import flashinfer
+
+        fn = getattr(flashinfer.fused_moe, fn_name)
+        return "gemm1_alpha" in inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        # If FlashInfer stops exposing an inspectable Python signature, keep
+        # passing the parameters so an incompatible install fails explicitly.
+        return True
+
+
+def _add_swiglu_params_if_supported(
+    kwargs: dict[str, object],
+    fn_name: str,
+    gemm1_alpha: torch.Tensor | None,
+    gemm1_beta: torch.Tensor | None,
+    gemm1_clamp_limit: torch.Tensor | None,
+) -> None:
+    swiglu_params = {
+        "gemm1_alpha": gemm1_alpha,
+        "gemm1_beta": gemm1_beta,
+        "gemm1_clamp_limit": gemm1_clamp_limit,
+    }
+    if _flashinfer_moe_supports_swiglu_params(fn_name):
+        kwargs.update(swiglu_params)
+    elif any(param is not None for param in swiglu_params.values()):
+        raise RuntimeError(
+            "The installed FlashInfer TRTLLM FP8 MoE kernel does not support "
+            "per-expert SwiGLU parameters. Please upgrade FlashInfer."
+        )
 
 
 class TrtLlmFp8ExpertsBase:
@@ -224,16 +261,13 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             weight_layout = WeightLayout.BlockMajorK
             hidden_states_scale = a1q_scale.t().contiguous()
 
-        flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
+        kwargs = dict(
             topk_ids=packed_topk_ids,
             routing_bias=None,
             hidden_states=hidden_states,
             hidden_states_scale=hidden_states_scale,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
-            gemm1_alpha=self.gemm1_alpha,
-            gemm1_beta=self.gemm1_beta,
-            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale,
             num_experts=global_num_experts,
@@ -250,6 +284,14 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             fp8_quantization_type=fp8_quant_type,
             output=output,
         )
+        _add_swiglu_params_if_supported(
+            kwargs,
+            "trtllm_fp8_block_scale_routed_moe",
+            self.gemm1_alpha,
+            self.gemm1_beta,
+            self.gemm1_clamp_limit,
+        )
+        flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(**kwargs)
 
 
 class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolithic):
@@ -402,9 +444,6 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             hidden_states_scale=hidden_states_scale,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
-            gemm1_alpha=self.gemm1_alpha,
-            gemm1_beta=self.gemm1_beta,
-            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale,
             num_experts=global_num_experts,
@@ -422,6 +461,13 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         )
         if is_mxfp8 or activation == MoEActivation.RELU2_NO_MUL:
             kwargs["activation_type"] = activation_type
+        _add_swiglu_params_if_supported(
+            kwargs,
+            "trtllm_fp8_block_scale_moe",
+            self.gemm1_alpha,
+            self.gemm1_beta,
+            self.gemm1_clamp_limit,
+        )
         return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(**kwargs)
 
     def _apply_per_tensor(
