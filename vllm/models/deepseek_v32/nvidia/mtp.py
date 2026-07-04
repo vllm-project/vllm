@@ -8,7 +8,6 @@ import torch.nn as nn
 
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
-from vllm.distributed import tensor_model_parallel_all_reduce
 from vllm.model_executor.layers.fused_moe import (
     fused_moe_make_expert_params_mapping,
 )
@@ -36,6 +35,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .kernels import fused_eh_norm
+from .fused_ops import fused_allreduce_rms_norm
 from .model import DeepseekV32DecoderLayer
 
 
@@ -89,10 +89,10 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
-        # mtp_block's MoE output is left un-reduced (skip_final_all_reduce); the
-        # main model fuses that all-reduce into the next norm, but here the
-        # recycle hidden is consumed directly, so reduce it now.
-        hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+        # mtp_block's MoE output is left un-reduced (skip_final_all_reduce);
+        # fuse its all-reduce into the final norm like the main model does at
+        # layer boundaries (norm(AR(h), residual), one flashinfer kernel).
+        #
         # Recycle the POST-final-norm hidden into the next draft step. The
         # residual-add is fused into the final RMSNorm so it is computed
         # exactly once, and the result is returned for both tuple positions:
@@ -103,7 +103,9 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         # is understood by both the V2 speculator (isinstance-tuple check) and
         # the legacy proposer (model_returns_tuple is True for the
         # DeepSeekMTPModel architecture).
-        hidden_states, _ = self.shared_head.norm(hidden_states, residual)
+        hidden_states, _ = fused_allreduce_rms_norm(
+            hidden_states, residual, self.shared_head.norm
+        )
         return hidden_states, hidden_states
 
 
