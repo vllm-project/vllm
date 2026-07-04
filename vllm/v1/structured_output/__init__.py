@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import itertools
 import multiprocessing
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from concurrent.futures import Future, ThreadPoolExecutor
 from typing import TYPE_CHECKING
 
@@ -272,23 +272,69 @@ class StructuredOutputManager:
                 grammar = structured_output_request.grammar
                 apply_bitmask = self.should_fill_bitmask(request)
 
+                reasoner = self._get_reasoner(request)
+                detect_reasoning_end = (
+                    not apply_bitmask
+                    and reasoner is not None
+                    and not self.enable_in_reasoning
+                )
+                simulated_buf: list[int] | None = None
+                history_len = 0
+
                 state_advancements = 0
+                post_reasoning_end_in_window = False
                 req_tokens = scheduled_spec_decode_tokens.get(req_id, ())
-                if self.vllm_config.model_config.is_diffusion and req_tokens:
-                    # Diffusion LLMs don't sample a bonus token after the
-                    # scheduled positions, so don't append the -1 placeholder.
-                    token_iter: Iterable[int] = req_tokens
-                else:
-                    token_iter = itertools.chain(req_tokens, (-1,))
-                for token in token_iter:
+                for i, token in enumerate(req_tokens):
                     self._fill_bitmasks(((grammar, cumulative_index, apply_bitmask),))
+                    advance_grammar = apply_bitmask
                     if token == -1:
-                        # Stop advancing the grammar once we hit a padding token.
                         apply_bitmask = False
-                    if apply_bitmask and not grammar.is_terminated():
+                        advance_grammar = False
+                    elif (
+                        detect_reasoning_end
+                        and reasoner is not None
+                        and not apply_bitmask
+                    ):
+                        if simulated_buf is None:
+                            history = list(request.all_token_ids)
+                            history_len = len(history)
+                            simulated_buf = history + list(req_tokens)
+                        simulated = simulated_buf[: history_len + i + 1]
+                        if reasoner.is_reasoning_end_streaming(simulated, [token]):
+                            # Reasoning ended mid-window. Constrain the rest
+                            # of the window via bitmask. Skip grammar advance
+                            # through the marker (it is reasoning content);
+                            # try to advance through subsequent drafts so the
+                            # next bitmask row reflects the post-advance state,
+                            # but tolerate rejection since those drafts predate
+                            # the bitmask and are not guaranteed valid.
+                            apply_bitmask = True
+                            advance_grammar = False
+                            post_reasoning_end_in_window = True
+                    if advance_grammar and not grammar.is_terminated():
                         accepted = grammar.accept_tokens(req_id, [token])
-                        assert accepted, (token, req_id, scheduled_spec_decode_tokens)
-                        state_advancements += 1
+                        if accepted:
+                            state_advancements += 1
+                        elif not post_reasoning_end_in_window:
+                            raise AssertionError(
+                                (token, req_id, scheduled_spec_decode_tokens)
+                            )
+                    cumulative_index += 1
+                # Diffusion LLMs don't sample a bonus token after the
+                # scheduled positions, so skip its bitmask in that case.
+                if not (self.vllm_config.model_config.is_diffusion and req_tokens):
+                    # bonus_apply must be True when the bonus-row position
+                    # should be grammar-constrained. Two triggers:
+                    # - should_fill_bitmask(request): reasoning was already
+                    #   over at step start (or no reasoner /
+                    #   enable_in_reasoning).
+                    # - apply_bitmask: reasoning ended mid-window in this
+                    #   call and was flipped True after the marker;
+                    #   should_fill_bitmask still returns False here because
+                    #   reasoning_ended is only persisted later by
+                    #   should_advance.
+                    bonus_apply = self.should_fill_bitmask(request) or apply_bitmask
+                    self._fill_bitmasks(((grammar, cumulative_index, bonus_apply),))
                     cumulative_index += 1
                 if state_advancements > 0:
                     grammar.rollback(state_advancements)
@@ -368,9 +414,63 @@ class StructuredOutputManager:
                 and structured_req.structured_output_key[0]
                 == StructuredOutputOptions.STRUCTURAL_TAG
             ):
+                # The scheduler will advance the grammar with this step's
+                # tokens right away, but the step still contains reasoning
+                # content up to and including the end marker. Record where
+                # it ends so trim_reasoning_for_advance() can drop it.
+                structured_req.reasoning_end_token_index = (
+                    self._find_reasoning_end_index(reasoner, all_token_ids, start)
+                )
                 return True
 
         return False
+
+    @staticmethod
+    def _find_reasoning_end_index(
+        reasoner: "ReasoningParser", all_token_ids: Sequence[int], start: int
+    ) -> int:
+        """Locates the last reasoning token within ``all_token_ids[start:]``.
+
+        Returns:
+            The absolute index of the token at which
+            ``is_reasoning_end_streaming`` first fires. Falls back to the
+            final index when no single token triggers the detection (e.g.
+            a multi-token marker only recognized on the full delta), which
+            conservatively treats the whole step as reasoning content.
+        """
+        prefix = list(itertools.islice(all_token_ids, start))
+        for idx in range(start, len(all_token_ids)):
+            token = all_token_ids[idx]
+            prefix.append(token)
+            if reasoner.is_reasoning_end_streaming(prefix, [token]):
+                return idx
+        return len(all_token_ids) - 1
+
+    def trim_reasoning_for_advance(
+        self, request: "Request", new_token_ids: list[int]
+    ) -> list[int]:
+        """Drops reasoning content from tokens about to advance the grammar.
+
+        When reasoning ends mid-step (see should_advance), the step's output
+        still contains reasoning tokens up to and including the end marker.
+        Those are not grammar content: feeding them to accept_tokens makes
+        the grammar reject the marker and kills the request (#44006).
+
+        Returns:
+            The suffix of ``new_token_ids`` that follows the reasoning-end
+            marker. Steps fully after the boundary are returned unchanged.
+        """
+        structured_req = request.structured_output_request
+        if structured_req is None:
+            return new_token_ids
+        end_idx = structured_req.reasoning_end_token_index
+        if end_idx is None:
+            return new_token_ids
+        first_idx = len(request.all_token_ids) - len(new_token_ids)
+        num_reasoning = end_idx + 1 - first_idx
+        if num_reasoning <= 0:
+            return new_token_ids
+        return new_token_ids[num_reasoning:]
 
     def clear_backend(self) -> None:
         if self.backend is not None:
