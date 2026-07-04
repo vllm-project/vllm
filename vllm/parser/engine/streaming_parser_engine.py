@@ -22,13 +22,12 @@ from vllm.parser.engine.parser_engine_config import (
     Transition,
 )
 from vllm.parser.engine.token_id_scanner import (
+    DROP_TERMINAL,
     LexerInput,
     PreLexedTerminal,
     TextChunk,
     TokenIDScanner,
 )
-
-DROP_TERMINAL = "__DROP__"
 
 
 @dataclass(slots=True)
