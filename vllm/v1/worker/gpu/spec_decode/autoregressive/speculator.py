@@ -91,6 +91,16 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         # Reset indices to zeros to prevent stale values from prior
         # dummy runs to cause out-of-bounds indexing during capture.
         self.last_token_indices.zero_()
+        self.current_draft_step.zero_()
+        self.hidden_states.zero_()
+        if getattr(self, "supports_mm_inputs", False) and hasattr(self, "inputs_embeds"):
+            getattr(self, "inputs_embeds").zero_()
+        self.idx_mapping.zero_()
+        self.temperature.zero_()
+        self.seeds.zero_()
+        self.draft_tokens.zero_()
+        if self.draft_logits is not None:
+            self.draft_logits.zero_()
 
         # Capture the prefill routine (model forward + compute_logits +
         # sample).
