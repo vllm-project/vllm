@@ -472,7 +472,10 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             if token_type_ids := engine_prompt.pop("token_type_ids", None):
                 params = pooling_params.clone()
                 compressed = compress_token_type_ids(token_type_ids)
-                params.extra_kwargs = {"compressed_token_type_ids": compressed}
+                params.extra_kwargs = {
+                    **(params.extra_kwargs or {}),
+                    "compressed_token_type_ids": compressed,
+                }
                 pooling_params_list.append(params)
             else:
                 pooling_params_list.append(pooling_params)
