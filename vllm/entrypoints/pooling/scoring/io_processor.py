@@ -604,12 +604,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
 class JinaRankingIOProcessorMixin:
     @staticmethod
-    def sanitize_input(text: str, special_tokens: dict[str, str]) -> str:
-        for token in special_tokens.values():
-            text = text.replace(token, "")
-        return text
-
-    @staticmethod
     def format_docs_prompts_func(
         query: str,
         docs: list[str],
@@ -626,11 +620,13 @@ class JinaRankingIOProcessorMixin:
         if special_tokens is None:
             special_tokens = default_special_tokens
 
-        query = JinaRankingIOProcessorMixin.sanitize_input(query, special_tokens)
-        docs = [
-            JinaRankingIOProcessorMixin.sanitize_input(doc, special_tokens)
-            for doc in docs
-        ]
+        def sanitize_input(text: str) -> str:
+            for token in special_tokens.values():
+                text = text.replace(token, "")
+            return text
+
+        query = sanitize_input(query)
+        docs = [sanitize_input(doc) for doc in docs]
 
         prefix = (
             "<|im_start|>system\n"
@@ -653,9 +649,7 @@ class JinaRankingIOProcessorMixin:
         )
 
         if instruction:
-            instruction = JinaRankingIOProcessorMixin.sanitize_input(
-                instruction, special_tokens
-            )
+            instruction = sanitize_input(instruction)
             prompt += f"<instruct>\n{instruction}\n</instruct>\n"
 
         doc_prompts = [
