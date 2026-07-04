@@ -1243,6 +1243,7 @@ def get_default_config(
     topk: int,
     dtype: str | None,
     block_shape: list[int] | None = None,
+    m_is_per_expert: bool = False,
 ) -> dict[str, int]:
     if envs.VLLM_BATCH_INVARIANT:
         return {
@@ -1291,8 +1292,10 @@ def get_default_config(
         # classic E=8/topk=2) keep today's configs at every M, while
         # high-expert-count MoEs defer the 64-row tile past the
         # decode/medium-batch range that raw M <= 64 mis-tiles. CUDA
-        # only (validated on NVIDIA); ROCm keeps the prior raw-M rule.
-        if current_platform.is_rocm():
+        # only (validated on NVIDIA); ROCm keeps the prior raw-M rule, as
+        # do batched (3-D) callers whose M is already the per-expert row
+        # count (max_num_tokens) rather than the pre-routing token count.
+        if current_platform.is_rocm() or m_is_per_expert:
             small_m_tile = M <= 64
         else:
             small_m_tile = M <= 64 or M * topk < 16 * E
@@ -1376,6 +1379,7 @@ def try_get_optimal_moe_config(
     dtype: str | None,
     M: int,
     block_shape: list[int] | None = None,
+    m_is_per_expert: bool = False,
 ) -> dict[str, int]:
     from vllm.model_executor.layers.fused_moe import get_config
 
@@ -1397,7 +1401,9 @@ def try_get_optimal_moe_config(
             config = configs[min(configs.keys(), key=lambda x: abs(x - M))]
         else:
             # Else use the default config
-            config = get_default_config(M, E, N, w1_shape[2], top_k, dtype, block_shape)
+            config = get_default_config(
+                M, E, N, w1_shape[2], top_k, dtype, block_shape, m_is_per_expert
+            )
     return config
 
 

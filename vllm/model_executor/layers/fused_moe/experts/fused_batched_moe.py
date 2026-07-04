@@ -892,6 +892,10 @@ class BatchedTritonExperts(mk.FusedMoEExpertsModular):
             config_dtype,
             max_num_tokens,
             block_shape=self.block_shape,
+            # In the batched (3-D) layout M is already the per-expert row
+            # count, so the default-config heuristic must not rescale it
+            # by topk/E.
+            m_is_per_expert=True,
         )
 
         if hidden_states.dtype == torch.bfloat16:
