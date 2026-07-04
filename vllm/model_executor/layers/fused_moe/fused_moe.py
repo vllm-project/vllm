@@ -1281,8 +1281,22 @@ def get_default_config(
         else:
             block_n = block_shape[0]
             num_stages = 3
+        # Choose the M tile from the rows an expert's GEMM actually sees,
+        # not the raw token count: routing spreads M tokens with topk
+        # replication over E experts, ~M*topk/E rows each. Keep 16-row
+        # tiles until the average expert fills one (M*topk/E > 16), with
+        # the legacy M <= 64 as a floor so shapes with E/topk < 4 keep
+        # their current config. For the classic E=8/topk=2 this reproduces
+        # M <= 64 exactly; for high-expert-count MoEs (E/topk >> 4) it
+        # defers the 64-row tile past the decode/medium-batch range where
+        # it is mostly padding. CUDA only (validated on NVIDIA); ROCm
+        # keeps the prior raw-M threshold.
+        if current_platform.is_rocm():
+            m_tile_switch = 64
+        else:
+            m_tile_switch = max(64, 16 * E // topk)
         config = {
-            "BLOCK_SIZE_M": 16 if M <= 64 else 64,
+            "BLOCK_SIZE_M": 16 if M <= m_tile_switch else 64,
             "BLOCK_SIZE_N": block_n,
             "BLOCK_SIZE_K": block_shape[1],
             "GROUP_SIZE_M": 1 if M <= 16 else 32,
