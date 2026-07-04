@@ -35,17 +35,13 @@ void gelu_and_mul(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_tanh_and_mul(torch::Tensor& out, torch::Tensor& input);
 
+void gelu_tanh(torch::Tensor& out, torch::Tensor& input);
+
 void gelu_new(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_fast(torch::Tensor& out, torch::Tensor& input);
 
 void gelu_quick(torch::Tensor& out, torch::Tensor& input);
-
-void cutlass_mla_decode(torch::Tensor const& out, torch::Tensor const& q_nope,
-                        torch::Tensor const& q_pe,
-                        torch::Tensor const& kv_c_and_k_pe_cache,
-                        torch::Tensor const& seq_lens,
-                        torch::Tensor const& page_table, double scale);
 
 void static_scaled_int8_quant(torch::Tensor& out, torch::Tensor const& input,
                               torch::Tensor const& scale,
@@ -71,7 +67,4 @@ void qr_open_handles(fptr_t _fa, const std::vector<torch::Tensor>& handles);
 void qr_all_reduce(fptr_t _fa, torch::Tensor& inp, torch::Tensor& out,
                    int64_t quant_level, bool cast_bf2half = false);
 int64_t qr_max_size();
-
-// TODO: Remove this once ROCm upgrade to torch 2.11.
-torch::Tensor get_cuda_view_from_cpu_tensor(torch::Tensor& cpu_tensor);
 #endif

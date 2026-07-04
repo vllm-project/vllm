@@ -21,9 +21,11 @@ serde.workspace = true
 serde-json-fmt.workspace = true
 serde_json.workspace = true
 serde_with.workspace = true
+strum.workspace = true
 subenum.workspace = true
 thiserror.workspace = true
 thiserror-ext.workspace = true
+time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 trait-set.workspace = true
@@ -48,6 +50,7 @@ tokio.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 vllm-engine-core-client = { workspace = true, features = ["test-util"] }
+vllm-tokenizer = { workspace = true, features = ["test-utils"] }
 zeromq.workspace = true
 
 [lints]
