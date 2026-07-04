@@ -1637,7 +1637,12 @@ class Scheduler(SchedulerInterface):
                 struct_output_request = request.structured_output_request
                 assert struct_output_request is not None
                 assert struct_output_request.grammar is not None
-                if not struct_output_request.grammar.accept_tokens(  # type: ignore[union-attr]
+                grammar = struct_output_request.grammar
+                # Once the grammar reaches a terminal state (e.g. the stop
+                # token was the last accepted token), skip accept_tokens().
+                # Calling it again returns False and spuriously marks the
+                # request FINISHED_ERROR (issue #42619).
+                if not grammar.is_terminated() and not grammar.accept_tokens(  # type: ignore[union-attr]
                     req_id, new_token_ids
                 ):
                     logger.error(
@@ -1953,7 +1958,12 @@ class Scheduler(SchedulerInterface):
             # Add newly generated spec token ids to the request.
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
-                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)  # type: ignore[union-attr]
+                assert metadata is not None and metadata.grammar is not None
+                # Skip validation when grammar is already terminated; the
+                # constraint has been fully satisfied so all spec tokens are
+                # structurally valid (issue #42619).
+                if not metadata.grammar.is_terminated():
+                    spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)
             request.spec_token_ids = spec_token_ids
 
     def update_draft_token_ids_in_output(
@@ -1983,7 +1993,9 @@ class Scheduler(SchedulerInterface):
             if self.structured_output_manager.should_advance(request):
                 metadata = request.structured_output_request
                 assert metadata is not None and metadata.grammar is not None
-                spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)
+                # Skip validation when grammar is already terminated (issue #42619).
+                if not metadata.grammar.is_terminated():
+                    spec_token_ids = metadata.grammar.validate_tokens(spec_token_ids)
             # Pad to original number of spec tokens.
             num_invalid_tokens = orig_num_spec_tokens - len(spec_token_ids)
             if num_invalid_tokens:
