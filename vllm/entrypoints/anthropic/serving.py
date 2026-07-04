@@ -632,7 +632,9 @@ class AnthropicServingMessages(OpenAIServingChat):
             kv_transfer_params=generator.kv_transfer_params,
         )
         choice = generator.choices[0]
-        if choice.finish_reason == "stop":
+        if choice.finish_reason == "stop" and choice.message.tool_calls:
+            result.stop_reason = "tool_use"
+        elif choice.finish_reason == "stop":
             result.stop_reason = "end_turn"
         elif choice.finish_reason == "length":
             result.stop_reason = "max_tokens"
@@ -717,6 +719,7 @@ class AnthropicServingMessages(OpenAIServingChat):
 
             first_item = True
             finish_reason = None
+            tool_use_started = False
             state = _ActiveBlockState()
             # Map from tool call index to tool_use_id
             tool_index_to_id: dict[int, str] = {}
@@ -832,8 +835,10 @@ class AnthropicServingMessages(OpenAIServingChat):
                         if len(origin_chunk.choices) == 0:
                             for event in stop_and_flush():
                                 yield event
-                            stop_reason = self.stop_reason_map.get(
-                                finish_reason or "stop"
+                            stop_reason = (
+                                "tool_use"
+                                if finish_reason == "stop" and tool_use_started
+                                else self.stop_reason_map.get(finish_reason or "stop")
                             )
                             chunk = AnthropicStreamEvent(
                                 type="message_delta",
@@ -935,6 +940,7 @@ class AnthropicServingMessages(OpenAIServingChat):
                                     ):
                                         for event in stop_and_flush():
                                             yield event
+                                        tool_use_started = True
                                         start_event = start_block(
                                             AnthropicContentBlock(
                                                 type="tool_use",
