@@ -36,7 +36,7 @@ class GateLinear(ReplicatedLinear):
 
     # (hidden_size, num_experts) pairs with an instantiated fp32 kernel:
     #   (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
-    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128)}
+    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128), (6144, 256)}
     FP32_MAX_TOKENS = 32
 
     def __init__(

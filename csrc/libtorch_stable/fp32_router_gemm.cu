@@ -101,6 +101,12 @@ __global__ __launch_bounds__(128, 1) void fp32_router_gemm_kernel(
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   cudaGridDependencySynchronize();
+  // Fire the PDL trigger right after our own wait instead of at kernel end:
+  // a gridsync-ing consumer is unaffected (its wait always targets full grid
+  // completion), while a consumer that reads none of our outputs (e.g. the
+  // NVFP4 activation quant, which reads the same hidden_states) can launch
+  // now and fully overlap this kernel's body.
+  cudaTriggerProgrammaticLaunchCompletion();
 #endif
 
   for (int ki = 0; ki < k_iterations; ki++) {
@@ -145,9 +151,6 @@ __global__ __launch_bounds__(128, 1) void fp32_router_gemm_kernel(
     }
   }
 
-#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  cudaTriggerProgrammaticLaunchCompletion();
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -176,7 +179,8 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
 
 // ---------------------------------------------------------------------------
 // Explicit instantiations: M=1..32, for both input types, for the supported
-// (E, H) pairs:  (256, 3072) [MiniMax-M2/M2.5]  and  (128, 6144) [MiniMax-M3].
+// (E, H) pairs:  (256, 3072) [MiniMax-M2/M2.5],  (128, 6144) [MiniMax-M3]
+// and  (256, 6144) [GLM-5.2].
 // ---------------------------------------------------------------------------
 
 #define INSTANTIATE(T, M, E, H)                                    \
@@ -221,6 +225,8 @@ INSTANTIATE_ALL(float, 256, 3072)
 INSTANTIATE_ALL(__nv_bfloat16, 256, 3072)
 INSTANTIATE_ALL(float, 128, 6144)
 INSTANTIATE_ALL(__nv_bfloat16, 128, 6144)
+INSTANTIATE_ALL(float, 256, 6144)
+INSTANTIATE_ALL(__nv_bfloat16, 256, 6144)
 
 #undef INSTANTIATE_ALL
 #undef INSTANTIATE
