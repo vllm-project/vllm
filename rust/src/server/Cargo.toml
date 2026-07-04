@@ -64,6 +64,7 @@ tempfile.workspace = true
 tokio = { workspace = true, features = ["test-util"] }
 tower.workspace = true
 vllm-engine-core-client = { workspace = true, features = ["test-util"] }
+vllm-tokenizer = { workspace = true, features = ["test-utils"] }
 zeromq.workspace = true
 
 [lints]
