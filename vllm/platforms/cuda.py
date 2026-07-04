@@ -6,6 +6,7 @@ pynvml. However, it should not initialize cuda context.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import platform
 from collections.abc import Callable
@@ -20,6 +21,9 @@ from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
 import vllm._C_stable_libtorch  # noqa
+
+with contextlib.suppress(ImportError):
+    import vllm._qutlass_C  # noqa
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import import_pynvml
@@ -38,11 +42,6 @@ else:
     CacheDType = None
 
 logger = init_logger(__name__)
-
-try:
-    import vllm._qutlass_C  # noqa: F401
-except ImportError as e:
-    logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
 _P = ParamSpec("_P")
 _R = TypeVar("_R")
@@ -138,6 +137,7 @@ def _get_backend_priorities(
                 AttentionBackendEnum.FLASHMLA,
                 AttentionBackendEnum.FLASHINFER_MLA,
                 AttentionBackendEnum.TRITON_MLA,
+                AttentionBackendEnum.FLASH_ATTN_MLA_SPARSE,
                 AttentionBackendEnum.FLASHMLA_SPARSE,
             ]
     else:
@@ -219,15 +219,11 @@ class CudaPlatformBase(Platform):
         try:
             import vllm._C_stable_libtorch  # noqa: F401
         except ImportError as e:
-            logger.warning("Failed to import from vllm._C_stable_libtorch: %r", e)
-        try:
+            logger.warning_once("Failed to import from vllm._C_stable_libtorch: %r", e)
+        with contextlib.suppress(ImportError):
             import vllm._moe_C_stable_libtorch  # noqa: F401
-        except ImportError as e:
-            logger.warning("Failed to import from vllm._moe_C_stable_libtorch: %r", e)
-        try:
+        with contextlib.suppress(ImportError):
             import vllm._qutlass_C  # noqa: F401
-        except ImportError as e:
-            logger.warning("Failed to import from vllm._qutlass_C: %r", e)
 
     @property
     def supported_dtypes(self) -> list[torch.dtype]:
@@ -290,7 +286,7 @@ class CudaPlatformBase(Platform):
             # kernel with limited pinned memory support for CUDA.
             version = _get_wsl_kernel_version()
             if version is None or version < (4, 19, 121):
-                logger.warning(
+                logger.warning_once(
                     "Using 'pin_memory=False' as WSL is detected and the "
                     "WSL2 kernel version is below 4.19.121. This may slow "
                     "down performance. Please run `wsl --update`."
@@ -319,7 +315,7 @@ class CudaPlatformBase(Platform):
             and scheduler_config.is_multimodal_model
             and not scheduler_config.disable_chunked_mm_input
         ):
-            logger.warning(
+            logger.warning_once(
                 "Forcing --disable_chunked_mm_input for models "
                 "with multimodal-bidirectional attention."
             )
@@ -330,7 +326,7 @@ class CudaPlatformBase(Platform):
             and vllm_config.offload_config.uva.cpu_offload_gb > 0
             and bool(vllm_config.compilation_config.cudagraph_mode)
         ):
-            logger.warning(
+            logger.warning_once(
                 "--cpu-offload-gb is enabled with CUDA graphs on WSL2. "
                 "This combination requires pinned (page-locked) memory "
                 "allocations. WARNING: Windows (WDDM) enforces a hard "

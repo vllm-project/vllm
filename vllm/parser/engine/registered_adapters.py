@@ -7,12 +7,26 @@ names so that :class:`ReasoningParserManager` and
 :class:`ToolParserManager` can load them lazily.
 """
 
+from vllm.parser.deepseek_v4 import DeepSeekV4Parser
+from vllm.parser.deepseek_v32 import DeepSeekV32Parser
 from vllm.parser.engine.adapters import make_adapters
 from vllm.parser.gemma4 import Gemma4Parser
 from vllm.parser.glm47_moe import Glm47MoeParser
+from vllm.parser.kimi_k2 import KimiK2Parser
 from vllm.parser.minimax_m2 import MinimaxM2Parser
 from vllm.parser.nemotron_v3 import NemotronV3Parser
 from vllm.parser.qwen3 import Qwen3Parser
+from vllm.parser.seed_oss import SeedOssParser
+
+(
+    DeepSeekV32ParserReasoningAdapter,
+    DeepSeekV32ParserToolAdapter,
+) = make_adapters(DeepSeekV32Parser)
+
+(
+    DeepSeekV4ParserReasoningAdapter,
+    DeepSeekV4ParserToolAdapter,
+) = make_adapters(DeepSeekV4Parser)
 
 (
     MinimaxM2ParserReasoningAdapter,
@@ -35,6 +49,16 @@ from vllm.parser.qwen3 import Qwen3Parser
 ) = make_adapters(Qwen3Parser)
 
 (
+    SeedOssParserReasoningAdapter,
+    SeedOssParserToolAdapter,
+) = make_adapters(SeedOssParser)
+
+(
     Glm47MoeParserReasoningAdapter,
     Glm47MoeParserToolAdapter,
 ) = make_adapters(Glm47MoeParser)
+
+(
+    KimiK2ParserReasoningAdapter,
+    KimiK2ParserToolAdapter,
+) = make_adapters(KimiK2Parser)

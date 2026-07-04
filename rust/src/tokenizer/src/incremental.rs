@@ -32,6 +32,7 @@ pub(crate) struct DecodeStream<'a, T: Tokenizer + ?Sized> {
     ids: Vec<u32>,
     prefix: String,
     prefix_index: usize,
+    prefix_seeded: bool,
     cumulative_output: String,
     output_index: usize,
 }
@@ -50,6 +51,7 @@ impl<'a, T: Tokenizer + ?Sized> DecodeStream<'a, T> {
             ids: prompt_token_ids.to_vec(),
             prefix: String::new(),
             prefix_index: 0,
+            prefix_seeded: prompt_token_ids.is_empty(),
             cumulative_output: String::new(),
             output_index: 0,
         }
@@ -63,27 +65,54 @@ const SAFE_SUFFIX_MIN: usize = 4;
 const SAFE_SUFFIX_MAX: usize = 6;
 
 impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
-    /// Seed `self.prefix` from the shortest trailing suffix whose decoded text
-    /// has no U+FFFD — a clean decode means the suffix starts and ends at
-    /// valid UTF-8/token boundaries, so priming from it is equivalent to
-    /// priming from the full prompt.
+    /// Decode prompt-only context for prefix seeding.
+    ///
+    /// Prompt ids may come from the model vocabulary rather than the local
+    /// tokenizer vocabulary. For this seeding path, ids that cannot be mapped
+    /// back to raw token text are dropped before retrying strict decode. This
+    /// tolerance is intentionally limited to prompt context; generated ids are
+    /// decoded later through the normal strict path.
+    fn decode_prompt_context(&self, ids: &[u32]) -> Result<(String, Vec<u32>)> {
+        match self.tokenizer.decode(ids, self.skip_special_tokens) {
+            Ok(decoded) => Ok((decoded, ids.to_vec())),
+            Err(error) => {
+                let filtered = ids
+                    .iter()
+                    .copied()
+                    .filter(|&id| self.tokenizer.id_to_token(id).is_some())
+                    .collect::<Vec<_>>();
+                if filtered.len() == ids.len() {
+                    return Err(error);
+                }
+                self.tokenizer
+                    .decode(&filtered, self.skip_special_tokens)
+                    .map(|decoded| (decoded, filtered))
+            }
+        }
+    }
+
+    /// Seed `self.prefix` from the shortest trailing prompt suffix whose
+    /// filtered context is still long enough and whose decoded text has no
+    /// U+FFFD. A clean decode means the suffix starts and ends at valid
+    /// UTF-8/token boundaries, so priming from it is equivalent to priming from
+    /// the full prompt.
     fn seed_prefix(&mut self) -> Result<()> {
         let prompt_len = self.ids.len();
         if prompt_len > SAFE_SUFFIX_MIN {
             let max_try = SAFE_SUFFIX_MAX.min(prompt_len - 1);
             for suffix_len in SAFE_SUFFIX_MIN..=max_try {
                 let start = prompt_len - suffix_len;
-                let decoded =
-                    self.tokenizer.decode(&self.ids[start..], self.skip_special_tokens)?;
-                if !decoded.contains('\u{FFFD}') {
+                let (decoded, context_ids) = self.decode_prompt_context(&self.ids[start..])?;
+                if !decoded.contains('\u{FFFD}') && context_ids.len() >= SAFE_SUFFIX_MIN {
                     self.prefix = decoded;
-                    self.ids.drain(..start);
+                    self.ids = context_ids;
                     self.prefix_index = self.ids.len();
                     return Ok(());
                 }
             }
         }
-        let decoded = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
+        let (decoded, context_ids) = self.decode_prompt_context(&self.ids)?;
+        self.ids = context_ids;
         if !decoded.ends_with('\u{FFFD}') {
             self.prefix = decoded;
             self.prefix_index = self.ids.len();
@@ -94,8 +123,9 @@ impl<T: Tokenizer + ?Sized> DecodeStream<'_, T> {
 
 impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
     fn push_token(&mut self, token_id: u32) -> Result<usize> {
-        if self.prefix.is_empty() && !self.ids.is_empty() {
+        if !self.prefix_seeded && !self.ids.is_empty() {
             self.seed_prefix()?;
+            self.prefix_seeded = true;
         }
 
         self.ids.push(token_id);
@@ -131,6 +161,7 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
             self.ids.clear();
             self.prefix.clear();
             self.prefix_index = 0;
+            self.prefix_seeded = true;
             // Ensure we split at a utf-8 char boundary.
             self.cumulative_output
                 .push_str(&string[string.floor_char_boundary(prefix_len)..]);
@@ -152,6 +183,7 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_utils::TestTokenizer;
 
     /// Backend that treats each token ID as a raw byte, producing lossy UTF-8.
     #[derive(Debug)]
@@ -168,6 +200,10 @@ mod tests {
         }
 
         fn token_to_id(&self, _token: &str) -> Option<u32> {
+            unreachable!()
+        }
+
+        fn id_to_token(&self, _id: u32) -> Option<String> {
             unreachable!()
         }
     }
@@ -248,6 +284,10 @@ mod tests {
         fn token_to_id(&self, _token: &str) -> Option<u32> {
             unreachable!()
         }
+
+        fn id_to_token(&self, _id: u32) -> Option<String> {
+            unreachable!()
+        }
     }
 
     #[test]
@@ -271,6 +311,67 @@ mod tests {
         let added = decoder.push_token(b'!' as u32).unwrap();
         assert_eq!(added, 1);
         assert_eq!(decoder.output(), "!");
+    }
+
+    #[test]
+    fn prompt_context_filters_unknown_ids() {
+        let tokenizer = TestTokenizer::new();
+        assert_eq!(tokenizer.id_to_token(10_000), None);
+
+        let cases: &[(&str, &[u32], u32, &str)] = &[
+            (
+                "suffix seed",
+                &[
+                    b'a' as u32,
+                    b'b' as u32,
+                    b'c' as u32,
+                    10_000,
+                    b'H' as u32,
+                    b'i' as u32,
+                ],
+                b'!' as u32,
+                "!",
+            ),
+            ("all unknown", &[10_000], b'!' as u32, "!"),
+            (
+                "unknown before incomplete utf-8",
+                &[10_000, 0xe4, 0xbd],
+                0xa0,
+                "你",
+            ),
+            (
+                "incomplete utf-8 before filtered suffix",
+                &[0xe4, 0xbd, 10_000, 10_001, 10_002, 10_003, 10_004, 10_005],
+                0xa0,
+                "你",
+            ),
+        ];
+
+        for &(name, prompt, token_id, output) in cases {
+            let mut decoder = tokenizer.create_decode_stream(prompt, false, 0);
+            assert_eq!(
+                decoder.push_token(token_id).unwrap(),
+                output.len(),
+                "{name}"
+            );
+            assert_eq!(decoder.output(), output, "{name}");
+        }
+    }
+
+    #[test]
+    fn generated_unknown_ids_still_return_decode_error() {
+        let tokenizer = TestTokenizer::new();
+        assert_eq!(tokenizer.id_to_token(10_000), None);
+
+        let prompt = &[10_000, b'H' as u32, b'i' as u32];
+        let mut decoder = tokenizer.create_decode_stream(prompt, false, 0);
+
+        let error = decoder.push_token(10_000).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("test tokenizer cannot decode unknown token id 10000")
+        );
     }
 
     #[test]
@@ -318,6 +419,10 @@ mod tests {
         }
 
         fn token_to_id(&self, _token: &str) -> Option<u32> {
+            unreachable!()
+        }
+
+        fn id_to_token(&self, _id: u32) -> Option<String> {
             unreachable!()
         }
     }

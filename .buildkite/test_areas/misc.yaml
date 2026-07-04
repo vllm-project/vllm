@@ -188,7 +188,7 @@ steps:
   - vllm/v1/
   - tests/test_regression
   commands:
-  - pip install modelscope
+  - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
   working_dir: "/vllm-workspace/tests" # optional
 
@@ -224,6 +224,16 @@ steps:
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
     # https://github.com/vllm-project/vllm/pull/26682 uses slightly more memory in PyTorch 2.9+ causing this test to OOM in 1xL4 GPU
     - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
+  mirror:
+    amd:
+      device: mi325_1
+      source_file_dependencies:
+      - vllm/entrypoints
+      - vllm/multimodal
+      - examples/
+      - vllm/platforms/rocm.py
+      depends_on:
+      - image-build-amd
 
 - label: Metrics, Tracing (2 GPUs)
   key: metrics-tracing-2-gpus
@@ -250,6 +260,12 @@ steps:
       'opentelemetry-exporter-otlp>=1.26.0' \
       'opentelemetry-semantic-conventions-ai>=0.4.1'"
   - pytest -v -s v1/tracing
+  mirror:
+    amd:
+      device: mi325_2
+      depends_on:
+      - image-build-amd
+      optional: true
 
 - label: Python-only Installation
   key: python-only-installation
@@ -262,6 +278,16 @@ steps:
   - setup.py
   commands:
   - bash standalone_tests/python_only_compile.sh
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 20
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - tests/standalone_tests/python_only_compile.sh
+      - setup.py
+      - vllm/platforms/rocm.py
 
 - label: Async Engine, Inputs, Utils, Worker
   device: h200_35gb
@@ -344,7 +370,7 @@ steps:
   - pytest -v -s test_ray_env.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
-  - pytest -v -s reasoning --ignore=reasoning/test_seedoss_reasoning_parser.py --ignore=reasoning/test_glm4_moe_reasoning_parser.py
+  - pytest -v -s reasoning
   - pytest -v -s tool_parsers
   - pytest -v -s tokenizers_
   - pytest -v -s parser

@@ -25,7 +25,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateShapeCalculator,
 )
 from vllm.model_executor.layers.quantization import QuantizationConfig
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
     MultiModalFeatureSpec,
@@ -44,6 +43,7 @@ from .interfaces import (
     HasInnerState,
     IsHybrid,
     MultiModalEmbeddings,
+    SupportsLoRA,
     SupportsMRoPE,
     SupportsMultiModal,
     SupportsPP,
@@ -140,7 +140,7 @@ class MiniCPMV4_6MultiModalProcessor(MiniCPMVMultiModalProcessor):
         per_frame = image_start + video_token * source_tokens + image_end
         if grids[0] > 0 and grids[1] > 0 and patch_tokens > 0:
             slice_ph = slice_start + video_token * patch_tokens + slice_end
-            rows = [slice_ph * grids[0] for _ in range(grids[1])]
+            rows = [slice_ph * grids[1] for _ in range(grids[0])]
             per_frame += "\n".join(rows)
 
         body = per_frame * num_frames
@@ -596,7 +596,7 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
         if use_image_id:
             placeholder = f"{id_start}{image_idx}{id_end}" + placeholder
 
-        num_cols, num_rows = grids[0], grids[1]
+        num_rows, num_cols = grids[0], grids[1]
         if num_cols > 0 and num_rows > 0 and patch_tokens > 0:
             slice_ph = slice_start + image_token * patch_tokens + slice_end
             slices = [slice_ph * num_cols for _ in range(num_rows)]
@@ -618,6 +618,14 @@ class MiniCPMV4_6ProcessingInfo(MiniCPMVProcessingInfo):
 
 
 class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            "q_proj": ("qkv_proj", "q"),
+            "k_proj": ("qkv_proj", "k"),
+            "v_proj": ("qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config,
@@ -666,31 +674,8 @@ class MiniCPMV4_6ViTWindowAttentionSelfAttn(nn.Module):
         return out
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                mapped_name = name.replace(weight_name, param_name, 1)
-                if mapped_name not in params_dict:
-                    continue
-                param = params_dict[mapped_name]
-                param.weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class MiniCPMV4_6ViTWindowAttentionMerger(nn.Module):
@@ -921,6 +906,7 @@ class MiniCPMV4_6Merger(nn.Module):
 class MiniCPMV4_6ForConditionalGeneration(
     nn.Module,
     SupportsMultiModal,
+    SupportsLoRA,
     SupportsPP,
     HasInnerState,
     IsHybrid,
