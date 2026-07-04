@@ -1284,19 +1284,20 @@ def get_default_config(
         # Choose the M tile from the rows an expert's GEMM actually sees,
         # not the raw token count: routing spreads M tokens with topk
         # replication over E experts, ~M*topk/E rows each. Keep 16-row
-        # tiles until the average expert fills one (M*topk/E > 16), with
-        # the legacy M <= 64 as a floor so shapes with E/topk < 4 keep
-        # their current config. For the classic E=8/topk=2 this reproduces
-        # M <= 64 exactly; for high-expert-count MoEs (E/topk >> 4) it
-        # defers the 64-row tile past the decode/medium-batch range where
-        # it is mostly padding. CUDA only (validated on NVIDIA); ROCm
-        # keeps the prior raw-M threshold.
+        # tiles while the average expert has less than one full tile of
+        # rows (M*topk < 16*E) — beyond that a 64-row tile stops being
+        # mostly padding and measures as fast or faster. The legacy
+        # M <= 64 stays as a floor, so shapes with E/topk < 4 (e.g. the
+        # classic E=8/topk=2) keep today's configs at every M, while
+        # high-expert-count MoEs defer the 64-row tile past the
+        # decode/medium-batch range that raw M <= 64 mis-tiles. CUDA
+        # only (validated on NVIDIA); ROCm keeps the prior raw-M rule.
         if current_platform.is_rocm():
-            m_tile_switch = 64
+            small_m_tile = M <= 64
         else:
-            m_tile_switch = max(64, 16 * E // topk)
+            small_m_tile = M <= 64 or M * topk < 16 * E
         config = {
-            "BLOCK_SIZE_M": 16 if M <= m_tile_switch else 64,
+            "BLOCK_SIZE_M": 16 if small_m_tile else 64,
             "BLOCK_SIZE_N": block_n,
             "BLOCK_SIZE_K": block_shape[1],
             "GROUP_SIZE_M": 1 if M <= 16 else 32,
