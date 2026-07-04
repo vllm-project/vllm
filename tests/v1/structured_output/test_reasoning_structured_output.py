@@ -215,6 +215,45 @@ class TestReasoningStructuredOutput:
         )
         assert result is False
 
+    def test_should_advance_uses_accepted_tokens_with_mtp_preincrement(
+        self,
+        manager_with_reasoner,
+        mock_request_with_structured_output,
+    ):
+        """MTP can pre-increment num_computed_tokens past accepted tokens."""
+        structured_req = mock_request_with_structured_output.structured_output_request
+        structured_req.reasoning_ended = False
+
+        end_think_token_id = 42
+        accepted_token_ids = [9, end_think_token_id]
+        prompt_token_ids = mock_request_with_structured_output.prompt_token_ids
+        all_token_ids = prompt_token_ids + accepted_token_ids
+        mock_request_with_structured_output.all_token_ids = all_token_ids
+        mock_request_with_structured_output.num_computed_tokens = len(all_token_ids)
+        mock_request_with_structured_output.num_output_placeholders = 0
+
+        old_delta_from = (
+            mock_request_with_structured_output.num_computed_tokens
+            - mock_request_with_structured_output.num_output_placeholders
+        )
+        assert all_token_ids[old_delta_from:] == []
+
+        reasoner = MockReasoner(tokenizer=Mock())
+        reasoner.is_reasoning_end_streaming.side_effect = (
+            lambda _all_ids, delta_ids: end_think_token_id in list(delta_ids)
+        )
+        structured_req.reasoner = reasoner
+
+        result = manager_with_reasoner.should_advance(
+            mock_request_with_structured_output, accepted_token_ids
+        )
+
+        assert structured_req.reasoning_ended is True
+        assert result is False
+        reasoner.is_reasoning_end_streaming.assert_called_once_with(
+            all_token_ids, accepted_token_ids
+        )
+
     def test_should_advance_reasoning_just_ended_with_spec_decode_structural_tag(
         self,
         manager_with_reasoner,
