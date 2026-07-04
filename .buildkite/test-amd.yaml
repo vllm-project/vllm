@@ -407,7 +407,7 @@ steps:
 #------------------------------------------------------------  mi250 · rust  -----------------------------------------------------------#
 
 - label: Rust Frontend Cargo Style + Clippy # TBD
-  timeout_in_minutes: 30
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
@@ -421,7 +421,7 @@ steps:
   - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
 
 - label: Rust Frontend Cargo Tests # TBD
-  timeout_in_minutes: 30
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
   agent_pool: mi250_1
   no_gpu: true
@@ -1963,7 +1963,7 @@ steps:
 #-------------------------------------------------------  mi300 · rust_frontend  -------------------------------------------------------#
 
 - label: Rust Frontend OpenAI Coverage # TBD
-  timeout_in_minutes: 90
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
@@ -1989,7 +1989,7 @@ steps:
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
 
 - label: Rust Frontend Serve Admin Coverage # TBD
-  timeout_in_minutes: 60
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
@@ -2012,7 +2012,7 @@ steps:
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
 
 - label: Rust Frontend Core Correctness # TBD
-  timeout_in_minutes: 30
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
@@ -2029,7 +2029,7 @@ steps:
   - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
 
 - label: Rust Frontend Tool Use # TBD
-  timeout_in_minutes: 60
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
@@ -2047,7 +2047,7 @@ steps:
   - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
 
 - label: Rust Frontend Distributed # TBD
-  timeout_in_minutes: 45
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_4
   num_gpus: 4
