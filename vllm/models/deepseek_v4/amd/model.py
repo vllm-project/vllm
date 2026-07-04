@@ -243,12 +243,26 @@ class DeepseekV4DecoderLayer(nn.Module):
         self.hidden_size = config.hidden_size
 
         self.rms_norm_eps = config.rms_norm_eps
-        self.attn = DeepseekV4ROCMAiterMLAAttention(
-            vllm_config,
-            prefix=f"{prefix}.attn",
-            topk_indices_buffer=topk_indices_buffer,
-            aux_stream_list=aux_stream_list,
-        )
+        from vllm.models.deepseek_v4.amd.atom_integration import dsv4_use_atom
+
+        if dsv4_use_atom():
+            # Ported ATOM attention is the default DSV4 ROCm compute path.
+            from vllm.models.deepseek_v4.amd.atom_integration import (
+                AtomV4Attention,
+                setup_atom_config_and_args,
+            )
+
+            _args = setup_atom_config_and_args(vllm_config)
+            self.attn = AtomV4Attention(
+                vllm_config, prefix=f"{prefix}.attn", args=_args
+            )
+        else:
+            self.attn = DeepseekV4ROCMAiterMLAAttention(
+                vllm_config,
+                prefix=f"{prefix}.attn",
+                topk_indices_buffer=topk_indices_buffer,
+                aux_stream_list=aux_stream_list,
+            )
         self.ffn = DeepseekV4MoE(vllm_config, prefix=f"{prefix}.ffn")
 
         self.attn_norm = RMSNorm(self.hidden_size, self.rms_norm_eps)
@@ -480,6 +494,17 @@ class DeepseekV4Model(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
 
+        from vllm.models.deepseek_v4.amd.atom_integration import dsv4_use_atom
+
+        if dsv4_use_atom():
+            # Register the single ATOM proxy KV layer before building the
+            # decoder layers so vLLM discovers it as the model's KV owner.
+            from vllm.models.deepseek_v4.amd.atom_integration import (
+                register_atom_proxy,
+            )
+
+            register_atom_proxy(vllm_config)
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
             lambda prefix: DeepseekV4DecoderLayer(
@@ -604,15 +629,24 @@ class DeepseekV4Model(nn.Module):
         return hidden_states
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("gate_up_proj", "w1", 0),
-            ("gate_up_proj", "w3", 1),
-            ("attn.fused_wqa_wkv", "attn.wq_a", 0),
-            ("attn.fused_wqa_wkv", "attn.wkv", 1),
-            ("compressor.fused_wkv_wgate", "compressor.wkv", 0),
-            ("compressor.fused_wkv_wgate", "compressor.wgate", 1),
-        ]
+        from vllm.models.deepseek_v4.amd.atom_integration import (
+            ATOM_STACKED_PARAMS_MAPPING,
+            dsv4_use_atom,
+        )
+
+        if dsv4_use_atom():
+            # ATOM attention fuses into ``wqkv_a`` / ``compressor.wkv_gate``.
+            stacked_params_mapping = ATOM_STACKED_PARAMS_MAPPING
+        else:
+            stacked_params_mapping = [
+                # (param_name, shard_name, shard_id)
+                ("gate_up_proj", "w1", 0),
+                ("gate_up_proj", "w3", 1),
+                ("attn.fused_wqa_wkv", "attn.wq_a", 0),
+                ("attn.fused_wqa_wkv", "attn.wkv", 1),
+                ("compressor.fused_wkv_wgate", "compressor.wkv", 0),
+                ("compressor.fused_wkv_wgate", "compressor.wgate", 1),
+            ]
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
@@ -763,8 +797,24 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
 
         config = vllm_config.model_config.hf_config
         self.config = config
+        self.vllm_config = vllm_config
         expert_dtype = getattr(config, "expert_dtype", "fp4")
-        if expert_dtype != "fp4":
+        from vllm.models.deepseek_v4.amd.atom_integration import dsv4_use_atom
+
+        self._use_atom = dsv4_use_atom()
+        if self._use_atom:
+            # ATOM attention needs its own scale-name mapping (.scale ->
+            # weight_scale for attn/indexer projections).
+            from vllm.models.deepseek_v4.amd.atom_integration import (
+                make_atom_v4_weights_mapper,
+                setup_atom_config_and_args,
+            )
+
+            self.hf_to_vllm_mapper = make_atom_v4_weights_mapper(expert_dtype)
+            # ``args`` is read by the proxy bind (per-request cache sizing +
+            # per-layer ring/compress slicing).
+            self.args = setup_atom_config_and_args(vllm_config)
+        elif expert_dtype != "fp4":
             self.hf_to_vllm_mapper = _make_deepseek_v4_weights_mapper(expert_dtype)
 
         self.model = self.model_cls(
@@ -800,6 +850,21 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
         intermediate_tensors: IntermediateTensors | None = None,
         inputs_embeds: torch.Tensor | None = None,
     ) -> torch.Tensor | IntermediateTensors:
+        if getattr(self, "_use_atom", False):
+            # Bind the proxy KV pool into per-layer ring/compress views and
+            # enter ATOM's forward context so the attention op finds its
+            # chunk-aware metadata.
+            from vllm.models.deepseek_v4.amd.atom_integration import (
+                atom_forward_context,
+            )
+
+            with atom_forward_context(
+                self, self.vllm_config, input_ids, positions
+            ):
+                hidden_states = self.model(
+                    input_ids, positions, intermediate_tensors, inputs_embeds
+                )
+            return hidden_states
         hidden_states = self.model(
             input_ids, positions, intermediate_tensors, inputs_embeds
         )
@@ -814,6 +879,20 @@ class DeepseekV4ForCausalLM(nn.Module, SupportsPP):
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self, skip_substrs=["mtp."])
         loaded_params = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        if getattr(self, "_use_atom", False):
+            # vLLM's post-load hook only fires for vLLM Attention types, so run
+            # ATOM's own post-load weight prep on each ATOM attention subtree
+            # (parent-first: the attention dequants wo_a fp8->bf16 + marks it
+            # No-quant, then its child linears shuffle the fp8 weights for the
+            # CK GEMM layout — matching ATOM's loader ordering).
+            for layer in self.model.layers:
+                attn = getattr(layer, "attn", None)
+                if attn is None:
+                    continue
+                for m in attn.modules():
+                    pw = getattr(m, "process_weights_after_loading", None)
+                    if callable(pw):
+                        pw()
         return loaded_params
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
