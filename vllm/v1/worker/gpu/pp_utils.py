@@ -86,6 +86,18 @@ class PPHandler:
         # between PP decodes.
         self.req_idx_gen_np = np.zeros(max_num_reqs, dtype=np.int32)
 
+        # Packed single-op broadcast layout (int64), per request row:
+        #   [ sampled(max_sample_len) | num_sampled(1) | num_rejected(1)
+        #     | draft(max_sample_len - 1) ]
+        # One NCCL broadcast per step instead of three (sampled, combined,
+        # draft) -- 3x fewer LL kernels spinning on the non-last ranks' side
+        # stream. Width is static per deployment so send/recv element counts
+        # always match.
+        self.packed_width = 2 * self.max_sample_len + 1
+        # Last rank, spec decode only: the packed buffer staged by broadcast()
+        # (sampled + counts) awaiting the draft columns in broadcast_draft().
+        self._staged_packed: torch.Tensor | None = None
+
         # Dedicated subgroup for the sampled-token broadcast.
         self.broadcast_group = get_pp_group().make_sibling_device_group(
             group_desc="pp_broadcast"
@@ -144,38 +156,28 @@ class PPHandler:
         num_reqs = input_batch.num_reqs
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
-            sampled_tokens = torch.empty(
-                num_reqs, self.max_sample_len, dtype=torch.int64, device=self.device
+            # Single packed recv (see __init__ for the row layout). One NCCL op
+            # per step instead of three.
+            msl = self.max_sample_len
+            packed = torch.empty(
+                num_reqs, self.packed_width, dtype=torch.int64, device=self.device
             )
-            combined = torch.empty(2, num_reqs, dtype=torch.int32, device=self.device)
             torch.distributed.broadcast(
-                sampled_tokens, src=self.last_rank, group=self.broadcast_group
+                packed, src=self.last_rank, group=self.broadcast_group
             )
-            torch.distributed.broadcast(
-                combined, src=self.last_rank, group=self.broadcast_group
-            )
-            # Spec decode: 3rd broadcast on this group — the proposed draft tokens
-            # relayed by the last rank (matches broadcast_draft's order). NCCL
-            # matches by op order on the communicator; the deferred event covers it.
-            draft_tokens = None
-            if self.max_sample_len > 1:
-                draft_tokens = torch.empty(
-                    num_reqs,
-                    self.max_sample_len - 1,
-                    dtype=torch.int64,
-                    device=self.device,
-                )
-                torch.distributed.broadcast(
-                    draft_tokens, src=self.last_rank, group=self.broadcast_group
-                )
+            # Unpack. Keep downstream dtypes identical to the pre-packing code:
+            # sampled int64 contiguous, counts int32, draft int64.
+            sampled_tokens = packed[:, :msl].contiguous()
+            num_sampled = packed[:, msl].to(torch.int32)
+            num_rejected = packed[:, msl + 1].to(torch.int32)
+            draft_tokens = packed[:, msl + 2 :] if msl > 1 else None
             event = self.broadcast_stream.record_event()
-            num_sampled, num_rejected = combined.unbind(dim=0)
             # Must record_stream since these were allocated on broadcast stream but
-            # later used on the main stream.
+            # later used on the main stream. `packed` covers the draft view.
+            packed.record_stream(self.main_stream)
             sampled_tokens.record_stream(self.main_stream)
-            combined.record_stream(self.main_stream)
-            if draft_tokens is not None:
-                draft_tokens.record_stream(self.main_stream)
+            num_sampled.record_stream(self.main_stream)
+            num_rejected.record_stream(self.main_stream)
         self.queue[-1] = PendingRecv(
             event,
             sampled_tokens,
@@ -202,61 +204,66 @@ class PPHandler:
             return
 
         assert sampled_token_ids.dtype == torch.int64
-        # The receiver always posts a [num_reqs, max_sample_len] buffer, but under
-        # spec decode the sampler emits width 1 on any step with no draft tokens
-        # (prefill, first decode) and width (num_spec+1) only once rejection
-        # sampling has run. Pad to max_sample_len so the NCCL broadcast element
-        # count matches the receiver on EVERY step (an unpadded width-1 send vs a
-        # width-(num_spec+1) recv is a count mismatch that deadlocks the receiver).
-        # Trailing -1 columns are placeholders ignored by post_update, which
-        # advances each request by its per-request num_sampled valid count.
-        width = sampled_token_ids.shape[-1]
-        if width != self.max_sample_len:
-            assert width < self.max_sample_len
-            padded = sampled_token_ids.new_full(
-                (sampled_token_ids.shape[0], self.max_sample_len), -1
-            )
-            padded[:, :width] = sampled_token_ids
-            sampled_token_ids = padded
 
         if current_platform.is_xpu():
             self.main_stream.synchronize()
 
+        # Build the packed row (see __init__ for the layout) on the main stream.
+        # The sampler may emit width < max_sample_len on steps with no draft
+        # tokens (prefill, first decode); the unused sampled columns stay -1,
+        # placeholders ignored by post_update, which advances each request by
+        # its per-request num_sampled valid count. Draft columns (spec decode)
+        # are filled by broadcast_draft() after propose(); the single NCCL op
+        # is issued there so there is exactly ONE broadcast per step.
+        msl = self.max_sample_len
+        num_reqs = sampled_token_ids.shape[0]
+        width = sampled_token_ids.shape[-1]
+        assert width <= msl
+        packed = torch.full(
+            (num_reqs, self.packed_width), -1, dtype=torch.int64, device=self.device
+        )
+        packed[:, :width] = sampled_token_ids
+        packed[:, msl] = num_sampled
+        packed[:, msl + 1] = num_rejected
+        if msl > 1:
+            # Spec decode: stage; broadcast_draft() fills the draft columns and
+            # sends. Assert the previous step's stage was flushed.
+            assert self._staged_packed is None
+            self._staged_packed = packed
+            return
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
             torch.distributed.broadcast(
-                sampled_token_ids.contiguous(),
-                src=self.last_rank,
-                group=self.broadcast_group,
+                packed, src=self.last_rank, group=self.broadcast_group
             )
-            combined = torch.stack((num_sampled, num_rejected), dim=0)
-            torch.distributed.broadcast(
-                combined, src=self.last_rank, group=self.broadcast_group
-            )
-            for tensor in (sampled_token_ids, num_sampled, num_rejected):
-                tensor.record_stream(self.broadcast_stream)
+            packed.record_stream(self.broadcast_stream)
 
     def broadcast_draft(
         self, draft_tokens: torch.Tensor, input_batch: InputBatch
     ) -> None:
-        """Relay the proposed draft tokens (spec decode) from the last rank to the
-        non-last ranks. Issued AFTER propose(), so it is the 3rd broadcast on this
-        group for the step (sampled, combined, draft) — matching the order in which
-        `receive` posts its recvs. Gated identically to `broadcast` so op counts
-        stay matched across ranks. Without this, non-last ranks verify against a
-        zero-init req_states.draft_tokens (near-zero acceptance, corrupt output)."""
+        """Fill the draft columns of the packed row staged by broadcast() and
+        issue the step's SINGLE packed broadcast. Called AFTER propose() (the
+        proposed draft tokens exist only then). Gated identically to
+        `broadcast` so the staged/flush pairing stays matched. Without the
+        draft relay, non-last ranks verify against a zero-init
+        req_states.draft_tokens (near-zero acceptance, corrupt output)."""
         assert self.is_last_rank
         if self.max_sample_len <= 1:
             return
         if compute_need_sampled_mask(input_batch) is None:
-            # No request needs sampled outputs next step; `broadcast` skipped too,
-            # so skip here to keep the per-step broadcast count matched.
+            # No request needs sampled outputs next step; `broadcast` staged
+            # nothing, so there is nothing to send.
+            assert self._staged_packed is None
             return
-        draft_tokens = draft_tokens.to(torch.int64).contiguous()
+        packed = self._staged_packed
+        assert packed is not None
+        self._staged_packed = None
+        # Fill draft columns on the main stream (propose()'s output lives there).
+        packed[:, self.max_sample_len + 2 :] = draft_tokens
         with torch.cuda.stream(self.broadcast_stream):
-            # wait_stream so the side-stream broadcast sees propose()'s output.
+            # wait_stream so the side-stream broadcast sees the draft fill.
             self.broadcast_stream.wait_stream(self.main_stream)
             torch.distributed.broadcast(
-                draft_tokens, src=self.last_rank, group=self.broadcast_group
+                packed, src=self.last_rank, group=self.broadcast_group
             )
-            draft_tokens.record_stream(self.broadcast_stream)
+            packed.record_stream(self.broadcast_stream)
