@@ -63,7 +63,9 @@ class QuarkConfig(QuantizationConfig):
         if kv_cache_group is None:
             kv_cache_group = []
         self.quant_config = quant_config
-        self.packed_modules_mapping = dict(getattr(self, "packed_modules_mapping", {}))
+        self.packed_modules_mapping = dict(
+            getattr(type(self), "packed_modules_mapping", {})
+        )
         self.packed_modules_mapping.setdefault("gate_up_proj", ["w1", "w3"])
         self.packed_modules_mapping.setdefault("fused_wqa_wkv", ["wq_a", "wkv"])
         self.kv_cache_group = kv_cache_group
