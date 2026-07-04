@@ -51,7 +51,7 @@ impl Llm {
         if enabled {
             let stats_logger = StatsLogger::start(
                 self.client.model_name().to_string(),
-                self.client.engine_count(),
+                self.client.engine_indices(),
             );
             self.stats_logger = Some(stats_logger);
         } else {
