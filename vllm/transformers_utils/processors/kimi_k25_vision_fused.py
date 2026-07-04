@@ -13,15 +13,8 @@ from PIL import Image
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.utils import TensorType
 
-try:
+if is_numba_available():
     from numba import njit, prange
-except ImportError:
-    njit = None
-    prange = range
-
-
-if njit is not None:
-
     @njit(parallel=True, cache=True)
     def _write_fused_patches(
         frames: np.ndarray,
