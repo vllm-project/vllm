@@ -117,6 +117,7 @@ class RejectionSampler:
             pos,
             draft_sampled,
             input_batch.expanded_local_pos,
+            has_structured_output_reqs=input_batch.has_structured_output_reqs,
         )
         sampled, num_sampled = rejection_sample(
             processed_logits,
