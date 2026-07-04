@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import (
+    MAX_LOGPROB_TOKEN_IDS,
     BeamSearchParams,
     SamplingParams,
     StructuredOutputsParams,
@@ -82,6 +83,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         temperature = params.temperature
         ignore_eos = params.ignore_eos
         length_penalty = params.length_penalty
+        request_allowed_token_ids = params.allowed_token_ids
 
         tokenizer = self.renderer.get_tokenizer()
         eos_token_id = tokenizer.eos_token_id
@@ -115,10 +117,23 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         # generate 2 * beam_width candidates at each step
         # following the huggingface transformers implementation
         # at https://github.com/huggingface/transformers/blob/e15687fffe5c9d20598a19aeab721ae0a7580f8a/src/transformers/generation/beam_search.py#L534 # noqa
+        request_logprob_token_ids = (
+            request_allowed_token_ids
+            if request_allowed_token_ids is not None
+            and len(request_allowed_token_ids) <= MAX_LOGPROB_TOKEN_IDS
+            else None
+        )
         base_sampling_params = SamplingParams(
-            logprobs=2 * beam_width,
+            logprobs=None if request_logprob_token_ids is not None else 2 * beam_width,
+            logprob_token_ids=request_logprob_token_ids,
             max_tokens=1,
             temperature=temperature,
+            allowed_token_ids=(
+                request_allowed_token_ids
+                if request_allowed_token_ids is not None
+                and len(request_allowed_token_ids) <= _MAX_NUM_ALLOWED_TOKEN_IDS
+                else None
+            ),
             skip_clone=True,  # Internal beam search, safe to skip clone
         )
         instances: list[BeamSearchInstance] = []
@@ -168,6 +183,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                         structured_output_backend=structured_output_backend,
                         structured_output_key=structured_output_key,
                         structured_output_bitmask=structured_output_bitmask,
+                        request_allowed_token_ids=request_allowed_token_ids,
                     )
                     if should_stop:
                         break
@@ -201,6 +217,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         structured_output_backend: StructuredOutputBackend | None,
         structured_output_key: tuple | None,
         structured_output_bitmask: torch.Tensor | None,
+        request_allowed_token_ids: list[int] | None,
     ) -> bool:
         """Run one token step of beam search across a batch of instances.
 
@@ -228,6 +245,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
                 structured_output_backend,
                 structured_output_key,
                 structured_output_bitmask,
+                request_allowed_token_ids,
             )
             active_indices = [
                 i for i, entry in enumerate(beam_entries) if entry is not None
@@ -280,7 +298,12 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         # tokens outside the grammar's allowed set. This filtering is also
         # the only grammar enforcement for beams whose allowed set exceeds
         # the engine-side allowed_token_ids cap.
-        allowed_sets: list[set[int] | None] = [None] * len(all_beams)
+        request_allowed_set = (
+            set(request_allowed_token_ids)
+            if request_allowed_token_ids is not None
+            else None
+        )
+        allowed_sets: list[set[int] | None] = [request_allowed_set] * len(all_beams)
         if structured_output_backend is not None:
             for i, entry in enumerate(beam_entries):
                 if entry is not None:
@@ -401,6 +424,7 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         backend: StructuredOutputBackend,
         structured_output_key: tuple,
         bitmask: torch.Tensor,
+        request_allowed_token_ids: list[int] | None,
     ) -> list[tuple[SamplingParams, list[int]] | None]:
         """Build per-beam SamplingParams and allowed token IDs from grammar.
 
@@ -408,6 +432,11 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
         """
         vocab_size = self.model_config.get_vocab_size()
         request_type, grammar_spec = structured_output_key
+        request_allowed_set = (
+            set(request_allowed_token_ids)
+            if request_allowed_token_ids is not None
+            else None
+        )
         result: list[tuple[SamplingParams, list[int]] | None] = []
 
         for beam in beams:
@@ -428,6 +457,12 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
 
             grammar.fill_bitmask(bitmask, 0)
             allowed_ids = _bitmask_to_token_ids(bitmask[0], vocab_size)
+            if request_allowed_set is not None:
+                allowed_ids = [
+                    token_id
+                    for token_id in allowed_ids
+                    if token_id in request_allowed_set
+                ]
 
             if not allowed_ids:
                 result.append(None)
@@ -437,8 +472,14 @@ class BeamSearchOfflineMixin(OfflineInferenceMixin):
             # grammar still allows more tokens than the cap (e.g. inside
             # free-form strings), skip the engine-side constraint and rely
             # on the logprobs filtering in _beam_search_step instead.
+            logprob_token_ids = (
+                allowed_ids if len(allowed_ids) <= MAX_LOGPROB_TOKEN_IDS else None
+            )
             beam_params = SamplingParams(
-                logprobs=base_params.logprobs,
+                logprobs=None
+                if logprob_token_ids is not None
+                else base_params.logprobs,
+                logprob_token_ids=logprob_token_ids,
                 max_tokens=1,
                 temperature=base_params.temperature,
                 allowed_token_ids=(
