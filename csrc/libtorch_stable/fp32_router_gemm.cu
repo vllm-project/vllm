@@ -187,6 +187,17 @@ static void launchFp32RouterGemm(float* output, InputT const* mat_a,
                      output, mat_a, mat_b);
 }
 
+static bool isBlackwellFamily() {
+  static int sm = []() {
+    int dev = 0, major = 0, minor = 0;
+    cudaGetDevice(&dev);
+    cudaDeviceGetAttribute(&major, cudaDevAttrComputeCapabilityMajor, dev);
+    cudaDeviceGetAttribute(&minor, cudaDevAttrComputeCapabilityMinor, dev);
+    return major * 10 + minor;
+  }();
+  return sm >= 100;
+}
+
 template <typename InputT, int kNumTokens, int kNumExperts, int kHiddenDim>
 void invokeFp32RouterGemm(float* output, InputT const* mat_a,
                           float const* mat_b, cudaStream_t stream) {
@@ -197,9 +208,15 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
   //   M >= 5 : BS=384, EPB=2 (5.1us vs 21.0us at M=16; EPB=2 halves the
   //            per-block activation re-reads, crossover measured at M in
   //            (4, 8)).
-  // Other shapes / fp32 activation keep the validated legacy geometry.
+  // Only enabled on the Blackwell family where it was validated; Hopper and
+  // other shapes / fp32 activation keep the legacy geometry.
   if constexpr (std::is_same_v<InputT, __nv_bfloat16> && kNumExperts == 256 &&
                 kHiddenDim == 6144) {
+    if (!isBlackwellFamily()) {
+      launchFp32RouterGemm<InputT, 128, 1, kNumTokens, kNumExperts,
+                           kHiddenDim>(output, mat_a, mat_b, stream);
+      return;
+    }
     if constexpr (kNumTokens <= 4) {
       launchFp32RouterGemm<InputT, 768, 1, kNumTokens, kNumExperts,
                            kHiddenDim>(output, mat_a, mat_b, stream);
