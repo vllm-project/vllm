@@ -70,6 +70,40 @@ def create_fp4_scale_tensor(
         return torch.empty((m, n // block_size), device=device, dtype=torch.uint8)
 
 
+def _zero_fp4_8x4_scale_padding_(
+    output_scale: torch.Tensor,
+    m: int,
+    n: int,
+) -> None:
+    """Zero logical padding in FlashInfer's 8x4 NVFP4 scale layout."""
+    from vllm.utils.math_utils import round_up
+
+    block_size = 16
+    scale_n = n // block_size
+    rounded_m = round_up(m, 8)
+    rounded_n = round_up(scale_n, 4)
+    if rounded_m == m and rounded_n == scale_n:
+        return
+
+    scale_tiles = output_scale.view(torch.uint8).reshape(
+        rounded_m // 8, rounded_n // 4, 8, 4
+    )
+
+    full_m_tiles, m_tail = divmod(m, 8)
+    if m_tail:
+        scale_tiles[full_m_tiles, :, m_tail:, :].zero_()
+        scale_tiles[full_m_tiles + 1 :, :, :, :].zero_()
+    else:
+        scale_tiles[full_m_tiles:, :, :, :].zero_()
+
+    full_n_tiles, n_tail = divmod(scale_n, 4)
+    if n_tail:
+        scale_tiles[:, full_n_tiles, :, n_tail:].zero_()
+        scale_tiles[:, full_n_tiles + 1 :, :, :].zero_()
+    else:
+        scale_tiles[:, full_n_tiles:, :, :].zero_()
+
+
 def create_fp4_output_tensors(
     m: int,
     n: int,
@@ -1542,6 +1576,7 @@ def scaled_fp4_quant(
         output, output_scale = flashinfer_quant_nvfp4_8x4_sf_layout(
             input, input_global_scale
         )
+        _zero_fp4_8x4_scale_padding_(output_scale, m, n)
     else:
         # Pre-allocate and call .out variant (same behavior as old in-place API)
         output, output_scale = create_fp4_output_tensors(
