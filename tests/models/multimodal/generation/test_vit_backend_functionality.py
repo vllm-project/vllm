@@ -20,6 +20,7 @@ from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from ....utils import create_new_process_for_each_test
 from ...utils import dummy_hf_overrides
+from .vlm_utils.builders import sample_frames_with_video_metadata
 
 # Dots.OCR prompt from official repository
 # https://github.com/rednote-hilab/dots.ocr/blob/d72d1d8c5bdd0362eb264f714cdbd1e5daa7cdff/dots_ocr/utils/prompts.py#L3
@@ -151,6 +152,7 @@ MODEL_CONFIGS: dict[str, dict[str, Any]] = {
             "num_frames": 16,
             "pruning_rates": [0.0, 0.75],
         },
+        "needs_video_metadata": True,
     },
     "qwen2_5_omni": {
         "model_name": "Qwen/Qwen2.5-Omni-3B",
@@ -346,10 +348,18 @@ def run_video_test(config, mm_encoder_attn_backend, video_assets, vllm_runner):
         num_frames = config["video_params"]["num_frames"]
 
         # Sample frames from video
-        sampled_vids = [
-            sample_frames_from_video(asset.np_ndarrays, num_frames)
-            for asset in video_assets
-        ]
+        if config.get("needs_video_metadata"):
+            sampled_vids = [
+                sample_frames_with_video_metadata(
+                    (asset.np_ndarrays, asset.metadata), num_frames
+                )
+                for asset in video_assets
+            ]
+        else:
+            sampled_vids = [
+                sample_frames_from_video(asset.np_ndarrays, num_frames)
+                for asset in video_assets
+            ]
 
         # Build prompt and prepare video
         prompt = build_qwen2_5_video_prompt()

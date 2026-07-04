@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from typing import Any
+
+import numpy as np
 import pytest
 from packaging.version import Version
 from transformers import __version__ as TRANSFORMERS_VERSION
@@ -128,3 +131,32 @@ def test_get_image_size_with_most_features(
         t, h, w = grid_thw[0]
         tokens = (t * h * w) // (merge_size**2)
         assert tokens < max_tokens
+
+
+def _build_qwen2_5_vl_video_mm_data(num_frames: int, fps: float) -> dict[str, Any]:
+    video = np.zeros((num_frames, 56, 56, 3), dtype=np.uint8)
+    metadata = {
+        "fps": fps,
+        "duration": num_frames / fps,
+        "total_num_frames": num_frames,
+        "frames_indices": list(range(num_frames)),
+        "video_backend": "opencv",
+        "do_sample_frames": False,
+    }
+    return {"video": [(video, metadata)]}
+
+
+@pytest.mark.parametrize("model_id", ["Qwen/Qwen2.5-VL-3B-Instruct"])
+def test_qwen2_5_vl_video_fps_to_second_per_grid_ts(model_id: str) -> None:
+    ctx = build_model_context(model_id, limit_mm_per_prompt={"image": 0, "video": 1})
+    processor = MULTIMODAL_REGISTRY.create_processor(ctx.model_config)
+    temporal_patch_size = (
+        processor.info.get_hf_processor().video_processor.temporal_patch_size
+    )
+
+    prompt = "<|vision_start|><|video_pad|><|vision_end|>"
+    for fps in (1.0, 30.0):
+        mm_data = _build_qwen2_5_vl_video_mm_data(num_frames=32, fps=fps)
+        processed = processor(prompt, mm_items=processor.info.parse_mm_data(mm_data))
+        spg = processed["mm_kwargs"]["video"][0].get_data()["second_per_grid_ts"]
+        assert float(spg) == pytest.approx(temporal_patch_size / fps, rel=2e-2)

@@ -2383,6 +2383,7 @@ MODELS_NEED_VIDEO_METADATA = [
     "glm4_5v",
     "glm4_5v_fp8",
     "molmo2",
+    "qwen2_5_vl",
     "qwen3_vl",
     "qwen3_vl_moe",
     "qwen3_5",
