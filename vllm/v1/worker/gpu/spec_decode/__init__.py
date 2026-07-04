@@ -20,6 +20,12 @@ def init_speculator(vllm_config: VllmConfig, device: torch.device):
         )
 
         return DSparkSpeculator(vllm_config, device)
+    elif speculative_config.method == "domino":
+        from vllm.v1.worker.gpu.spec_decode.domino.speculator import (
+            DominoSpeculator,
+        )
+        
+        return DominoSpeculator(vllm_config, device)
     elif speculative_config.use_gemma4_mtp():
         from vllm.v1.worker.gpu.spec_decode.gemma4.speculator import (
             Gemma4Speculator,
