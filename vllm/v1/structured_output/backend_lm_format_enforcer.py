@@ -17,6 +17,7 @@ from vllm.v1.structured_output.backend_types import (
     StructuredOutputGrammar,
     StructuredOutputOptions,
 )
+from vllm.v1.structured_output.utils import compile_regex_with_timeout
 
 if TYPE_CHECKING:
     import lmformatenforcer
@@ -107,7 +108,10 @@ class LMFormatEnforcerBackend(StructuredOutputBackend):
         elif request_type == StructuredOutputOptions.JSON_OBJECT:
             character_level_parser = lmformatenforcer.JsonSchemaParser(None)
         elif request_type == StructuredOutputOptions.REGEX:
-            character_level_parser = lmformatenforcer.RegexParser(grammar_spec)
+            character_level_parser = compile_regex_with_timeout(
+                lmformatenforcer.RegexParser,
+                grammar_spec,
+            )
         elif request_type == StructuredOutputOptions.CHOICE:
             choices = ast.literal_eval(grammar_spec)
             character_level_parser = lmformatenforcer.UnionParser(
@@ -153,6 +157,15 @@ def validate_structured_output_request_lm_format_enforcer(params: SamplingParams
     so_params = params.structured_outputs
 
     if so_params.regex:
+        try:
+            compile_regex_with_timeout(
+                lmformatenforcer.RegexParser,
+                so_params.regex,
+            )
+        except Exception as err:
+            raise ValueError(
+                f"Failed to compile regex for lm-format-enforcer: {err}"
+            ) from err
         return
     elif so_params.json:
         if isinstance(so_params.json, str):
