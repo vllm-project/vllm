@@ -1000,8 +1000,8 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     response_format: Any | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = Field(default_factory=list)
-    temperature: float | None = 0.7
-    top_p: float | None = 1.0
+    temperature: float | None = None
+    top_p: float | None = None
     user: str | None = None
     tool_choice: Literal["none"] | None = "none"
     include_reasoning: bool = True
@@ -1010,8 +1010,8 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     best_of: int | None = None
     use_beam_search: bool = False
     top_k: int | None = None
-    min_p: float | None = 0.0
-    repetition_penalty: float | None = 1.0
+    min_p: float | None = None
+    repetition_penalty: float | None = None
     length_penalty: float | None = 1.0
     early_stopping: bool = False
     structured_outputs: StructuredOutputsParams | None = None
@@ -1059,8 +1059,6 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
         self, messages: list[ChatCompletionMessageParam]
     ) -> ChatCompletionRequest:
         """Build a single-conversation ChatCompletionRequest from one conversation."""
-        data = self.model_dump(
-            exclude={"messages"}, exclude_none=True, exclude_unset=True
-        )
+        data = self.model_dump(exclude={"messages"}, exclude_none=True)
         data["messages"] = messages
         return ChatCompletionRequest.model_validate(data)
