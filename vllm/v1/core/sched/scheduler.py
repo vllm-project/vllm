@@ -1623,6 +1623,30 @@ class Scheduler(SchedulerInterface):
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
 
+            # Pre-commit grammar filter: when spec-decode × reasoning
+            # produces post-boundary bonus tokens that the verifier
+            # sampled WITHOUT the grammar mask engaged (the mask is
+            # gated on reasoning_ended, which is False until the
+            # boundary is observed — i.e. until *after* this step's
+            # tokens are sampled), drop the rejected trailing tokens
+            # before they enter the response stream. Mirrors the
+            # existing verifier-rejected-spec-token bookkeeping: we
+            # decrement num_computed_tokens / num_output_placeholders
+            # by the rejection count, so the next step re-runs from
+            # the truncated position with the mask now correctly
+            # engaged.
+            if new_token_ids:
+                new_token_ids, num_grammar_rejected = (
+                    self.structured_output_manager.precommit_filter_tokens(
+                        request, new_token_ids
+                    )
+                )
+                if num_grammar_rejected > 0:
+                    if request.num_computed_tokens > 0:
+                        request.num_computed_tokens -= num_grammar_rejected
+                    if request.num_output_placeholders > 0:
+                        request.num_output_placeholders -= num_grammar_rejected
+
             # Check for stop and update request status.
             if new_token_ids:
                 new_token_ids, stopped = self._update_request_with_output(
