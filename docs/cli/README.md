@@ -50,6 +50,21 @@ vllm serve --help=max-num-seqs
 vllm serve --help=max
 ```
 
+!!! tip "Human-readable integer arguments"
+    Many integer arguments accept human-readable suffixes for convenience. For example:
+
+    - `1k` = 1,000 (decimal kilo)
+    - `1K` = 1,024 (binary kibibyte)
+    - `1m` = 1,000,000 (decimal mega)
+    - `1M` = 1,048,576 (binary mebibyte)
+    - `1g` / `1G` = 1 billion / 1 gibibyte
+    - `1t` / `1T` = 1 trillion / 1 tebibyte
+    
+    Decimal suffixes (`k`, `m`, `g`, `t`) also accept floating point: `25.6k` = 25,600.
+    Binary suffixes (`K`, `M`, `G`, `T`) require integers: `32K` = 32,768.
+    
+    Supported arguments include: `--max-model-len`, `--max-num-batched-tokens`, `--max-num-scheduled-tokens`, `--kv-cache-memory-bytes`, `--kv-cache-size-tokens`, `--safetensors-prefetch-block-size`, `--window-size`.
+
 See [vllm serve](./serve.md) for the full reference of all available arguments.
 
 ## launch

@@ -354,14 +354,19 @@ def _compute_kwargs(cls: ConfigType) -> dict[str, dict[str, Any]]:
         elif contains_type(type_hints, set):
             kwargs[name].update(collection_to_kwargs(type_hints, set))
         elif contains_type(type_hints, int):
+            # Arguments that accept human-readable integer strings (e.g., 1K, 2M, 1G)
+            human_readable_int_args = {
+                "max_num_batched_tokens",
+                "max_num_scheduled_tokens",
+                "kv_cache_memory_bytes",
+                "kv_cache_size_tokens",
+                "safetensors_prefetch_block_size",
+                "window_size",
+            }
             if name == "max_model_len":
                 kwargs[name]["type"] = human_readable_int_or_auto
                 kwargs[name]["help"] += f"\n\n{human_readable_int_or_auto.__doc__}"
-            elif name in (
-                "max_num_batched_tokens",
-                "kv_cache_memory_bytes",
-                "safetensors_prefetch_block_size",
-            ):
+            elif name in human_readable_int_args:
                 kwargs[name]["type"] = human_readable_int
                 kwargs[name]["help"] += f"\n\n{human_readable_int.__doc__}"
             else:
