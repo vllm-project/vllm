@@ -15,11 +15,14 @@ from mistral_common.tokens.tokenizers.tekken import SpecialTokenPolicy
 from vllm import LLM, EngineArgs, SamplingParams
 from vllm.assets.audio import AudioAsset
 from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.utils.math_utils import cdiv
 from vllm.v1.engine.async_llm import AsyncLLM
+from vllm.v1.kv_cache_interface import SlidingWindowSpec
 
 from ....utils import ROCM_ENGINE_KWARGS
 
 MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602"
+AUDIO_LAYER_NAME = "whisper_encoder.whisper_encoder.layers.0.layers.self_attn.attn"
 ENGINE_CONFIG = {
     "model": MODEL_NAME,
     "max_model_len": 8192,
@@ -60,6 +63,33 @@ def _normalize(texts: list[str]) -> list[str]:
     return texts
 
 
+def assert_encoder_kv_cache_spec(engine: LLM) -> None:
+    vllm_config = engine.llm_engine.vllm_config
+    audio_config = vllm_config.model_config.hf_config.audio_config
+    kv_cache_specs_per_rank = engine.llm_engine.model_executor.get_kv_cache_specs()
+
+    assert len(kv_cache_specs_per_rank) == 1
+    kv_cache_specs = kv_cache_specs_per_rank[0]
+    assert AUDIO_LAYER_NAME in kv_cache_specs, kv_cache_specs.keys()
+    spec = kv_cache_specs[AUDIO_LAYER_NAME]
+
+    assert audio_config.sliding_window == 750
+    assert audio_config.block_pool_size == 4
+    assert isinstance(spec, SlidingWindowSpec)
+    assert spec.block_size == 16
+    assert spec.num_kv_heads == 128
+    # cdiv(750, 4) == 188 pooled tokens cover the model's window; the extra
+    # +1 is an eviction margin (see whisper_causal.py get_kv_cache_spec).
+    assert spec.sliding_window == cdiv(750, 4) + 1 == 189
+    assert (
+        spec.max_admission_blocks_per_request(
+            max_num_batched_tokens=1,
+            max_model_len=vllm_config.model_config.max_model_len,
+        )
+        == 13
+    )
+
+
 @pytest.fixture
 def audio_assets() -> list[AudioAsset]:
     return [AudioAsset("mary_had_lamb"), AudioAsset("winning_call")]
@@ -71,7 +101,9 @@ def tokenizer() -> MistralTokenizer:
 
 
 @pytest.fixture
-def engine():
+def engine(monkeypatch: pytest.MonkeyPatch):
+    # Disable multiprocessing allows us to access model executor from LLM engine
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
     engine_args = EngineArgs(**ENGINE_CONFIG)
     llm = LLM.from_engine_args(engine_args)
     try:
@@ -95,6 +127,7 @@ async def async_engine():
 
 
 def test_voxtral_realtime_forward(audio_assets, tokenizer, engine):
+    assert_encoder_kv_cache_spec(engine)
     audio_config = tokenizer.instruct_tokenizer.tokenizer.audio
 
     def from_file(file_path: str):

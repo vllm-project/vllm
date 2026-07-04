@@ -33,14 +33,37 @@ from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import
 )
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
-from vllm.v1.kv_cache_interface import KVCacheConfig
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheConfig,
+    KVCacheGroupSpec,
+)
 from vllm.v1.request import RequestStatus
 
 from .utils import create_request, create_scheduler, create_vllm_config
 
 
 def _make_test_kv_cache_config() -> KVCacheConfig:
-    return KVCacheConfig(num_blocks=0, kv_cache_tensors=[], kv_cache_groups=[])
+    return KVCacheConfig(
+        num_blocks=0,
+        kv_cache_tensors=[],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                [
+                    "model.layers.0.self_attn",
+                    "model.layers.1.self_attn",
+                    "model.layers.0.mla_attn",
+                    "model.layers.1.eagle_attn",
+                ],
+                FullAttentionSpec(
+                    block_size=16,
+                    num_kv_heads=4,
+                    head_size=64,
+                    dtype=torch.float16,
+                ),
+            )
+        ],
+    )
 
 
 class FakeMooncakeWrapper:
@@ -126,6 +149,8 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
     worker.is_kv_producer = True
     worker.tp_rank = 0
     worker.tp_size = 1
+    worker.kv_cache_config = _make_test_kv_cache_config()
+    worker._physical_blocks_per_logical_kv_block = 1
     worker.transfer_topo = SimpleNamespace(local_replicates_kv_cache=False)
 
     block_len = 256
@@ -206,6 +231,7 @@ async def test_build_transfer_params_separates_prefill_pp_layers():
         req_blocks={"d-req-pp": (transfer_id, [[20, 21]])},
         kv_caches_base_addr=[region.base_addr for region in remote_regions],
         block_lens=[region.block_len for region in remote_regions],
+        kv_block_lens=[region.kv_block_len for region in remote_regions],
         registered_layer_names=[region.layer_name for region in remote_regions],
         registered_layer_indices=[region.layer_index for region in remote_regions],
     )
@@ -266,6 +292,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
         kv_half = block_len // 2
         prefill_worker.kv_caches_base_addr = [0x1000]
         prefill_worker.block_len_per_layer = [block_len]
+        prefill_worker.kv_block_len_per_layer = [kv_half]
         prefill_worker.registered_layer_names = ["model.layers.1.self_attn"]
         prefill_worker.registered_layer_indices = [1]
 
@@ -294,6 +321,7 @@ async def test_send_kv_to_decode_aligns_consumer_regions_by_layer_metadata(
             req_blocks={"d-req-layer-align": (transfer_id, [[20]])},
             kv_caches_base_addr=[0xA000, 0xB000],
             block_lens=[block_len, block_len],
+            kv_block_lens=[kv_half, kv_half],
             registered_layer_names=[
                 "model.layers.0.self_attn",
                 "model.layers.1.self_attn",
@@ -804,7 +832,9 @@ async def test_kv_producer(monkeypatch):
         prefill_worker = prefill_connector.connector_worker
         prefill_worker.kv_caches_base_addr = [0x1000]
         block_len = 4096
+        kv_half = block_len // 2
         prefill_worker.block_len_per_layer = [block_len]
+        prefill_worker.kv_block_len_per_layer = [kv_half]
         prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
         prefill_worker.registered_layer_indices = [0]
 
@@ -832,6 +862,7 @@ async def test_kv_producer(monkeypatch):
             req_blocks={"d-req-1": (transfer_id, [[20, 21]])},
             kv_caches_base_addr=[0x2000],
             block_lens=[block_len],
+            kv_block_lens=[kv_half],
             registered_layer_names=["model.layers.0.self_attn"],
             registered_layer_indices=[0],
         )
@@ -845,8 +876,6 @@ async def test_kv_producer(monkeypatch):
         ) as mock_send_blocks:
             # With blocks-first layout, each block is virtually split
             # into K and V halves, producing non-coalesced transfers.
-            kv_half = block_len // 2
-
             def expected_split_transfers(src_base, dst_base, src_blocks, dst_blocks):
                 """Build expected (src_ptrs, dst_ptrs, lengths) for
                 virtual-split K/V transfers."""
@@ -981,6 +1010,7 @@ async def test_kv_consumuer(monkeypatch):
         decode_worker = decode_connector.connector_worker
         decode_worker.kv_caches_base_addr = [0x1000]
         decode_worker.block_len_per_layer = [4096]
+        decode_worker.kv_block_len_per_layer = [4096]
         decode_worker.registered_layer_names = ["model.layers.0.self_attn"]
         decode_worker.registered_layer_indices = [0]
         decode_worker.rpc_port = 54321
@@ -1236,6 +1266,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
 
         prefill_worker.kv_caches_base_addr = [0x1000]
         prefill_worker.block_len_per_layer = [local_block_len]
+        prefill_worker.kv_block_len_per_layer = [local_block_len // 2]
         prefill_worker.registered_layer_names = ["model.layers.0.self_attn"]
         prefill_worker.registered_layer_indices = [0]
 
@@ -1283,6 +1314,7 @@ async def test_kv_producer_heterogeneous_tp(monkeypatch, d_tp_size):
                     },
                     kv_caches_base_addr=[0x2000],
                     block_lens=[remote_block_len],
+                    kv_block_lens=[remote_block_len // 2],
                     registered_layer_names=["model.layers.0.self_attn"],
                     registered_layer_indices=[0],
                 )

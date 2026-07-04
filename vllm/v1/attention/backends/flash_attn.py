@@ -252,6 +252,8 @@ class FlashAttentionMetadata:
 
     causal: bool | torch.Tensor = True
 
+    sliding_window: tuple[int, int] | None = None
+
     # PrefixLM bidirectional ranges for multimodal tokens.
     # Shape: (num_seqs, max_ranges, 2) int32, [start, end] per range.
     mm_prefix_range_tensor: torch.Tensor | None = None
@@ -282,6 +284,20 @@ def _get_sliding_window_configs(
             continue
         sliding_window_configs.add(layer.impl.sliding_window)
     return sliding_window_configs
+
+
+def _maybe_symmetrize_window(
+    window: tuple[int, int] | None,
+    causal: bool | torch.Tensor,
+) -> tuple[int, int] | None:
+    """Make a causal sliding window ``(w, 0)`` symmetric ``(w, w)`` when attention
+    is non-causal, so bidirectional queries attend in both directions. Leaves
+    full-attention ``(-1, -1)`` and already-symmetric windows untouched.
+    """
+    non_causal = isinstance(causal, torch.Tensor) or causal is False
+    if window is not None and window[0] >= 0 and window[1] == 0 and non_causal:
+        return (window[0], window[0])
+    return window
 
 
 class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
@@ -487,7 +503,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     cu_seqlens_q=cu_query_lens,
                     page_size=self.block_size,
                     causal=causal,
-                    window_size=self.aot_sliding_window,
+                    window_size=_maybe_symmetrize_window(
+                        self.aot_sliding_window, causal
+                    ),
                     num_splits=max_num_splits,
                 )
             return None
@@ -579,6 +597,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         if isinstance(causal, torch.Tensor) and causal.dtype != torch.int32:
             causal = causal.to(torch.int32)
 
+        # Symmetrize the spec's sliding_window for non-causal attention
+        group_sliding_window = getattr(self.kv_cache_spec, "sliding_window", None)
+        base_window = (
+            (-1, -1) if group_sliding_window is None else (group_sliding_window - 1, 0)
+        )
+        effective_sliding_window = _maybe_symmetrize_window(base_window, causal)
+
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -598,6 +623,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             causal=causal,
+            sliding_window=effective_sliding_window,
         )
 
         # Compute mm_prefix range tensor if the batch contains
@@ -844,27 +870,17 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
+                window = (
+                    attn_metadata.sliding_window
+                    if attn_metadata.sliding_window is not None
+                    else self.sliding_window
+                )
                 sliding_window_size: list[int] | None = (
-                    list(self.sliding_window)
-                    if self.sliding_window is not None
-                    else None
+                    list(window) if window is not None else None
                 )
 
                 causal = attn_metadata.causal
                 is_dynamic_causal = isinstance(causal, torch.Tensor)
-
-                # For non-causal (bidirectional) attention, make the
-                # sliding window symmetric so queries attend in both
-                # directions.
-                if (
-                    sliding_window_size is not None
-                    and sliding_window_size[1] == 0
-                    and (is_dynamic_causal or causal is False)
-                ):
-                    sliding_window_size = [
-                        sliding_window_size[0],
-                        sliding_window_size[0],
-                    ]
 
                 mm_prefix_ranges = attn_metadata.mm_prefix_range_tensor
                 mm_mask_mod = None
@@ -876,7 +892,22 @@ class FlashAttentionImpl(AttentionImpl):
                     and self.vllm_flash_attn_version == 4
                 ):
                     max_ranges = mm_prefix_ranges.shape[1]
-                    mm_mask_mod = _make_mm_prefix_mask_mod(max_ranges)
+                    # Gemma4: clamp the bidirectional block to the sliding
+                    # window (HF (causal OR blockwise) AND sliding_window on
+                    # local layers). Other mm-prefix models pass sliding_window=0
+                    # -> unclamped, behavior unchanged. sliding_window_size[0]+1
+                    # is the window (self.sliding_window = (sw-1, 0) on sliding
+                    # layers); causal mm_prefix never hits the symmetric path.
+                    mm_clamp_sw = 0
+                    if (
+                        getattr(layer, "mm_prefix_clamp_sliding_window", False)
+                        and sliding_window_size is not None
+                        and sliding_window_size[0] >= 0
+                    ):
+                        mm_clamp_sw = sliding_window_size[0] + 1
+                    mm_mask_mod = _make_mm_prefix_mask_mod(
+                        max_ranges, sliding_window=mm_clamp_sw
+                    )
                     mm_aux = [mm_prefix_ranges]
 
                 # R-SWA: use CuTE-DSL mask_mod on FA4 for exact token-level
@@ -906,7 +937,10 @@ class FlashAttentionImpl(AttentionImpl):
                             f"FA{self.vllm_flash_attn_version}"
                         )
                     dynamic_causal = causal
-                    causal = False
+                    has_window = (
+                        sliding_window_size is not None and sliding_window_size[1] >= 0
+                    )
+                    causal = not has_window
 
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
@@ -1164,18 +1198,29 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale.expand(descale_shape),  # type: ignore[operator]
             v_descale=layer._v_scale.expand(descale_shape),  # type: ignore[operator]
             num_splits=1 if self.batch_invariant_enabled else 0,
+            s_aux=self.sinks,
         )
 
         return output
 
 
-def _make_mm_prefix_mask_mod(max_ranges: int):
+def _make_mm_prefix_mask_mod(max_ranges: int, sliding_window: int = 0):
     """Build a CuTE-DSL mask_mod implementing (causal OR mm_prefix).
 
     Returns a @cute.jit callable that evaluates:
       keep = (kv_idx <= q_idx) OR
-             (q_idx in [r_start,r_end] AND kv_idx in [r_start,r_end])
+             (q_idx in [r_start,r_end] AND kv_idx in [r_start,r_end]
+              [AND (q_idx - kv_idx) < sliding_window])
     for each mm_prefix range stored in aux_tensors[0].
+
+    When sliding_window > 0 (Gemma4 sliding layers), the bidirectional block is
+    clamped to the sliding window, matching HF's
+    (causal OR blockwise) AND sliding_window (== sliding_window_overlay
+    kv > q - sw; future kv passes since q - kv < 0). sliding_window <= 0
+    (default) leaves the block unclamped, so other mm-prefix models are
+    unchanged. q_idx/kv_idx are local offsets, but their difference is
+    frame-invariant and image bidirectional attention only matters during
+    prefill (where local == absolute).
     """
     import cutlass
     import cutlass.cute as cute
@@ -1203,7 +1248,10 @@ def _make_mm_prefix_mask_mod(max_ranges: int):
             valid = r_start < r_end
             q_in = (q_idx >= r_start) & (q_idx <= r_end) & valid
             k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
-            keep = keep | (q_in & k_in)
+            mm = q_in & k_in
+            if sliding_window > 0:
+                mm = mm & ((q_idx - kv_idx) < sliding_window)
+            keep = keep | mm
         return keep
 
     mm_prefix_mask_mod.use_fast_sampling = True

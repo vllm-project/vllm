@@ -478,7 +478,7 @@ def test_flashinfer_impl_caches_nvfp4_slot_mapping_writer(monkeypatch) -> None:
     monkeypatch.setattr(
         flashinfer_backend,
         "can_use_trtllm_attention",
-        lambda num_heads, num_kv_heads: False,
+        lambda num_heads, num_kv_heads, is_prefill=False: False,
     )
 
     impl = flashinfer_backend.FlashInferImpl(
@@ -514,7 +514,7 @@ def test_flashinfer_impl_caches_nvfp4_kv_cache_views(monkeypatch) -> None:
     monkeypatch.setattr(
         flashinfer_backend,
         "can_use_trtllm_attention",
-        lambda num_heads, num_kv_heads: False,
+        lambda num_heads, num_kv_heads, is_prefill=False: False,
     )
     monkeypatch.setattr(flashinfer_backend, "get_kv_cache_layout", lambda: "NHD")
 
@@ -565,7 +565,7 @@ def test_flashinfer_impl_requires_nvfp4_slot_mapping_writer(monkeypatch) -> None
     monkeypatch.setattr(
         flashinfer_backend,
         "can_use_trtllm_attention",
-        lambda num_heads, num_kv_heads: False,
+        lambda num_heads, num_kv_heads, is_prefill=False: False,
     )
 
     with pytest.raises(RuntimeError, match="NVFP4 slot-mapping KV cache update"):
