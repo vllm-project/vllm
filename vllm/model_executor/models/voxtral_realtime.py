@@ -264,10 +264,9 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
             await buffer.append_audio(right_pad.audio_array)
             await buffer.append_audio(None)  # signal end
 
-        # Feed output tokens back into the buffer. input_stream is a token
-        # queue; idle gaps (silences) are normal, not a hang. The old wait_for
-        # timeout killed this feeder on any silence and hung the session.
-        # #36015, #35863
+        # Feed output tokens back into the buffer with a blocking read: idle
+        # gaps between chunks are normal during silence, so any read timeout
+        # here would kill the feeder mid-session (#36015, #35863).
         async def feed_tokens():
             while True:
                 all_outputs = await input_stream.get()

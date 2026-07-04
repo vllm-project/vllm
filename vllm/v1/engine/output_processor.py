@@ -647,11 +647,11 @@ class OutputProcessor:
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
-            # A streaming session stays unfinished between chunks. A normal
-            # per-step finish is FinishReason.LENGTH (the session resumes with
-            # the next chunk), so only ERROR/ABORT is terminal here; genuine
-            # max_model_len caps are delivered via _streaming_finish_outputs.
-            terminal_stream_finish = req_state.streaming_input and finish_reason in (
+            # A streaming session stays unfinished between chunks: a normal
+            # per-step finish is FinishReason.LENGTH and the session resumes
+            # with the next chunk. Only ERROR/ABORT terminates it here;
+            # genuine max_model_len caps arrive via _streaming_finish_outputs.
+            stream_continues = req_state.streaming_input and finish_reason not in (
                 FinishReason.ERROR,
                 FinishReason.ABORT,
             )
@@ -664,7 +664,7 @@ class OutputProcessor:
                 stop_reason,
                 kv_transfer_params,
             ):
-                if req_state.streaming_input and not terminal_stream_finish:
+                if stream_continues:
                     request_output.finished = False
 
                 if req_state.queue is not None:
@@ -676,7 +676,7 @@ class OutputProcessor:
 
             # Free completed requests.
             if finish_reason is not None:
-                if req_state.streaming_input and not terminal_stream_finish:
+                if stream_continues:
                     if req_state.input_chunk_queue:
                         update = req_state.input_chunk_queue.popleft()
                         req_state.apply_streaming_update(update)
