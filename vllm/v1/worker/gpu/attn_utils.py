@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    KVQuantMode,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -41,6 +42,16 @@ class AttentionCGSupportInfo:
     min_cg_attn_backend: str | None = None
 
 
+def _get_attention_layer_cache_dtype(
+    kv_cache_spec: AttentionSpec,
+    cache_dtype: str,
+) -> str:
+    # Skipped layers (--kv-cache-dtype-skip-layers) keep the unquantized
+    # layout; only the quantized primary uses the quantized cache dtype's
+    # possibly packed layout.
+    return "auto" if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE else cache_dtype
+
+
 def get_attention_kv_cache_shape_and_stride_order(
     attn_backend: type[Any],
     kv_cache_spec: AttentionSpec,
@@ -51,8 +62,9 @@ def get_attention_kv_cache_shape_and_stride_order(
     kv_cache_shape_prefix: tuple[int, ...] = (),
     include_num_layers_dimension: bool = False,
 ) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    layer_cache_dtype = _get_attention_layer_cache_dtype(kv_cache_spec, cache_dtype)
     head_size_v = None
-    if cache_dtype == "nvfp4" and attn_backend.get_name() == "FLASHINFER":
+    if layer_cache_dtype == "nvfp4" and attn_backend.get_name() == "FLASHINFER":
         head_size_v = getattr(kv_cache_spec, "head_size_v", kv_cache_spec.head_size)
 
     if head_size_v is None:
@@ -61,7 +73,7 @@ def get_attention_kv_cache_shape_and_stride_order(
             kernel_block_size,
             kv_cache_spec.num_kv_heads,
             kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
+            cache_dtype_str=layer_cache_dtype,
         )
     else:
         kv_cache_shape = attn_backend.get_kv_cache_shape(  # type: ignore[call-arg]
@@ -69,7 +81,7 @@ def get_attention_kv_cache_shape_and_stride_order(
             kernel_block_size,
             kv_cache_spec.num_kv_heads,
             kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
+            cache_dtype_str=layer_cache_dtype,
             head_size_v=head_size_v,
         )
     kv_cache_shape = kv_cache_shape_prefix + kv_cache_shape
@@ -85,7 +97,7 @@ def get_attention_kv_cache_shape_and_stride_order(
                 include_num_layers_dimension=include_num_layers_dimension,
                 head_size=kv_cache_spec.head_size,
                 head_size_v=head_size_v,
-                cache_dtype_str=cache_dtype,
+                cache_dtype_str=layer_cache_dtype,
             )
         assert len(kv_cache_stride_order) == len(kv_cache_shape)
     except (AttributeError, NotImplementedError):
@@ -425,11 +437,16 @@ def _update_hybrid_attention_layout(
         kv_cache_spec = group.kv_cache_spec
         if not isinstance(kv_cache_spec, AttentionSpec):
             continue
+        # Mirror the per-layer dtype selection used when building the shape
+        # above. The block-dim index is dtype-independent for current backends
+        # (quantization only changes the last dim), so this is a no-op today,
+        # but it keeps both call sites consistent for skip layers.
+        layer_cache_dtype = _get_attention_layer_cache_dtype(kv_cache_spec, cache_dtype)
         block_dim = group.backend.get_kv_cache_block_dim(
             kernel_block_sizes[group.kv_cache_group_id],
             kv_cache_spec.num_kv_heads,
             kv_cache_spec.head_size,
-            cache_dtype_str=cache_dtype,
+            cache_dtype_str=layer_cache_dtype,
         )
         # if the first dim of the kvcache's layout is already num_blocks, continue
         if block_dim == 0:
