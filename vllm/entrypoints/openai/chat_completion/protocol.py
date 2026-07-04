@@ -1020,9 +1020,16 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     continue_final_message: bool = False
     chat_template: str | None = None
     chat_template_kwargs: dict[str, Any] | None = None
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None
+    mm_processor_kwargs: dict[str, Any] | None = None
+    priority: int = Field(default=0, ge=_INT64_MIN, le=_INT64_MAX)
+    cache_salt: str | None = None
     include_stop_str_in_output: bool = False
     guided_decoding_backend: str | None = None
     echo: bool = False
+    # None falls back to the server-level --return-tokens-as-token-ids default,
+    # matching ChatCompletionRequest.return_tokens_as_token_ids.
+    return_tokens_as_token_ids: bool | None = None
     return_token_ids: bool = False
 
     @model_validator(mode="before")
