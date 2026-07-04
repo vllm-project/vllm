@@ -211,6 +211,9 @@ class VoxtralRealtimeBuffer:
 @support_torch_compile
 class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtime):
     requires_raw_input_tokens = True
+    # Token the model emits for silent audio frames; target of the optional
+    # blank-run penalty (--realtime-blank-run-k).
+    realtime_blank_token_id = 32
     # transformers' currently has limited support for MistralCommon backend
     # and cached_get_processor. Let's skip until fixed
     skip_warmup_audio_preprocessing = True

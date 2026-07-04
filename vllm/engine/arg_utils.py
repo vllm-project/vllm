@@ -530,6 +530,9 @@ class EngineArgs:
     realtime_reanchor_margin_tokens: int = (
         SchedulerConfig.realtime_reanchor_margin_tokens
     )
+    realtime_blank_run_k: int = SchedulerConfig.realtime_blank_run_k
+    realtime_blank_penalty: float = SchedulerConfig.realtime_blank_penalty
+    realtime_blank_penalty_cap: float = SchedulerConfig.realtime_blank_penalty_cap
     max_num_seqs: int | None = None
     max_logprobs: int = ModelConfig.max_logprobs
     logprobs_mode: LogprobsMode = ModelConfig.logprobs_mode
@@ -1436,6 +1439,18 @@ class EngineArgs:
             "--realtime-reanchor-margin-tokens",
             **scheduler_kwargs["realtime_reanchor_margin_tokens"],
         )
+        scheduler_group.add_argument(
+            "--realtime-blank-run-k",
+            **scheduler_kwargs["realtime_blank_run_k"],
+        )
+        scheduler_group.add_argument(
+            "--realtime-blank-penalty",
+            **scheduler_kwargs["realtime_blank_penalty"],
+        )
+        scheduler_group.add_argument(
+            "--realtime-blank-penalty-cap",
+            **scheduler_kwargs["realtime_blank_penalty_cap"],
+        )
         # multi-step scheduling has been removed; corresponding arguments
         # are no longer supported.
         scheduler_group.add_argument(
@@ -2169,6 +2184,9 @@ class EngineArgs:
             long_prefill_token_threshold=self.long_prefill_token_threshold,
             enable_realtime_unbounded=self.enable_realtime_unbounded,
             realtime_reanchor_margin_tokens=self.realtime_reanchor_margin_tokens,
+            realtime_blank_run_k=self.realtime_blank_run_k,
+            realtime_blank_penalty=self.realtime_blank_penalty,
+            realtime_blank_penalty_cap=self.realtime_blank_penalty_cap,
             scheduler_reserve_full_isl=self.scheduler_reserve_full_isl,
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,

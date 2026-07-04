@@ -263,3 +263,36 @@ PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True vllm serve mistralai/Voxtral-Mi
   --enable-realtime-unbounded --realtime-reanchor-margin-tokens 2048 \
   --compilation-config '{"cudagraph_mode":"PIECEWISE"}'
 ```
+
+**Silence-rut mitigation: the blank-run penalty.** Sliding-window realtime models that
+re-ingest their own output can fall into a self-sustained decoding rut: on marginal audio the
+model starts emitting its blank/silence token every frame and keeps doing so over real speech,
+for minutes, while the engine looks perfectly healthy (steady 1 token/frame, empty deltas).
+Temperature does not help, the distribution genuinely collapses on the blank token. The
+mitigation penalizes the blank token progressively once a request has emitted it more than K
+consecutive times (`penalty = min(cap, alpha * (run - K))`):
+
+```bash
+  --realtime-blank-run-k 200
+```
+
+- `--realtime-blank-run-k` (default 0 = off): consecutive blank frames before the penalty
+  engages. Set it well above the longest natural inter-sentence silence run of the model
+  (Voxtral realtime: natural runs reach ~165 frames, i.e. 13 s at 12.5 tok/s; 200 is a
+  validated value).
+- `--realtime-blank-penalty` (default 0.5) and `--realtime-blank-penalty-cap` (default 7.0):
+  slope and ceiling. The defaults are calibrated from measured logit margins on Voxtral
+  realtime (the blank token wins by +3.5 to +6.6 logits inside a rut, by +8.5 to +17 on
+  genuinely silent audio), so a saturated penalty breaks a rut but never flips real silence
+  into invented text.
+
+The blank token id is declared by the model class (`SupportsRealtime.realtime_blank_token_id`,
+32 for Voxtral realtime); models that do not declare one ignore the flags. The run length is
+accumulated in the model runner keyed by request id, because the realtime streaming path
+recycles the engine request per audio chunk and clears its output-token list, which makes
+history-based logits processors blind on this path.
+
+Related sizing note: one realtime encoder chunk is ~350-400 tokens. A
+`--max-num-batched-tokens` budget smaller than that splits every chunk across scheduler steps,
+and on marginal audio the splitting alone can seed the rut, even for a single stream. Size the
+budget so chunks are not split (at least 512 for a single stream, ideally N_streams x 400).

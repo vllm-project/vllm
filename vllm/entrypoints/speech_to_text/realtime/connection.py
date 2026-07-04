@@ -215,11 +215,37 @@ class RealtimeConnection:
             # Create sampling params
             from vllm.sampling_params import RequestOutputKind, SamplingParams
 
+            # Optional blank-run penalty (--realtime-blank-run-k): breaks
+            # self-sustained silence ruts. Realtime-only wiring: regular
+            # requests never receive these extra_args.
+            extra_args = None
+            sched = self.serving.engine_client.vllm_config.scheduler_config
+            if sched.realtime_blank_run_k > 0:
+                blank_token = getattr(
+                    self.serving.model_cls, "realtime_blank_token_id", None
+                )
+                if blank_token is None:
+                    logger.warning_once(
+                        "--realtime-blank-run-k is set but %s does not define"
+                        " realtime_blank_token_id; blank-run penalty disabled",
+                        self.serving.model_cls.__name__,
+                    )
+                else:
+                    extra_args = {
+                        "blank_run_penalty": {
+                            "token_id": blank_token,
+                            "k": sched.realtime_blank_run_k,
+                            "alpha": sched.realtime_blank_penalty,
+                            "cap": sched.realtime_blank_penalty_cap,
+                        }
+                    }
+
             sampling_params = SamplingParams.from_optional(
                 temperature=0.0,
                 max_tokens=self.serving.model_cls.realtime_max_tokens,
                 output_kind=RequestOutputKind.DELTA,
                 skip_clone=True,
+                extra_args=extra_args,
             )
 
             # Pass the streaming input generator to the engine

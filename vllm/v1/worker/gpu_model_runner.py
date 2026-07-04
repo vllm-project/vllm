@@ -108,6 +108,7 @@ from vllm.multimodal.utils import get_mm_features_in_window, group_and_batch_mm_
 from vllm.platforms import current_platform
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingType
+from vllm.v1.worker.blank_run_penalty import BlankRunPenalizer
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import GenerationTask, PoolingTask, SupportedTask
 from vllm.tracing import instrument
@@ -528,6 +529,7 @@ class GPUModelRunner(
         self.use_async_scheduling = self.scheduler_config.async_scheduling
 
         # Sampler
+        self.blank_run_penalizer = BlankRunPenalizer()
         self.sampler = Sampler(
             logprobs_mode=self.model_config.logprobs_mode,
             use_fp64_gumbel=self.model_config.use_fp64_gumbel,
@@ -3709,10 +3711,28 @@ class GPUModelRunner(
         # if async scheduling and required by current sampling params.
         self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
-            return self.sampler(
+            # Blank-run penalty (realtime streaming): worker-side because the
+            # streaming path recycles the request per audio chunk and clears
+            # its output-token list, so run length must be accumulated here,
+            # keyed by req_id. Inert unless a request carries the
+            # blank_run_penalty extra_args (realtime connection wiring).
+            num_rows = logits.shape[0] if logits is not None else 0
+            penalized_req_ids = self.input_batch.req_ids[:num_rows]
+            penalty_active = self.blank_run_penalizer.apply(
+                logits,
+                penalized_req_ids,
+                lambda rid: getattr(self.requests.get(rid), "sampling_params", None),
+            )
+            sampler_output = self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
+            if penalty_active:
+                self.blank_run_penalizer.update(
+                    penalized_req_ids,
+                    sampler_output.sampled_token_ids.view(-1).tolist(),
+                )
+            return sampler_output
 
         # Update spec_token_ids with real draft tokens from pre step only when
         # output_token_ids is needed (penalties or bad_words are in use).
