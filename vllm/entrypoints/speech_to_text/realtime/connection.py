@@ -48,6 +48,7 @@ class RealtimeConnection:
         self.serving = serving
         self.audio_queue: asyncio.Queue[np.ndarray | None] = asyncio.Queue()
         self.generation_task: asyncio.Task | None = None
+        self.request_id: str | None = None
 
         self._is_connected = False
         self._is_model_validated = False
@@ -204,6 +205,7 @@ class RealtimeConnection:
         6. Cleans up the audio queue
         """
         request_id = f"rt-{self.connection_id}-{uuid4()}"
+        self.request_id = request_id
         full_text = ""
 
         prompt_token_ids_len: int = 0
@@ -213,11 +215,37 @@ class RealtimeConnection:
             # Create sampling params
             from vllm.sampling_params import RequestOutputKind, SamplingParams
 
+            # Optional blank-run penalty (--realtime-blank-run-k): breaks
+            # self-sustained silence ruts. Realtime-only wiring: regular
+            # requests never receive these extra_args.
+            extra_args = None
+            sched = self.serving.engine_client.vllm_config.scheduler_config
+            if sched.realtime_blank_run_k > 0:
+                blank_token = getattr(
+                    self.serving.model_cls, "realtime_blank_token_id", None
+                )
+                if blank_token is None:
+                    logger.warning_once(
+                        "--realtime-blank-run-k is set but %s does not define"
+                        " realtime_blank_token_id; blank-run penalty disabled",
+                        self.serving.model_cls.__name__,
+                    )
+                else:
+                    extra_args = {
+                        "blank_run_penalty": {
+                            "token_id": blank_token,
+                            "k": sched.realtime_blank_run_k,
+                            "alpha": sched.realtime_blank_penalty,
+                            "cap": sched.realtime_blank_penalty_cap,
+                        }
+                    }
+
             sampling_params = SamplingParams.from_optional(
                 temperature=0.0,
                 max_tokens=self.serving.model_cls.realtime_max_tokens,
                 output_kind=RequestOutputKind.DELTA,
                 skip_clone=True,
+                extra_args=extra_args,
             )
 
             # Pass the streaming input generator to the engine
@@ -263,7 +291,11 @@ class RealtimeConnection:
 
         except Exception as e:
             logger.exception("Error in generation: %s", e)
-            await self.send_error(sanitize_message(str(e)), "processing_error")
+            try:
+                await self.send_error(sanitize_message(str(e)), "processing_error")
+            except Exception:
+                # The socket may already be closed; nothing more we can do.
+                pass
 
     async def send(
         self, event: SessionCreated | TranscriptionDelta | TranscriptionDone
@@ -282,8 +314,28 @@ class RealtimeConnection:
         # Signal audio stream to stop
         self.audio_queue.put_nowait(None)
 
-        # Cancel generation task if running
+        # Abort the engine request. Cancelling the asyncio task alone does NOT
+        # abort the underlying engine request: a request parked in the
+        # VAD-waiting state keeps occupying a slot and generating into a now
+        # dead websocket (an orphaned request that never frees and starves
+        # other streams). Aborting also unblocks the generation task, which is
+        # otherwise stuck awaiting the next engine output.
+        if self.request_id is not None:
+            try:
+                await self.serving.engine_client.abort(self.request_id)
+            except Exception:
+                logger.exception("Failed to abort request %s", self.request_id)
+            self.request_id = None
+
+        # Cancel the generation task if still running, and await it so the
+        # cancellation (and any generator cleanup) actually completes.
         if self.generation_task and not self.generation_task.done():
             self.generation_task.cancel()
+            try:
+                await self.generation_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                logger.exception("Error awaiting cancelled generation task")
 
         logger.debug("Connection cleanup complete: %s", self.connection_id)

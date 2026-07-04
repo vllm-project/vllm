@@ -1049,6 +1049,12 @@ class SupportsRealtime(Protocol):
     """Maximum tokens to generate per streaming audio segment.
     Override in subclasses based on the model's expected output length."""
 
+    realtime_blank_token_id: ClassVar[int | None] = None
+    """Token id the model emits for silent/blank audio frames, if any.
+    Used by the optional blank-run penalty (see scheduler config
+    `realtime_blank_run_k`) to break self-sustained silence ruts. None
+    disables the penalty for this model regardless of server flags."""
+
     @classmethod
     async def buffer_realtime_audio(
         cls,

@@ -67,6 +67,43 @@ class SchedulerConfig:
     In real usage, this should be set in `EngineArgs.create_engine_config`.
     """
 
+    enable_realtime_unbounded: bool = False
+    """[EXPERIMENTAL] Enable unbounded-duration realtime streaming for
+    sliding-window realtime models (e.g. Voxtral realtime). When True, a
+    streaming session's RoPE position clock is periodically re-anchored (the
+    live sliding window is shifted down) so the session can run indefinitely
+    without the absolute position counter ever reaching max_model_len. The
+    per-stream KV cost stays constant (bounded by the sliding window). Requires
+    a non-fp8 KV cache. Off by default."""
+
+    realtime_reanchor_margin_tokens: int = Field(default=4096, ge=1)
+    """[EXPERIMENTAL] With `enable_realtime_unbounded`, re-anchor a streaming
+    session's sliding window this many tokens before its position clock would
+    reach max_model_len. Must be smaller than `(max_model_len - sliding_window)`;
+    a larger value leaves no head-room to re-anchor and is rejected at startup."""
+
+    realtime_blank_run_k: int = Field(default=0, ge=0)
+    """[EXPERIMENTAL] Break self-sustained blank/silence ruts in realtime
+    transcription sessions: after a session has emitted the model's blank
+    token more than this many consecutive times, a progressive penalty is
+    applied to that token (see `realtime_blank_penalty`). Set well above the
+    longest healthy silence run of the model (Voxtral realtime: natural
+    inter-sentence silences reach ~165 frames, i.e. 13 s at 12.5 tok/s;
+    200 is a validated value). 0 disables (default)."""
+
+    realtime_blank_penalty: float = Field(default=0.5, gt=0)
+    """[EXPERIMENTAL] With `realtime_blank_run_k` > 0, the penalty slope:
+    penalty = min(cap, alpha * (run - k)) logits subtracted from the blank
+    token, where alpha is this value."""
+
+    realtime_blank_penalty_cap: float = Field(default=7.0, gt=0)
+    """[EXPERIMENTAL] With `realtime_blank_run_k` > 0, the penalty ceiling.
+    Must stay below the blank token's logit margin on genuinely silent audio
+    (so real silence keeps decoding as silence) while exceeding its margin
+    inside a rut over real speech. Measured on Voxtral realtime: margin is
+    +11 to +17 logits on true silence (min +8.5) vs +3.5 to +6.6 inside a
+    rut, so 7.0 breaks ruts without ever touching real silence."""
+
     max_num_partial_prefills: int = Field(default=1, ge=1)
     """For chunked prefill, the maximum number of sequences that can be
     partially prefilled concurrently."""
