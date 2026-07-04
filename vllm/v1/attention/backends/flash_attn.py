@@ -896,7 +896,22 @@ class FlashAttentionImpl(AttentionImpl):
                     and self.vllm_flash_attn_version == 4
                 ):
                     max_ranges = mm_prefix_ranges.shape[1]
-                    mm_mask_mod = _make_mm_prefix_mask_mod(max_ranges)
+                    # Gemma4: clamp the bidirectional block to the sliding
+                    # window (HF (causal OR blockwise) AND sliding_window on
+                    # local layers). Other mm-prefix models pass sliding_window=0
+                    # -> unclamped, behavior unchanged. sliding_window_size[0]+1
+                    # is the window (self.sliding_window = (sw-1, 0) on sliding
+                    # layers); causal mm_prefix never hits the symmetric path.
+                    mm_clamp_sw = 0
+                    if (
+                        getattr(layer, "mm_prefix_clamp_sliding_window", False)
+                        and sliding_window_size is not None
+                        and sliding_window_size[0] >= 0
+                    ):
+                        mm_clamp_sw = sliding_window_size[0] + 1
+                    mm_mask_mod = _make_mm_prefix_mask_mod(
+                        max_ranges, sliding_window=mm_clamp_sw
+                    )
                     mm_aux = [mm_prefix_ranges]
 
                 # R-SWA: use CuTE-DSL mask_mod on FA4 for exact token-level
@@ -1194,13 +1209,23 @@ class FlashAttentionImpl(AttentionImpl):
         return output
 
 
-def _make_mm_prefix_mask_mod(max_ranges: int):
+def _make_mm_prefix_mask_mod(max_ranges: int, sliding_window: int = 0):
     """Build a CuTE-DSL mask_mod implementing (causal OR mm_prefix).
 
     Returns a @cute.jit callable that evaluates:
       keep = (kv_idx <= q_idx) OR
-             (q_idx in [r_start,r_end] AND kv_idx in [r_start,r_end])
+             (q_idx in [r_start,r_end] AND kv_idx in [r_start,r_end]
+              [AND (q_idx - kv_idx) < sliding_window])
     for each mm_prefix range stored in aux_tensors[0].
+
+    When sliding_window > 0 (Gemma4 sliding layers), the bidirectional block is
+    clamped to the sliding window, matching HF's
+    (causal OR blockwise) AND sliding_window (== sliding_window_overlay
+    kv > q - sw; future kv passes since q - kv < 0). sliding_window <= 0
+    (default) leaves the block unclamped, so other mm-prefix models are
+    unchanged. q_idx/kv_idx are local offsets, but their difference is
+    frame-invariant and image bidirectional attention only matters during
+    prefill (where local == absolute).
     """
     import cutlass
     import cutlass.cute as cute
@@ -1228,7 +1253,10 @@ def _make_mm_prefix_mask_mod(max_ranges: int):
             valid = r_start < r_end
             q_in = (q_idx >= r_start) & (q_idx <= r_end) & valid
             k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
-            keep = keep | (q_in & k_in)
+            mm = q_in & k_in
+            if sliding_window > 0:
+                mm = mm & ((q_idx - kv_idx) < sliding_window)
+            keep = keep | mm
         return keep
 
     mm_prefix_mask_mod.use_fast_sampling = True

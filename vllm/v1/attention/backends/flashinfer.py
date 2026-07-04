@@ -727,12 +727,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # decode phases require different Q dtypes when the KV cache is FP8
         # (FP8-Q for the FI native prefill, BF16/FP16-Q for XQA decode),
         # so both values must be tracked independently.
-        self.q_data_type_prefill = self.get_q_data_type(
-            vllm_config, self.kv_cache_spec, is_prefill=True
-        )
-        self.q_data_type_decode = self.get_q_data_type(
-            vllm_config, self.kv_cache_spec, is_prefill=False
-        )
+        self.q_data_type_prefill = self.get_q_data_type(is_prefill=True)
+        self.q_data_type_decode = self.get_q_data_type(is_prefill=False)
 
         # Prefer TRTLLM/XQA for decoding whenever supported. The decode kernel
         # must be selected statically for FULL cudagraph capture.
@@ -817,35 +813,41 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
 
     # Keep SM90 prefill/decode Q dtype selection in one place.
-    @classmethod
-    def get_q_data_type(
-        cls,
-        vllm_config: VllmConfig,
-        kv_cache_spec: AttentionSpec,
-        is_prefill: bool,
-    ) -> torch.dtype:
+    def get_q_data_type(self, is_prefill: bool) -> torch.dtype:
         # The user sets --attention-config.disable_flashinfer_q_quantization
         # to 1 explicitly, use model dtype for query.
-        if vllm_config.attention_config.disable_flashinfer_q_quantization:
-            return vllm_config.model_config.dtype
+        if self.vllm_config.attention_config.disable_flashinfer_q_quantization:
+            return self.model_config.dtype
+
+        # self.cache_dtype is resolved per KV-cache group: it is "auto" when
+        # this group is unquantized (e.g. --kv-cache-dtype-skip-layers), even
+        # if cache_config requests a quantized dtype globally.
+        cache_dtype = self.cache_dtype
 
         # On SM90, XQA decode requires BF16/FP16-Q even with FP8 KV cache.
         # FI native prefill on SM90 still uses FP8-Q in that case.
-        cache_dtype = vllm_config.cache_config.cache_dtype
         if (
             current_platform.is_device_capability(90)
             and not is_prefill
             and force_use_trtllm_attention() is not False
             and cache_dtype.startswith("fp8")
         ):
-            return vllm_config.model_config.dtype
+            return self.model_config.dtype
 
         # Otherwise, match Q dtype to the KV cache dtype.
         if cache_dtype.startswith("fp8"):
-            return FlashInferBackend.get_dtype_for_flashinfer(cache_dtype)
+            # FP8-Q requires an fp8 tensor-core attention path
+            # (FI native fa3 on SM90, trtllm-gen/XQA on SM100).
+            # Architectures with only fa2 (e.g. SM89, SM120) cannot
+            # consume FP8 queries, so keep the model dtype for Q there.
+            if current_platform.is_device_capability(
+                90
+            ) or current_platform.is_device_capability_family(100):
+                return FlashInferBackend.get_dtype_for_flashinfer(cache_dtype)
+            return self.model_config.dtype
         if cache_dtype == "nvfp4":
             return FlashInferBackend.get_dtype_for_flashinfer("fp8_e4m3")
-        return kv_cache_spec.dtype
+        return self.kv_cache_spec.dtype
 
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype = torch.int32
