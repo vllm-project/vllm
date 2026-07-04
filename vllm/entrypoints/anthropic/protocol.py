@@ -144,6 +144,42 @@ class AnthropicMessagesRequest(BaseModel):
             "Will be accessible by the template."
         ),
     )
+    seed: int | None = Field(
+        default=None,
+        description="Random seed to use for the generation.",
+    )
+    frequency_penalty: float | None = Field(
+        default=0.0,
+        description=(
+            "Penalizes new tokens based on their frequency in the generated "
+            "text so far. Values > 0 encourage the model to use new tokens, "
+            "while values < 0 encourage the model to repeat tokens."
+        ),
+    )
+    presence_penalty: float | None = Field(
+        default=0.0,
+        description=(
+            "Penalizes new tokens based on whether they appear in the "
+            "generated text so far. Values > 0 encourage the model to use new "
+            "tokens, while values < 0 encourage the model to repeat tokens."
+        ),
+    )
+    repetition_penalty: float | None = Field(
+        default=None,
+        description=(
+            "Penalizes new tokens based on whether they appear in the prompt "
+            "and the generated text so far. Values > 1 encourage the model to "
+            "use new tokens, while values < 1 encourage the model to repeat "
+            "tokens."
+        ),
+    )
+    min_tokens: int = Field(
+        default=0,
+        description=(
+            "Minimum number of tokens to generate per output sequence before "
+            "EOS or stop_token_ids can be generated."
+        ),
+    )
 
     @field_validator("model")
     @classmethod

@@ -1420,3 +1420,39 @@ class TestMessagesFullConverter:
         assert len(result.content) == 1
         assert result.content[0].type == "text"
         assert result.content[0].text == ""
+
+
+# ======================================================================
+# Sampling params passthrough (Anthropic → OpenAI)
+# ======================================================================
+
+
+class TestSamplingParamsPassthrough:
+    def test_sampling_params_passed_through(self):
+        """vLLM-specific sampling params should flow into the
+        converted ChatCompletionRequest."""
+        request = _make_request(
+            [{"role": "user", "content": "Hello"}],
+            seed=1234,
+            frequency_penalty=0.5,
+            presence_penalty=0.25,
+            repetition_penalty=1.1,
+            min_tokens=3,
+        )
+        result = _convert(request)
+        assert result.seed == 1234
+        assert result.frequency_penalty == 0.5
+        assert result.presence_penalty == 0.25
+        assert result.repetition_penalty == 1.1
+        assert result.min_tokens == 3
+
+    def test_sampling_params_defaults(self):
+        """When unset, sampling params should fall back to defaults
+        that mirror the OpenAI request."""
+        request = _make_request([{"role": "user", "content": "Hello"}])
+        result = _convert(request)
+        assert result.seed is None
+        assert result.frequency_penalty == 0.0
+        assert result.presence_penalty == 0.0
+        assert result.repetition_penalty is None
+        assert result.min_tokens == 0

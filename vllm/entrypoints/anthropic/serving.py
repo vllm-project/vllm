@@ -492,6 +492,11 @@ class AnthropicServingMessages(OpenAIServingChat):
             top_k=anthropic_request.top_k,
             kv_transfer_params=anthropic_request.kv_transfer_params,
             chat_template_kwargs=anthropic_request.chat_template_kwargs,
+            seed=anthropic_request.seed,
+            frequency_penalty=anthropic_request.frequency_penalty,
+            presence_penalty=anthropic_request.presence_penalty,
+            repetition_penalty=anthropic_request.repetition_penalty,
+            min_tokens=anthropic_request.min_tokens,
         )
 
     @classmethod
