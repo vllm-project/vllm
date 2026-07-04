@@ -9,20 +9,14 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
-from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
-from vllm.v1.worker.gpu.dp_utils import dispatch_cg_and_sync_dp
-from vllm.v1.worker.gpu.input_batch import InputBatch, InputBuffers
 from vllm.v1.worker.gpu.model_states.interface import ModelState
 from vllm.v1.worker.gpu.spec_decode.dflash.cudagraph import DFlashCudaGraphManager
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dflash.utils import (
     load_dflash_model,
 )
-from vllm.v1.worker.gpu.spec_decode.utils import get_parallel_drafting_token_id
 
 logger = init_logger(__name__)
 
@@ -192,49 +186,28 @@ class DominoSpeculator(DFlashSpeculator):
         realized_prefix_embed = self.model.embed_input_ids(combined)
         gru_hidden = self.model.gru_forward(realized_prefix_embed[:, 0, :], None)
         gru_hidden = self.model.gru_forward(realized_prefix_embed[:, 1, :], gru_hidden)
-        hidden_3d = last_hidden_states.view(
-            num_reqs, self.num_query_per_req, -1
-        )
+        hidden_3d = last_hidden_states.view(num_reqs, self.num_query_per_req, -1)
         logits_3d = base_logits.view(num_reqs, self.num_query_per_req, -1)
 
         for i in range(1, K):
             self._domino_cat_buf[:num_reqs, :, : self.hidden_size] = hidden_3d[
                 :, i : i + 1, :
             ]
-            self._domino_cat_buf[
-                :num_reqs, :, self.hidden_size :
-            ] = gru_hidden.unsqueeze(1)
+            self._domino_cat_buf[:num_reqs, :, self.hidden_size :] = (
+                gru_hidden.unsqueeze(1)
+            )
             bias = self.model.domino_mlp_forward(self._domino_cat_buf[:num_reqs])
             current_token_id = self._sample_single_token(
                 logits_3d[:, i : i + 1, :] + bias,
                 0,
             )
-            draft_tokens[:, i: i + 1] = current_token_id
+            draft_tokens[:, i : i + 1] = current_token_id
 
             if i + 1 < K:
                 new_embed = self.model.embed_input_ids(draft_tokens[:, i])
                 gru_hidden = self.model.gru_forward(new_embed, gru_hidden)
 
         return draft_tokens
-
-    def _build_draft_attn_metadata(
-        self,
-        num_reqs: int,
-        num_reqs_padded: int,
-        num_tokens_padded: int,
-        num_query_per_req: int | None = None,
-        causal: bool = False,
-    ) -> dict[str, Any] | None:
-        if not self.draft_attn_layer_names:
-            return None
-        assert num_query_per_req is None  # Omitted for DFlash, read from self instead
-        return super()._build_draft_attn_metadata(
-            num_reqs,
-            num_reqs_padded,
-            num_tokens_padded,
-            num_query_per_req=self.num_query_per_req,
-            causal=causal,
-        )
 
     def _sample_single_token(self, logits: torch.Tensor, temperature: float = 0.0):
         if temperature <= 1e-6:
@@ -246,4 +219,3 @@ class DominoSpeculator(DFlashSpeculator):
             probs = torch.softmax(logits, dim=-1)
 
             return torch.multinomial(probs, num_samples=1)
-
