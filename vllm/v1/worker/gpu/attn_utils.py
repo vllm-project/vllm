@@ -23,7 +23,6 @@ from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
-    KVQuantMode,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
@@ -46,10 +45,7 @@ def _get_attention_layer_cache_dtype(
     kv_cache_spec: AttentionSpec,
     cache_dtype: str,
 ) -> str:
-    # Skipped layers (--kv-cache-dtype-skip-layers) keep the unquantized
-    # layout; only the quantized primary uses the quantized cache dtype's
-    # possibly packed layout.
-    return "auto" if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE else cache_dtype
+    return kv_cache_spec.cache_dtype_for_shape(cache_dtype)
 
 
 def get_attention_kv_cache_shape_and_stride_order(

@@ -4,8 +4,17 @@
 import torch
 
 from vllm.utils.torch_utils import nvfp4_kv_cache_full_dim
-from vllm.v1.kv_cache_interface import FullAttentionSpec, KVQuantMode
-from vllm.v1.worker.gpu.attn_utils import _reshape_kv_cache
+from vllm.v1.attention.backends.turboquant_attn import TurboQuantAttentionBackend
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVQuantMode,
+    TQFullAttentionSpec,
+)
+from vllm.v1.worker.gpu.attn_utils import (
+    _get_attention_layer_cache_dtype,
+    _reshape_kv_cache,
+    get_attention_kv_cache_shape_and_stride_order,
+)
 from vllm.v1.worker.utils import AttentionGroup
 
 
@@ -205,6 +214,38 @@ def test_reshape_flashinfer_nvfp4_mixed_kv_cache_passes_head_size_v():
         1,
         nvfp4_kv_cache_full_dim(32) + nvfp4_kv_cache_full_dim(64),
     )
+
+
+def test_turboquant_spec_preserves_configured_cache_dtype_for_shape():
+    tq_spec = TQFullAttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.uint8,
+        tq_slot_size=134,
+    )
+    plain_spec = FullAttentionSpec(
+        block_size=16,
+        num_kv_heads=8,
+        head_size=128,
+        dtype=torch.bfloat16,
+    )
+
+    assert (
+        _get_attention_layer_cache_dtype(tq_spec, "turboquant_4bit_nc")
+        == "turboquant_4bit_nc"
+    )
+    assert _get_attention_layer_cache_dtype(plain_spec, "turboquant_4bit_nc") == "auto"
+
+    shape, stride_order = get_attention_kv_cache_shape_and_stride_order(
+        TurboQuantAttentionBackend,
+        tq_spec,
+        kernel_num_blocks=1,
+        kernel_block_size=tq_spec.block_size,
+        cache_dtype="turboquant_4bit_nc",
+    )
+    assert shape == (1, 16, 8, 134)
+    assert stride_order == (0, 1, 2, 3)
 
 
 class FakeDiffKVBackend:
