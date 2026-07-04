@@ -156,6 +156,8 @@ LinearBackend = Literal[
     "conch",
     "exllama",
     "emulation",
+    "xpu",
+    "xpu_woq",
 ]
 
 
@@ -217,7 +219,10 @@ class KernelConfig:
     - "fbgemm": Use FBGEMM kernels
     - "conch": Use Conch mixed-precision kernels
     - "exllama": Use Exllama mixed-precision kernels
-    - "emulation": Use slow dequant-to-BF16 emulation (for testing only)"""
+    - "emulation": Use slow dequant-to-BF16 emulation (for testing only)
+    - "xpu": Use XPU kernels
+    - "xpu_woq": Use XPU kernels for weight-only quantization (e.g. W8A16)
+    """
 
     @field_validator("moe_backend", mode="before")
     @classmethod
