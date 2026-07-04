@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """SM120 implementation variant for ``FLASHINFER_MLA_SPARSE_SM120``."""
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -115,15 +115,20 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
         assert self.topk_indices_buffer is not None
         topk_indices = self.topk_indices_buffer[:num_actual_toks]
 
-        topk_indices_physical = cast(
-            torch.Tensor,
-            triton_convert_req_index_to_global_index(
-                attn_metadata.req_id_per_token[:num_actual_toks],
-                attn_metadata.block_table,
-                topk_indices,
-                BLOCK_SIZE=attn_metadata.block_size,
-                NUM_TOPK_TOKENS=topk_indices.shape[1],
-            ),
+        # Request per-token valid counts (non-(-1) top-k entries) in the same
+        # kernel pass at no extra cost, and pass them as seq_lens so the
+        # trtllm-gen sparse kernel reads only each request's valid prefix and
+        # skips -1 padding when its context < topk_tokens. Matches the sibling
+        # flashinfer_mla_sparse backend (and upstream PR #47527). Bit-identical
+        # to seq_lens=None whenever every row is fully populated (context >=
+        # topk_tokens), which covers the long-context path.
+        topk_indices_physical, seq_lens = triton_convert_req_index_to_global_index(
+            attn_metadata.req_id_per_token[:num_actual_toks],
+            attn_metadata.block_table,
+            topk_indices,
+            BLOCK_SIZE=attn_metadata.block_size,
+            NUM_TOPK_TOKENS=topk_indices.shape[1],
+            return_valid_counts=True,
         )
 
         output = q.new_empty(
@@ -146,7 +151,7 @@ class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMet
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
             block_tables=topk_indices_physical.unsqueeze(1),
-            seq_lens=None,
+            seq_lens=seq_lens,
             max_seq_len=attn_metadata.topk_tokens,
             out=output.unsqueeze(1),
             bmm1_scale=self.scale,
