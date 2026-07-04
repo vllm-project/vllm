@@ -494,7 +494,6 @@ class FlashModel(nn.Module):
             self.embed_tokens = VocabParallelEmbedding(
                 config.vocab_size,
                 config.hidden_size,
-                quant_config=quant_config,
                 prefix=maybe_prefix(prefix, "embed_tokens"),
             )
         else:
