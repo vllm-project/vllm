@@ -4,7 +4,6 @@
 import torch
 import torch.nn.functional as F
 
-import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.platforms import current_platform
 from vllm.transformers_utils.config import get_config
