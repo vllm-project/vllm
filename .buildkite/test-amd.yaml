@@ -404,6 +404,28 @@ steps:
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
+#-----------------------------------------------------------  mi250 · docker  ----------------------------------------------------------#
+
+- label: Docker Build Metadata (ROCm) # TBD
+  timeout_in_minutes: 20
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - .buildkite/scripts/docker-build-metadata-args.sh
+  - .buildkite/scripts/ci-bake-rocm.sh
+  - docker/Dockerfile
+  - docker/Dockerfile.cpu
+  - docker/Dockerfile.rocm
+  - docker/Dockerfile.rocm_base
+  - docker/ci-rocm.hcl
+  - docker/docker-bake.hcl
+  - docker/docker-bake-rocm.hcl
+  - tests/tools/test_docker_build_metadata_args.py
+  commands:
+  - pytest -v -s tools/test_docker_build_metadata_args.py
+
 #########################################################################################################################################
 #                                                                                                                                       #
 #                                                         MI300 (gfx942) tests                                                          #
@@ -1003,6 +1025,23 @@ steps:
   commands:
   - pytest -s -v evals/gsm8k/test_gsm8k_correctness.py --config-list-file=configs/models-small.txt
 
+- label: MRCR Eval Small Models # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  - tests/evals/mrcr/
+  commands:
+  - pytest -s -v evals/mrcr/test_mrcr_correctness.py --config-list-file=evals/mrcr/configs/models-small.txt
+
 - label: LM Eval Small Models (MI300) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -1137,6 +1176,27 @@ steps:
   commands:
   - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_block_ep_eplb.sh 0.8 200 8020
 
+- label: Qwen3-30B-A3B-FP8 DP4 Async EPLB Accuracy (4xH100-4xMI300) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - vllm/model_executor/models/
+  - vllm/model_executor/model_loader/
+  - vllm/model_executor/layers/quantization/
+  - vllm/distributed/eplb
+  - vllm/model_executor/layers/fused_moe/
+  - vllm/v1/attention/backends/
+  - vllm/v1/attention/selector.py
+  - .buildkite/scripts/scheduled_integration_test/
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - bash .buildkite/scripts/scheduled_integration_test/qwen30b_a3b_fp8_dp4_async_eplb.sh 0.8 200 8050
+
 - label: Qwen3-Next-80B-A3B-Instruct MTP Async EPLB Accuracy # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -1240,6 +1300,21 @@ steps:
 
 #----------------------------------------------------------  mi300 · kernels  ----------------------------------------------------------#
 
+- label: vLLM IR Tests # TBD
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/"
+  source_file_dependencies:
+  - vllm/ir
+  - vllm/kernels
+  - vllm/_aiter_ops.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s tests/ir
+  - pytest -v -s tests/kernels/ir
+
 - label: Kernels Attention Test %N # TBD
   timeout_in_minutes: 100
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -1273,6 +1348,21 @@ steps:
   - vllm/platforms/rocm.py
   commands:
   - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py
+
+- label: Kernels KDA Test # TBD
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/layers/fla/ops/kda.py
+  - vllm/model_executor/layers/fla/ops/chunk_delta_h.py
+  - vllm/model_executor/layers/fla/ops/l2norm.py
+  - tests/kernels/test_kda.py
+  - vllm/platforms/rocm.py
+  commands:
+  - pytest -v -s kernels/test_kda.py
 
 - label: Kernels MoE Test %N # TBD
   timeout_in_minutes: 95
@@ -1385,6 +1475,128 @@ steps:
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
   - pytest -v -s model_executor -m '(not slow_test)'
   - pytest -v -s entrypoints/openai/completion/test_tensorizer_entrypoint.py
+
+#----------------------------------------------------  mi300 · model_runner_v2  -------------------------------------------------------#
+
+- label: Model Runner V2 Core Tests # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_worker.py
+  - vllm/v1/core/sched/
+  - vllm/v1/attention/
+  - tests/v1/engine/test_llm_engine.py
+  - tests/v1/e2e/
+  - tests/entrypoints/llm/test_struct_output_generate.py
+  - vllm/platforms/rocm.py
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pytest -v -s v1/engine/test_llm_engine.py -k "not test_engine_metrics"
+  - ENFORCE_EAGER=1 pytest -v -s v1/e2e/general/test_async_scheduling.py -k "not ngram"
+  - pytest -v -s v1/e2e/general/test_context_length.py
+  - pytest -v -s v1/e2e/general/test_min_tokens.py
+  - pytest -v -s entrypoints/llm/test_struct_output_generate.py -k "xgrammar and not speculative_config6 and not speculative_config7 and not speculative_config8 and not speculative_config0"
+
+- label: Model Runner V2 Examples # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/examples"
+  source_file_dependencies:
+  - vllm/v1/worker/gpu/
+  - vllm/v1/core/sched/
+  - vllm/v1/worker/gpu_worker.py
+  - examples/basic/offline_inference/
+  - examples/generate/multimodal/
+  - examples/features/
+  - examples/pooling/embed/vision_embedding_offline.py
+  - examples/features/tensorize_vllm_model.py
+  - examples/deployment/llm_engine_example.py
+  - vllm/platforms/rocm.py
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pip install tensorizer
+  - python3 basic/offline_inference/chat.py
+  - python3 basic/offline_inference/generate.py --model facebook/opt-125m
+  - python3 generate/multimodal/audio_language_offline.py --seed 0
+  - python3 generate/multimodal/vision_language_offline.py --seed 0
+  - python3 generate/multimodal/vision_language_multi_image_offline.py --seed 0
+  - python3 generate/multimodal/encoder_decoder_multimodal_offline.py --model-type whisper --seed 0
+  - python3 pooling/embed/vision_embedding_offline.py --seed 0
+  - python3 features/automatic_prefix_caching/prefix_caching_offline.py
+  - python3 deployment/llm_engine_example.py
+  - python3 features/tensorize_vllm_model.py --model facebook/opt-125m serialize --serialized-directory /tmp/ --suffix v1 && python3 features/tensorize_vllm_model.py --model facebook/opt-125m deserialize --path-to-tensors /tmp/vllm/facebook/opt-125m/v1/model.tensors
+  - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 2048
+  - python3 features/speculative_decoding/spec_decode_offline.py --test --method eagle3 --num_spec_tokens 3 --dataset-name hf --dataset-path philschmid/mt-bench --num-prompts 80 --temp 0 --top-p 1.0 --top-k -1 --tp 1 --enable-chunked-prefill --max-model-len 1536
+
+- label: Model Runner V2 Distributed (2 GPUs) # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_worker.py
+  - tests/basic_correctness/test_basic_correctness.py
+  - tests/v1/distributed/test_async_llm_dp.py
+  - tests/v1/distributed/test_eagle_dp.py
+  - vllm/platforms/rocm.py
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - TARGET_TEST_SUITE=MI300 pytest -v -s basic_correctness/test_basic_correctness.py -m 'distributed(num_gpus=2)' -k "not ray and not True"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_async_llm_dp.py -k "not ray"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
+
+- label: Model Runner V2 Pipeline Parallelism (4 GPUs) # TBD
+  timeout_in_minutes: 60
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_worker.py
+  - tests/distributed/test_pipeline_parallel.py
+  - tests/distributed/test_pp_cudagraph.py
+  - vllm/platforms/rocm.py
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pytest -v -s distributed/test_pipeline_parallel.py -k "not ray and not Jamba"
+  - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
+
+- label: Model Runner V2 Spec Decode # TBD
+  timeout_in_minutes: 45
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/v1/worker/gpu/
+  - vllm/v1/worker/gpu_worker.py
+  - tests/v1/spec_decode/test_max_len.py
+  - tests/v1/spec_decode/test_rejection_sampler_utils.py
+  - tests/v1/spec_decode/test_synthetic_rejection_sampler_utils.py
+  - tests/v1/e2e/spec_decode/test_spec_decode.py
+  - vllm/platforms/rocm.py
+  commands:
+  - set -x
+  - export VLLM_USE_V2_MODEL_RUNNER=1
+  - pytest -v -s v1/spec_decode/test_max_len.py -k "eagle or mtp"
+  - pytest -v -s v1/spec_decode/test_rejection_sampler_utils.py
+  - pytest -v -s v1/spec_decode/test_synthetic_rejection_sampler_utils.py
+  - pytest -v -s v1/e2e/spec_decode/test_spec_decode.py -k "eagle or mtp"
 
 #------------------------------------------------------  mi300 · models / basic  -------------------------------------------------------#
 
@@ -1702,6 +1914,22 @@ steps:
   - pytest -v -s plugins_tests/test_oot_registration_offline.py # it needs a clean process
   - pytest -v -s plugins_tests/lora_resolvers # unit tests for in-tree lora resolver plugins
 
+- label: GGUF Plugin # TBD
+  timeout_in_minutes: 30
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  soft_fail: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/model_executor/layers/quantization
+  - tests/plugins_tests/test_gguf_plugin.py
+  - tests/plugins_tests/gguf
+  - vllm/platforms/rocm.py
+  commands:
+  - pip install "vllm-gguf-plugin >= 0.0.2"
+  - pytest -v -s plugins_tests/gguf
+
 #-------------------------------------------------------  mi300 · quantization  --------------------------------------------------------#
 
 - label: Quantization # TBD
@@ -1789,7 +2017,7 @@ steps:
   - vllm/
   - tests/test_regression
   commands:
-  - pip install modelscope
+  - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
 
 #---------------------------------------------------------  mi300 · ray_compat  ---------------------------------------------------------#
@@ -1953,7 +2181,8 @@ steps:
 - label: Extract Hidden States Integration # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
-  agent_pool: mi300_1
+  agent_pool: mi300_2
+  num_gpus: 2
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/config/speculative.py
@@ -2726,7 +2955,7 @@ steps:
 #---------------------------------------------------------  mi355 · examples  ----------------------------------------------------------#
 
 - label: Examples # TBD
-  timeout_in_minutes: 45
+  timeout_in_minutes: 100
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx950nightly, amdmi355]
   agent_pool: mi355_1
   working_dir: "/vllm-workspace/examples"
@@ -3162,5 +3391,5 @@ steps:
   - vllm/
   - tests/test_regression
   commands:
-  - pip install modelscope
+  - pip install 'modelscope<1.38'
   - pytest -v -s test_regression.py
