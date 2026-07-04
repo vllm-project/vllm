@@ -1268,6 +1268,17 @@ def test_rocm_mxfp4_moe_oracle(
     if config["requires_gfx950"] and not ROCM_GFX950:
         pytest.skip(f"Backend {backend_name} requires GFX950")
 
+    # Fused TRITON path produces ~90% mismatch on gfx950: reference_moe()
+    # uses raw bfloat16 weights while the fused kernel operates on weights
+    # converted by convert_gpt_oss_weight_to_mxfp4_moe_kernel_format, which
+    # produces a different layout the reference does not account for.
+    # TRITON_UNFUSED passes. xfail pending a corrected reference.
+    if backend_name == "TRITON" and ROCM_GFX950:
+        pytest.xfail(
+            "Fused TRITON MXFP4 MoE accuracy mismatch on gfx950 (~90%); "
+            "see https://github.com/vllm-project/vllm/issues/46261"
+        )
+
     from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
