@@ -1,8 +1,8 @@
 # Voxtral realtime benchmarks
 
 Scripts to reproduce the realtime sliding-window / re-anchoring numbers
-(KV-bounded streaming + unbounded duration). Hardware-agnostic; the results in
-`results/` were collected on a single RTX 4090 Laptop 16 GiB.
+(KV-bounded streaming + unbounded duration). Hardware-agnostic; the numbers
+quoted in the PR discussion were collected on a single RTX 4090 Laptop 16 GiB.
 
 ## Tools
 
