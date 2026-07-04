@@ -81,6 +81,21 @@ __all__ = [
 ]
 
 
+def _get_mxfp4_eplb_storage_data(tensor: Any) -> torch.Tensor:
+    if isinstance(tensor, torch.Tensor):
+        return tensor
+
+    storage = getattr(tensor, "storage", None)
+    data = getattr(storage, "data", None)
+    if isinstance(data, torch.Tensor):
+        return data
+
+    raise TypeError(
+        "Expected a torch.Tensor or a tensor wrapper with torch.Tensor "
+        f"storage.data, got {type(tensor).__name__}."
+    )
+
+
 class QuarkMoEMethod(FusedMoEMethodBase):
     def __init__(self, moe: FusedMoEConfig):
         super().__init__(moe)
@@ -1226,6 +1241,27 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             layer.w2_weight = w2
             self.w13_precision_config = w13_scale
             self.w2_precision_config = w2_scale
+            if self.moe.moe_parallel_config.enable_eplb:
+                replace_parameter(
+                    layer,
+                    "w13_weight_eplb",
+                    _get_mxfp4_eplb_storage_data(w13),
+                )
+                replace_parameter(
+                    layer,
+                    "w2_weight_eplb",
+                    _get_mxfp4_eplb_storage_data(w2),
+                )
+                replace_parameter(
+                    layer,
+                    "w13_weight_scale",
+                    _get_mxfp4_eplb_storage_data(w13_scale.weight_scale),
+                )
+                replace_parameter(
+                    layer,
+                    "w2_weight_scale",
+                    _get_mxfp4_eplb_storage_data(w2_scale.weight_scale),
+                )
         else:
             # Standard backends: replace parameters
             replace_parameter(layer, "w13_weight", w13)
