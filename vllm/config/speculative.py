@@ -57,7 +57,12 @@ DFlashModelTypes = Literal["dflash"]
 DSparkModelTypes = Literal["dspark"]
 DominoModelTypes = Literal["domino"]
 EagleModelTypes = Literal[
-    "eagle", "eagle3", "extract_hidden_states", MTPModelTypes, DFlashModelTypes
+    "eagle",
+    "eagle3",
+    "extract_hidden_states",
+    MTPModelTypes,
+    DFlashModelTypes,
+    DominoModelTypes,
 ]
 SpeculativeMethod = Literal[
     "ngram",
@@ -790,6 +795,8 @@ class SpeculativeConfig:
                     self.method = "eagle3"
                 elif "dflash" in self.draft_model_config.model.lower():
                     self.method = "dflash"
+                elif "domino" in self.draft_model_config.model.lower():
+                    self.method = "domino"
                 elif (
                     "dspark" in self.draft_model_config.model.lower()
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
@@ -821,7 +828,7 @@ class SpeculativeConfig:
                     )
 
                 # Replace hf_config for EAGLE draft_model
-                if self.method in ("eagle", "eagle3", "dflash"):
+                if self.method in ("eagle", "eagle3", "dflash", "domino"):
                     from vllm.transformers_utils.configs.eagle import EAGLEConfig
                     from vllm.transformers_utils.configs.speculators import (
                         SpeculatorsConfig,
@@ -852,7 +859,7 @@ class SpeculativeConfig:
                     ]
                     self.update_arch_()
 
-                if self.method in ("dflash", "dspark"):
+                if self.method in ("dflash", "dspark", "domino"):
                     self.parallel_drafting = True
 
                 if self.num_speculative_tokens is not None and hasattr(
@@ -1184,7 +1191,7 @@ class SpeculativeConfig:
         # NOTE: This method is usually a stand-in for "speculative decoding using
         # target model hidden states"
         # TODO(ben): Refactor this so the naming is clearer
-        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark")
+        return self.method in ("eagle", "eagle3", "mtp", "dflash", "dspark", "domino")
 
     def use_dflash(self) -> bool:
         return self.method == "dflash"

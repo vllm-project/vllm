@@ -104,9 +104,8 @@ class DominoQwen3Model(DFlashQwen3Model):
         embed_proj_dims = drafter_config.get("embed_proj_dims", None)
         emb_dim = drafter_config.get("emb_dim", None)
         
-        assert emb_dim is not None 
-        "emb_dim must be provided in domino"
-        
+        assert emb_dim is not None, "emb_dim must be provided in domino"
+
         if embed_proj_dims is None:
             embed_proj_dims = [in_dim, emb_dim, self.config.vocab_size]
 

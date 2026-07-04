@@ -74,7 +74,7 @@ class EAGLEConfig(PretrainedConfig):
             ]
         elif method == "domino":
             assert self.model is not None, (
-                "model should not be None when method is dflash"
+                "model should not be None when method is domino"
             )
             kwargs["architectures"] = [
                 arch
@@ -85,7 +85,7 @@ class EAGLEConfig(PretrainedConfig):
         else:
             raise ValueError(
                 f"Invalid method {method}. Supported methods are "
-                "eagle, eagle3, and dflash."
+                "eagle, eagle3, dflash, and domino."
             )
 
         super().__init__(**kwargs)

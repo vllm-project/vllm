@@ -31,9 +31,19 @@ class DominoSpeculator(DFlashSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
         super().__init__(vllm_config, device)
 
-        gru_hidden_dim = self.draft_model_config.hf_config.dflash_config[
+        self.is_domino = True
+
+        eagle_cfg = getattr(self.draft_model_config.hf_config, "eagle_config", {})
+        dflash_cfg = getattr(self.draft_model_config.hf_config, "dflash_config", {})
+        gru_hidden_dim = eagle_cfg.get("gru_hidden_dim") or dflash_cfg.get(
             "gru_hidden_dim"
-        ]
+        )
+        if gru_hidden_dim is None:
+            raise ValueError(
+                "gru_hidden_dim must be set in eagle_config or dflash_config "
+                "for domino speculator"
+            )
+        self.gru_hidden_dim = gru_hidden_dim
         self.gru_hidden_buffer = torch.zeros(
             self.max_num_reqs, gru_hidden_dim, dtype=self.dtype, device=device
         )
@@ -182,12 +192,18 @@ class DominoSpeculator(DFlashSpeculator):
         realized_prefix_embed = self.model.embed_input_ids(combined)
         gru_hidden = self.model.gru_forward(realized_prefix_embed[:, 0, :], None)
         gru_hidden = self.model.gru_forward(realized_prefix_embed[:, 1, :], gru_hidden)
-        hidden_3d = last_hidden_states.view(num_reqs, 16, -1)
-        logits_3d = base_logits.view(num_reqs, 16, -1)
+        hidden_3d = last_hidden_states.view(
+            num_reqs, self.num_query_per_req, -1
+        )
+        logits_3d = base_logits.view(num_reqs, self.num_query_per_req, -1)
 
         for i in range(1, K):
-            self._domino_cat_buf[:num_reqs, :, :2560] = hidden_3d[:, i : i + 1, :]
-            self._domino_cat_buf[:num_reqs, :, 2560:] = gru_hidden.unsqueeze(1)
+            self._domino_cat_buf[:num_reqs, :, : self.hidden_size] = hidden_3d[
+                :, i : i + 1, :
+            ]
+            self._domino_cat_buf[
+                :num_reqs, :, self.hidden_size :
+            ] = gru_hidden.unsqueeze(1)
             bias = self.model.domino_mlp_forward(self._domino_cat_buf[:num_reqs])
             current_token_id = self._sample_single_token(
                 logits_3d[:, i : i + 1, :] + bias,
