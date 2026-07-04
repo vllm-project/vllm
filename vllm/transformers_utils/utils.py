@@ -5,6 +5,7 @@ import json
 import os
 import struct
 from functools import cache
+from inspect import signature
 from os import PathLike
 from pathlib import Path
 from typing import Any
@@ -48,13 +49,25 @@ def modelscope_list_repo_files(
 
     api = HubApi()
     api.login(token)
+    get_model_files_params = signature(api.get_model_files).parameters
+    get_model_files_kwargs: dict[str, Any] = {
+        "model_id": repo_id,
+        "recursive": True,
+    }
+    if "revision" in get_model_files_params:
+        get_model_files_kwargs["revision"] = revision
+    elif revision is not None:
+        raise ValueError(
+            "The installed modelscope package does not support listing files "
+            "for a specific revision. Please use revision=None or install a "
+            "modelscope version whose HubApi.get_model_files supports revision."
+        )
+
     # same as huggingface_hub.list_repo_files
     files = [
         file["Path"]
-        for file in api.get_model_files(
-            model_id=repo_id, revision=revision, recursive=True
-        )
-        if file["Type"] == "blob"
+        for file in api.get_model_files(**get_model_files_kwargs)
+        if file.get("Type", "blob") == "blob"
     ]
     return files
 
