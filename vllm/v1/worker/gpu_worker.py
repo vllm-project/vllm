@@ -977,52 +977,14 @@ class Worker(WorkerBase):
             return drafter.get_model()
         return getattr(drafter, "model", None)
 
-    def update_speculative_model_weights(
-        self,
-        weights: list[tuple[str, torch.Tensor]],
-    ) -> None:
-        """Update draft model weights in-place via the model's load_weights path.
-
-        Args:
-            weights: List of (param_name, tensor) pairs.  param_name must use
-                     the draft model's own naming convention (e.g. unfused
-                     training-side names such as q_proj / gate_proj are
-                     accepted; the model's load_weights handles fused-param
-                     mapping internally).  FSDP prefixes and any
-                     training-framework-specific renames are the caller's
-                     responsibility.
-        """
-        draft_model = self.get_draft_model()
-        if draft_model is None:
-            return
-        draft_model.load_weights(iter(weights))
-
     @staticmethod
-    def _get_weight_update_target(options: dict | None) -> str:
-        if not options:
-            return "model"
-        if not isinstance(options, dict):
+    def _get_weight_update_target(include_draft: bool) -> str:
+        if not isinstance(include_draft, bool):
             raise TypeError(
-                f"Weight update options must be a dictionary, got {type(options)}."
+                "Weight update include_draft must be a boolean, "
+                f"got {type(include_draft)}."
             )
-        unsupported_options = set(options) - {"include_draft"}
-        if unsupported_options:
-            raise ValueError(
-                f"Unsupported weight update option(s): {sorted(unsupported_options)}."
-            )
-
-        return "draft" if options.get("include_draft", False) else "model"
-
-    def _load_draft_model_weights(
-        self,
-        weights: list[tuple[str, torch.Tensor]],
-    ) -> None:
-        draft_model = self.get_draft_model()
-        if draft_model is None:
-            raise RuntimeError(
-                "Draft model weight update requested, but no draft model is configured."
-            )
-        draft_model.load_weights(iter(weights))
+        return "draft" if include_draft else "model"
 
     def _initialize_draft_weight_update(self) -> nn.Module:
         draft_model = self.get_draft_model()
@@ -1336,7 +1298,7 @@ class Worker(WorkerBase):
         self._weight_update_active = True
         self._draft_weight_update_active = False
 
-    def update_weights(self, update_info: dict, options: dict | None = None) -> None:
+    def update_weights(self, update_info: dict, include_draft: bool = False) -> None:
         """
         Receive one weight update chunk from the trainer.
 
@@ -1345,9 +1307,8 @@ class Worker(WorkerBase):
 
         Args:
             update_info: Dictionary containing backend-specific update info
-            options: Optional controls for the update. ``include_draft=True``
-                loads the received weights into the speculative draft model
-                instead of the target model.
+            include_draft: If True, load the received weights into the
+                speculative draft model instead of the target model.
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1358,7 +1319,7 @@ class Worker(WorkerBase):
             )
 
         try:
-            target_model = self._get_weight_update_target(options)
+            target_model = self._get_weight_update_target(include_draft)
             if target_model == "model":
                 self.weight_transfer_engine.update_weights(update_info)
             else:
@@ -1389,7 +1350,18 @@ class Worker(WorkerBase):
                     "Draft model weight update requested, but no draft model "
                     "is configured."
                 )
-            finalize_layerwise_reload(draft_model, self.model_config)
+            speculative_config = self.speculative_config
+            if (
+                speculative_config is None
+                or speculative_config.draft_model_config is None
+            ):
+                raise RuntimeError(
+                    "Draft model weight update requested, but no draft model "
+                    "config is configured."
+                )
+            finalize_layerwise_reload(
+                draft_model, speculative_config.draft_model_config
+            )
 
         self.weight_transfer_engine.finish_weight_update()
         self._weight_update_active = False

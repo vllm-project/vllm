@@ -145,9 +145,11 @@ async def update_weights(raw_request: Request):
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'update_info' in request body",
         )
-    options = body.get("options") or {}
+    include_draft = body.get("include_draft", False)
     await engine_client(raw_request).update_weights(
-        request=WeightTransferUpdateRequest(update_info=update_info, options=options)
+        request=WeightTransferUpdateRequest(
+            update_info=update_info, include_draft=include_draft
+        )
     )
     return JSONResponse(content={"message": "Weights updated"})
 
