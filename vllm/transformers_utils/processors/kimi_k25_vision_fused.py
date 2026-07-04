@@ -2,19 +2,22 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Optimized CPU image processor for Kimi-K2.5/K2.6 vision chunks."""
 
-import base64
 import io
 import math
 from typing import Any
 
 import numpy as np
+import pybase64 as base64
 import torch
 from PIL import Image
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.utils import TensorType
 
+from vllm.utils.import_utils import is_numba_available
+
 if is_numba_available():
     from numba import njit, prange
+
     @njit(parallel=True, cache=True)
     def _write_fused_patches(
         frames: np.ndarray,
