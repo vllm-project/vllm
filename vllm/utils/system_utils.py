@@ -306,28 +306,39 @@ def set_ulimit(target_soft_limit: int = 65535):
             )
 
 
+def _matching_library_path(lib_name: str, maps_line: str) -> str | None:
+    """Return the mapped path in `maps_line` if it is the shared object
+    `lib_name`, otherwise ``None``.
+
+    The basename must be `lib_name` followed by a version/build separator
+    (``.`` or ``-``), e.g. ``libcudart.so``, ``libcudart.so.12`` or
+    ``libcudart-<hash>.so``. Lookalikes such as tilelang's
+    ``libcudart_stub.so`` are rejected so they are not mistaken for the real
+    CUDA/HIP runtime (see issue #47548).
+    """
+    if lib_name not in maps_line or "/" not in maps_line:
+        return None
+    path = maps_line[maps_line.index("/") :].strip()
+    filename = path.split("/")[-1]
+    if not filename.startswith(lib_name):
+        return None
+    suffix = filename[len(lib_name) :]
+    if suffix and suffix[0] not in ".-":
+        return None
+    return path
+
+
 def find_loaded_library(lib_name: str) -> str | None:
     """
-    According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
-    the file `/proc/self/maps` contains the memory maps of the process, which includes the
-    shared libraries loaded by the process. We can use this file to find the path of the
-    loaded library.
-    """  # noqa
-    found_line = None
+    According to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
+    the file `/proc/self/maps` contains the memory maps of the process, which
+    includes the shared libraries loaded by the process. We use this file to
+    find the path of the loaded library.
+    """
     with open("/proc/self/maps") as f:
         for line in f:
-            if lib_name in line:
-                found_line = line
-                break
-    if found_line is None:
-        # the library is not loaded in the current process
-        return None
-    # if lib_name is libcudart, we need to match a line with:
-    # address /path/to/libcudart-hash.so.11.0
-    start = found_line.index("/")
-    path = found_line[start:].strip()
-    filename = path.split("/")[-1]
-    assert filename.rpartition(".so")[0].startswith(lib_name), (
-        f"Unexpected filename: {filename} for library {lib_name}"
-    )
-    return path
+            path = _matching_library_path(lib_name, line)
+            if path is not None:
+                return path
+    # the library is not loaded in the current process
+    return None
