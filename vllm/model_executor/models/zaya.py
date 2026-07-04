@@ -15,7 +15,7 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import FusedMoE, RoutedExperts
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -580,9 +580,9 @@ class ZayaForCausalLM(nn.Module, HasInnerState, IsHybrid):
                 continue
             params_dict[key] = buffer
         fused_moe_modules = {
-            name: module
+            name.removesuffix(".routed_experts"): module
             for name, module in self.named_modules()
-            if isinstance(module, FusedMoE)
+            if isinstance(module, RoutedExperts)
         }
 
         loaded_params: set[str] = set()
@@ -619,7 +619,7 @@ class ZayaForCausalLM(nn.Module, HasInnerState, IsHybrid):
                     skipped_weights.append(chkpt_weight_name)
                     continue
 
-                param_name = f"{fused_moe_prefix}.w13_weight"
+                param_name = f"{fused_moe_prefix}.routed_experts.w13_weight"
                 param = params_dict[param_name]
                 gate_weight, up_weight = loaded_weight.chunk(2, dim=1)
                 for expert_id, (gate_expert, up_expert) in enumerate(
@@ -648,7 +648,7 @@ class ZayaForCausalLM(nn.Module, HasInnerState, IsHybrid):
                     skipped_weights.append(chkpt_weight_name)
                     continue
 
-                param_name = f"{fused_moe_prefix}.w2_weight"
+                param_name = f"{fused_moe_prefix}.routed_experts.w2_weight"
                 param = params_dict[param_name]
                 for expert_id, down_expert in enumerate(loaded_weight):
                     fused_moe_module.weight_loader(
