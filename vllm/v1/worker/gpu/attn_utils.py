@@ -310,7 +310,7 @@ def _reshape_kv_cache(
                     "auto"
                     if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
                     and not isinstance(kv_cache_spec, TQFullAttentionSpec)
-                    else cache_dtype
+                    else getattr(kv_cache_spec, "cache_dtype_str", None) or cache_dtype
                 )
                 kv_cache_shape = group.backend.get_kv_cache_shape(
                     kernel_num_blocks,
@@ -397,7 +397,7 @@ def _update_hybrid_attention_layout(
             "auto"
             if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
             and not isinstance(kv_cache_spec, TQFullAttentionSpec)
-            else cache_dtype
+            else getattr(kv_cache_spec, "cache_dtype_str", None) or cache_dtype
         )
         block_dim = group.backend.get_kv_cache_block_dim(
             kernel_block_sizes[group.kv_cache_group_id],
