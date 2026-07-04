@@ -59,15 +59,6 @@ def modelscope_list_repo_files(
     return files
 
 
-def is_modelscope_legacy_hub_api_error(exc: Exception) -> bool:
-    """Return True for ModelScope legacy hub compatibility failures."""
-    exc_name = type(exc).__name__
-    if "LegacyHubApi" in exc_name:
-        return True
-
-    return "LegacyHubApi" in str(exc)
-
-
 def _maybe_json_dict(path: str | PathLike) -> dict[str, str]:
     with open(path) as f:
         try:
