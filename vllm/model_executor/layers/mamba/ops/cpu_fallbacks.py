@@ -352,16 +352,23 @@ def _mamba_chunk_scan_combined_fwd_cpu(
     _use_cpp_kernel = hasattr(torch.ops._C, "mamba_chunk_scan_fwd_cpu")
 
     if _use_cpp_kernel:
-        # Ensure out is writable and contiguous.
-        if not out.is_contiguous():
-            out = out.contiguous()
+        # out must be contiguous — the C++ kernel writes via raw data_ptr().
+        # Creating a contiguous copy here would discard the results, so we
+        # require the caller to pass a contiguous tensor.
+        assert out.is_contiguous(), (
+            "_mamba_chunk_scan_combined_fwd_cpu: `out` must be "
+            "pre-allocated as a contiguous tensor"
+        )
 
-        # D: strip broadcast dims so the kernel sees (nheads,) float32.
+        # D: strip trailing dims that are broadcast (stride == 0) so the
+        # kernel sees a (nheads,) float32 array.  Only peel dims whose
+        # stride is 0 (broadcast-expanded); genuine multi-dim D is passed
+        # as-is and flattened by the C++ wrapper.
         D_1d = None
         if D is not None:
             d = D.float()
-            while d.dim() > 1:
-                d = d.select(d.dim() - 1, 0)
+            while d.dim() > 1 and d.stride(-1) == 0:
+                d = d.squeeze(-1)
             D_1d = d.contiguous()
 
         ops.mamba_chunk_scan_fwd_cpu(
@@ -382,7 +389,10 @@ def _mamba_chunk_scan_combined_fwd_cpu(
             seq_start = cu_seqlens[b_idx].item()
             seq_end = cu_seqlens[b_idx + 1].item()
 
-            state = all_states[b_idx]  # shares storage — updated in-place
+            # Note: basic indexing returns a view, but arithmetic ops
+            # below (state * dA + dBx) produce new tensors, so state is
+            # reassigned each token. all_states[b_idx] is committed at line 416.
+            state = all_states[b_idx].clone()  # local working copy
 
             for t in range(seq_start, seq_end):
                 x_t = x[t].float()
@@ -419,4 +429,5 @@ def _mamba_chunk_scan_combined_fwd_cpu(
     all_states = all_states.to(out_dtype)
 
     return all_states
+
 

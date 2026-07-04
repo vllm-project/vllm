@@ -278,6 +278,8 @@ void mamba_chunk_scan_fwd_cpu_impl(
 
   TORCH_CHECK(final_states.is_contiguous(),
       "mamba_chunk_scan_fwd_cpu: final_states must be contiguous");
+  TORCH_CHECK(out.is_contiguous(),
+      "mamba_chunk_scan_fwd_cpu: out must be contiguous (writes via raw data_ptr)");
 
   VLLM_DISPATCH_FLOATING_TYPES(input_type, "mamba_chunk_scan_fwd_cpu", [&] {
     mamba_cpu::mamba_chunk_scan_fwd_kernel<scalar_t>(

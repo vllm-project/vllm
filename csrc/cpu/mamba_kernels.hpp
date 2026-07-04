@@ -304,7 +304,7 @@ inline void mamba_chunk_scan_fwd_kernel(
   const int64_t stride_s_h = headdim * dstate;
   // stride_s_d = dstate, stride_s_n = 1
 
-#pragma omp parallel for collapse(2) schedule(dynamic)
+#pragma omp parallel for collapse(2) schedule(static)
   for (int64_t b = 0; b < batch; ++b) {
     for (int64_t h = 0; h < nheads; ++h) {
       const int64_t seq_start = cu_seqlens[b];
