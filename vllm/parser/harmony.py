@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple
 
-from openai_harmony import HarmonyError, Message, Role
+from openai_harmony import HarmonyError
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -91,9 +91,6 @@ class HarmonyParser(DelegatingParser):
         self._next_tool_call_index = 0
         self._num_processed_messages = 0
 
-        # For error recovery
-        self._current_message_tokens: list[int] = []
-
     @property
     def _harmony_parser(self) -> StreamableParser:
         """Lazily initializes the Harmony parser."""
@@ -110,48 +107,32 @@ class HarmonyParser(DelegatingParser):
         self._num_processed_messages += 1
         return msg
 
-    def flush(self) -> list[Segment]:
-        segments: list[Segment] = []
+    def flush(self) -> Segment | None:
         try:
             self._harmony_parser.process_eos()
             msg = self._poll_completed_message()
         except HarmonyError:
             logger.warning(
                 "Harmony parser ended in a non-terminal state; returning the "
-                "recovered raw output."
+                "raw unparsed output. This usually indicates a malformed "
+                "assistant turn, e.g. a 'final' channel missing the "
+                "<|message|> delimiter."
             )
-
-            final_channel = "final"
-            text = self.model_tokenizer.decode(self._current_message_tokens)
-            segments.append(
-                Segment(
-                    channel=final_channel,
-                    recipient=None,
-                    delta=text,
-                    completed_message=None,
-                )
-            )
-            msg = Message.from_role_and_content(Role.ASSISTANT, text).with_channel(
-                final_channel
-            )
-
-        # Reset to the initial assistant-parser state for the next turn.
-        self._parser = None
-        self._num_processed_messages = 0
-        self._current_message_tokens.clear()
+            raise
+        finally:
+            # Reset to the initial assistant-parser state for the next turn.
+            self._parser = None
+            self._num_processed_messages = 0
 
         if msg is None:
-            return segments
+            return None
 
-        segments.append(
-            Segment(
-                channel=msg.channel,
-                recipient=msg.recipient,
-                delta="",
-                completed_message=msg,
-            )
+        return Segment(
+            channel=msg.channel,
+            recipient=msg.recipient,
+            delta="",
+            completed_message=msg,
         )
-        return segments
 
     def parse(
         self,
@@ -166,9 +147,12 @@ class HarmonyParser(DelegatingParser):
         Callers must decide whether to surface them.
         """
         result = self.process_chunk(model_output_token_ids)
-        flushed_segments = self.flush()
-        if flushed_segments:
-            result.segments.extend(flushed_segments)
+        try:
+            flushed_segment = self.flush()
+        except HarmonyError:
+            return None, model_output, None
+        if flushed_segment is not None:
+            result.segments.append(flushed_segment)
 
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
@@ -225,9 +209,13 @@ class HarmonyParser(DelegatingParser):
         )
         result = self.process_chunk(delta_token_ids)
         if finished:
-            flushed_segments = self.flush()
-            if flushed_segments:
-                result.segments.extend(flushed_segments)
+            try:
+                flushed_segment = self.flush()
+            except HarmonyError:
+                self._next_tool_call_index = 0
+                return DeltaMessage(content=delta_text)
+            if flushed_segment is not None:
+                result.segments.append(flushed_segment)
         combined_content = ""
         combined_reasoning = ""
         tool_messages: list[DeltaToolCall] = []
@@ -309,11 +297,6 @@ class HarmonyParser(DelegatingParser):
             )
             delta = self._harmony_parser.last_content_delta or ""
             completed_message = self._poll_completed_message()
-
-            if completed_message is not None:
-                self._current_message_tokens.clear()
-            else:
-                self._current_message_tokens.append(token_id)
 
             if channel == "analysis" or (
                 channel == "commentary" and recipient is not None
