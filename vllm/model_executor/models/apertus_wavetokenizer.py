@@ -1714,11 +1714,13 @@ class WavTokenizerBase(nn.Module):
         device: str = "cuda",
         checkpoint: str | None = None,
         torch_compile: bool = True,
+        audio_config: dict | None = None,
     ):
         super().__init__()
         self.device = device
         self.checkpoint = checkpoint
         self.torch_compile = torch_compile
+        self.audio_config = audio_config
         self._load_model()
 
     def _load_model(self) -> None:
@@ -1782,84 +1784,78 @@ class WavTokenizer40(WavTokenizerBase):
     _downsample_rate = 600
 
     def _load_model(self) -> None:
-        try:
-            ckpt_name = "wavtokenizer_large_unify_600_24k.ckpt"
-            sf_name = "wavtokenizer_large_unify_600_24k.safetensors"
-            if self.checkpoint:
-                if os.path.isdir(self.checkpoint):
-                    sf_path = os.path.join(self.checkpoint, sf_name)
-                    ckpt_path = os.path.join(self.checkpoint, ckpt_name)
-                    if os.path.exists(sf_path):
-                        model_path = sf_path
-                    elif os.path.exists(ckpt_path):
-                        model_path = ckpt_path
-                    else:
-                        raise FileNotFoundError(
-                            f"Neither '{sf_name}' nor '{ckpt_name}' was found in directory '{self.checkpoint}'."
-                        )
-                elif os.path.isfile(self.checkpoint):
-                    model_path = self.checkpoint
-                else:
-                    raise FileNotFoundError(
-                        f"WavTokenizer checkpoint path '{self.checkpoint}' does not exist or is not a file/directory."
-                    )
+        assert self.checkpoint is not None, "checkpoint path must be provided"
+        
+        # Check for safetensors or ckpt file
+        safetensors_path = os.path.join(self.checkpoint, "wavtokenizer_large_unify_600_24k.safetensors")
+        ckpt_path = os.path.join(self.checkpoint, "wavtokenizer_large_unify_600_24k.ckpt")
+        
+        # Initialize self.model using config
+        config = self.audio_config if self.audio_config is not None else DEFAULT_CONFIG
+        init_args = config["model"]["init_args"]
+        feature_extractor = instantiate_class(args=(), init=init_args["feature_extractor"])
+        backbone = instantiate_class(args=(), init=init_args["backbone"])
+        head = instantiate_class(args=(), init=init_args["head"])
+        self.model = OriginalWavTokenizer(feature_extractor=feature_extractor, backbone=backbone, head=head)
+        
+        # Load weights
+        if os.path.exists(safetensors_path):
+            from safetensors.torch import load_file
+            state_dict_raw = load_file(safetensors_path, device="cpu")
+        elif os.path.exists(ckpt_path):
+            raw_state = torch.load(ckpt_path, map_location="cpu")
+            if isinstance(raw_state, dict) and "state_dict" in raw_state:
+                state_dict_raw = raw_state["state_dict"]
             else:
-                raise ValueError(
-                    "WavTokenizer checkpoint path must be specified. "
-                    "Dynamic downloading on the fly is disabled."
-                )
-
-            logger.info(
-                "Loading WavTokenizer large-600 (40 tokens/s) from %s", model_path
+                state_dict_raw = raw_state
+        else:
+            raise FileNotFoundError(
+                f"WavTokenizer checkpoint not found under {self.checkpoint}. "
+                f"Expected either 'wavtokenizer_large_unify_600_24k.safetensors' or 'wavtokenizer_large_unify_600_24k.ckpt'."
             )
-
-            config_path = None
-            if self.checkpoint:
-                if os.path.isdir(self.checkpoint):
-                    possible_yaml = os.path.join(self.checkpoint, "config.yaml")
-                    possible_json = os.path.join(self.checkpoint, "config.json")
-                    if os.path.exists(possible_yaml):
-                        config_path = possible_yaml
-                    elif os.path.exists(possible_json):
-                        config_path = possible_json
-                elif os.path.isfile(self.checkpoint):
-                    possible_yaml = os.path.join(
-                        os.path.dirname(self.checkpoint), "config.yaml"
-                    )
-                    possible_json = os.path.join(
-                        os.path.dirname(self.checkpoint), "config.json"
-                    )
-                    if os.path.exists(possible_yaml):
-                        config_path = possible_yaml
-                    elif os.path.exists(possible_json):
-                        config_path = possible_json
-
-            self.model = OriginalWavTokenizer.from_pretrained0802(
-                config_path, model_path
+            
+        state_dict = {}
+        for k, v in state_dict_raw.items():
+            if k.startswith("backbone.") or k.startswith("head.") or k.startswith("feature_extractor."):
+                state_dict[k] = v
+                
+        self.model.load_state_dict(state_dict)
+        self.model.to(self.device)
+        self.model.eval()
+        
+        if self.torch_compile and dynamo is not None:
+            try:
+                dynamo.config.recompile_limit = int(
+                    os.environ.get("WAVTOKENIZER_DYNAMO_RECOMPILE_LIMIT", "64")
+                )
+            except Exception:
+                pass
+            self.model.feature_extractor.encodec.encoder = torch.compile(
+                self.model.feature_extractor.encodec.encoder,
+                dynamic=False,
             )
-            self.model = self.model.to(self.device)
-            self.model.eval()
+            logger.info("WavTokenizer large-600 loaded successfully (compiled)")
+        else:
+            logger.info("WavTokenizer large-600 loaded successfully (eager)")
 
-            if self.torch_compile and dynamo is not None:
-                try:
-                    dynamo.config.recompile_limit = int(
-                        os.environ.get("WAVTOKENIZER_DYNAMO_RECOMPILE_LIMIT", "64")
-                    )
-                except Exception:
-                    pass
-                self.model.feature_extractor.encodec.encoder = torch.compile(
-                    self.model.feature_extractor.encodec.encoder,
-                    dynamic=False,
-                )
-                logger.info(
-                    "WavTokenizer large-600 loaded successfully (40 tokens/s, compiled)"
-                )
-            else:
-                logger.info(
-                    "WavTokenizer large-600 loaded successfully "
-                    "(40 tokens/s, eager mode)"
-                )
 
-        except Exception as e:
-            logger.error("Error loading WavTokenizer: %s", e)
-            raise
+def build_audio_tokenizer(
+    type: str,
+    model_path: str,
+    device: str = "cuda:0",
+    audio_config: dict | None = None,
+) -> nn.Module:
+    if type != "wavtokenizer":
+        raise NotImplementedError(f"Unsupported audio tokenizer type: {type}")
+
+    assert audio_config is not None, "audio_config must be provided to build_audio_tokenizer"
+
+    tokenizer_compile = audio_config.get("apertus_audio_tokenizer_compile", False)
+
+    tokenizer = WavTokenizer40(
+        device=device,
+        checkpoint=model_path,
+        torch_compile=tokenizer_compile,
+        audio_config=audio_config,
+    )
+    return tokenizer

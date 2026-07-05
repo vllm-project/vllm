@@ -629,69 +629,58 @@ def build_vision_tokenizer(
     type: str,
     model_path: str,
     device: str = "cuda:0",
-    config_file: str = "config.yaml",
-    ckpt_file: str = "model.ckpt",
+    vision_config: dict | None = None,
 ) -> nn.Module:
     if type != "ibq":
         raise NotImplementedError(f"Unsupported vision tokenizer type: {type}")
 
-    # Check for new format: config.json and emu35_vison_tokenizer.safetensors
-    import json
-    cfg_json_path = osp.join(model_path, "config.json")
+    assert vision_config is not None, "vision_config must be provided to build_vision_tokenizer"
+
+    # Check for safetensors or ckpt file
     safetensors_path = osp.join(model_path, "emu35_vison_tokenizer.safetensors")
+    ckpt_path = osp.join(model_path, "model.ckpt")
     
-    if osp.exists(cfg_json_path) and osp.exists(safetensors_path):
-        with open(cfg_json_path, "r", encoding="utf-8") as f:
-            config_dict = json.load(f)
-        vision_config = config_dict.get("vision_config", {})
-        
-        ddconfig = {
-            "double_z": vision_config.get("double_z", False),
-            "z_channels": vision_config.get("z_channels", 256),
-            "resolution": vision_config.get("resolution", 256),
-            "in_channels": vision_config.get("in_channels", 3),
-            "out_ch": vision_config.get("out_ch", 3),
-            "ch": vision_config.get("ch", 256),
-            "ch_mult": tuple(vision_config.get("ch_mult", [1, 1, 2, 2, 4])),
-            "num_res_blocks": vision_config.get("num_res_blocks", 4),
-            "attn_resolutions": vision_config.get("attn_resolutions", [16]),
-            "dropout": vision_config.get("dropout", 0.0),
-        }
-        
-        cfg = {
-            "ddconfig": ddconfig,
-            "n_embed": vision_config.get("codebook_size", 131072),
-            "embed_dim": vision_config.get("embed_dim", 256),
-            "beta": vision_config.get("beta", 0.25),
-            "use_entropy_loss": vision_config.get("use_entropy_loss", False),
-            "cosine_similarity": vision_config.get("cosine_similarity", False),
-            "entropy_temperature": vision_config.get("entropy_temperature", 0.01),
-            "sample_minimization_weight": vision_config.get("sample_minimization_weight", 1.0),
-            "batch_maximization_weight": vision_config.get("batch_maximization_weight", 1.0),
-        }
-        
-        tokenizer = IBQ(**cfg)
+    ddconfig = {
+        "double_z": vision_config.get("double_z", False),
+        "z_channels": vision_config.get("z_channels", 256),
+        "resolution": vision_config.get("resolution", 256),
+        "in_channels": vision_config.get("in_channels", 3),
+        "out_ch": vision_config.get("out_ch", 3),
+        "ch": vision_config.get("ch", 256),
+        "ch_mult": tuple(vision_config.get("ch_mult", [1, 1, 2, 2, 4])),
+        "num_res_blocks": vision_config.get("num_res_blocks", 4),
+        "attn_resolutions": vision_config.get("attn_resolutions", [16]),
+        "dropout": vision_config.get("dropout", 0.0),
+    }
+    
+    cfg = {
+        "ddconfig": ddconfig,
+        "n_embed": vision_config.get("codebook_size", 131072),
+        "embed_dim": vision_config.get("embed_dim", 256),
+        "beta": vision_config.get("beta", 0.25),
+        "use_entropy_loss": vision_config.get("use_entropy_loss", False),
+        "cosine_similarity": vision_config.get("cosine_similarity", False),
+        "entropy_temperature": vision_config.get("entropy_temperature", 0.01),
+        "sample_minimization_weight": vision_config.get("sample_minimization_weight", 1.0),
+        "batch_maximization_weight": vision_config.get("batch_maximization_weight", 1.0),
+    }
+    
+    tokenizer = IBQ(**cfg)
+
+    if osp.exists(safetensors_path):
         from safetensors.torch import load_file
         ckpt = load_file(safetensors_path, device="cpu")
         tokenizer.load_state_dict(ckpt)
-        tokenizer.eval().to(device)
-        return tokenizer
-
-    cfg_path = osp.join(model_path, config_file)
-    ckpt_path = osp.join(model_path, ckpt_file)
-    if not (osp.exists(cfg_path) and osp.exists(ckpt_path)):
+    elif osp.exists(ckpt_path):
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+        if isinstance(ckpt, dict) and "state_dict" in ckpt:
+            ckpt = ckpt["state_dict"]
+        tokenizer.load_state_dict(ckpt)
+    else:
         raise FileNotFoundError(
-            f"config/ckpt not found under {model_path}: "
-            f"expected {config_file}, {ckpt_file}"
+            f"Apertus vision tokenizer checkpoint not found under {model_path}. "
+            f"Expected either 'emu35_vison_tokenizer.safetensors' or 'model.ckpt'."
         )
 
-    with open(cfg_path) as f:
-        cfg = yaml.safe_load(f)
-
-    tokenizer = IBQ(**cfg)
-    ckpt = torch.load(ckpt_path, map_location="cpu")
-    if isinstance(ckpt, dict) and "state_dict" in ckpt:
-        ckpt = ckpt["state_dict"]
-    tokenizer.load_state_dict(ckpt)
     tokenizer.eval().to(device)
     return tokenizer
