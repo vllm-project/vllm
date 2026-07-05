@@ -296,7 +296,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GlmMoeDsaForCausalLM": _HfExamplesInfo(
         "zai-org/GLM-5", min_transformers_version="5.0.1", is_available_online=False
     ),
-    "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
+    "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2"),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
         extras={
@@ -1407,6 +1407,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         "Qwen/Qwen3.5-4B",
         speculative_model="z-lab/Qwen3-4B-DFlash-b16",
         use_original_num_layers=True,  # Need all layers since DFlash has >1 layer,
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
+    "DFlashLagunaForCausalLM": _HfExamplesInfo(
+        "poolside/Laguna-XS-2.1",
+        speculative_model="poolside/Laguna-XS-2.1-DFlash",
+        use_original_num_layers=True,
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
