@@ -1092,6 +1092,11 @@ class SupportsTranscription(Protocol):
     """
     Enables the segment timestamp option for supported models by setting this to `True`.
     """
+    supports_word_timestamp: ClassVar[bool] = False
+    """
+    Enables word-level timestamps (cross-attention DTW) for supported models by
+    setting this to `True`.
+    """
 
     supports_explicit_language_detection: ClassVar[bool] = False
     """

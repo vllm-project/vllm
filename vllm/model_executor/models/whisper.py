@@ -86,6 +86,97 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+# Word-timestamp capture (opt-in): record cross-attention Q/K before the fused
+# kernel and recompute softmax(Q.K^T) + DTW on ``alignment_heads`` post-forward,
+# so the fused backends need not expose attention weights. State is module-level
+# so the compiled forward reads the enable flag as a compile-time constant.
+_WORD_ALIGN_ENABLED = False
+# Per-slot capture buffers, keyed by a stable request slot the runner assigns.
+_WORD_ALIGN_QBUF: torch.Tensor | None = None  # [slots, layers, max_tgt, d_model]
+_WORD_ALIGN_KBUF: torch.Tensor | None = None  # [slots, layers, max_src, d_model]
+# Per-row (slot, position) destinations the runner uploads before each forward.
+_WORD_ALIGN_QSLOT: torch.Tensor | None = None  # [max_q_tokens]
+_WORD_ALIGN_QPOS: torch.Tensor | None = None  # [max_q_tokens]
+_WORD_ALIGN_KSLOT: torch.Tensor | None = None  # [max_k_frames]
+_WORD_ALIGN_KPOS: torch.Tensor | None = None  # [max_k_frames]
+
+
+@torch.library.custom_op("whisper_align::capture", mutates_args={"qbuf", "kbuf"})
+def _word_align_capture(
+    q: torch.Tensor,
+    k: torch.Tensor | None,
+    qbuf: torch.Tensor,
+    kbuf: torch.Tensor,
+    qslot: torch.Tensor,
+    qpos: torch.Tensor,
+    kslot: torch.Tensor,
+    kpos: torch.Tensor,
+    layer: int,
+) -> None:
+    # Stateless scatter into per-slot buffers using runner-provided
+    # (slot, position) indices; CUDA-graph safe (index_copy_ + static buffers).
+    nq = q.shape[0]
+    if nq > qslot.shape[0]:  # skip oversized profiling/warmup batch
+        return
+    _, ql, qt, qd = qbuf.shape
+    fq = ((qslot[:nq] * ql + layer) * qt + qpos[:nq]).clamp_(max=qbuf.numel() // qd - 1)
+    qbuf.view(-1, qd).index_copy_(0, fq, q.to(qbuf.dtype))
+    if k is not None:
+        nk = k.shape[0]
+        if nk <= kslot.shape[0]:
+            _, kl, kt, kd = kbuf.shape
+            fk = ((kslot[:nk] * kl + layer) * kt + kpos[:nk]).clamp_(
+                max=kbuf.numel() // kd - 1
+            )
+            kbuf.view(-1, kd).index_copy_(0, fk, k.to(kbuf.dtype))
+
+
+@_word_align_capture.register_fake
+def _(q, k, qbuf, kbuf, qslot, qpos, kslot, kpos, layer):
+    return None
+
+
+def _word_align_median_filter(x: torch.Tensor, width: int) -> torch.Tensor:
+    pad = width // 2
+    xp = nn.functional.pad(x, (pad, pad), mode="reflect")
+    return xp.unfold(-1, width, 1).median(dim=-1).values
+
+
+def _word_align_token_times(
+    qbuf: torch.Tensor,
+    kbuf: torch.Tensor,
+    n_positions: int,
+    alignment_heads: list[tuple[int, int]],
+    num_heads: int,
+    head_dim: int,
+    num_audio_frames: int,
+    median_filter_width: int,
+    time_precision: float = 0.02,
+) -> list[float]:
+    """Recompute cross-attention on ``alignment_heads`` and DTW-align decoder
+    positions to audio frames, returning one onset time (seconds) per position.
+    """
+    from transformers.models.whisper.generation_whisper import (
+        _dynamic_time_warping,
+    )
+
+    scaling = head_dim**-0.5
+    frames = num_audio_frames // 2  # encoder downsamples audio frames by 2
+    per_head = []
+    for layer, head in alignment_heads:
+        q = qbuf[layer, :n_positions].float().view(n_positions, num_heads, head_dim)
+        k = kbuf[layer].float().view(-1, num_heads, head_dim)
+        per_head.append(torch.softmax(scaling * (q[:, head] @ k[:, head].T), dim=-1))
+    weights = torch.stack(per_head)[..., :frames]
+    weights = (weights - weights.mean(-2, keepdim=True)) / weights.std(
+        -2, keepdim=True, unbiased=False
+    )
+    weights = _word_align_median_filter(weights, median_filter_width).mean(dim=0)
+    text_idx, time_idx = _dynamic_time_warping(-weights.double().cpu().numpy())
+    jumps = np.pad(np.diff(text_idx), (1, 0), constant_values=1).astype(bool)
+    return (time_idx[jumps] * time_precision).tolist()
+
+
 class WhisperPosEmbedType(enum.Enum):
     SINUSOIDAL = "sinusoidal"
     ROPE = "rope"
@@ -270,6 +361,11 @@ class WhisperCrossAttention(WhisperAttention):
             prefix=prefix,
             attn_type=AttentionType.ENCODER_DECODER,
         )
+        # Decoder-layer index for word-timestamp capture (-1 if not a decoder).
+        try:
+            self._align_layer = int(prefix.split("layers.")[1].split(".")[0])
+        except (IndexError, ValueError):
+            self._align_layer = -1
 
     def _init_qkv(
         self,
@@ -310,6 +406,14 @@ class WhisperCrossAttention(WhisperAttention):
             k, v = kv.split([self.kv_size, self.kv_size], dim=-1)
         else:
             k = v = None
+
+        # Capture Q (and encoder K at prefill) before the fused kernel.
+        if _WORD_ALIGN_ENABLED and self._align_layer >= 0:
+            torch.ops.whisper_align.capture(
+                q, k, _WORD_ALIGN_QBUF, _WORD_ALIGN_KBUF,
+                _WORD_ALIGN_QSLOT, _WORD_ALIGN_QPOS,
+                _WORD_ALIGN_KSLOT, _WORD_ALIGN_KPOS, self._align_layer,
+            )
 
         attn_output = self.attn(q, k, v)
 
@@ -785,8 +889,92 @@ class WhisperForConditionalGeneration(
     # Whisper only supports audio-conditioned generation.
     supports_transcription_only = True
     supports_segment_timestamp = True
+    supports_word_timestamp = True
     supports_explicit_language_detection = True
     supported_languages = ISO639_1_SUPPORTED_LANGS
+
+    def enable_word_align(
+        self,
+        alignment_heads: list[list[int]],
+        eos_token_id: int,
+        median_filter_width: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        max_slots: int,
+        max_q_tokens: int,
+        max_k_frames: int,
+    ) -> None:
+        """Allocate per-slot capture buffers and turn on cross-attention capture.
+
+        Called once by the model runner (before compilation) when word
+        timestamps are enabled. ``max_slots`` bounds the number of concurrent
+        word-timestamp requests; ``max_q_tokens``/``max_k_frames`` bound the
+        per-forward decoder-token / encoder-frame counts.
+        """
+        global _WORD_ALIGN_ENABLED, _WORD_ALIGN_QBUF, _WORD_ALIGN_KBUF
+        global _WORD_ALIGN_QSLOT, _WORD_ALIGN_QPOS, _WORD_ALIGN_KSLOT, _WORD_ALIGN_KPOS
+        cfg = self.config
+        n_layers = cfg.decoder_layers
+        n_heads = cfg.decoder_attention_heads
+        _WORD_ALIGN_QBUF = torch.zeros(
+            max_slots, n_layers, cfg.max_target_positions, cfg.d_model,
+            device=device, dtype=dtype,
+        )
+        _WORD_ALIGN_KBUF = torch.zeros(
+            max_slots, n_layers, cfg.max_source_positions, cfg.d_model,
+            device=device, dtype=dtype,
+        )
+        z = lambda n: torch.zeros(n, device=device, dtype=torch.long)  # noqa: E731
+        _WORD_ALIGN_QSLOT, _WORD_ALIGN_QPOS = z(max_q_tokens), z(max_q_tokens)
+        _WORD_ALIGN_KSLOT, _WORD_ALIGN_KPOS = z(max_k_frames), z(max_k_frames)
+        self._word_align_heads = [tuple(h) for h in alignment_heads]
+        self._word_align_eos = eos_token_id
+        self._word_align_mfw = median_filter_width
+        self._word_align_nheads = n_heads
+        self._word_align_hdim = cfg.d_model // n_heads
+        self._word_align_frames = cfg.max_source_positions * 2
+        _WORD_ALIGN_ENABLED = True
+
+    @staticmethod
+    def word_align_index_tensors() -> tuple[torch.Tensor, ...]:
+        """Return the (qslot, qpos, kslot, kpos) device buffers the runner
+        fills each step to route capture rows to per-request slots."""
+        return (
+            _WORD_ALIGN_QSLOT, _WORD_ALIGN_QPOS, _WORD_ALIGN_KSLOT, _WORD_ALIGN_KPOS,
+        )
+
+    def compute_word_align(
+        self,
+        req_ids: list[str],
+        sampled_token_ids: list[list[int]],
+        req_slots: dict[str, int],
+        req_npos: dict[str, int],
+    ) -> dict[str, list[float]] | None:
+        """DTW-align each request that finishes this step; return per-token times.
+
+        Reads each finishing request's own capture slot (``req_slots``) over its
+        ``req_npos`` decoder positions, so concurrent requests don't collide.
+        """
+        result: dict[str, list[float]] = {}
+        for i, req_id in enumerate(req_ids):
+            toks = sampled_token_ids[i] if i < len(sampled_token_ids) else None
+            if not toks or toks[-1] != self._word_align_eos:
+                continue
+            slot = req_slots.get(req_id)
+            n = req_npos.get(req_id, 0)
+            if slot is None or n <= 0:
+                continue
+            result[req_id] = _word_align_token_times(
+                _WORD_ALIGN_QBUF[slot],
+                _WORD_ALIGN_KBUF[slot],
+                n,
+                self._word_align_heads,
+                self._word_align_nheads,
+                self._word_align_hdim,
+                self._word_align_frames,
+                self._word_align_mfw,
+            )
+        return result or None
 
     @classmethod
     def validate_language(cls, language: str | None) -> str | None:
