@@ -25,6 +25,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVQuantMode,
     MambaSpec,
+    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -307,6 +308,7 @@ def _reshape_kv_cache(
                 layer_cache_dtype = (
                     "auto"
                     if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+                    and not isinstance(kv_cache_spec, TQFullAttentionSpec)
                     else cache_dtype
                 )
                 kv_cache_shape = group.backend.get_kv_cache_shape(
@@ -391,7 +393,10 @@ def _update_hybrid_attention_layout(
         # (quantization only changes the last dim), so this is a no-op today,
         # but it keeps both call sites consistent for skip layers.
         layer_cache_dtype = (
-            "auto" if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE else cache_dtype
+            "auto"
+            if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+            and not isinstance(kv_cache_spec, TQFullAttentionSpec)
+            else cache_dtype
         )
         block_dim = group.backend.get_kv_cache_block_dim(
             kernel_block_sizes[group.kv_cache_group_id],
