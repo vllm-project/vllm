@@ -99,6 +99,10 @@ _WORD_ALIGN_QSLOT: torch.Tensor | None = None  # [max_q_tokens]
 _WORD_ALIGN_QPOS: torch.Tensor | None = None  # [max_q_tokens]
 _WORD_ALIGN_KSLOT: torch.Tensor | None = None  # [max_k_frames]
 _WORD_ALIGN_KPOS: torch.Tensor | None = None  # [max_k_frames]
+# Actual (pre-padding) encoder-frame count per slot, for DTW cropping. Whisper
+# pads audio to 30s so the encoder always emits 1500 frames; without cropping to
+# the real length the DTW degenerates on short clips.
+_WORD_ALIGN_NFRAMES: torch.Tensor | None = None  # [max_slots]
 
 
 @torch.library.custom_op("whisper_align::capture", mutates_args={"qbuf", "kbuf"})
@@ -913,6 +917,7 @@ class WhisperForConditionalGeneration(
         """
         global _WORD_ALIGN_ENABLED, _WORD_ALIGN_QBUF, _WORD_ALIGN_KBUF
         global _WORD_ALIGN_QSLOT, _WORD_ALIGN_QPOS, _WORD_ALIGN_KSLOT, _WORD_ALIGN_KPOS
+        global _WORD_ALIGN_NFRAMES
         cfg = self.config
         n_layers = cfg.decoder_layers
         n_heads = cfg.decoder_attention_heads
@@ -927,12 +932,13 @@ class WhisperForConditionalGeneration(
         z = lambda n: torch.zeros(n, device=device, dtype=torch.long)  # noqa: E731
         _WORD_ALIGN_QSLOT, _WORD_ALIGN_QPOS = z(max_q_tokens), z(max_q_tokens)
         _WORD_ALIGN_KSLOT, _WORD_ALIGN_KPOS = z(max_k_frames), z(max_k_frames)
+        _WORD_ALIGN_NFRAMES = torch.full(
+            (max_slots,), cfg.max_source_positions, device=device, dtype=torch.long)
         self._word_align_heads = [tuple(h) for h in alignment_heads]
         self._word_align_eos = eos_token_id
         self._word_align_mfw = median_filter_width
         self._word_align_nheads = n_heads
         self._word_align_hdim = cfg.d_model // n_heads
-        self._word_align_frames = cfg.max_source_positions * 2
         _WORD_ALIGN_ENABLED = True
 
     @staticmethod
@@ -964,6 +970,8 @@ class WhisperForConditionalGeneration(
             n = req_npos.get(req_id, 0)
             if slot is None or n <= 0:
                 continue
+            # crop the DTW to this request's real audio length (not the 30s pad)
+            nframes = int(_WORD_ALIGN_NFRAMES[slot])
             result[req_id] = _word_align_token_times(
                 _WORD_ALIGN_QBUF[slot],
                 _WORD_ALIGN_KBUF[slot],
@@ -971,7 +979,7 @@ class WhisperForConditionalGeneration(
                 self._word_align_heads,
                 self._word_align_nheads,
                 self._word_align_hdim,
-                self._word_align_frames,
+                nframes * 2,
                 self._word_align_mfw,
             )
         return result or None
@@ -1149,10 +1157,27 @@ class WhisperForConditionalGeneration(
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         # Required as part of SupportsMultiModal interface.
         audio_input = self._parse_and_validate_audio_input(**kwargs)
+        feats = audio_input["input_features"]
         # Split concatenated encoder outputs into one tensor per audio input
-        enc_output = self.model.get_encoder_outputs(audio_input["input_features"])
+        enc_output = self.model.get_encoder_outputs(feats)
+        if _WORD_ALIGN_ENABLED and _WORD_ALIGN_NFRAMES is not None:
+            self._word_align_record_nframes(feats)
         # The assumption is we can only process whole mm items (audios)
         return enc_output.unbind(dim=0)
+
+    def _word_align_record_nframes(self, feats) -> None:
+        """Record each audio's real (pre-padding) encoder-frame count per slot,
+        so ``compute_word_align`` can crop the DTW to actual content. Whisper
+        pads audio to 30s with zeros, so the trailing mel columns are a constant
+        floor; the last column that differs from it marks the content boundary.
+        Runs at prefill (eager), matching the encoder-K slot order in KSLOT."""
+        src = int(self.config.max_source_positions)
+        for i, f in enumerate(feats):
+            f = f if f.ndim == 2 else f.reshape(f.shape[-2], f.shape[-1])
+            differs = (f != f[:, -1:]).any(dim=0).nonzero()
+            n_mel = int(differs.max().item()) + 1 if differs.numel() else f.shape[-1]
+            slot = int(_WORD_ALIGN_KSLOT[i * src].item())
+            _WORD_ALIGN_NFRAMES[slot] = max(1, min(src, n_mel // 2))
 
     def embed_input_ids(
         self,
