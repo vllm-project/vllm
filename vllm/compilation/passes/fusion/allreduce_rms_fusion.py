@@ -11,6 +11,7 @@ import torch.fx as fx
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._inductor.pattern_matcher import PatternMatcherPass
 
+import vllm.envs as envs
 import vllm.ir.ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.passes.fusion.rms_quant_fusion import (
@@ -19,7 +20,11 @@ from vllm.compilation.passes.fusion.rms_quant_fusion import (
 from vllm.config import VllmConfig
 from vllm.config.utils import Range
 from vllm.distributed import get_tp_group, tensor_model_parallel_all_reduce
+from vllm.distributed.device_communicators.all_reduce_utils import (
+    effective_fi_allreduce_fusion_max_bytes,
+)
 from vllm.distributed.device_communicators.custom_all_reduce import CustomAllreduce
+from vllm.distributed.device_communicators.symm_mem import SymmMemCommunicator
 from vllm.distributed.parallel_state import (
     get_tensor_model_parallel_rank,
     get_tensor_model_parallel_world_size,
@@ -965,6 +970,32 @@ class AllReduceFusionPass(VllmPatternMatcherPass):
                 self.tp_size,
             )
             return
+        # Clamp the fusion byte cap by the active fast unfused-AR threshold:
+        # on multimem-capable hardware ``multimem_all_reduce`` takes over
+        # above ``CUSTOM_ALL_REDUCE_MAX_SIZES[cap][ws]`` and is faster than
+        # flashinfer's one-shot AR, so keeping the fusion eligible above that
+        # point trades a fast unfused AR for a slower fused one. No-op on
+        # configurations without a multimem / NCCL-symm-mem fast path.
+        capability = current_platform.get_device_capability()
+        if capability is not None:
+            capability_str = capability.as_version_str()
+            multimem_active = (
+                envs.VLLM_ALLREDUCE_USE_SYMM_MEM
+                and capability_str in SymmMemCommunicator._WORLD_SIZES_MULTIMEM
+                and self.tp_size
+                in SymmMemCommunicator._WORLD_SIZES_MULTIMEM[capability_str]
+            )
+            # NCCL symm-mem gating is implemented + unit-tested in the helper
+            # but left disabled here pending hardware validation: the
+            # 256KB-512KB regression was only measured for the multimem path.
+            # Enabling the nccl_symm_active path is a follow-up.
+            max_size = effective_fi_allreduce_fusion_max_bytes(
+                capability_str=capability_str,
+                world_size=self.tp_size,
+                base_cap_bytes=max_size,
+                multimem_active=multimem_active,
+                nccl_symm_active=False,
+            )
         element_size = torch.tensor([], dtype=self.model_dtype).element_size()
         self.max_token_num = max_size // (self.hidden_dim * element_size)
         # take the min to save workspace size and we'll never use more
