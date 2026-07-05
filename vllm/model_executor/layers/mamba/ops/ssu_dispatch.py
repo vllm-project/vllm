@@ -205,11 +205,14 @@ class CPUSSUBackend(MambaSSUBackend):
             _ = ops.selective_state_update_cpu
             self._use_cpp = True
             self._cpp_kernel = ops.selective_state_update_cpu
-            logger.info("CPUSSUBackend: using compiled C++ selective_state_update kernel.")
+            logger.info(
+                "CPUSSUBackend: using compiled C++ selective_state_update kernel."
+            )
         except (ImportError, AttributeError):
             from vllm.model_executor.layers.mamba.ops.cpu_fallbacks import (
                 _selective_state_update_cpu,
             )
+
             self._use_cpp = False
             self._py_kernel = _selective_state_update_cpu
             logger.warning(
@@ -392,4 +395,3 @@ def selective_state_update(
         cu_seqlens=cu_seqlens,
         is_blackwell=is_blackwell,
     )
-

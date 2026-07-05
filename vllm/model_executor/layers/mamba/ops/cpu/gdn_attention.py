@@ -231,4 +231,3 @@ def register_cpu_gdn_attention_ops() -> None:
         fake_impl=cpu_gdn_attention_core_fake,
     )
     _CPU_GDN_ATTENTION_OPS_REGISTERED = True
-

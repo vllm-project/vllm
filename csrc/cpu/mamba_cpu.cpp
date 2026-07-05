@@ -16,13 +16,11 @@
 // causal_conv1d_update
 // ---------------------------------------------------------------------------
 at::Tensor causal_conv1d_update_cpu_impl(
-    at::Tensor& x,
-    at::Tensor& conv_state, const at::Tensor& weight,
+    at::Tensor& x, at::Tensor& conv_state, const at::Tensor& weight,
     const c10::optional<at::Tensor>& bias,
     const c10::optional<std::string>& activation,
     const c10::optional<at::Tensor>& conv_state_indices,
     const c10::optional<at::Tensor>& query_start_loc, int64_t pad_slot_id) {
-
   bool do_silu = false;
   if (activation.has_value()) {
     const std::string& act = activation.value();
@@ -43,27 +41,28 @@ at::Tensor causal_conv1d_update_cpu_impl(
   // state_c and conv_state may be non-contiguous — that is intentional.
 
   // Weight: coerce to same dtype if needed (should match in practice)
-  at::Tensor w_c = (weight.scalar_type() != dtype) ?
-      weight.to(dtype).contiguous() :
-      (weight.is_contiguous() ? weight : weight.contiguous());
+  at::Tensor w_c =
+      (weight.scalar_type() != dtype)
+          ? weight.to(dtype).contiguous()
+          : (weight.is_contiguous() ? weight : weight.contiguous());
 
   // Bias stays float32 (small scalar, used only for fp32 accumulation)
   at::Tensor bias_f32;
   if (bias.has_value() && bias.value().defined())
     bias_f32 = bias.value().to(at::kFloat).contiguous();
 
-  int64_t batch     = x_c.size(0);
-  int64_t dim       = x_c.size(1);
-  int64_t seqlen    = (x_c.dim() == 3) ? x_c.size(2) : 1;
-  int64_t width     = w_c.size(1);
+  int64_t batch = x_c.size(0);
+  int64_t dim = x_c.size(1);
+  int64_t seqlen = (x_c.dim() == 3) ? x_c.size(2) : 1;
+  int64_t width = w_c.size(1);
   int64_t state_len = state_c.size(2);
 
-  // Extract strides — works for contiguous AND non-contiguous (transposed) state.
-  // stride(0): between cache slots (e.g. num_slots × dim × width-1 in contiguous)
-  // stride(1): between conv channels (dim stride)
-  // stride(2): between state elements (=1 when contiguous, =dim when transposed)
-  int64_t stride_s_slot  = state_c.stride(0);
-  int64_t stride_s_dim   = state_c.stride(1);
+  // Extract strides — works for contiguous AND non-contiguous (transposed)
+  // state. stride(0): between cache slots (e.g. num_slots × dim × width-1 in
+  // contiguous) stride(1): between conv channels (dim stride) stride(2):
+  // between state elements (=1 when contiguous, =dim when transposed)
+  int64_t stride_s_slot = state_c.stride(0);
+  int64_t stride_s_dim = state_c.stride(1);
   int64_t stride_s_state = state_c.stride(2);
 
   at::Tensor out = at::empty_like(x_c);  // native dtype, no float32 alloc
@@ -77,14 +76,12 @@ at::Tensor causal_conv1d_update_cpu_impl(
 
   VLLM_DISPATCH_FLOATING_TYPES(dtype, "causal_conv1d_update", [&] {
     mamba_cpu::causal_conv1d_update_kernel<scalar_t>(
-        x_c.data_ptr<scalar_t>(),
-        state_c.data_ptr<scalar_t>(),
-        stride_s_slot, stride_s_dim, stride_s_state,
-        w_c.data_ptr<scalar_t>(),
+        x_c.data_ptr<scalar_t>(), state_c.data_ptr<scalar_t>(), stride_s_slot,
+        stride_s_dim, stride_s_state, w_c.data_ptr<scalar_t>(),
         bias_f32.defined() ? bias_f32.data_ptr<float>() : nullptr,
-        out.data_ptr<scalar_t>(),
-        cache_idx_ptr, static_cast<int32_t>(pad_slot_id),
-        batch, dim, seqlen, width, state_len, do_silu);
+        out.data_ptr<scalar_t>(), cache_idx_ptr,
+        static_cast<int32_t>(pad_slot_id), batch, dim, seqlen, width, state_len,
+        do_silu);
   });
 
   // Write back only when a type-conversion copy was made.
@@ -94,28 +91,21 @@ at::Tensor causal_conv1d_update_cpu_impl(
   return out;
 }
 
-
 // ---------------------------------------------------------------------------
 // selective_state_update
 // ---------------------------------------------------------------------------
 void selective_state_update_cpu_impl(
     at::Tensor& state,    // (nstates, nheads, dim, dstate)
     const at::Tensor& x,  // (N, nheads, dim)
-    const at::Tensor& dt,
-    const at::Tensor& A,
-    const at::Tensor& B,
-    const at::Tensor& C,
-    const c10::optional<at::Tensor>& D,
+    const at::Tensor& dt, const at::Tensor& A, const at::Tensor& B,
+    const at::Tensor& C, const c10::optional<at::Tensor>& D,
     const c10::optional<at::Tensor>& z,
-    const c10::optional<at::Tensor>& dt_bias,
-    bool dt_softplus,
+    const c10::optional<at::Tensor>& dt_bias, bool dt_softplus,
     const c10::optional<at::Tensor>& state_batch_indices,
     const c10::optional<at::Tensor>& dst_state_batch_indices,
-    int64_t null_block_id,
-    at::Tensor& out,
+    int64_t null_block_id, at::Tensor& out,
     const c10::optional<at::Tensor>& num_accepted_tokens,
-    const c10::optional<at::Tensor>& cu_seqlens
-) {
+    const c10::optional<at::Tensor>& cu_seqlens) {
   at::ScalarType state_type = state.scalar_type();
   at::ScalarType input_type = x.scalar_type();
 
@@ -148,7 +138,7 @@ void selective_state_update_cpu_impl(
     return r.is_contiguous() ? r : r.contiguous();
   };
 
-  at::Tensor A_f32      = to_per_head_1d_f32(A);  // (nheads,) float32
+  at::Tensor A_f32 = to_per_head_1d_f32(A);  // (nheads,) float32
   at::Tensor D_f32, dt_bias_f32;
   if (D.has_value() && D.value().defined())
     D_f32 = to_per_head_1d_f32(D.value());
@@ -185,14 +175,16 @@ void selective_state_update_cpu_impl(
   int64_t stride_out_h = out.stride(1);
 
   // Optional index pointers
-  auto get_int32_ptr = [](const c10::optional<at::Tensor>& opt) -> const int32_t* {
-    return (opt.has_value() && opt.value().defined()) ?
-        opt.value().data_ptr<int32_t>() : nullptr;
+  auto get_int32_ptr =
+      [](const c10::optional<at::Tensor>& opt) -> const int32_t* {
+    return (opt.has_value() && opt.value().defined())
+               ? opt.value().data_ptr<int32_t>()
+               : nullptr;
   };
-  const int32_t* sbi_ptr  = get_int32_ptr(state_batch_indices);
+  const int32_t* sbi_ptr = get_int32_ptr(state_batch_indices);
   const int32_t* dsbi_ptr = get_int32_ptr(dst_state_batch_indices);
-  const int32_t* nat_ptr  = get_int32_ptr(num_accepted_tokens);
-  const int32_t* csl_ptr  = get_int32_ptr(cu_seqlens);
+  const int32_t* nat_ptr = get_int32_ptr(num_accepted_tokens);
+  const int32_t* csl_ptr = get_int32_ptr(cu_seqlens);
 
   // Dispatch on (state_t, input_t, out_t): write directly into `out`
   // without any intermediate float32 buffer.
@@ -203,42 +195,37 @@ void selective_state_update_cpu_impl(
       VLLM_DISPATCH_FLOATING_TYPES(out.scalar_type(), "ssu_out", [&] {
         using out_t = scalar_t;
         mamba_cpu::selective_state_update_kernel<state_t, input_t, out_t>(
-            state.data_ptr<state_t>(),
-            stride_state_n, stride_state_h, stride_state_d,
-            x_in.data_ptr<input_t>(),
-            stride_x_n, stride_x_h,
-            dt_f32.data_ptr<float>(),
-            stride_dt_n,
-            A_f32.data_ptr<float>(),
-            B_in.data_ptr<input_t>(), C_in.data_ptr<input_t>(),
-            stride_BC_n, stride_BC_g,
-            D_f32.defined() ? D_f32.data_ptr<float>() : nullptr,
+            state.data_ptr<state_t>(), stride_state_n, stride_state_h,
+            stride_state_d, x_in.data_ptr<input_t>(), stride_x_n, stride_x_h,
+            dt_f32.data_ptr<float>(), stride_dt_n, A_f32.data_ptr<float>(),
+            B_in.data_ptr<input_t>(), C_in.data_ptr<input_t>(), stride_BC_n,
+            stride_BC_g, D_f32.defined() ? D_f32.data_ptr<float>() : nullptr,
             z_in.defined() ? z_in.data_ptr<input_t>() : nullptr,
             dt_bias_f32.defined() ? dt_bias_f32.data_ptr<float>() : nullptr,
-            out.data_ptr<out_t>(),
-            stride_out_n, stride_out_h,
-            sbi_ptr, dsbi_ptr, static_cast<int32_t>(null_block_id),
-            nat_ptr, csl_ptr, N, nheads, ngroups, dim, dstate, dt_softplus);
+            out.data_ptr<out_t>(), stride_out_n, stride_out_h, sbi_ptr,
+            dsbi_ptr, static_cast<int32_t>(null_block_id), nat_ptr, csl_ptr, N,
+            nheads, ngroups, dim, dstate, dt_softplus);
       });
     });
   });
 }
 
-
 // ---------------------------------------------------------------------------
 // mamba_chunk_scan_fwd_cpu
 // ---------------------------------------------------------------------------
 void mamba_chunk_scan_fwd_cpu_impl(
-    at::Tensor& out,          // [seqlen, nheads, headdim] — pre-allocated by caller
-    at::Tensor& final_states, // [batch, nheads, headdim, dstate] float32 contiguous
-    const at::Tensor& x,      // [seqlen, nheads, headdim]
-    const at::Tensor& dt,     // [seqlen, nheads] float32 (preprocessed: bias+softplus+clamp)
-    const at::Tensor& A,      // [nheads] float32
-    const at::Tensor& B,      // [seqlen, ngroups, dstate]
-    const at::Tensor& C,      // [seqlen, ngroups, dstate]
-    const c10::optional<at::Tensor>& D,    // [nheads] float32 (optional)
-    const c10::optional<at::Tensor>& z,    // [seqlen, nheads, headdim] (optional)
-    const at::Tensor& cu_seqlens           // [batch+1] int32
+    at::Tensor& out,  // [seqlen, nheads, headdim] — pre-allocated by caller
+    at::Tensor&
+        final_states,     // [batch, nheads, headdim, dstate] float32 contiguous
+    const at::Tensor& x,  // [seqlen, nheads, headdim]
+    const at::Tensor&
+        dt,  // [seqlen, nheads] float32 (preprocessed: bias+softplus+clamp)
+    const at::Tensor& A,                 // [nheads] float32
+    const at::Tensor& B,                 // [seqlen, ngroups, dstate]
+    const at::Tensor& C,                 // [seqlen, ngroups, dstate]
+    const c10::optional<at::Tensor>& D,  // [nheads] float32 (optional)
+    const c10::optional<at::Tensor>& z,  // [seqlen, nheads, headdim] (optional)
+    const at::Tensor& cu_seqlens         // [batch+1] int32
 ) {
   const at::ScalarType input_type = x.scalar_type();
 
@@ -264,36 +251,33 @@ void mamba_chunk_scan_fwd_cpu_impl(
   at::Tensor D_f32;
   if (D.has_value() && D.value().defined()) D_f32 = to_per_head_f32(D.value());
 
-  // dt: [seqlen, nheads] float32 — caller has applied bias+softplus+clamp in Python.
+  // dt: [seqlen, nheads] float32 — caller has applied bias+softplus+clamp in
+  // Python.
   at::Tensor dt_c = dt.is_contiguous() ? dt : dt.contiguous();
   if (dt_c.scalar_type() != at::kFloat) dt_c = dt_c.to(at::kFloat);
 
   at::Tensor cu_int = cu_seqlens.to(at::kInt).contiguous();
 
-  const int64_t batch   = final_states.size(0);
-  const int64_t nheads  = final_states.size(1);
+  const int64_t batch = final_states.size(0);
+  const int64_t nheads = final_states.size(1);
   const int64_t headdim = final_states.size(2);
-  const int64_t dstate  = final_states.size(3);
+  const int64_t dstate = final_states.size(3);
   const int64_t ngroups = B_in.size(1);
 
   TORCH_CHECK(final_states.is_contiguous(),
-      "mamba_chunk_scan_fwd_cpu: final_states must be contiguous");
+              "mamba_chunk_scan_fwd_cpu: final_states must be contiguous");
   TORCH_CHECK(out.is_contiguous(),
-      "mamba_chunk_scan_fwd_cpu: out must be contiguous (writes via raw data_ptr)");
+              "mamba_chunk_scan_fwd_cpu: out must be contiguous (writes via "
+              "raw data_ptr)");
 
   VLLM_DISPATCH_FLOATING_TYPES(input_type, "mamba_chunk_scan_fwd_cpu", [&] {
     mamba_cpu::mamba_chunk_scan_fwd_kernel<scalar_t>(
-        final_states.data_ptr<float>(),
-        x_in.data_ptr<scalar_t>(),
-        dt_c.data_ptr<float>(),
-        A_f32.data_ptr<float>(),
-        B_in.data_ptr<scalar_t>(),
-        C_in.data_ptr<scalar_t>(),
+        final_states.data_ptr<float>(), x_in.data_ptr<scalar_t>(),
+        dt_c.data_ptr<float>(), A_f32.data_ptr<float>(),
+        B_in.data_ptr<scalar_t>(), C_in.data_ptr<scalar_t>(),
         D_f32.defined() ? D_f32.data_ptr<float>() : nullptr,
         z_in.defined() ? z_in.data_ptr<scalar_t>() : nullptr,
-        out.data_ptr<scalar_t>(),
-        cu_int.data_ptr<int32_t>(),
-        batch, nheads, ngroups, headdim, dstate);
+        out.data_ptr<scalar_t>(), cu_int.data_ptr<int32_t>(), batch, nheads,
+        ngroups, headdim, dstate);
   });
 }
-

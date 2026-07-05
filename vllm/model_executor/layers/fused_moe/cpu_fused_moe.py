@@ -475,7 +475,7 @@ class CPUFusedMOE:
         num_tokens: int = input.shape[0]
         hidden_dim: int = input.shape[1]
         num_experts: int = layer.w13_weight.shape[0]
-        gate_up_dim: int = layer.w13_weight.shape[1]   # gate + up concatenated
+        gate_up_dim: int = layer.w13_weight.shape[1]  # gate + up concatenated
         top_k: int = topk_ids.shape[1]
         act_fn = _CPU_MOE_ACT_FN[activation]
 
@@ -493,7 +493,6 @@ class CPUFusedMOE:
 
         # Apply gating activation: (T, E, gate+up) → (T, E, down_dim)
         gate_up_act = act_fn(gate_up_all)
-        down_dim: int = gate_up_act.shape[-1]
 
         # ------------------------------------------------------------------
         # 2. Down — batched GEMM over experts.
@@ -501,7 +500,7 @@ class CPUFusedMOE:
         #    w2_weight: (E, out, down_dim) → transpose → (E, down_dim, out)
         #    bmm: (E, T, down_dim) @ (E, down_dim, out) → (E, T, out)
         # ------------------------------------------------------------------
-        gate_up_t = gate_up_act.permute(1, 0, 2).contiguous()   # (E, T, down)
+        gate_up_t = gate_up_act.permute(1, 0, 2).contiguous()  # (E, T, down)
         down_all = torch.bmm(
             gate_up_t,
             layer.w2_weight.transpose(1, 2),
@@ -525,12 +524,10 @@ class CPUFusedMOE:
             output.add_(down_all[t_idx, expert_ids, :])
         else:
             for k in range(top_k):
-                expert_ids = topk_ids[:, k].long()        # (T,)
+                expert_ids = topk_ids[:, k].long()  # (T,)
                 w_k = topk_weights[:, k].to(input.dtype)  # (T,)
-                expert_out = down_all[t_idx, expert_ids, :]       # (T, out)
-                output.addcmul_(
-                    expert_out, w_k.unsqueeze(-1).expand_as(expert_out)
-                )
+                expert_out = down_all[t_idx, expert_ids, :]  # (T, out)
+                output.addcmul_(expert_out, w_k.unsqueeze(-1).expand_as(expert_out))
 
         return output
 
@@ -596,4 +593,3 @@ direct_register_custom_op(
     op_func=cpu_fused_moe_torch,
     mutates_args=["output"],
 )
-

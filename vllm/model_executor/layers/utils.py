@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility methods for model layers."""
 
+import contextlib
 from collections.abc import Callable
 
 import torch
@@ -239,8 +240,10 @@ def dispatch_cpu_unquantized_gemm(
     if layer.weight.ndim != 2:
         # this is not a linear layer
         # For now it should be a causal_conv1d op or MoE 3D expert weights
-        if torch.cpu._is_amx_tile_supported() and hasattr(ops, "causal_conv1d_weight_pack"):
-            try:
+        if torch.cpu._is_amx_tile_supported() and hasattr(
+            ops, "causal_conv1d_weight_pack"
+        ):
+            with contextlib.suppress(Exception):
                 # prepack conv weight
                 layer.weight.data = ops.causal_conv1d_weight_pack(
                     layer.weight.view(
@@ -248,8 +251,6 @@ def dispatch_cpu_unquantized_gemm(
                         layer.weight.size(2),
                     )
                 )
-            except Exception:
-                pass
         layer.cpu_linear = lambda x, weight, bias: torch.nn.functional.linear(
             x, weight, bias
         )

@@ -3422,7 +3422,6 @@ def causal_conv1d_fwd_cpu(
     )
 
 
-
 class CPUDNNLGEMMHandler:
     def __init__(self) -> None:
         self.handler_tensor: torch.Tensor | None = None
@@ -3876,4 +3875,3 @@ if hasattr(torch.ops._C, "minimax_allreduce_rms_qk"):
             torch.empty([token_num, q_size], dtype=qkv.dtype, device=qkv.device),
             torch.empty([token_num, kv_size], dtype=qkv.dtype, device=qkv.device),
         )
-

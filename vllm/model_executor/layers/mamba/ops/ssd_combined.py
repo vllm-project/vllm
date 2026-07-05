@@ -264,4 +264,3 @@ def mamba_chunk_scan_combined_varlen(
     )
 
     return varlen_states
-

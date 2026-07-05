@@ -15,7 +15,6 @@ from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
 from .cpu_fallbacks import _causal_conv1d_fn_cpu, _causal_conv1d_update_cpu
 
 
-
 @triton.jit()
 def _causal_conv1d_fwd_kernel(  # continuous batching
     # Pointers to matrices

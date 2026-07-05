@@ -16,6 +16,9 @@ from packaging import version
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
+from vllm.model_executor.layers.mamba.ops.cpu_fallbacks import (
+    _selective_state_update_cpu,
+)
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
@@ -870,7 +873,6 @@ def selective_scan_fn(
         return z  # output written inplace to z
 
 
-
 def selective_state_update(
     state,
     x,
@@ -919,17 +921,35 @@ def selective_state_update(
         _sbi = state_batch_indices
         _dsbi = dst_state_batch_indices
         ops.selective_state_update_cpu(
-            _state, _x, _dt, _A, _B, _C,
-            _D, _z, _dt_bias, dt_softplus,
-            _sbi, _dsbi,
-            null_block_id, _out,
-            num_accepted_tokens, cu_seqlens,
+            _state,
+            _x,
+            _dt,
+            _A,
+            _B,
+            _C,
+            _D,
+            _z,
+            _dt_bias,
+            dt_softplus,
+            _sbi,
+            _dsbi,
+            null_block_id,
+            _out,
+            num_accepted_tokens,
+            cu_seqlens,
         )
         return _out.squeeze(1) if out.dim() == 2 else _out
 
     return _selective_state_update_cuda(
-        state, x, dt, A, B, C,
-        D=D, z=z, dt_bias=dt_bias,
+        state,
+        x,
+        dt,
+        A,
+        B,
+        C,
+        D=D,
+        z=z,
+        dt_bias=dt_bias,
         dt_softplus=dt_softplus,
         state_batch_indices=state_batch_indices,
         dst_state_batch_indices=dst_state_batch_indices,

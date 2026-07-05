@@ -429,5 +429,3 @@ def _mamba_chunk_scan_combined_fwd_cpu(
     all_states = all_states.to(out_dtype)
 
     return all_states
-
-
