@@ -506,6 +506,14 @@ class LlamaBidirectionalConfig(VerifyAndUpdateConfig):
         model_config.pooler_config.seq_pooling_type = pooling_type
 
 
+class EuroBertModelConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        # EuroBERT is a bidirectional (encoder-only) Llama. The HF config does
+        # not set `is_causal`, so enable bidirectional attention explicitly.
+        model_config.hf_config.is_causal = False
+
+
 class LlamaNemotronVLConfig(VerifyAndUpdateConfig):
     """Config handler for LlamaNemotronVL embedding models."""
 
@@ -816,6 +824,8 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
     "Ernie4_5_VLMoeForConditionalGeneration": Ernie4_5_VLMoeForConditionalGenerationConfig,  # noqa: E501
+    "EuroBertForMaskedLM": EuroBertModelConfig,
+    "EuroBertModel": EuroBertModelConfig,
     "FalconMambaForCausalLM": MambaModelConfig,
     "Gemma3TextModel": Gemma3TextModelConfig,
     "Gemma4ForCausalLM": Gemma4Config,
