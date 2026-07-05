@@ -41,7 +41,7 @@ class CPUOffloadingSpec(OffloadingSpec):
             ),
             CPUOffloadingMetrics.CPU_ALLOCATION_SIZE: OffloadingHistogramMetadata(
                 documentation=(
-                    "Histogram of the number of CPU blocks allocated by each "
+                    "Histogram of the number of CPU blocks requested by each "
                     "KV offload prepare_store call."
                 ),
                 buckets=(1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144),
