@@ -210,6 +210,22 @@ if(VLLM_GPU_LANG STREQUAL "CUDA")
   # `arch=compute_*`. If a kernel really needs PTX, add `+PTX` to that kernel's
   # component-specific arch list below.
   #
+  if(DEFINED ENV{TORCH_CUDA_ARCH_LIST})
+    string(REGEX REPLACE "[ ;,]+" ";" _TORCH_CUDA_ARCH_LIST
+      "$ENV{TORCH_CUDA_ARCH_LIST}")
+    foreach(_TORCH_CUDA_ARCH ${_TORCH_CUDA_ARCH_LIST})
+      if(_TORCH_CUDA_ARCH MATCHES "\\+PTX$")
+        message(WARNING
+          "`+PTX` entries in TORCH_CUDA_ARCH_LIST are ignored by vLLM's "
+          "per-kernel CUDA arch selection. Add `+PTX` to the relevant "
+          "component-specific CMake arch list instead.")
+        break()
+      endif()
+    endforeach()
+    unset(_TORCH_CUDA_ARCH)
+    unset(_TORCH_CUDA_ARCH_LIST)
+  endif()
+
   clear_cuda_arches(CUDA_ARCH_FLAGS)
   extract_unique_cuda_archs_ascending(CUDA_ARCHS "${CUDA_ARCH_FLAGS}")
   message(STATUS "CUDA target architectures: ${CUDA_ARCHS}")
