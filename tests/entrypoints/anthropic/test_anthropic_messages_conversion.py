@@ -8,6 +8,8 @@ AnthropicServingMessages._convert_anthropic_to_openai_request().
 Also covers extended-thinking edge cases such as ``redacted_thinking``
 blocks echoed back by Anthropic clients, and streaming conversion in
 ``message_stream_converter``.
+
+Also covers cache usage computation in ``_build_anthropic_usage``.
 """
 
 import json
@@ -18,15 +20,23 @@ import pytest
 from vllm.entrypoints.anthropic.protocol import (
     AnthropicMessagesRequest,
 )
-from vllm.entrypoints.anthropic.serving import AnthropicServingMessages
+from vllm.entrypoints.anthropic.serving import (
+    AnthropicServingMessages,
+    _build_anthropic_usage,
+    _get_cached_tokens,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionResponse,
+    ChatCompletionResponseChoice,
     ChatCompletionResponseStreamChoice,
     ChatCompletionStreamResponse,
+    ChatMessage,
 )
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
+    PromptTokenUsageInfo,
     UsageInfo,
 )
 
@@ -653,12 +663,115 @@ class TestThinkingBlockConversion:
         assert asst.get("content") == "Hi!"
 
 
+# ======================================================================
+# Cache usage computation
+# ======================================================================
+
+
+class TestGetCachedTokens:
+    """Tests for _get_cached_tokens helper."""
+
+    def test_none_usage(self):
+        assert _get_cached_tokens(None) is None
+
+    def test_no_prompt_tokens_details(self):
+        usage = UsageInfo(prompt_tokens=100, completion_tokens=10)
+        assert _get_cached_tokens(usage) is None
+
+    def test_cached_tokens_present(self):
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=80),
+        )
+        assert _get_cached_tokens(usage) == 80
+
+    def test_cached_tokens_zero(self):
+        """Zero cached tokens should return 0, not None."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=0),
+        )
+        assert _get_cached_tokens(usage) == 0
+
+    def test_cached_tokens_none_in_details(self):
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=None),
+        )
+        assert _get_cached_tokens(usage) is None
+
+
+class TestBuildAnthropicUsage:
+    """Tests for _build_anthropic_usage helper.
+
+    Anthropic defines: total_input = input_tokens + cache_read + cache_creation
+    vLLM's prompt_tokens is the total.
+    """
+
+    def test_no_cache_info(self):
+        """When cache info is unavailable, return raw prompt_tokens."""
+        result = _build_anthropic_usage(100, 10, None)
+        assert result.input_tokens == 100
+        assert result.output_tokens == 10
+        assert result.cache_read_input_tokens is None
+        assert result.cache_creation_input_tokens is None
+
+    def test_cache_hit(self):
+        """When cache is hit, input_tokens excludes cached tokens."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=80),
+        )
+        result = _build_anthropic_usage(100, 10, usage)
+        assert result.input_tokens == 20  # 100 - 80
+        assert result.output_tokens == 10
+        assert result.cache_read_input_tokens == 80
+        assert result.cache_creation_input_tokens == 0
+
+    def test_zero_cached_tokens(self):
+        """Zero cached tokens should still set cache_creation to 0."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=0),
+        )
+        result = _build_anthropic_usage(100, 10, usage)
+        assert result.input_tokens == 100  # 100 - 0
+        assert result.cache_read_input_tokens == 0
+        assert result.cache_creation_input_tokens == 0
+
+    def test_all_tokens_cached(self):
+        """When all tokens are cached, input_tokens should be 0."""
+        usage = UsageInfo(
+            prompt_tokens=100,
+            completion_tokens=10,
+            prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=100),
+        )
+        result = _build_anthropic_usage(100, 10, usage)
+        assert result.input_tokens == 0
+        assert result.cache_read_input_tokens == 100
+        assert result.cache_creation_input_tokens == 0
+
+    def test_no_prompt_tokens_details(self):
+        """UsageInfo without prompt_tokens_details returns no cache info."""
+        usage = UsageInfo(prompt_tokens=100, completion_tokens=10)
+        result = _build_anthropic_usage(100, 10, usage)
+        assert result.input_tokens == 100
+        assert result.cache_read_input_tokens is None
+        assert result.cache_creation_input_tokens is None
+
+
 class TestInlineSystemMessageInMessagesArray:
     """Verify that ``role: system`` messages embedded inside the ``messages``
-    array are accepted and merged with the top-level ``system`` prompt.
+    array are preserved in their original position.
 
-    This handles clients that place system messages inside the messages array
-    instead of the Anthropic-standard top-level ``system`` field.
+    Unlike the previous approach that merged all system messages into a single
+    leading system message (breaking prefix caching), this preserves the
+    conversation structure so KV-cache hits remain intact.
     """
 
     def test_inline_system_merged_with_top_level_system(self):
@@ -706,17 +819,15 @@ class TestInlineSystemMessageInMessagesArray:
 
         result = _convert(request)
 
-        # First message should be the merged system prompt.
+        # First message: top-level system prompt (billing header stripped).
         assert result.messages[0]["role"] == "system"
-        # Billing header stripped, inline system appended.
         assert (
             result.messages[0]["content"]
             == "You are Claude Code, Anthropic's official CLI for Claude."
             "...."
-            "....."
         )
 
-        # Second message should be the user message, content preserved.
+        # Second message: user message, content preserved at original position.
         assert result.messages[1]["role"] == "user"
         user_content = result.messages[1]["content"]
         assert len(user_content) == 2
@@ -729,6 +840,11 @@ class TestInlineSystemMessageInMessagesArray:
             "text": "help?",
         }
 
+        # Third message: inline system stays in original position
+        # (after user, not merged into leading system).
+        assert result.messages[2]["role"] == "system"
+        assert result.messages[2]["content"] == "....."
+
     def test_inline_system_string_only(self):
         """Only an inline system string, no top-level system."""
         request = _make_request(
@@ -739,9 +855,11 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
-        assert result.messages[0]["role"] == "system"
-        assert result.messages[0]["content"] == "Be concise."
-        assert result.messages[1]["role"] == "user"
+        # Inline system stays in its original position.
+        assert result.messages[0]["role"] == "user"
+        assert result.messages[0]["content"] == "Hello"
+        assert result.messages[1]["role"] == "system"
+        assert result.messages[1]["content"] == "Be concise."
 
     def test_inline_system_list_content(self):
         """Inline system with list content blocks."""
@@ -759,11 +877,15 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
-        assert result.messages[0]["role"] == "system"
-        assert result.messages[0]["content"] == "Part one. Part two."
+        # Inline system stays in its original position;
+        # text blocks are concatenated (same as top-level system).
+        assert result.messages[0]["role"] == "user"
+        assert result.messages[0]["content"] == "Hi"
+        assert result.messages[1]["role"] == "system"
+        assert result.messages[1]["content"] == "Part one. Part two."
 
     def test_multiple_inline_system_messages(self):
-        """Multiple inline system messages should all be merged."""
+        """Multiple inline system messages each stay in their position."""
         request = _make_request(
             [
                 {"role": "system", "content": "First system."},
@@ -773,9 +895,13 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
+        # Each system message stays in its original position.
         assert result.messages[0]["role"] == "system"
-        assert result.messages[0]["content"] == "First system.Second system."
+        assert result.messages[0]["content"] == "First system."
         assert result.messages[1]["role"] == "user"
+        assert result.messages[1]["content"] == "Hello"
+        assert result.messages[2]["role"] == "system"
+        assert result.messages[2]["content"] == "Second system."
 
     def test_inline_system_with_top_level_string(self):
         """Top-level system is a string, inline system is also present."""
@@ -788,9 +914,59 @@ class TestInlineSystemMessageInMessagesArray:
         )
         result = _convert(request)
 
+        # Top-level system goes first; inline system stays in position.
         assert result.messages[0]["role"] == "system"
-        assert result.messages[0]["content"] == "Top-level prompt.Inline hint."
+        assert result.messages[0]["content"] == "Top-level prompt."
         assert result.messages[1]["role"] == "user"
+        assert result.messages[1]["content"] == "Hello"
+        assert result.messages[2]["role"] == "system"
+        assert result.messages[2]["content"] == "Inline hint."
+
+    def test_inline_system_billing_header_stripped(self):
+        """Inline system that is only a billing header is omitted."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "system",
+                    "content": "x-anthropic-billing-header: cc_version=2.1.160",
+                },
+                {"role": "assistant", "content": "Hi there"},
+            ]
+        )
+        result = _convert(request)
+
+        # Billing-header-only system message should be dropped entirely.
+        assert len(result.messages) == 2
+        assert result.messages[0]["role"] == "user"
+        assert result.messages[1]["role"] == "assistant"
+
+    def test_inline_system_billing_header_mixed_with_content(self):
+        """Inline system with billing header block + real content."""
+        request = _make_request(
+            [
+                {"role": "user", "content": "Hello"},
+                {
+                    "role": "system",
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "x-anthropic-billing-header: "
+                            "cc_version=2.1.160.bca; cch=d1d48;",
+                        },
+                        {"type": "text", "text": "Real system content."},
+                    ],
+                },
+            ]
+        )
+        result = _convert(request)
+
+        # Billing header stripped, real content preserved in position.
+        assert len(result.messages) == 2
+        assert result.messages[0]["role"] == "user"
+        assert result.messages[0]["content"] == "Hello"
+        assert result.messages[1]["role"] == "system"
+        assert result.messages[1]["content"] == "Real system content."
 
 
 # ======================================================================
@@ -996,3 +1172,251 @@ class TestMessageStreamConverterToolUseContentBuffering:
         assert "text" in block_starts
 
         assert events[-1][0] == "message_stop"
+
+
+class TestMessageStartIncludesTypeAndRole:
+    """Regression test for issue #45367: the streaming message_start event is
+    serialized with exclude_unset=True, which silently dropped the
+    default-valued ``type``/``role`` fields of the nested message object.
+    Strict Anthropic SDK clients (e.g. Claude Code) validate
+    ``message_start.message.type``/``role`` and reject the whole stream when
+    they are missing.
+    """
+
+    @pytest.mark.asyncio
+    async def test_message_start_contains_message_type_and_role(self):
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(content="Hello"),
+                usage=UsageInfo(
+                    prompt_tokens=20,
+                    total_tokens=20,
+                    completion_tokens=0,
+                ),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+
+        events = _parse_sse_events(output)
+
+        assert events[0][0] == "message_start"
+        message = events[0][1]["message"]
+        assert message["type"] == "message"
+        assert message["role"] == "assistant"
+
+
+class TestStreamingCacheUsageSemantics:
+    """Locks in the documented streaming behavior of cache usage fields.
+
+    vLLM's OpenAI chat completion streaming only attaches
+    ``prompt_tokens_details`` to the terminal usage chunk. The Anthropic layer
+    mirrors that contract: cache fields are omitted on ``message_start`` (key
+    absence signals "unknown") and populated on ``message_delta`` (the final
+    cumulative count). This is intentionally consistent with vLLM's OpenAI
+    behavior, even though Anthropic's upstream API populates cache fields on
+    ``message_start``; closing that gap requires plumbing cache info into the
+    first chunk at the OpenAI layer, which is out of scope here.
+    """
+
+    @pytest.mark.asyncio
+    async def test_streaming_cache_fields_absent_then_populated(self):
+        """First chunk lacks prompt_tokens_details (vLLM contract);
+        message_start omits cache fields. The final chunk carries
+        prompt_tokens_details, so message_delta carries resolved values."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant", content="hi"),
+                usage=UsageInfo(prompt_tokens=100, total_tokens=100),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=100,
+                    completion_tokens=5,
+                    total_tokens=105,
+                    prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=80),
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        # message_start: cache fields unknown → omitted from JSON entirely.
+        start_usage = events[0][1]["message"]["usage"]
+        assert events[0][0] == "message_start"
+        assert start_usage["input_tokens"] == 100
+        assert "cache_read_input_tokens" not in start_usage
+        assert "cache_creation_input_tokens" not in start_usage
+
+        # message_delta: authoritative usage with cache fields populated.
+        delta_usage = next(
+            data["usage"] for ev, data in events if ev == "message_delta"
+        )
+        assert delta_usage["input_tokens"] == 20  # 100 - 80
+        assert delta_usage["cache_read_input_tokens"] == 80
+        assert delta_usage["cache_creation_input_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_streaming_no_cache_hit(self):
+        """When the final chunk reports cached_tokens=0, message_delta carries
+        cache fields = 0 (cache miss); message_start still omits them."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=50, total_tokens=50),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(
+                    prompt_tokens=50,
+                    completion_tokens=5,
+                    total_tokens=55,
+                    prompt_tokens_details=PromptTokenUsageInfo(cached_tokens=0),
+                ),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        start_usage = events[0][1]["message"]["usage"]
+        delta_usage = next(
+            data["usage"] for ev, data in events if ev == "message_delta"
+        )
+        assert start_usage["input_tokens"] == 50
+        assert "cache_read_input_tokens" not in start_usage
+        assert "cache_creation_input_tokens" not in start_usage
+        assert delta_usage["input_tokens"] == 50  # 50 - 0
+        assert delta_usage["cache_read_input_tokens"] == 0
+        assert delta_usage["cache_creation_input_tokens"] == 0
+
+    @pytest.mark.asyncio
+    async def test_streaming_no_prompt_tokens_details_at_all(self):
+        """If --enable-prompt-tokens-details is off, no chunk carries cache
+        info; both message_start and message_delta omit cache fields."""
+
+        async def sse_input():
+            yield _make_stream_chunk(
+                delta=DeltaMessage(role="assistant"),
+                usage=UsageInfo(prompt_tokens=30, total_tokens=30),
+            )
+            yield _make_stream_chunk(finish_reason="stop")
+            yield _make_stream_chunk(
+                choices=[],
+                usage=UsageInfo(prompt_tokens=30, completion_tokens=2, total_tokens=32),
+            )
+            yield "data: [DONE]"
+
+        converter = _make_stream_converter()
+        output = []
+        async for event in converter.message_stream_converter(sse_input()):
+            output.append(event)
+        events = _parse_sse_events(output)
+
+        start_usage = events[0][1]["message"]["usage"]
+        delta_usage = next(
+            data["usage"] for ev, data in events if ev == "message_delta"
+        )
+        assert "cache_read_input_tokens" not in start_usage
+        assert "cache_creation_input_tokens" not in start_usage
+        assert "cache_read_input_tokens" not in delta_usage
+        assert "cache_creation_input_tokens" not in delta_usage
+
+
+# ======================================================================
+# Auto-detection of system-first template requirement
+# ======================================================================
+
+
+Q35_TEMPLATE = (
+    "{%- for message in messages %}"
+    "{%- if message.role == 'system' %}"
+    "{%- if not loop.first %}"
+    "{{- raise_exception('System message must be at the beginning.') }}"
+    "{%- endif %}"
+    "{%- endif %}"
+    "{%- endfor %}"
+)
+
+
+class TestDetectMergeInlineSystem:
+    """Verify _detect_merge_inline_system auto-detection.
+
+    Tests three scenarios:
+    1. Template with system-first guard (e.g. Qwen) → merge needed
+    2. Template without restrictions → no merge, cache-friendly
+    3. No template provided → safe default: merge
+    """
+
+    def test_qwen_template_requires_merge(self):
+        """Template with loop.first guard rejects mid-conversation system."""
+        assert (
+            AnthropicServingMessages._detect_merge_inline_system(Q35_TEMPLATE) is True
+        )
+
+    def test_no_restriction_no_merge(self):
+        """Template without restriction accepts mid-conversation system."""
+        assert (
+            AnthropicServingMessages._detect_merge_inline_system(
+                "{%- for message in messages %}"
+                "{{- message.role }}: {{ message.content }}\n"
+                "{%- endfor %}"
+            )
+            is False
+        )
+
+    def test_no_template_defaults_merge(self):
+        """No chat_template → conservative default: merge."""
+        assert AnthropicServingMessages._detect_merge_inline_system(None) is True
+
+
+# ======================================================================
+# Full (non-streaming) response conversion: messages_full_converter
+# ======================================================================
+
+
+def _make_full_converter():
+    obj = MagicMock(spec=AnthropicServingMessages)
+    obj.messages_full_converter = (
+        AnthropicServingMessages.messages_full_converter.__get__(obj)
+    )
+    return obj
+
+
+class TestMessagesFullConverter:
+    def test_empty_completion_emits_one_text_block(self):
+        """An empty completion still yields exactly one (empty) text block."""
+        generator = ChatCompletionResponse(
+            id="chatcmpl-empty",
+            model="test-model",
+            choices=[
+                ChatCompletionResponseChoice(
+                    index=0,
+                    message=ChatMessage(role="assistant", content=None),
+                    finish_reason="stop",
+                )
+            ],
+            usage=UsageInfo(prompt_tokens=10, completion_tokens=0, total_tokens=10),
+        )
+
+        result = _make_full_converter().messages_full_converter(generator)
+
+        assert len(result.content) == 1
+        assert result.content[0].type == "text"
+        assert result.content[0].text == ""

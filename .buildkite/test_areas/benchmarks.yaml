@@ -11,6 +11,11 @@ steps:
   - tests/benchmarks/
   commands:
   - pytest -v -s benchmarks/
+  mirror:
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Attention Benchmarks Smoke Test (B200)
   key: attention-benchmarks-smoke-test-b200
@@ -23,4 +28,4 @@ steps:
   - benchmarks/attention_benchmarks/
   - vllm/v1/attention/
   commands:
-  - python3 benchmarks/attention_benchmarks/benchmark.py --backends flash flashinfer --batch-specs "8q1s1k" --repeats 1 --warmup-iters 1
+  - python3 benchmarks/attention_benchmarks/benchmark.py --backends flash flashinfer --batch-specs "8q1s1k"

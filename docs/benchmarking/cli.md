@@ -37,7 +37,7 @@ th {
 | HuggingFace-HumanEval | ✅ | ✅ | `openai/openai_humaneval` |
 | HuggingFace-GSM8K | ✅ | ✅ | `openai/gsm8k` |
 | HuggingFace-Blazedit | ✅ | ✅ | `vdaita/edit_5k_char`, `vdaita/edit_10k_char` |
-| HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`,  `LIUM/tedlium`, `edinburghcstr/ami`,        `speechcolab/gigaspeech`,        `kensho/spgispeech` |
+| HuggingFace-ASR | ✅ | ✅ | `openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`, `ArtificialAnalysis/Earnings22-Cleaned-AA`, `D4nt3/esb-datasets-earnings22-validation-tiny-filtered` |
 | Spec Bench | ✅ | ✅ | `wget https://raw.githubusercontent.com/hemingkx/Spec-Bench/refs/heads/main/data/spec_bench/question.jsonl` |
 | SPEED-Bench | ✅ | ✅ | `curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py \| python3 -` |
 | Custom | ✅ | ✅ | Local file: `data.jsonl` |
@@ -338,7 +338,7 @@ vllm bench serve \
     --model meta-llama/Meta-Llama-3-8B-Instruct \
     --dataset-name spec_bench \
     --dataset-path "<YOUR_DOWNLOADED_PATH>/data/spec_bench/question.jsonl" \
-    --num-prompts -1
+    --num-prompts -1 \
     --spec-bench-category "summarization"
 ```
 
@@ -352,7 +352,7 @@ vllm bench serve \
 First, download the dataset to a folder, using this one liner:
 
 ```bash
-curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py \| python3 -
+curl -LsSf https://raw.githubusercontent.com/NVIDIA-NeMo/Skills/refs/heads/main/nemo_skills/dataset/speed-bench/prepare.py | python3 -
 ```
 
 The command supports also the following arguments:
@@ -388,7 +388,7 @@ vllm bench serve \
     --model meta-llama/Llama-3.3-70B-Instruct \
     --dataset-name speed_bench \
     --dataset-path "<YOUR_DOWNLOADED_PATH>/data/speed_bench" \
-    --num-prompts -1
+    --num-prompts -1 \
     --speed-bench-category "multilingual"
 ```
 
@@ -398,7 +398,7 @@ Run all categories in the Throughput split (2k ISL):
 vllm bench serve \
     --model meta-llama/Llama-3.3-70B-Instruct \
     --dataset-name speed_bench \
-    --speed-bench-dataset-subset throughput_2k
+    --speed-bench-dataset-subset throughput_2k \
     --dataset-path "<YOUR_DOWNLOADED_PATH>/data/speed_bench/" \
     --num-prompts -1
 ```
@@ -532,7 +532,7 @@ vllm bench serve \
     --blazedit-max-distance 0.99
 ```
 
-`openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`
+`openslr/librispeech_asr`, `facebook/voxpopuli`, `LIUM/tedlium`, `edinburghcstr/ami`, `speechcolab/gigaspeech`, `kensho/spgispeech`, `ArtificialAnalysis/Earnings22-Cleaned-AA`, `D4nt3/esb-datasets-earnings22-validation-tiny-filtered`
 
 ```bash
 vllm bench serve \
@@ -1337,7 +1337,7 @@ Serve and benchmark VLM2Vec:
 # Run this in another process
 vllm serve TIGER-Lab/VLM2Vec-Full --runner pooling \
   --trust-remote-code \
-  --chat-template examples/template_vlm2vec_phi3v.jinja
+  --chat-template examples/pooling/embed/template/vlm2vec_phi3v.jinja
 
 # Run these one by one after the server is up
 # download dataset

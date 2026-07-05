@@ -33,8 +33,12 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.SILU_NO_MUL: ActivationType.Silu,
         MoEActivation.GELU_NO_MUL: ActivationType.Gelu,
         MoEActivation.SILU: ActivationType.Swiglu,
+        # SwiGLU-OAI uses Swiglu; the OAI alpha/beta/clamp come from gemm1_* args.
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
         MoEActivation.GELU: ActivationType.Geglu,
+        MoEActivation.GELU_TANH: ActivationType.Geglu,
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation]
 
@@ -107,6 +111,7 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     cache_permute_indices: dict[torch.Size, torch.Tensor],
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
+    is_gated_act_gemm: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert expert weights to FlashInfer's block layout.
 
@@ -120,7 +125,6 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
 
     from flashinfer.fused_moe.core import (
         _maybe_get_cached_w3_w1_permute_indices,
-        convert_to_block_layout,
         get_w2_permute_indices_with_cache,
     )
 
@@ -130,23 +134,51 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     # Reorder rows of W13 and W2 for fused gated activation and convert to the
     # block layout expected by the FlashInfer kernel.
     num_experts = w13_weight.shape[0]
-    device_w13 = w13_weight.device
-    device_w2 = w2_weight.device
 
-    w13_weights_shuffled: list[torch.Tensor] = []
-    w2_weights_shuffled: list[torch.Tensor] = []
+    def _copy_permuted_expert_to_block_layout(
+        out: torch.Tensor,
+        expert_uint8: torch.Tensor,
+        source_indices: torch.Tensor,
+    ) -> None:
+        expert_blocks = expert_uint8.view(
+            expert_uint8.shape[0], out.shape[0], block_k
+        ).permute(1, 0, 2)
+        torch.index_select(
+            expert_blocks,
+            1,
+            source_indices.to(expert_uint8.device),
+            out=out,
+        )
+
+    w13_rows, w13_cols = w13_weight[0].view(torch.uint8).shape
+    w2_rows, w2_cols = w2_weight[0].view(torch.uint8).shape
+    w13_weights_shuffled_tensor = torch.empty(
+        (num_experts, w13_cols // block_k, w13_rows, block_k),
+        dtype=torch.uint8,
+        device=w13_weight.device,
+    )
+    w2_weights_shuffled_tensor = torch.empty(
+        (num_experts, w2_cols // block_k, w2_rows, block_k),
+        dtype=torch.uint8,
+        device=w2_weight.device,
+    )
 
     for i in range(num_experts):
+        w13_expert_uint8 = w13_weight[i].view(torch.uint8)
+
         permute_indices = _maybe_get_cached_w3_w1_permute_indices(
             cache_permute_indices,
-            w13_weight[i].view(torch.uint8),
+            w13_expert_uint8,
             epilogue_tile_m,
+            is_gated_act_gemm=is_gated_act_gemm,
         )
-        tmp_weights1 = (
-            w13_weight[i]
-            .clone()
-            .view(torch.uint8)[permute_indices.to(device_w13)]
-            .contiguous()
+        if is_gated_act_gemm:
+            rows = w13_expert_uint8.shape[0]
+            permute_indices = (permute_indices + rows // 2) % rows
+        _copy_permuted_expert_to_block_layout(
+            w13_weights_shuffled_tensor[i],
+            w13_expert_uint8,
+            permute_indices,
         )
 
         permute_indices = get_w2_permute_indices_with_cache(
@@ -154,28 +186,16 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
             w2_weight[i].view(torch.uint8),
             epilogue_tile_m,
         )
-        tmp_weights2 = (
-            w2_weight[i]
-            .clone()
-            .view(torch.uint8)[permute_indices.to(device_w2)]
-            .contiguous()
+        _copy_permuted_expert_to_block_layout(
+            w2_weights_shuffled_tensor[i],
+            w2_weight[i].view(torch.uint8),
+            permute_indices,
         )
 
-        tmp_weights1 = convert_to_block_layout(tmp_weights1.view(torch.uint8), block_k)
-        tmp_weights2 = convert_to_block_layout(tmp_weights2.view(torch.uint8), block_k)
-
-        w13_weights_shuffled.append(tmp_weights1.view(torch.bfloat16))
-        w2_weights_shuffled.append(tmp_weights2.view(torch.bfloat16))
-
-    # Stack weights for all experts and return as BF16 tensors.
-    w13_weights_shuffled_tensor = (
-        torch.stack(w13_weights_shuffled).view(torch.bfloat16).contiguous()
+    return (
+        w13_weights_shuffled_tensor.view(torch.bfloat16),
+        w2_weights_shuffled_tensor.view(torch.bfloat16),
     )
-    w2_weights_shuffled_tensor = (
-        torch.stack(w2_weights_shuffled).view(torch.bfloat16).contiguous()
-    )
-
-    return w13_weights_shuffled_tensor, w2_weights_shuffled_tensor
 
 
 def align_fp4_moe_weights_for_fi(
@@ -274,12 +294,12 @@ def align_trtllm_fp4_moe_hidden_dim_for_fi(
     return padded_w13, padded_w13_scale, padded_w2, padded_w2_scale, padded_hidden_size
 
 
-def align_fp8_moe_weights_for_fi(
+def align_moe_weights_for_fi(
     w13: torch.Tensor, w2: torch.Tensor, is_act_and_mul: bool, min_alignment: int = 16
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
 
-    Some FlashInfer FP8 MoE kernels require the (gated) intermediate size
+    Some FlashInfer MoE kernels require the (gated) intermediate size
     used for GEMM to be divisible by a small alignment value. When this is
     not satisfied (e.g. with certain tensor-parallel sizes), we pad the
     gate/up and down projection weights along the intermediate dim.
@@ -478,7 +498,7 @@ def prepare_fp8_moe_layer_for_fi(
     # for the gate-up proj. Pad the weights to respect this.
     if not block_quant:
         min_alignment = 16 if is_gated else 128
-        w13, w2, new_intermediate = align_fp8_moe_weights_for_fi(
+        w13, w2, new_intermediate = align_moe_weights_for_fi(
             w13,
             w2,
             layer.moe_config.is_act_and_mul,

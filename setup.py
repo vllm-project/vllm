@@ -432,6 +432,19 @@ class cmake_build_ext(build_ext):
                     dirs_exist_ok=True,
                 )
 
+            # copy vendored fmha_sm100 package from build_lib to source tree
+            # for editable installs
+            fmha_sm100_build = os.path.join(
+                self.build_lib, "vllm", "third_party", "fmha_sm100"
+            )
+            if os.path.exists(fmha_sm100_build):
+                print(f"Copying {fmha_sm100_build} to vllm/third_party/fmha_sm100")
+                shutil.copytree(
+                    fmha_sm100_build,
+                    "vllm/third_party/fmha_sm100",
+                    dirs_exist_ok=True,
+                )
+
 
 class precompiled_build_ext(build_ext):
     """Disables extension building when using precompiled binaries."""
@@ -756,6 +769,7 @@ class precompiled_wheel_utils:
                             "vllm/_C.abi3.so",
                             "vllm/_C_stable_libtorch.abi3.so",
                             "vllm/_moe_C_stable_libtorch.abi3.so",
+                            "vllm/_qutlass_C.abi3.so",
                             "vllm/_flashmla_C.abi3.so",
                             "vllm/_flashmla_extension_C.abi3.so",
                             "vllm/_sparse_flashmla_C.abi3.so",
@@ -763,6 +777,7 @@ class precompiled_wheel_utils:
                             "vllm/vllm_flash_attn/_vllm_fa3_C.abi3.so",
                             "vllm/cumem_allocator.abi3.so",
                             "vllm/spinloop.abi3.so",
+                            "vllm/fs_io_C.abi3.so",
                             # ROCm-specific libraries
                             "vllm/_rocm_C.abi3.so",
                         }
@@ -787,6 +802,7 @@ class precompiled_wheel_utils:
                 )
                 # DeepGEMM: extract all files (.py, .so, .cuh, .h, .hpp, etc.)
                 deep_gemm_regex = re.compile(r"vllm/third_party/deep_gemm/.*")
+                fmha_sm100_regex = re.compile(r"vllm/third_party/fmha_sm100/.*")
                 file_members = []
                 for member in wheel.filelist:
                     if member.filename in exact_members:
@@ -812,6 +828,7 @@ class precompiled_wheel_utils:
                         or triton_kernels_regex.match(member.filename)
                         or flashmla_regex.match(member.filename)
                         or deep_gemm_regex.match(member.filename)
+                        or fmha_sm100_regex.match(member.filename)
                     ):
                         file_members.append(member)
 
@@ -1088,6 +1105,7 @@ if _is_cuda() or _is_hip():
 
 if sys.version_info >= (3, 11):
     ext_modules.append(CMakeExtension(name="vllm.spinloop"))
+    ext_modules.append(CMakeExtension(name="vllm.fs_io_C"))
 
 if _is_hip():
     ext_modules.append(CMakeExtension(name="vllm._rocm_C"))
@@ -1120,6 +1138,9 @@ if _is_cuda():
         # DeepGEMM requires CUDA 12.3+ (SM90/SM100)
         # Optional since it won't build on unsupported architectures
         ext_modules.append(CMakeExtension(name="vllm._deep_gemm_C", optional=True))
+        ext_modules.append(CMakeExtension(name="vllm._qutlass_C", optional=True))
+    # fmha_sm100 is a Python/CuTe-DSL package installed into vllm.third_party.
+    ext_modules.append(CMakeExtension(name="vllm.fmha_sm100", optional=True))
 
 if _is_cpu():
     import platform
@@ -1132,7 +1153,8 @@ if _is_cpu():
         ext_modules.append(CMakeExtension(name="vllm._C"))
 
 if _build_custom_ops():
-    ext_modules.append(CMakeExtension(name="vllm._C"))
+    if _is_hip():
+        ext_modules.append(CMakeExtension(name="vllm._C"))
     if _is_cuda() or _is_hip():
         ext_modules.append(CMakeExtension(name="vllm._C_stable_libtorch"))
         ext_modules.append(CMakeExtension(name="vllm._moe_C_stable_libtorch"))
@@ -1150,6 +1172,16 @@ package_data = {
         "third_party/deep_gemm/include/**/*.cuh",
         "third_party/deep_gemm/include/**/*.h",
         "third_party/deep_gemm/include/**/*.hpp",
+        # fmha_sm100 sparse CuTe-DSL helper kernels (vendored via cmake)
+        "third_party/fmha_sm100/csrc/**/*.cu",
+        "third_party/fmha_sm100/csrc/**/*.h",
+        "third_party/fmha_sm100/csrc/**/*.jinja",
+        "third_party/fmha_sm100/csrc/**/*.cu.jinja",
+        "third_party/fmha_sm100/cute/**/*.cu",
+        "third_party/fmha_sm100/cutlass/include/**/*.h",
+        "third_party/fmha_sm100/cutlass/include/**/*.hpp",
+        "third_party/fmha_sm100/cutlass/tools/util/include/**/*.h",
+        "third_party/fmha_sm100/cutlass/tools/util/include/**/*.hpp",
     ]
 }
 
@@ -1221,6 +1253,7 @@ setup(
             "av",
             "scipy",
             "soundfile",
+            "soxr",
             "mistral_common[audio]",
         ],  # Required for audio processing
         "video": [],  # Kept for backwards compatibility
@@ -1239,6 +1272,8 @@ setup(
             "opentelemetry-exporter-otlp>=1.26.0",
             "opentelemetry-semantic-conventions-ai>=0.4.1",
         ],
+        # extra quantization plugin
+        "extra-quant": ["vllm-gguf-plugin>=0.0.2"],
     },
     cmdclass=cmdclass,
     package_data=package_data,

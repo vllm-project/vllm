@@ -29,8 +29,8 @@ pub use parser::reasoning::{
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
-    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, RenderedPrompt,
-    RendererSelection,
+    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer,
+    HarmonyChatRenderer, RenderedPrompt, RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
@@ -50,7 +50,8 @@ mod request;
 mod stream;
 
 use vllm_engine_core_client::EngineCoreClient;
-use vllm_engine_core_client::protocol::ModelDtype;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
 
@@ -145,8 +146,8 @@ impl ChatLlm {
         self.text.tokenizer_vocab_size()
     }
 
-    /// Model vocabulary size, else `None`.
-    pub fn model_vocab_size(&self) -> Option<usize> {
+    /// Model vocabulary size from the model config.
+    pub fn model_vocab_size(&self) -> usize {
         self.text.model_vocab_size()
     }
 
@@ -179,6 +180,14 @@ impl ChatLlm {
             },
         )?;
         let rendered = self.backend.chat_renderer().render(&request)?;
+        let reasoning_parser_kwargs =
+            request
+                .sampling_params
+                .structured_outputs
+                .is_some()
+                .then(|| ReasoningParserKwargs {
+                    chat_template_kwargs: rendered.effective_template_kwargs.clone(),
+                });
 
         let (prompt, mm_features) = multimodal::finalize_rendered_prompt(
             &request,
@@ -199,6 +208,7 @@ impl ChatLlm {
             cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
             data_parallel_rank: request.data_parallel_rank,
+            reasoning_parser_kwargs,
             lora_request: request.lora_request,
         };
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
@@ -233,6 +243,12 @@ impl ChatLlm {
             Prompt::TokenIds(ids) => ids,
         };
         Ok(token_ids)
+    }
+
+    /// Abort in-flight requests by their external (user-supplied) request ids.
+    pub async fn abort(&self, external_ids: &[String]) -> Result<()> {
+        self.text.abort(external_ids).await?;
+        Ok(())
     }
 
     /// Shut down the underlying LLM client and its background tasks.
@@ -271,7 +287,7 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, hermes, hy_v3, internlm, kimi_k2, llama3_json, llama4_json, minimax_m2, mistral, phi4_mini_json, qwen3_coder, qwen3_xml)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["tool parser `definitely_missing_tool_parser` is not registered (choose from: deepseek_v3, deepseek_v31, deepseek_v32, deepseek_v4, gemma4, glm45, glm47, granite4, hermes, hy_v3, internlm, kimi_k2, llama3_json, llama4_json, minimax_m2, minimax_m3, mistral, phi4_mini_json, qwen3_coder, qwen3_xml)"].assert_eq(&error.to_report_string());
     }
 
     #[test]
@@ -282,6 +298,6 @@ mod tests {
         )
         .unwrap_err();
 
-        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, kimi, kimi_k2, minimax_m2, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
+        expect_test::expect!["reasoning parser `definitely_missing_reasoning_parser` is not registered (choose from: cohere_cmd, deepseek_r1, deepseek_v3, deepseek_v4, gemma4, glm45, kimi, kimi_k2, minimax_m2, minimax_m3, nemotron_v3, qwen3, seed_oss, step3, step3p5)"].assert_eq(&error.to_report_string());
     }
 }

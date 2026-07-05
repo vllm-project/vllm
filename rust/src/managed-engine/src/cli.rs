@@ -43,6 +43,11 @@ pub struct ManagedEngineArgs {
     /// Arguments after an explicit `--` are forwarded verbatim. Before `--`,
     /// `vllm-rs serve` automatically keeps recognized frontend options on
     /// the Rust side and forwards everything else to Python.
+    ///
+    /// The explicit `--` passthrough is a last-resort escape hatch. Rust does
+    /// not interpret, validate, or de-duplicate those arguments against
+    /// managed-engine arguments that it appends later; if the same Python flag
+    /// appears more than once, Python argparse owns the final result.
     #[arg(
         last = true,
         allow_hyphen_values = true,
@@ -71,7 +76,12 @@ impl ManagedEngineArgs {
         self,
         model: String,
         max_model_len: Option<u32>,
+        max_logprobs: Option<i32>,
+        profiler_config: Option<String>,
+        reasoning_parser: Option<&str>,
         language_model_only: bool,
+        disable_log_stats: bool,
+        shutdown_timeout: u64,
         handshake_port: u16,
     ) -> ManagedEngineConfig {
         let mut python_args = self.python_args;
@@ -80,8 +90,29 @@ impl ManagedEngineArgs {
             python_args.push("--max-model-len".to_string());
             python_args.push(max_model_len.to_string());
         }
+        if let Some(max_logprobs) = max_logprobs {
+            python_args.push("--max-logprobs".to_string());
+            python_args.push(max_logprobs.to_string());
+        }
+        if let Some(profiler_config) = profiler_config {
+            python_args.push("--profiler-config".to_string());
+            python_args.push(profiler_config);
+        }
+        if let Some(reasoning_parser) = reasoning_parser {
+            python_args.push("--reasoning-parser".to_string());
+            python_args.push(reasoning_parser.to_string());
+        }
         if language_model_only {
             python_args.push("--language-model-only".to_string());
+        }
+        if disable_log_stats {
+            python_args.push("--disable-log-stats".to_string());
+        }
+        // we must pass through shutdown_timeout to the engine,
+        // otherwise inflight requests get aborted on shutdown
+        if shutdown_timeout > 0 {
+            python_args.push("--shutdown-timeout".to_string());
+            python_args.push(shutdown_timeout.to_string());
         }
         if let Some(data_parallel_size_local) = self.data_parallel_size_local {
             python_args.push("--data-parallel-size-local".to_string());

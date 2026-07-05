@@ -21,11 +21,11 @@ use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
     CollectedAssistantMessage, FinishReason,
 };
-use vllm_engine_core_client::protocol::StopReason;
+use vllm_engine_core_client::protocol::output::StopReason;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 use crate::config::ApiServerOptions;
-use crate::error::{ApiError, bail_server_error, server_error};
+use crate::error::{ApiError, bail_server_error, chat_submit_error, server_error};
 use crate::routes::openai::chat_completions::types::{
     AssistantRole, ChatCompletionChoice, ChatCompletionMessage, ChatCompletionRequest,
     ChatCompletionResponse, ChatCompletionStreamChoice, ChatCompletionStreamResponse,
@@ -53,13 +53,6 @@ pub async fn chat_completions(
     let request_context = resolve_request_context(&headers, body.request_id.as_deref());
     let lora_resolution = state.resolve_model_with_loras(Some(&body.model)).await;
 
-    if let Err(err) = validate::validate_token_id_ranges(
-        &body,
-        state.tokenizer_vocab_size(),
-        state.model_vocab_size(),
-    ) {
-        return err.into_response();
-    }
     let prepared = match prepare_chat_request(body, &lora_resolution, request_context) {
         Ok(prepared) => prepared,
         Err(error) => return error.into_response(),
@@ -77,11 +70,7 @@ pub async fn chat_completions(
         match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
             Ok(stream) => stream,
             Err(error) => {
-                return server_error!(
-                    "failed to submit chat request: {}",
-                    error.to_report_string()
-                )
-                .into_response();
+                return chat_submit_error("failed to submit chat request", error).into_response();
             }
         };
 
@@ -816,7 +805,7 @@ fn chat_finish_reason_to_openai(
         FinishReason::Stop(_) => Ok("stop"),
         FinishReason::Length => Ok("length"),
         FinishReason::Abort => Ok("abort"),
-        FinishReason::Repetition => Ok("stop"),
+        FinishReason::Repetition(_) => Ok("repetition"),
         FinishReason::Error => {
             bail_server_error!("Internal server error");
         }
@@ -836,7 +825,7 @@ mod tests {
     use vllm_chat::{
         AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatEvent, FinishReason,
     };
-    use vllm_engine_core_client::protocol::StopReason;
+    use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
     use super::{

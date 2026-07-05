@@ -66,16 +66,46 @@ class TrtLlmNvFp4ExpertsBase:
         else:
             self.g1_scale_c = self.quant_config.a2_gscale.clone()
 
-        if moe_config.is_act_and_mul and quant_config.gemm1_clamp_limit is not None:
-            device = torch.accelerator.current_device_index()
-            self.gemm1_clamp_limit = torch.full(
+        # Fall back to moe_config.swiglu_* when quant_config doesn't carry them
+        # (ModelOpt NVFP4 checkpoints store these on moe_config, not quant_config).
+        device = torch.accelerator.current_device_index()
+
+        def _per_expert(val: float | None) -> torch.Tensor | None:
+            if val is None:
+                return None
+            return torch.full(
                 (self.local_num_experts,),
-                quant_config.gemm1_clamp_limit,
+                float(val),
                 dtype=torch.float32,
                 device=device,
             )
+
+        clamp = quant_config.gemm1_clamp_limit
+        if clamp is None:
+            clamp = getattr(moe_config, "swiglu_limit", None)
+        alpha = quant_config.gemm1_alpha
+        if alpha is None:
+            alpha = getattr(moe_config, "swiglu_alpha", None)
+        beta = quant_config.gemm1_beta
+        if beta is None:
+            beta = getattr(moe_config, "swiglu_beta", None)
+
+        if moe_config.is_act_and_mul:
+            self.gemm1_clamp_limit = _per_expert(clamp)
+            self.gemm1_alpha = _per_expert(alpha)
+            self.gemm1_beta = _per_expert(beta)
         else:
             self.gemm1_clamp_limit = None
+            self.gemm1_alpha = None
+            self.gemm1_beta = None
+
+        logger.debug_once(
+            "activation=%s, gemm1_alpha=%s, gemm1_beta=%s, gemm1_clamp_limit=%s",
+            moe_config.activation,
+            alpha,
+            beta,
+            clamp,
+        )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         layer.w13_weight_scale_2.data.mul_(layer.w13_input_scale)
@@ -109,6 +139,25 @@ class TrtLlmNvFp4ExpertsBase:
             )
             self.gemm1_clamp_limit = layer.gemm1_clamp_limit
 
+        # beta shifts the raw GEMM1 accumulator, so fold by g1_alphas like the
+        # clamp limit. alpha is applied to the dequantized gate, so it stays
+        # raw. Register both on the layer so EPLB rearranges them with the
+        # other per-expert tensors.
+        if self.gemm1_beta is not None:
+            gemm1_beta = self.gemm1_beta / self.quant_config.g1_alphas
+            layer.register_parameter(
+                "gemm1_beta",
+                torch.nn.Parameter(gemm1_beta, requires_grad=False),
+            )
+            self.gemm1_beta = layer.gemm1_beta
+
+        if self.gemm1_alpha is not None:
+            layer.register_parameter(
+                "gemm1_alpha",
+                torch.nn.Parameter(self.gemm1_alpha, requires_grad=False),
+            )
+            self.gemm1_alpha = layer.gemm1_alpha
+
     @staticmethod
     def _supports_current_device() -> bool:
         """Supports only Blackwell-family GPUs."""
@@ -137,11 +186,13 @@ class TrtLlmNvFp4ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports only SiLU, RELU^2 non-gated and GELU activation."""
+        """Supports SiLU, RELU^2 non-gated, GELU, and clamped SwiGLU-OAI."""
         return activation in [
             MoEActivation.SILU,
             MoEActivation.RELU2_NO_MUL,
             MoEActivation.GELU,
+            MoEActivation.GELU_TANH,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
         ]
 
     @staticmethod
@@ -247,8 +298,8 @@ class TrtLlmNvFp4ExpertsModular(TrtLlmNvFp4ExpertsBase, mk.FusedMoEExpertsModula
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
             gemm1_bias=None,
-            gemm1_alpha=None,
-            gemm1_beta=None,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
             gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
@@ -408,8 +459,8 @@ class TrtLlmNvFp4ExpertsMonolithic(
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale.view(torch.float8_e4m3fn),
             gemm1_bias=None,
-            gemm1_alpha=None,
-            gemm1_beta=None,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
             gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale.view(torch.float8_e4m3fn),
