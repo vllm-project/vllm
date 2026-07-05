@@ -11,6 +11,7 @@ import numpy as np
 import torch
 
 from vllm.lora.request import LoRARequest
+from vllm.logger import logger
 from vllm.outputs import (
     STREAM_FINISHED,
     CompletionOutput,
@@ -569,6 +570,172 @@ class OutputProcessor:
             # Queue the streaming update otherwise.
             req_state.input_chunk_queue.append(update)
 
+    def _log_decode_debug(
+        self,
+        req_state: RequestState,
+        engine_core_output: EngineCoreOutput,
+        new_token_ids: list[int],
+        finish_reason: FinishReason | None,
+    ) -> None:
+        tokenizer_name = (
+            getattr(self.tokenizer, "name_or_path", None)
+            or getattr(getattr(self.tokenizer, "tokenizer", None), "name_or_path", None)
+            or (type(self.tokenizer).__name__ if self.tokenizer is not None else "UNKNOWN_MODEL")
+        )
+        default_model_tag = str(tokenizer_name).replace(" ", "_")
+        model_tag = str(
+            getattr(engine_core_output, "debug_log_model_tag", default_model_tag)
+        )
+
+        input_text_prefix = str(
+            getattr(
+                engine_core_output,
+                "debug_log_input_text_prefix",
+                f"<{model_tag}|INPUT_TEXT_BEGIN>",
+            )
+        )
+        input_text_suffix = str(
+            getattr(
+                engine_core_output,
+                "debug_log_input_text_suffix",
+                f"<{model_tag}|INPUT_TEXT_END>",
+            )
+        )
+        input_token_prefix = str(
+            getattr(
+                engine_core_output,
+                "debug_log_input_token_prefix",
+                f"<{model_tag}|INPUT_TOKEN_IDS_BEGIN>",
+            )
+        )
+        input_token_suffix = str(
+            getattr(
+                engine_core_output,
+                "debug_log_input_token_suffix",
+                f"<{model_tag}|INPUT_TOKEN_IDS_END>",
+            )
+        )
+        output_text_prefix = str(
+            getattr(
+                engine_core_output,
+                "debug_log_output_text_prefix",
+                f"<{model_tag}|OUTPUT_TEXT_BEGIN>",
+            )
+        )
+        output_text_suffix = str(
+            getattr(
+                engine_core_output,
+                "debug_log_output_text_suffix",
+                f"<{model_tag}|OUTPUT_TEXT_END>",
+            )
+        )
+        output_token_prefix = str(
+            getattr(
+                engine_core_output,
+                "debug_log_output_token_prefix",
+                f"<{model_tag}|OUTPUT_TOKEN_IDS_BEGIN>",
+            )
+        )
+        output_token_suffix = str(
+            getattr(
+                engine_core_output,
+                "debug_log_output_token_suffix",
+                f"<{model_tag}|OUTPUT_TOKEN_IDS_END>",
+            )
+        )
+
+        full_debug = bool(getattr(engine_core_output, "debug_log_full", False))
+        detokenizer = req_state.detokenizer
+        input_text = req_state.prompt or ""
+        input_token_ids = req_state.prompt_token_ids or []
+        decoded_prompt_from_token_ids = ""
+        if self.tokenizer is not None and input_token_ids:
+            try:
+                decoded_prompt_from_token_ids = self.tokenizer.decode(
+                    input_token_ids,
+                    skip_special_tokens=False,
+                )
+            except TypeError:
+                decoded_prompt_from_token_ids = self.tokenizer.decode(
+                    input_token_ids
+                )
+            except Exception as e:
+                logger.warning(
+                    "[Garbled-Decode debug decode_prompt_failed] req_id=%s error=%s",
+                    req_state.external_req_id,
+                    e,
+                )
+        if detokenizer is None:
+            output_text = ""
+            output_token_ids: list[int] = []
+        else:
+            output_text = detokenizer.get_next_output_text(
+                finished=finish_reason is not None,
+                delta=False,
+            )
+            output_token_ids = detokenizer.output_token_ids
+
+        logger.info("[Gf 0] req_id=%s full_debug_flag=%s",
+            req_state.external_req_id,
+            full_debug)
+
+        if full_debug:
+            logger.info("[Garbled-Decode debug 1] req_id=%s finished=%s full_debug_flag=%s",
+                req_state.external_req_id,
+                finish_reason is not None,
+                full_debug)
+
+            logger.info("[Garbled-Decode debug 2] req_id=%s new_token_ids=%s",
+                req_state.external_req_id,
+                new_token_ids if new_token_ids else [])
+
+            logger.info(
+                "[Garbled-Decode debug 2.1] req_id=%s input_text=%r",
+                req_state.external_req_id,
+                input_text,
+            )
+
+            if input_text != decoded_prompt_from_token_ids:
+                logger.info(
+                    "[Garbled-Decode debug 2.2] req_id=%s input_text != decoded_prompt_from_token_ids=%r",
+                    req_state.external_req_id,
+                    decoded_prompt_from_token_ids,
+                )
+            else:
+                logger.info(
+                    "[Garbled-Decode debug 2.3] req_id=%s input_text == decoded_prompt_from_token_ids",
+                    req_state.external_req_id,
+                )
+
+            logger.info(
+                "[Garbled-Decode debug 3.1] req_id=%s input_token_ids=%s",
+                req_state.external_req_id,
+                input_token_ids,
+            )
+
+            logger.info(
+                "[Garbled-Decode debug 4] req_id=%s output_text=%r",
+                req_state.external_req_id,
+                output_text if output_text else "",
+            )
+
+            logger.info(
+                "[Garbled-Decode debug 5] req_id=%s output_token_ids=%s",
+                req_state.external_req_id,
+                output_token_ids if output_token_ids else [],
+            )
+        else:
+            logger.info(
+                "[Garbled-Decode debug short] req_id=%s full_debug_flag=%s finished=%s prompt_len=%d output_token_len=%d new_token_ids=%s",
+                req_state.external_req_id,
+                full_debug,
+                finish_reason is not None,
+                req_state.prompt_len,
+                len(output_token_ids),
+                new_token_ids[:20] if new_token_ids else [],
+            )
+
+
     def process_outputs(
         self,
         engine_core_outputs: list[EngineCoreOutput],
@@ -639,6 +806,13 @@ class OutputProcessor:
                 # 3) Compute sample and prompt logprobs for request,
                 # if required.
                 req_state.logprobs_processor.update_from_output(engine_core_output)
+                
+            self._log_decode_debug(
+                req_state,
+                engine_core_output,
+                new_token_ids,
+                finish_reason,
+            )
 
             # 4) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
