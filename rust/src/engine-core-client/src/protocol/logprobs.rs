@@ -9,8 +9,7 @@ use enum_as_inner::EnumAsInner;
 use serde::{Deserialize, Deserializer, Serialize};
 
 use self::wire::*;
-use super::{EngineCoreOutput, EngineCoreOutputs, decode_msgpack};
-use crate::error::{Error, Result, bail_ext_value_decode, ext_value_decode};
+use crate::error::{Error, Result, bail_ext_value_decode};
 use crate::protocol::tensor::{WireArrayData, WireNdArray};
 
 /// One token candidate and its logprob metadata for a single sequence position.
@@ -160,7 +159,7 @@ impl Serialize for MaybeWireLogprobs {
 impl MaybeWireLogprobs {
     /// Resolve the wire representation into decoded logprobs by looking up aux
     /// frames and decoding raw views as needed.
-    fn resolve<Frame>(self, frames: &[Frame], field_prefix: &str) -> Result<Self>
+    pub(super) fn resolve<Frame>(self, frames: &[Frame], field_prefix: &str) -> Result<Self>
     where
         Frame: AsRef<[u8]>,
     {
@@ -168,37 +167,6 @@ impl MaybeWireLogprobs {
             Self::Direct(value) => Ok(Self::Direct(value)),
             Self::Wire(value) => value.resolve(frames, field_prefix).map(Self::Direct),
         }
-    }
-}
-
-impl EngineCoreOutputs {
-    /// Resolve all wire-format fields in-place by looking up aux frames and
-    /// decoding raw-view payloads as needed.
-    fn resolve_in_place<Frame>(&mut self, frames: &[Frame]) -> Result<()>
-    where
-        Frame: AsRef<[u8]>,
-    {
-        for output in &mut self.outputs {
-            output.resolve_in_place(frames)?;
-        }
-        Ok(())
-    }
-}
-
-impl EngineCoreOutput {
-    /// Resolve all wire-format fields in-place by looking up aux frames and
-    /// decoding raw-view payloads as needed.
-    fn resolve_in_place<Frame>(&mut self, frames: &[Frame]) -> Result<()>
-    where
-        Frame: AsRef<[u8]>,
-    {
-        self.new_logprobs = (self.new_logprobs.take())
-            .map(|value| value.resolve(frames, "new_logprobs"))
-            .transpose()?;
-        self.new_prompt_logprobs_tensors = (self.new_prompt_logprobs_tensors.take())
-            .map(|value| value.resolve(frames, "new_prompt_logprobs_tensors"))
-            .transpose()?;
-        Ok(())
     }
 }
 
@@ -314,17 +282,4 @@ impl WireLogprobs {
 
         Ok(Logprobs { positions })
     }
-}
-
-/// Decode one ordinary or multipart engine-core output message into the strong
-/// typed public protocol shape.
-pub fn decode_engine_core_outputs<Frame>(frames: &[Frame]) -> Result<EngineCoreOutputs>
-where
-    Frame: AsRef<[u8]>,
-{
-    let first_frame = frames.first().ok_or_else(|| ext_value_decode!("missing output frame"))?;
-
-    let mut outputs: EngineCoreOutputs = decode_msgpack(first_frame.as_ref())?;
-    outputs.resolve_in_place(frames)?;
-    Ok(outputs)
 }

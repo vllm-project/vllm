@@ -5,7 +5,7 @@
 import torch
 
 from vllm.platforms import current_platform
-from vllm.utils.import_utils import _has_module
+from vllm.utils.import_utils import has_humming
 
 from .MPLinearKernel import MPLinearKernel, MPLinearLayerConfig
 
@@ -19,7 +19,7 @@ class HummingLinearKernel(MPLinearKernel):
     def can_implement(cls, c: MPLinearLayerConfig) -> tuple[bool, str | None]:
         if not current_platform.is_cuda():
             return False, "Humming is only supported on CUDA"
-        if not _has_module("humming"):
+        if not has_humming():
             return False, "Humming is not installed"
         if c.has_g_idx:
             return False, "Humming does not support act-order (g_idx)"
@@ -50,7 +50,7 @@ class HummingLinearKernel(MPLinearKernel):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        from humming.layer import HummingMethod
+        from vllm.utils.humming import HummingMethod
 
         flatten_inputs = x.view(-1, x.size(-1))
         output = HummingMethod.forward_layer(

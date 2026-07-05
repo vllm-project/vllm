@@ -69,6 +69,21 @@ class PoolingBasicRequestMixin(OpenAIBaseModel):
     )
     # --8<-- [end:pooling-common-extra-params]
 
+    @model_validator(mode="before")
+    @classmethod
+    def check_cache_salt_support(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        if data.get("cache_salt") is not None and (
+            not isinstance(data["cache_salt"], str) or not data["cache_salt"]
+        ):
+            raise VLLMValidationError(
+                "Parameter 'cache_salt' must be a non-empty string if provided.",
+                parameter="cache_salt",
+            )
+        return data
+
     def _build_pooling_tok_params(
         self,
         model_config: ModelConfig,
@@ -168,11 +183,7 @@ class CompletionRequestMixin(OpenAIBaseModel):
     # --8<-- [end:completion-extra-params]
 
 
-class ChatRequestMixin(OpenAIBaseModel):
-    # --8<-- [start:chat-params]
-    messages: list[ChatCompletionMessageParam]
-    # --8<-- [end:chat-params]
-
+class ChatRequestOptionsMixin(OpenAIBaseModel):
     # --8<-- [start:chat-extra-params]
     add_generation_prompt: bool = Field(
         default=False,
@@ -254,6 +265,12 @@ class ChatRequestMixin(OpenAIBaseModel):
             ),
             media_io_kwargs=self.media_io_kwargs,
         )
+
+
+class ChatRequestMixin(ChatRequestOptionsMixin):
+    # --8<-- [start:chat-params]
+    messages: list[ChatCompletionMessageParam]
+    # --8<-- [end:chat-params]
 
 
 class EncodingRequestMixin(OpenAIBaseModel):

@@ -51,7 +51,7 @@ class MoELoRAContext:
     # Events are paired one-per-overlap-pair: events[0,1] for w13,
     # events[2,3] for w2, so the two pairs do not race on the same event.
     aux_stream: torch.cuda.Stream | None = None
-    events: tuple[torch.cuda.Event, ...] | None = None
+    events: tuple[torch.Event, ...] | None = None
 
     # Per-rank token→LoRA mapping after EP dispatch. Set by
     # FusedMoEPrepareAndFinalizeModular.prepare() when EP+LoRA is active, read
@@ -59,3 +59,10 @@ class MoELoRAContext:
     # None means no dispatch happened (non-EP path), in which case callers
     # fall back to punica_wrapper.token_mapping_meta.
     local_token_lora_mapping: torch.Tensor | None = None
+
+    # Original unquantized hidden states, stashed by the modular kernel
+    # before the prepare step potentially quantizes them. Used by
+    # apply_w13_lora so the LoRA kernel sees correct-magnitude activations
+    # instead of raw quantized values that are missing the activation scale.
+    # Set per forward pass; None until the modular kernel writes it.
+    original_hidden_states: torch.Tensor | None = None

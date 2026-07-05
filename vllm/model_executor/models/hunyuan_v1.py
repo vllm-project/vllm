@@ -1003,7 +1003,6 @@ class HunYuanMoEV1Base(HunyuanV1ModelBase, MixtureOfExperts):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
 
         # Set MoE hyperparameters
-        self.expert_weights = []
         self.num_expert_groups = 1
         self.moe_layers = []
         example_layer = None

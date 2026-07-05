@@ -641,36 +641,48 @@ class Step3p5Model(nn.Module):
 
         # Old packed 3D format: .moe.gate_proj.weight [num_experts, out, in]
         expert_params_mapping = [
-            (f".moe.experts.{base_layer}w13_weight", ".moe.gate_proj.weight", "w1"),
-            (f".moe.experts.{base_layer}w13_weight", ".moe.up_proj.weight", "w3"),
-            (f".moe.experts.{base_layer}w2_weight", ".moe.down_proj.weight", "w2"),
             (
-                f".moe.experts.{base_layer}w13_weight_scale_2",
+                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.gate_proj.weight",
+                "w1",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight",
+                ".moe.up_proj.weight",
+                "w3",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w2_weight",
+                ".moe.down_proj.weight",
+                "w2",
+            ),
+            (
+                f".moe.experts.routed_experts.{base_layer}w13_weight_scale_2",
                 ".moe.gate_proj.weight_scale_2",
                 "w1",
             ),
             (
-                f".moe.experts.{base_layer}w13_weight_scale_2",
+                f".moe.experts.routed_experts.{base_layer}w13_weight_scale_2",
                 ".moe.up_proj.weight_scale_2",
                 "w3",
             ),
             (
-                f".moe.experts.{base_layer}w2_weight_scale_2",
+                f".moe.experts.routed_experts.{base_layer}w2_weight_scale_2",
                 ".moe.down_proj.weight_scale_2",
                 "w2",
             ),
             (
-                f".moe.experts.{base_layer}w13_weight_scale",
+                f".moe.experts.routed_experts.{base_layer}w13_weight_scale",
                 ".moe.gate_proj.weight_scale",
                 "w1",
             ),
             (
-                f".moe.experts.{base_layer}w13_weight_scale",
+                f".moe.experts.routed_experts.{base_layer}w13_weight_scale",
                 ".moe.up_proj.weight_scale",
                 "w3",
             ),
             (
-                f".moe.experts.{base_layer}w2_weight_scale",
+                f".moe.experts.routed_experts.{base_layer}w2_weight_scale",
                 ".moe.down_proj.weight_scale",
                 "w2",
             ),
@@ -678,17 +690,17 @@ class Step3p5Model(nn.Module):
             # input scales are stored as moe.{gate,up,down}_proj.input_scale
             # rather than the standard per-expert format handled generically.
             (
-                f".moe.experts.{base_layer}w13_input_scale",
+                f".moe.experts.routed_experts.{base_layer}w13_input_scale",
                 ".moe.gate_proj.input_scale",
                 "w1",
             ),
             (
-                f".moe.experts.{base_layer}w13_input_scale",
+                f".moe.experts.routed_experts.{base_layer}w13_input_scale",
                 ".moe.up_proj.input_scale",
                 "w3",
             ),
             (
-                f".moe.experts.{base_layer}w2_input_scale",
+                f".moe.experts.routed_experts.{base_layer}w2_input_scale",
                 ".moe.down_proj.input_scale",
                 "w2",
             ),
@@ -913,17 +925,17 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
         )
 
         # Set MoE hyperparameters
-        self.moe_layers: list[FusedMoEBlock] = []
+        self.moe_layers: list[MoERunner] = []
+        example_layer: FusedMoEBlock | None = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):
                 continue
             assert isinstance(layer, Step3p5DecoderLayer)
             if hasattr(layer, "moe") and isinstance(layer.moe, FusedMoEBlock):
-                self.moe_layers.append(layer.moe)
+                example_layer = layer.moe
+                self.moe_layers.append(layer.moe.experts)
 
-        self.expert_weights = []
         assert len(self.moe_layers) > 0, "No MoE layers found in the model."
-        example_layer = self.moe_layers[0]
         self.num_moe_layers = len(self.moe_layers)
         self.num_expert_groups = 1
         self.num_shared_experts = 0
@@ -952,24 +964,6 @@ class Step3p5ForCausalLM(nn.Module, SupportsPP, MixtureOfExperts):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_tokens(input_ids)
-
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ) -> None:
-        for layer_idx, layer in enumerate(self.moe_layers):
-            experts = layer.experts
-            assert isinstance(experts, MoERunner)
-            # Register the expert weights.
-            self.expert_weights.append(experts.get_expert_weights())
-            experts.set_eplb_state(
-                moe_layer_idx=layer_idx,
-                expert_load_view=expert_load_view,
-                logical_to_physical_map=logical_to_physical_map,
-                logical_replica_count=logical_replica_count,
-            )
 
     def update_physical_experts_metadata(
         self,

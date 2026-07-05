@@ -6,6 +6,7 @@ import math
 import time
 import zlib
 from collections.abc import AsyncGenerator, Callable, Set
+from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
 from typing import Final, Literal, TypeAlias, TypeVar, cast
 
@@ -15,14 +16,15 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing, SpeechToTextRequest
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
@@ -37,7 +39,7 @@ from vllm.renderers.inputs import DictPrompt, EncoderDecoderDictPrompt
 from vllm.renderers.inputs.preprocess import parse_enc_dec_prompt, parse_model_prompt
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import get_tokenizer
-from vllm.utils.async_utils import merge_async_iterators
+from vllm.utils.async_utils import make_async_with_semaphore, merge_async_iterators
 
 from ..transcription.protocol import (
     TranscriptionResponse,
@@ -63,6 +65,7 @@ T = TypeVar("T", bound=SpeechToTextResponse)
 V = TypeVar("V", bound=SpeechToTextResponseVerbose)
 S = TypeVar("S", bound=SpeechToTextSegment)
 
+
 ResponseType: TypeAlias = (
     TranscriptionResponse
     | TranslationResponse
@@ -84,7 +87,7 @@ def asr_inter_chunk_separator(
     return "" if language and language.lower() in no_space_languages else " "
 
 
-class OpenAISpeechToText(OpenAIServing):
+class SpeechToTextBaseServing(GenerateBaseServing):
     """Base class for speech-to-text operations like transcription and
     translation."""
 
@@ -131,12 +134,70 @@ class OpenAISpeechToText(OpenAIServing):
                 self.default_sampling_params,
             )
 
+        # setup preprocess resources
+        # we keep separate thread pool for frontend preprocessing instead
+        # of reusing the one from Renderer which showed lower throughput
+        # https://github.com/vllm-project/vllm/pull/44612#issuecomment-4662757781
+        num_audio_preprocess_workers = envs.VLLM_MAX_AUDIO_PREPROCESS_WORKERS
+        self._preprocess_executor = ThreadPoolExecutor(
+            max_workers=num_audio_preprocess_workers,
+            thread_name_prefix="stt-preprocess",
+        )
+        self._decode_and_chunk_speech_async = make_async_with_semaphore(
+            self._decode_and_chunk_speech, executor=self._preprocess_executor
+        )
+
     @cached_property
     def model_cls(self) -> type[SupportsTranscription]:
         from vllm.model_executor.model_loader import get_model_cls
 
         model_cls = get_model_cls(self.model_config)
         return cast(type[SupportsTranscription], model_cls)
+
+    def shutdown(self) -> None:
+        self._preprocess_executor.shutdown(wait=False)
+
+    def _decode_and_chunk_speech(
+        self,
+        audio_data: bytes,
+    ) -> tuple[list[np.ndarray], float]:
+        # Decode audio bytes.  For container formats (MP4, M4A, WebM) that
+        # soundfile cannot detect from a BytesIO stream, _load_audio_bytes
+        # transparently falls back to ffmpeg via an in-memory fd.
+        # NOTE resample to model SR here for efficiency. This is also a
+        # pre-requisite for chunking, as it assumes Whisper SR.
+        try:
+            with io.BytesIO(audio_data) as buf:
+                y, sr = load_audio(
+                    buf,
+                    sr=self.asr_config.sample_rate,
+                    max_duration_s=self.max_audio_decode_duration_s,
+                )
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise ValueError("Invalid or unsupported audio file.") from exc
+
+        duration = get_audio_duration(y=y, sr=sr)
+        do_split_audio = self.asr_config.allow_audio_chunking and (
+            self.asr_config.max_audio_clip_s is not None
+            and duration > self.asr_config.max_audio_clip_s
+        )
+
+        if not do_split_audio:
+            chunks = [y]
+        else:
+            assert self.asr_config.max_audio_clip_s is not None
+            assert self.asr_config.min_energy_split_window_size is not None
+            chunks = split_audio(
+                audio_data=y,
+                sample_rate=int(sr),
+                max_clip_duration_s=self.asr_config.max_audio_clip_s,
+                overlap_duration_s=self.asr_config.overlap_chunk_second,
+                min_energy_window_size=self.asr_config.min_energy_split_window_size,
+            )
+
+        return chunks, duration
 
     async def _detect_language(
         self,
@@ -210,39 +271,8 @@ class OpenAISpeechToText(OpenAIServing):
                 value=len(audio_data) / 1024**2,
             )
 
-        # Decode audio bytes.  For container formats (MP4, M4A, WebM) that
-        # soundfile cannot detect from a BytesIO stream, _load_audio_bytes
-        # transparently falls back to ffmpeg via an in-memory fd.
-        # NOTE resample to model SR here for efficiency. This is also a
-        # pre-requisite for chunking, as it assumes Whisper SR.
-        try:
-            with io.BytesIO(audio_data) as buf:
-                y, sr = load_audio(
-                    buf,
-                    sr=self.asr_config.sample_rate,
-                    max_duration_s=self.max_audio_decode_duration_s,
-                )
-        except Exception as exc:
-            raise ValueError("Invalid or unsupported audio file.") from exc
-
-        duration = get_audio_duration(y=y, sr=sr)
-        do_split_audio = self.asr_config.allow_audio_chunking and (
-            self.asr_config.max_audio_clip_s is not None
-            and duration > self.asr_config.max_audio_clip_s
-        )
-
-        if not do_split_audio:
-            chunks = [y]
-        else:
-            assert self.asr_config.max_audio_clip_s is not None
-            assert self.asr_config.min_energy_split_window_size is not None
-            chunks = split_audio(
-                audio_data=y,
-                sample_rate=int(sr),
-                max_clip_duration_s=self.asr_config.max_audio_clip_s,
-                overlap_duration_s=self.asr_config.overlap_chunk_second,
-                min_energy_window_size=self.asr_config.min_energy_split_window_size,
-            )
+        # Run cpu intensive preprocess step in a separate thread pool executor.
+        chunks, duration = await self._decode_and_chunk_speech_async(audio_data)
 
         if request.language is None and getattr(
             self.model_cls, "supports_explicit_language_detection", False
@@ -445,7 +475,7 @@ class OpenAISpeechToText(OpenAIServing):
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
 
         input_len = (
-            OpenAISpeechToText._get_decoder_prompt_len(engine_inputs)
+            SpeechToTextBaseServing._get_decoder_prompt_len(engine_inputs)
             if request.use_beam_search
             else 0
         )
