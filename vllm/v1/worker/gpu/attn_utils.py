@@ -14,6 +14,7 @@ from vllm.config import (
 )
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
+from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backend import (
     AttentionCGSupport,
@@ -25,6 +26,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     KVQuantMode,
     MambaSpec,
+    TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
 )
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
@@ -307,6 +309,7 @@ def _reshape_kv_cache(
                 layer_cache_dtype = (
                     "auto"
                     if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+                    and not isinstance(kv_cache_spec, TQFullAttentionSpec)
                     else cache_dtype
                 )
                 kv_cache_shape = group.backend.get_kv_cache_shape(
@@ -391,7 +394,10 @@ def _update_hybrid_attention_layout(
         # (quantization only changes the last dim), so this is a no-op today,
         # but it keeps both call sites consistent for skip layers.
         layer_cache_dtype = (
-            "auto" if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE else cache_dtype
+            "auto"
+            if kv_cache_spec.kv_quant_mode == KVQuantMode.NONE
+            and not isinstance(kv_cache_spec, TQFullAttentionSpec)
+            else cache_dtype
         )
         block_dim = group.backend.get_kv_cache_block_dim(
             kernel_block_sizes[group.kv_cache_group_id],
@@ -482,6 +488,7 @@ def build_attn_metadata(
     seq_lens_cpu_upper_bound: torch.Tensor | None = None,
     dcp_local_seq_lens: torch.Tensor | None = None,
     positions: torch.Tensor | None = None,
+    mm_req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None,
     model_specific_attn_metadata: ModelSpecificAttnMetadata | None = None,
     for_cudagraph_capture: bool = False,
     causal: bool = True,
@@ -518,6 +525,7 @@ def build_attn_metadata(
             causal=causal,
             dcp_local_seq_lens=dcp_local_seq_lens,
             positions=positions,
+            mm_req_doc_ranges=mm_req_doc_ranges,
             rswa_prefix_lens=rswa_prefix_lens,
             **common_attn_metadata_extra_kwargs,
         )
@@ -545,3 +553,27 @@ def build_attn_metadata(
             for layer_name in attn_group.layer_names:
                 attn_metadata[layer_name] = metadata
     return attn_metadata
+
+
+def compute_mm_prefix_ranges(
+    req_ids: list[str],
+    mm_features: dict[str, list[MultiModalFeatureSpec]],
+    sliding_window: int | None = None,
+) -> dict[int, list[tuple[int, int]]]:
+    """Compute PrefixLM bidirectional ranges for multimodal tokens.
+
+    Ranges exceeding sliding_window are skipped to prevent early tokens
+    from attending across the entire image span.
+    """
+    req_doc_ranges: dict[int, list[tuple[int, int]]] = {}
+    for req_idx, req_id in enumerate(req_ids):
+        image_doc_ranges = []
+        for mm_feature in mm_features.get(req_id, ()):
+            if mm_feature.modality not in ("image", "video"):
+                continue
+            for r in mm_feature.mm_position.extract_embeds_range():
+                if sliding_window is not None and (r[1] - r[0] + 1) > sliding_window:
+                    continue
+                image_doc_ranges.append(r)
+        req_doc_ranges[req_idx] = image_doc_ranges
+    return req_doc_ranges
