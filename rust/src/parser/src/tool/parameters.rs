@@ -281,16 +281,44 @@ impl JsonParamType {
     }
 }
 
+/// Return `true` when the normalized schema admits JSON null.
+///
+/// Used to gate the Python-repr `"None"` coercion so that only schemas that
+/// actually allow a null value convert the Qwen3.5 chat-template output to
+/// JSON null. This mirrors Python's `coerce_to_schema_type`, which only
+/// emits `None` when `"null"` is one of the resolved types. Lowercase
+/// `"none"` and `"nil"` remain strings.
+fn schema_admits_null(param_type: Option<&JsonParamType>) -> bool {
+    match param_type {
+        // No schema means we don't know what the parameter allows, so fall
+        // back to treating it as a free-form value — the same behavior the
+        // string `"null"` coercion uses in this function.
+        None => true,
+        Some(JsonParamType::Null) => true,
+        Some(JsonParamType::OneOf(types)) => types.iter().any(|t| matches!(t, JsonParamType::Null)),
+        _ => false,
+    }
+}
+
 /// Convert one parameter input to a normalized JSON value.
 fn convert_with_optional_schema(param_type: Option<&JsonParamType>, input: &ParamInput) -> Value {
     // Coerce the literal text `null` to JSON null, except for `string`-typed
     // params, where it must stay the string "null": a model emitting the literal
     // text "null" for a string field means the string, not a missing value.
-    if let ParamInput::Text(value) = input
-        && value.eq_ignore_ascii_case("null")
-        && param_type != Some(&JsonParamType::String)
-    {
-        return Value::Null;
+    //
+    // The Python-repr `None` produced by Jinja's `| string` filter
+    // (Qwen3.5 chat template — see https://github.com/vllm-project/vllm/issues/38885)
+    // is only coerced when the normalized schema actually admits null. This
+    // mirrors Python's `coerce_to_schema_type`, which only treats the value as
+    // null when `"null"` is one of the resolved types. Lowercase "none" and
+    // "nil" remain strings.
+    if let ParamInput::Text(value) = input {
+        if param_type != Some(&JsonParamType::String) && value.eq_ignore_ascii_case("null") {
+            return Value::Null;
+        }
+        if value == "None" && schema_admits_null(param_type) {
+            return Value::Null;
+        }
     }
 
     // If we have a schema, try to convert the value using it.
@@ -712,6 +740,110 @@ mod tests {
         // Non-string and schema-less params are unchanged: "null" -> null.
         assert_eq!(params.convert("count", text("null")), json!(null));
         assert_eq!(params.convert("anything", text("null")), json!(null));
+    }
+
+    #[test]
+    fn python_repr_none_coerced_to_null() {
+        // Regression for https://github.com/vllm-project/vllm/issues/38885:
+        // Qwen3.5's chat template renders Python ``None`` via Jinja's
+        // ``| string`` filter as the literal text ``"None"``. The parser
+        // must coerce it to JSON null only when the normalized schema
+        // actually admits null — see `python_repr_none_preserved_for_string`
+        // and `python_repr_none_preserved_for_non_null_unions` for the
+        // counter-cases. This mirrors Python's `coerce_to_schema_type`,
+        // which only emits ``None`` when ``"null"`` is one of the resolved
+        // types.
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "label": { "type": "string" },
+                "anything": {},
+                "nullable_object": {
+                    "anyOf": [{ "type": "object" }, { "type": "null" }]
+                },
+                "explicit_null": { "type": "null" }
+            }
+        }));
+
+        // String-typed param: "None" stays the string "None".
+        assert_eq!(params.convert("label", text("None")), json!("None"));
+        // Schema-less param: "None" -> null (free-form fallback, matching the
+        // existing literal-"null" fallback in `string_param_preserves_literal_null_text`).
+        assert_eq!(params.convert("anything", text("None")), json!(null));
+        // Union that includes null: "None" -> null.
+        assert_eq!(params.convert("nullable_object", text("None")), json!(null));
+        // Pure null-typed param: "None" -> null.
+        assert_eq!(params.convert("explicit_null", text("None")), json!(null));
+    }
+
+    #[test]
+    fn python_repr_none_preserved_for_string() {
+        // Regression guard: a string-typed parameter must keep the literal
+        // text "None" as the JSON string "None", not coerce it to null,
+        // even though strings admit any text value.
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "label": { "type": "string" }
+            }
+        }));
+
+        assert_eq!(params.convert("label", text("None")), json!("None"));
+    }
+
+    #[test]
+    fn python_repr_none_preserved_for_non_null_unions() {
+        // Regression guard for Codex review feedback on PR #47643: schemas
+        // that *do not* include null (typed integers, typed strings,
+        // string/integer unions) must keep "None" as the string "None".
+        // The Python-repr coercion is only valid when the normalized
+        // schema actually admits null — mirroring Python's
+        // `coerce_to_schema_type`, which only emits ``None`` when
+        // ``"null"`` is one of the resolved types. Otherwise the qwen /
+        // glm / hy / minimax parsers would corrupt legitimate string
+        // arguments emitted as the literal text "None".
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "count": { "type": "integer" },
+                "ratio": { "type": "number" },
+                "flag": { "type": "boolean" },
+                "either": { "anyOf": [{ "type": "integer" }, { "type": "string" }] },
+                "either_array_type": { "type": ["string", "integer"] },
+                "either_inverted": { "type": ["integer", "string"] }
+            }
+        }));
+
+        assert_eq!(params.convert("count", text("None")), json!("None"));
+        assert_eq!(params.convert("ratio", text("None")), json!("None"));
+        assert_eq!(params.convert("flag", text("None")), json!("None"));
+        assert_eq!(params.convert("either", text("None")), json!("None"));
+        assert_eq!(
+            params.convert("either_array_type", text("None")),
+            json!("None")
+        );
+        assert_eq!(
+            params.convert("either_inverted", text("None")),
+            json!("None")
+        );
+    }
+
+    #[test]
+    fn lowercase_none_is_not_coerced() {
+        // Guard against over-coercion: the English word "none" (lowercase)
+        // is a legitimate string value and must not become JSON null.
+        let params = ToolSchema::from_schema(&json!({
+            "type": "object",
+            "properties": {
+                "value": { "type": "string" },
+                "count": { "type": "integer" }
+            }
+        }));
+
+        assert_eq!(params.convert("value", text("none")), json!("none"));
+        // Even on non-string types, "none" stays a string (no schema
+        // permits it, and it is not the Python repr "None").
+        assert_eq!(params.convert("count", text("none")), json!("none"));
     }
 
     #[test]
