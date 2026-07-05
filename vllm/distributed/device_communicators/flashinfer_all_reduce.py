@@ -35,7 +35,9 @@ except ImportError:
 
 # Workspace for standalone allreduce and non-quant ar+rms fusion
 _fi_ar_workspace = None
-# Extra workspace for quant fusion patterns (only supported by trtllm backend)
+# Extra workspace for quant fusion patterns. This may use either the primary
+# allreduce backend or a fallback backend when the primary workspace is not
+# available on the current topology.
 _fi_ar_quant_workspace = None
 
 
@@ -189,38 +191,64 @@ def get_fi_ar_quant_workspace(
     """
     Return the allreduce workspace for quant patterns, initializing if needed.
 
-    Always uses trtllm backend as it is the only one supporting quantization
-    fusion (FP8/FP4). Returns None for multi-node setups since not supported
-    by trtllm backend.
+    Backend is controlled by VLLM_FLASHINFER_ALLREDUCE_BACKEND env var, matching
+    non-quant fusion. With ``auto`` this prefers mnnvl and falls back to trtllm
+    only on single-node topologies where mnnvl multicast is unavailable.
     """
     global _fi_ar_quant_workspace
     if _fi_ar_quant_workspace is not None:
         return _fi_ar_quant_workspace
 
-    if get_node_count() > 1:
-        logger.warning_once(
-            "Flashinfer allreduce quantization fusion is not supported for "
-            "multi-node allreduce. Disabling quant fusion."
-        )
-        return None
+    backend, allow_trtllm_fallback = _resolve_fi_ar_backend()
 
-    # Reuse the non-quant workspace if it was already created with trtllm
-    if _fi_ar_workspace is not None and _fi_ar_workspace.backend == "trtllm":
+    if get_node_count() > 1 and backend == "trtllm":
+        raise ValueError(
+            "Flashinfer allreduce quantization fusion is not supported for "
+            "multi-node allreduce with 'trtllm' backend. Please use 'mnnvl' "
+            "backend instead."
+        )
+
+    # Reuse the non-quant workspace if it was already created with the same
+    # backend.
+    if _fi_ar_workspace is not None and _fi_ar_workspace.backend == backend:
+        _fi_ar_quant_workspace = _fi_ar_workspace
+        return _fi_ar_quant_workspace
+
+    if (
+        _fi_ar_workspace is not None
+        and _fi_ar_workspace.backend == "trtllm"
+        and allow_trtllm_fallback
+        and backend != "trtllm"
+    ):
         _fi_ar_quant_workspace = _fi_ar_workspace
         return _fi_ar_quant_workspace
 
     _fi_ar_quant_workspace = _create_workspace(
-        "trtllm", world_size, rank, max_token_num, hidden_dim, dtype, group
+        backend, world_size, rank, max_token_num, hidden_dim, dtype, group
     )
+    if _fi_ar_quant_workspace is None and allow_trtllm_fallback and backend != "trtllm":
+        logger.warning_once(
+            "FlashInfer mnnvl allreduce quantization fusion workspace unavailable "
+            "(likely no NVSwitch multicast support); falling back to trtllm "
+            "backend for single node."
+        )
+        backend = "trtllm"
+        if _fi_ar_workspace is not None and _fi_ar_workspace.backend == backend:
+            _fi_ar_quant_workspace = _fi_ar_workspace
+        else:
+            _fi_ar_quant_workspace = _create_workspace(
+                backend, world_size, rank, max_token_num, hidden_dim, dtype, group
+            )
+
     if _fi_ar_quant_workspace is not None:
         logger.info_once(
             "Initialized FlashInfer Allreduce norm quantization "
-            "fusion workspace with backend=trtllm"
+            f"fusion workspace with backend={backend}"
         )
     else:
         logger.warning_once(
             "Failed to initialize FlashInfer Allreduce norm quantization "
-            "fusion workspace with backend=trtllm"
+            f"fusion workspace with backend={backend}"
         )
 
     return _fi_ar_quant_workspace

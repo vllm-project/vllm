@@ -50,6 +50,20 @@ _IR_RMS_NORM_OP = torch.ops.vllm_ir.rms_norm.default
 _IR_FUSED_ADD_RMS_NORM_OP = torch.ops.vllm_ir.fused_add_rms_norm.default
 
 
+def _view_nvfp4_scale_out_for_flashinfer(
+    scale_out: torch.Tensor,
+) -> torch.Tensor:
+    """View vLLM's packed NVFP4 scale buffer as FP8 for FlashInfer."""
+    return torch.ops.aten.view.dtype(scale_out, FP8_DTYPE)
+
+
+def _view_flashinfer_nvfp4_scale_out_as_int32(
+    scale_out: torch.Tensor,
+) -> torch.Tensor:
+    """View FlashInfer's NVFP4 scale buffer back as vLLM's int32 format."""
+    return torch.ops.aten.view.dtype(scale_out, torch.int32)
+
+
 def _norm_input_weight_dtype_match(match: pm.Match) -> bool:
     """Prevent fusion when the norm input and weight dtypes differ (e.g. a Gemma
     fp32 weight.float()+1 gamma), covering rms_norm and fused_add_rms_norm."""
@@ -196,8 +210,8 @@ if flashinfer_comm is not None:
         curr_device = current_platform.get_device_capability()
         device_capability = curr_device.to_int() if curr_device is not None else None
 
-        # Select workspace based on pattern: quant patterns use the
-        # trtllm quant workspace, non-quant patterns use the primary workspace.
+        # Select workspace based on pattern: quant patterns use the quant
+        # workspace, non-quant patterns use the primary workspace.
         is_quant_pattern = pattern_code in (
             ar_fusion_patterns.kARResidualRMSNormFP8Quant,
             ar_fusion_patterns.kARResidualRMSNormFP4Quant,
@@ -233,9 +247,9 @@ if flashinfer_comm is not None:
             residual_out = allreduce_in
 
         layout_code = None
-        # layout_code only supported by trtllm backend
-        if workspace.backend == "trtllm":
-            # in vllm we only support swizzled layout
+        # vLLM quant patterns use swizzled scale-factor layout. Non-quant
+        # patterns ignore layout_code.
+        if workspace.backend in ("trtllm", "mnnvl"):
             layout_code = flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4
 
         flashinfer_comm.allreduce_fusion(
@@ -817,6 +831,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             residual = torch.zeros_like(input)
             result_rms = torch.empty_like(input)
+            output_scale_fp8 = _view_nvfp4_scale_out_for_flashinfer(output_scale)
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
@@ -824,7 +839,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 residual=residual,
                 norm_out=result_rms,
                 quant_out=quant_result,
-                scale_out=output_scale,
+                scale_out=output_scale_fp8,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
                 # We don't use norm_out afterwards
@@ -836,7 +851,11 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
             )
 
             # quant_out, allreduce_output, output_scale
-            return allreduce[4], allreduce[1], allreduce[5]
+            return (
+                allreduce[4],
+                allreduce[1],
+                _view_flashinfer_nvfp4_scale_out_as_int32(allreduce[5]),
+            )
 
         pm.register_replacement(
             pattern,
@@ -920,6 +939,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
             weight: torch.Tensor,
             input_global_scale: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+            output_scale_fp8 = _view_nvfp4_scale_out_for_flashinfer(output_scale)
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
                 flashinfer_trtllm_fused_allreduce_norm,
@@ -927,7 +947,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 residual=residual,
                 norm_out=None,
                 quant_out=quant_result,
-                scale_out=output_scale,
+                scale_out=output_scale_fp8,
                 rms_gamma=weight,
                 rms_eps=self.epsilon,
                 # We don't use norm_out afterwards
@@ -938,7 +958,11 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
                 **self.allreduce_params.get_trtllm_fused_allreduce_kwargs(),
             )
             # quant_out, rms_norm_residual, output_scale
-            return allreduce[4], allreduce[2], allreduce[5]
+            return (
+                allreduce[4],
+                allreduce[2],
+                _view_flashinfer_nvfp4_scale_out_as_int32(allreduce[5]),
+            )
 
         pm.register_replacement(
             pattern, replacement, self.get_inputs(), pm.fwd_only, pm_pass
