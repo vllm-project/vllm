@@ -448,6 +448,7 @@ def test_placeholder_spec_token_ids_written_verbatim():
         vocab_size=VOCAB_SIZE,
         block_sizes=[16],
         kernel_block_sizes=[16],
+        max_num_blocks_per_req=[1],
     )
     req = CachedRequestState(
         req_id="req",
