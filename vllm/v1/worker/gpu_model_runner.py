@@ -6281,6 +6281,17 @@ class GPUModelRunner(
                             dummy_modality
                         ]
 
+                        # Realtime admission is bounded by the encoder token
+                        # budget, not by item count: profile the item count
+                        # that budget admits. Profiling a single item
+                        # under-reserves and OOMs in service (#38233).
+                        if supports_realtime(self.model):
+                            max_toks = mm_budget.mm_max_toks_per_item[dummy_modality]
+                            max_mm_items_per_batch = max(
+                                1,
+                                min(max_mm_items_per_batch, encoder_budget // max_toks),
+                            )
+
                         logger.info_once(
                             "Encoder cache will be initialized with a "
                             "budget of %s tokens, and profiled with "

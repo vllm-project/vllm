@@ -51,7 +51,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -191,6 +196,11 @@ class Scheduler(SchedulerInterface):
 
         # IDs of requests preempted since the last call to schedule().
         self.reset_preempted_req_ids: set[str] = set()
+
+        # Client-facing finishes for streaming sessions ended inside schedule()/
+        # add_request() (no `outputs` dict there). Drained next update_from_output
+        # so the client gets a finish_reason instead of hanging. Flushed each step.
+        self._streaming_finish_outputs: list[tuple[int, str, FinishReason]] = []
 
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
@@ -809,6 +819,16 @@ class Scheduler(SchedulerInterface):
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
 
+                    # Clamp resumable (streaming) sessions to max_model_len;
+                    # their token count grows across resumes. Classic prefills
+                    # stay unclamped (a pooling req at prompt_len == max_model_len
+                    # must keep its last token). Runs before spec-decode padding.
+                    if request.resumable:
+                        num_new_tokens = min(
+                            num_new_tokens,
+                            self.max_model_len - 1 - num_computed_tokens,
+                        )
+
                     # Pad new decode requests to uniform spec decoding size to
                     # preserve full cudagraph for this step.
                     if (
@@ -840,7 +860,19 @@ class Scheduler(SchedulerInterface):
                         break
 
                     num_new_tokens = min(num_new_tokens, token_budget)
-                    assert num_new_tokens > 0
+                    if not request.resumable:
+                        # Non-resumable prefills are never clamped above.
+                        assert num_new_tokens > 0
+                    elif num_new_tokens <= 0:
+                        # Resumable session hit max_model_len: finish gracefully
+                        # (don't crash the engine) and notify the client.
+                        finished = self.finish_requests(
+                            request_id, RequestStatus.FINISHED_LENGTH_CAPPED
+                        )
+                        self._buffer_streaming_finish(
+                            finished, RequestStatus.FINISHED_LENGTH_CAPPED
+                        )
+                        continue
 
                     # Schedule encoder inputs.
                     if request.has_encoder_inputs:
@@ -1706,6 +1738,8 @@ class Scheduler(SchedulerInterface):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
+                    # Applying a queued chunk may have flipped STOP -> LENGTH.
+                    finish_reason = request.get_finished_reason()
                     kv_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
@@ -1774,6 +1808,19 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                     )
                 )
+
+        # Drain finishes buffered by schedule()/add_request() (request already
+        # freed; only place the client learns it ended).
+        if self._streaming_finish_outputs:
+            for client_index, req_id, reason in self._streaming_finish_outputs:
+                outputs[client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=reason,
+                    )
+                )
+            self._streaming_finish_outputs.clear()
 
         # KV Connector: update state for finished KV Transfers.
         if kv_connector_output:
@@ -1885,6 +1932,18 @@ class Scheduler(SchedulerInterface):
                 # Streaming request finished.
                 return True
             self._update_request_as_session(request, update)
+            # Streaming input pushed the session past max_model_len: finish
+            # gracefully, else a fatal assert fires later in the model runner.
+            if request.num_tokens >= self.max_model_len:
+                logger.warning(
+                    "Streaming session %s reached max_model_len (%d >= %d) "
+                    "after session update. Finishing request gracefully.",
+                    request.request_id,
+                    request.num_tokens,
+                    self.max_model_len,
+                )
+                request.status = RequestStatus.FINISHED_LENGTH_CAPPED
+                return True
         else:
             request.status = RequestStatus.WAITING_FOR_STREAMING_REQ
             self.num_waiting_for_streaming_input += 1
@@ -2018,6 +2077,24 @@ class Scheduler(SchedulerInterface):
             elif update is not None:
                 # Commence next input chunk.
                 self._update_request_as_session(existing, update)
+                # Session reached max_model_len after the update: finish
+                # gracefully + notify the client.
+                if existing.num_tokens >= self.max_model_len:
+                    logger.warning(
+                        "Streaming session %s reached max_model_len "
+                        "(%d >= %d) after session update. Finishing request "
+                        "gracefully.",
+                        existing.request_id,
+                        existing.num_tokens,
+                        self.max_model_len,
+                    )
+                    finished = self.finish_requests(
+                        existing.request_id,
+                        RequestStatus.FINISHED_LENGTH_CAPPED,
+                    )
+                    self._buffer_streaming_finish(
+                        finished, RequestStatus.FINISHED_LENGTH_CAPPED
+                    )
             else:
                 # Streaming-input session finished.
                 self.finish_requests(request.request_id, RequestStatus.FINISHED_ABORTED)
@@ -2093,6 +2170,21 @@ class Scheduler(SchedulerInterface):
             self._free_request(request, delay_free_blocks=delay_free_blocks)
 
         return [(r.request_id, r.client_index) for r in valid_requests]
+
+    def _buffer_streaming_finish(
+        self,
+        finished: list[tuple[str, int]],
+        finished_status: RequestStatus,
+    ) -> None:
+        """Buffer a client-facing finish for a session ended inside schedule()/
+        add_request(); drained next update_from_output so the client isn't left
+        hanging. ``finished`` is the (req_id, client_index) list from
+        finish_requests."""
+        reason = RequestStatus.get_finished_reason(finished_status)
+        if reason is None:
+            return
+        for req_id, client_index in finished:
+            self._streaming_finish_outputs.append((client_index, req_id, reason))
 
     def _free_request(
         self, request: Request, delay_free_blocks: bool = False
