@@ -413,6 +413,24 @@ class MoERunner(MoERunnerInterface):
             and self._quant_method.moe_kernel.output_is_reduced()
         )
 
+    @property
+    def _can_defer_final_all_reduce(self) -> bool:
+        """Return True if the final all-reduce can be deferred for fusion."""
+        cfg = self.moe_config
+        return (
+            cfg.tp_size > 1
+            and not cfg.use_ep
+            and not cfg.is_sequence_parallel
+            and not self._fused_output_is_reduced
+        )
+
+    def try_defer_final_all_reduce(self) -> bool:
+        """Try deferring the final all-reduce for fusion."""
+        if self._can_defer_final_all_reduce:
+            self.moe_config.skip_final_all_reduce = True
+            return True
+        return False
+
     def _maybe_reduce_shared_expert_output(
         self,
         shared_output: torch.Tensor | None,

@@ -744,6 +744,14 @@ class MiniMaxM3DecoderLayer(nn.Module):
         hidden_states = ffn(hidden_states)
         return hidden_states, residual
 
+    def defer_ffn_all_reduce(self) -> bool:
+        """Defer this layer's FFN output all-reduce to fuse with next layer's
+        input_layernorm. Returns True if the deferral is active, False otherwise.
+        """
+        if self.is_moe_layer:
+            return self.block_sparse_moe.experts.try_defer_final_all_reduce()
+        return not self.mlp.down_proj.reduce_results
+
 
 class MiniMaxM3Model(nn.Module, EagleModelMixin):
     fall_back_to_pt_during_load = False
@@ -805,6 +813,7 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
+        self.fuse_final_norm_allreduce = False
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -840,7 +849,12 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if self.fuse_final_norm_allreduce:
+            hidden_states, _ = fused_allreduce_gemma_rms_norm(
+                hidden_states, residual, self.norm
+            )
+        else:
+            hidden_states, _ = self.norm(hidden_states, residual)
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states
@@ -980,8 +994,26 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
             self.model.make_empty_intermediate_tensors
         )
 
+        # Lazy configure cross-layer allreduce/RMSNorm fusion on first forward
+        self._ar_fusion_configured = False
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
+
+    def _configure_allreduce_fusion(self) -> None:
+        """Configure cross-layer all-reduce/RMSNorm fusion after weights load."""
+        if self._ar_fusion_configured:
+            return
+        self._ar_fusion_configured = True
+        if get_pp_group().world_size > 1:
+            return
+        model = self.model
+        prev_defers = False
+        layers = model.layers[model.start_layer : model.end_layer]
+        for idx, layer in enumerate(layers):
+            layer.fuse_input_allreduce = idx > 0 and prev_defers
+            prev_defers = layer.defer_ffn_all_reduce()
+        model.fuse_final_norm_allreduce = prev_defers
 
     def forward(
         self,
@@ -991,6 +1023,7 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
+        self._configure_allreduce_fusion()
         return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
