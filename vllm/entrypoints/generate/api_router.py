@@ -163,6 +163,7 @@ async def init_generate_state(
             request_logger=request_logger,
             chat_template=resolved_chat_template,
             chat_template_content_format=args.chat_template_content_format,
+            inline_system_messages=args.inline_system_messages,
             return_tokens_as_token_ids=args.return_tokens_as_token_ids,
             enable_auto_tools=args.enable_auto_tool_choice,
             tool_parser=args.tool_call_parser,

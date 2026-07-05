@@ -103,6 +103,11 @@ def wrap_data_with_event(data: str, event: str):
 class AnthropicServingMessages(OpenAIServingChat):
     """Handler for Anthropic Messages API requests"""
 
+    # Models verified to handle inline (mid-conversation) system messages
+    # without output quality degradation. This allowlist starts empty and
+    # grows conservatively as models are explicitly tested.
+    _INLINE_SYSTEM_ALLOWLIST: set[str] = set()
+
     def __init__(
         self,
         engine_client: EngineClient,
@@ -113,6 +118,7 @@ class AnthropicServingMessages(OpenAIServingChat):
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
+        inline_system_messages: str = "merge",
         return_tokens_as_token_ids: bool = False,
         reasoning_parser: str = "",
         enable_auto_tools: bool = False,
@@ -142,18 +148,27 @@ class AnthropicServingMessages(OpenAIServingChat):
             "length": "max_tokens",
             "tool_calls": "tool_use",
         }
-        self._merge_inline_system = self._detect_merge_inline_system(chat_template)
+        self._merge_inline_system = self._resolve_merge_inline_system(
+            chat_template, inline_system_messages
+        )
 
-    @staticmethod
-    def _detect_merge_inline_system(chat_template: str | None) -> bool:
-        """Auto-detect whether the chat template requires system-first ordering.
+    _INLINE_SYSTEM_MODE_MERGE = "merge"
+    _INLINE_SYSTEM_MODE_PRESERVE = "preserve"
+    _INLINE_SYSTEM_MODE_AUTO = "auto"
 
-        Renders a [system, user, system, user] conversation against the
-        template; if it raises (e.g. Qwen's ``loop.first`` guard), the
-        model needs inline system messages merged into the leading block.
-        """
+    def _resolve_merge_inline_system(
+        self, chat_template: str | None, mode: str
+    ) -> bool:
+        if mode == self._INLINE_SYSTEM_MODE_MERGE:
+            return True
+        if mode == self._INLINE_SYSTEM_MODE_PRESERVE:
+            return False
+
+        assert mode == self._INLINE_SYSTEM_MODE_AUTO
+
         if not chat_template:
             return True
+
         try:
             env = jinja2.sandbox.ImmutableSandboxedEnvironment(
                 trim_blocks=True,
@@ -169,9 +184,14 @@ class AnthropicServingMessages(OpenAIServingChat):
                 ],
                 add_generation_prompt=False,
             )
-            return False
         except jinja2.TemplateError:
             return True
+
+        model_name = self.model_config.model
+        if model_name in self._INLINE_SYSTEM_ALLOWLIST:
+            return False
+
+        return True
 
     @staticmethod
     def _convert_image_source_to_url(source: dict[str, Any]) -> str:
