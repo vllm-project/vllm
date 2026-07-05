@@ -322,11 +322,7 @@ class DeviceCommunicatorBase:
         pass
 
     def suspend(self) -> None:
-        """Release reclaimable communicator memory (default: no-op).
-
-        Overridden by communicators that can free their device buffers while a
-        engine sleeps and restore them on ``resume``. Collective across ranks.
-        """
+        """Release reclaimable communicator memory (default: no-op)."""
 
     def resume(self) -> None:
         """Restore memory released by ``suspend`` (default: no-op)."""
