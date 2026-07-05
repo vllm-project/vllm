@@ -52,9 +52,13 @@ if ROCM_AVAILABLE:
     ROCM_GFX950 = on_gfx950()
 
     if ROCM_AITER_AVAILABLE:
-        from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
-        from aiter.ops.triton.quant import dynamic_mxfp4_quant
-        _ROCM_QUANT_UTILS_AVAILABLE = True
+        try:
+            from aiter.ops.triton.moe.quant_moe import upcast_from_mxfp
+            from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+            _ROCM_QUANT_UTILS_AVAILABLE = True
+        except ImportError:
+            _ROCM_QUANT_UTILS_AVAILABLE = False
 
 if TRTLLM_GEN_MXFP4_AVAILABLE:
     from flashinfer import (
@@ -1196,37 +1200,17 @@ def test_trtllm_gen_mxfp8_block_scale_moe(
     check_accuracy(ref, out, atol=0.1, rtol=0.85, percent=0.8)
 
 
-@pytest.fixture(scope="session")
-def dist_init_single_rank():
-    import os
-    from unittest.mock import patch
-    import torch.distributed as dist
-    from vllm.config import VllmConfig, set_current_vllm_config
-    from vllm.distributed.parallel_state import (
-        init_distributed_environment,
-        initialize_model_parallel,
-    )
+@pytest.fixture
+def dist_init_single_rank(dist_init):
+    from types import SimpleNamespace
 
-    config_ctx = set_current_vllm_config(VllmConfig())
-    config_ctx.__enter__()
+    from vllm.config import get_current_vllm_config
 
-    mock_ctx = patch(
-        "vllm.model_executor.layers.fused_moe.oracle.mxfp4.get_current_vllm_config"
-    )
-    mock_cfg = mock_ctx.__enter__()
-    mock_cfg.return_value.model_config.quantization_config = None
-
-    if not dist.is_initialized():
-        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
-        os.environ.setdefault("MASTER_PORT", "29501")
-        dist.init_process_group(backend="nccl", world_size=1, rank=0)
-        init_distributed_environment(world_size=1, rank=0, local_rank=0)
-        initialize_model_parallel(tensor_model_parallel_size=1)
-
+    vllm_config = get_current_vllm_config()
+    if vllm_config.model_config is None:
+        vllm_config.model_config = SimpleNamespace(quantization_config=None)
     yield
 
-    mock_ctx.__exit__(None, None, None)
-    config_ctx.__exit__(None, None, None)
 
 # -----------------------------------------------------------------------------
 # ROCm Oracle-based kernel execution tests
@@ -1266,7 +1250,6 @@ ROCM_BACKEND_CONFIGS = {
 }
 
 
-@pytest.mark.skip_global_cleanup
 @pytest.mark.parametrize("backend_name", list(ROCM_BACKEND_CONFIGS.keys()))
 @pytest.mark.parametrize("topk", [4])
 @pytest.mark.parametrize("num_experts", [8])
@@ -1312,7 +1295,6 @@ def test_rocm_mxfp4_moe_oracle(
         pytest.skip(f"Backend {backend_name} requires GFX950")
 
     import vllm.distributed.parallel_state as ps
-    from vllm.config import VllmConfig, set_current_vllm_config
     from vllm.model_executor.layers.fused_moe.activation import MoEActivation
     from vllm.model_executor.layers.fused_moe.oracle.mxfp4 import (
         Mxfp4MoeBackend,
@@ -1452,50 +1434,49 @@ def test_rocm_mxfp4_moe_oracle(
 
     # Build kernel using oracle
     assert quant_config is not None, "Failed to create quant config"
-    with set_current_vllm_config(VllmConfig()):
-        kernel = make_mxfp4_moe_kernel(
-            moe_quant_config=quant_config,
-            moe_config=moe_config,
-            mxfp4_backend=backend,
-            experts_cls=experts_cls,
-            routing_tables=None,
-            layer=None,
-        )
+    kernel = make_mxfp4_moe_kernel(
+        moe_quant_config=quant_config,
+        moe_config=moe_config,
+        mxfp4_backend=backend,
+        experts_cls=experts_cls,
+        routing_tables=None,
+        layer=None,
+    )
 
-        # Create inputs
-        x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
-        router_logits = torch.randn(
-            num_tokens, num_experts, dtype=torch.float32, device=device
-        )
-        topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
-        topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
+    # Create inputs
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    router_logits = torch.randn(
+        num_tokens, num_experts, dtype=torch.float32, device=device
+    )
+    topk_weights, topk_ids = torch.topk(router_logits, k=topk, dim=-1, sorted=True)
+    topk_weights = torch.nn.functional.softmax(topk_weights, dim=-1)
 
-        # Run kernel - use appropriate method based on impl type
-        if kernel.is_monolithic:
-            # Monolithic impl uses router_logits
-            out = kernel.apply_monolithic(
-                hidden_states=x,
-                w1=w13_conv,
-                w2=w2_conv,
-                router_logits=router_logits,
-                activation=activation,
-                global_num_experts=num_experts,
-                expert_map=None,
-                apply_router_weight_on_input=False,
-            )
-        else:
-            # Modular impl uses topk_weights and topk_ids
-            out = kernel.apply(
-                hidden_states=x,
-                w1=w13_conv,
-                w2=w2_conv,
-                topk_weights=topk_weights,
-                topk_ids=topk_ids,
-                activation=activation,
-                global_num_experts=num_experts,
-                expert_map=None,
-                apply_router_weight_on_input=False,
-            )
+    # Run kernel - use appropriate method based on impl type
+    if kernel.is_monolithic:
+        # Monolithic impl uses router_logits
+        out = kernel.apply_monolithic(
+            hidden_states=x,
+            w1=w13_conv,
+            w2=w2_conv,
+            router_logits=router_logits,
+            activation=activation,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
+    else:
+        # Modular impl uses topk_weights and topk_ids
+        out = kernel.apply(
+            hidden_states=x,
+            w1=w13_conv,
+            w2=w2_conv,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            activation=activation,
+            global_num_experts=num_experts,
+            expert_map=None,
+            apply_router_weight_on_input=False,
+        )
 
     # Verify output is valid (no NaN/Inf) and has expected shape
     assert out.shape == (num_tokens, hidden_size), f"Unexpected shape: {out.shape}"
