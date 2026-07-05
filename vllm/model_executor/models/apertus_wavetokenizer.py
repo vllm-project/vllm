@@ -68,34 +68,7 @@ DEFAULT_CONFIG = {
     }
 
 
-def is_distributed() -> bool:
-    return torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
 
-
-def broadcast_tensors(tensors: tp.Iterable[torch.Tensor], src: int = 0) -> None:
-    if not is_distributed():
-        return
-    tensors_list = [
-        t for t in tensors if torch.is_floating_point(t) or torch.is_complex(t)
-        ]
-    if not tensors_list:
-        return
-    device = tensors_list[0].device
-    local_len = len(tensors_list)
-    tensor = torch.tensor([local_len], device=device, dtype=torch.long)
-    torch.distributed.all_reduce(tensor)
-    if tensor.item() != local_len * torch.distributed.get_world_size():
-        raise RuntimeError(
-                f"Mismatch in number of params: ours is {local_len}, "
-                "at least one worker has a different one.",
-                )
-
-    handles = []
-    for t in tensors_list:
-        handle = torch.distributed.broadcast(t.data, src=src, async_op=True)
-        handles.append(handle)
-    for handle in handles:
-        handle.wait()
 
 
 class SLSTM(nn.Module):
@@ -718,340 +691,6 @@ class EncodecFeatures(FeatureExtractor):
         return quantized, codes, commit_loss
 
 
-class ResnetBlock(nn.Module):
-    def __init__(
-            self,
-            *,
-            in_channels: int,
-            out_channels: int | None = None,
-            conv_shortcut: bool = False,
-            dropout: float,
-            temb_channels: int = 512,
-            ):
-        super().__init__()
-        self.in_channels = in_channels
-        self.out_channels = in_channels if out_channels is None else out_channels
-        self.use_conv_shortcut = conv_shortcut
-
-        self.norm1 = nn.GroupNorm(
-                num_groups=32, num_channels=in_channels, eps=1e-6, affine=True,
-                )
-        self.conv1 = nn.Conv1d(
-                in_channels, self.out_channels, kernel_size=3, stride=1, padding=1,
-                )
-        if temb_channels > 0:
-            self.temb_proj = nn.Linear(temb_channels, self.out_channels)
-        self.norm2 = nn.GroupNorm(
-                num_groups=32, num_channels=self.out_channels, eps=1e-6, affine=True,
-                )
-        self.dropout = nn.Dropout(dropout)
-        self.conv2 = nn.Conv1d(
-                self.out_channels, self.out_channels, kernel_size=3, stride=1, padding=1,
-                )
-        if self.in_channels != self.out_channels:
-            if self.use_conv_shortcut:
-                self.conv_shortcut = nn.Conv1d(
-                        in_channels, self.out_channels, kernel_size=3, stride=1, padding=1,
-                        )
-            else:
-                self.nin_shortcut = nn.Conv1d(
-                        in_channels, self.out_channels, kernel_size=1, stride=1, padding=0,
-                        )
-
-    def forward(
-            self, x: torch.Tensor, temb: torch.Tensor | None = None,
-            ) -> torch.Tensor:
-        h = x
-        h = self.norm1(h)
-        h = h * torch.sigmoid(h)
-        h = self.conv1(h)
-        if temb is not None:
-            h = h + self.temb_proj(temb * torch.sigmoid(temb))[:, :, None, None]
-        h = self.norm2(h)
-        h = h * torch.sigmoid(h)
-        h = self.dropout(h)
-        h = self.conv2(h)
-        if self.in_channels != self.out_channels:
-            if self.use_conv_shortcut:
-                x = self.conv_shortcut(x)
-            else:
-                x = self.nin_shortcut(x)
-        return x + h
-
-
-class AttnBlock(nn.Module):
-    def __init__(self, in_channels: int):
-        super().__init__()
-        self.in_channels = in_channels
-        self.norm = nn.GroupNorm(
-                num_groups=32, num_channels=in_channels, eps=1e-6, affine=True,
-                )
-        self.q = nn.Conv1d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.k = nn.Conv1d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.v = nn.Conv1d(in_channels, in_channels, kernel_size=1, stride=1, padding=0)
-        self.proj_out = nn.Conv1d(
-                in_channels, in_channels, kernel_size=1, stride=1, padding=0,
-                )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h_ = x
-        h_ = self.norm(h_)
-        q = self.q(h_)
-        k = self.k(h_)
-        v = self.v(h_)
-
-        b, c, h = q.shape
-        q = q.permute(0, 2, 1)
-        w_ = torch.bmm(q, k)
-        w_ = w_ * (int(c) ** (-0.5))
-        w_ = torch.nn.functional.softmax(w_, dim=2)
-        w_ = w_.permute(0, 2, 1)
-        h_ = torch.bmm(v, w_)
-        h_ = self.proj_out(h_)
-        return x + h_
-
-
-class ConvNeXtBlock(nn.Module):
-    def __init__(
-            self,
-            dim: int,
-            intermediate_dim: int,
-            layer_scale_init_value: float | None = None,
-            adanorm_num_embeddings: int | None = None,
-            ):
-        super().__init__()
-        self.dwconv = nn.Conv1d(dim, dim, kernel_size=7, padding=3, groups=dim)
-        self.adanorm = adanorm_num_embeddings is not None
-        if adanorm_num_embeddings:
-            self.norm = AdaLayerNorm(adanorm_num_embeddings, dim, eps=1e-6)
-        else:
-            self.norm = nn.LayerNorm(dim, eps=1e-6)
-        self.pwconv1 = nn.Linear(dim, intermediate_dim)
-        self.act = nn.GELU()
-        self.pwconv2 = nn.Linear(intermediate_dim, dim)
-        self.gamma = (
-            nn.Parameter(layer_scale_init_value * torch.ones(dim), requires_grad=True)
-            if layer_scale_init_value is not None and layer_scale_init_value > 0
-            else None
-        )
-
-    def forward(
-            self, x: torch.Tensor, cond_embedding_id: torch.Tensor | None = None,
-            ) -> torch.Tensor:
-        residual = x
-        x = self.dwconv(x)
-        x = x.transpose(1, 2)
-        if self.adanorm:
-            assert cond_embedding_id is not None
-            x = self.norm(x, cond_embedding_id)
-        else:
-            x = self.norm(x)
-        x = self.pwconv1(x)
-        x = self.act(x)
-        x = self.pwconv2(x)
-        if self.gamma is not None:
-            x = self.gamma * x
-        x = x.transpose(1, 2)
-        return residual + x
-
-
-class AdaLayerNorm(nn.Module):
-    def __init__(self, num_embeddings: int, embedding_dim: int, eps: float = 1e-6):
-        super().__init__()
-        self.eps = eps
-        self.dim = embedding_dim
-        self.scale = nn.Embedding(
-                num_embeddings=num_embeddings, embedding_dim=embedding_dim,
-                )
-        self.shift = nn.Embedding(
-                num_embeddings=num_embeddings, embedding_dim=embedding_dim,
-                )
-        torch.nn.init.ones_(self.scale.weight)
-        torch.nn.init.zeros_(self.shift.weight)
-
-    def forward(self, x: torch.Tensor, cond_embedding_id: torch.Tensor) -> torch.Tensor:
-        scale = self.scale(cond_embedding_id)
-        shift = self.shift(cond_embedding_id)
-        x = nn.functional.layer_norm(x, (self.dim,), eps=self.eps)
-        return x * scale + shift
-
-
-class Backbone(nn.Module):
-    def forward(self, x: torch.Tensor, **kwargs: tp.Any) -> torch.Tensor:
-        raise NotImplementedError("Subclasses must implement the forward method.")
-
-
-class VocosBackbone(Backbone):
-    def __init__(
-            self,
-            input_channels: int,
-            dim: int,
-            intermediate_dim: int,
-            num_layers: int,
-            layer_scale_init_value: float | None = None,
-            adanorm_num_embeddings: int | None = None,
-            ):
-        super().__init__()
-        self.input_channels = input_channels
-        self.embed = nn.Conv1d(input_channels, dim, kernel_size=7, padding=3)
-        self.adanorm = adanorm_num_embeddings is not None
-        if adanorm_num_embeddings:
-            self.norm = AdaLayerNorm(adanorm_num_embeddings, dim, eps=1e-6)
-        else:
-            self.norm = nn.LayerNorm(dim, eps=1e-6)
-        layer_scale_init_value = layer_scale_init_value or 1 / num_layers
-        self.convnext = nn.ModuleList(
-                [
-                    ConvNeXtBlock(
-                            dim=dim,
-                            intermediate_dim=intermediate_dim,
-                            layer_scale_init_value=layer_scale_init_value,
-                            adanorm_num_embeddings=adanorm_num_embeddings,
-                            )
-                    for _ in range(num_layers)
-                    ],
-                )
-        self.final_layer_norm = nn.LayerNorm(dim, eps=1e-6)
-        self.apply(self._init_weights)
-
-        self.temb_ch = 0
-        block_in = dim
-        dropout = 0.1
-
-        pos_net: list[nn.Module] = [
-            ResnetBlock(
-                    in_channels=block_in,
-                    out_channels=block_in,
-                    temb_channels=self.temb_ch,
-                    dropout=dropout,
-                    ),
-            ResnetBlock(
-                    in_channels=block_in,
-                    out_channels=block_in,
-                    temb_channels=self.temb_ch,
-                    dropout=dropout,
-                    ),
-            AttnBlock(block_in),
-            ResnetBlock(
-                    in_channels=block_in,
-                    out_channels=block_in,
-                    temb_channels=self.temb_ch,
-                    dropout=dropout,
-                    ),
-            ResnetBlock(
-                    in_channels=block_in,
-                    out_channels=block_in,
-                    temb_channels=self.temb_ch,
-                    dropout=dropout,
-                    ),
-            nn.GroupNorm(num_groups=32, num_channels=block_in, eps=1e-6, affine=True),
-            ]
-        self.pos_net = nn.Sequential(*pos_net)
-
-    def _init_weights(self, m: nn.Module) -> None:
-        if isinstance(m, (nn.Conv1d, nn.Linear)):
-            nn.init.trunc_normal_(m.weight, std=0.02)
-            nn.init.constant_(m.bias, 0)
-
-    def forward(
-            self, x: torch.Tensor, bandwidth_id: torch.Tensor | None = None,
-            ) -> torch.Tensor:
-        x = self.embed(x)
-        x = self.pos_net(x)
-        if self.adanorm:
-            assert bandwidth_id is not None
-            x = self.norm(x.transpose(1, 2), cond_embedding_id=bandwidth_id)
-        else:
-            x = self.norm(x.transpose(1, 2))
-        x = x.transpose(1, 2)
-        for conv_block in self.convnext:
-            x = conv_block(x, cond_embedding_id=bandwidth_id)
-        x = self.final_layer_norm(x.transpose(1, 2))
-        return x
-
-
-class ISTFT(nn.Module):
-    def __init__(
-            self, n_fft: int, hop_length: int, win_length: int, padding: str = "same",
-            ):
-        super().__init__()
-        if padding not in ["center", "same"]:
-            raise ValueError("Padding must be 'center' or 'same'.")
-        self.padding = padding
-        self.n_fft = n_fft
-        self.hop_length = hop_length
-        self.win_length = win_length
-        window = torch.hann_window(win_length)
-        self.register_buffer("window", window)
-
-    def forward(self, spec: torch.Tensor) -> torch.Tensor:
-        if self.padding == "center":
-            return torch.istft(
-                    spec,
-                    self.n_fft,
-                    self.hop_length,
-                    self.win_length,
-                    self.window,
-                    center=True,
-                    )
-        elif self.padding == "same":
-            pad = (self.win_length - self.hop_length) // 2
-        else:
-            raise ValueError("Padding must be 'center' or 'same'.")
-
-        assert spec.dim() == 3, "Expected a 3D tensor as input"
-        B, N, T = spec.shape
-
-        ifft = torch.fft.irfft(spec, self.n_fft, dim=1, norm="backward")
-        ifft = ifft * self.window[None, :, None]
-
-        output_size = (T - 1) * self.hop_length + self.win_length
-        y = torch.nn.functional.fold(
-                ifft,
-                output_size=(1, output_size),
-                kernel_size=(1, self.win_length),
-                stride=(1, self.hop_length),
-                )[:, 0, 0, pad:-pad]
-
-        window_sq = self.window.square().expand(1, T, -1).transpose(1, 2)
-        window_envelope = torch.nn.functional.fold(
-                window_sq,
-                output_size=(1, output_size),
-                kernel_size=(1, self.win_length),
-                stride=(1, self.hop_length),
-                ).squeeze()[pad:-pad]
-
-        assert (window_envelope > 1e-11).all()
-        y = y / window_envelope
-        return y
-
-
-class FourierHead(nn.Module):
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        raise NotImplementedError("Subclasses must implement the forward method.")
-
-
-class ISTFTHead(FourierHead):
-    def __init__(self, dim: int, n_fft: int, hop_length: int, padding: str = "same"):
-        super().__init__()
-        out_dim = n_fft + 2
-        self.out = nn.Linear(dim, out_dim)
-        self.istft = ISTFT(
-                n_fft=n_fft, hop_length=hop_length, win_length=n_fft, padding=padding,
-                )
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        x = self.out(x).transpose(1, 2)
-        mag, p = x.chunk(2, dim=1)
-        mag = torch.exp(mag)
-        mag = torch.clip(mag, max=1e2)
-        x_cos = torch.cos(p)
-        y_sin = torch.sin(p)
-        S = mag * (x_cos + 1j * y_sin)
-        audio = self.istft(S)
-        return audio
-
-
 def instantiate_class(args: tuple[tp.Any, ...], init: dict[str, tp.Any]) -> tp.Any:
     kwargs = init.get("init_args", {})
     if not isinstance(args, tuple):
@@ -1059,26 +698,16 @@ def instantiate_class(args: tuple[tp.Any, ...], init: dict[str, tp.Any]) -> tp.A
     class_path = init["class_path"]
     class_name = class_path.split(".")[-1]
 
-    mapping = {
-        "EncodecFeatures": EncodecFeatures,
-        "VocosBackbone":   VocosBackbone,
-        "ISTFTHead":       ISTFTHead,
-        }
-
-    if class_name in mapping:
-        return mapping[class_name](*args, **kwargs)
+    if class_name == "EncodecFeatures":
+        return EncodecFeatures(*args, **kwargs)
 
     raise ValueError(f"Unsupported class_path in configuration: {class_path}")
 
 
 class OriginalWavTokenizer(nn.Module):
-    def __init__(
-            self, feature_extractor: FeatureExtractor, backbone: Backbone, head: FourierHead,
-            ):
+    def __init__(self, feature_extractor: FeatureExtractor):
         super().__init__()
         self.feature_extractor = feature_extractor
-        self.backbone = backbone
-        self.head = head
 
     @torch.inference_mode()
     def encode_infer(
@@ -1088,31 +717,6 @@ class OriginalWavTokenizer(nn.Module):
                 audio_input, **kwargs,
                 )
         return features, discrete_codes
-
-    @torch.inference_mode()
-    def decode(self, features_input: torch.Tensor, **kwargs: tp.Any) -> torch.Tensor:
-        x = self.backbone(features_input, **kwargs)
-        audio_output = self.head(x)
-        return audio_output
-
-    @torch.inference_mode()
-    def codes_to_features(self, codes: torch.Tensor) -> torch.Tensor:
-        assert isinstance(self.feature_extractor, EncodecFeatures), (
-            "Feature extractor should be an instance of EncodecFeatures"
-        )
-
-        if codes.dim() == 2:
-            codes = codes.unsqueeze(1)
-
-        n_bins = self.feature_extractor.encodec.quantizer.bins
-        offsets = torch.arange(0, n_bins * len(codes), n_bins, device=codes.device)
-        embeddings_idxs = codes + offsets.view(-1, 1, 1)
-
-        layers = self.feature_extractor.encodec.quantizer.vq.layers
-        tmp = torch.cat([vq.codebook for vq in layers], dim=0)
-        features = torch.nn.functional.embedding(embeddings_idxs, tmp).sum(dim=0)
-        features = features.transpose(1, 2)
-        return features
 
 
 class WavTokenizerBase(nn.Module):
@@ -1162,19 +766,6 @@ class WavTokenizerBase(nn.Module):
             discrete_codes = discrete_codes.squeeze(0)
         return discrete_codes
 
-    def decode_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
-        tokens = tokens.to(self.device)
-        tokens = tokens.long()
-        if tokens.dim() == 2:
-            tokens = tokens.unsqueeze(0)
-        with torch.no_grad():
-            features = self.model.codes_to_features(tokens)
-            bandwidth_id = torch.tensor([0]).to(self.device)
-            audio = self.model.decode(features, bandwidth_id=bandwidth_id)
-        if audio.dim() == 2:
-            audio = audio.unsqueeze(1)
-        return audio
-
 
 class WavTokenizer40(WavTokenizerBase):
     name = "wavtokenizer-40"
@@ -1193,9 +784,7 @@ class WavTokenizer40(WavTokenizerBase):
         config = self.audio_config if self.audio_config is not None else DEFAULT_CONFIG
         init_args = config["model"]["init_args"]
         feature_extractor = instantiate_class(args=(), init=init_args["feature_extractor"])
-        backbone = instantiate_class(args=(), init=init_args["backbone"])
-        head = instantiate_class(args=(), init=init_args["head"])
-        self.model = OriginalWavTokenizer(feature_extractor=feature_extractor, backbone=backbone, head=head)
+        self.model = OriginalWavTokenizer(feature_extractor=feature_extractor)
 
         # Load weights
         if os.path.exists(safetensors_path):
@@ -1216,7 +805,7 @@ class WavTokenizer40(WavTokenizerBase):
 
         state_dict = {}
         for k, v in state_dict_raw.items():
-            if k.startswith("backbone.") or k.startswith("head.") or k.startswith("feature_extractor."):
+            if k.startswith("feature_extractor."):
                 if not k.startswith("feature_extractor.encodec.decoder"):
                     state_dict[k] = v
 
