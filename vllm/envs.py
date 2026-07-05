@@ -186,11 +186,18 @@ if TYPE_CHECKING:
     VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_MIN_TOKENS: int = 4096
     VLLM_DEEPSEEK_V4_INDEXED_D512_SPLIT_PREFILL_WARMUP: bool = True
     VLLM_DEEPSEEK_V4_INDEXED_D512_CHUNKED_PREFILL: bool = True
-    VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE: bool = False
-    # Default ON: when the SM120 FlashInfer sparse-MLA backend is active (DECODE
-    # opted in + SM12x + kernel present), the packed prefill runner is used by
-    # default. Set =0 to force the FlashMLA indexed-D512 (Triton split/merge)
-    # prefill path. No effect unless that backend is active (see
+    # Default ON (SM12x + FlashInfer >= 0.6.14 kernel present): route DSv4 sparse
+    # MLA through the FlashInfer SM120 packed path (prefill + decode). No effect
+    # elsewhere -- the selector still gates on SM12x + has_flashinfer_trtllm_
+    # sparse_mla_dsv4() and falls back to the Triton FlashMLA path otherwise.
+    # A/B on FI 0.6.14 (GB10 2-node, 616a5723ac): ~parity at 8-32k, and at long
+    # context FI leads clearly -- ctx_pp +12-18%, decode +45-81% at 128k/256k,
+    # both widening with context; arthur 434k 2/2 + GSM8K 0.975. Set =0 for the
+    # Triton FlashMLA path.
+    VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE: bool = True
+    # When the SM120 FlashInfer sparse-MLA backend is active, the packed prefill
+    # runner is used by default. Set =0 to force the FlashMLA indexed-D512 (Triton
+    # split/merge) prefill path. No effect unless that backend is active (see
     # is_dsv4_sm120_fi_prefill_active).
     VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL: bool = True
     VLLM_TRITON_MLA_SPARSE: bool | None = None
@@ -1512,7 +1519,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.getenv("VLLM_DEEPSEEK_V4_INDEXED_D512_CHUNKED_PREFILL", "1"))
     ),
     "VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE": lambda: bool(
-        int(os.getenv("VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE", "0"))
+        int(os.getenv("VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE", "1"))
     ),
     "VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL": lambda: bool(
         int(os.getenv("VLLM_DEEPSEEK_V4_FLASHINFER_SM120_PREFILL", "1"))
