@@ -130,7 +130,11 @@ def _get_backend_priorities(
         elif device_capability.major == 12:
             return [
                 AttentionBackendEnum.TRITON_MLA,
+                # FP8 KV cache only; with BF16 KV it is rejected by
+                # supports_combination and selection falls through to the
+                # Triton sparse backend below.
                 AttentionBackendEnum.FLASHINFER_MLA_SPARSE_SM120,
+                AttentionBackendEnum.TRITON_MLA_SPARSE,
             ]
         else:
             return [
