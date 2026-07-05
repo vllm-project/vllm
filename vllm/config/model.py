@@ -1346,7 +1346,20 @@ class ModelConfig:
                         )
                     else:
                         return self.get_num_layers(parallel_config)
-                return sum(t == block_type for t in layers_block_type_value[start:end])
+                # transformers >= 5 remaps legacy layer-type names on config
+                # load ("attention" -> "full_attention", "mamba" ->
+                # "linear_attention"), and ``layers_block_type`` may alias the
+                # remapped ``layer_types``. Normalize both sides so either
+                # naming convention matches.
+                legacy_aliases = {
+                    "full_attention": "attention",
+                    "linear_attention": "mamba",
+                }
+                normalized_block_type = legacy_aliases.get(block_type, block_type)
+                return sum(
+                    legacy_aliases.get(t, t) == normalized_block_type
+                    for t in layers_block_type_value[start:end]
+                )
 
             # Hybrid model Minimax
             attn_type_list = getattr(self.hf_config, "attn_type_list", None)

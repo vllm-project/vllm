@@ -316,8 +316,15 @@ class GraniteMoeHybridAttention(nn.Module):
 
 
 ALL_DECODER_LAYER_TYPES = {
+    # Checkpoint values under transformers < 5.
     "attention": GraniteMoeHybridAttentionDecoderLayer,
     "mamba": GraniteMoeHybridMambaDecoderLayer,
+    # transformers >= 5 rewrites legacy ``layer_types`` values on config load
+    # ("attention" -> "full_attention", "mamba" -> "linear_attention"; see
+    # ``remap_legacy_layer_types`` in transformers ``configuration_utils.py``),
+    # so accept both conventions.
+    "full_attention": GraniteMoeHybridAttentionDecoderLayer,
+    "linear_attention": GraniteMoeHybridMambaDecoderLayer,
 }
 
 
