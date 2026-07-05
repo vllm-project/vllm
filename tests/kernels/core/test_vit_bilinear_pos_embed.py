@@ -13,6 +13,7 @@ from vllm.triton_utils import HAS_TRITON
 
 if HAS_TRITON:
     from vllm.model_executor.models.qwen3_vl import (
+        _bilinear_pos_embed_kernel,
         pos_embed_interpolate_native,
         triton_pos_embed_interpolate,
     )
@@ -28,6 +29,16 @@ HIDDEN_DIM = 1152
 SQUARE_GRIDS = [(1, 4, 4), (1, 16, 16), (1, 32, 32), (1, 48, 48)]
 NON_SQUARE_GRIDS = [(1, 8, 16), (1, 14, 20), (1, 32, 48), (1, 60, 80)]
 ALL_GRIDS = SQUARE_GRIDS + NON_SQUARE_GRIDS
+
+
+@pytest.mark.skipif(not HAS_TRITON, reason="Triton not available")
+def test_shape_args_do_not_specialize() -> None:
+    assert set(_bilinear_pos_embed_kernel.do_not_specialize) == {
+        "H",
+        "W",
+        "h_scale",
+        "w_scale",
+    }
 
 
 @pytest.mark.skipif(not HAS_TRITON, reason="Triton not available")
