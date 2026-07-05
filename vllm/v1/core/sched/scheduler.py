@@ -1659,6 +1659,12 @@ class Scheduler(SchedulerInterface):
                     request.resumable = False
                     stopped = True
 
+            word_align = (
+                model_runner_output.word_align.get(req_id)
+                if model_runner_output.word_align
+                else None
+            )
+
             routed_experts = None
             if (
                 self.enable_return_routed_experts
@@ -1747,6 +1753,7 @@ class Scheduler(SchedulerInterface):
                         kv_transfer_params=kv_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
+                        word_align=word_align,
                         num_nans_in_logits=request.num_nans_in_logits,
                     )
                 )

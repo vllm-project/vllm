@@ -251,9 +251,13 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         vocab_size: int,
         routed_experts: RoutedExpertsTensors | None = None,
         check_ep_fault: bool = False,
+        word_align_fn: "Callable | None" = None,
     ):
         self._model_runner_output = model_runner_output
         self._invalid_req_indices = invalid_req_indices
+        # Whisper word timestamps: computed in get_output() once the real
+        # sampled tokens are on the host (async defers them).
+        self._word_align_fn = word_align_fn
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
         self.async_copy_ready_event = torch.Event()
@@ -321,6 +325,11 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         if self._routed_experts_cpu is not None:
             output.routed_experts = self._routed_experts_cpu.tolists()
         del self._routed_experts
+
+        if self._word_align_fn is not None:
+            output.word_align = self._word_align_fn(
+                output.req_ids, valid_sampled_token_ids
+            )
 
         if self._has_fault is not None and self._has_fault.item():
             mask = get_ep_all2all_manager().query_active_mask()
@@ -478,6 +487,8 @@ class GPUModelRunner(
         # Set to True after init_routed_experts_capturer() completes.
         # Prevents routed experts code from running during profiling/dummy run.
         self.routed_experts_initialized = False
+        # Set to True by _maybe_init_word_align() for Whisper word timestamps.
+        self.word_align_enabled = False
         self.max_model_len = model_config.max_model_len
 
         # Always set to false after the first forward pass
@@ -1940,6 +1951,11 @@ class GPUModelRunner(
             self.input_batch.num_computed_tokens_cpu[req_indices]
             + self.query_pos.np[: cu_num_tokens[-1]]
         )
+
+        if self.word_align_enabled:
+            self._word_align_build_indices(
+                req_indices, positions_np, num_scheduled_tokens, num_reqs
+            )
 
         # Calculate M-RoPE positions.
         # Only relevant for models using M-RoPE (e.g, Qwen2-VL)
@@ -4644,6 +4660,16 @@ class GPUModelRunner(
                 routed_experts=None,
             )
 
+        # Word timestamps for finishing requests. The async path defers this to
+        # AsyncGPUModelRunnerOutput, where the sampled tokens are on the host.
+        if self.word_align_enabled and not self.use_async_scheduling:
+            output.word_align = self.model.compute_word_align(
+                req_ids_output_copy,
+                valid_sampled_token_ids,
+                self._wa_slot_of,
+                self._wa_npos,
+            )
+
         if not self.use_async_scheduling:
             if self.routed_experts_initialized:
                 # Sync path: D2H was issued in ``_bookkeeping_sync`` and
@@ -4691,6 +4717,9 @@ class GPUModelRunner(
                 vocab_size=self.input_batch.vocab_size,
                 routed_experts=routed_experts_snapshot,
                 check_ep_fault=self.check_ep_fault,
+                word_align_fn=self._word_align_snapshot_fn()
+                if self.word_align_enabled
+                else None,
             )
         with record_function_or_nullcontext(
             "gpu_model_runner: set_async_sampled_token_ids"
@@ -5191,6 +5220,9 @@ class GPUModelRunner(
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
+                # Enable Whisper word-timestamp capture before the model is
+                # compiled, so the capture op is included in the traced graph.
+                self.maybe_init_word_align()
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
                     if hasattr(self.drafter, "load_model"):
@@ -7431,6 +7463,106 @@ class GPUModelRunner(
             if isinstance(group.kv_cache_spec, FullAttentionSpec):
                 return gid
         return 0
+
+    def maybe_init_word_align(self) -> None:
+        """Enable Whisper cross-attention capture for word timestamps (opt-in).
+
+        Must run before graph capture so the compiled decoder includes the
+        capture op. No-op unless requested and the model supports it.
+        """
+        if not self.model_config.enable_word_timestamps:
+            return
+        model = self.model
+        if not getattr(model, "supports_word_timestamp", False) or not hasattr(
+            model, "enable_word_align"
+        ):
+            return
+        from transformers import GenerationConfig
+
+        gen_config = GenerationConfig.from_pretrained(self.model_config.model)
+        # One capture slot per concurrent request (+1 scratch for padded/overflow
+        # rows), bounded to cap capture-buffer memory.
+        n_slots = min(self.max_num_reqs, 64)
+        max_frames = int(self.model_config.hf_config.max_source_positions)
+        model.enable_word_align(
+            # alignment_heads is a Whisper-specific dynamic field on the HF
+            # generation config, not declared on GenerationConfig.
+            alignment_heads=gen_config.alignment_heads,  # type: ignore[attr-defined]
+            eos_token_id=gen_config.eos_token_id,
+            median_filter_width=getattr(
+                self.model_config.hf_config, "median_filter_width", 7
+            ),
+            device=self.device,
+            dtype=self.model_config.dtype,
+            max_slots=n_slots + 1,
+            max_q_tokens=self.max_num_tokens,
+            max_k_frames=n_slots * max_frames,
+        )
+        (
+            self._wa_qslot,
+            self._wa_qpos,
+            self._wa_kslot,
+            self._wa_kpos,
+        ) = model.word_align_index_tensors()
+        self._wa_scratch = n_slots  # reserved slot for padded/overflow rows
+        self._wa_free = list(range(n_slots))
+        self._wa_slot_of: dict[str, int] = {}
+        self._wa_npos: dict[str, int] = {}
+        self._wa_kframes = max_frames
+        self.word_align_enabled = True
+        logger.info("Whisper word-timestamp cross-attention capture enabled")
+
+    def _word_align_build_indices(
+        self, req_indices, positions_np, num_scheduled_tokens, num_reqs
+    ):
+        """Fill the per-row (slot, position) index buffers so this step's capture
+        rows land in each request's own slot. Assigns a stable slot per request
+        and routes prefilling requests' encoder K by fixed frame count."""
+        req_ids = self.input_batch.req_ids
+        slot_of = self._wa_slot_of
+        live = {req_ids[ri] for ri in range(num_reqs)}
+        for rid in [r for r in slot_of if r not in live]:  # free departed requests
+            s = slot_of.pop(rid)
+            self._wa_npos.pop(rid, None)
+            if s != self._wa_scratch:
+                self._wa_free.append(s)
+        for ri in range(num_reqs):  # allocate a slot for new requests
+            rid = req_ids[ri]
+            if rid not in slot_of:
+                # FIFO (pop front) so a just-freed slot isn't reused immediately,
+                # giving the async readout time to read it before reallocation.
+                slot_of[rid] = (
+                    self._wa_free.pop(0) if self._wa_free else self._wa_scratch
+                )
+        slot_per_ri = np.fromiter(
+            (slot_of[req_ids[ri]] for ri in range(num_reqs)),
+            dtype=np.int64,
+            count=num_reqs,
+        )
+        nq = req_indices.shape[0]
+        self._wa_qslot.fill_(self._wa_scratch)
+        self._wa_qpos.zero_()
+        self._wa_qslot[:nq].copy_(torch.from_numpy(slot_per_ri[req_indices]))
+        self._wa_qpos[:nq].copy_(torch.from_numpy(positions_np.astype(np.int64)))
+        ncomp = self.input_batch.num_computed_tokens_cpu
+        for ri in range(num_reqs):
+            self._wa_npos[req_ids[ri]] = int(ncomp[ri]) + int(num_scheduled_tokens[ri])
+        pref = [ri for ri in range(num_reqs) if int(ncomp[ri]) == 0]
+        if pref:
+            f = self._wa_kframes
+            self._wa_kslot[: len(pref) * f].copy_(
+                torch.from_numpy(np.repeat(slot_per_ri[pref], f))
+            )
+            self._wa_kpos[: len(pref) * f].copy_(
+                torch.from_numpy(np.tile(np.arange(f, dtype=np.int64), len(pref)))
+            )
+
+    def _word_align_snapshot_fn(self):
+        """Snapshot the current slot/length maps so the async readout aligns each
+        finishing request against the slot it actually used this step."""
+        slots = dict(self._wa_slot_of)
+        npos = dict(self._wa_npos)
+        return lambda rids, toks: self.model.compute_word_align(rids, toks, slots, npos)
 
     def init_routed_experts_capturer(self):
         logger.info(
