@@ -10,7 +10,11 @@ from vllm.config import get_current_vllm_config_or_none
 from vllm.config.cache import CacheDType
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.platform_utils import num_compute_units
-from vllm.v1.attention.backend import AttentionBackend, AttentionCGSupport
+from vllm.v1.attention.backend import (
+    AttentionBackend,
+    AttentionCGSupport,
+    MultipleOf,
+)
 from vllm.v1.attention.backends.mla.xpu_mla_sparse import (
     XPUMLASparseImpl,
     XPUMLASparseMetadata,
@@ -119,6 +123,17 @@ class TritonMLASparseBackend(AttentionBackend):
     @staticmethod
     def get_name() -> str:
         return "TRITON_MLA_SPARSE"
+
+    @staticmethod
+    def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
+        # The DSA indexer backend requires block size 64 on CUDA and shares
+        # the KV cache group with this backend; the base-class MultipleOf(1)
+        # default lets auto-selection settle on 16, which then fails
+        # select_common_block_size ("No common block size for 16").
+        # MultipleOf(64) (rather than [64]) keeps larger user-specified
+        # sizes like 128 usable, which measurably lowers profile-time peak
+        # memory for very long contexts.
+        return [MultipleOf(64)]
 
     @staticmethod
     def get_metadata_cls() -> type[XPUMLASparseMetadata]:
