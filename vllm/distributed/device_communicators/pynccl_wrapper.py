@@ -296,9 +296,6 @@ class NCCLLibrary:
         # shutdown when peer ranks may already be gone.
         # ncclResult_t  ncclCommAbort(ncclComm_t comm);
         Function("ncclCommAbort", ncclResult_t, [ncclComm_t]),
-        # Release a communicator's dynamic GPU memory while keeping its
-        # topology/connection state, so resume is cheap. NCCL >= 2.29.7 only;
-        # bound optionally (see __init__) and absent on older NCCL.
         # ncclResult_t ncclCommSuspend(ncclComm_t comm, int flags);
         Function("ncclCommSuspend", ncclResult_t, [ncclComm_t, ctypes.c_int]),
         # ncclResult_t ncclCommResume(ncclComm_t comm);
