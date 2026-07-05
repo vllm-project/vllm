@@ -40,6 +40,7 @@ def _model_config():
         multimodal_config=None,
         allowed_local_media_path="",
         allowed_media_domains=None,
+        forbid_media_private_networks_access=False,
         enable_prompt_embeds=False,
     )
 

@@ -85,6 +85,10 @@ significantly reduce the attack surface for these types of abuse.
 Also, consider setting `VLLM_MEDIA_URL_ALLOW_REDIRECTS=0` to prevent HTTP
 redirects from being followed to bypass domain restrictions.
 
+For use cases where all the public domains are allowed,
+`--forbid-media-private-networks-access` can be used to restrict domains resolution
+to public IPs.
+
 ### 5. **Restrict Media Decode Sizes:**
 
 Compressed media files can expand into gigabytes of memory during decoding. vLLM

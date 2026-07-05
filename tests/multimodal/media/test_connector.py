@@ -33,6 +33,15 @@ TEST_VIDEO_URLS = [
     "https://github.com/opencv/opencv/raw/refs/tags/4.12.0/samples/data/vtest.avi",
 ]
 
+TEST_VIDEO_URLS_PRIVATE_NETWORK = [
+    "http://localhost/does-not-exist.mp4",
+    "http://localhost:9000/does-not-exist.mp4",
+    "http://127.0.0.1/does-not-exist.avi",
+    "http://127.0.0.1.nip.io/does/not/exist.mp4",
+    "http://192.168.0.2/does-not-exist.avi",
+    "http://192.168.0.5:8006/does-not-exist.avi",
+]
+
 
 @pytest.fixture(scope="module")
 def url_images(local_asset_server) -> dict[str, Image.Image]:
@@ -77,7 +86,9 @@ async def test_fetch_image_base64(
         allowed_media_domains=[
             "www.bogotobogo.com",
             "github.com",
-        ]
+        ],
+        # Private domain restriction should not apply to data URLs.
+        forbid_media_private_networks_access=True,
     )
     url_image = url_images[raw_image_url]
 
@@ -339,6 +350,20 @@ async def test_allowed_media_domains(video_url: str, num_frames: int):
 
     with pytest.raises(ValueError):
         _, _ = await connector.fetch_video_async(disallowed_url)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("private_video_url", TEST_VIDEO_URLS_PRIVATE_NETWORK)
+async def test_forbid_private_networks_access_for_media(private_video_url: str):
+    connector = MediaConnector(
+        forbid_media_private_networks_access=True,
+    )
+
+    with pytest.raises(ValueError):
+        _, _ = await connector.fetch_video_async(private_video_url)
+
+    with pytest.raises(ValueError):
+        _, _ = await connector.fetch_video_async(private_video_url)
 
 
 @pytest.mark.asyncio
