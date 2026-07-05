@@ -787,6 +787,25 @@ class VllmConfig:
         )
         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
 
+    def _maybe_disable_dynamic_sd_for_unsupported_method(self) -> None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or not speculative_config.uses_dynamic_speculative_decoding()
+            or speculative_config.supports_dynamic_speculative_decoding()
+        ):
+            return
+
+        logger.warning_once(
+            "Dynamic speculative decoding is not supported with the '%s' "
+            "speculative method, which always proposes a fixed number of "
+            "speculative tokens. Disabling num_speculative_tokens_per_batch_size "
+            "and falling back to static num_speculative_tokens=%d.",
+            speculative_config.method,
+            speculative_config.num_speculative_tokens,
+        )
+        speculative_config.num_speculative_tokens_per_batch_size = None
+
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
 
@@ -1201,6 +1220,7 @@ class VllmConfig:
                 "optimization level defaults."
             )
 
+        self._maybe_disable_dynamic_sd_for_unsupported_method()
         self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if (

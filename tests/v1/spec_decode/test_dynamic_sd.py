@@ -2,6 +2,8 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Regression tests for the Dynamic SD batch-size schedule helpers."""
 
+import logging
+
 import pytest
 
 from tests.v1.core.utils import create_requests, create_scheduler
@@ -216,3 +218,41 @@ def test_scheduler_passes_max_num_seqs_as_dsd_runtime_batch_limit():
     assert len(scheduler.dynamic_sd_lookup) == 17
     assert len(output.num_scheduled_tokens) == 16
     assert output.num_spec_tokens_to_schedule == 3
+
+
+@pytest.mark.parametrize(
+    "method, expect_disabled",
+    [
+        ("ngram_gpu", True),
+        ("ngram", False),
+    ],
+)
+def test_dynamic_sd_disabled_for_fixed_k_method(method, expect_disabled, caplog_vllm):
+    schedule = [(1, 16, 3), (64, 128, 2), (256, 4096, 0)]
+    with caplog_vllm.at_level(logging.WARNING, logger="vllm"):
+        scheduler = create_scheduler(
+            max_num_seqs=256,
+            max_num_batched_tokens=2560,
+            num_speculative_tokens=3,
+            speculative_method=method,
+            num_speculative_tokens_per_batch_size=schedule,
+        )
+
+    speculative_config = scheduler.vllm_config.speculative_config
+    assert speculative_config is not None
+    if expect_disabled:
+        # Fixed-K proposers crash on a runtime K below the configured max, so
+        # dynamic SD is disabled and we fall back to a static schedule.
+        assert speculative_config.num_speculative_tokens_per_batch_size is None
+        assert not speculative_config.uses_dynamic_speculative_decoding()
+        assert scheduler.dynamic_sd_lookup is None
+        assert (
+            "Dynamic speculative decoding is not supported with the "
+            "'ngram_gpu' speculative method" in caplog_vllm.text
+        )
+    else:
+        # Proposers that honor a runtime K keep the dynamic schedule.
+        assert speculative_config.num_speculative_tokens_per_batch_size == schedule
+        assert speculative_config.uses_dynamic_speculative_decoding()
+        assert scheduler.dynamic_sd_lookup is not None
+        assert "is not supported with the" not in caplog_vllm.text

@@ -1193,6 +1193,15 @@ class SpeculativeConfig:
     def uses_dynamic_speculative_decoding(self) -> bool:
         return self.num_speculative_tokens_per_batch_size is not None
 
+    def supports_dynamic_speculative_decoding(self) -> bool:
+        # Fixed-K proposers assert the runtime count equals the configured max.
+        return self.method not in (
+            "ngram_gpu",
+            "suffix",
+            "medusa",
+            "extract_hidden_states",
+        )
+
     def uses_draft_model(self) -> bool:
         return self.method == "draft_model"
 
