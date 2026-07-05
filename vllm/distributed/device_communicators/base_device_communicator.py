@@ -62,6 +62,8 @@ class All2AllManagerBase:
                 in_the_same_node_as(tcp_store_group, source_rank=0)
             )
 
+        self.support_fault_tolerance = False
+
     def get_handle(self, kwargs):
         # get a handle for the all2all communication,
         # based on the kwargs.
@@ -100,6 +102,13 @@ class All2AllManagerBase:
         # Subclasses should either:
         # - implement handling for extra_tensors, or
         # - raise a clear error if extra_tensors is not supported.
+        raise NotImplementedError
+
+    def query_active_mask(self) -> torch.Tensor:
+        raise NotImplementedError
+
+    def query_fault(self) -> torch.Tensor:
+        """Returns has_fault scalar."""
         raise NotImplementedError
 
     def set_num_sms(self, num_sms: int):
