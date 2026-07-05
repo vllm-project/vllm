@@ -20,7 +20,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 import typing
 from collections.abc import Callable, Iterable
 from typing import Any
@@ -30,7 +29,7 @@ from torch import nn
 from transformers import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ParallelConfig, VllmConfig
+from vllm.config import CacheConfig, ParallelConfig, VllmConfig, get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
     get_pp_group,
@@ -39,11 +38,14 @@ from vllm.distributed import (
     get_tp_group,
     tensor_model_parallel_all_gather,
 )
+from vllm.forward_context import get_forward_context
+from vllm.model_executor.custom_op import CustomOp, PluggableLayer
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import (
     Attention,
     StaticSinkAttention,
 )
+from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     fused_moe_make_expert_params_mapping,
@@ -57,8 +59,23 @@ from vllm.model_executor.layers.linear import (
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mla import MLAModules, MultiHeadLatentAttentionWrapper
+from vllm.model_executor.layers.mamba.ops.causal_conv1d import (
+    causal_conv1d_fn,
+    causal_conv1d_update,
+)
+from vllm.model_executor.layers.mhc import (
+    HCHeadOp,
+    MHCPostOp,
+    MHCPreOp,
+)
+from vllm.model_executor.layers.mla import (
+    MLAModules,
+    MultiHeadLatentAttentionWrapper,
+)
 from vllm.model_executor.layers.quantization import QuantizationConfig
+from vllm.model_executor.layers.quantization.utils.fp8_utils import (
+    per_token_group_quant_fp8,
+)
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
@@ -67,6 +84,13 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
+    sharded_weight_loader,
+)
+from vllm.model_executor.models.deepseek_v2 import (
+    Indexer as _DeepseekIndexer,
+)
+from vllm.model_executor.models.deepseek_v2 import (
+    _try_load_fp8_indexer_wk,
 )
 from vllm.model_executor.models.interfaces import (
     MixtureOfExperts,
@@ -87,8 +111,16 @@ from vllm.model_executor.utils import set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.config import set_default_rope_theta
+from vllm.utils.math_utils import round_up
+from vllm.utils.torch_utils import (
+    direct_register_custom_op,
+    kv_cache_dtype_str_to_dtype,
+)
 from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.flash_attn_diffkv import FlashAttentionDiffKVBackend
+from vllm.v1.kv_cache_interface import SlidingWindowMomeSpec
+
+from .utils import get_pp_missing_layer_names
 
 
 def check_ffn_act_fn(act_fn: str):
@@ -96,6 +128,481 @@ def check_ffn_act_fn(act_fn: str):
         raise ValueError(
             f"Unsupported activation: {act_fn}. Only silu is supported for now."
         )
+
+
+@CustomOp.register("MomeAttention")
+class MomeAttention(AttentionLayerBase, CustomOp):
+    """
+    MoME attention layer with vLLM KV cache management.
+    Handles 3-part convolution state (q, kv, o).
+    """
+
+    def __init__(
+        self,
+        kernel_size: int,
+        num_spec_tokens: int,
+        q_lora_rank: int,
+        kv_lora_rank: int,
+        num_heads: int,
+        num_local_heads: int,
+        v_head_dim: int,
+        cache_alignment: int,
+        vllm_config: VllmConfig,
+        prefix: str,
+    ):
+        super().__init__()
+        self.kernel_size = kernel_size
+        self.num_spec_tokens = num_spec_tokens
+        self.dtype = vllm_config.model_config.dtype
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+        self.num_heads = num_heads
+        self.num_local_heads = num_local_heads
+        self.v_head_dim = v_head_dim
+        self.o_dim = num_local_heads * v_head_dim
+        self.cache_head_size = q_lora_rank + kv_lora_rank + self.o_dim
+        self.cache_alignment = cache_alignment
+        self.prefix = prefix
+        self.kv_cache_dtype = vllm_config.cache_config.cache_dtype
+
+        # 3 Conv1d weights for q, kv, o
+        # These names match the original weights in the checkpoint
+        self.qa_conv = nn.Conv1d(
+            q_lora_rank,
+            q_lora_rank,
+            kernel_size,
+            groups=q_lora_rank,
+            bias=False,
+            dtype=self.dtype,
+        )
+        self.compresskv_conv = nn.Conv1d(
+            kv_lora_rank,
+            kv_lora_rank,
+            kernel_size,
+            groups=kv_lora_rank,
+            bias=False,
+            dtype=self.dtype,
+        )
+        self.o_conv = nn.Conv1d(
+            self.o_dim,
+            self.o_dim,
+            kernel_size,
+            groups=self.o_dim,
+            bias=False,
+            dtype=self.dtype,
+        )
+
+        # Set weight loading attributes
+        set_weight_attrs(self.qa_conv.weight, {"weight_loader": default_weight_loader})
+        set_weight_attrs(
+            self.compresskv_conv.weight, {"weight_loader": default_weight_loader}
+        )
+        set_weight_attrs(
+            self.o_conv.weight, {"weight_loader": sharded_weight_loader(0)}
+        )
+
+        # In v1, the KV cache tensors are set by the ModelRunner
+        self.kv_cache = (torch.tensor([]), torch.tensor([]), torch.tensor([]))
+
+        compilation_config = get_current_vllm_config().compilation_config
+        if prefix in compilation_config.static_forward_context:
+            raise ValueError(f"Duplicate layer name: {prefix}")
+        compilation_config.static_forward_context[prefix] = self
+
+    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
+        return ((self.q_lora_rank,), (self.kv_lora_rank,), (self.o_dim,))
+
+    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
+        return (self.qa_conv.weight.dtype,) * 3
+
+    def _get_cache_window_size(self) -> int:
+        max_window_size = self.kernel_size - 1 + self.num_spec_tokens
+        return round_up(max_window_size, 8)
+
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> SlidingWindowMomeSpec:
+        kv_cache_dtype = kv_cache_dtype_str_to_dtype(
+            self.kv_cache_dtype, vllm_config.model_config
+        )
+        cache_window_size = self._get_cache_window_size()
+        return SlidingWindowMomeSpec(
+            block_size=cache_window_size,
+            num_kv_heads=1,
+            head_size=self.cache_head_size,
+            dtype=kv_cache_dtype,
+            sliding_window=cache_window_size,
+            cache_dtype_str=vllm_config.cache_config.cache_dtype,
+            alignment=self.cache_alignment,
+            component_dims=(self.q_lora_rank, self.kv_lora_rank, self.o_dim),
+        )
+
+    def get_attn_backend(self) -> type:
+        from vllm.v1.attention.backends.mome_attn import MomeAttentionBackend
+
+        return MomeAttentionBackend
+
+    def forward(self, hidden_states: torch.Tensor, state_indice: int) -> torch.Tensor:
+        output = torch.empty_like(hidden_states, memory_format=torch.contiguous_format)
+        if state_indice == 0:
+            conv_weight = self.qa_conv.weight
+            hidden_size = self.q_lora_rank
+        elif state_indice == 1:
+            conv_weight = self.compresskv_conv.weight
+            hidden_size = self.kv_lora_rank
+        else:
+            conv_weight = self.o_conv.weight
+            hidden_size = self.o_dim
+        conv_weight = conv_weight.view(hidden_size, self.kernel_size)
+        conv_state = self.kv_cache[state_indice]
+        torch.ops.vllm.mome_attention(
+            hidden_states,
+            conv_state,
+            conv_weight,
+            hidden_size,
+            self.prefix,
+            output,
+        )
+        return output
+
+
+def mome_attention(
+    hidden_states: torch.Tensor,
+    conv_state: torch.Tensor,
+    conv_weight: torch.Tensor,
+    hidden_size: int,
+    layer_name: str,
+    output: torch.Tensor,
+) -> None:
+    forward_context = get_forward_context()
+    if forward_context.attn_metadata is None:
+        output.fill_(0)
+        return
+
+    conv_state_ = conv_state.transpose(-1, -2)
+    mome_metadata = forward_context.attn_metadata[layer_name]
+    num_decode_tokens = mome_metadata.num_decode_tokens
+    num_prefill_tokens = mome_metadata.num_prefill_tokens
+    num_actual_tokens = num_decode_tokens + num_prefill_tokens
+    num_decodes = mome_metadata.num_decodes
+    num_prefills = mome_metadata.num_prefills
+    if num_decodes > 0:
+        decode_hidden_states = hidden_states[:num_decode_tokens].clone()
+        decode_state_indices = mome_metadata.state_indices_tensor_d
+        decode_block_idx_last_scheduled_token = (
+            mome_metadata.block_idx_last_scheduled_token_d
+        )
+        decode_block_idx_last_computed_token = (
+            mome_metadata.block_idx_last_computed_token_d
+        )
+        query_start_loc_d = mome_metadata.query_start_loc_d
+        num_accepted_tokens = mome_metadata.num_accepted_tokens
+        assert decode_state_indices is not None
+        assert decode_block_idx_last_scheduled_token is not None
+        assert decode_block_idx_last_computed_token is not None
+        max_query_len = mome_metadata.max_decode_query_len
+
+        decode_output = causal_conv1d_update(
+            decode_hidden_states,
+            conv_state_,
+            conv_weight,
+            bias=None,
+            activation=None,
+            conv_state_indices=decode_state_indices,
+            block_idx_last_scheduled_token=decode_block_idx_last_scheduled_token,
+            initial_state_idx=decode_block_idx_last_computed_token,
+            num_accepted_tokens=num_accepted_tokens,
+            query_start_loc=query_start_loc_d,
+            max_query_len=max_query_len,
+        )
+        output[:num_decode_tokens] = decode_output
+
+    num_prefills = mome_metadata.num_prefills
+    if num_prefills > 0:
+        query_start_loc = mome_metadata.query_start_loc_p
+        prefill_state_indices = mome_metadata.state_indices_tensor_p
+        prefill_block_idx_first_scheduled_token = (
+            mome_metadata.block_idx_first_scheduled_token_p
+        )
+        prefill_block_idx_last_scheduled_token = (
+            mome_metadata.block_idx_last_scheduled_token_p
+        )
+        prefill_block_idx_last_computed_token = (
+            mome_metadata.block_idx_last_computed_token_p
+        )
+        num_computed_tokens_p = mome_metadata.num_computed_tokens_p
+        assert query_start_loc is not None
+        assert prefill_state_indices is not None
+        assert prefill_block_idx_first_scheduled_token is not None
+        assert prefill_block_idx_last_scheduled_token is not None
+        assert prefill_block_idx_last_computed_token is not None
+        assert num_computed_tokens_p is not None
+        prefill_hidden_states = hidden_states[num_decode_tokens:num_actual_tokens]
+        prefill_output = causal_conv1d_fn(
+            prefill_hidden_states.transpose(0, 1),
+            conv_weight,
+            bias=None,
+            activation=None,
+            conv_states=conv_state_,
+            has_initial_state=mome_metadata.has_initial_states_p,
+            cache_indices=prefill_state_indices,
+            query_start_loc=query_start_loc,
+            block_idx_first_scheduled_token=prefill_block_idx_first_scheduled_token,
+            block_idx_last_scheduled_token=prefill_block_idx_last_scheduled_token,
+            initial_state_idx=prefill_block_idx_last_computed_token,
+            num_computed_tokens=num_computed_tokens_p,
+            block_size_to_align=conv_state_.size(-1),
+            metadata=mome_metadata,
+            zero_initial_state_output=True,
+        ).transpose(0, 1)
+        output[num_decode_tokens:num_actual_tokens] = prefill_output
+
+
+def mome_attention_fake(
+    hidden_states: torch.Tensor,
+    conv_state: torch.Tensor,
+    conv_weight: torch.Tensor,
+    hidden_size: int,
+    layer_name: str,
+    output: torch.Tensor,
+) -> None:
+    return
+
+
+direct_register_custom_op(
+    op_name="mome_attention",
+    op_func=mome_attention,
+    mutates_args=["conv_state", "output"],
+    fake_impl=mome_attention_fake,
+)
+
+
+@PluggableLayer.register("static_sink_multi_head_latent_attention")
+class StaticSinkMultiHeadLatentAttentionWrapper(PluggableLayer):
+    """OpenPangu MLA layer with static sink tokens and optional MoME."""
+
+    def __init__(
+        self,
+        hidden_size: int,
+        num_heads: int,
+        scale: float,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        v_head_dim: int,
+        q_lora_rank: int | None,
+        kv_lora_rank: int,
+        mla_modules: MLAModules,
+        cache_config: CacheConfig | None = None,
+        quant_config: QuantizationConfig | None = None,
+        prefix: str = "",
+        sink_len: int = 0,
+        sliding_window: int | None = None,
+        mome_attn: torch.nn.Module | None = None,
+    ) -> None:
+        super().__init__()
+        self.hidden_size = hidden_size
+        self.qk_nope_head_dim = qk_nope_head_dim
+        self.qk_rope_head_dim = qk_rope_head_dim
+        self.qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
+        self.v_head_dim = v_head_dim
+        self.q_lora_rank = q_lora_rank
+        self.kv_lora_rank = kv_lora_rank
+        self.num_heads = num_heads
+        self.fused_qkv_a_proj = mla_modules.fused_qkv_a_proj
+        self.kv_a_proj_with_mqa = mla_modules.kv_a_proj_with_mqa
+        self.q_a_layernorm = mla_modules.q_a_layernorm
+        self.q_b_proj = mla_modules.q_b_proj
+        self.q_proj = mla_modules.q_proj
+        self.kv_a_layernorm = mla_modules.kv_a_layernorm
+        self.kv_b_proj = mla_modules.kv_b_proj
+        self.rotary_emb = mla_modules.rotary_emb
+        self.o_proj = mla_modules.o_proj
+        self.indexer = mla_modules.indexer
+        self.indexer_rope_emb = mla_modules.indexer_rotary_emb
+        self.is_sparse = mla_modules.is_sparse
+        self.mome_attn = mome_attn
+        self.prefix = prefix
+
+        if self.indexer is not None:
+            assert hasattr(self.indexer, "topk_tokens")
+            self.topk_tokens = self.indexer.topk_tokens
+            self.topk_indices_buffer = mla_modules.topk_indices_buffer
+
+        from vllm.model_executor.layers.attention.static_sink_attention import (
+            StaticSinkMLAAttention,
+        )
+
+        attn_backend = None
+        if self.is_sparse:
+            from vllm.v1.attention.backends.mla.flashmla_sparse import (
+                FlashMLASparseBackend,
+            )
+
+            attn_backend = FlashMLASparseBackend
+
+        self.mla_attn = StaticSinkMLAAttention(
+            num_heads=self.num_heads,
+            scale=scale,
+            qk_nope_head_dim=self.qk_nope_head_dim,
+            qk_rope_head_dim=self.qk_rope_head_dim,
+            v_head_dim=self.v_head_dim,
+            q_lora_rank=self.q_lora_rank,
+            kv_lora_rank=self.kv_lora_rank,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=f"{prefix}.attn",
+            kv_b_proj=self.kv_b_proj,
+            use_sparse=self.is_sparse,
+            attn_backend=attn_backend,
+            indexer=self.indexer,
+            sink_len=sink_len,
+            sliding_window=sliding_window,
+        )
+
+    def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        llama_4_scaling: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        q_c = None
+        kv_lora = None
+
+        if self.q_lora_rank is not None:
+            assert self.fused_qkv_a_proj is not None, (
+                "fused_qkv_a_proj is required when q_lora_rank is not None"
+            )
+            assert self.q_a_layernorm is not None, (
+                "q_a_layernorm is required when q_lora_rank is not None"
+            )
+            assert self.q_b_proj is not None, (
+                "q_b_proj is required when q_lora_rank is not None"
+            )
+            qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
+            q_c, kv_lora = qkv_lora.split(
+                [self.q_lora_rank, self.kv_lora_rank + self.qk_rope_head_dim],
+                dim=-1,
+            )
+            if self.mome_attn is not None:
+                q_c = self.mome_attn(q_c, state_indice=0) + q_c
+            q_c = self.q_a_layernorm(q_c)
+            q = self.q_b_proj(q_c)[0]
+        else:
+            assert self.kv_a_proj_with_mqa is not None, (
+                "kv_a_proj_with_mqa is required when q_lora_rank is None"
+            )
+            assert self.q_proj is not None, (
+                "q_proj is required when q_lora_rank is None"
+            )
+            kv_lora = self.kv_a_proj_with_mqa(hidden_states)[0]
+            q = self.q_proj(hidden_states)[0]
+
+        kv_c, k_pe = kv_lora.split([self.kv_lora_rank, self.qk_rope_head_dim], dim=-1)
+        if self.mome_attn is not None:
+            kv_c = self.mome_attn(kv_c, state_indice=1) + kv_c
+        kv_c_normed = self.kv_a_layernorm(kv_c)
+
+        q = q.view(-1, self.num_heads, self.qk_head_dim)
+        # Add head dim of 1 to k_pe
+        k_pe = k_pe.unsqueeze(1)
+
+        if self.rotary_emb is not None:
+            q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
+                positions, q[..., self.qk_nope_head_dim :], k_pe
+            )
+
+        if self.indexer and self.is_sparse:
+            _topk_indices = self.indexer(
+                hidden_states,
+                q_c,
+                positions,
+                self.indexer_rope_emb,
+            )
+
+        if llama_4_scaling is not None:
+            q *= llama_4_scaling
+
+        attn_out = self.mla_attn(
+            q,
+            kv_c_normed,
+            k_pe,
+            output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
+        )
+
+        if self.mome_attn is not None:
+            attn_out = self.mome_attn(attn_out, state_indice=2) + attn_out
+        output = self.o_proj(attn_out)[0]
+        return output
+
+
+class PanguIndexer(_DeepseekIndexer):
+    def __init__(self, *args, **kwargs):
+        if current_platform.is_rocm():
+            raise NotImplementedError("PanguIndexer does not support ROCm.")
+        super().__init__(*args, **kwargs)
+        self.k_norm = RMSNorm(self.head_dim, self.config.rms_norm_eps)
+        self.deepgemm_n_head = 32 if self.n_head <= 32 else 64
+
+    def forward(
+        self,
+        hidden_states: torch.Tensor,
+        qr: torch.Tensor,
+        positions,
+        rotary_emb,
+    ) -> torch.Tensor:
+        q, _ = self.wq_b(qr)
+        q = q.view(-1, self.n_head, self.head_dim)
+
+        q_pe, q_nope = torch.split(
+            q, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+        )
+        kw, _ = self.wk_weights_proj(hidden_states)
+        k = kw[:, : self.head_dim]
+        weights = kw[:, self.head_dim :]
+
+        k = self.k_norm(k)
+        k_pe, k_nope = torch.split(
+            k, [self.rope_dim, self.head_dim - self.rope_dim], dim=-1
+        )
+
+        q_pe, k_pe = rotary_emb(positions, q_pe, k_pe.unsqueeze(1))
+        q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
+        k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+
+        q = torch.cat([q_pe, q_nope], dim=-1)
+        k = torch.cat([k_pe.reshape(-1, self.rope_dim), k_nope], dim=-1)
+
+        q = q.view(-1, self.head_dim)
+        q_fp8, q_scale = per_token_group_quant_fp8(
+            q,
+            self.quant_block_size,
+            column_major_scales=False,
+            use_ue8m0=self.scale_fmt is not None,
+        )
+        q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
+        q_scale = q_scale.view(-1, self.n_head, 1)
+
+        weights = (
+            weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
+        )
+        weights = weights.squeeze(-1)
+
+        if self.deepgemm_n_head != self.n_head:
+            pad_heads = self.deepgemm_n_head - self.n_head
+            q_fp8 = torch.cat(
+                [
+                    q_fp8,
+                    q_fp8.new_zeros(q_fp8.shape[0], pad_heads, q_fp8.shape[2]),
+                ],
+                dim=1,
+            )
+            weights = torch.cat(
+                [
+                    weights,
+                    weights.new_zeros(weights.shape[0], pad_heads),
+                ],
+                dim=1,
+            )
+
+        return self.indexer_op(hidden_states, q_fp8, k, weights)
 
 
 class OpenPanguMLP(nn.Module):
@@ -253,6 +760,7 @@ class OpenPanguMLAAttention(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
+        vllm_config: VllmConfig,
         hidden_size: int,
         num_heads: int,
         qk_nope_head_dim: int,
@@ -264,6 +772,7 @@ class OpenPanguMLAAttention(nn.Module):
         cache_config: CacheConfig | None = None,
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = hidden_size
@@ -349,13 +858,71 @@ class OpenPanguMLAAttention(nn.Module):
             "type": "yarn",
             "rope_type": "deepseek_yarn",
         }
+        self.rope_interleave = getattr(config, "rope_interleave", True)
         self.rotary_emb = get_rope(
             qk_rope_head_dim,
             max_position=max_position_embeddings,
             rope_parameters=rope_parameters,
-            is_neox_style=False,
+            is_neox_style=(not self.rope_interleave),
         )
-
+        self.param_sink_number = getattr(config, "param_sink_number", 0)
+        # SWA
+        layer_idx = extract_layer_index(prefix)
+        is_dsa = hasattr(config, "index_topk") and (
+            not hasattr(config, "dsa_layers") or layer_idx in config.dsa_layers
+        )
+        is_sliding = (
+            hasattr(config, "sliding_window") or hasattr(config, "sliding_window_list")
+        ) and (not hasattr(config, "swa_layers") or layer_idx in config.swa_layers)
+        if is_sliding:
+            if hasattr(config, "sliding_window_list"):
+                sliding_window = config.sliding_window_list[
+                    config.swa_layers.index(layer_idx)
+                ]
+            else:
+                sliding_window = config.sliding_window
+        else:
+            sliding_window = None
+        if is_dsa:
+            self.indexer_rope_emb = get_rope(
+                qk_rope_head_dim,
+                max_position=max_position_embeddings,
+                rope_parameters=rope_parameters,
+                is_neox_style=(not self.rope_interleave),
+            )
+            self.indexer = PanguIndexer(
+                vllm_config,
+                config,
+                hidden_size,
+                q_lora_rank,
+                quant_config,
+                cache_config,
+                topk_indices_buffer,
+                f"{prefix}.indexer",
+            )
+        else:
+            self.indexer_rope_emb = None
+            self.indexer = None
+        self.sliding_window = sliding_window
+        # MOME
+        if getattr(config, "use_mome", False):
+            spec_token_num = 0
+            if vllm_config.speculative_config:
+                spec_token_num = vllm_config.speculative_config.num_speculative_tokens
+            self.mome_attn = MomeAttention(
+                kernel_size=config.router_sliding_window,
+                num_spec_tokens=spec_token_num,
+                q_lora_rank=self.q_lora_rank,
+                kv_lora_rank=self.kv_lora_rank,
+                num_heads=self.num_heads,
+                num_local_heads=self.num_local_heads,
+                v_head_dim=self.v_head_dim,
+                cache_alignment=self.kv_lora_rank + self.qk_rope_head_dim,
+                vllm_config=vllm_config,
+                prefix=f"{prefix}.mome_attn",
+            )
+        else:
+            self.mome_attn = None
         mla_modules = MLAModules(
             kv_a_layernorm=self.kv_a_layernorm,
             kv_b_proj=self.kv_b_proj,
@@ -370,25 +937,72 @@ class OpenPanguMLAAttention(nn.Module):
             q_a_layernorm=self.q_a_layernorm if self.q_lora_rank is not None else None,
             q_b_proj=self.q_b_proj if self.q_lora_rank is not None else None,
             q_proj=self.q_proj if self.q_lora_rank is None else None,
-            indexer=None,
-            is_sparse=False,
-            topk_indices_buffer=None,
+            indexer=self.indexer,
+            indexer_rotary_emb=self.indexer_rope_emb,
+            is_sparse=is_dsa,
+            topk_indices_buffer=topk_indices_buffer,
         )
-
-        self.mla_attn = MultiHeadLatentAttentionWrapper(
-            self.hidden_size,
-            self.num_local_heads,
-            self.scaling,
-            self.qk_nope_head_dim,
-            self.qk_rope_head_dim,
-            self.v_head_dim,
-            self.q_lora_rank,
-            self.kv_lora_rank,
-            mla_modules,
-            cache_config,
-            quant_config,
-            prefix,
-        )
+        if self.param_sink_number == 0:
+            self.mla_attn = MultiHeadLatentAttentionWrapper(
+                self.hidden_size,
+                self.num_local_heads,
+                self.scaling,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.v_head_dim,
+                self.q_lora_rank,
+                self.kv_lora_rank,
+                mla_modules,
+                cache_config,
+                quant_config,
+                prefix,
+            )
+        else:
+            self.mla_attn = StaticSinkMultiHeadLatentAttentionWrapper(
+                self.hidden_size,
+                self.num_local_heads,
+                self.scaling,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.v_head_dim,
+                self.q_lora_rank,
+                self.kv_lora_rank,
+                mla_modules,
+                cache_config,
+                quant_config,
+                prefix,
+                sink_len=self.param_sink_number,
+                sliding_window=sliding_window,
+                mome_attn=self.mome_attn,
+            )
+            self.param_sink_k_pe = torch.nn.Parameter(
+                torch.empty(
+                    (
+                        self.param_sink_number,
+                        self.qk_rope_head_dim,
+                    ),
+                    device=current_platform.current_device(),
+                    dtype=config.torch_dtype,
+                )
+            )
+            set_weight_attrs(
+                self.param_sink_k_pe, {"weight_loader": default_weight_loader}
+            )
+            self.param_sink_compressed_kv = torch.nn.Parameter(
+                torch.empty(
+                    (
+                        self.param_sink_number,
+                        self.kv_lora_rank,
+                    ),
+                    device=current_platform.current_device(),
+                    dtype=config.torch_dtype,
+                )
+            )
+            set_weight_attrs(
+                self.param_sink_compressed_kv, {"weight_loader": default_weight_loader}
+            )
+        # To enable dummy run with out weight
+        self.post_weight_load()
 
     def forward(
         self,
@@ -396,6 +1010,18 @@ class OpenPanguMLAAttention(nn.Module):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         return self.mla_attn(positions, hidden_states)
+
+    def post_weight_load(self) -> None:
+        if getattr(self, "param_sink_number", 0) > 0:
+            if getattr(self, "kv_a_layernorm", None) is not None:
+                param_sink_compressed_kv = self.kv_a_layernorm(
+                    self.param_sink_compressed_kv
+                )
+            else:
+                param_sink_compressed_kv = self.param_sink_compressed_kv
+            self.mla_attn.mla_attn.update_sink_kv(
+                self.param_sink_k_pe, param_sink_compressed_kv
+            )
 
 
 class OpenPanguEmbeddedAttention(nn.Module):
@@ -447,6 +1073,8 @@ class OpenPanguEmbeddedAttention(nn.Module):
         if head_dim is None:
             head_dim = self.hidden_size // self.total_num_heads
         self.head_dim = head_dim
+        self.qk_nope_dim = getattr(config, "qk_nope_dim", None)
+        self.qk_rope_dim = getattr(config, "qk_rope_dim", self.head_dim)
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim**-0.5
@@ -590,7 +1218,6 @@ class OpenPanguSinkAttention(nn.Module):
         self.max_position_embeddings = max_position_embeddings
 
         self.param_sink_number = getattr(config, "param_sink_number", 0)
-        self.param_sink_with_value = getattr(config, "param_sink_with_value", False)
         self.param_sink_scalar = getattr(config, "param_sink_scalar", None)
         self.param_sink_of_head_num = getattr(config, "param_sink_of_head_dim", False)
 
@@ -664,34 +1291,11 @@ class OpenPanguSinkAttention(nn.Module):
                 )
             )
             set_weight_attrs(
-                self.param_sink_key,
-                {
-                    "output_dim": 1,
-                    "weight_loader": self.weight_loader,
-                },
+                self.param_sink_key, {"weight_loader": sharded_weight_loader(1)}
             )
 
-            if self.param_sink_with_value:
-                self.param_sink_value = torch.nn.Parameter(
-                    torch.empty(
-                        (
-                            self.param_sink_number,
-                            self.num_kv_heads,
-                            self.v_channels,
-                        ),
-                        device=current_platform.current_device(),
-                        dtype=config.torch_dtype,
-                    )
-                )
-                set_weight_attrs(
-                    self.param_sink_value,
-                    {
-                        "output_dim": 1,
-                        "weight_loader": self.weight_loader,
-                    },
-                )
-            else:
-                self.param_sink_value = torch.zeros(
+            self.param_sink_value = torch.nn.Parameter(
+                torch.empty(
                     (
                         self.param_sink_number,
                         self.num_kv_heads,
@@ -700,31 +1304,12 @@ class OpenPanguSinkAttention(nn.Module):
                     device=current_platform.current_device(),
                     dtype=config.torch_dtype,
                 )
+            )
+            set_weight_attrs(
+                self.param_sink_value, {"weight_loader": sharded_weight_loader(1)}
+            )
         # To enable dummy run with out weight
         self.post_weight_load()
-
-    def weight_loader(self, param: nn.Parameter, loaded_weight: torch.Tensor):
-        output_dim = getattr(param, "output_dim", None)
-
-        is_sharded_weight = getattr(param, "is_sharded_weight", False)
-        use_bitsandbytes_4bit = getattr(param, "use_bitsandbytes_4bit", False)
-        # bitsandbytes loads the weights of the specific portion
-        # no need to narrow
-        is_sharded_weight = is_sharded_weight or use_bitsandbytes_4bit
-
-        param_data = param.data
-        if output_dim is not None and not is_sharded_weight:
-            shard_size = param_data.shape[output_dim]
-            start_idx = self.tp_rank * shard_size
-            loaded_weight = loaded_weight.narrow(output_dim, start_idx, shard_size)
-
-        # Special case for loading scales off disk, which often do not
-        # have a shape (such as in the case of AutoFP8).
-        if len(loaded_weight.shape) == 0:
-            loaded_weight = loaded_weight.reshape(1)
-
-        assert param_data.shape == loaded_weight.shape
-        param_data.copy_(loaded_weight)
 
     def forward(
         self,
@@ -753,17 +1338,16 @@ class OpenPanguSinkAttention(nn.Module):
     def _init_rotary_emb(
         self,
         config: PretrainedConfig,
-        rope_parameters: dict[str, Any] | None,
+        rope_parameters: dict[str, Any],
         quant_config: QuantizationConfig | None,
     ) -> None:
-        is_neox_style = False
-        rope_parameters = {"partial_rotary_factor": self.qk_rope_dim / self.head_dim}
-
+        rope_parameters["partial_rotary_factor"] = self.qk_rope_dim / self.head_dim
+        self.rope_interleave = getattr(config, "rope_interleave", True)
         self.rotary_emb = get_rope(
             self.head_dim,
             max_position=self.max_position_embeddings,
             rope_parameters=rope_parameters,
-            is_neox_style=is_neox_style,
+            is_neox_style=(not self.rope_interleave),
         )
 
     def post_weight_load(self) -> None:
@@ -775,12 +1359,96 @@ class OpenPanguSinkAttention(nn.Module):
         self.attn.update_sink_kv(param_sink_key, self.param_sink_value)
 
 
+@CustomOp.register("mHCModule")
+class mHCModule(CustomOp):
+    def __init__(
+        self,
+        config: PretrainedConfig,
+        merge_layer_only_pre=False,
+        prefix: str = "",
+    ):
+        super().__init__()
+        self.num_stream = config.mhc_num_stream
+        self.hidden_size = config.hidden_size
+        self.merge_layer_only_pre = merge_layer_only_pre
+
+        if not self.merge_layer_only_pre:
+            phi_output_hidden_size = (self.num_stream + 2) * self.num_stream
+            self.branch_alpha = nn.Parameter(torch.empty(3, dtype=torch.float32))
+            self.branch_beta = nn.Parameter(
+                torch.empty(
+                    self.num_stream * (self.num_stream + 2), dtype=torch.float32
+                )
+            )
+        else:
+            phi_output_hidden_size = self.num_stream
+            self.branch_alpha_pre = nn.Parameter(torch.empty(1, dtype=torch.float32))
+            self.branch_beta_pre = nn.Parameter(
+                torch.empty(self.num_stream, dtype=torch.float32)
+            )
+        self.phi = ReplicatedLinear(
+            self.hidden_size * self.num_stream,
+            phi_output_hidden_size,
+            bias=False,
+            prefix=f"{prefix}.phi",
+        )
+        self.mhc_use_gamma = config.mhc_use_gamma
+        self.hc_eps = 1e-6
+        self.norm_eps = config.rms_norm_eps
+        self.mhc_recur_norm = config.mhc_recur_norm
+        self.hc_post_alpha = 2.0
+        if self.mhc_use_gamma:
+            self.norm_gamma = nn.Parameter(
+                torch.empty(self.hidden_size * self.num_stream, dtype=torch.bfloat16)
+            )
+        self.mhc_pre = MHCPreOp()
+        self.mhc_post = MHCPostOp()
+
+    def post_weight_load(self) -> None:
+        if self.mhc_use_gamma:
+            self.phi_weight = (self.phi.weight * self.norm_gamma).contiguous().float()
+
+    def hc_pre(
+        self,
+        x: torch.Tensor,
+    ):
+        x = x.view(-1, self.num_stream, self.hidden_size)
+        fn = (
+            self.phi_weight if hasattr(self, "phi_weight") else self.phi.weight
+        ).float()
+        post_mix, res_mix, layer_input = self.mhc_pre(
+            residual=x,
+            fn=fn,
+            hc_scale=self.branch_alpha,
+            hc_base=self.branch_beta,
+            rms_eps=self.norm_eps,
+            hc_pre_eps=self.hc_eps,
+            hc_sinkhorn_eps=self.hc_eps,
+            hc_post_mult_value=self.hc_post_alpha,
+            sinkhorn_repeat=self.mhc_recur_norm,
+        )
+        return layer_input, post_mix, res_mix
+
+    def hc_post(
+        self,
+        x: torch.Tensor,
+        residual: torch.Tensor,
+        h_post: torch.Tensor,
+        h_res: torch.Tensor,
+    ):
+        residual = residual.view(-1, self.num_stream, self.hidden_size)
+        res = self.mhc_post(x, residual, h_post, h_res)
+        res = res.view(-1, self.num_stream * self.hidden_size)
+        return res
+
+
 class OpenPanguDecoderLayer(nn.Module):
     def __init__(
         self,
         config: PretrainedConfig,
         prefix: str,
         vllm_config: VllmConfig,
+        topk_indices_buffer: torch.Tensor | None = None,
     ) -> None:
         super().__init__()
 
@@ -805,9 +1473,11 @@ class OpenPanguDecoderLayer(nn.Module):
         self.use_sink_attention = (
             hasattr(config, "param_sink_number") and config.param_sink_number > 0
         )
+        self.router_sliding_window = getattr(config, "router_sliding_window", 0)
         if self.use_mla:
             self.self_attn = OpenPanguMLAAttention(
                 config=config,
+                vllm_config=vllm_config,
                 hidden_size=self.hidden_size,
                 num_heads=config.num_attention_heads,
                 qk_nope_head_dim=config.qk_nope_head_dim,
@@ -821,6 +1491,7 @@ class OpenPanguDecoderLayer(nn.Module):
                 cache_config=cache_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.self_attn",
+                topk_indices_buffer=topk_indices_buffer,
             )
         elif self.use_sink_attention:
             attention_bias = getattr(config, "attention_bias", False) or getattr(
@@ -915,20 +1586,57 @@ class OpenPanguDecoderLayer(nn.Module):
         )
 
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
-        self.post_attention_layernorm = RMSNorm(
-            config.hidden_size, eps=config.rms_norm_eps
-        )
-        self.tp_group = get_tp_group().device_group
+
+        self.use_mhc = getattr(config, "use_mhc", False)
         self.sandwich_norm = getattr(config, "sandwich_norm", False)
-        if self.sandwich_norm:
+        if self.use_mhc or (not self.use_mhc and self.sandwich_norm):
             self.pre_mlp_layernorm = RMSNorm(
                 config.hidden_size, eps=config.rms_norm_eps
             )
+        if not self.use_mhc or (self.use_mhc and self.sandwich_norm):
+            self.post_attention_layernorm = RMSNorm(
+                config.hidden_size, eps=config.rms_norm_eps
+            )
+        if self.sandwich_norm:
             self.post_mlp_layernorm = RMSNorm(
                 config.hidden_size, eps=config.rms_norm_eps
             )
+        block_post_layernorm_hidden_size = config.hidden_size
+        mtp_idx = self.layer_idx - self.num_hidden_layers
+        mtp_layer_num = getattr(config, "num_nextn_predict_layers", -1)
+        self.is_mtp_layer = mtp_idx >= 0 and mtp_idx < mtp_layer_num
+        self.use_mhc = getattr(config, "use_mhc", False)
+        if self.use_mhc and not self.is_mtp_layer:
+            self.attn_mhc_module = mHCModule(
+                config=config,
+                prefix=f"{prefix}.attn_mhc_module",
+            )
+            self.mlp_mhc_module = mHCModule(
+                config=config,
+                prefix=f"{prefix}.mlp_mhc_module",
+            )
+            block_post_layernorm_hidden_size *= getattr(config, "mhc_num_stream", 4)
+        self.has_block_post_layernorm = layer_idx in getattr(
+            config, "block_post_layernorm_idx", []
+        )
+        if self.has_block_post_layernorm:
+            self.block_post_layernorm = RMSNorm(
+                block_post_layernorm_hidden_size, eps=config.rms_norm_eps
+            )
+        self.layer_name = prefix
 
     def forward(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> torch.Tensor:
+        if self.use_mhc and not self.is_mtp_layer:
+            return self.forward_mhc(positions, hidden_states, residual)
+        else:
+            return self.forward_normal(positions, hidden_states, residual)
+
+    def forward_normal(
         self,
         positions: torch.Tensor,
         hidden_states: torch.Tensor,
@@ -979,7 +1687,48 @@ class OpenPanguDecoderLayer(nn.Module):
         if self.sandwich_norm:
             hidden_states = self.post_mlp_layernorm(hidden_states)
 
+        if self.has_block_post_layernorm:
+            hidden_states, _ = self.block_post_layernorm(hidden_states, residual)
+            residual = None
+
         return hidden_states, residual
+
+    def forward_mhc(
+        self,
+        positions: torch.Tensor,
+        hidden_states: torch.Tensor,
+        residual: torch.Tensor | None,
+    ) -> torch.Tensor:
+        residual = hidden_states
+
+        hidden_states, h_post, h_res = self.attn_mhc_module.hc_pre(hidden_states)
+        hidden_states = self.input_layernorm(hidden_states)
+        hidden_states = self.self_attn(
+            positions=positions,
+            hidden_states=hidden_states,
+        )
+
+        if self.sandwich_norm:
+            hidden_states = self.post_attention_layernorm(hidden_states)
+        hidden_states = self.attn_mhc_module.hc_post(
+            hidden_states, residual, h_post, h_res
+        )
+        residual = hidden_states
+        hidden_states, h_post, h_res = self.mlp_mhc_module.hc_pre(hidden_states)
+        hidden_states = self.pre_mlp_layernorm(hidden_states)
+
+        # Fully Connected
+        hidden_states = self.mlp(hidden_states)
+
+        if self.sandwich_norm:
+            hidden_states = self.post_mlp_layernorm(hidden_states)
+        hidden_states = self.mlp_mhc_module.hc_post(
+            hidden_states, residual, h_post, h_res
+        )
+        if self.has_block_post_layernorm:
+            hidden_states = self.block_post_layernorm(hidden_states)
+
+        return hidden_states, None
 
 
 @support_torch_compile
@@ -1009,9 +1758,22 @@ class OpenPanguModel(nn.Module):
         else:
             self.embed_tokens = PPMissingLayer()
 
+        if hasattr(config, "index_topk"):
+            topk_tokens = config.index_topk
+            topk_indices_buffer = torch.empty(
+                vllm_config.scheduler_config.max_num_batched_tokens,
+                topk_tokens,
+                dtype=torch.int32,
+                device=current_platform.device_type,
+            )
+        else:
+            topk_indices_buffer = None
+
         self.start_layer, self.end_layer, self.layers = make_layers(
             config.num_hidden_layers,
-            lambda prefix: OpenPanguDecoderLayer(config, prefix, vllm_config),
+            lambda prefix: OpenPanguDecoderLayer(
+                config, prefix, vllm_config, topk_indices_buffer
+            ),
             prefix=f"{prefix}.layers",
         )
 
@@ -1023,8 +1785,32 @@ class OpenPanguModel(nn.Module):
             ["hidden_states", "residual"], config.hidden_size
         )
 
+        self.use_mhc = getattr(config, "use_mhc", False)
+        if self.use_mhc:
+            self.num_stream = getattr(config, "mhc_num_stream", 4)
+            self.merge_mhc_module = mHCModule(
+                config=config,
+                merge_layer_only_pre=True,
+                prefix=f"{prefix}.attn_mhc_module",
+            )
+            self.hc_head_op = HCHeadOp()
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
+
+    def hc_head(self, x) -> torch.Tensor:
+        x = x.view(-1, self.num_stream, self.merge_mhc_module.hidden_size)
+        res = self.hc_head_op(
+            x,
+            self.merge_mhc_module.phi_weight
+            if hasattr(self.merge_mhc_module, "phi_weight")
+            else self.merge_mhc_module.phi.weight.float(),
+            self.merge_mhc_module.branch_alpha_pre,
+            self.merge_mhc_module.branch_beta_pre,
+            self.merge_mhc_module.norm_eps,
+            self.merge_mhc_module.hc_eps,
+        )
+        return res
 
     def forward(
         self,
@@ -1038,6 +1824,8 @@ class OpenPanguModel(nn.Module):
                 hidden_states = inputs_embeds
             else:
                 hidden_states = self.embed_input_ids(input_ids)
+                if self.use_mhc:
+                    hidden_states = hidden_states.repeat(1, self.num_stream)
             residual = None
         else:
             assert intermediate_tensors is not None
@@ -1053,7 +1841,14 @@ class OpenPanguModel(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
 
-        hidden_states, _ = self.norm(hidden_states, residual)
+        if self.use_mhc:
+            hidden_states = self.hc_head(hidden_states)
+        else:
+            hidden_states = (
+                hidden_states + residual if residual is not None else hidden_states
+            )
+
+        hidden_states = self.norm(hidden_states)
         return hidden_states
 
     def load_attn_mlp_weight(
@@ -1131,6 +1926,8 @@ class OpenPanguModel(nn.Module):
             (".fused_qkv_a_proj", ".kv_a_proj_with_mqa", 1),
             (".gate_up_proj", ".gate_proj", 0),
             (".gate_up_proj", ".up_proj", 1),
+            (".indexer.wk_weights_proj", ".indexer.wk", 0),
+            (".indexer.wk_weights_proj", ".indexer.weights_proj", 1),
         ]
         has_experts = hasattr(self.config, "n_routed_experts")
         if has_experts:
@@ -1143,9 +1940,15 @@ class OpenPanguModel(nn.Module):
                 num_redundant_experts=self.num_redundant_experts,
             )
 
+        _pending_wk_fp8: dict = {}
+        pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
         for name, loaded_weight in weights:
+            if "layers" in name:
+                layer_idx = int(name.split("layers.")[-1].split(".")[0])
+                if layer_idx >= self.config.num_hidden_layers:
+                    continue
             if "rotary_emb.inv_freq" in name:
                 continue
             if self.config.tie_word_embeddings and "lm_head.weight" in name:
@@ -1160,6 +1963,16 @@ class OpenPanguModel(nn.Module):
                 mtp_idx = layer_idx - self.config.num_hidden_layers
                 if mtp_idx >= 0 and mtp_idx < self.config.num_nextn_predict_layers:
                     continue  # skip spec decode layers for main model
+
+            if _try_load_fp8_indexer_wk(
+                name,
+                loaded_weight,
+                _pending_wk_fp8,
+                params_dict,
+                loaded_params,
+                pp_missing_layer_names,
+            ):
+                continue
 
             flag_dict = {"is_expert_weight": False}
             if (
@@ -1190,6 +2003,21 @@ class OpenPanguModel(nn.Module):
                 if name.endswith("e_score_correction_bias"):
                     name = name.replace(
                         "e_score_correction_bias", "gate.e_score_correction_bias"
+                    )
+                if ".self_attn.qa_conv.weight" in name:
+                    name = name.replace(
+                        ".self_attn.qa_conv.weight",
+                        ".self_attn.mome_attn.qa_conv.weight",
+                    )
+                if ".self_attn.compresskv_conv.weight" in name:
+                    name = name.replace(
+                        ".self_attn.compresskv_conv.weight",
+                        ".self_attn.mome_attn.compresskv_conv.weight",
+                    )
+                if ".self_attn.o_conv.weight" in name:
+                    name = name.replace(
+                        ".self_attn.o_conv.weight",
+                        ".self_attn.mome_attn.o_conv.weight",
                     )
                 if name is None:
                     continue
@@ -1346,4 +2174,8 @@ class PanguUltraMoEForCausalLM(OpenPanguMoEModel):
 
 
 class PanguProMoEV2ForCausalLM(OpenPanguMoEModel):
+    pass
+
+
+class OpenPanguV2ForCausalLM(OpenPanguMoEModel):
     pass

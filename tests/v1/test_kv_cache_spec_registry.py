@@ -18,7 +18,6 @@ from vllm.v1.core.single_type_kv_cache_manager import (
     FullAttentionManager,
     MambaManager,
     SingleTypeKVCacheManager,
-    SinkFullAttentionManager,
     SlidingWindowManager,
     register_all_kvcache_specs,
 )
@@ -30,8 +29,8 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MambaSpec,
     MLAAttentionSpec,
-    SinkFullAttentionSpec,
     SlidingWindowMLASpec,
+    SlidingWindowMomeSpec,
     SlidingWindowSpec,
     TQFullAttentionSpec,
     UniformTypeKVCacheSpecs,
@@ -88,10 +87,10 @@ spec_manager_map: dict[type[KVCacheSpec], type[SingleTypeKVCacheManager]] = {
     HiddenStateCacheSpec: FullAttentionManager,
     SlidingWindowSpec: SlidingWindowManager,
     SlidingWindowMLASpec: SlidingWindowManager,
+    SlidingWindowMomeSpec: SlidingWindowManager,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionManager,
     MambaSpec: MambaManager,
     CrossAttentionSpec: CrossAttentionManager,
-    SinkFullAttentionSpec: SinkFullAttentionManager,
 }
 
 spec_uniform_base_map: dict[type[KVCacheSpec], type[KVCacheSpec]] = {
@@ -101,10 +100,10 @@ spec_uniform_base_map: dict[type[KVCacheSpec], type[KVCacheSpec]] = {
     HiddenStateCacheSpec: FullAttentionSpec,
     SlidingWindowSpec: SlidingWindowSpec,
     SlidingWindowMLASpec: SlidingWindowMLASpec,
+    SlidingWindowMomeSpec: SlidingWindowMomeSpec,
     ChunkedLocalAttentionSpec: ChunkedLocalAttentionSpec,
     MambaSpec: MambaSpec,
     CrossAttentionSpec: CrossAttentionSpec,
-    SinkFullAttentionSpec: FullAttentionSpec,
 }
 
 spec_args_map: dict[type[KVCacheSpec], dict[str, Any]] = {
@@ -138,6 +137,14 @@ spec_args_map: dict[type[KVCacheSpec], dict[str, Any]] = {
         dtype=torch.bfloat16,
         sliding_window=128,
     ),
+    SlidingWindowMomeSpec: dict(
+        block_size=64,
+        num_kv_heads=1,
+        head_size=224,
+        dtype=torch.bfloat16,
+        sliding_window=128,
+        component_dims=(32, 64, 128),
+    ),
     ChunkedLocalAttentionSpec: dict(
         block_size=64,
         num_kv_heads=8,
@@ -154,9 +161,6 @@ spec_args_map: dict[type[KVCacheSpec], dict[str, Any]] = {
     ),
     CrossAttentionSpec: dict(
         block_size=64, num_kv_heads=8, head_size=128, dtype=torch.bfloat16
-    ),
-    SinkFullAttentionSpec: dict(
-        block_size=64, num_kv_heads=8, head_size=128, dtype=torch.bfloat16, sink_len=16
     ),
 }
 
@@ -263,7 +267,6 @@ class TestKVCacheSpecRegistry:
             make_spec(TQFullAttentionSpec),
             make_spec(MLAAttentionSpec),
             make_spec(HiddenStateCacheSpec),
-            make_spec(SinkFullAttentionSpec),
         ]
 
         assert are_uniform_specs(*specs)
@@ -273,6 +276,8 @@ class TestKVCacheSpecRegistry:
         [
             (SlidingWindowSpec, "sliding_window", 256),
             (SlidingWindowMLASpec, "sliding_window", 256),
+            (SlidingWindowMomeSpec, "sliding_window", 256),
+            (SlidingWindowMomeSpec, "component_dims", (32, 64, 256)),
             (ChunkedLocalAttentionSpec, "attention_chunk_size", 8),
             (MambaSpec, "num_speculative_blocks", 4),
         ],
@@ -291,6 +296,8 @@ class TestKVCacheSpecRegistry:
             (FullAttentionSpec, ChunkedLocalAttentionSpec),
             (FullAttentionSpec, MambaSpec),
             (SlidingWindowMLASpec, SlidingWindowSpec),
+            (SlidingWindowMomeSpec, SlidingWindowMLASpec),
+            (SlidingWindowMomeSpec, SlidingWindowSpec),
             (ChunkedLocalAttentionSpec, SlidingWindowSpec),
             (MambaSpec, CrossAttentionSpec),
         ],

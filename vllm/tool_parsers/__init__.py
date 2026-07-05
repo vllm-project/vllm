@@ -146,6 +146,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "gptoss_tool_parser",
         "GptOssToolParser",
     ),
+    "openpangu_v2": (
+        "openpangu_v2_tool_parser",
+        "OpenPanguV2ToolParser",
+    ),
     "phi4_mini_json": (
         "phi4mini_tool_parser",
         "Phi4MiniJsonToolParser",

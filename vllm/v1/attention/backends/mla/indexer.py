@@ -515,7 +515,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     - max_decode_len
                     + 1
                     + self.offsets_buffer[:max_decode_len]
-                )
+                ).clamp(min=0)
                 seq_lens = seq_lens_buffer
             return seq_lens, block_table, decode_lens, num_decodes, requires_padding
 

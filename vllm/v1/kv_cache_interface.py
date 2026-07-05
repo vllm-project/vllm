@@ -90,7 +90,6 @@ class KVCacheSpecKind(str, Enum):
     SLIDING_WINDOW_MLA = "sliding_window_mla"
     MAMBA = "mamba"
     CHUNKED_LOCAL_ATTENTION = "chunked_local_attention"
-    SINK_FULL_ATTENTION = "sink_full_attention"
     ENCODER_ONLY_ATTENTION = "encoder_only_attention"
     CROSS_ATTENTION = "cross_attention"
     UNKNOWN = "unknown"
@@ -707,6 +706,47 @@ class MambaSpec(KVCacheSpec):
 
 
 @dataclass(frozen=True)
+class SlidingWindowMomeSpec(SlidingWindowMLASpec):
+    component_dims: tuple[int, ...] = ()
+
+    @property
+    def shapes(self) -> tuple[tuple[int, ...], ...]:
+        return tuple((self.block_size, dim) for dim in self.component_dims)
+
+    @property
+    def dtypes(self) -> tuple[torch.dtype, ...]:
+        return (self.dtype,) * len(self.component_dims)
+
+    @property
+    def num_speculative_blocks(self) -> int:
+        # for compatibility with mamba metadata builder
+        return 0
+
+    def is_uniform_with_collection(
+        self, kv_cache_specs: dict[str, KVCacheSpec]
+    ) -> bool:
+        return all(
+            isinstance(spec, SlidingWindowMomeSpec)
+            and spec.sliding_window == self.sliding_window
+            and spec.component_dims == self.component_dims
+            for spec in kv_cache_specs.values()
+        )
+
+    def __post_init__(self):
+        super().__post_init__()
+        if len(self.component_dims) != 3:
+            raise ValueError(
+                "SlidingWindowMomeSpec expects three component dims "
+                f"(q, compressed-kv, output), got {self.component_dims}."
+            )
+        if any(dim <= 0 for dim in self.component_dims):
+            raise ValueError(
+                "SlidingWindowMomeSpec component dims must be positive, "
+                f"got {self.component_dims}."
+            )
+
+
+@dataclass(frozen=True)
 class EncoderOnlyAttentionSpec(AttentionSpec):
     def max_memory_usage_bytes(self, vllm_config: VllmConfig) -> int:
         # Encoder-only layers do not need KV cache
@@ -724,60 +764,6 @@ class CrossAttentionSpec(AttentionSpec):
         # Get encoder length (e.g., 1500 for Whisper).
         max_encoder_len = vllm_config.scheduler_config.max_num_encoder_input_tokens
         return cdiv(max_encoder_len, self.block_size) * self.page_size_bytes
-
-
-@dataclass(frozen=True)
-class SinkFullAttentionSpec(FullAttentionSpec):
-    sink_len: int | None = None
-
-    @classmethod
-    def merge(cls, specs: list[Self]) -> Self:
-        """
-        Merge a list of FullAttentionSpec objects into a single
-        FullAttentionSpec object.
-        """
-        assert all(isinstance(spec, FullAttentionSpec) for spec in specs), (
-            "All attention layers in the same KV cache group must be FullAttentionSpec."
-        )
-
-        sliding_window = set(
-            spec.sliding_window for spec in specs if spec.sliding_window is not None
-        )
-        attention_chunk_size = set(
-            spec.attention_chunk_size
-            for spec in specs
-            if spec.attention_chunk_size is not None
-        )
-        assert not any(isinstance(spec, MLAAttentionSpec) for spec in specs), (
-            "MLAAttentionSpec should be merged in MLAAttentionSpec.merge"
-        )
-        merged_spec = cls(
-            block_size=specs[0].block_size,
-            num_kv_heads=specs[0].num_kv_heads,
-            head_size=specs[0].head_size,
-            head_size_v=specs[0].head_size_v,
-            sink_len=specs[0].sink_len,
-            dtype=specs[0].dtype,
-            kv_quant_mode=specs[0].kv_quant_mode,
-            page_size_padded=specs[0].page_size_padded,
-            indexes_kv_by_block_stride=specs[0].indexes_kv_by_block_stride,
-            sliding_window=cls.merge_window_sizes(sliding_window),
-            attention_chunk_size=cls.merge_window_sizes(attention_chunk_size),
-            non_causal=any(spec.non_causal for spec in specs),
-        )
-        for spec in specs:
-            for f in fields(AttentionSpec):
-                assert getattr(spec, f.name) == getattr(merged_spec, f.name), (
-                    "All attention layers in the same KV cache group must have "
-                    "the same attention spec."
-                )
-        assert (merged_spec.sliding_window is not None) + (
-            merged_spec.attention_chunk_size is not None
-        ) <= 1, (
-            "Model with both sliding window layers and chunked local attention "
-            "layers is not supported."
-        )
-        return merged_spec
 
 
 @dataclass(frozen=True)
@@ -860,8 +846,6 @@ def get_kv_cache_spec_kind(kv_cache_spec: KVCacheSpec) -> KVCacheSpecKind:
         return KVCacheSpecKind.SLIDING_WINDOW_MLA
     if isinstance(kv_cache_spec, MLAAttentionSpec):
         return KVCacheSpecKind.MLA_ATTENTION
-    if isinstance(kv_cache_spec, SinkFullAttentionSpec):
-        return KVCacheSpecKind.SINK_FULL_ATTENTION
     if isinstance(kv_cache_spec, FullAttentionSpec):
         return KVCacheSpecKind.FULL_ATTENTION
     if isinstance(kv_cache_spec, ChunkedLocalAttentionSpec):

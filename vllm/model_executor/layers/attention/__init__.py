@@ -17,6 +17,7 @@ from vllm.model_executor.layers.attention.prefill_prefix_lm_attention import (
 from vllm.model_executor.layers.attention.rswa_attention import RSWAAttention
 from vllm.model_executor.layers.attention.static_sink_attention import (
     StaticSinkAttention,
+    StaticSinkMLAAttention,
 )
 
 __all__ = [
@@ -29,4 +30,5 @@ __all__ = [
     "PrefillPrefixLMAttention",
     "RSWAAttention",
     "StaticSinkAttention",
+    "StaticSinkMLAAttention",
 ]

@@ -15,6 +15,7 @@ from vllm.model_executor.layers.attention.mla_attention import (
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
+from vllm.utils.math_utils import cdiv
 from vllm.utils.platform_utils import num_compute_units
 from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
 from vllm.v1.attention.backend import (
@@ -27,6 +28,7 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     SparseMLAAttentionImpl,
 )
+from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
 )
@@ -42,8 +44,14 @@ from vllm.v1.attention.ops.flashmla import (
     flash_mla_with_kvcache,
     get_mla_metadata,
 )
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import AttentionSpec
 from vllm.v1.worker.workspace import current_workspace_manager
+
+if is_flash_attn_varlen_func_available():
+    from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
+else:
+    flash_attn_varlen_func = None  # type: ignore[assignment]
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -892,3 +900,178 @@ class FlashMLASparseImpl(SparseMLAAttentionImpl[FlashMLASparseMetadata]):
             )
 
         return attn_out, None
+
+
+class FlashMLASparseStaticSinkImpl(FlashMLASparseImpl):
+    """BF16 sparse MLA with static sink via split attention + LSE merge."""
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        topk_indices_buffer: torch.Tensor | None = None,
+        indexer: "Indexer | None" = None,
+        **mla_args,
+    ) -> None:
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            alibi_slopes,
+            sliding_window,
+            kv_cache_dtype,
+            logits_soft_cap,
+            attn_type,
+            kv_sharing_target_layer_name,
+            topk_indices_buffer=topk_indices_buffer,
+            indexer=indexer,
+            **mla_args,
+        )
+        self.sink_k_pe: torch.Tensor | None = None
+        self.sink_compressed_kv: torch.Tensor | None = None
+        self.sink_len = 0
+        self.qk_rope_head_dim: int = mla_args["qk_rope_head_dim"]
+
+    def update_sink_kv(
+        self, sink_k_pe: torch.Tensor, sink_compressed_kv: torch.Tensor
+    ) -> None:
+        self.sink_k_pe = sink_k_pe.unsqueeze(1).clone()
+        self.sink_compressed_kv = sink_compressed_kv.clone()
+        self.sink_len = sink_k_pe.shape[0]
+
+    def _compute_sink_mqa_attn(
+        self,
+        q: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Dense MQA over static sink tokens (non-causal prefix)."""
+        assert self.sink_k_pe is not None and self.sink_compressed_kv is not None
+        q_nope, q_pe = torch.split(
+            q, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
+        )
+        num_reqs = attn_metadata.num_reqs
+        max_seqlen_q = max(attn_metadata.max_query_len, 1)
+
+        sink_k_pe = self.sink_k_pe.repeat(num_reqs, 1, 1)
+        sink_kv_c = self.sink_compressed_kv
+        if sink_kv_c.dim() == 2:
+            sink_kv_c = sink_kv_c.unsqueeze(1)
+        sink_kv_c = sink_kv_c.repeat(num_reqs, 1, 1)
+        cu_seqlens_k_sink = torch.arange(
+            0,
+            num_reqs * self.sink_len + 1,
+            self.sink_len,
+            device=q.device,
+            dtype=torch.int32,
+        )
+
+        assert flash_attn_varlen_func is not None, (
+            "FlashMLASparseStaticSinkImpl requires flash_attn_varlen_func."
+        )
+        sink_o, sink_lse = flash_attn_varlen_func(
+            q=q_pe,
+            k=sink_k_pe,
+            v=sink_kv_c,
+            q_v=q_nope,
+            max_seqlen_q=max_seqlen_q,
+            cu_seqlens_q=attn_metadata.query_start_loc,
+            max_seqlen_k=self.sink_len,
+            cu_seqlens_k=cu_seqlens_k_sink,
+            softmax_scale=self.softmax_scale,
+            causal=False,
+            return_softmax_lse=True,
+            fa_version=3,
+            num_splits=0,
+        )
+        return sink_o, sink_lse
+
+    def _bf16_flash_mla_kernel_with_lse(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        num_tokens = q.shape[0]
+        kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.reshape(
+            -1, 1, kv_c_and_k_pe_cache.shape[-1]
+        )
+
+        if self.num_heads % self.prefill_padding != 0:
+            padded_heads = (
+                cdiv(self.num_heads, self.prefill_padding) * self.prefill_padding
+            )
+            q_padded = q.new_zeros((q.shape[0], padded_heads, q.shape[2]))
+            q_padded[:, : self.num_heads, :] = q
+            q = q_padded
+
+        topk_indices = topk_indices.view(num_tokens, 1, -1)
+        sparse_o, _, sparse_lse = flash_mla_sparse_fwd(
+            q, kv_c_and_k_pe_cache, topk_indices, self.softmax_scale
+        )
+        sparse_o = sparse_o[:, : self.num_heads, :].contiguous()
+        sparse_lse = sparse_lse[:, : self.num_heads]
+        # flash_mla_sparse_fwd returns lse as [num_tokens, num_heads]
+        return sparse_o, sparse_lse.transpose(0, 1).contiguous()
+
+    def _forward_bf16_kv_with_lse(
+        self,
+        q: torch.Tensor,
+        kv_c_and_k_pe_cache: torch.Tensor,
+        topk_indices: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        topk_indices = triton_convert_req_index_to_global_index(
+            attn_metadata.req_id_per_token,
+            attn_metadata.block_table,
+            topk_indices,
+            BLOCK_SIZE=attn_metadata.block_size,
+            NUM_TOPK_TOKENS=topk_indices.shape[1],
+        )
+        return self._bf16_flash_mla_kernel_with_lse(
+            q, kv_c_and_k_pe_cache, topk_indices
+        )
+
+    def forward_mqa(
+        self,
+        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
+        kv_c_and_k_pe_cache: torch.Tensor,
+        attn_metadata: FlashMLASparseMetadata,
+        layer: AttentionLayer,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        use_fp8_cache = self.kv_cache_dtype == "fp8_ds_mla"
+        if self.sink_len == 0 or use_fp8_cache:
+            return super().forward_mqa(q, kv_c_and_k_pe_cache, attn_metadata, layer)
+
+        if isinstance(q, tuple):
+            ql_nope, q_pe = q
+            q = self.q_concat_buffer[: ql_nope.shape[0]]
+            ops.concat_mla_q(ql_nope, q_pe, q)
+
+        num_actual_toks = q.shape[0]
+        assert self.topk_indices_buffer is not None
+        topk_indices = self.topk_indices_buffer[:num_actual_toks]
+
+        sink_o, sink_lse = self._compute_sink_mqa_attn(q, attn_metadata)
+        sparse_o, sparse_lse = self._forward_bf16_kv_with_lse(
+            q, kv_c_and_k_pe_cache, topk_indices, attn_metadata
+        )
+
+        o = torch.empty_like(sparse_o)
+        merge_attn_states(
+            output=o,
+            output_lse=None,
+            prefix_output=sink_o,
+            prefix_lse=sink_lse,
+            suffix_output=sparse_o,
+            suffix_lse=sparse_lse,
+        )
+        return o, None

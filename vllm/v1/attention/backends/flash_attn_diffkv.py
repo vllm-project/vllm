@@ -22,6 +22,7 @@ from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
 if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
+from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 
 from .flash_attn import (
     FlashAttentionBackend,
@@ -339,3 +340,192 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
             s_aux=self.sinks,
         )
         return output
+
+
+class FlashAttentionStaticSinkDiffKVImpl(FlashAttentionDiffKVImpl):
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.sink_k = None
+        self.sink_v = None
+        self.sink_len = 0
+
+    def update_sink_kv(self, sink_k: torch.Tensor, sink_v: torch.Tensor) -> None:
+        self.sink_k = sink_k
+        self.sink_v = sink_v
+        self.sink_len = sink_k.shape[0]
+
+    def _compute_sink_attn(
+        self,
+        q: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Attention over static sink tokens only (non-causal prefix)."""
+        assert self.sink_k is not None and self.sink_v is not None
+        num_reqs = attn_metadata.seq_lens.shape[0]
+        max_seqlen_q = max(attn_metadata.max_query_len, 1)
+        sink_k = self.sink_k.repeat(num_reqs, 1, 1)
+        sink_v = self.sink_v.repeat(num_reqs, 1, 1)
+        cu_seqlens_k_sink = torch.arange(
+            0,
+            num_reqs * self.sink_len + 1,
+            self.sink_len,
+            device=q.device,
+            dtype=torch.int32,
+        )
+        sink_o, sink_lse = flash_attn_varlen_func(
+            q=q,
+            k=sink_k,
+            v=sink_v,
+            max_seqlen_q=max_seqlen_q,
+            cu_seqlens_q=attn_metadata.query_start_loc,
+            max_seqlen_k=self.sink_len,
+            cu_seqlens_k=cu_seqlens_k_sink,
+            softmax_scale=self.scale,
+            causal=False,
+            return_softmax_lse=True,
+            fa_version=3,
+            num_splits=0,
+            window_size=None,
+        )
+        return sink_o, sink_lse
+
+    def forward(
+        self,
+        layer: torch.nn.Module,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        attn_metadata: FlashAttentionMetadata,
+        output: torch.Tensor,
+        output_scale: torch.Tensor | None = None,
+        output_block_scale: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Forward pass with FlashAttention.
+
+        Args:
+            query: shape = [num_tokens, num_heads, head_size]
+            key: shape = [num_tokens, num_kv_heads, head_size]
+            value: shape = [num_tokens, num_kv_heads, head_size_v]
+            kv_cache: shape =
+                [num_blocks, block_size, num_kv_heads, head_size + head_size_v]
+            attn_metadata: Metadata for attention.
+        Returns:
+            shape = [num_tokens, num_heads * head_size_v]
+        NOTE: FP8 quantization, flash-attn expect the size of
+              {q,k,v}_descale to be (num_sequences, num_kv_heads).
+              We use torch's .expand() to avoid duplicating values
+        """
+        assert self.vllm_flash_attn_version is not None, (
+            "FlashAttention version not detected."
+        )
+
+        if output_scale is not None or output_block_scale is not None:
+            raise NotImplementedError(
+                "fused output quantization is not yet supported for FlashAttentionImpl"
+            )
+
+        if attn_metadata is None:
+            # Profiling run.
+            return output.fill_(0)
+
+        attn_type = self.attn_type
+
+        # IMPORTANT!
+        # NOTE(woosuk): With piece-wise CUDA graphs, this method is executed in
+        # eager-mode PyTorch. Thus, we need to be careful about any CPU overhead
+        # in this method. For example, `view` and `slice` (or `[:n]`) operations
+        # are surprisingly slow even in the case they do not invoke any GPU ops.
+        # Minimize the PyTorch ops in this method as much as possible.
+        # Whenever making a change in this method, please benchmark the
+        # performance to make sure it does not introduce any overhead.
+
+        num_actual_tokens = attn_metadata.num_actual_tokens
+
+        # Handle encoder attention differently - no KV cache needed
+        if attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            # For encoder attention,
+            # we use direct Q, K, V tensors without caching
+            return self._forward_encoder_attention(
+                query[:num_actual_tokens],
+                key[:num_actual_tokens],
+                value[:num_actual_tokens],
+                output[:num_actual_tokens],
+                attn_metadata,
+                layer,
+            )
+
+        # For decoder and cross-attention, use KV cache as before
+        # Different head_size for K and V
+        key_cache = kv_cache[..., : self.head_size]
+        value_cache = kv_cache[..., self.head_size :]
+        # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
+        # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
+        # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
+        fixed_k = canonicalize_singleton_dim_strides(key_cache)
+        fixed_v = canonicalize_singleton_dim_strides(value_cache)
+        if fixed_k is not key_cache or fixed_v is not value_cache:
+            logger.debug(
+                "Canonicalized degenerate KV cache strides (FlashAttentionDiffKV): "
+                "shape=%s, key strides before=%s after=%s, "
+                "value strides before=%s after=%s",
+                key_cache.shape,
+                key_cache.stride(),
+                fixed_k.stride(),
+                value_cache.stride(),
+                fixed_v.stride(),
+            )
+        key_cache, value_cache = fixed_k, fixed_v
+
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            # queries are quantized in the attention layer
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
+
+        if attn_metadata.use_cascade:
+            raise NotImplementedError("Static sink with cascade is not supported yet.")
+        else:
+            cu_seqlens_q = attn_metadata.query_start_loc
+            seqused_k = attn_metadata.seq_lens
+            max_seqlen_q = attn_metadata.max_query_len
+            max_seqlen_k = attn_metadata.max_seq_len
+            block_table = attn_metadata.block_table
+
+            descale_shape = (cu_seqlens_q.shape[0] - 1, self.num_kv_heads)
+
+            if self.dcp_world_size > 1:
+                raise NotImplementedError("Static sink with dcp is not supported yet.")
+            else:
+                sliding_window_size = (
+                    list(self.sliding_window)
+                    if self.sliding_window is not None
+                    else None
+                )
+                sink_o, sink_lse = self._compute_sink_attn(
+                    query[:num_actual_tokens],
+                    attn_metadata,
+                )
+                no_sink_o, no_sink_lse = flash_attn_varlen_func(
+                    q=query[:num_actual_tokens],
+                    k=key_cache,
+                    v=value_cache,
+                    cu_seqlens_q=cu_seqlens_q,
+                    max_seqlen_q=max_seqlen_q,
+                    seqused_k=seqused_k,
+                    max_seqlen_k=max_seqlen_k,
+                    softmax_scale=self.scale,
+                    causal=attn_metadata.causal,
+                    alibi_slopes=self.alibi_slopes,
+                    window_size=sliding_window_size,
+                    block_table=block_table,
+                    softcap=self.logits_soft_cap,
+                    return_softmax_lse=True,
+                    fa_version=self.vllm_flash_attn_version,
+                    q_descale=layer._q_scale.expand(descale_shape),
+                    k_descale=layer._k_scale.expand(descale_shape),
+                    v_descale=layer._v_scale.expand(descale_shape),
+                    num_splits=attn_metadata.max_num_splits,
+                    s_aux=self.sinks,
+                )
+                merge_attn_states(output, sink_o, sink_lse, no_sink_o, no_sink_lse)
+                return output
