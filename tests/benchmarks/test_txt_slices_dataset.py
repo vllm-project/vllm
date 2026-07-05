@@ -13,7 +13,7 @@ from vllm.benchmarks.datasets.create_txt_slices_dataset import create_txt_slices
 @pytest.fixture(scope="session")
 def hf_tokenizer() -> PreTrainedTokenizerBase:
     # Use a small, commonly available tokenizer
-    return AutoTokenizer.from_pretrained("gpt2")
+    return AutoTokenizer.from_pretrained("openai-community/gpt2")
 
 
 text_content = """
@@ -39,7 +39,7 @@ def test_create_txt_slices_jsonl(
     create_txt_slices_jsonl(
         input_path=str(txt_path),
         output_path=str(jsonl_path),
-        tokenizer_name="gpt2",
+        tokenizer_name="openai-community/gpt2",
         num_prompts=10,
         input_len=10,
         output_len=10,
