@@ -134,9 +134,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             host: Address the ZMQ control socket binds to. Defaults to
                 ``VLLM_P2P_SIDE_CHANNEL_HOST`` (``localhost``) when not
                 set; override to the node IP for cross-host P/D.
-            port: Port for the ZMQ control socket. Must be reachable
-                from peers. Defaults to ``VLLM_P2P_SIDE_CHANNEL_PORT``
-                (``5710``) when not set.
+            port: Base port for the ZMQ control socket. Must be
+                reachable from peers. Defaults to
+                ``VLLM_P2P_SIDE_CHANNEL_PORT`` (``5710``) when not set.
+                The bound port is ``base + data_parallel_index`` so each
+                DP replica gets a distinct port (one socket per replica,
+                like NIXL); for DP=1 the offset is 0.
             backends: NIXL transport backends (e.g. ``["UCX"]``,
                 ``["MOONCAKE"]``, ``["LIBFABRIC"]``). Defaults to
                 ``["UCX"]``. When any non-UCX backend is requested, the
@@ -153,7 +156,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             host = envs.VLLM_P2P_SIDE_CHANNEL_HOST
         if port is None:
             port = envs.VLLM_P2P_SIDE_CHANNEL_PORT
-        port = int(port)
+        # One control socket per DP replica: offset the base by the global
+        # data-parallel index so replicas on a host don't collide (mirrors
+        # NIXL). For DP=1 the index is 0, leaving the base port unchanged.
+        dp_index = offloading_spec.vllm_config.parallel_config.data_parallel_index
+        port = int(port) + dp_index
         self._local_id = f"{host}:{port}"
 
         config_fields = FileMapper.from_offloading_spec(

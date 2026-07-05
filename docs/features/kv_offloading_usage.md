@@ -128,7 +128,7 @@ The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances o
 | --- | --- | --- | --- |
 | `type` | yes | — | Must be `p2p`. |
 | `host` | no | `$VLLM_P2P_SIDE_CHANNEL_HOST` (`localhost`) | Address the control socket binds to. When omitted, resolves from the env var below. |
-| `port` | no | `$VLLM_P2P_SIDE_CHANNEL_PORT` (`5710`) | Port for the control socket. Must be reachable from peers. When omitted, resolves from the env var below. |
+| `port` | no | `$VLLM_P2P_SIDE_CHANNEL_PORT` (`5710`) | Base port for the control socket. Must be reachable from peers. The bound port is `base + data_parallel_index` (one socket per DP replica). When omitted, the base resolves from the env var below. |
 | `backends` | no | `["UCX"]` | NIXL transport backends. See [NixlConnector Usage Guide](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin) for available backends and selection guidance. |
 | `num_threads` | no | `4` | NIXL agent worker threads. Only used when `backends` is UCX-only; ignored when any non-UCX backend is requested. |
 
@@ -139,7 +139,7 @@ The `backends` and `num_threads` options mirror the conditional logic used by [`
 Rather than embedding `host`/`port` in each `secondary_tiers` entry, set them once at deploy time via environment variables (mirroring `VLLM_NIXL_SIDE_CHANNEL_HOST`/`VLLM_NIXL_SIDE_CHANNEL_PORT`). Explicit `host`/`port` config keys, when present, take precedence.
 
 - `VLLM_P2P_SIDE_CHANNEL_HOST` (default `localhost`): address the P2P control socket binds to. Leave as `localhost` when prefiller and decoder share a host; set to the node IP for cross-host P/D.
-- `VLLM_P2P_SIDE_CHANNEL_PORT` (default `5710`): port the P2P control socket binds to. The peer's port is still passed as `remote_port` in `kv_transfer_params` — use this value as the well-known default. Unlike NIXL, there is **no** data-parallel-index increment; the P2P tier binds a single control socket per engine. When a prefiller and decoder run on the *same* host, give one side a different port (e.g. `5711`) to avoid a bind collision.
+- `VLLM_P2P_SIDE_CHANNEL_PORT` (default `5710`): base port for the P2P control socket. The port actually bound is `VLLM_P2P_SIDE_CHANNEL_PORT + data_parallel_index` — one socket per DP replica, matching NIXL (for DP=1 the offset is 0). The peer's port is passed as `remote_port` in `kv_transfer_params`; the router/EPP that selects the DP rank (e.g. via the `X-data-parallel-rank` header) computes `remote_port = base + rank`. The DP-index offset separates replicas *within* one deployment; two co-located *deployments* (a prefiller and a decoder on the same host) still need distinct base ports (e.g. decoder base `5711`) to avoid a bind collision.
 
 ## Tuning Tips
 
