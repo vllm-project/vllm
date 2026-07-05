@@ -321,6 +321,16 @@ class DeviceCommunicatorBase:
     def destroy(self):
         pass
 
+    def suspend(self) -> None:
+        """Release reclaimable communicator memory (default: no-op).
+
+        Overridden by communicators that can free their device buffers while a
+        engine sleeps and restore them on ``resume``. Collective across ranks.
+        """
+
+    def resume(self) -> None:
+        """Restore memory released by ``suspend`` (default: no-op)."""
+
     def prepare_communication_buffer_for_model(self, model: torch.nn.Module) -> None:
         """
         Prepare the communication buffer for the model.

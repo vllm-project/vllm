@@ -127,35 +127,34 @@ def _register_group(group: "GroupCoordinator") -> None:
     _groups[group.unique_name] = weakref.ref(group)
 
 
-def _apply_to_nccl_comms(label: str, action: Callable[[Any], None]) -> None:
-    """Apply ``action`` to every group's NCCL communicator, collectively.
+def _apply_to_device_comms(label: str, action: Callable[[Any], None]) -> None:
+    """Apply ``action`` to every group's device communicator, collectively.
 
-    Walks the registered parallel groups and skips those without a CUDA NCCL
-    communicator (``pynccl_comm`` is CUDA-only; also absent at ``world_size
-    == 1`` or when disabled). ncclCommSuspend/Resume are collective (internal
-    cross-rank barrier) and synchronous on return, so no extra sync is needed.
+    Walks the registered parallel groups and skips those without a device
+    communicator (absent at ``world_size == 1``). Each communicator's
+    ``suspend``/``resume`` is a no-op unless it holds releasable device memory
+    (see ``DeviceCommunicatorBase``). Collective across ranks and synchronous
+    on return, so no extra sync is needed.
     """
     comms = []
     for group_ref in _groups.values():
         group = group_ref()
         if group is None:
             continue
-        # pynccl_comm exists only on CudaCommunicator (not CPU/XPU/Ray, nor on
-        # groups with no device communicator such as world_size == 1).
-        pynccl = getattr(group.device_communicator, "pynccl_comm", None)
-        if pynccl is None or pynccl.disabled:
+        dc = group.device_communicator
+        if dc is None:
             continue
-        comms.append(pynccl)
+        comms.append(dc)
     if not comms:
         return
 
-    free_before = torch.cuda.mem_get_info()[0]
-    for pynccl in comms:
-        action(pynccl)
-    delta = torch.cuda.mem_get_info()[0] - free_before
+    free_before = torch.accelerator.get_memory_info()[0]
+    for dc in comms:
+        action(dc)
+    delta = torch.accelerator.get_memory_info()[0] - free_before
     direction = "freed" if delta > 0 else "allocated"
     logger.info(
-        "NCCL %s: %d comms, %.1f MiB %s",
+        "device-comm %s: %d comms, %.1f MiB %s",
         label,
         len(comms),
         abs(delta) / 1024**2,
@@ -163,18 +162,19 @@ def _apply_to_nccl_comms(label: str, action: Callable[[Any], None]) -> None:
     )
 
 
-def suspend_nccl_comms() -> None:
-    """Release idle NCCL communicator memory on every group (collective).
+def suspend_device_comms() -> None:
+    """Release idle device communicator memory on every group (collective).
 
-    Must run on every rank with the communicators idle; ncclCommSuspend has an
-    internal cross-rank barrier. No-op on NCCL < 2.29.7 or at world_size 1.
+    Must run on every rank with communicators idle. Communicator suspend hooks
+    (e.g. NCCL's ncclCommSuspend) have internal cross-rank barriers; a no-op
+    where unsupported (older NCCL, world_size 1, non-CUDA).
     """
-    _apply_to_nccl_comms("suspend", lambda c: c.suspend())
+    _apply_to_device_comms("suspend", lambda c: c.suspend())
 
 
-def resume_nccl_comms() -> None:
-    """Restore all suspended NCCL communicators before reuse (collective)."""
-    _apply_to_nccl_comms("resume", lambda c: c.resume())
+def resume_device_comms() -> None:
+    """Restore all suspended device communicators before reuse (collective)."""
+    _apply_to_device_comms("resume", lambda c: c.resume())
 
 
 def all_reduce(tensor: torch.Tensor, group_name: str) -> torch.Tensor:
