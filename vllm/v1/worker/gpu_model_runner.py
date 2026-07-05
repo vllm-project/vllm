@@ -209,6 +209,10 @@ from vllm.v1.worker.gpu_input_batch import CachedRequestState, InputBatch
 from vllm.v1.worker.gpu_ubatch_wrapper import UBatchWrapper
 from vllm.v1.worker.kv_connector_model_runner_mixin import KVConnectorModelRunnerMixin
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
+from vllm.v1.worker.reanchor_rotary import (
+    apply_inverse_rotary_cos_sin,
+    inverse_rotary_cos_sin,
+)
 from vllm.v1.worker.ubatch_utils import (
     UBatchSlices,
     check_ubatch_thresholds,
@@ -1124,6 +1128,118 @@ class GPUModelRunner(
         """Zero the KV cache memory for the given block IDs."""
         if hasattr(self, "_kv_block_zeroer"):
             self._kv_block_zeroer.zero_block_ids(block_ids)
+
+    def _reanchor_requests(self, reanchor_reqs: dict[str, int]) -> None:
+        """[EXPERIMENTAL] Worker side of RoPE re-anchoring for unbounded realtime.
+
+        The scheduler has already rebased each request's clock and block table
+        (via _update_states re-adding the resumed session). The only thing left
+        here is to re-rotate the live cached keys by the constant R(-D) in every
+        KV group, dropping each key's effective RoPE position by D while every
+        in-window relative score is preserved exactly (proven in
+        benchmarks/voxtral_realtime/test_reanchor_math.py).
+
+        Runs at the between-steps barrier (after _update_states, before the
+        forward writes this step's keys). Invalid under fp8 KV.
+        """
+        if not reanchor_reqs:
+            return
+        assert not is_quantized_kv_cache(self.cache_config.cache_dtype), (
+            "realtime re-anchoring requires a non-fp8 KV cache"
+        )
+        ib = self.input_batch
+        fctx = self.compilation_config.static_forward_context
+        groups = self.kv_cache_config.kv_cache_groups
+        # The audio encoder's RoPE positions run at block_pool_size x the decoder
+        # (whisper positions are expanded by this factor), so its constant shift
+        # is pool * D; the decoder (text) group shifts by D.
+        audio_cfg = getattr(self.model_config.hf_config, "audio_config", None)
+        # downsample_factor lives on audio_config (the Mistral adapter writes it
+        # there, not top-level). Startup validation rejects a non-derivable pool
+        # for the re-anchor path, so the trailing `or 1` is unreachable there.
+        pool = (
+            getattr(audio_cfg, "block_pool_size", None)
+            or getattr(audio_cfg, "downsample_factor", None)
+            or 1
+        )
+        for req_id, D in reanchor_reqs.items():
+            idx = ib.req_id_to_index.get(req_id)
+            if idx is None or D <= 0:
+                # INVARIANT: reanchor_reqs only holds requests scheduled this
+                # step with a positive shift, so each must be in the persistent
+                # batch with D > 0. idx is None (absent from batch) or D <= 0
+                # both mean a scheduler bug; log and skip.
+                logger.error(
+                    "Re-anchor INVARIANT VIOLATION: request %s in reanchor_reqs "
+                    "but not applicable (idx=%s, D=%s); expected it in the "
+                    "persistent batch with D > 0. Key re-rotation dropped, so "
+                    "attention will be corrupted for this stream. This should be "
+                    "unreachable; investigate schedule().",
+                    req_id,
+                    idx,
+                    D,
+                )
+                continue
+            # The persistent-batch row already carries the rebased (small) clock
+            # from full re-add; logged below for observability.
+            clock = int(ib.num_computed_tokens_cpu[idx])
+            # Voxtral/Ministral rope_theta, hardcoded here for the experimental
+            # realtime path. Startup validation (VllmConfig) rejects any model
+            # whose text/audio rope_theta != 1e6, that carries a real RoPE
+            # scaling, or whose decoder/encoder head_dim is not the validated
+            # 128-NeoX / 64-GPT-J pairing this dispatch keys off. The head_size
+            # assert below only rejects a dim outside {64, 128}; by itself it
+            # does NOT catch a 64-dim NeoX or 128-dim GPT-J head, which is why
+            # the geometry is validated up front.
+            base = 1.0e6
+            # At most two distinct rotations per re-anchor (decoder 128-dim
+            # NeoX shifted by D, audio encoder 64-dim GPT-J shifted by pool*D);
+            # compute each cos/sin table once instead of per layer (~60x).
+            cos_sin: dict[tuple[int, int], tuple[torch.Tensor, torch.Tensor]] = {}
+            for gid, group in enumerate(groups):
+                bt = ib.block_table.block_tables[gid]
+                n = int(bt.num_blocks_per_row[idx])
+                if n <= 0:
+                    continue
+                # Whole rebased row: leading evicted/null blocks were dropped
+                # scheduler-side; trailing freshly-allocated blocks (this step's
+                # new tokens) are zeroed by _update_states and overwritten by the
+                # forward pass, so re-rotating them is a harmless no-op. R(-d_grp)
+                # is position-independent, so a uniform rotation of every key in
+                # the row is exactly right.
+                live = bt.block_table.np[idx, :n].copy()
+                live_t = torch.from_numpy(live).to(self.device, torch.long)
+                for layer_name in group.layer_names:
+                    kv = fctx[layer_name].kv_cache
+                    if isinstance(kv, (list, tuple)):
+                        kv = kv[0]
+                    # KV layout (num_blocks, 2, block, num_kv_heads, head_size);
+                    # index 0 = key (post-RoPE). head_size is read per layer, not
+                    # per group: equal text/audio windows merge the decoder
+                    # (128-dim NeoX, shift D) and audio encoder (64-dim GPT-J,
+                    # shift pool*D) into one mixed-head_size group.
+                    head_size = kv.shape[-1]
+                    assert head_size in (64, 128), (
+                        f"re-anchor: unexpected rotary head_size {head_size}"
+                    )
+                    is_neox = head_size == 128
+                    d_grp = D if is_neox else pool * D
+                    cs = cos_sin.get((d_grp, head_size))
+                    if cs is None:
+                        cs = inverse_rotary_cos_sin(
+                            d_grp, head_size, base, kv.dtype, kv.device
+                        )
+                        cos_sin[(d_grp, head_size)] = cs
+                    key = kv[live_t, 0]
+                    kv[live_t, 0] = apply_inverse_rotary_cos_sin(
+                        key, cs[0], cs[1], head_size, is_neox
+                    )
+            logger.info(
+                "Re-anchored worker keys for %s by D=%d (decoder clock=%d).",
+                req_id,
+                D,
+                clock,
+            )
 
     # Note: used for model runner override.
     def _init_device_properties(self) -> None:
@@ -4100,6 +4216,11 @@ class GPUModelRunner(
             # Update persistent batch states.
             deferred_state_corrections_fn = self._update_states(scheduler_output)
 
+            # [EXPERIMENTAL] Unbounded realtime: re-anchor requests at this
+            # between-steps barrier (no in-flight attention) before _prepare_inputs.
+            if scheduler_output.reanchor_reqs:
+                self._reanchor_requests(scheduler_output.reanchor_reqs)
+
             if has_ec_transfer() and not get_ec_transfer().is_consumer:
                 with self.maybe_get_ec_connector_output(
                     scheduler_output,
@@ -6280,6 +6401,17 @@ class GPUModelRunner(
                         max_mm_items_per_batch = mm_budget.mm_max_items_per_batch[
                             dummy_modality
                         ]
+
+                        # Realtime admission is bounded by the encoder token
+                        # budget, not by item count: profile the item count
+                        # that budget admits. Profiling a single item
+                        # under-reserves and OOMs in service (#38233).
+                        if supports_realtime(self.model):
+                            max_toks = mm_budget.mm_max_toks_per_item[dummy_modality]
+                            max_mm_items_per_batch = max(
+                                1,
+                                min(max_mm_items_per_batch, encoder_budget // max_toks),
+                            )
 
                         logger.info_once(
                             "Encoder cache will be initialized with a "

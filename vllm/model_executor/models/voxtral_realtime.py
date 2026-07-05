@@ -17,7 +17,6 @@ from vllm.compilation.decorators import support_torch_compile
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.engine.protocol import StreamingInput
-from vllm.envs import VLLM_ENGINE_ITERATION_TIMEOUT_S
 from vllm.inputs import PromptType, TokensPrompt
 from vllm.logger import init_logger
 from vllm.model_executor.models.interfaces import MultiModalEmbeddings, SupportsRealtime
@@ -265,13 +264,12 @@ class VoxtralRealtimeGeneration(VoxtralForConditionalGeneration, SupportsRealtim
             await buffer.append_audio(right_pad.audio_array)
             await buffer.append_audio(None)  # signal end
 
-        # Feed output tokens back into buffer in background
+        # Feed output tokens back into the buffer with a blocking read: idle
+        # gaps between chunks are normal during silence, so any read timeout
+        # here would kill the feeder mid-session (#36015, #35863).
         async def feed_tokens():
             while True:
-                all_outputs = await asyncio.wait_for(
-                    input_stream.get(),
-                    timeout=VLLM_ENGINE_ITERATION_TIMEOUT_S,
-                )
+                all_outputs = await input_stream.get()
                 await buffer.append_tokens(all_outputs[-1:])
 
         audio_task = asyncio.create_task(feed_audio())

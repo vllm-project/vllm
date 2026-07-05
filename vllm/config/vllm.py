@@ -1044,6 +1044,168 @@ class VllmConfig:
             "enabled" if self.scheduler_config.async_scheduling else "disabled",
         )
 
+        if self.scheduler_config.enable_realtime_unbounded:
+            from vllm.utils.torch_utils import is_quantized_kv_cache
+
+            # Re-anchoring re-rotates cached keys in place; a quantized KV cache
+            # cannot be rotated. Reject at startup, not hours into a stream.
+            if self.cache_config is not None and is_quantized_kv_cache(
+                self.cache_config.cache_dtype
+            ):
+                raise ValueError(
+                    "enable_realtime_unbounded requires a non-fp8 KV cache; "
+                    f"got cache_dtype={self.cache_config.cache_dtype!r}."
+                )
+
+            # Re-anchoring rebases the per-group block lists in place; it cannot
+            # also rebase prefix-cache block hashes, so _reanchor_session is a
+            # silent no-op when prefix caching is on (scheduler.py). With prefix
+            # caching enabled (the default), the flag would be inert and the
+            # session still killed at max_model_len; worse, with the
+            # graceful-finish warning suppressed for re-anchor streams. Reject at
+            # startup rather than letting the feature silently do nothing.
+            if (
+                self.cache_config is not None
+                and self.cache_config.enable_prefix_caching
+            ):
+                raise ValueError(
+                    "enable_realtime_unbounded is incompatible with prefix "
+                    "caching (re-anchoring cannot rebase block hashes), but "
+                    "enable_prefix_caching is on. Pass --no-enable-prefix-caching."
+                )
+
+            # The worker re-rotation indexes the KV cache as (num_blocks, 2, ...)
+            # and reads head_size from the trailing dim; the layout shared by
+            # the CUDA attention family (FlashAttention/FlashInfer/Triton/
+            # FlexAttention). ROCm's default ROCM_ATTN backend uses
+            # (2, num_blocks, ...) and the CPU backend interleaves K/V into the
+            # trailing dim, so both would corrupt keys (CPU silently, since a
+            # 64-dim head's 2*head_size=128 trailing dim still passes the
+            # head_size assert). Restrict the experimental path to CUDA.
+            from vllm.platforms import current_platform
+
+            if not current_platform.is_cuda():
+                raise ValueError(
+                    "enable_realtime_unbounded is only supported on CUDA "
+                    "(the re-anchor key re-rotation assumes the CUDA "
+                    "attention-family KV layout); current platform is "
+                    f"{current_platform.device_name!r}."
+                )
+
+            if self.model_config is not None:
+                hf_config = self.model_config.hf_config
+                text_config = getattr(hf_config, "text_config", hf_config)
+                audio_config = getattr(hf_config, "audio_config", None)
+                sliding_window = getattr(text_config, "sliding_window", None)
+                margin = self.scheduler_config.realtime_reanchor_margin_tokens
+                max_model_len = self.model_config.max_model_len
+                # Re-anchoring fires at max_model_len - margin. If the margin is
+                # not smaller than (max_model_len - sliding_window) that
+                # threshold collapses and re-anchoring thrashes or never engages.
+                if sliding_window is not None and (
+                    margin >= max_model_len - sliding_window
+                ):
+                    raise ValueError(
+                        "enable_realtime_unbounded needs head-room for "
+                        "re-anchoring: realtime_reanchor_margin_tokens "
+                        f"({margin}) must be smaller than max_model_len - "
+                        f"sliding_window ({max_model_len} - {sliding_window} = "
+                        f"{max_model_len - sliding_window}). Lower the margin or "
+                        "raise --max-model-len above sliding_window + margin."
+                    )
+                # The R(-D) re-rotation assumes plain (unscaled) RoPE; an actual
+                # scaling (YaRN/linear/dynamic) shifts the per-frequency angles and
+                # would corrupt the rotated keys. Reject only a real scaling type:
+                # Voxtral's config carries a benign rope_scaling with
+                # rope_type="default" (plain RoPE plus an explicit theta), which
+                # must NOT be rejected.
+                #
+                # Read rope_parameters FIRST (canonical, see model.py): the Mistral
+                # config adapter writes scaling only into rope_parameters, never
+                # rope_scaling. transformers v5 aliases rope_scaling->rope_parameters
+                # so reading rope_scaling happens to work there, but under v4 there
+                # is no alias and a Mistral-format YaRN model would slip through.
+                for name, cfg in (("text", text_config), ("audio", audio_config)):
+                    if cfg is None:
+                        continue
+                    rs = getattr(cfg, "rope_parameters", None) or getattr(
+                        cfg, "rope_scaling", None
+                    )
+                    rope_type = str(
+                        (rs or {}).get("rope_type", (rs or {}).get("type", "default"))
+                    ).lower()
+                    if rs and rope_type not in ("default", "none"):
+                        raise ValueError(
+                            "enable_realtime_unbounded does not support RoPE "
+                            f"scaling; {name}_config has rope={rs!r}."
+                        )
+                    # The worker re-rotation hardcodes rope_theta=1e6 (Voxtral/
+                    # Ministral). A checkpoint with a different theta would
+                    # SILENTLY corrupt re-rotated keys; unlike head_size, theta
+                    # is not tripwired at runtime. Validate it here.
+                    theta = (rs or {}).get(
+                        "rope_theta", getattr(cfg, "rope_theta", None)
+                    )
+                    if theta is not None and float(theta) != 1.0e6:
+                        raise ValueError(
+                            "enable_realtime_unbounded assumes rope_theta=1e6 "
+                            f"(the worker re-rotation hardcodes it); {name}_config "
+                            f"has rope_theta={theta}. This experimental path is "
+                            "validated for Voxtral/Ministral only."
+                        )
+
+                # The worker re-anchor dispatches the key re-rotation off
+                # head_size alone: a 128-dim head is rotated as the NeoX decoder
+                # and shifted by D, a 64-dim head as the GPT-J audio encoder and
+                # shifted by pool*D. The runtime head_size assert only rejects a
+                # dim outside {64, 128}; it does NOT catch a 64-dim NeoX or a
+                # 128-dim GPT-J head, nor a pool that silently fell to 1; all
+                # of which would SILENTLY corrupt re-rotated keys, exactly like
+                # theta above. Validate the assumed geometry up front.
+                #
+                # Gate on audio_config: VllmConfig is re-validated with a
+                # sub-config swapped in during model init (voxtral.py calls
+                # with_hf_config(audio_config)), where text_config falls back to
+                # the audio encoder (head_dim 40, not the decoder's 128). Only the
+                # full multimodal config carries a nested audio_config, so that is
+                # where; and the only place; the decoder vs encoder geometry
+                # can be checked without falsely rejecting Voxtral.
+                if audio_config is not None:
+                    text_head_dim = getattr(text_config, "head_dim", None) or (
+                        getattr(text_config, "hidden_size", 0)
+                        // max(getattr(text_config, "num_attention_heads", 1), 1)
+                    )
+                    if text_head_dim != 128:
+                        raise ValueError(
+                            "enable_realtime_unbounded assumes a 128-dim NeoX decoder "
+                            "(the worker shifts a 128-dim head by D); text_config has "
+                            f"head_dim={text_head_dim}. This experimental path is "
+                            "validated for Voxtral/Ministral only."
+                        )
+                    # Audio-encoder positions run at block_pool_size x the decoder
+                    # clock, so the worker shifts encoder keys by pool*D. pool is
+                    # derived from config, never validated; if it silently fell to
+                    # 1 every encoder key would be under-rotated with no tripwire.
+                    pool = getattr(audio_config, "block_pool_size", None) or getattr(
+                        audio_config, "downsample_factor", None
+                    )
+                    if not pool or pool < 1:
+                        raise ValueError(
+                            "enable_realtime_unbounded needs a derivable audio "
+                            "block_pool_size / downsample_factor (the worker "
+                            "re-rotation shifts the audio-encoder group by pool*D); "
+                            f"got pool={pool!r}."
+                        )
+                    enc_head_dim = getattr(audio_config, "encoder_head_dim", None)
+                    if enc_head_dim != 64:
+                        raise ValueError(
+                            "enable_realtime_unbounded assumes a 64-dim GPT-J audio "
+                            "encoder (the worker shifts a 64-dim head by pool*D); "
+                            f"audio_config has encoder_head_dim={enc_head_dim}. This "
+                            "experimental path is validated for Voxtral/Ministral "
+                            "only."
+                        )
+
         if self.parallel_config.disable_nccl_for_dp_synchronization is None:
             if self.scheduler_config.async_scheduling:
                 if self.parallel_config.data_parallel_size > 1 and (
