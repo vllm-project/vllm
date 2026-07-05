@@ -184,6 +184,20 @@ MODEL_CONFIGS: dict[str, VitCudagraphTestConfig] = {
         vllm_runner_kwargs={"trust_remote_code": True},
         marks=[pytest.mark.core_model],
     ),
+    "idefics3": VitCudagraphTestConfig(
+        model="HuggingFaceTB/SmolVLM-256M-Instruct",
+        modalities=["image"],
+        image_prompt=(
+            "<|begin_of_text|>User:<image>What is in this image?"
+            "<end_of_utterance>\nAssistant:"
+        ),
+        max_model_len=4096,
+        compilation_config_overrides={
+            "encoder_cudagraph_token_budgets": [4096],
+        },
+        vllm_runner_kwargs={"gpu_memory_utilization": 0.80},
+        marks=[pytest.mark.core_model],
+    ),
     "step3_vl": VitCudagraphTestConfig(
         model="stepfun-ai/Step3-VL-10B",
         modalities=["image"],

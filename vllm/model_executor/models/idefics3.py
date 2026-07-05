@@ -17,7 +17,7 @@
 """Inference-only Idefics3 model compatible with HuggingFace weights."""
 
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 from torch import nn
@@ -58,6 +58,7 @@ from .idefics2_vision_model import (
 )
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
 )
@@ -487,6 +488,9 @@ class Idefics3Model(nn.Module):
         self,
         pixel_values: torch.Tensor,
         pixel_attention_mask: torch.Tensor,
+        *,
+        remove_padding: bool = True,
+        position_ids: torch.Tensor | None = None,
     ) -> torch.Tensor:
         # NOTE: we skip the step to select the vision feature layer since
         # this is already done inside the vision tower
@@ -494,17 +498,33 @@ class Idefics3Model(nn.Module):
             dtype=self.vision_model.embeddings.patch_embedding.weight.dtype
         )  # fp16 compatibility
 
-        # Remove padding images - padding images are full 0.
-        nb_values_per_image = pixel_values.shape[1:].numel()
-        real_images_inds = (pixel_values == 0.0).sum(
-            dim=(-1, -2, -3)
-        ) != nb_values_per_image
-        pixel_values = pixel_values[real_images_inds].contiguous()
+        if remove_padding:
+            # Remove padding images - padding images are full 0.
+            nb_values_per_image = pixel_values.shape[1:].numel()
+            real_images_inds = (pixel_values == 0.0).sum(
+                dim=(-1, -2, -3)
+            ) != nb_values_per_image
+            pixel_values = pixel_values[real_images_inds].contiguous()
 
-        # Handle the vision attention mask
-        # Remove padding images from the mask
-        pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
+            # Handle the vision attention mask
+            # Remove padding images from the mask
+            pixel_attention_mask = pixel_attention_mask[real_images_inds].contiguous()
 
+        patch_attention_mask = self.get_patch_attention_mask(pixel_attention_mask)
+
+        # Get sequence from the vision encoder
+        image_hidden_states = self.vision_model(
+            pixel_values=pixel_values,
+            patch_attention_mask=patch_attention_mask,
+            position_ids=position_ids,
+        )
+
+        return image_hidden_states
+
+    def get_patch_attention_mask(
+        self,
+        pixel_attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
         patch_size = self.config.vision_config.patch_size
         patches_subgrid = pixel_attention_mask.unfold(
             dimension=1, size=patch_size, step=patch_size
@@ -512,15 +532,14 @@ class Idefics3Model(nn.Module):
         patches_subgrid = patches_subgrid.unfold(
             dimension=2, size=patch_size, step=patch_size
         )
-        patch_attention_mask = (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
+        return (patches_subgrid.sum(dim=(-1, -2)) > 0).bool()
 
-        # Get sequence from the vision encoder
-        image_hidden_states = self.vision_model(
-            pixel_values=pixel_values,
-            patch_attention_mask=patch_attention_mask,
-        )
-
-        return image_hidden_states
+    def get_position_ids(
+        self,
+        pixel_attention_mask: torch.Tensor,
+    ) -> torch.Tensor:
+        patch_attention_mask = self.get_patch_attention_mask(pixel_attention_mask)
+        return self.vision_model.embeddings.get_position_ids(patch_attention_mask)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.text_model.embed_input_ids(input_ids)
@@ -546,7 +565,11 @@ class Idefics3Model(nn.Module):
     info=Idefics3ProcessingInfo,
     dummy_inputs=Idefics3DummyInputsBuilder,
 )
-class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLoRA):
+class Idefics3ForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsLoRA, SupportsEncoderCudaGraph
+):
+    supports_encoder_cudagraph = True
+
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -647,6 +670,171 @@ class Idefics3ForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsLo
 
         num_patches = image_input["num_patches"]
         return [e.flatten(0, 1) for e in image_features.split(num_patches.tolist())]
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderCudaGraphConfig
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=["pixel_values", "pixel_attention_mask", "position_ids"],
+            out_hidden_size=self.config.text_config.hidden_size,
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        min_budget = self.model.image_seq_len
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            vllm_config.model_config.max_model_len,
+        )
+        return (min_budget, max_budget)
+
+    def _get_num_patches_list(self, mm_kwargs: dict[str, Any]) -> list[int]:
+        num_patches = mm_kwargs["num_patches"]
+        if isinstance(num_patches, torch.Tensor):
+            return num_patches.tolist()
+        return [int(n) for n in num_patches]
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        return [
+            EncoderItemSpec(
+                input_size=num_patches,
+                output_tokens=num_patches * self.model.image_seq_len,
+            )
+            for num_patches in self._get_num_patches_list(mm_kwargs)
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values"]
+        pixel_attention_mask = mm_kwargs["pixel_attention_mask"]
+        num_patches_list = self._get_num_patches_list(mm_kwargs)
+
+        if len(indices) == 0:
+            return {
+                "pixel_values": pixel_values[:0],
+                "pixel_attention_mask": pixel_attention_mask[:0],
+                "num_patches": torch.empty(
+                    (0,), dtype=torch.long, device=pixel_values.device
+                ),
+            }
+
+        cum_patches = [0]
+        for num_patches in num_patches_list:
+            cum_patches.append(cum_patches[-1] + num_patches)
+
+        selected_pixel_values = torch.cat(
+            [pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+        selected_attention_mask = torch.cat(
+            [
+                pixel_attention_mask[cum_patches[i] : cum_patches[i + 1]]
+                for i in indices
+            ]
+        )
+        selected_num_patches = torch.tensor(
+            [num_patches_list[i] for i in indices],
+            dtype=torch.long,
+            device=pixel_values.device,
+        )
+
+        return {
+            "pixel_values": selected_pixel_values,
+            "pixel_attention_mask": selected_attention_mask,
+            "num_patches": selected_num_patches,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        image_size = self.config.vision_config.image_size
+        num_tiles = max(
+            (token_budget + self.model.image_seq_len - 1) // self.model.image_seq_len,
+            1,
+        )
+        dummy_pixel_values = torch.randn(
+            num_tiles, 3, image_size, image_size, device=device, dtype=dtype
+        )
+        dummy_pixel_attention_mask = torch.ones(
+            num_tiles, image_size, image_size, device=device, dtype=torch.bool
+        )
+        dummy_position_ids = self.model.get_position_ids(dummy_pixel_attention_mask)
+
+        return EncoderCudaGraphCaptureInputs(
+            values={
+                "pixel_values": dummy_pixel_values,
+                "pixel_attention_mask": dummy_pixel_attention_mask,
+                "position_ids": dummy_position_ids,
+            }
+        )
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        return EncoderCudaGraphReplayBuffers(
+            values={
+                "pixel_values": mm_kwargs["pixel_values"],
+                "pixel_attention_mask": mm_kwargs["pixel_attention_mask"],
+                "position_ids": self.model.get_position_ids(
+                    mm_kwargs["pixel_attention_mask"]
+                ),
+            }
+        )
+
+    def encoder_cudagraph_forward(
+        self,
+        inputs: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        image_features = self.model.image_pixels_to_features(
+            inputs["pixel_values"],
+            pixel_attention_mask=inputs["pixel_attention_mask"],
+            remove_padding=False,
+            position_ids=inputs["position_ids"],
+        )
+        image_features = self.model.connector(image_features)
+        return image_features.flatten(0, 1)
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        image_input = self._parse_and_validate_image_input(**mm_kwargs)
+        assert image_input is not None and image_input["type"] == "pixel_values"
+        image_features = self._process_image_pixels(image_input)
+        image_features = self.model.connector(image_features)
+        return image_features.flatten(0, 1)
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         image_input = self._parse_and_validate_image_input(**kwargs)
