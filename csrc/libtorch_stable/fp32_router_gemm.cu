@@ -80,23 +80,31 @@ __device__ __forceinline__ void load_activation<__nv_bfloat16, 8>(
 // VPT = 16 / sizeof(InputT):  4 for fp32, 8 for bf16
 // Each block computes kEPB expert columns; wider blocks / kEPB > 1 are
 // selected per (shape, M) in invokeFp32RouterGemm (B300-tuned, see below).
+// kTGroups > 1 splits the tokens across groups of kBlockSize threads within
+// the block: all groups scan the same weight K-slices (group 0 misses to
+// DRAM, later groups hit L1) so weight traffic stays 1x, while per-thread
+// accumulator registers drop by kTGroups (at M=16 the 32 fp32 accumulators
+// push the kernel to 128 regs/thread and 1 block/SM).
 template <typename InputT, int kBlockSize, int kNumTokens, int kEPB,
-          int kNumExperts, int kHiddenDim>
-__global__ __launch_bounds__(kBlockSize, 1) void fp32_router_gemm_kernel(
+          int kNumExperts, int kHiddenDim, int kTGroups = 1>
+__global__ __launch_bounds__(kBlockSize* kTGroups, 1) void fp32_router_gemm_kernel(
     float* out, InputT const* mat_a, float const* mat_b) {
   constexpr int VPT = 16 / sizeof(InputT);
   constexpr int k_elems_per_k_iteration = VPT * kBlockSize;
   constexpr int k_iterations = kHiddenDim / k_elems_per_k_iteration;
   static_assert(kHiddenDim % k_elems_per_k_iteration == 0);
+  static_assert(kNumTokens % kTGroups == 0);
   constexpr int kWarpSize = 32;
-  constexpr int kNumWarps = kBlockSize / kWarpSize;
+  constexpr int kNumWarps = kBlockSize / kWarpSize;  // per token group
+  constexpr int kMG = kNumTokens / kTGroups;         // tokens per group
 
   int const e_base = blockIdx.x * kEPB;
-  int const tid = threadIdx.x;
+  int const tid = threadIdx.x % kBlockSize;
+  int const m0 = (threadIdx.x / kBlockSize) * kMG;
   int const warpId = tid / kWarpSize;
   int const laneId = tid % kWarpSize;
 
-  float acc[kNumTokens][kEPB] = {};
+  float acc[kMG][kEPB] = {};
   __shared__ float sm_reduction[kNumTokens][kEPB][kNumWarps];
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
@@ -120,10 +128,10 @@ __global__ __launch_bounds__(kBlockSize, 1) void fp32_router_gemm_kernel(
     }
 
 #pragma unroll
-    for (int m_idx = 0; m_idx < kNumTokens; m_idx++) {
+    for (int m_idx = 0; m_idx < kMG; m_idx++) {
       float a_float[VPT];
-      load_activation<InputT, VPT>(mat_a + m_idx * kHiddenDim + k_base,
-                                   a_float);
+      load_activation<InputT, VPT>(
+          mat_a + (size_t)(m0 + m_idx) * kHiddenDim + k_base, a_float);
 #pragma unroll
       for (int e = 0; e < kEPB; e++) {
 #pragma unroll
@@ -136,7 +144,7 @@ __global__ __launch_bounds__(kBlockSize, 1) void fp32_router_gemm_kernel(
 
   // Warp-level butterfly reduction
 #pragma unroll
-  for (int m = 0; m < kNumTokens; m++) {
+  for (int m = 0; m < kMG; m++) {
 #pragma unroll
     for (int e = 0; e < kEPB; e++) {
       float sum = acc[m][e];
@@ -145,14 +153,15 @@ __global__ __launch_bounds__(kBlockSize, 1) void fp32_router_gemm_kernel(
       sum += __shfl_xor_sync(0xffffffff, sum, 4);
       sum += __shfl_xor_sync(0xffffffff, sum, 2);
       sum += __shfl_xor_sync(0xffffffff, sum, 1);
-      if (laneId == 0) sm_reduction[m][e][warpId] = sum;
+      if (laneId == 0) sm_reduction[m0 + m][e][warpId] = sum;
     }
   }
 
   __syncthreads();
 
   // Parallel finalize: one thread per (m, e) output.
-  for (int idx = tid; idx < kNumTokens * kEPB; idx += kBlockSize) {
+  for (int idx = threadIdx.x; idx < kNumTokens * kEPB;
+       idx += kBlockSize * kTGroups) {
     int const m = idx / kEPB;
     int const e = idx % kEPB;
     float final_sum = 0.0f;
@@ -167,13 +176,13 @@ __global__ __launch_bounds__(kBlockSize, 1) void fp32_router_gemm_kernel(
 // ---------------------------------------------------------------------------
 
 template <typename InputT, int kBlockSize, int kEPB, int kNumTokens,
-          int kNumExperts, int kHiddenDim>
+          int kNumExperts, int kHiddenDim, int kTGroups = 1>
 static void launchFp32RouterGemm(float* output, InputT const* mat_a,
                                  float const* mat_b, cudaStream_t stream) {
   static_assert(kNumExperts % kEPB == 0);
   cudaLaunchConfig_t config;
   config.gridDim = kNumExperts / kEPB;
-  config.blockDim = kBlockSize;
+  config.blockDim = kBlockSize * kTGroups;
   config.dynamicSmemBytes = 0;
   config.stream = stream;
   cudaLaunchAttribute attrs[1];
@@ -181,10 +190,11 @@ static void launchFp32RouterGemm(float* output, InputT const* mat_a,
   attrs[0].val.programmaticStreamSerializationAllowed = 1;
   config.numAttrs = 1;
   config.attrs = attrs;
-  cudaLaunchKernelEx(&config,
-                     fp32_router_gemm_kernel<InputT, kBlockSize, kNumTokens,
-                                             kEPB, kNumExperts, kHiddenDim>,
-                     output, mat_a, mat_b);
+  cudaLaunchKernelEx(
+      &config,
+      fp32_router_gemm_kernel<InputT, kBlockSize, kNumTokens, kEPB,
+                              kNumExperts, kHiddenDim, kTGroups>,
+      output, mat_a, mat_b);
 }
 
 static bool isBlackwellFamily() {
@@ -204,10 +214,12 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
   // Geometry tuned on B300 for GLM-5.2 (E=256, H=6144), bf16 activation,
   // under a production-fidelity harness (CUDA-graph replay, per-layer cold
   // weights). One-wave wide blocks beat the legacy 128-thread geometry:
-  //   M <= 4 : BS=768, EPB=1 (2.7us vs cast+cuBLAS 8.1us at M=1)
-  //   M >= 5 : BS=384, EPB=2 (5.1us vs 21.0us at M=16; EPB=2 halves the
-  //            per-block activation re-reads, crossover measured at M in
-  //            (4, 8)).
+  //   M <= 4        : BS=768, EPB=1 (2.7us vs cast+cuBLAS 8.1us at M=1)
+  //   M in [5, 15]
+  //   or odd        : BS=384, EPB=2 (crossover vs BS=768 measured in (4, 8))
+  //   M >= 16, even : BS=192, EPB=2, 2 token groups (M=16 4.79us vs 5.04,
+  //                   M=24 5.71 vs 6.38, M=32 6.79 vs 7.72; M=12 loses at
+  //                   0.97x, so the boundary is 16).
   // Only enabled on the Blackwell family where it was validated; Hopper and
   // other shapes / fp32 activation keep the legacy geometry.
   if constexpr (std::is_same_v<InputT, __nv_bfloat16> && kNumExperts == 256 &&
@@ -220,6 +232,9 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
     if constexpr (kNumTokens <= 4) {
       launchFp32RouterGemm<InputT, 768, 1, kNumTokens, kNumExperts,
                            kHiddenDim>(output, mat_a, mat_b, stream);
+    } else if constexpr (kNumTokens >= 16 && kNumTokens % 2 == 0) {
+      launchFp32RouterGemm<InputT, 192, 2, kNumTokens, kNumExperts,
+                           kHiddenDim, 2>(output, mat_a, mat_b, stream);
     } else {
       launchFp32RouterGemm<InputT, 384, 2, kNumTokens, kNumExperts,
                            kHiddenDim>(output, mat_a, mat_b, stream);
