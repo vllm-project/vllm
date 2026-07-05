@@ -93,12 +93,20 @@ class LLMEngine:
         # Convert EngineInput --> EngineCoreRequest.
         self.input_processor = InputProcessor(self.vllm_config, renderer)
 
+        # Served model name (a constant) for the OTel `gen_ai.request.model`
+        # span attribute. `served_model_name` may be a list or None; normalize
+        # to a single string, falling back to the model id.
+        served_model_name = self.model_config.served_model_name
+        if isinstance(served_model_name, list):
+            served_model_name = served_model_name[0] if served_model_name else None
+
         # Converts EngineCoreOutputs --> RequestOutput.
         self.output_processor = OutputProcessor(
             renderer.tokenizer,
             log_stats=self.log_stats,
             stream_interval=self.vllm_config.scheduler_config.stream_interval,
             tracing_enabled=tracing_endpoint is not None,
+            model_name=served_model_name or self.model_config.model,
         )
 
         # EngineCore (gets EngineCoreRequests and gives EngineCoreOutputs)

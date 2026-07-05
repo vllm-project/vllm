@@ -25,6 +25,8 @@ from vllm.tracing import (
     SpanKind,
     extract_trace_context,
     instrument_manual,
+    is_gen_ai_latest_semconv_enabled,
+    latest_gen_ai_semconv_attributes,
 )
 from vllm.utils import length_from_prompt_token_ids_or_embeds
 from vllm.v1.engine import EngineCoreOutput, EngineCoreRequest, FinishReason
@@ -149,6 +151,7 @@ class RequestState:
         n: int | None = None,
         temperature: float | None = None,
         stream_input: bool = False,
+        operation_name: str | None = None,
     ):
         self.request_id = request_id
         self.external_req_id = external_req_id
@@ -169,6 +172,7 @@ class RequestState:
         self.top_p = top_p
         self.n = n
         self.temperature = temperature
+        self.operation_name = operation_name
         self.is_prefilling = True
         self.queue = queue
         self.num_cached_tokens = 0
@@ -267,6 +271,7 @@ class RequestState:
             log_stats=log_stats,
             stream_interval=stream_interval,
             stream_input=request.resumable,
+            operation_name=request.operation_name,
         )
 
     def make_request_output(
@@ -424,6 +429,7 @@ class OutputProcessor:
         log_stats: bool,
         stream_interval: int = 1,
         tracing_enabled: bool = False,
+        model_name: str | None = None,
     ):
         self.log_stats = log_stats
         self.tokenizer = tokenizer
@@ -433,6 +439,9 @@ class OutputProcessor:
         self.external_req_ids: defaultdict[str, list[str]] = defaultdict(list)
         self.lora_states = LoRARequestStates(log_stats)
         self.tracing_enabled = tracing_enabled
+        # Served model name, a constant used for the OTel `gen_ai.request.model`
+        # span attribute (only under the semconv opt-in).
+        self.model_name = model_name
 
     def get_num_unfinished_requests(self):
         return len(self.request_states)
@@ -763,8 +772,20 @@ class OutputProcessor:
         if req_state.n:
             attributes[SpanAttributes.GEN_AI_REQUEST_N] = req_state.n
 
+        # Current OTel GenAI semconv identity attributes + span name, emitted
+        # only under OTEL_SEMCONV_STABILITY_OPT_IN=gen_ai_latest_experimental so
+        # default behavior is unchanged.
+        span_name = "llm_request"
+        if is_gen_ai_latest_semconv_enabled():
+            extra_attrs, latest_span_name = latest_gen_ai_semconv_attributes(
+                req_state.operation_name, self.model_name
+            )
+            attributes.update(extra_attrs)
+            if latest_span_name is not None:
+                span_name = latest_span_name
+
         instrument_manual(
-            span_name="llm_request",
+            span_name=span_name,
             start_time=arrival_time_ns,
             attributes=attributes,
             context=trace_context,
