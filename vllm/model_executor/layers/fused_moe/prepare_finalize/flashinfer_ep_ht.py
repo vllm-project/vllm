@@ -37,6 +37,7 @@ import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.config import FusedMoEQuantConfig
 from vllm.model_executor.layers.fused_moe.topk_weight_and_reduce import (
     TopKWeightAndReduceDelegate,
+    TopKWeightAndReduceNoOP,
 )
 
 from .flashinfer_ep_common import FlashInferEPPrepareAndFinalizeBase
@@ -115,9 +116,33 @@ class FlashInferEPHTPrepareAndFinalize(FlashInferEPPrepareAndFinalizeBase):
         # FLAT recv; flatten to the [num_recv, hidden] Standard format.
         expert_x = d.expert_tensors.reshape(-1, self.hidden_size)
 
-        # Return the received per-token routing (local expert ids, -1 = non-local).
-        # NOTE(on-gpu): vLLM's Standard fused_moe must treat -1 picks as skipped.
-        return expert_x, None, None, d.recv_topk_idx, d.recv_topk_weights
+        # FlashInfer HT FLAT recv carries LOCAL expert ids with -1 for non-local /
+        # padding picks. vLLM's Standard experts, however, feed topk_ids straight
+        # into moe_align_block_size + expert_map[...] expecting *global* ids in
+        # [0, num_experts): the skip for non-local picks is done via expert_map
+        # (global->local, -1), never by a -1 in topk_ids. Passing local ids (and
+        # especially -1) corrupts the alignment histogram and OOBs expert_map[...]
+        # (illegal memory access). Rebuild global ids from expert_map so this path
+        # matches the DeepEP HT contract: valid local picks -> their global id;
+        # non-local (-1) picks -> a non-owned global id, which expert_map then
+        # re-tags -1 (skipped by the experts).
+        recv_idx = d.recv_topk_idx
+        if expert_map is not None:
+            owned = (expert_map >= 0).nonzero(as_tuple=True)[0]  # global ids on rank
+            local_to_global = torch.empty(
+                self._num_local_experts, dtype=recv_idx.dtype, device=recv_idx.device
+            )
+            local_to_global[expert_map[owned]] = owned.to(recv_idx.dtype)
+            not_owned = (expert_map < 0).nonzero(as_tuple=True)[0]
+            skip_id = (not_owned[0] if not_owned.numel() else owned[0]).to(recv_idx.dtype)
+            valid = recv_idx >= 0
+            recv_idx = torch.where(
+                valid, local_to_global[recv_idx.clamp_min(0)], skip_id
+            )
+
+        # NOTE(on-gpu): expert_map re-tags the non-owned skip id to -1; the Standard
+        # experts then contribute 0 for those picks, matching combine's masking.
+        return expert_x, None, None, recv_idx, d.recv_topk_weights
 
     def finalize(
         self,
@@ -128,9 +153,20 @@ class FlashInferEPHTPrepareAndFinalize(FlashInferEPPrepareAndFinalizeBase):
         apply_router_weight_on_input: bool,
         weight_and_reduce_impl: mk.TopKWeightAndReduce,
     ) -> None:
-        assert isinstance(weight_and_reduce_impl, TopKWeightAndReduceDelegate), (
-            "FlashInfer moe_ep HT reduces across ranks inside combine; weights were "
-            "bound at dispatch."
+        # The Standard experts either delegate weight+reduce to us
+        # (TopKWeightAndReduceDelegate) or have already applied the dispatched
+        # per-token routing weights and reduced their local picks
+        # (TopKWeightAndReduceNoOP, e.g. the Triton experts). Both are correct here:
+        # FlashInfer HT combine applies NO weights (routing weights were captured at
+        # dispatch and consumed by the experts) and only reduces the per-rank partial
+        # sums across ranks — so there is no double weighting in either case.
+        assert isinstance(
+            weight_and_reduce_impl,
+            (TopKWeightAndReduceDelegate, TopKWeightAndReduceNoOP),
+        ), (
+            "FlashInfer moe_ep HT combine reduces per-rank partials across ranks "
+            "(weights bound at dispatch); the experts must not request a different "
+            f"weight/reduce, got {type(weight_and_reduce_impl).__name__}."
         )
         from flashinfer.moe_ep import CombineInputParams
 
