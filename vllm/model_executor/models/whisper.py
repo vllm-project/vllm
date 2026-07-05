@@ -145,6 +145,8 @@ def _(q, k, qbuf, kbuf, qslot, qpos, kslot, kpos, layer):
 
 def _word_align_median_filter(x: torch.Tensor, width: int) -> torch.Tensor:
     pad = width // 2
+    if x.shape[-1] <= pad:  # too few frames for reflect-pad (near-silent clip)
+        return x
     xp = nn.functional.pad(x, (pad, pad), mode="reflect")
     return xp.unfold(-1, width, 1).median(dim=-1).values
 
@@ -177,7 +179,9 @@ def _word_align_neg_weights(
     return (-weights).float().cpu().numpy()
 
 
-def _word_align_dtw(neg_weights: np.ndarray, time_precision: float = 0.02) -> list[float]:
+def _word_align_dtw(
+    neg_weights: np.ndarray, time_precision: float = 0.02
+) -> list[float]:
     """CPU part (numpy-vectorized over anti-diagonals; releases the GIL →
     parallelizable): DTW-align decoder positions to audio frames, one onset time
     (s) per position. Bit-identical to transformers' ``_dynamic_time_warping``
@@ -205,7 +209,8 @@ def _word_align_dtw(neg_weights: np.ndarray, time_precision: float = 0.02) -> li
         path.append((i - 1, j - 1))
         t = trace[i, j]
         if t == 0:
-            i -= 1; j -= 1
+            i -= 1
+            j -= 1
         elif t == 1:
             i -= 1
         else:
@@ -449,9 +454,15 @@ class WhisperCrossAttention(WhisperAttention):
         # Capture Q (and encoder K at prefill) before the fused kernel.
         if _WORD_ALIGN_ENABLED and self._align_layer >= 0:
             torch.ops.whisper_align.capture(
-                q, k, _WORD_ALIGN_QBUF, _WORD_ALIGN_KBUF,
-                _WORD_ALIGN_QSLOT, _WORD_ALIGN_QPOS,
-                _WORD_ALIGN_KSLOT, _WORD_ALIGN_KPOS, self._align_layer,
+                q,
+                k,
+                _WORD_ALIGN_QBUF,
+                _WORD_ALIGN_KBUF,
+                _WORD_ALIGN_QSLOT,
+                _WORD_ALIGN_QPOS,
+                _WORD_ALIGN_KSLOT,
+                _WORD_ALIGN_KPOS,
+                self._align_layer,
             )
 
         attn_output = self.attn(q, k, v)
@@ -957,20 +968,28 @@ class WhisperForConditionalGeneration(
         n_layers = cfg.decoder_layers
         n_heads = cfg.decoder_attention_heads
         _WORD_ALIGN_QBUF = torch.zeros(
-            max_slots, n_layers, cfg.max_target_positions, cfg.d_model,
-            device=device, dtype=dtype,
+            max_slots,
+            n_layers,
+            cfg.max_target_positions,
+            cfg.d_model,
+            device=device,
+            dtype=dtype,
         )
         _WORD_ALIGN_KBUF = torch.zeros(
-            max_slots, n_layers, cfg.max_source_positions, cfg.d_model,
-            device=device, dtype=dtype,
+            max_slots,
+            n_layers,
+            cfg.max_source_positions,
+            cfg.d_model,
+            device=device,
+            dtype=dtype,
         )
         z = lambda n: torch.zeros(n, device=device, dtype=torch.long)  # noqa: E731
         _WORD_ALIGN_QSLOT, _WORD_ALIGN_QPOS = z(max_q_tokens), z(max_q_tokens)
         _WORD_ALIGN_KSLOT, _WORD_ALIGN_KPOS = z(max_k_frames), z(max_k_frames)
         _WORD_ALIGN_NFRAMES = torch.full(
-            (max_slots,), cfg.max_source_positions, device=device, dtype=torch.long)
-        _WORD_ALIGN_POOL = ThreadPoolExecutor(
-            max_workers=min(8, (os.cpu_count() or 4)))
+            (max_slots,), cfg.max_source_positions, device=device, dtype=torch.long
+        )
+        _WORD_ALIGN_POOL = ThreadPoolExecutor(max_workers=min(8, (os.cpu_count() or 4)))
         self._word_align_heads = [tuple(h) for h in alignment_heads]
         self._word_align_eos = eos_token_id
         self._word_align_mfw = median_filter_width
@@ -981,9 +1000,11 @@ class WhisperForConditionalGeneration(
         # turbo, where only 2 of 4 layers are used).
         align_layers = {h[0] for h in self._word_align_heads}
         for m in self.modules():
-            if (isinstance(m, WhisperCrossAttention)
-                    and getattr(m, "_align_layer", -1) >= 0
-                    and m._align_layer not in align_layers):
+            if (
+                isinstance(m, WhisperCrossAttention)
+                and getattr(m, "_align_layer", -1) >= 0
+                and m._align_layer not in align_layers
+            ):
                 m._align_layer = -1
         _WORD_ALIGN_ENABLED = True
 
@@ -992,7 +1013,10 @@ class WhisperForConditionalGeneration(
         """Return the (qslot, qpos, kslot, kpos) device buffers the runner
         fills each step to route capture rows to per-request slots."""
         return (
-            _WORD_ALIGN_QSLOT, _WORD_ALIGN_QPOS, _WORD_ALIGN_KSLOT, _WORD_ALIGN_KPOS,
+            _WORD_ALIGN_QSLOT,
+            _WORD_ALIGN_QPOS,
+            _WORD_ALIGN_KSLOT,
+            _WORD_ALIGN_KPOS,
         )
 
     def compute_word_align(
@@ -1020,10 +1044,21 @@ class WhisperForConditionalGeneration(
                 continue
             # crop the DTW to this request's real audio length (not the 30s pad)
             nframes = int(_WORD_ALIGN_NFRAMES[slot])
-            jobs.append((req_id, _word_align_neg_weights(
-                _WORD_ALIGN_QBUF[slot], _WORD_ALIGN_KBUF[slot], n,
-                self._word_align_heads, self._word_align_nheads,
-                self._word_align_hdim, nframes * 2, self._word_align_mfw)))
+            jobs.append(
+                (
+                    req_id,
+                    _word_align_neg_weights(
+                        _WORD_ALIGN_QBUF[slot],
+                        _WORD_ALIGN_KBUF[slot],
+                        n,
+                        self._word_align_heads,
+                        self._word_align_nheads,
+                        self._word_align_hdim,
+                        nframes * 2,
+                        self._word_align_mfw,
+                    ),
+                )
+            )
         if not jobs:
             return None
         # Phase 2 (CPU): the DTW releases the GIL, so run the batch across a
