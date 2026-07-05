@@ -589,15 +589,31 @@ class MultiModalDataParser:
         new_audios = list[np.ndarray]()
         for data_item in data_items:
             audio, orig_sr = self._get_audio_with_sr(data_item)
+            restore_time_first = False
+            if self.target_channels is not None:
+                spec = AudioSpec(target_channels=self.target_channels)
+                audio = normalize_audio(audio, spec)
+                if (
+                    orig_sr is not None
+                    and isinstance(audio, np.ndarray)
+                    and audio.ndim == 2
+                ):
+                    audio = np.ascontiguousarray(audio)
+            elif (
+                orig_sr is not None
+                and audio.ndim == 2
+                and audio.shape[0] > audio.shape[1]
+            ):
+                # Resamplers expect 2D input as (channels, samples).
+                audio = np.ascontiguousarray(audio.T)
+                restore_time_first = True
+
             if orig_sr is None:
                 new_audio = audio
             else:
                 new_audio = self.audio_resampler.resample(audio, orig_sr=orig_sr)
-
-            # Apply channel normalization if target_channels is set
-            if self.target_channels is not None:
-                spec = AudioSpec(target_channels=self.target_channels)
-                new_audio = normalize_audio(new_audio, spec)
+                if restore_time_first:
+                    new_audio = new_audio.T
 
             new_audios.append(new_audio)
 
