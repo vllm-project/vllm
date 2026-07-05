@@ -35,7 +35,7 @@ template <int BLOCK_M>
 int moe_align_block_size(
     int32_t* __restrict__ sorted_ids,
     int32_t* __restrict__ expert_ids,
-    int32_t* __restrict__ topk_ids,
+    const int32_t* __restrict__ topk_ids,
     int32_t* __restrict__ total_cnts,
     int32_t* __restrict__ cumsums,
     int32_t* __restrict__ offsets,
@@ -50,7 +50,13 @@ int moe_align_block_size(
     int32_t* __restrict__ local_cnts = T_INDEX(tid + 1);
 
     for (int i = begin; i < end; ++i) {
-      local_cnts[topk_ids[i]]++;
+      int32_t e = topk_ids[i];
+      if (e == -1) {
+        continue;
+      }
+      TORCH_CHECK(
+          0 <= e && e < num_experts, "Invalid expert id ", e, " for ", num_experts, " experts.");
+      local_cnts[e]++;
     }
   });
 
@@ -63,10 +69,12 @@ int moe_align_block_size(
   // the last row holds sums of each experts
   int32_t* total_cnts_t_1 = T_INDEX(num_threads);
 
+  int num_valid = 0;
   cumsums[0] = 0;
   for (int e = 0; e < num_experts; ++e) {
     // accumulate `num_tokens_post_pad`, also as the expert offset
     cumsums[e + 1] = cumsums[e] + div_up(total_cnts_t_1[e], BLOCK_M) * BLOCK_M;
+    num_valid += total_cnts_t_1[e];
 
     for (int k = cumsums[e]; k < cumsums[e + 1]; k += BLOCK_M) {
       expert_ids[k / BLOCK_M] = e;
@@ -81,6 +89,9 @@ int moe_align_block_size(
 
     for (int i = begin; i < end; ++i) {
       int32_t expert_id = topk_ids[i];
+      if (expert_id == -1) {
+        continue;
+      }
       int32_t b_offset = cumsums[expert_id];
       int32_t t_offset = offsets[expert_id];
       sorted_ids[b_offset + t_offset] = i;
@@ -117,8 +128,8 @@ int moe_align_block_size(
   for (int mb = 0; mb < num_token_blocks; ++mb) {
     offsets[mb + 1] += offsets[mb];
   }
-  // debug: the last value of offsets should be `numel`
-  TORCH_CHECK(offsets[num_token_blocks] == numel);
+  // debug: the last value of offsets should be `num_valid`
+  TORCH_CHECK(offsets[num_token_blocks] == num_valid);
 
   return num_tokens_post_pad;
 }
@@ -834,16 +845,21 @@ static inline void check_moe_scales(
   }
 }
 
-#define CHECK_MOE_SCALES_FP8(DIM0, DIM1)                      \
-  auto w1s = w1_scale.value();                                \
-  auto w2s = w2_scale.value();                                \
-  auto block_size_val = block_size.value();                   \
-  int64_t block_size_N = block_size_val[0];                   \
-  int64_t block_size_K = block_size_val[1];                   \
-  TORCH_CHECK(w1s.size(DIM0) == div_up(2 * N, block_size_N)); \
-  TORCH_CHECK(w1s.size(DIM1) == div_up(K, block_size_K));     \
-  TORCH_CHECK(w2s.size(DIM0) == div_up(K, block_size_N));     \
-  TORCH_CHECK(w2s.size(DIM1) == div_up(N, block_size_K))
+static inline void check_moe_scales_fp8(
+    int64_t N,
+    int64_t K,
+    const at::Tensor& w1s,
+    const at::Tensor& w2s,
+    const std::vector<int64_t>& block_size,
+    int64_t dim0,
+    int64_t dim1) {
+  int64_t block_size_N = block_size[0];
+  int64_t block_size_K = block_size[1];
+  TORCH_CHECK(w1s.size(dim0) == div_up(2 * N, block_size_N));
+  TORCH_CHECK(w1s.size(dim1) == div_up(K, block_size_K));
+  TORCH_CHECK(w2s.size(dim0) == div_up(K, block_size_N));
+  TORCH_CHECK(w2s.size(dim1) == div_up(N, block_size_K));
+}
 
 // hidden_states: [M, K]
 // w1: [E, 2N, K] or [E, 2N, K / 2] for uint8
@@ -900,6 +916,17 @@ at::Tensor fused_experts_cpu(
   auto topk_weights_ = topk_weights.to(at::kFloat);
   CHECK_EQ(topk_weights_.scalar_type(), at::kFloat);
 
+  if (moe_comp_method == CPUQuantMethod::INT4_W4A8) {
+    TORCH_CHECK(w1_scale.has_value(), "missing w1_scale for int4 w4a8.");
+    TORCH_CHECK(w2_scale.has_value(), "missing w2_scale for int4 w4a8.");
+    TORCH_CHECK(w1_zero.has_value(), "missing w1_zero for int4 w4a8.");
+    TORCH_CHECK(w2_zero.has_value(), "missing w2_zero for int4 w4a8.");
+    CHECK_DIM(4, w1_scale.value());
+    CHECK_DIM(4, w2_scale.value());
+    TORCH_CHECK(w1_zero.value().scalar_type() == at::kChar, "expect w1_zero to be int8.");
+    TORCH_CHECK(w2_zero.value().scalar_type() == at::kChar, "expect w2_zero to be int8.");
+  }
+
   int64_t M = hidden_states.size(0);
   int64_t K = hidden_states.size(1);
   int64_t N = moe_comp_method == CPUQuantMethod::INT4_W4A8 ? w1_scale.value().size(1) * w1_scale.value().size(3) / 2
@@ -930,6 +957,21 @@ at::Tensor fused_experts_cpu(
       w1_scale,
       w2_scale,
       block_size);
+
+  if (moe_comp_method == CPUQuantMethod::INT8_W8A8) {
+    auto w1s = w1_scale.value();
+    auto w2s = w2_scale.value();
+    TORCH_CHECK(w1s.numel() == E * 2 * N);
+    TORCH_CHECK(w2s.numel() == E * K);
+  } else if (moe_comp_method == CPUQuantMethod::FP8_W8A16) {
+    check_moe_scales_fp8(N, K, w1_scale.value(), w2_scale.value(), block_size.value(), 1, 2);
+  } else if (moe_comp_method == CPUQuantMethod::MXFP4) {
+    constexpr int64_t group_size = 32;
+    auto w1s = w1_scale.value();
+    auto w2s = w2_scale.value();
+    TORCH_CHECK(w1s.numel() == E * 2 * N * K / group_size, "w1_scale size mismatch");
+    TORCH_CHECK(w2s.numel() == E * K * N / group_size, "w2_scale size mismatch");
+  }
 
   at::Tensor out_hidden_states = inplace ? hidden_states : at::empty_like(hidden_states);
 
@@ -971,6 +1013,13 @@ at::Tensor fused_experts_cpu(
   int64_t num_tokens_post_pad = moe_align_block_size<BLOCK_M>(
       sorted_ids, expert_ids, topk_ids.data_ptr<int32_t>(), total_cnts, cumsums, offsets, E, numel, num_threads);
 
+  bool has_skip = offsets[num_tokens_post_pad / BLOCK_M] != numel;
+
+  if (num_tokens_post_pad == 0) {
+    out_hidden_states.zero_();
+    return out_hidden_states;
+  }
+
   // unlike triton kernel, we fuse silu with gemm1 so only need 2 intermediate_caches:
   //   1. intermediate_cache1 : [M * topk, N]
   //   2. intermediate_cache2 : [M * topk, K]
@@ -1007,6 +1056,12 @@ at::Tensor fused_experts_cpu(
     scalar_t* __restrict__ intermediate_cache1 = (scalar_t*)((void*)(buffer2.data_ptr<int8_t>()));
     scalar_t* __restrict__ intermediate_cache2 = intermediate_cache1 + M * topk * N;
 
+    if (has_skip) {
+      at::parallel_for(0, M * topk, 0, [&](int64_t begin, int64_t end) {
+        fill_stub(intermediate_cache2 + begin * K, (scalar_t)0, (end - begin) * K);
+      });
+    }
+
     if (moe_comp_method == CPUQuantMethod::INT8_W8A8) {
       uint8_t* __restrict__ A_tmp = (uint8_t*)((void*)(intermediate_cache2 + M * topk * K));
       float* __restrict__ C_tmp = (float*)((void*)(A_tmp + num_threads * BLOCK_M * K));
@@ -1015,8 +1070,6 @@ at::Tensor fused_experts_cpu(
 
       auto w1s = w1_scale.value();
       auto w2s = w2_scale.value();
-      TORCH_CHECK(w1s.numel() == E * 2 * N);
-      TORCH_CHECK(w2s.numel() == E * K);
 
       fused_experts_int8_kernel_impl<scalar_t>(
           out_hidden_states.data_ptr<scalar_t>(),
@@ -1050,7 +1103,11 @@ at::Tensor fused_experts_cpu(
       bool with_bias = w1_bias.has_value();
       auto act_func = alpha.has_value() && limit.has_value() ? CPUAcTMethod::swiglu : CPUAcTMethod::silu_and_mul;
 
-      CHECK_MOE_SCALES_FP8(1, 2);
+      auto w1s = w1_scale.value();
+      auto w2s = w2_scale.value();
+      auto block_size_val = block_size.value();
+      int64_t block_size_N = block_size_val[0];
+      int64_t block_size_K = block_size_val[1];
       fused_experts_fp_kernel_impl<scalar_t, at::Float8_e4m3fn, float, false>(
           out_hidden_states.data_ptr<scalar_t>(),
           intermediate_cache0,
@@ -1094,8 +1151,6 @@ at::Tensor fused_experts_cpu(
       constexpr int64_t group_size = 32;
       auto w1s = w1_scale.value();
       auto w2s = w2_scale.value();
-      TORCH_CHECK(w1s.numel() == E * 2 * N * K / group_size, "w1_scale size mismatch");
-      TORCH_CHECK(w2s.numel() == E * K * N / group_size, "w2_scale size mismatch");
       fused_experts_fp_kernel_impl<scalar_t, uint8_t, uint8_t, true>(
           out_hidden_states.data_ptr<scalar_t>(),
           intermediate_cache0,
@@ -1314,7 +1369,12 @@ at::Tensor shared_expert_cpu(
       scalar_t* __restrict__ intermediate_cache0 = (scalar_t*)((void*)(C_tmp + num_threads * 2 * BLOCK_M * BLOCK_N));
       scalar_t* __restrict__ B_tmp = (scalar_t*)((void*)(intermediate_cache0 + M * 2 * N));
 
-      CHECK_MOE_SCALES_FP8(0, 1);
+      auto w1s = w1_scale.value();
+      auto w2s = w2_scale.value();
+      auto block_size_val = block_size.value();
+      int64_t block_size_N = block_size_val[0];
+      int64_t block_size_K = block_size_val[1];
+      check_moe_scales_fp8(N, K, w1s, w2s, block_size_val, 0, 1);
       shared_expert_fp8_kernel_impl<scalar_t>(
           out_hidden_states.data_ptr<scalar_t>(),
           intermediate_cache0,
