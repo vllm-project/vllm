@@ -5,7 +5,7 @@ import io
 import math
 import time
 import zlib
-from collections.abc import AsyncGenerator, Callable, Set
+from collections.abc import AsyncGenerator, Callable, Sequence, Set
 from concurrent.futures import ThreadPoolExecutor
 from functools import cached_property
 from typing import Final, Literal, TypeAlias, TypeVar, cast
@@ -47,6 +47,7 @@ from ..transcription.protocol import (
     TranscriptionResponseVerbose,
     TranscriptionSegment,
     TranscriptionStreamResponse,
+    TranscriptionWord,
 )
 from ..translation.protocol import (
     TranslationResponse,
@@ -410,6 +411,59 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 avg_logprob += log_probs[idx - 1][token].logprob
         return segments
 
+    def _group_words(
+        self,
+        token_ids: "Sequence[int]",
+        token_times: list[float],
+        start_offset: float,
+    ) -> "list[TranscriptionWord]":
+        """Group generated tokens into words with (start, end) seconds from the
+        per-position onset times computed by the worker's cross-attention DTW.
+        """
+        tok = self.tokenizer
+        ts_begin = cast(int, tok.convert_tokens_to_ids("<|0.00|>"))
+        specials = set(tok.all_special_ids)
+        n_prompt = max(len(token_times) - len(token_ids), 0)
+        raw: list[tuple[str, float, float]] = []
+        cur: str = ""
+        cur_start: float | None = None
+        prev_end: float = 0.0
+        for j, tid in enumerate(token_ids):
+            pos = n_prompt + j
+            if pos + 1 >= len(token_times):
+                break
+            tid = int(tid)
+            if tid in specials or tid >= ts_begin:
+                continue
+            piece = str(tok.decode([tid]))
+            s, e = float(token_times[pos]), float(token_times[pos + 1])
+            if piece.startswith(" ") and cur:
+                assert cur_start is not None
+                raw.append((cur.strip(), cur_start, prev_end))
+                cur, cur_start = "", None
+            if cur_start is None:
+                cur_start = s
+            cur += piece
+            prev_end = e
+        if cur:
+            assert cur_start is not None
+            raw.append((cur.strip(), cur_start, prev_end))
+
+        words: list[TranscriptionWord] = []
+        last = 0.0
+        for word, s, e in raw:
+            s = max(s, last)
+            e = max(e, s)
+            words.append(
+                TranscriptionWord(
+                    word=word,
+                    start=round(start_offset + s, 2),
+                    end=round(start_offset + e, 2),
+                )
+            )
+            last = s
+        return words
+
     async def _create_speech_to_text(
         self,
         audio_data: bytes,
@@ -574,6 +628,16 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 [] for _ in list_result_generator
             ]
             chunk_text_parts: list[list[str]] = [[] for _ in list_result_generator]
+            # Word-level timestamps (opt-in), grouped from the worker's onsets.
+            want_words = (
+                self.task_type == "transcribe"
+                and request.response_format == "verbose_json"
+                and "word" in (getattr(request, "timestamp_granularities", None) or [])
+                and getattr(self.model_cls, "supports_word_timestamp", False)
+            )
+            chunk_word_parts: list[list[TranscriptionWord]] = [
+                [] for _ in list_result_generator
+            ]
             segments_types: dict[str, type[SpeechToTextSegment]] = {
                 "transcribe": TranscriptionSegment,
                 "translate": TranslationSegment,
@@ -601,6 +665,15 @@ class SpeechToTextBaseServing(GenerateBaseServing):
 
                     chunk_segment_parts[idx].extend(segments)
                     chunk_text_parts[idx].extend([seg.text for seg in segments])
+
+                    if want_words and op.outputs[0].word_align is not None:
+                        chunk_word_parts[idx].extend(
+                            self._group_words(
+                                op.outputs[0].token_ids,
+                                op.outputs[0].word_align,
+                                start_time,
+                            )
+                        )
                 else:
                     raw_text = op.outputs[0].text
                     chunk_text_parts[idx].append(
@@ -610,6 +683,9 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                 segment
                 for segment_parts in chunk_segment_parts
                 for segment in segment_parts
+            ]
+            total_words = [
+                word for word_parts in chunk_word_parts for word in word_parts
             ]
             text_parts = [text for text_part in chunk_text_parts for text in text_part]
             text = separator.join(text_parts)
@@ -633,6 +709,7 @@ class SpeechToTextBaseServing(GenerateBaseServing):
                             language=request.language,
                             duration=str(duration_s),
                             segments=total_segments,
+                            words=total_words or None,
                         ),
                     )
             else:
