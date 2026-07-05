@@ -5,11 +5,12 @@ import ctypes
 import sys
 import struct
 import types
+from concurrent.futures import Future
 
 import torch
 
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.data import (
-    HIDDEN_LAYOUT_VERSION,
+    HIDDEN_TENSOR_LAYOUT,
     HiddenKeyMetadata,
     HiddenPoolKey,
     HiddenSaveRequest,
@@ -21,10 +22,14 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.keys import
     make_hidden_data_key,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.store_client import (
+    HiddenStoreError,
+    HiddenStoreLoadError,
+    HiddenStoreSaveError,
     MooncakeHiddenStoreClient,
     _get_hidden_state_object_data_type,
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.worker import (
+    HiddenLookupClient,
     HiddenStoreSendingThread,
     HiddenStoreWorker,
 )
@@ -42,18 +47,27 @@ TORCH_DTYPE_TO_MOONCAKE_DTYPE = {
 class FakeStore:
     def __init__(self):
         self.objects = {}
+        self.batch_is_exist_calls = []
         self.registered = []
+        self.unregistered = []
         self.pub_tensors = []
         self.range_gets = []
+        self.fail_register_addrs = set()
+        self.raise_on_batch_put = False
+        self.batch_put_results = [0]
 
     def batch_is_exist(self, keys):
+        self.batch_is_exist_calls.append(list(keys))
         return [1 if key in self.objects else 0 for key in keys]
 
     def register_buffer(self, addr, size):
+        if addr in self.fail_register_addrs:
+            return -1
         self.registered.append((addr, size))
         return 0
 
     def unregister_buffer(self, addr):
+        self.unregistered.append(addr)
         return 0
 
     def pub_tensor(self, key, tensor, replicate_config=None):
@@ -114,6 +128,20 @@ class FakeStore:
         return results
 
 
+class FakeBufferStore(FakeStore):
+    def batch_put_from_multi_buffers(
+        self,
+        keys,
+        buffer_ptrs,
+        buffer_sizes,
+        replicate_config=None,
+    ):
+        if self.raise_on_batch_put:
+            raise RuntimeError("batch put failed")
+        self.objects[keys[0]] = b"tensor-object"
+        return self.batch_put_results
+
+
 class FakeReplicateConfig:
     def __init__(self):
         self.replica_num = 1
@@ -149,10 +177,13 @@ class FakeObjectDataTypeNoTensor:
 def make_pool_key(identifier: str = "image-hash") -> HiddenPoolKey:
     return HiddenPoolKey(
         key_metadata=HiddenKeyMetadata(
+            cache_prefix="",
+            kind="encoder_output",
             model_name="qwen",
-            mm_encoder_config_hash="encoder-config-a",
-            hidden_parallel_key="tp:1@pp:1@pcp:1@dcp:1@mm_tp:weights@storage:replicated",
-            layout=HIDDEN_LAYOUT_VERSION,
+            encoder="encoder-config-a",
+            storage="replicated_object",
+            parallel="tp:1@pp:1@pcp:1@dcp:1@mm_tp:weights",
+            tensor_layout=HIDDEN_TENSOR_LAYOUT,
         ),
         identifier=identifier,
     )
@@ -189,11 +220,76 @@ def test_worker_lookup_checks_existence_without_reading_tensor_metadata():
         tensor_database=HiddenTensorDatabase(),
         key_metadata=pool_key.key_metadata,
     )
-    worker.save_tensor(pool_key, tensor, now_ms=1234)
+    worker.save_tensor(pool_key, tensor)
 
     assert worker.lookup(pool_key.identifier)
     assert not worker.lookup("missing-image-hash")
     assert store.range_gets == []
+
+
+def test_worker_batch_lookup_checks_existence_in_one_store_call():
+    pool_key_a = make_pool_key("image-a")
+    pool_key_b = make_pool_key("image-b")
+    store = FakeBufferStore()
+    store.objects[make_hidden_data_key(pool_key_a)] = b"tensor-object"
+    worker = HiddenStoreWorker(
+        store_client=MooncakeHiddenStoreClient(store),
+        tensor_database=HiddenTensorDatabase(),
+        key_metadata=pool_key_a.key_metadata,
+    )
+
+    results = worker.lookup_batch(["image-a", "image-b"])
+
+    assert results == {"image-a": True, "image-b": False}
+    assert store.batch_is_exist_calls == [
+        [make_hidden_data_key(pool_key_a), make_hidden_data_key(pool_key_b)]
+    ]
+    assert store.range_gets == []
+
+
+def test_lookup_client_discard_removes_identifier_future_mapping():
+    client = HiddenLookupClient.__new__(HiddenLookupClient)
+    future: Future[dict[str, bool]] = Future()
+    client.futures = {
+        "image-a": future,
+        "image-b": future,
+    }
+
+    client.discard("image-a")
+
+    assert "image-a" not in client.futures
+    assert client.futures == {"image-b": future}
+    assert not future.cancelled()
+
+    client.discard("image-b")
+
+    assert client.futures == {}
+    assert future.cancelled()
+
+
+def test_worker_lookup_records_minimal_operation_stats():
+    pool_key = make_pool_key()
+    store = FakeBufferStore()
+    store.objects[make_hidden_data_key(pool_key)] = b"tensor-object"
+    worker = HiddenStoreWorker(
+        store_client=MooncakeHiddenStoreClient(store),
+        tensor_database=HiddenTensorDatabase(),
+        key_metadata=pool_key.key_metadata,
+    )
+
+    assert worker.lookup_batch(["image-hash", "missing-image-hash"]) == {
+        "image-hash": True,
+        "missing-image-hash": False,
+    }
+
+    stats = worker.get_operation_stats()
+    records = stats.data["lookup_exists"]
+    assert len(records) == 1
+    assert records[0]["num_keys"] == 2
+    assert records[0]["num_bytes"] == 0
+    assert records[0]["status"] == "miss"
+    assert records[0]["num_failed_keys"] == 1
+    assert worker.get_operation_stats() is None
 
 
 def test_worker_save_stores_hidden_as_single_tensor_object():
@@ -208,11 +304,93 @@ def test_worker_save_stores_hidden_as_single_tensor_object():
         tensor_database=HiddenTensorDatabase(),
     )
 
-    worker.save_tensor(pool_key, tensor, now_ms=1234)
+    worker.save_tensor(pool_key, tensor)
 
     assert store.pub_tensors[0][0] == make_hidden_data_key(pool_key)
     assert store.pub_tensors[0][2] is not None
     assert make_hidden_data_key(pool_key) in store.objects
+
+
+def test_worker_save_rejects_dtype_that_load_cannot_decode():
+    pool_key = make_pool_key()
+    tensor = torch.zeros((2, 4), dtype=torch.float64)
+    store = FakeStore()
+    worker = HiddenStoreWorker(
+        store_client=MooncakeHiddenStoreClient(store),
+        tensor_database=HiddenTensorDatabase(),
+    )
+
+    try:
+        worker.save_tensor(pool_key, tensor)
+    except HiddenStoreSaveError as exc:
+        assert "unsupported hidden tensor dtype" in str(exc)
+    else:
+        raise AssertionError("unsupported hidden dtype should fail before store put")
+
+    assert store.pub_tensors == []
+
+
+def test_buffer_put_unregisters_payload_and_metadata_buffers():
+    pool_key = make_pool_key()
+    tensor = torch.zeros((2, 4), dtype=torch.float16)
+    store = FakeBufferStore()
+    client = MooncakeHiddenStoreClient(store, replicate_config=FakeReplicateConfig())
+
+    client.put_tensor(pool_key, tensor)
+
+    payload_addr = tensor.data_ptr()
+    metadata_addr = next(
+        addr for addr, size in store.registered if size == TENSOR_METADATA_SIZE
+    )
+    assert payload_addr in store.unregistered
+    assert metadata_addr in store.unregistered
+    assert store.unregistered[-2:] == [metadata_addr, payload_addr]
+
+
+def test_buffer_put_unregisters_payload_and_metadata_when_put_raises():
+    pool_key = make_pool_key()
+    tensor = torch.zeros((2, 4), dtype=torch.float16)
+    store = FakeBufferStore()
+    store.raise_on_batch_put = True
+    client = MooncakeHiddenStoreClient(store, replicate_config=FakeReplicateConfig())
+
+    try:
+        client.put_tensor(pool_key, tensor)
+    except RuntimeError as exc:
+        assert "batch put failed" in str(exc)
+    else:
+        raise AssertionError("batch put exception should propagate")
+
+    payload_addr = tensor.data_ptr()
+    metadata_addr = next(
+        addr for addr, size in store.registered if size == TENSOR_METADATA_SIZE
+    )
+    assert payload_addr in store.unregistered
+    assert metadata_addr in store.unregistered
+
+
+def test_buffer_put_unregisters_payload_when_metadata_registration_fails():
+    pool_key = make_pool_key()
+    tensor = torch.zeros((2, 4), dtype=torch.float16)
+    store = FakeBufferStore()
+    original_register = store.register_buffer
+
+    def register_buffer(addr, size):
+        if size == TENSOR_METADATA_SIZE:
+            store.fail_register_addrs.add(addr)
+        return original_register(addr, size)
+
+    store.register_buffer = register_buffer
+    client = MooncakeHiddenStoreClient(store, replicate_config=FakeReplicateConfig())
+
+    try:
+        client.put_tensor(pool_key, tensor)
+    except HiddenStoreError:
+        pass
+    else:
+        raise AssertionError("metadata registration failure should raise")
+
+    assert tensor.data_ptr() in store.unregistered
 
 
 def test_worker_save_marks_hidden_state_data_type(monkeypatch):
@@ -234,7 +412,7 @@ def test_worker_save_marks_hidden_state_data_type(monkeypatch):
         tensor_database=HiddenTensorDatabase(),
     )
 
-    worker.save_tensor(pool_key, tensor, now_ms=1234)
+    worker.save_tensor(pool_key, tensor)
 
     used_config = store.pub_tensors[0][2]
     assert used_config is not replicate_config
@@ -273,7 +451,7 @@ def test_worker_save_does_not_require_mooncake_object_group_support():
         tensor_database=HiddenTensorDatabase(),
     )
 
-    worker.save_tensor(pool_key, tensor, now_ms=1234)
+    worker.save_tensor(pool_key, tensor)
 
     assert store.pub_tensors[0][0] == make_hidden_data_key(pool_key)
 
@@ -287,10 +465,48 @@ def test_worker_save_skips_existing_tensor_object():
         tensor_database=HiddenTensorDatabase(),
     )
 
-    worker.save_tensor(pool_key, tensor, now_ms=1234)
-    worker.save_tensor(pool_key, tensor, now_ms=1235)
+    worker.save_tensor(pool_key, tensor)
+    worker.save_tensor(pool_key, tensor)
 
     assert len(store.pub_tensors) == 1
+
+
+def test_worker_save_records_exists_and_put_operation_stats():
+    pool_key = make_pool_key()
+    tensor = torch.zeros((2, 4), dtype=torch.float16)
+    store = FakeStore()
+    worker = HiddenStoreWorker(
+        store_client=MooncakeHiddenStoreClient(store),
+        tensor_database=HiddenTensorDatabase(),
+    )
+
+    worker.save_tensor(pool_key, tensor)
+
+    stats = worker.get_operation_stats()
+    assert stats.data["save_exists"][0]["status"] == "miss"
+    assert stats.data["save_exists"][0]["num_keys"] == 1
+    assert stats.data["save_put"][0]["status"] == "ok"
+    assert stats.data["save_put"][0]["num_keys"] == 1
+    assert stats.data["save_put"][0]["num_bytes"] == (
+        tensor.numel() * tensor.element_size()
+    )
+
+
+def test_worker_save_existing_records_only_save_exists():
+    pool_key = make_pool_key()
+    tensor = torch.zeros((2, 4), dtype=torch.float16)
+    store = FakeStore()
+    store.objects[make_hidden_data_key(pool_key)] = b"tensor-object"
+    worker = HiddenStoreWorker(
+        store_client=MooncakeHiddenStoreClient(store),
+        tensor_database=HiddenTensorDatabase(),
+    )
+
+    worker.save_tensor(pool_key, tensor)
+
+    stats = worker.get_operation_stats()
+    assert stats.data["save_exists"][0]["status"] == "ok"
+    assert "save_put" not in stats.data
 
 
 def test_sending_thread_stores_hidden_tensor_asynchronously():
@@ -300,18 +516,41 @@ def test_sending_thread_stores_hidden_tensor_asynchronously():
     worker = HiddenStoreWorker(
         store_client=MooncakeHiddenStoreClient(store),
         tensor_database=HiddenTensorDatabase(),
-        producer_engine_id="encoder-1",
     )
     sending_thread = HiddenStoreSendingThread(worker)
     sending_thread.start()
 
     sending_thread.add_request(
-        HiddenSaveRequest(pool_key=pool_key, tensor=tensor, now_ms=1234)
+        HiddenSaveRequest(pool_key=pool_key, tensor=tensor)
     )
     sending_thread.request_queue.join()
 
     assert store.pub_tensors[0][0] == make_hidden_data_key(pool_key)
     assert sending_thread.get_and_clear_finished_identifiers() == {pool_key.identifier}
+    sending_thread.close()
+
+
+def test_sending_thread_records_failed_identifier_without_finishing():
+    pool_key = make_pool_key()
+    tensor = torch.zeros((2, 4), dtype=torch.float16)
+    store = FakeBufferStore()
+    store.raise_on_batch_put = True
+    worker = HiddenStoreWorker(
+        store_client=MooncakeHiddenStoreClient(store),
+        tensor_database=HiddenTensorDatabase(),
+    )
+    sending_thread = HiddenStoreSendingThread(worker)
+    sending_thread.start()
+
+    sending_thread.add_request(
+        HiddenSaveRequest(pool_key=pool_key, tensor=tensor)
+    )
+    sending_thread.request_queue.join()
+
+    assert sending_thread.get_and_clear_finished_identifiers() == set()
+    assert sending_thread.get_and_clear_failed_identifiers() == {pool_key.identifier}
+    assert pool_key.identifier in sending_thread.failure_reasons
+    assert worker.get_operation_stats().data["save_put"][0]["status"] == "error"
     sending_thread.close()
 
 
@@ -324,7 +563,7 @@ def test_worker_load_gets_tensor_data_into_encoder_cache_before_returning():
         tensor_database=HiddenTensorDatabase(),
         key_metadata=pool_key.key_metadata,
     )
-    worker.save_tensor(pool_key, stored, now_ms=1234)
+    worker.save_tensor(pool_key, stored)
 
     encoder_cache = {}
     worker.load(
@@ -341,6 +580,83 @@ def test_worker_load_gets_tensor_data_into_encoder_cache_before_returning():
     assert store.range_gets[0][4] == [[[TENSOR_METADATA_SIZE]]]
     assert store.range_gets[-1][1] == [[make_hidden_data_key(pool_key)]]
     assert store.range_gets[-1][3] == [[[TENSOR_METADATA_SIZE]]]
+
+    stats = worker.get_operation_stats()
+    assert stats.data["load_get"][0]["status"] == "ok"
+    assert stats.data["load_get"][0]["num_keys"] == 1
+    assert stats.data["load_get"][0]["num_bytes"] == (
+        stored.numel() * stored.element_size()
+    )
+
+
+def test_worker_load_records_error_without_writing_encoder_cache():
+    pool_key = make_pool_key()
+    store = FakeStore()
+    worker = HiddenStoreWorker(
+        store_client=MooncakeHiddenStoreClient(store),
+        tensor_database=HiddenTensorDatabase(),
+        key_metadata=pool_key.key_metadata,
+    )
+    encoder_cache = {}
+
+    try:
+        worker.load(
+            [MMMeta(identifier=pool_key.identifier, load_spec=LoadSpec(can_load=True))],
+            encoder_cache,
+            device="cpu",
+        )
+    except HiddenStoreLoadError:
+        pass
+    else:
+        raise AssertionError("missing hidden tensor should fail fast")
+
+    assert pool_key.identifier not in encoder_cache
+    stats = worker.get_operation_stats()
+    assert stats.data["load_get"][0]["status"] == "error"
+    assert stats.data["load_get"][0]["num_failed_keys"] == 1
+
+
+def test_get_tensor_payload_unregisters_target_buffer_after_success():
+    pool_key = make_pool_key()
+    stored = torch.zeros((2, 4), dtype=torch.float16)
+    store = FakeStore()
+    worker = HiddenStoreWorker(
+        store_client=MooncakeHiddenStoreClient(store),
+        tensor_database=HiddenTensorDatabase(),
+        key_metadata=pool_key.key_metadata,
+    )
+    worker.save_tensor(pool_key, stored)
+    target = torch.empty_like(stored)
+
+    worker.store_client.get_tensor_payload(
+        pool_key,
+        target.data_ptr(),
+        target.numel() * target.element_size(),
+        TENSOR_METADATA_SIZE,
+    )
+
+    assert target.data_ptr() in store.unregistered
+
+
+def test_get_tensor_payload_unregisters_target_buffer_after_load_error():
+    pool_key = make_pool_key()
+    target = torch.empty((2, 4), dtype=torch.float16)
+    store = FakeStore()
+    client = MooncakeHiddenStoreClient(store)
+
+    try:
+        client.get_tensor_payload(
+            pool_key,
+            target.data_ptr(),
+            target.numel() * target.element_size(),
+            TENSOR_METADATA_SIZE,
+        )
+    except HiddenStoreLoadError:
+        pass
+    else:
+        raise AssertionError("missing payload should raise")
+
+    assert target.data_ptr() in store.unregistered
 
 
 def _serialize_tensor_object(tensor: torch.Tensor) -> bytes:

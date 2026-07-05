@@ -9,6 +9,7 @@ import queue
 import socket
 import threading
 import time
+from concurrent.futures import Future, ThreadPoolExecutor
 
 import torch
 import zmq
@@ -19,6 +20,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.data import
     HiddenKeyMetadata,
     HiddenPoolKey,
     HiddenSaveRequest,
+    HiddenStoreOperationStats,
     HiddenTensorDatabase,
     MMMeta,
     build_tensor_meta,
@@ -37,6 +39,8 @@ from vllm.utils.network_utils import make_zmq_socket
 logger = init_logger(__name__)
 
 LOOKUP_MSG = b"LOOKUP"
+BATCH_LOOKUP_MSG = b"BATCH_LOOKUP"
+RESP_BATCH = b"BATCH"
 RESP_HIT = b"HIT"
 RESP_MISS = b"MISS"
 RESP_ERR = b"ERR"
@@ -49,14 +53,14 @@ class HiddenStoreWorker:
         self,
         store_client: MooncakeHiddenStoreClient,
         tensor_database: HiddenTensorDatabase | None = None,
-        producer_engine_id: str | None = None,
         key_metadata: HiddenKeyMetadata | None = None,
     ):
         self.store_client = store_client
         self.tensor_database = tensor_database or HiddenTensorDatabase()
-        self.producer_engine_id = producer_engine_id
         self.key_metadata = key_metadata
         self.sending_thread: HiddenStoreSendingThread | None = None
+        self._operation_stats_lock = threading.Lock()
+        self._operation_stats = HiddenStoreOperationStats()
 
     def make_pool_key(self, identifier: str) -> HiddenPoolKey:
         assert self.key_metadata is not None
@@ -76,7 +80,6 @@ class HiddenStoreWorker:
             self.save_tensor(
                 request.pool_key,
                 request.tensor,
-                now_ms=request.now_ms,
                 with_soft_pin=request.with_soft_pin,
             )
             return
@@ -87,6 +90,34 @@ class HiddenStoreWorker:
             return set()
         return self.sending_thread.get_and_clear_finished_identifiers()
 
+    def get_operation_stats(self) -> HiddenStoreOperationStats | None:
+        with self._operation_stats_lock:
+            if self._operation_stats.is_empty():
+                return None
+            stats = self._operation_stats
+            self._operation_stats = HiddenStoreOperationStats()
+            return stats
+
+    def _record_operation(
+        self,
+        operation: str,
+        duration_seconds: float,
+        num_keys: int,
+        *,
+        num_bytes: int = 0,
+        status: str = "ok",
+        num_failed_keys: int = 0,
+    ) -> None:
+        with self._operation_stats_lock:
+            self._operation_stats.record_operation(
+                operation=operation,
+                duration_seconds=duration_seconds,
+                num_keys=num_keys,
+                num_bytes=num_bytes,
+                status=status,
+                num_failed_keys=num_failed_keys,
+            )
+
     def shutdown(self) -> None:
         if self.sending_thread is not None:
             self.sending_thread.close()
@@ -94,32 +125,76 @@ class HiddenStoreWorker:
 
     def lookup(self, identifier: str) -> bool:
         """Return whether the hidden object exists in Mooncake Store."""
-        pool_key = self.make_pool_key(identifier)
-        if not self.store_client.exists(pool_key):
-            logger.info(
-                "hidden_store_lookup_miss identifier=%s hidden_pool_key=%s "
-                "reason=missing_object",
-                pool_key.identifier,
-                pool_key.to_string(),
-            )
-            return False
+        return self.lookup_batch([identifier]).get(identifier, False)
 
-        logger.info(
-            "hidden_store_lookup_hit identifier=%s hidden_pool_key=%s",
-            pool_key.identifier,
-            pool_key.to_string(),
+    def lookup_batch(self, identifiers: list[str]) -> dict[str, bool]:
+        """Return whether hidden objects exist in Mooncake Store."""
+        pool_keys = [self.make_pool_key(identifier) for identifier in identifiers]
+        started = time.perf_counter()
+        try:
+            exists = self.store_client.batch_exists(pool_keys)
+        except Exception:
+            self._record_operation(
+                "lookup_exists",
+                time.perf_counter() - started,
+                len(pool_keys),
+                status="error",
+                num_failed_keys=len(pool_keys),
+            )
+            raise
+
+        failed_keys = sum(1 for hit in exists if not hit)
+        self._record_operation(
+            "lookup_exists",
+            time.perf_counter() - started,
+            len(pool_keys),
+            status="miss" if failed_keys else "ok",
+            num_failed_keys=failed_keys,
         )
-        return True
+        results = dict(zip(identifiers, exists, strict=True))
+        for pool_key, hit in zip(pool_keys, exists, strict=True):
+            if hit:
+                logger.info(
+                    "hidden_store_lookup_hit identifier=%s hidden_pool_key=%s",
+                    pool_key.identifier,
+                    pool_key.to_string(),
+                )
+            else:
+                logger.info(
+                    "hidden_store_lookup_miss identifier=%s hidden_pool_key=%s "
+                    "reason=missing_object",
+                    pool_key.identifier,
+                    pool_key.to_string(),
+                )
+        return results
 
     def save_tensor(
         self,
         pool_key: HiddenPoolKey,
         tensor: torch.Tensor,
-        now_ms: int | None = None,
         with_soft_pin: bool = False,
     ) -> None:
-        if self.store_client.exists(pool_key):
-            logger.debug(
+        exists_started = time.perf_counter()
+        try:
+            exists = self.store_client.exists(pool_key)
+        except Exception:
+            self._record_operation(
+                "save_exists",
+                time.perf_counter() - exists_started,
+                1,
+                status="error",
+                num_failed_keys=1,
+            )
+            raise
+
+        self._record_operation(
+            "save_exists",
+            time.perf_counter() - exists_started,
+            1,
+            status="ok" if exists else "miss",
+        )
+        if exists:
+            logger.info(
                 "hidden_store_save_skip identifier=%s hidden_pool_key=%s "
                 "reason=exists",
                 pool_key.identifier,
@@ -131,10 +206,28 @@ class HiddenStoreWorker:
         stored_tensor = tensor if tensor.is_contiguous() else tensor.contiguous()
         used_staging = stored_tensor is not tensor
         tensor_meta = build_tensor_meta(pool_key, stored_tensor)
-        self.store_client.put_tensor(
-            pool_key,
-            stored_tensor,
-            with_soft_pin=with_soft_pin,
+        try:
+            self.store_client.put_tensor(
+                pool_key,
+                stored_tensor,
+                with_soft_pin=with_soft_pin,
+            )
+        except Exception:
+            self._record_operation(
+                "save_put",
+                time.perf_counter() - started,
+                1,
+                num_bytes=tensor_meta.nbytes,
+                status="error",
+                num_failed_keys=1,
+            )
+            raise
+        self._record_operation(
+            "save_put",
+            time.perf_counter() - started,
+            1,
+            num_bytes=tensor_meta.nbytes,
+            status="ok",
         )
         logger.info(
             "hidden_store_put identifier=%s hidden_pool_key=%s nbytes=%d "
@@ -167,33 +260,52 @@ class HiddenStoreWorker:
 
             started = time.perf_counter()
             pool_key = self.make_pool_key(item.identifier)
-            tensor_meta = self.store_client.get_tensor_meta(pool_key)
-            if tensor_meta is None:
-                raise HiddenStoreLoadError(
-                    "failed to load hidden tensor metadata for "
-                    f"{pool_key.to_string()}"
-                )
+            tensor_meta = None
+            try:
+                tensor_meta = self.store_client.get_tensor_meta(pool_key)
+                if tensor_meta is None:
+                    raise HiddenStoreLoadError(
+                        "failed to load hidden tensor metadata for "
+                        f"{pool_key.to_string()}"
+                    )
 
-            target_device = device
-            if target_device is None:
-                target_device = "cuda" if torch.cuda.is_available() else None
-            target = torch.empty(
-                tensor_meta.shape,
-                dtype=_resolve_torch_dtype(tensor_meta.dtype),
-                device=target_device,
-            )
-            _data_key, addrs, sizes = self.tensor_database.prepare_value(
-                pool_key,
-                target,
-            )
-            self.store_client.get_tensor_payload(
-                pool_key,
-                addrs[0],
-                sizes[0],
-                tensor_meta.data_offset,
-            )
-            validate_loaded_tensor(target, tensor_meta)
+                target_device = device
+                if target_device is None:
+                    target_device = "cuda" if torch.cuda.is_available() else None
+                target = torch.empty(
+                    tensor_meta.shape,
+                    dtype=_resolve_torch_dtype(tensor_meta.dtype),
+                    device=target_device,
+                )
+                _data_key, addrs, sizes = self.tensor_database.prepare_value(
+                    pool_key,
+                    target,
+                )
+                self.store_client.get_tensor_payload(
+                    pool_key,
+                    addrs[0],
+                    sizes[0],
+                    tensor_meta.data_offset,
+                )
+                validate_loaded_tensor(target, tensor_meta)
+            except Exception:
+                self._record_operation(
+                    "load_get",
+                    time.perf_counter() - started,
+                    1,
+                    num_bytes=tensor_meta.nbytes if tensor_meta is not None else 0,
+                    status="error",
+                    num_failed_keys=1,
+                )
+                raise
             encoder_cache[item.identifier] = target
+            self._record_operation(
+                "load_get",
+                time.perf_counter() - started,
+                1,
+                num_bytes=tensor_meta.nbytes,
+                status="ok",
+            )
             logger.info(
                 "hidden_store_get identifier=%s hidden_pool_key=%s nbytes=%d "
                 "hidden_store_get_ms=%.3f",
@@ -223,6 +335,8 @@ class HiddenStoreSendingThread(threading.Thread):
         self.request_queue: queue.Queue[HiddenSaveRequest | None] = queue.Queue()
         self.done_task_lock = threading.Lock()
         self.finished_identifiers: set[str] = set()
+        self.failed_identifiers: set[str] = set()
+        self.failure_reasons: dict[str, str] = {}
         self._closed = threading.Event()
 
     def add_request(self, request: HiddenSaveRequest) -> None:
@@ -234,9 +348,20 @@ class HiddenStoreSendingThread(threading.Thread):
             self.finished_identifiers.clear()
         return finished
 
+    def get_and_clear_failed_identifiers(self) -> set[str]:
+        with self.done_task_lock:
+            failed = self.failed_identifiers.copy()
+            self.failed_identifiers.clear()
+        return failed
+
     def set_finished_identifier(self, identifier: str) -> None:
         with self.done_task_lock:
             self.finished_identifiers.add(identifier)
+
+    def set_failed_identifier(self, identifier: str, error: Exception) -> None:
+        with self.done_task_lock:
+            self.failed_identifiers.add(identifier)
+            self.failure_reasons[identifier] = str(error)
 
     def run(self) -> None:
         while True:
@@ -247,11 +372,12 @@ class HiddenStoreSendingThread(threading.Thread):
                 self.store_worker.save_tensor(
                     request.pool_key,
                     request.tensor,
-                    now_ms=request.now_ms,
                     with_soft_pin=request.with_soft_pin,
                 )
                 self.set_finished_identifier(request.identifier)
             except Exception as e:
+                if request is not None:
+                    self.set_failed_identifier(request.identifier, e)
                 logger.error("Error in %s: %s", self.name, e)
             finally:
                 self.request_queue.task_done()
@@ -302,6 +428,20 @@ class HiddenLookupServer:
                     except Exception:
                         logger.exception("HiddenLookupServer lookup failed")
                         self.socket.send_multipart([RESP_ERR])
+                elif msg_type == BATCH_LOOKUP_MSG:
+                    try:
+                        identifiers = [
+                            bytes(frame).decode("utf-8") for frame in all_frames[1:]
+                        ]
+                        exists = self.store_worker.lookup_batch(identifiers)
+                        frames = [
+                            RESP_HIT if exists.get(identifier, False) else RESP_MISS
+                            for identifier in identifiers
+                        ]
+                        self.socket.send_multipart([RESP_BATCH, *frames])
+                    except Exception:
+                        logger.exception("HiddenLookupServer batch lookup failed")
+                        self.socket.send_multipart([RESP_ERR])
                 else:
                     logger.warning(
                         "HiddenLookupServer received unknown msg_type: %r",
@@ -331,19 +471,87 @@ class HiddenLookupClient:
             zmq.REQ,  # type: ignore[attr-defined]
             bind=False,
         )
+        self.executor = ThreadPoolExecutor(
+            max_workers=1,
+            thread_name_prefix="HiddenLookupClient",
+        )
+        self.futures: dict[str, Future[dict[str, bool]]] = {}
 
     def lookup(self, identifier: str) -> bool:
-        self.socket.send_multipart([LOOKUP_MSG, identifier.encode("utf-8")])
+        result = self.lookup_batch([identifier], non_block=False)
+        assert result is not None
+        return result.get(identifier, False)
+
+    def _lookup_batch(self, identifiers: list[str]) -> dict[str, bool]:
+        self.socket.send_multipart(
+            [
+                BATCH_LOOKUP_MSG,
+                *(identifier.encode("utf-8") for identifier in identifiers),
+            ]
+        )
         resp = self.socket.recv_multipart()
         msg_type = bytes(resp[0])
-        if msg_type == RESP_HIT:
-            return True
-        if msg_type in (RESP_MISS, RESP_ERR):
-            return False
+        if msg_type == RESP_BATCH:
+            states = [bytes(frame) == RESP_HIT for frame in resp[1:]]
+            if len(states) != len(identifiers):
+                logger.warning(
+                    "HiddenLookupClient received malformed batch response: "
+                    "identifiers=%d states=%d",
+                    len(identifiers),
+                    len(states),
+                )
+                return {identifier: False for identifier in identifiers}
+            return dict(zip(identifiers, states, strict=True))
+        if msg_type == RESP_ERR:
+            return {identifier: False for identifier in identifiers}
         logger.warning("HiddenLookupClient received unknown response: %r", msg_type)
-        return False
+        return {identifier: False for identifier in identifiers}
+
+    def lookup_batch(
+        self,
+        identifiers: list[str],
+        non_block: bool = False,
+    ) -> dict[str, bool] | None:
+        identifiers = list(dict.fromkeys(identifiers))
+        if not identifiers:
+            return {}
+
+        new_identifiers = [
+            identifier for identifier in identifiers if identifier not in self.futures
+        ]
+        if new_identifiers:
+            future = self.executor.submit(self._lookup_batch, new_identifiers)
+            for identifier in new_identifiers:
+                self.futures[identifier] = future
+
+        if non_block and any(
+            not self.futures[identifier].done() for identifier in identifiers
+        ):
+            return None
+
+        results: dict[str, bool] = {}
+        for identifier in identifiers:
+            future = self.futures[identifier]
+            try:
+                batch_results = future.result()
+                results[identifier] = batch_results.get(identifier, False)
+            except Exception as e:
+                logger.error("Async hidden lookup failed for %s: %s", identifier, e)
+                results[identifier] = False
+            finally:
+                self.futures.pop(identifier, None)
+        return results
+
+    def discard(self, identifier: str) -> None:
+        future = self.futures.pop(identifier, None)
+        if future is None:
+            return
+        if not any(existing is future for existing in self.futures.values()):
+            future.cancel()
 
     def close(self):
+        self.executor.shutdown(wait=False, cancel_futures=True)
+        self.futures.clear()
         self.socket.close(linger=0)
 
 

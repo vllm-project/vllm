@@ -14,7 +14,9 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.keys import
     make_hidden_data_key,
 )
 
-HIDDEN_LAYOUT_VERSION = "vllm-encoder-cache-tensor-v1"
+HIDDEN_OBJECT_KIND = "encoder_output"
+HIDDEN_STORAGE_LAYOUT = "replicated_object"
+HIDDEN_TENSOR_LAYOUT = "tensor"
 HIDDEN_PROTOCOL_VERSION = "v1"
 MOONCAKE_TENSOR_METADATA_NBYTES = 304
 
@@ -23,10 +25,13 @@ MOONCAKE_TENSOR_METADATA_NBYTES = 304
 class HiddenKeyMetadata:
     """Metadata that defines the semantic namespace for hidden reuse."""
 
+    cache_prefix: str
+    kind: str
     model_name: str
-    mm_encoder_config_hash: str
-    hidden_parallel_key: str
-    layout: str
+    encoder: str
+    storage: str
+    parallel: str
+    tensor_layout: str
 
 
 @dataclass(frozen=True, order=True)
@@ -38,13 +43,18 @@ class HiddenPoolKey:
 
     def to_string(self) -> str:
         meta = self.key_metadata
+        prefix = (
+            f"{escape_key_part(meta.cache_prefix)}@" if meta.cache_prefix else ""
+        )
         return (
-            "hidden"
+            f"{prefix}hidden"
+            f"@kind:{escape_key_part(meta.kind)}"
             f"@model:{escape_key_part(meta.model_name)}"
-            f"@mm_encoder:{escape_key_part(meta.mm_encoder_config_hash)}"
-            f"@parallel:{escape_key_part(meta.hidden_parallel_key)}"
-            f"@layout:{escape_key_part(meta.layout)}"
-            f"@{escape_key_part(self.identifier)}"
+            f"@encoder:{escape_key_part(meta.encoder)}"
+            f"@storage:{escape_key_part(meta.storage)}"
+            f"@parallel:{escape_key_part(meta.parallel)}"
+            f"@tensor_layout:{escape_key_part(meta.tensor_layout)}"
+            f"@id:{escape_key_part(self.identifier)}"
         )
 
 
@@ -86,7 +96,6 @@ class HiddenSaveRequest:
 
     pool_key: HiddenPoolKey
     tensor: torch.Tensor
-    now_ms: int | None = None
     with_soft_pin: bool = False
 
     @property
@@ -99,10 +108,39 @@ class MooncakeStoreConnectorMetadata(ECConnectorMetadata):
     """Metadata passed from scheduler to worker for hidden store operations."""
 
     items: list[MMMeta] = field(default_factory=list)
-    unfinished_identifiers: set[str] = field(default_factory=set)
 
     def add_item(self, item: MMMeta) -> None:
         self.items.append(item)
+
+
+@dataclass
+class HiddenStoreOperationStats:
+    """Minimal per-operation telemetry aligned with Mooncake KV store stats."""
+
+    data: dict[str, list[dict[str, int | float | str]]] = field(default_factory=dict)
+
+    def is_empty(self) -> bool:
+        return not self.data
+
+    def record_operation(
+        self,
+        operation: str,
+        duration_seconds: float,
+        num_keys: int,
+        *,
+        num_bytes: int = 0,
+        status: str = "ok",
+        num_failed_keys: int = 0,
+    ) -> None:
+        self.data.setdefault(operation, []).append(
+            {
+                "duration_seconds": duration_seconds,
+                "num_keys": num_keys,
+                "num_bytes": num_bytes,
+                "status": status,
+                "num_failed_keys": num_failed_keys,
+            }
+        )
 
 
 class HiddenTensorDatabase:
@@ -131,7 +169,7 @@ def build_tensor_meta(
     return TensorMeta(
         pool_key=pool_key,
         protocol_version=HIDDEN_PROTOCOL_VERSION,
-        layout=HIDDEN_LAYOUT_VERSION,
+        layout=HIDDEN_TENSOR_LAYOUT,
         shape=tuple(tensor.shape),
         dtype=str(tensor.dtype),
         nbytes=tensor.numel() * tensor.element_size(),
@@ -160,5 +198,5 @@ def validate_loaded_tensor(tensor: torch.Tensor, meta: TensorMeta) -> None:
             f"actual={actual_nbytes} expected={meta.nbytes}"
         )
 
-    if meta.layout != HIDDEN_LAYOUT_VERSION:
+    if meta.layout != HIDDEN_TENSOR_LAYOUT:
         raise ValueError(f"Unsupported hidden tensor layout: {meta.layout}")

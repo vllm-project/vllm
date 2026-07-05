@@ -14,8 +14,8 @@ from dataclasses import dataclass
 from typing import Any
 
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.data import (
-    HIDDEN_LAYOUT_VERSION,
     HIDDEN_PROTOCOL_VERSION,
+    HIDDEN_TENSOR_LAYOUT,
     MOONCAKE_TENSOR_METADATA_NBYTES,
     HiddenPoolKey,
     TensorMeta,
@@ -68,6 +68,11 @@ _TORCH_DTYPE_TO_MOONCAKE_DTYPE = {
     "torch.bfloat16": 12,
     "torch.float8_e4m3fn": 13,
     "torch.float8_e5m2": 14,
+}
+_SUPPORTED_HIDDEN_TORCH_DTYPES = {
+    "torch.float16",
+    "torch.bfloat16",
+    "torch.float32",
 }
 
 
@@ -234,6 +239,7 @@ class MooncakeHiddenStoreClient:
         *,
         with_soft_pin: bool = False,
     ) -> None:
+        _validate_supported_hidden_tensor_dtype(tensor)
         key = make_hidden_data_key(pool_key)
         replicate_config = _make_hidden_replicate_config(
             self.replicate_config,
@@ -288,30 +294,56 @@ class MooncakeHiddenStoreClient:
         metadata = _encode_mooncake_tensor_metadata(tensor)
         metadata_buffer = (ctypes.c_ubyte * len(metadata)).from_buffer_copy(metadata)
         metadata_ptr = ctypes.addressof(metadata_buffer)
-        self.register_tensor(tensor.data_ptr(), data_size)
-        self.register_tensor(metadata_ptr, len(metadata))
+        payload_ptr = tensor.data_ptr()
+        registered_addrs: list[int] = []
+        try:
+            self.register_tensor(payload_ptr, data_size)
+            registered_addrs.append(payload_ptr)
+            self.register_tensor(metadata_ptr, len(metadata))
+            registered_addrs.append(metadata_ptr)
 
-        key = make_hidden_data_key(pool_key)
-        results = self.store.batch_put_from_multi_buffers(
-            [key],
-            [[metadata_ptr, tensor.data_ptr()]],
-            [[len(metadata), data_size]],
-            replicate_config,
-        )
-        unregister_fn = getattr(self.store, "unregister_buffer", None)
-        if unregister_fn is not None:
-            unregister_fn(metadata_ptr)
-        failed = [result for result in results if result < 0]
-        if failed:
-            raise HiddenStoreSaveError(
-                "failed to put hidden tensor for " f"{pool_key.to_string()}: {failed}"
+            key = make_hidden_data_key(pool_key)
+            results = self.store.batch_put_from_multi_buffers(
+                [key],
+                [[metadata_ptr, payload_ptr]],
+                [[len(metadata), data_size]],
+                replicate_config,
             )
+            failed = [result for result in results if result < 0]
+            if failed:
+                raise HiddenStoreSaveError(
+                    "failed to put hidden tensor for "
+                    f"{pool_key.to_string()}: {failed}"
+                )
+        finally:
+            for addr in reversed(registered_addrs):
+                self.unregister_tensor(addr)
 
     def register_tensor(self, addr: int, size: int) -> None:
         ret = self.store.register_buffer(addr, size)
         if ret != 0:
             raise HiddenStoreError(
                 f"failed to register hidden buffer addr={addr:#x} size={size}: {ret}"
+            )
+
+    def unregister_tensor(self, addr: int) -> None:
+        unregister_fn = getattr(self.store, "unregister_buffer", None)
+        if unregister_fn is None:
+            return
+        try:
+            ret = unregister_fn(addr)
+        except Exception:
+            logger.warning(
+                "failed to unregister hidden buffer addr=%#x",
+                addr,
+                exc_info=True,
+            )
+            return
+        if ret != 0:
+            logger.warning(
+                "unregister hidden buffer failed addr=%#x ret=%s",
+                addr,
+                ret,
             )
 
     def get_tensor_payload(
@@ -322,21 +354,24 @@ class MooncakeHiddenStoreClient:
         src_offset: int,
     ) -> int:
         self.register_tensor(addr, size)
-        key = make_hidden_data_key(pool_key)
-        results = self.store.get_into_ranges(
-            [addr],
-            [[key]],
-            [[[0]]],
-            [[[src_offset]]],
-            [[[size]]],
-        )
-        result = _single_range_result(results)
-        if result != size:
-            raise HiddenStoreLoadError(
-                "failed to get hidden tensor payload for "
-                f"{pool_key.to_string()}: {result}"
+        try:
+            key = make_hidden_data_key(pool_key)
+            results = self.store.get_into_ranges(
+                [addr],
+                [[key]],
+                [[[0]]],
+                [[[src_offset]]],
+                [[[size]]],
             )
-        return result
+            result = _single_range_result(results)
+            if result != size:
+                raise HiddenStoreLoadError(
+                    "failed to get hidden tensor payload for "
+                    f"{pool_key.to_string()}: {result}"
+                )
+            return result
+        finally:
+            self.unregister_tensor(addr)
 
     def _read_range(
         self,
@@ -358,9 +393,7 @@ class MooncakeHiddenStoreClient:
                 [[[size]]],
             )
         finally:
-            unregister_fn = getattr(self.store, "unregister_buffer", None)
-            if unregister_fn is not None:
-                unregister_fn(buffer_ptr)
+            self.unregister_tensor(buffer_ptr)
         if _single_range_result(results) != size:
             return None
         return bytes(buffer)
@@ -421,7 +454,7 @@ def _decode_mooncake_tensor_metadata(
     return TensorMeta(
         pool_key=pool_key,
         protocol_version=HIDDEN_PROTOCOL_VERSION,
-        layout=HIDDEN_LAYOUT_VERSION,
+        layout=HIDDEN_TENSOR_LAYOUT,
         shape=shape,
         dtype=_MOONCAKE_DTYPE_TO_TORCH_DTYPE[dtype],
         nbytes=int(data_bytes),
@@ -432,8 +465,7 @@ def _decode_mooncake_tensor_metadata(
 
 def _encode_mooncake_tensor_metadata(tensor: Any) -> bytes:
     dtype = str(tensor.dtype)
-    if dtype not in _TORCH_DTYPE_TO_MOONCAKE_DTYPE:
-        raise HiddenStoreSaveError(f"unsupported hidden tensor dtype: {dtype}")
+    _validate_supported_hidden_tensor_dtype(tensor)
     shape = tuple(int(dim) for dim in tensor.shape)
     if len(shape) > 8:
         raise HiddenStoreSaveError(
@@ -461,6 +493,12 @@ def _encode_mooncake_tensor_metadata(tensor: Any) -> bytes:
             f"invalid Mooncake tensor metadata size: {len(metadata)}"
         )
     return metadata
+
+
+def _validate_supported_hidden_tensor_dtype(tensor: Any) -> None:
+    dtype = str(tensor.dtype)
+    if dtype not in _SUPPORTED_HIDDEN_TORCH_DTYPES:
+        raise HiddenStoreSaveError(f"unsupported hidden tensor dtype: {dtype}")
 
 
 def _make_hidden_replicate_config(
