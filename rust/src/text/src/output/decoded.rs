@@ -5,7 +5,7 @@ use futures::{Stream, StreamExt};
 use serde::{Deserialize, Serialize};
 use tracing::{Level, debug, trace};
 use vllm_engine_core_client::AbortCause;
-use vllm_engine_core_client::protocol::StopReason;
+use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::{FinishReason, GenerateOutput, TokenUsage};
 use vllm_tokenizer::{DynTokenizer, IncrementalDecoder};
 
