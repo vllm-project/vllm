@@ -35,7 +35,6 @@ TRITON_W4A16_SUPPORTED_QUANT_TYPES = [
     scalar_types.uint4,  # asymmetric with explicit zeros
 ]
 
-_logged = set()
 
 @triton.jit
 def triton_w4a16_gemm_kernel(
