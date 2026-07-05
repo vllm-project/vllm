@@ -619,12 +619,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
 class JinaRankingIOProcessorMixin:
     @staticmethod
-    def sanitize_input(text: str, special_tokens: dict[str, str]) -> str:
-        for token in special_tokens.values():
-            text = text.replace(token, "")
-        return text
-
-    @staticmethod
     def format_docs_prompts_func(
         query: str,
         docs: list[str],
@@ -641,11 +635,13 @@ class JinaRankingIOProcessorMixin:
         if special_tokens is None:
             special_tokens = default_special_tokens
 
-        query = JinaRankingIOProcessorMixin.sanitize_input(query, special_tokens)
-        docs = [
-            JinaRankingIOProcessorMixin.sanitize_input(doc, special_tokens)
-            for doc in docs
-        ]
+        def sanitize_input(text: str) -> str:
+            for token in special_tokens.values():
+                text = text.replace(token, "")
+            return text
+
+        query = sanitize_input(query)
+        docs = [sanitize_input(doc) for doc in docs]
 
         prefix = (
             "<|im_start|>system\n"
@@ -668,6 +664,7 @@ class JinaRankingIOProcessorMixin:
         )
 
         if instruction:
+            instruction = sanitize_input(instruction)
             prompt += f"<instruct>\n{instruction}\n</instruct>\n"
 
         doc_prompts = [
@@ -703,12 +700,24 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
     ) -> Sequence[EngineInput]:
         queries = self.ensure_str(scoring_data.data_1)
         docs = self.ensure_str(scoring_data.data_2)
+        chat_template_kwargs = (
+            prompt_extras.get("chat_template_kwargs") if prompt_extras else None
+        )
+        instruction = (
+            chat_template_kwargs.get("instruction") if chat_template_kwargs else None
+        )
 
         if len(queries) == 1:
-            prompts = [self.format_docs_prompts_func(query=queries[0], docs=docs)]
+            prompts = [
+                self.format_docs_prompts_func(
+                    query=queries[0], docs=docs, instruction=instruction
+                )
+            ]
         else:
             prompts = [
-                self.format_docs_prompts_func(query=q, docs=[d])
+                self.format_docs_prompts_func(
+                    query=q, docs=[d], instruction=instruction
+                )
                 for q, d in zip(queries, docs)
             ]
 
