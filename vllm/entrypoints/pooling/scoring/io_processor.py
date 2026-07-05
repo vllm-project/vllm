@@ -10,6 +10,7 @@ from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
 from vllm.inputs import EngineInput
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
+from vllm.renderers.inputs.preprocess import extract_target_prompt
 from vllm.tasks import PoolingTask
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -433,8 +434,16 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_doc: int = 0,
         prompt_extras: dict[str, Any] | None = None,
     ) -> tuple[Sequence[EngineInput], list[PoolingParams]]:
-        # todo: support prompt_extras
         arrival_time = time.time()
+        engine_prompt_extras = (
+            {
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := prompt_extras.get(k)) is not None
+            }
+            if prompt_extras
+            else None
+        )
 
         data_1 = scoring_data.data_1
         data_2 = scoring_data.data_2
@@ -463,12 +472,18 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             if token_type_ids := engine_prompt.pop("token_type_ids", None):
                 params = pooling_params.clone()
                 compressed = compress_token_type_ids(token_type_ids)
-                params.extra_kwargs = {"compressed_token_type_ids": compressed}
+                params.extra_kwargs = {
+                    **(params.extra_kwargs or {}),
+                    "compressed_token_type_ids": compressed,
+                }
                 pooling_params_list.append(params)
             else:
                 pooling_params_list.append(pooling_params)
 
             tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
+            if engine_prompt_extras:
+                target_prompt = extract_target_prompt(self.model_config, engine_prompt)
+                target_prompt.update(engine_prompt_extras)
             engine_inputs.append(
                 self.renderer.process_for_engine(engine_prompt, arrival_time)
             )
