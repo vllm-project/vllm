@@ -501,7 +501,7 @@ def select_indexer_impl_cls(
             indexer_kv_dtype,
         )
         return MiniMaxM3IndexerMSAImpl
-    if indexer_kv_dtype != "bf16":
+    if indexer_kv_dtype not in ("bf16", "fp8", "fp8_e4m3"):
         raise NotImplementedError(
             f"indexer_kv_dtype={indexer_kv_dtype!r} is not supported by the "
             "Triton indexer impl."
