@@ -30,7 +30,7 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | EAGLE | High gain | Medium to high gain | Strong general-purpose model-based method. |
 | MTP | High gain | Medium to high gain | Best when the target model has native MTP support. |
 | Draft model | High gain | Medium gain | Needs a separate draft model. |
-| DFlash / Domino | High gain | Medium to high gain | Parallel drafter with optional causal correction (Domino). |
+| DFlash / Domino | — | — | Parallel drafter with optional causal correction (Domino). Gains depend on model, hardware, and workload. |
 | Parallel Draft Model | High gain | Medium to high gain | Low draft model latency. |
 | MLP speculator | Medium to high gain | Medium gain | Good when compatible MLP speculators are available. |
 | N-gram | Low to medium gain | Medium gain | Lightweight and easy to enable. |
