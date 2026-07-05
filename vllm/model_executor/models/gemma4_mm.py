@@ -22,6 +22,7 @@ import numpy as np
 import torch
 from PIL import Image as PILImage
 from torch import nn
+from torch.nn.utils.rnn import pad_sequence
 from transformers import AutoModel, BatchFeature
 from transformers.models.gemma4 import (
     Gemma4Config,
@@ -154,6 +155,26 @@ class Gemma4AudioInputs(TensorSchema):
     input_features_mask: Annotated[
         torch.Tensor, TensorShape("bn", "s", dynamic_dims={"s"})
     ]
+
+
+def _pad_ragged_audio_features(
+    input_features_padded: torch.Tensor | list[torch.Tensor],
+    input_features_mask: torch.Tensor | list[torch.Tensor],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Re-pad per-audio features to the batch max sequence length.
+
+    `_call_hf_processor` stores each audio's features unpadded so that
+    cache entries are independent of the batch they were processed with.
+    `MultiModalFieldConfig.batched()` stacks items only when their shapes
+    are all equal and otherwise yields a plain list, so audios with
+    different frame counts arrive here as ragged lists.
+    """
+    if isinstance(input_features_padded, torch.Tensor):
+        return input_features_padded, input_features_mask
+    return (
+        pad_sequence(list(input_features_padded), batch_first=True),
+        pad_sequence(list(input_features_mask), batch_first=True, padding_value=False),
+    )
 
 
 Gemma4ImageInputs = Gemma4ImagePixelInputs
@@ -739,10 +760,11 @@ class Gemma4MultiModalProcessor(BaseMultiModalProcessor[Gemma4ProcessingInfo]):
 
         if "input_features" in processed_outputs:
             # Unpad per-item so each item's cache entry is
-            # self-contained. The batched() field config in
-            # _get_mm_fields_config will re-pad all fields to the
-            # batch's max length at batch time, ensuring consistent
-            # padding regardless of cache history.
+            # self-contained regardless of which audios it was
+            # co-processed with. The batched() field config does NOT
+            # re-pad ragged items at batch time (it yields a plain
+            # list), so _parse_and_validate_audio_input re-pads to the
+            # batch max via _pad_ragged_audio_features.
             masks = processed_outputs["input_features_mask"]
             unpadded_features = [
                 f[mask]
@@ -1160,6 +1182,9 @@ class Gemma4ForConditionalGeneration(
         input_features_mask = kwargs.pop("input_features_mask", None)
         if input_features_mask is None:
             return None
+        input_features_padded, input_features_mask = _pad_ragged_audio_features(
+            input_features_padded, input_features_mask
+        )
         return Gemma4AudioInputs(
             input_features_padded=input_features_padded,
             input_features_mask=input_features_mask,
@@ -1474,8 +1499,8 @@ class Gemma4ForConditionalGeneration(
         self,
         audio_input: Gemma4AudioInputs,
     ) -> list[torch.Tensor]:
-        input_features = audio_input["input_features_padded"].squeeze(1)
-        input_features_mask = audio_input["input_features_mask"].squeeze(1)
+        input_features = audio_input["input_features_padded"]
+        input_features_mask = audio_input["input_features_mask"]
 
         # Run audio tower — mask convention: True=valid, False=padding.
         audio_outputs = self.audio_tower(input_features, input_features_mask)

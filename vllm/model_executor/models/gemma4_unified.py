@@ -47,6 +47,7 @@ from vllm.model_executor.models.gemma4_mm import (
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.multimodal.processing.processor import PromptUpdateDetails
 
 from .utils import (
     AutoWeightsLoader,
@@ -182,6 +183,36 @@ class Gemma4UnifiedProcessingInfo(Gemma4ProcessingInfo):
             num_frames = min(num_frames, video_opts.num_frames)
         tokens["video"] = num_frames * (_VIDEO_MAX_SOFT_TOKENS + 2 + 6)
         return tokens
+
+    def get_audio_repl(
+        self,
+        *,
+        audio_len: int,
+        processor: Gemma4UnifiedProcessor | None,
+    ) -> PromptUpdateDetails[list[int]]:
+        """Return the dynamic audio token sequence for this audio.
+
+        The unified variant is encoder-free: the feature extractor pads
+        the waveform up to a multiple of ``audio_samples_per_token``
+        (640) and emits one soft token per frame with no downsampling,
+        so the token count is ``ceil(audio_len / 640)`` — matching
+        ``Gemma4UnifiedProcessor.replace_audio_token`` (mask.sum()).
+        The parent's mel + conv subsampling arithmetic applies only to
+        the tower-based variant and undercounts by one whenever
+        ``audio_len % 640`` falls in [1, 160].
+        """
+        if processor is None:
+            processor = self.get_hf_processor()
+
+        samples_per_token = processor.feature_extractor.audio_samples_per_token
+        num_tokens = math.ceil(audio_len / samples_per_token)
+        config = self.get_hf_config()
+        token_ids = (
+            [config.boa_token_id]
+            + [processor.audio_token_id] * num_tokens
+            + [getattr(config, "eoa_token_id", config.eoa_token_index)]
+        )
+        return PromptUpdateDetails.select_token_id(token_ids, processor.audio_token_id)
 
     def _compute_num_soft_tokens(
         self,
@@ -423,8 +454,8 @@ class Gemma4UnifiedForConditionalGeneration(Gemma4ForConditionalGeneration):
         No audio tower: the per-frame raw features are passed straight
         through the multimodal embedder, then padding is stripped.
         """
-        input_features = audio_input["input_features_padded"].squeeze(1)
-        input_features_mask = audio_input["input_features_mask"].squeeze(1)
+        input_features = audio_input["input_features_padded"]
+        input_features_mask = audio_input["input_features_mask"]
 
         target_dtype = self.embed_audio.embedding_projection.weight.dtype
         audio_features = self.embed_audio(input_features.to(target_dtype))
