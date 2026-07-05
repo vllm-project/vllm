@@ -7,7 +7,6 @@ from dataclasses import dataclass
 
 import numpy as np
 import torch
-from typing_extensions import override
 
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
@@ -20,16 +19,14 @@ from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     GPULoadStoreSpec,
+    LoadStoreSpec,
+    OffloadingWorker,
+    TransferResult,
 )
 from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.cpu.swap_blocks_triton import (
     THRESHOLD_BYTES,
     swap_blocks_batch,
-)
-from vllm.v1.kv_offload.worker.worker import (
-    OffloadingHandler,
-    TransferResult,
-    TransferSpec,
 )
 
 logger = init_logger(__name__)
@@ -166,10 +163,9 @@ def _new_descriptor_buffers(
     )
 
 
-class SingleDirectionOffloadingHandler(OffloadingHandler):
+class SingleDirectionOffloadingHandler:
     """
-    SingleDirectionOffloadingHandler handles transfers for a single direction,
-    either CPU->GPU or GPU->CPU.
+    Handles transfers for a single direction, either CPU->GPU or GPU->CPU.
     Transfers are guaranteed to be executed in order of their submission.
     Each transfer uses a unique CUDA stream, and its stream will start
     executing only after the streams of previous transfers have finished.
@@ -228,7 +224,6 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         self.src_block_size_factor = 1 if self.gpu_to_cpu else block_size_factor
         self.dst_block_size_factor = block_size_factor if self.gpu_to_cpu else 1
 
-        self.transfer_type = ("GPU", "CPU") if self.gpu_to_cpu else ("CPU", "GPU")
         # mmap_region to clean up on shutdown (gpu_to_cpu handler owns it)
         self._mmap_region = mmap_region
         # job_id -> event
@@ -242,9 +237,9 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # list of pinned descriptor buffer sets available for re-use
         self._buffer_pool: list[tuple[torch.Tensor, torch.Tensor, torch.Tensor]] = []
 
-    @override
-    def transfer_async(self, job_id: int, transfer_spec: TransferSpec) -> bool:
-        src_spec, dst_spec = transfer_spec
+    def transfer_async(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
         assert isinstance(src_spec, BlockIDsLoadStoreSpec)
         assert isinstance(dst_spec, BlockIDsLoadStoreSpec)
 
@@ -425,7 +420,6 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
         # success
         return True
 
-    @override
     def get_finished(self) -> list[TransferResult]:
         results: list[TransferResult] = []
         while self._transfers and self._transfers[0].end_event.query():
@@ -438,7 +432,6 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
                 success=True,
                 transfer_size=transfer.num_bytes,
                 transfer_time=transfer_time,
-                transfer_type=self.transfer_type,
             )
 
             results.append(result)
@@ -451,14 +444,12 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             del self._transfer_events[transfer.job_id]
         return results
 
-    @override
     def wait(self, job_ids: set[int]):
         for job_id in job_ids:
             event = self._transfer_events.get(job_id)
             if event is not None:
                 event.synchronize()
 
-    @override
     def shutdown(self) -> None:
         while self._transfers:
             transfer = self._transfers.popleft()
@@ -474,7 +465,14 @@ class SingleDirectionOffloadingHandler(OffloadingHandler):
             self._mmap_region = None
 
 
-class CpuGpuOffloadingHandlers:
+class CPUOffloadingWorker(OffloadingWorker):
+    """OffloadingWorker for CPU offloading.
+
+    Composes two SingleDirectionOffloadingHandler instances (one for each
+    direction) and exposes them through the explicit submit_store /
+    submit_load API.
+    """
+
     def __init__(
         self,
         kv_caches: CanonicalKVCaches,
@@ -484,7 +482,6 @@ class CpuGpuOffloadingHandlers:
     ):
         pin_memory = PIN_MEMORY
         logger.info("Allocating %d CPU tensors...", len(kv_caches.tensors))
-        self._mmap_region = mmap_region
         if mmap_region is not None and pin_memory:
             pin_mmap_region(mmap_region)
 
@@ -518,7 +515,7 @@ class CpuGpuOffloadingHandlers:
             gpu_tensors.append(gpu_tensor)
             cpu_tensors.append(cpu_tensor)
 
-        self.gpu_to_cpu_handler = SingleDirectionOffloadingHandler(
+        self._store_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
             block_size_factor=block_size_factor,
@@ -527,10 +524,33 @@ class CpuGpuOffloadingHandlers:
             mmap_region=mmap_region,
         )
 
-        self.cpu_to_gpu_handler = SingleDirectionOffloadingHandler(
+        self._load_handler = SingleDirectionOffloadingHandler(
             gpu_tensors=gpu_tensors,
             cpu_tensors=cpu_tensors,
             block_size_factor=block_size_factor,
             kv_cache_groups_data_refs=kv_caches.group_data_refs,
             gpu_to_cpu=False,
         )
+
+    def submit_store(
+        self, job_id: int, src_spec: GPULoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
+        """Async GPU -> CPU."""
+        return self._store_handler.transfer_async(job_id, src_spec, dst_spec)
+
+    def submit_load(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: GPULoadStoreSpec
+    ) -> bool:
+        """Async CPU -> GPU."""
+        return self._load_handler.transfer_async(job_id, src_spec, dst_spec)
+
+    def get_finished(self) -> list[TransferResult]:
+        return self._store_handler.get_finished() + self._load_handler.get_finished()
+
+    def wait(self, job_ids: set[int]) -> None:
+        self._store_handler.wait(job_ids)
+        self._load_handler.wait(job_ids)
+
+    def shutdown(self) -> None:
+        self._store_handler.shutdown()
+        self._load_handler.shutdown()

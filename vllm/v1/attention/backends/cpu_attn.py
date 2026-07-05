@@ -64,6 +64,10 @@ class CPUAttentionBackend(AttentionBackend):
         return "CPU_ATTN"
 
     @classmethod
+    def supports_non_causal(cls) -> bool:
+        return True
+
+    @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
         """CPU attention supports decoder,
         encoder-only and encoder-decoder attention."""
@@ -137,7 +141,7 @@ class CPUAttentionMetadataBuilder(AttentionMetadataBuilder[CPUAttentionMetadata]
         self.vllm_config = vllm_config
 
         parallel_config = vllm_config.parallel_config
-        self.num_kv_heads = vllm_config.model_config.get_num_kv_heads(parallel_config)
+        self.num_kv_heads = kv_cache_spec.num_kv_heads
         self.num_heads = vllm_config.model_config.get_num_attention_heads(
             parallel_config
         )

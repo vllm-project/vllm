@@ -189,6 +189,9 @@ class Scheduler(SchedulerInterface):
         # This is flushed at the end of each scheduling step.
         self.finished_req_ids: set[str] = set()
 
+        # IDs of requests preempted since the last call to schedule().
+        self.reset_preempted_req_ids: set[str] = set()
+
         # Counter for requests waiting for streaming input. Used to calculate
         # number of unfinished requests
         self.num_waiting_for_streaming_input: int = 0
@@ -247,6 +250,11 @@ class Scheduler(SchedulerInterface):
                 # decoding instead of standard next-token sampling, so it has a query
                 # for the last sampled token plus queries for each draft token.
                 self.num_lookahead_tokens = self.num_spec_tokens + 1
+            if speculative_config.use_dspark():
+                # DSpark drafts a block of num_spec_tokens query tokens in which the
+                # anchor itself is the first prediction position (no separate bonus
+                # query), so it needs exactly num_spec_tokens lookahead slots.
+                self.num_lookahead_tokens = self.num_spec_tokens
 
         # Create the KV cache manager.
         if hash_block_size is None:
@@ -415,6 +423,8 @@ class Scheduler(SchedulerInterface):
         encoder_compute_budget = self.max_num_encoder_input_tokens
         # Spec decode-related.
         scheduled_spec_decode_tokens: dict[str, list[int]] = {}
+        # Whether the running batch contains any prefill requests.
+        prefill_scheduled = False
 
         # For logging.
         scheduled_timestamp = time.monotonic()
@@ -573,6 +583,7 @@ class Scheduler(SchedulerInterface):
 
             # Schedule the request.
             scheduled_running_reqs.append(request)
+            prefill_scheduled |= request.is_prefill_chunk
             request_id = request.request_id
             req_to_new_blocks[request_id] = new_blocks
             num_scheduled_tokens[request_id] = num_new_tokens
@@ -627,7 +638,10 @@ class Scheduler(SchedulerInterface):
             step_skipped_waiting = create_request_queue(self.policy)
 
             while (self.waiting or self.skipped_waiting) and token_budget > 0:
-                if len(self.running) == self.max_num_running_reqs:
+                # Paused streaming sessions (WAITING_FOR_STREAMING_REQ) are not
+                # in `running` but still hold a model-runner request slot.
+                num_running = len(self.running) + self.num_waiting_for_streaming_input
+                if num_running >= self.max_num_running_reqs:
                     break
 
                 request_queue = self._select_waiting_queue_for_scheduling()
@@ -778,15 +792,15 @@ class Scheduler(SchedulerInterface):
                 encoder_inputs_to_schedule = None
                 external_load_encoder_input = []
                 new_encoder_compute_budget = encoder_compute_budget
+                pad_spec_decode = False
 
                 if load_kv_async:
                     # KVTransfer: loading remote KV, do not allocate for new work.
                     assert num_external_computed_tokens > 0
                     num_new_tokens = 0
-                elif defer_prefills and request.num_computed_tokens == 0:
-                    # DP prefill balancing: async KV loads (the branch above) are
-                    # allowed to start even on throttled steps, but committing new
-                    # prefill compute is deferred to a cadence-aligned step.
+                elif defer_prefills and num_computed_tokens < request.num_tokens - 1:
+                    # DP prefill balancing: defer this step's local prefill
+                    # compute to a cadence-aligned step.
                     break
                 else:
                     # Number of tokens to be scheduled.
@@ -794,6 +808,23 @@ class Scheduler(SchedulerInterface):
                     # `request.num_prompt_tokens` to consider the resumed
                     # requests, which have output tokens.
                     num_new_tokens = request.num_tokens - num_computed_tokens
+
+                    # Pad new decode requests to uniform spec decoding size to
+                    # preserve full cudagraph for this step.
+                    if (
+                        (self.num_spec_tokens > 0 and self.dynamic_sd_lookup is None)
+                        and num_new_tokens == 1
+                        and (scheduled_running_reqs and not prefill_scheduled)
+                    ):
+                        num_new_tokens = 1 + self.num_spec_tokens
+                        if (
+                            num_new_tokens > token_budget
+                            or num_computed_tokens + num_new_tokens > self.max_model_len
+                        ):
+                            # Prefer to not schedule than schedule un-padded here.
+                            break
+                        pad_spec_decode = True
+
                     threshold = self.scheduler_config.long_prefill_token_threshold
                     if 0 < threshold < num_new_tokens:
                         num_new_tokens = threshold
@@ -958,6 +989,10 @@ class Scheduler(SchedulerInterface):
                 token_budget -= num_new_tokens
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
+                if pad_spec_decode:
+                    scheduled_spec_decode_tokens[request_id] = [
+                        -1
+                    ] * self.num_spec_tokens
                 # Only track requests that will still be prefilling after this chunk.
                 if num_computed_tokens + num_new_tokens < request.num_tokens:
                     self._inflight_prefills.add(request)
@@ -1064,7 +1099,7 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_decode_tokens=scheduled_spec_decode_tokens,
             scheduled_encoder_inputs=scheduled_encoder_inputs,
             num_common_prefix_blocks=num_common_prefix_blocks,
-            preempted_req_ids={req.request_id for req in preempted_reqs},
+            preempted_req_ids=self.reset_preempted_req_ids,
             # finished_req_ids is an existing state in the scheduler,
             # instead of being newly scheduled in this step.
             # It contains the request IDs that are finished in between
@@ -1126,6 +1161,7 @@ class Scheduler(SchedulerInterface):
 
         # Put the request back to the waiting queue.
         self.waiting.prepend_request(request)
+        self.reset_preempted_req_ids.add(request.request_id)
 
     def _update_after_schedule(self, scheduler_output: SchedulerOutput) -> None:
         # Advance the number of computed tokens for the request AFTER
@@ -1170,10 +1206,11 @@ class Scheduler(SchedulerInterface):
                 }
             )
 
-        # Clear the finished request IDs.
-        # NOTE: We shouldn't do self.finished_req_ids.clear() here because
-        # it will also affect the scheduler output.
+        # Clear the finished and preempted request IDs.
+        # NOTE: We shouldn't just clear() here because it will also affect
+        # the scheduler output.
         self.finished_req_ids = set()
+        self.reset_preempted_req_ids = set()
 
     def _update_request_as_session(
         self, session: Request, update: StreamingUpdate
@@ -1603,8 +1640,9 @@ class Scheduler(SchedulerInterface):
                 assert struct_output_request is not None
                 grammar = struct_output_request.grammar
                 assert grammar is not None
-                # Reasoning content (up to and including the end marker) is
-                # not grammar content; drop it before advancing (#44006).
+                # new_token_ids can be a mixed block of reasoning content, then
+                # the reasoning end marker, then the start of the grammar content.
+                # Trim the reasoning content so the grammar only sees grammar content.
                 advance_token_ids = (
                     self.structured_output_manager.trim_reasoning_for_advance(
                         request, new_token_ids
@@ -2328,6 +2366,7 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager.remove_skipped_blocks(
             request_id=request.request_id,
             total_computed_tokens=request.num_computed_tokens,
+            num_prompt_tokens=request.num_prompt_tokens,
         )
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)

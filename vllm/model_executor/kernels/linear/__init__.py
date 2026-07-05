@@ -88,6 +88,7 @@ from vllm.model_executor.kernels.linear.mxfp8.emulation import (
     EmulationMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+    FlashInferCutedslMxfp8LinearKernel,
     FlashInferCutlassMxfp8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.mxfp8.marlin import (
@@ -170,7 +171,8 @@ from vllm.model_executor.kernels.linear.scaled_mm.triton import (
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
     XPUFp8BlockScaledMMKernel,
-    XPUFP8ScaledMMLinearKernel,
+    XPUW8A8FP8LinearKernel,
+    XPUW8A16FP8LinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
     ZentorchInt8ScaledMMLinearKernel,
@@ -212,6 +214,7 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
     },
     "flashinfer_cutedsl": {
         FlashInferCuteDslNvFp4LinearKernel,
+        FlashInferCutedslMxfp8LinearKernel,
     },
     "flashinfer_trtllm": {
         FlashInferTrtllmNvFp4LinearKernel,
@@ -264,6 +267,13 @@ _LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
         EmulationMxfp8LinearKernel,
         EmulationNvFp4LinearKernel,
     },
+    "xpu": {
+        XPUW8A8FP8LinearKernel,
+        XPUFp8BlockScaledMMKernel,
+    },
+    "xpu_woq": {
+        XPUW8A16FP8LinearKernel,
+    },
 }
 
 
@@ -309,7 +319,8 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.XPU: [
-        XPUFP8ScaledMMLinearKernel,
+        XPUW8A16FP8LinearKernel,
+        XPUW8A8FP8LinearKernel,
     ],
 }
 
@@ -349,7 +360,7 @@ _POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]
         # To be added
     ],
     PlatformEnum.XPU: [
-        XPUFP8ScaledMMLinearKernel,
+        XPUW8A16FP8LinearKernel,
     ],
 }
 
@@ -385,6 +396,7 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
 # in priority/performance order (when available)
 _POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
     PlatformEnum.CUDA: [
+        FlashInferCutedslMxfp8LinearKernel,
         FlashInferCutlassMxfp8LinearKernel,
         MarlinMxfp8LinearKernel,
         EmulationMxfp8LinearKernel,
@@ -1036,6 +1048,7 @@ __all__ = [
     "MxFp4LinearLayerConfig",
     "FlashInferMxFp4LinearKernel",
     "MarlinMxFp4LinearKernel",
+    "FlashInferCutedslMxfp8LinearKernel",
     "FlashInferCutlassMxfp8LinearKernel",
     "MarlinMxfp8LinearKernel",
     "XPUMxFp8LinearKernel",
