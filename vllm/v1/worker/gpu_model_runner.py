@@ -5371,8 +5371,15 @@ class GPUModelRunner(
             options = None
         options = self._maybe_enable_stock_graph_partition(options, backend)
 
-        compilation_counter.stock_torch_compile_count += 1
-        self.model.compile(fullgraph=True, backend=backend, options=options)
+        # VLLM_USE_AOT_COMPILE selects the aot_compile driver (a standalone
+        # AOTCompiledFunction, no eval frame / per-call guards) over the default
+        # lazy eval-frame nn.Module.compile(). Everything else (external cudagraph
+        # wrapper, Inductor graph partition, fusion passes) is identical.
+        use_aot = self._use_stock_aot(backend)
+
+        if not use_aot:
+            compilation_counter.stock_torch_compile_count += 1
+            self.model.compile(fullgraph=True, backend=backend, options=options)
 
         # A model-backed spec-decode drafter runs under the same engine-global STOCK
         # mode; its @support_torch_compile decorator does not use vLLM's custom
@@ -5385,9 +5392,35 @@ class GPUModelRunner(
         # model and are skipped.
         drafter = getattr(self, "drafter", None)
         drafter_model = getattr(drafter, "model", None)
-        if isinstance(drafter_model, torch.nn.Module):
+        if isinstance(drafter_model, torch.nn.Module) and not use_aot:
             compilation_counter.stock_torch_compile_count += 1
             drafter_model.compile(fullgraph=True, backend=backend, options=options)
+
+        if use_aot:
+            from vllm.compilation.stock_aot import install_stock_aot_forward
+
+            install_stock_aot_forward(self.model, self.vllm_config, options)
+            if isinstance(drafter_model, torch.nn.Module):
+                install_stock_aot_forward(drafter_model, self.vllm_config, options)
+
+    def _use_stock_aot(self, backend: str | Callable[..., Any]) -> bool:
+        """Whether to drive the stock compile through the aot_compile API.
+
+        Gated on VLLM_USE_AOT_COMPILE, an inductor backend (aot serialization is
+        only wired for the inductor/AOTAutograd path), and torch exposing the API;
+        otherwise fall back to the eval-frame nn.Module.compile() driver.
+        """
+        if not envs.VLLM_USE_AOT_COMPILE or backend != "inductor":
+            return False
+        from vllm.compilation.stock_aot import stock_aot_available
+
+        if not stock_aot_available():
+            logger.warning_once(
+                "VLLM_USE_AOT_COMPILE is set but this torch build lacks the "
+                "aot_compile API; falling back to the eval-frame stock compile."
+            )
+            return False
+        return True
 
     def _maybe_enable_stock_graph_partition(
         self, options: dict[str, Any] | None, backend: str | Callable[..., Any]

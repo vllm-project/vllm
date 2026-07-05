@@ -174,6 +174,123 @@ def test_stock_torch_compile(vllm_runner, monkeypatch):
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
+def test_stock_aot_torch_compile(vllm_runner, monkeypatch):
+    # VLLM_USE_AOT_COMPILE drives the stock path through the aot_compile API
+    # instead of the lazy eval-frame nn.Module.compile(). The compile fires on the
+    # first forward (profile_run), so by the time the runner is up num_aot_compiles
+    # and stock_torch_compile_count are both 1 -- the model runs off a standalone
+    # AOTCompiledFunction, not the Dynamo eval frame.
+    from vllm.compilation.stock_aot import stock_aot_available
+
+    if not stock_aot_available():
+        pytest.skip("torch build lacks the aot_compile API")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    # Isolate a fresh compile (no serialized artifact reuse) so num_aot_compiles
+    # is a reliable signal rather than a possible num_aot_artifacts_loaded hit.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    with (
+        compilation_counter.expect(
+            num_aot_compiles=1,
+            stock_torch_compile_count=1,
+        ),
+        vllm_runner(
+            "facebook/opt-125m",
+            compilation_config={
+                "mode": CompilationMode.STOCK_TORCH_COMPILE,
+                # Pin FULL_DECODE_ONLY + partition off: a piecewise cudagraph_mode
+                # without graph partition falls the config back to VllmBackend, which
+                # would (incorrectly) satisfy num_aot_compiles via the VllmBackend aot
+                # path instead of the stock aot path under test.
+                "use_inductor_graph_partition": False,
+                "cudagraph_mode": CUDAGraphMode.FULL_DECODE_ONLY,
+                "cudagraph_capture_sizes": [100],
+            },
+            gpu_memory_utilization=0.4,
+        ) as _,
+    ):
+        pass
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
+def test_stock_aot_installs_forward_not_eval_frame(vllm_runner, monkeypatch):
+    # The aot path must replace the model's forward with the _StockAOTForward
+    # driver and must NOT arm nn.Module.compile(): _compiled_call_impl stays None
+    # (no eval-frame dispatch) while forward is an _StockAOTForward carrying a live
+    # AOTCompiledFunction after the first forward.
+    from vllm.compilation.stock_aot import _StockAOTForward, stock_aot_available
+
+    if not stock_aot_available():
+        pytest.skip("torch build lacks the aot_compile API")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    with vllm_runner(
+        "facebook/opt-125m",
+        compilation_config={
+            "mode": CompilationMode.STOCK_TORCH_COMPILE,
+            "use_inductor_graph_partition": False,
+            "cudagraph_mode": CUDAGraphMode.FULL_DECODE_ONLY,
+            "cudagraph_capture_sizes": [100],
+        },
+        gpu_memory_utilization=0.4,
+    ) as m:
+        runner = m.llm.llm_engine.model_executor.driver_worker.worker.model_runner
+        model = runner.get_model()
+        assert isinstance(model.forward, _StockAOTForward)
+        assert model.forward._aot_fn is not None
+        assert model._compiled_call_impl is None
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
+@pytest.mark.parametrize("use_partition", [False, True])
+def test_stock_aot_matches_eval_frame_stock(vllm_runner, monkeypatch, use_partition):
+    # The aot driver must be numerically identical to the eval-frame stock driver:
+    # same stock Inductor backend, same external cudagraph + graph-partition wiring,
+    # only the compile trigger differs. Compare greedy decode of the two drivers for
+    # each partition setting. A divergence isolates an aot-specific bug (wrong self
+    # arg, stale guard, bad artifact) rather than compile-vs-eager drift.
+    from vllm.compilation.stock_aot import stock_aot_available
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if not stock_aot_available():
+        pytest.skip("torch build lacks the aot_compile API")
+    if use_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("use_inductor_graph_partition requires torch>=2.9.0.dev")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    prompts = [
+        "The capital of France is",
+        "The quick brown fox jumps over the",
+    ]
+
+    def _greedy(use_aot):
+        cc = {
+            "mode": CompilationMode.STOCK_TORCH_COMPILE,
+            "use_inductor_graph_partition": use_partition,
+            "cudagraph_capture_sizes": [8],
+        }
+        if not use_partition:
+            cc["cudagraph_mode"] = CUDAGraphMode.FULL_DECODE_ONLY
+        with monkeypatch.context() as mp:
+            mp.setenv("VLLM_USE_AOT_COMPILE", "1" if use_aot else "0")
+            mp.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+            with vllm_runner(
+                "facebook/opt-125m",
+                compilation_config=cc,
+                gpu_memory_utilization=0.4,
+            ) as m:
+                return m.generate_greedy(prompts, max_tokens=32)
+
+    eval_frame = _greedy(use_aot=False)
+    aot = _greedy(use_aot=True)
+    for (base_ids, _), (aot_ids, _) in zip(eval_frame, aot):
+        assert base_ids == aot_ids
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
 def test_stock_torch_compile_piecewise_graph_partition(vllm_runner, monkeypatch):
     # Stock + use_inductor_graph_partition recovers piecewise cudagraphs (step 2 of
     # the VllmBackend migration): Inductor partitions at the attention ops and the
