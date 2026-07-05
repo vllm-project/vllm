@@ -271,6 +271,10 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             self.connector.bind_gpu_block_pool(self.kv_cache_manager.block_pool)
 
+        # Extend request-level deferral to blocks freed mid-flight when an
+        # attention window slides forward (sliding-window / chunked-local / R-SWA).
+        self.kv_cache_manager.block_pool.defer_skipped_free = self.defer_block_free
+
         self.use_pp = self.parallel_config.pipeline_parallel_size > 1
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
         # Scheduler iteration counter. Drives the V2+PP+async decode-throttle
@@ -387,6 +391,11 @@ class Scheduler(SchedulerInterface):
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
         self.current_step += 1
+        # Fence mid-flight skipped-block frees to the reader step: sched_step_seq
+        # still holds the prior step's value here (it advances after allocation),
+        # which is exactly the in-flight forward that may still read these blocks.
+        if self.defer_block_free:
+            self.kv_cache_manager.block_pool.skipped_free_fence = self.sched_step_seq
         # NOTE(woosuk) on the scheduling algorithm:
         # There's no "decoding phase" nor "prefill phase" in the scheduler.
         # Each request just has the num_computed_tokens and
@@ -1504,6 +1513,9 @@ class Scheduler(SchedulerInterface):
         if self.defer_block_free and scheduler_output.total_num_scheduled_tokens > 0:
             self.processed_step_seq += 1
             self._drain_deferred_frees()
+            self.kv_cache_manager.block_pool.drain_skipped_frees(
+                self.processed_step_seq
+            )
 
         perf_stats: PerfStats | None = None
         if self.perf_metrics and self.perf_metrics.is_enabled():

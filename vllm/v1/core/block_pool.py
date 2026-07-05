@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections import deque
 from collections.abc import Iterable, Sequence
 from typing import Any
 
@@ -195,6 +196,14 @@ class BlockPool:
         self.kv_event_queue: list[KVCacheEvent] = []
 
         self.metrics_collector = metrics_collector
+
+        # Deferral of blocks a running request frees mid-flight (attention
+        # windows sliding forward). Enabled by the scheduler; fenced by the
+        # scheduling step seq so a block reused as a load destination cannot
+        # clobber it while an in-flight forward still reads it (load-WAR).
+        self.defer_skipped_free = False
+        self.skipped_free_fence = 0
+        self.deferred_skipped_frees: deque[tuple[int, list[KVCacheBlock]]] = deque()
 
     def get_cached_block(
         self, block_hash: BlockHash, kv_cache_group_ids: list[int]
@@ -633,6 +642,28 @@ class BlockPool:
         # Blocks without hash always get evicted first - prepend them last to the tail
         self.free_block_queue.prepend_n(blocks_without_hash)
         self.free_block_queue.append_n(blocks_with_hash)
+
+    def free_blocks_maybe_deferred(self, ordered_blocks: list[KVCacheBlock]) -> None:
+        """Free skipped blocks, deferring the pool return when fencing is active.
+
+        See ``defer_skipped_free`` for why the deferral is needed.
+        """
+        if not self.defer_skipped_free:
+            self.free_blocks(ordered_blocks)
+            return
+        if ordered_blocks:
+            self.deferred_skipped_frees.append(
+                (self.skipped_free_fence, ordered_blocks)
+            )
+
+    def drain_skipped_frees(self, processed_step_seq: int) -> None:
+        """Return deferred skipped blocks whose fence step has been processed."""
+        while self.deferred_skipped_frees:
+            fence, _ = self.deferred_skipped_frees[0]
+            if fence > processed_step_seq:
+                break
+            _, blocks = self.deferred_skipped_frees.popleft()
+            self.free_blocks(blocks)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.

@@ -502,7 +502,7 @@ class SingleTypeKVCacheManager(ABC):
             freed.append(blocks[i])
             blocks[i] = self._null_block
         if freed:
-            self.block_pool.free_blocks(freed)
+            self.block_pool.free_blocks_maybe_deferred(freed)
 
     def remove_skipped_blocks(
         self,
