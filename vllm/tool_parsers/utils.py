@@ -495,15 +495,22 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     return candidate, added_text
 
 
+# All primitive JSON Schema types, used when a schema has no type constraint.
+_ALL_JSON_SCHEMA_TYPES: list[str] = [
+    "string", "number", "integer", "boolean", "null", "object", "array"
+]
+
+
 def extract_types_from_schema(schema: Any) -> list[str]:
     """Extract all possible type strings from a JSON Schema definition.
 
     Handles ``type`` (string or list), ``enum`` value inference, and
-    recursive ``anyOf``/``oneOf``/``allOf``.  Returns ``["string"]``
-    when no type information can be determined.
+    recursive ``anyOf``/``oneOf``/``allOf``.  Returns all JSON Schema
+    primitive types when no type information can be determined, since an
+    absent ``type`` field means any type is allowed per the JSON Schema spec.
     """
     if schema is None or not isinstance(schema, dict):
-        return ["string"]
+        return _ALL_JSON_SCHEMA_TYPES
 
     types: set[str] = set()
 
@@ -538,7 +545,7 @@ def extract_types_from_schema(schema: Any) -> list[str]:
             for choice in schema[choice_field]:
                 types.update(extract_types_from_schema(choice))
 
-    return list(types) if types else ["string"]
+    return list(types) if types else _ALL_JSON_SCHEMA_TYPES
 
 
 _TYPE_ALIASES: dict[str, str] = {
