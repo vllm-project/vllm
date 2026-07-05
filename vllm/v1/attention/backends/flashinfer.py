@@ -3,6 +3,7 @@
 """Attention layer with FlashInfer."""
 
 from dataclasses import dataclass
+from enum import Enum
 from functools import partial
 from typing import ClassVar
 
@@ -19,6 +20,7 @@ from flashinfer.prefill import trtllm_batch_context_with_kv_cache
 from flashinfer.utils import FP4Tensor
 from typing_extensions import override
 
+from vllm import _custom_ops as custom_ops
 from vllm import envs
 from vllm.config import (
     CUDAGraphMode,
@@ -38,6 +40,8 @@ from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.flashinfer import (
     can_use_trtllm_attention,
+    force_use_trtllm_attention,
+    supports_trtllm_attention,
     use_trtllm_attention,
 )
 from vllm.utils.math_utils import cdiv
@@ -84,16 +88,16 @@ FP4_DTYPE = torch.uint8
 
 logger = init_logger(__name__)
 
-trtllm_gen_workspace_buffer = None
+trtllm_workspace_buffer = None
 
 
-def _get_trtllm_gen_workspace_buffer():
-    global trtllm_gen_workspace_buffer
-    if trtllm_gen_workspace_buffer is None:
-        trtllm_gen_workspace_buffer = torch.zeros(
+def _get_trtllm_workspace_buffer():
+    global trtllm_workspace_buffer
+    if trtllm_workspace_buffer is None:
+        trtllm_workspace_buffer = torch.zeros(
             envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE, dtype=torch.uint8, device="cuda"
         )
-    return trtllm_gen_workspace_buffer
+    return trtllm_workspace_buffer
 
 
 @triton.jit
@@ -350,6 +354,7 @@ class FlashInferBackend(AttentionBackend):
             use_large_pages = (
                 num_kv_heads > 0
                 and num_qo_heads // num_kv_heads > 1
+                and current_platform.is_device_capability_family(100)
                 and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
             )
         if not use_large_pages:
@@ -419,6 +424,16 @@ class FlashInferBackend(AttentionBackend):
             raise ValueError(f"Unrecognized dtype: {kv_cache_dtype}")
 
     @classmethod
+    def supports_kv_cache_dtype(cls, kv_cache_dtype: CacheDType | None) -> bool:
+        if kv_cache_dtype == "nvfp4":
+            return (
+                current_platform.is_device_capability_family(100)
+                and supports_trtllm_attention(is_prefill=True)
+                and supports_trtllm_attention(is_prefill=False)
+            )
+        return super().supports_kv_cache_dtype(kv_cache_dtype)
+
+    @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
         # https://github.com/flashinfer-ai/flashinfer/blob/3d55c71a62052c590c130897d3a3db49b14fcc34/include/flashinfer/utils.cuh#L157
         return [64, 128, 256, 512]
@@ -436,10 +451,9 @@ class FlashInferBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
-        """FlashInfer supports sinks when TRTLLM attention is available (SM100)."""
+        """FlashInfer supports sinks only on the SM100 trtllm-gen path."""
         from vllm.utils.flashinfer import (
             force_use_trtllm_attention,
-            supports_trtllm_attention,
         )
 
         # Respect explicit disable flag (e.g.,
@@ -447,8 +461,13 @@ class FlashInferBackend(AttentionBackend):
         if force_use_trtllm_attention() is False:
             return False
 
+        if not current_platform.is_device_capability_family(100):
+            return False
+
         # Check if TRTLLM is supported on this platform
-        return supports_trtllm_attention()
+        return supports_trtllm_attention(
+            is_prefill=False
+        ) and supports_trtllm_attention(is_prefill=True)
 
     @classmethod
     def get_required_kv_cache_layout(cls) -> KVCacheLayoutType | None:
@@ -472,6 +491,13 @@ class FIDecode:
     """Metadata for the native FlashInfer decode pathway (non-TRTLLM)."""
 
     wrapper: BatchDecodeWithPagedKVCacheWrapper
+
+
+class FlashInferDecodeKernel(Enum):
+    """Decode kernels selected inside the FlashInfer backend."""
+
+    XQA = "xqa"
+    TRTLLM_GEN = "trtllm-gen"
 
 
 @dataclass
@@ -503,8 +529,15 @@ class TRTLLMPrefill:
 
 
 @dataclass
-class TRTLLMDecode:
-    """Metadata for the TRTLLM decode pathway."""
+class FlashInferTrtllmAPIDecode:
+    """Metadata for decode paths using FlashInfer's TRTLLM decode API.
+
+    FlashInfer exposes both XQA (SM90) and trtllm-gen (SM100) through
+    ``trtllm_batch_decode_with_kv_cache``.  Keep them as distinct vLLM
+    decode kernels because their dtype/layout/output constraints differ.
+    """
+
+    kernel: FlashInferDecodeKernel
 
     block_tables: torch.Tensor
     """
@@ -530,7 +563,10 @@ class FlashInferMetadata:
     slot_mapping: torch.Tensor
     """Tensor for writing K/V to the cache. Shape: [num_actual_tokens]"""
 
-    q_data_type: torch.dtype
+    # The data types of the query for prefill and decode.
+    # On SM90, these two data types may be different.
+    q_data_type_prefill: torch.dtype
+    q_data_type_decode: torch.dtype
 
     num_decodes: int
     num_decode_tokens: int
@@ -544,7 +580,7 @@ class FlashInferMetadata:
     Will be `None` if `num_prefill_tokens == 0`.
     """
 
-    decode: FIDecode | TRTLLMDecode | None
+    decode: FIDecode | FlashInferTrtllmAPIDecode | None
     """
     Holds the metadata for the decode portion of the batch.
     Will be `None` if `num_decode_tokens == 0`.
@@ -651,12 +687,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             # storage dtype may not be the same as the op dtype (uint8 vs fp8_e4m3)
             self.is_kvcache_nvfp4 = self.cache_dtype == "nvfp4"
             if self.is_kvcache_nvfp4:
-                # trtllm-gen FP4 FMHA kernels only exist for sm100f (sm_100/sm_103).
-                # Fail fast at init rather than crashing on the first request.
-                if not current_platform.is_device_capability_family(100):
+                if (
+                    force_use_trtllm_attention() is False
+                    or not supports_trtllm_attention(is_prefill=True)
+                    or not supports_trtllm_attention(is_prefill=False)
+                ):
                     raise ValueError(
-                        "--kv-cache-dtype nvfp4 requires sm100f, "
-                        "please try a different dtype or remove"
+                        "--kv-cache-dtype nvfp4 requires the SM100 trtllm-gen "
+                        "FlashInfer path."
                     )
                 # For NVFP4, kv_cache_dtype stays as the string "nvfp4"
                 # which is passed to FlashInferImpl
@@ -671,54 +709,83 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             assert self.kv_cache_spec.dtype == self.model_config.dtype
             self.kv_cache_dtype = self.kv_cache_spec.dtype
 
-        # Use model dtype as q dtype when TRTLLM attn is not supported, or
-        # --attention-config.disable_flashinfer_q_quantization is set to 1. Otherwise,
-        # try to use fp8 q if kv cache is fp8, and will fall back to model dtype
-        # if TRTLLM attention kernel is not used when building attn metadata
-        can_use_trtllm = can_use_trtllm_attention(self.num_qo_heads, self.num_kv_heads)
+        # Compute per-phase Q dtype.  On SM90 (XQA decode), the prefill and
+        # decode phases require different Q dtypes when the KV cache is FP8
+        # (FP8-Q for the FI native prefill, BF16/FP16-Q for XQA decode),
+        # so both values must be tracked independently.
+        self.q_data_type_prefill = self.get_q_data_type(is_prefill=True)
+        self.q_data_type_decode = self.get_q_data_type(is_prefill=False)
 
+        # Prefer TRTLLM/XQA for decoding whenever supported. The decode kernel
+        # must be selected statically for FULL cudagraph capture.
+        can_use_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
+            self.num_qo_heads, self.num_kv_heads, is_prefill=False
+        )
         # Page sizes >= 128 require the trtllm-gen GQA/MQA path (guaranteed by
         # get_supported_kernel_block_sizes).
         assert self.page_size <= 64 or (
-            can_use_trtllm and self.num_qo_heads // self.num_kv_heads > 1
+            current_platform.is_device_capability_family(100)
+            and can_use_xqa_or_trtllm_gen_decode
+            and self.num_qo_heads // self.num_kv_heads > 1
         ), f"Unexpected FlashInfer page size {self.page_size} without trtllm-gen GQA"
-
-        if (
-            can_use_trtllm
-            and not vllm_config.attention_config.disable_flashinfer_q_quantization
-        ):
-            if self.is_kvcache_nvfp4:
-                # NVFP4 KV cache uses FP8 quantized queries
-                self.q_data_type = FlashInferBackend.get_dtype_for_flashinfer(
-                    "fp8_e4m3"
-                )
-            else:
-                self.q_data_type = self.kv_cache_dtype
-        else:
-            self.q_data_type = self.model_config.dtype
-
-        # Prefer TRTLLM attention for decoding in all cases.
-        # This allows us to use AttentionCGSupport.UNIFORM_BATCH mode.
-        self.use_trtllm_decode_attention = can_use_trtllm
-        self._init_reorder_batch_threshold(1, supports_spec_as_decode=can_use_trtllm)
+        self.use_trtllm_decode_attention = can_use_xqa_or_trtllm_gen_decode
+        self.flashinfer_trtllm_api_decode_kernel: FlashInferDecodeKernel | None = (
+            self._get_flashinfer_trtllm_api_decode_kernel()
+            if can_use_xqa_or_trtllm_gen_decode
+            else None
+        )
+        supports_spec_as_decode = (
+            self.flashinfer_trtllm_api_decode_kernel
+            == FlashInferDecodeKernel.TRTLLM_GEN
+        )
+        self._init_reorder_batch_threshold(
+            1, supports_spec_as_decode=supports_spec_as_decode
+        )
 
         self._cascade_wrapper = None  # Wrapper for cascade attention
 
         # Global hyperparameters shared by all attention layers
         # TODO: discard this for trtllm-gen backend
-        self.global_hyperparameters = infer_global_hyperparameters(
-            get_per_layer_parameters(vllm_config, layer_names, FlashInferImpl)
+        per_layer_parameters = get_per_layer_parameters(
+            vllm_config, layer_names, FlashInferImpl
         )
+        if current_platform.is_device_capability(90) and any(
+            params.window_left != -1 for params in per_layer_parameters.values()
+        ):
+            # FlashInfer SM90 sliding-window prefill is not reliable with FP8-Q:
+            # https://github.com/flashinfer-ai/flashinfer/issues/3578
+            raise NotImplementedError(
+                "FlashInfer backend on SM90 currently crashes with "
+                "sliding-window attention layers. Use the default attention "
+                "backend."
+            )
+        self.global_hyperparameters = infer_global_hyperparameters(per_layer_parameters)
         self.sm_scale = self.global_hyperparameters.sm_scale
         self.window_left = self.global_hyperparameters.window_left
         self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
         self.has_sinks = self.global_hyperparameters.has_sinks
-        if self.has_sinks and not can_use_trtllm:
+        if self.has_sinks and not FlashInferBackend.supports_sink():
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
                 "sinks, please use trtllm on blackwell or flash attention on "
                 "earlier GPUs."
             )
+        capability = current_platform.get_device_capability()
+        arch = f"sm{capability.major}{capability.minor}" if capability else "unknown"
+        decode_backend = (
+            self.flashinfer_trtllm_api_decode_kernel.value
+            if self.flashinfer_trtllm_api_decode_kernel is not None
+            else "flashinfer-native"
+        )
+        logger.info_once(
+            "FlashInfer resolved query dtypes: prefill=%s, decode=%s, "
+            "decode_backend=%s, kv_cache_dtype=%s, arch=%s",
+            self.q_data_type_prefill,
+            self.q_data_type_decode,
+            decode_backend,
+            self.kv_cache_dtype,
+            arch,
+        )
         # Preparing persistent buffers
         # Since we do not have explicit synchronization in ModelRunnerV2, we do not pin
         # reused CPU buffers to avoid a race condition between step N async copies to
@@ -730,6 +797,43 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         )  # Extra buffer for mutable paged_kv_indptr.cpu in cuda graph mode
         self.paged_kv_indices = self._make_buffer(max_num_pages)
         self.paged_kv_last_page_len = self._make_buffer(max_num_reqs)
+
+    # Keep SM90 prefill/decode Q dtype selection in one place.
+    def get_q_data_type(self, is_prefill: bool) -> torch.dtype:
+        # The user sets --attention-config.disable_flashinfer_q_quantization
+        # to 1 explicitly, use model dtype for query.
+        if self.vllm_config.attention_config.disable_flashinfer_q_quantization:
+            return self.model_config.dtype
+
+        # self.cache_dtype is resolved per KV-cache group: it is "auto" when
+        # this group is unquantized (e.g. --kv-cache-dtype-skip-layers), even
+        # if cache_config requests a quantized dtype globally.
+        cache_dtype = self.cache_dtype
+
+        # On SM90, XQA decode requires BF16/FP16-Q even with FP8 KV cache.
+        # FI native prefill on SM90 still uses FP8-Q in that case.
+        if (
+            current_platform.is_device_capability(90)
+            and not is_prefill
+            and force_use_trtllm_attention() is not False
+            and cache_dtype.startswith("fp8")
+        ):
+            return self.model_config.dtype
+
+        # Otherwise, match Q dtype to the KV cache dtype.
+        if cache_dtype.startswith("fp8"):
+            # FP8-Q requires an fp8 tensor-core attention path
+            # (FI native fa3 on SM90, trtllm-gen/XQA on SM100).
+            # Architectures with only fa2 (e.g. SM89, SM120) cannot
+            # consume FP8 queries, so keep the model dtype for Q there.
+            if current_platform.is_device_capability(
+                90
+            ) or current_platform.is_device_capability_family(100):
+                return FlashInferBackend.get_dtype_for_flashinfer(cache_dtype)
+            return self.model_config.dtype
+        if cache_dtype == "nvfp4":
+            return FlashInferBackend.get_dtype_for_flashinfer("fp8_e4m3")
+        return self.kv_cache_spec.dtype
 
     def _make_buffer(
         self, *size: int | torch.SymInt, dtype: torch.dtype = torch.int32
@@ -751,12 +855,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
     ) -> AttentionCGSupport:
         """Get the cudagraph support level for FlashInfer attention.
 
-        This depends on whether we can use TRTLLM attention for decodes, since we can
-        only do UNIFORM_SINGLE_TOKEN_DECODE if it is unavailable.
-        To check this, we must call can_use_trtllm_attention with the number of KV
-        heads from the kv_cache_spec. We check all available KV cache specs and
-        only return UNIFORM_BATCH if all of them support TRTLLM attention.
+        The SM90 XQA integration only enables single-token decode today. Keep
+        specdec CUDA graphs limited to trtllm-gen until vLLM wires the XQA
+        specdec mask.
         """
+        if current_platform.is_device_capability(90):
+            return AttentionCGSupport.UNIFORM_SINGLE_TOKEN_DECODE
+
         # For UniformTypeKVCacheSpecs, check all contained specs
         kv_specs = (
             kv_cache_spec.kv_cache_specs.values()
@@ -775,6 +880,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             if not can_use_trtllm_attention(
                 num_qo_heads=num_qo_heads,
                 num_kv_heads=spec.num_kv_heads,
+                is_prefill=False,
             ):
                 has_trtllm_support = False
                 break
@@ -796,6 +902,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
     def set_workspace_buffer(self, workspace_buffer: torch.Tensor):
         self._workspace_buffer = workspace_buffer
+
+    @staticmethod
+    def _get_flashinfer_trtllm_api_decode_kernel() -> FlashInferDecodeKernel:
+        if current_platform.is_device_capability(90):
+            return FlashInferDecodeKernel.XQA
+        assert current_platform.is_device_capability_family(100)
+        return FlashInferDecodeKernel.TRTLLM_GEN
 
     def _get_prefill_wrapper(
         self,
@@ -976,7 +1089,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         # Step 1: Decide which dispatch modes to use:
         # - Cascade attention (distinct mode)
         # - Prefill (FI native or TRTLLM)
-        # - Decode (FI native or TRTLLM)
+        # - Decode (FI native, XQA, or trtllm-gen)
         use_cascade = common_prefix_len > 0
         uses_spec_reorder = self.reorder_batch_threshold > 1
         # Page sizes >= 128 must use trtllm-gen; force it for prefill too.
@@ -990,13 +1103,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             max_seq_len,
             self.dcp_world_size,
             self.cache_dtype,
-            self.q_data_type,
+            self.q_data_type_prefill,
             is_prefill=True,
             force_use_trtllm=prefill_force_trtllm,
             has_sinks=self.has_sinks,
             has_spec=uses_spec_reorder,
         )
-        decode_use_trtllm = (
+        decode_with_flashinfer_trtllm_api = (
             causal and self.use_trtllm_decode_attention and self.dcp_world_size <= 1
         )
 
@@ -1011,7 +1124,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             )
         all_uses_trtllm = causal and (
             (num_prefills == 0 or prefill_use_trtllm)
-            and (num_decodes == 0 or decode_use_trtllm)
+            and (num_decodes == 0 or decode_with_flashinfer_trtllm_api)
         )
 
         if not all_uses_trtllm:
@@ -1035,17 +1148,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 "`sm_scale`."
             )
 
-            # The q quantization is not supported for non-trtllm attention,
-            # fall back to model dtype.
-            self.q_data_type = self.model_config.dtype
-
         # Step 2: Initialize the output metadata
         # Leave prefill/decode/cascade_wrapper empty, to be populated
         # case by case depending on the batch contents and backend selection.
         attn_metadata = FlashInferMetadata(
             num_actual_tokens=num_actual_tokens,
             slot_mapping=common_attn_metadata.slot_mapping,
-            q_data_type=self.q_data_type,
+            q_data_type_prefill=self.q_data_type_prefill,
+            q_data_type_decode=self.q_data_type_decode,
             num_decodes=num_decodes,
             num_decode_tokens=num_decode_tokens,
             num_prefills=num_prefills,
@@ -1101,7 +1211,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         # Compute paged_kv_indices if necessary
         # paged_kv_indices is only needed for FlashInfer native paths;
-        # TRTLLM paths use block_tables directly on GPU.
+        # XQA/trtllm-gen paths use block_tables directly on GPU.
         needs_paged_kv_indices = use_cascade or not all_uses_trtllm
         if needs_paged_kv_indices:
             assert num_blocks_np is not None
@@ -1143,6 +1253,9 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
             paged_kv_last_page_len_cpu = self.paged_kv_last_page_len.cpu[:num_reqs]
 
             attn_metadata.cascade_wrapper = self._get_cascade_wrapper()
+            # Cascade attention must use the same q dtype for prefill and decode
+            # because it does not support FP8 kv-cache or FP8 query yet.
+            assert self.q_data_type_prefill == self.q_data_type_decode
             attn_metadata.cascade_wrapper.plan(
                 qo_indptr_arr=[shared_qo_indptr_cpu, qo_indptr_cpu],
                 paged_kv_indptr_arr=[shared_kv_page_indptr_cpu, paged_kv_indptr_cpu],
@@ -1159,7 +1272,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 sm_scale=self.sm_scale,
                 window_left=self.window_left,
                 logits_soft_cap=self.logits_soft_cap,
-                q_data_type=self.q_data_type,
+                q_data_type=self.q_data_type_prefill,
                 kv_data_type=self.kv_cache_dtype,
             )
             return attn_metadata
@@ -1233,7 +1346,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         sm_scale=self.sm_scale,
                         window_left=self.window_left,
                         logits_soft_cap=self.logits_soft_cap,
-                        q_data_type=self.q_data_type,
+                        q_data_type=self.q_data_type_prefill,
                         kv_cache_dtype=self.kv_cache_dtype,
                         prefill_fixed_split_size=self.prefill_fixed_split_size,
                         disable_split_kv=self.disable_split_kv,
@@ -1262,7 +1375,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                         sm_scale=self.sm_scale,
                         window_left=self.window_left,
                         logits_soft_cap=self.logits_soft_cap,
-                        q_data_type=self.q_data_type,
+                        q_data_type=self.q_data_type_prefill,
                         kv_data_type=self.kv_cache_dtype,
                         o_data_type=o_dtype,
                         fixed_split_size=self.prefill_fixed_split_size,
@@ -1272,12 +1385,14 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
 
         ## DECODE PATHWAY
         if num_decodes > 0:
-            if decode_use_trtllm:
+            if decode_with_flashinfer_trtllm_api:
                 assert num_decode_tokens % num_decodes == 0, (
-                    "TRTLLM decode requires uniform query lengths per request. "
+                    "XQA/trtllm-gen decode requires uniform query lengths per request. "
                     f"Got {num_decode_tokens=} and {num_decodes=}."
                 )
-                attn_metadata.decode = TRTLLMDecode(
+                assert self.flashinfer_trtllm_api_decode_kernel is not None
+                attn_metadata.decode = FlashInferTrtllmAPIDecode(
+                    kernel=self.flashinfer_trtllm_api_decode_kernel,
                     block_tables=block_table_tensor[:num_decodes],
                     seq_lens=seq_lens[:num_decodes],
                     max_seq_len=max_seq_len,
@@ -1320,7 +1435,7 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                     sm_scale=self.sm_scale,
                     window_left=self.window_left,
                     logits_soft_cap=self.logits_soft_cap,
-                    q_data_type=self.q_data_type,
+                    q_data_type=self.q_data_type_decode,
                     kv_data_type=self.kv_cache_dtype,
                     o_data_type=o_dtype,
                     fixed_split_size=self.decode_fixed_split_size,
@@ -1396,10 +1511,17 @@ class FlashInferImpl(AttentionImpl):
                 )
             self.sinks = sinks
 
-        self.support_trtllm_attn = can_use_trtllm_attention(num_heads, num_kv_heads)
+        self.supports_xqa_or_trtllm_gen_decode = can_use_trtllm_attention(
+            num_heads, num_kv_heads, is_prefill=False
+        )
         vllm_config = get_current_vllm_config_or_none()
+        # Query pre-quantization needs a single dtype for the whole query tensor.
+        # SM90 XQA needs BF16/FP16-Q for decode and FP8 for prefill,
+        # so only enable this for SM100 trtllm-gen where both use FP8-Q.
         self.supports_quant_query_input = (
-            self.support_trtllm_attn
+            self.supports_xqa_or_trtllm_gen_decode
+            and is_quantized_kv_cache(self.kv_cache_dtype)
+            and current_platform.is_device_capability_family(100)
             and vllm_config is not None
             and not vllm_config.attention_config.disable_flashinfer_q_quantization
         )
@@ -1429,9 +1551,12 @@ class FlashInferImpl(AttentionImpl):
             self.dcp_combine = partial(cp_lse_ag_out_rs, is_lse_base_on_e=False)
 
     def fused_output_quant_supported(self, quant_key: QuantKey):
+        # XQA does not support FP8/NVFP4 output, so require trtllm-gen
+        # (SM100+) here.  Without that we cannot fuse the output quant.
         return (
-            self.support_trtllm_attn
+            self.supports_xqa_or_trtllm_gen_decode
             and is_quantized_kv_cache(self.kv_cache_dtype)
+            and current_platform.is_device_capability_family(100)
             and quant_key in (kFp8StaticTensorSym, kNvfp4Dynamic)
         )
 
@@ -1439,6 +1564,37 @@ class FlashInferImpl(AttentionImpl):
     def process_weights_after_loading(self, act_dtype: torch.dtype):
         if self.sinks is not None and self.sinks.dtype != torch.float32:
             self.sinks = self.sinks.to(torch.float32)
+
+    def get_xqa_bmm1_scale(self, layer: torch.nn.Module, q_data_type: torch.dtype):
+        bmm1_scale = self.scale
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            if q_data_type in (torch.float8_e4m3fn, torch.float8_e5m2):
+                bmm1_scale *= layer._q_scale_float
+            bmm1_scale *= layer._k_scale_float
+        return bmm1_scale
+
+    # SM90 may need FP8-Q for native prefill and BF16/FP16-Q for XQA decode,
+    # so quantize only the slice whose target dtype differs.
+    def maybe_quant_query(
+        self,
+        query: torch.Tensor,
+        q_data_type: torch.dtype,
+        scale: torch.Tensor,
+    ) -> torch.Tensor:
+        if query.dtype != q_data_type:
+            assert query.dtype in [torch.float16, torch.bfloat16]
+            assert q_data_type in [torch.float8_e4m3fn, torch.float8_e5m2]
+            assert query.is_contiguous()
+            assert query.dim() == 3
+            num_tokens = query.shape[0]
+            num_heads = query.shape[1]
+            head_size = query.shape[2]
+            query_quantized, _ = custom_ops.scaled_fp8_quant(
+                query.view(num_tokens, num_heads * head_size), scale=scale
+            )
+            return query_quantized.view(num_tokens, num_heads, head_size)
+
+        return query
 
     def forward(
         self,
@@ -1469,12 +1625,6 @@ class FlashInferImpl(AttentionImpl):
             # Profiling run.
             return output.fill_(0)
 
-        # Ensure query dtype matches the expected dtype from attention metadata
-        assert attn_metadata.q_data_type == query.dtype, (
-            f"Query dtype mismatch: expected {attn_metadata.q_data_type}, "
-            f"got {query.dtype}"
-        )
-
         if self.bmm1_scale is None:
             self.bmm1_scale = self.scale
             if is_quantized_kv_cache(self.kv_cache_dtype):
@@ -1486,7 +1636,14 @@ class FlashInferImpl(AttentionImpl):
                 self.bmm2_scale *= layer._v_scale_float
 
         prefill_use_trtllm = isinstance(attn_metadata.prefill, TRTLLMPrefill)
-        decode_use_trtllm = isinstance(attn_metadata.decode, TRTLLMDecode)
+        decode_kernel = (
+            attn_metadata.decode.kernel
+            if isinstance(attn_metadata.decode, FlashInferTrtllmAPIDecode)
+            else None
+        )
+        decode_with_xqa = decode_kernel == FlashInferDecodeKernel.XQA
+        decode_with_trtllm_gen = decode_kernel == FlashInferDecodeKernel.TRTLLM_GEN
+        decode_with_flashinfer_trtllm_api = decode_with_xqa or decode_with_trtllm_gen
 
         # The attn+quant fusion happens when output_scale is provided.
         if output_scale is None:
@@ -1494,12 +1651,15 @@ class FlashInferImpl(AttentionImpl):
                 "output_block_scale is not supported when fusion has not happened"
             )
         else:
-            assert attn_metadata.q_data_type == FP8_DTYPE, (
-                "Query must be FP8 when attn+quant fusion happened."
+            assert attn_metadata.q_data_type_prefill == FP8_DTYPE, (
+                "Query must be FP8 when attn+quant fusion happened for prefill."
+            )
+            assert attn_metadata.q_data_type_decode == FP8_DTYPE, (
+                "Query must be FP8 when attn+quant fusion happened for decode."
             )
             assert (attn_metadata.num_prefills == 0 or prefill_use_trtllm) and (
-                attn_metadata.num_decodes == 0 or decode_use_trtllm
-            ), "Must use TRT-LLM attn"
+                attn_metadata.num_decodes == 0 or decode_with_trtllm_gen
+            ), "Output quant fusion requires TRTLLM prefill/trtllm-gen decode"
 
             if output.dtype == FP8_DTYPE:
                 assert output_block_scale is None, (
@@ -1597,6 +1757,13 @@ class FlashInferImpl(AttentionImpl):
             prefill_query = query[num_decode_tokens:]
             assert prefill_query.shape[0] == num_prefill_tokens
 
+            # Convert query to the expected dtype for prefill if needed.
+            prefill_query = self.maybe_quant_query(
+                prefill_query,
+                attn_metadata.q_data_type_prefill,
+                layer._q_scale,
+            )
+
             if not prefill_use_trtllm:
                 assert isinstance(attn_metadata.prefill, FIPrefill)
                 prefill_wrapper = attn_metadata.prefill.wrapper
@@ -1655,6 +1822,7 @@ class FlashInferImpl(AttentionImpl):
                     prefill_wrapper.run(
                         prefill_query,
                         kv_cache_permute,
+                        q_scale=layer._q_scale_float,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=out_prefill,
@@ -1673,7 +1841,7 @@ class FlashInferImpl(AttentionImpl):
                 # degenerate strides on size=1 dims for TMA alignment.
                 prefill_query = prefill_query.contiguous()
                 prefill_query = canonicalize_singleton_dim_strides(prefill_query)
-                workspace_buffer = _get_trtllm_gen_workspace_buffer()
+                workspace_buffer = _get_trtllm_workspace_buffer()
                 block_tables_prefill = attn_metadata.prefill.block_tables
                 seq_lens_prefill = attn_metadata.prefill.seq_lens
 
@@ -1705,7 +1873,7 @@ class FlashInferImpl(AttentionImpl):
                 prefill_kv_block_scales = None
                 if self.is_kvcache_nvfp4:
                     # NVFP4 trtllm-gen kernel requires FP8 query.
-                    assert attn_metadata.q_data_type == FP8_DTYPE, (
+                    assert attn_metadata.q_data_type_prefill == FP8_DTYPE, (
                         "NVFP4 KV cache requires FP8 quantized queries for "
                         "trtllm-gen prefill. Set "
                         "disable_flashinfer_q_quantization=False."
@@ -1714,7 +1882,7 @@ class FlashInferImpl(AttentionImpl):
                     mock_block_table = block_tables_prefill
                     prefill_kv_block_scales = nvfp4_kv_block_scales
                 elif (
-                    attn_metadata.q_data_type != FP8_DTYPE
+                    attn_metadata.q_data_type_prefill != FP8_DTYPE
                     and self.kv_cache_dtype.startswith("fp8")
                 ):
                     # TRTLLM prefill attention does not support BF16 Q
@@ -1738,7 +1906,7 @@ class FlashInferImpl(AttentionImpl):
                         block_tables_prefill,
                         layer._k_scale,
                         layer._v_scale,
-                        attn_metadata.q_data_type,
+                        attn_metadata.q_data_type_prefill,
                     )
                 else:
                     mock_kv_cache = kv_cache_permute
@@ -1773,7 +1941,14 @@ class FlashInferImpl(AttentionImpl):
             decode_query = query[:num_decode_tokens]
             assert decode_query.shape[0] == num_decode_tokens
 
-            if not decode_use_trtllm:
+            # Convert query to the expected dtype for decode if needed.
+            decode_query = self.maybe_quant_query(
+                decode_query,
+                attn_metadata.q_data_type_decode,
+                layer._q_scale,
+            )
+
+            if not decode_with_flashinfer_trtllm_api:
                 assert isinstance(attn_metadata.decode, FIDecode)
                 decode_wrapper = attn_metadata.decode.wrapper
                 assert decode_wrapper is not None
@@ -1806,6 +1981,7 @@ class FlashInferImpl(AttentionImpl):
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_permute,
+                        q_scale=layer._q_scale_float,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=output_tmp,
@@ -1822,6 +1998,7 @@ class FlashInferImpl(AttentionImpl):
                     decode_wrapper.run(
                         decode_query,
                         kv_cache_permute,
+                        q_scale=layer._q_scale_float,
                         k_scale=layer._k_scale_float,
                         v_scale=layer._v_scale_float,
                         out=out_decode,
@@ -1831,19 +2008,23 @@ class FlashInferImpl(AttentionImpl):
                 if needs_fp8_out:
                     output[:num_decode_tokens].copy_(out_decode.to(output.dtype))
             else:
-                assert isinstance(attn_metadata.decode, TRTLLMDecode)
+                assert isinstance(attn_metadata.decode, FlashInferTrtllmAPIDecode)
                 # decode_query may be non-contiguous or have degenerate strides
                 # on size=1 dims. contiguous() ensures memory layout; then
                 # canonicalize_singleton_dim_strides fixes any remaining
                 # degenerate strides on size=1 dims for TMA alignment.
                 decode_query = decode_query.contiguous()
                 decode_query = canonicalize_singleton_dim_strides(decode_query)
-                workspace_buffer = _get_trtllm_gen_workspace_buffer()
+                workspace_buffer = _get_trtllm_workspace_buffer()
                 block_tables_decode = attn_metadata.decode.block_tables
                 seq_lens_decode = attn_metadata.decode.seq_lens
 
-                # This path needs to be enabled with VLLM_KV_CACHE_LAYOUT = HND
-                assert get_kv_cache_layout() == "HND"
+                # trtllm-gen needs HND layout on SM100. XQA is selected
+                # separately on SM90 and does not use this SM100 layout gate.
+                if decode_with_trtllm_gen:
+                    assert get_kv_cache_layout() == "HND"
+                else:
+                    assert decode_with_xqa
                 assert is_strictly_contiguous(decode_query)
                 assert is_strictly_contiguous(workspace_buffer)
                 assert is_strictly_contiguous(block_tables_decode)
@@ -1882,6 +2063,19 @@ class FlashInferImpl(AttentionImpl):
                 else:
                     q_len_per_req = num_decode_tokens // attn_metadata.num_decodes
 
+                if decode_with_xqa and q_len_per_req > 1:
+                    raise NotImplementedError(
+                        "FlashInfer XQA speculative decode is not wired in vLLM yet."
+                    )
+
+                # XQA decode can use model-dtype Q with FP8 KV, so only include
+                # q_scale when the decode query is actually FP8.
+                bmm1_scale = (
+                    self.get_xqa_bmm1_scale(layer, attn_metadata.q_data_type_decode)
+                    if decode_with_xqa
+                    else self.bmm1_scale
+                )
+
                 trtllm_batch_decode_with_kv_cache(
                     query=decode_query,
                     kv_cache=(
@@ -1891,12 +2085,14 @@ class FlashInferImpl(AttentionImpl):
                     block_tables=block_tables_decode,
                     seq_lens=seq_lens_decode,
                     max_seq_len=attn_metadata.decode.max_seq_len,
-                    bmm1_scale=self.bmm1_scale,
+                    bmm1_scale=bmm1_scale,
                     bmm2_scale=self.bmm2_scale,
                     window_left=self.window_left,
                     sinks=self.sinks,
                     o_sf_scale=self.o_sf_scale,
                     out=out,
+                    kv_layout=get_kv_cache_layout(),
+                    backend=attn_metadata.decode.kernel.value,
                     q_len_per_req=q_len_per_req,
                     kv_cache_sf=(
                         nvfp4_kv_block_scales if self.is_kvcache_nvfp4 else None
