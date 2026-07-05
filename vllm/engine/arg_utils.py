@@ -416,6 +416,7 @@ class EngineArgs:
 
     model: str = ModelConfig.model
     enable_return_routed_experts: bool = ModelConfig.enable_return_routed_experts
+    enable_word_timestamps: bool = ModelConfig.enable_word_timestamps
     model_weights: str = ModelConfig.model_weights
     served_model_name: str | list[str] | None = ModelConfig.served_model_name
     tokenizer: str | None = ModelConfig.tokenizer
@@ -829,6 +830,10 @@ class EngineArgs:
         model_group.add_argument(
             "--enable-return-routed-experts",
             **model_kwargs["enable_return_routed_experts"],
+        )
+        model_group.add_argument(
+            "--enable-word-timestamps",
+            **model_kwargs["enable_word_timestamps"],
         )
         model_group.add_argument("--max-logprobs", **model_kwargs["max_logprobs"])
         model_group.add_argument("--logprobs-mode", **model_kwargs["logprobs_mode"])
@@ -1629,6 +1634,7 @@ class EngineArgs:
             allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
             enable_return_routed_experts=self.enable_return_routed_experts,
+            enable_word_timestamps=self.enable_word_timestamps,
             max_logprobs=self.max_logprobs,
             logprobs_mode=self.logprobs_mode,
             use_fp64_gumbel=self.use_fp64_gumbel,

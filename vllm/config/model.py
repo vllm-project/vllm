@@ -213,6 +213,9 @@ class ModelConfig:
     flexibility."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
+    enable_word_timestamps: bool = False
+    """Whether to enable Whisper word-level timestamps (cross-attention DTW).
+    Adds a small per-request capture; off by default."""
     max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
