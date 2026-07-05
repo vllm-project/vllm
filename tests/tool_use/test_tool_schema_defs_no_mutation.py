@@ -83,3 +83,16 @@ def test_second_call_returns_same_defs(tool_with_defs):
     assert schema_first["$defs"] == schema_second["$defs"], (
         "$defs differ between first and second call — mutation occurred"
     )
+
+
+def test_defs_not_duplicated_in_embedded_params(tool_with_defs):
+    """$defs must live only at the top level, not inside each tool's params."""
+    schema = _get_json_schema_from_tools([tool_with_defs])
+
+    assert "$defs" in schema, "top-level $defs missing from returned schema"
+    for variant in schema["items"]["anyOf"]:
+        params = variant["properties"]["parameters"]
+        assert "$defs" not in params, (
+            "$defs duplicated inside the embedded tool parameters — it should "
+            "only appear once at the top level of the schema"
+        )

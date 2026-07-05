@@ -185,6 +185,10 @@ def find_tool_properties(
 def _get_tool_schema_from_tool(tool: Tool) -> dict:
     name, params = _extract_tool_info(tool)
     params = params if params else {"type": "object", "properties": {}}
+    # $defs are hoisted to the top-level schema by _get_tool_schema_defs; drop
+    # them from this embedded copy so they are not duplicated per tool.
+    if "$defs" in params:
+        params = {k: v for k, v in params.items() if k != "$defs"}
     return {
         "properties": {
             "name": {"type": "string", "enum": [name]},
