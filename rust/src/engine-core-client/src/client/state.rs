@@ -7,9 +7,9 @@ use tracing::trace;
 use crate::EngineId;
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::error::{Error, Result};
+use crate::protocol::output::{EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput};
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
-use crate::protocol::{EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput};
 use crate::transport::ConnectedEngine;
 
 pub type OutputSender = mpsc::UnboundedSender<Result<EngineCoreStreamOutput>>;
@@ -100,6 +100,7 @@ impl EngineRoutingState {
 pub struct RequestRegistry {
     closed: bool,
     requests: HashMap<String, TrackedRequest>,
+    active_lora_requests: usize,
     routing_per_engine: BTreeMap<EngineId, EngineRoutingState>,
 }
 
@@ -108,6 +109,7 @@ impl RequestRegistry {
         Self {
             closed: false,
             requests: HashMap::default(),
+            active_lora_requests: 0,
             routing_per_engine: engines
                 .iter()
                 .map(|engine| (engine.engine_id.clone(), EngineRoutingState::default()))
@@ -133,15 +135,19 @@ impl RequestRegistry {
 
         let engine_id = self.choose_engine_for_request(data_parallel_rank)?;
         let (tx, rx) = mpsc::unbounded_channel();
+        let lora = lora_name.map(|adapter_name| LoraRequestState {
+            adapter_name,
+            phase: LoraPhase::Waiting,
+        });
+        if lora.is_some() {
+            self.active_lora_requests += 1;
+        }
         self.requests.insert(
             request_id,
             TrackedRequest {
                 sender: tx,
                 engine_id: engine_id.clone(),
-                lora: lora_name.map(|adapter_name| LoraRequestState {
-                    adapter_name,
-                    phase: LoraPhase::Waiting,
-                }),
+                lora,
             },
         );
 
@@ -230,6 +236,10 @@ impl RequestRegistry {
     /// Snapshot the adapter names of tracked LoRA requests as
     /// (running, waiting) sets. Feeds the `vllm:lora_requests_info` gauge.
     pub fn lora_adapter_states(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        if self.active_lora_requests == 0 {
+            return (BTreeSet::new(), BTreeSet::new());
+        }
+
         let mut running = BTreeSet::new();
         let mut waiting = BTreeSet::new();
         for lora in self.requests.values().filter_map(|tracked| tracked.lora.as_ref()) {
@@ -283,6 +293,7 @@ impl RequestRegistry {
         }
 
         self.closed = true;
+        self.active_lora_requests = 0;
         std::mem::take(&mut self.requests)
             .into_values()
             .map(|tracked| tracked.sender)
@@ -322,6 +333,9 @@ impl RequestRegistry {
     #[must_use]
     pub fn remove(&mut self, request_id: &str) -> Option<(OutputSender, EngineId)> {
         let tracked = self.requests.remove(request_id)?;
+        if tracked.lora.is_some() {
+            self.active_lora_requests -= 1;
+        }
         self.routing_per_engine
             .get_mut(&tracked.engine_id)
             .expect("request registry must track all known engines")
@@ -358,6 +372,11 @@ impl RequestRegistry {
 
     pub fn is_closed(&self) -> bool {
         self.closed
+    }
+
+    #[cfg(test)]
+    fn active_lora_requests(&self) -> usize {
+        self.active_lora_requests
     }
 }
 
@@ -433,7 +452,7 @@ mod tests {
         EngineLoadSnapshot, EngineRoutingState, RequestRegistry, UtilityRegistry,
     };
     use crate::mock_engine::default_ready_response;
-    use crate::protocol::{
+    use crate::protocol::output::{
         EngineCoreEvent, EngineCoreEventType, EngineCoreFinishReason, EngineCoreOutput,
     };
     use crate::transport::ConnectedEngine;
@@ -571,6 +590,63 @@ mod tests {
                 adapter_names(&["adapter-a"]),
                 adapter_names(&["adapter-a", "adapter-b"])
             )
+        );
+    }
+
+    #[test]
+    fn registry_counts_only_active_lora_requests() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+
+        registry.register("req-plain".to_string(), None, None).unwrap();
+        assert_eq!(registry.active_lora_requests(), 0);
+        assert_eq!(
+            registry.lora_adapter_states(),
+            (adapter_names(&[]), adapter_names(&[]))
+        );
+
+        registry
+            .register(
+                "req-lora-a".to_string(),
+                Some("adapter-a".to_string()),
+                None,
+            )
+            .unwrap();
+        registry
+            .register(
+                "req-lora-b".to_string(),
+                Some("adapter-b".to_string()),
+                None,
+            )
+            .unwrap();
+        assert_eq!(registry.active_lora_requests(), 2);
+
+        drop(registry.remove("req-plain"));
+        assert_eq!(registry.active_lora_requests(), 2);
+
+        drop(registry.finish_many(&["req-lora-a".to_string()]));
+        assert_eq!(registry.active_lora_requests(), 1);
+
+        drop(registry.abort_many(&["req-lora-b".to_string()], 0.0));
+        assert_eq!(registry.active_lora_requests(), 0);
+        assert_eq!(
+            registry.lora_adapter_states(),
+            (adapter_names(&[]), adapter_names(&[]))
+        );
+    }
+
+    #[test]
+    fn registry_clears_lora_count_on_close() {
+        let mut registry = RequestRegistry::new(&[connected_engine(EngineId::from(b"engine-0"))]);
+        registry
+            .register("req-lora".to_string(), Some("adapter-a".to_string()), None)
+            .unwrap();
+
+        assert_eq!(registry.active_lora_requests(), 1);
+        drop(registry.close());
+        assert_eq!(registry.active_lora_requests(), 0);
+        assert_eq!(
+            registry.lora_adapter_states(),
+            (adapter_names(&[]), adapter_names(&[]))
         );
     }
 

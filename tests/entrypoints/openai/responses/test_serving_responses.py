@@ -51,6 +51,7 @@ from vllm.entrypoints.openai.responses.streaming_events import (
 )
 from vllm.inputs import tokens_input
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.parser.harmony import Segment
 from vllm.sampling_params import SamplingParams
 
 
@@ -230,7 +231,7 @@ class TestInitializeToolSessions:
         instance = OpenAIServingResponses(
             engine_client=engine_client,
             models=models,
-            openai_serving_render=MagicMock(),
+            online_renderer=MagicMock(),
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
@@ -316,7 +317,7 @@ class TestValidateGeneratorInput:
         instance = OpenAIServingResponses(
             engine_client=engine_client,
             models=models,
-            openai_serving_render=MagicMock(),
+            online_renderer=MagicMock(),
             request_logger=None,
             chat_template=None,
             chat_template_content_format="auto",
@@ -379,7 +380,7 @@ async def test_reasoning_tokens_counted_for_text_reasoning_model(monkeypatch):
     serving = OpenAIServingResponses(
         engine_client=engine_client,
         models=models,
-        openai_serving_render=MagicMock(),
+        online_renderer=MagicMock(),
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",
@@ -534,13 +535,9 @@ class TestHarmonyPreambleStreaming:
     """Tests for preamble (commentary with no recipient) streaming events."""
 
     @staticmethod
-    def _make_ctx(*, channel, recipient, delta="hello"):
-        """Build a lightweight mock StreamingHarmonyContext."""
-        ctx = MagicMock()
-        ctx.last_content_delta = delta
-        ctx.parser.current_channel = channel
-        ctx.parser.current_recipient = recipient
-        return ctx
+    def _make_segment(*, channel, recipient, delta="hello"):
+        """Build a lightweight segment for Harmony streaming tests."""
+        return Segment(channel=channel, recipient=recipient, delta=delta)
 
     @staticmethod
     def _make_previous_item(*, channel, recipient, text="preamble text"):
@@ -559,10 +556,10 @@ class TestHarmonyPreambleStreaming:
             emit_content_delta_events,
         )
 
-        ctx = self._make_ctx(channel="commentary", recipient=None)
+        segment = self._make_segment(channel="commentary", recipient=None)
         state = StreamingState()
 
-        events = emit_content_delta_events(ctx, state)
+        events = emit_content_delta_events(segment, state)
 
         type_names = [e.type for e in events]
         assert "response.output_text.delta" in type_names
@@ -574,13 +571,13 @@ class TestHarmonyPreambleStreaming:
             emit_content_delta_events,
         )
 
-        ctx = self._make_ctx(channel="commentary", recipient=None, delta="w")
+        segment = self._make_segment(channel="commentary", recipient=None, delta="w")
         state = StreamingState()
         state.sent_output_item_added = True
         state.current_item_id = "msg_test"
         state.current_content_index = 0
 
-        events = emit_content_delta_events(ctx, state)
+        events = emit_content_delta_events(segment, state)
 
         type_names = [e.type for e in events]
         assert "response.output_text.delta" in type_names
@@ -592,13 +589,13 @@ class TestHarmonyPreambleStreaming:
             emit_content_delta_events,
         )
 
-        ctx = self._make_ctx(
+        segment = self._make_segment(
             channel="commentary",
             recipient="functions.get_weather",
         )
         state = StreamingState()
 
-        events = emit_content_delta_events(ctx, state)
+        events = emit_content_delta_events(segment, state)
 
         type_names = [e.type for e in events]
         assert "response.output_text.delta" not in type_names
@@ -612,6 +609,7 @@ class TestHarmonyPreambleStreaming:
 
         previous = self._make_previous_item(channel="commentary", recipient=None)
         state = StreamingState()
+        state.sent_output_item_added = True
         state.current_item_id = "msg_test"
         state.current_output_index = 0
         state.current_content_index = 0
@@ -634,12 +632,52 @@ class TestHarmonyPreambleStreaming:
             channel="commentary", recipient="functions.get_weather"
         )
         state = StreamingState()
+        state.is_first_function_call_delta = True
         state.current_item_id = "fc_test"
+        state.current_call_id = "call_test"
 
         events = emit_previous_item_done_events(previous, state)
 
         type_names = [e.type for e in events]
         assert "response.output_text.done" not in type_names
+
+    @pytest.mark.xfail(
+        reason=(
+            "TODO: Ensure added/in-progress events are emitted for zero-delta items."
+            "So we can safely emit done events for zero-delta items."
+        ),
+        strict=True,
+    )
+    def test_zero_delta_items_should_preserve_streaming_lifecycle(
+        self,
+    ) -> None:
+        """Zero-delta Harmony items should still produce a coherent lifecycle."""
+        from vllm.entrypoints.openai.responses.streaming_events import (
+            emit_previous_item_done_events,
+        )
+
+        cases: list[tuple[str, str | None, str]] = [
+            ("commentary", None, "msg_stale"),
+            ("analysis", None, "msg_stale"),
+            ("commentary", "functions.get_weather", "fc_stale"),
+            ("commentary", "python", "tool_stale"),
+            ("commentary", "repo_browser.list", "mcp_stale"),
+        ]
+
+        for channel, recipient, current_item_id in cases:
+            previous = self._make_previous_item(channel=channel, recipient=recipient)
+            state = StreamingState()
+            state.current_item_id = current_item_id
+            state.current_call_id = "call_stale"
+            state.current_content_index = 0
+
+            events = emit_previous_item_done_events(
+                previous, state, function_tool_names=None
+            )
+
+            type_names = [e.type for e in events]
+            assert "response.output_item.added" in type_names
+            assert "response.output_item.done" in type_names
 
 
 def _make_simple_context_with_output(text, token_ids, response_parser=None):
@@ -684,7 +722,7 @@ def _make_serving_instance_with_reasoning():
     serving = OpenAIServingResponses(
         engine_client=engine_client,
         models=models,
-        openai_serving_render=MagicMock(),
+        online_renderer=MagicMock(),
         request_logger=None,
         chat_template=None,
         chat_template_content_format="auto",

@@ -6,7 +6,7 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 import msgspec
 import regex as re
@@ -43,6 +43,11 @@ ReqId = str
 TransferId = str
 
 
+class MoRIIOTransferAck(NamedTuple):
+    transfer_id: TransferId
+    consumer_tp_size: int = 1
+
+
 @dataclass
 class WriteTask:
     request_id: ReqId
@@ -51,7 +56,7 @@ class WriteTask:
     local_block_ids: list[int]
     remote_block_ids_hint: list[int] | None
     layer_name: str
-    event: torch.cuda.Event
+    event: torch.Event
     remote_notify_port: int
     remote_ip: str
     enqueue_time: float = field(default_factory=time.perf_counter)

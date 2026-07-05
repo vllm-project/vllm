@@ -116,9 +116,10 @@ choreographer==1.2.1
     # via kaleido
 chz==0.4.0
     # via gpt-oss
-click==8.3.1
+click==8.4.2
     # via
     #   black
+    #   huggingface-hub
     #   jiwer
     #   nltk
     #   ray
@@ -130,6 +131,8 @@ cloudpickle==3.1.2
     # via
     #   -r requirements/test/../common.txt
     #   tilelang
+cohere-melody==0.9.0
+    # via -r requirements/test/rocm.in
 colorama==0.4.6
     # via
     #   perceptron
@@ -205,7 +208,6 @@ docstring-parser==0.17.0
 einops==0.8.2
     # via
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
     #   encodec
     #   vector-quantize-pytorch
     #   vocos
@@ -322,7 +324,7 @@ h2==4.3.0
     # via httpx
 harfile==0.5.0
     # via schemathesis
-hf-xet==1.4.3
+hf-xet==1.5.1
     # via huggingface-hub
 hiredis==3.3.1
     # via tensorizer
@@ -348,7 +350,7 @@ httpx==0.27.2
     #   schemathesis
 httpx-sse==0.4.3
     # via mcp
-huggingface-hub==1.10.2
+huggingface-hub==1.22.0
     # via
     #   accelerate
     #   datasets
@@ -499,7 +501,7 @@ mcp==1.27.0
     # via -r requirements/test/../common.txt
 mdurl==0.1.2
     # via markdown-it-py
-mistral-common==1.11.3
+mistral-common==1.11.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -561,7 +563,6 @@ numba==0.65.0
 numpy==2.2.6
     # via
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
     #   accelerate
     #   albumentations
     #   bitsandbytes
@@ -630,7 +631,6 @@ opencv-python-headless==4.13.0.92
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
     #   albumentations
     #   mistral-common
 openpyxl==3.1.5
@@ -834,7 +834,6 @@ pydantic==2.12.5
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
-    #   -r requirements/test/rocm.in
     #   albumentations
     #   anthropic
     #   compressed-tensors
@@ -1246,7 +1245,6 @@ typer==0.24.1
     #   fastapi-cli
     #   fastapi-cloud-cli
     #   fastsafetensors
-    #   huggingface-hub
     #   perceptron
     #   transformers
 typing-extensions==4.15.0
