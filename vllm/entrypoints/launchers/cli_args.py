@@ -99,6 +99,16 @@ class BaseFrontendArgs:
     with request values taking precedence. Useful for setting default
     behavior for reasoning models. Example: '{"enable_thinking": false}'
     to disable thinking mode by default for Qwen3/DeepSeek models."""
+    inline_system_messages: str = "merge"
+    """How to handle inline system messages in the Anthropic Messages API.
+
+    * "merge" (default) — all system messages are merged into a single leading
+      block. Safe for all models.
+    * "preserve" — keep inline system messages at their original position.
+      Better for prefix caching, but may degrade output quality on models
+      not trained for mid-conversation system messages.
+    * "auto" — merge by default, but preserve for models in the verified
+      allowlist."""
     response_role: str = "assistant"
     """The role name to return if `request.add_generation_prompt=true`."""
     return_tokens_as_token_ids: bool = False
