@@ -1,5 +1,5 @@
 group: Models - Multimodal
-depends_on: 
+depends_on:
   - image-build-xpu
 steps:
 - label: "Multi-Modal Models (Standard) 1: qwen2"
@@ -22,7 +22,7 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install av git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+      'pip install av &&
       cd tests &&
       pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2" &&
       pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model'
@@ -47,8 +47,7 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
-      cd tests &&
+      'cd tests &&
       pytest -v -s models/multimodal/generation/test_qwen2_5_vl.py -m core_model'
 
 - label: "Multi-Modal Models (Standard) 3: llava + qwen2_vl"
@@ -71,8 +70,7 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install git+https://github.com/TIGER-AI-Lab/Mantis.git &&
-      cd tests &&
+      'cd tests &&
       pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "not qwen2 and not qwen3 and not gemma" &&
       pytest -v -s models/multimodal/generation/test_qwen2_vl.py -m core_model'
 
@@ -96,7 +94,7 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install av git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+      'pip install av &&
       cd tests &&
       pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing'
 
@@ -121,11 +119,9 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install av matplotlib ftfy git+https://github.com/TIGER-AI-Lab/Mantis.git &&
+      'pip install av matplotlib ftfy &&
       pip install open-clip-torch --no-deps &&
       cd tests &&
       pytest -v -s models/multimodal/processing/test_tensor_schema.py
-      --deselect "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4]"
-      --deselect "tests/models/multimodal/processing/test_tensor_schema.py::test_model_tensor_schema[Qwen/Qwen2.5-Omni-7B-AWQ]"
       --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB'
   parallelism: 4

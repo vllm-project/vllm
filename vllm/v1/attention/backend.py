@@ -436,7 +436,7 @@ class CommonAttentionMetadata:
     positions: torch.Tensor | None = None
     """(num_actual_tokens,) token positions.  Optional; set when the caller
     has positions available so that builders can pre-compute position-dependent
-    metadata (e.g. C128A topk indices for DeepSeek V4)."""
+    sparse metadata for DeepSeek V4 C128A layers."""
 
     is_prefilling: torch.Tensor | None = None
     """(batch_size,) bool tensor: True if request is still in prefill phase
@@ -454,6 +454,13 @@ class CommonAttentionMetadata:
     request index to list of (start, end) token position ranges
     where bidirectional attention should apply. None for text-only
     batches or non-PrefixLM models."""
+
+    rswa_prefix_lens: torch.Tensor | None = None
+    """(batch_size,) per-request prefix length (prompt/image token count) for
+    Reference Sliding Window Attention (R-SWA). Tokens with logical index below
+    this stay globally visible; later (generated) tokens additionally see a
+    fixed sliding window. None disables R-SWA. The attention backend copies this
+    into its own persistent buffer and reads ``rswa_window`` from model config."""
 
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
@@ -539,6 +546,7 @@ class CommonAttentionMetadata:
             dcp_local_seq_lens=maybe_slice_reqs(self.dcp_local_seq_lens),
             dcp_local_seq_lens_cpu=maybe_slice_reqs(self.dcp_local_seq_lens_cpu),
             is_prefilling=maybe_slice_reqs(self.is_prefilling),
+            rswa_prefix_lens=maybe_slice_reqs(self.rswa_prefix_lens),
         )
 
 
@@ -747,6 +755,17 @@ class AttentionImplBase(ABC, Generic[T]):
     # Whether the attention impl can return the softmax lse for decode.
     # Some features like decode context parallelism require the softmax lse.
     can_return_lse_for_decode: bool = False
+
+    # Base of the logarithm used by this backend when returning softmax lse.
+    # True  => natural log (lse = ln(sum(exp(qk))))
+    #          -- e.g. Triton MLA, FlashAttention, FlashMLA, Cutlass MLA
+    # False => base 2      (lse = log2(sum(exp(qk))))
+    #          -- e.g. FlashInfer trtllm-gen MLA
+    # The DCP combine kernel (cp_lse_ag_out_rs / dcp_a2a_lse_reduce in
+    # vllm/v1/attention/ops/common.py) branches on this via its IS_BASE_E
+    # constexpr; getting it wrong silently corrupts the cross-shard
+    # softmax denominator.
+    lse_base_on_e: bool = True
 
     # Whether the attention impl supports Prefill Context Parallelism.
     supports_pcp: bool = False

@@ -426,7 +426,6 @@ class MoeWNA16Method(FusedMoEMethodBase):
 
             device = get_tp_group().device
             tp_rank = get_tensor_model_parallel_rank()
-            tp_size = layer.moe_config.moe_parallel_config.tp_size
             loaded_weight = loaded_weight.to(device)
             shard_size = layer.intermediate_size_per_partition
 
@@ -465,7 +464,9 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 )
 
             if "w13_qzeros" in weight_name:
-                tensor = loaded_weight.view(tp_size, -1, loaded_weight.size(1))[tp_rank]
+                tensor = loaded_weight.view(
+                    layer.moe_config.tp_size, -1, loaded_weight.size(1)
+                )[tp_rank]
                 if shard_id == "w1":
                     param.data[expert_id, : shard_size // 2] = tensor
                 else:
@@ -473,7 +474,7 @@ class MoeWNA16Method(FusedMoEMethodBase):
                 return True if return_success else None
             elif "w2_qzeros" in weight_name:
                 param.data[expert_id] = loaded_weight.view(
-                    loaded_weight.size(0), tp_size, -1
+                    loaded_weight.size(0), layer.moe_config.tp_size, -1
                 )[:, tp_rank]
                 return True if return_success else None
             else:
