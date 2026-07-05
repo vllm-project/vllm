@@ -22,6 +22,7 @@ from vllm.tokenizers import TokenizerLike
 from vllm.v1.engine import (
     EngineCoreEvent,
     EngineCoreEventType,
+    EngineCoreOutput,
     EngineCoreOutputs,
     EngineCoreRequest,
     FinishReason,
@@ -139,6 +140,57 @@ def test_incremental_detokenization(
 
     assert output_processor.get_num_unfinished_requests() == 0
     assert not output_processor.has_unfinished_requests()
+
+def test_process_outputs_logs_decode_debug_with_short_or_full_details(
+    caplog, dummy_test_vectors
+):
+    output_processor = OutputProcessor(dummy_test_vectors.tokenizer, log_stats=False)
+
+    request = EngineCoreRequest(
+        request_id="request-debug",
+        external_req_id="request-debug",
+        prompt_token_ids=[1, 2, 3],
+        mm_features=None,
+        arrival_time=0,
+        lora_request=None,
+        cache_salt=None,
+        data_parallel_rank=None,
+        sampling_params=SamplingParams(
+            skip_special_tokens=False,
+            spaces_between_special_tokens=False,
+            output_kind=RequestOutputKind.FINAL_ONLY,
+            stop=[],
+            include_stop_str_in_output=False,
+        ),
+        pooling_params=None,
+    )
+    output_processor.add_request(request, "hello world")
+
+    engine_core_output = EngineCoreOutput(
+        request_id=request.request_id,
+        new_token_ids=[42],
+        debug_log_full=False,
+    )
+    with caplog.at_level("INFO"):
+        output_processor.process_outputs([engine_core_output])
+
+    assert "[Decode debug]" in caplog.text
+    assert "prompt_len=" in caplog.text
+    assert "output_text=" not in caplog.text
+
+    caplog.clear()
+    full_engine_core_output = EngineCoreOutput(
+        request_id=request.request_id,
+        new_token_ids=[42],
+        debug_log_full=True,
+    )
+    with caplog.at_level("INFO"):
+        output_processor.process_outputs([full_engine_core_output])
+
+    assert "[Decode debug]" in caplog.text
+    assert "prompt=" in caplog.text
+    assert "output_text=" in caplog.text
+
 
 
 def _validate_logprobs(
