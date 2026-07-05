@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Warm up Qwen3-VL vision Triton kernels."""
+"""Warm up Qwen3-VL vision Triton kernels when MM profiling is skipped."""
 
 from __future__ import annotations
 
@@ -48,7 +48,7 @@ def _warmup_qwen3_vl_visual_module(visual: torch.nn.Module) -> None:
 
 
 def qwen3_vl_vision_warmup(model: torch.nn.Module) -> None:
-    """Warm Qwen3-VL vision kernels missed by text-only dummy runs."""
+    """Warm Qwen3-VL vision kernels missed when MM profiling is skipped."""
     warmed_keys: set[tuple[Any, ...]] = set()
     warmed_count = 0
 
@@ -59,6 +59,7 @@ def qwen3_vl_vision_warmup(model: torch.nn.Module) -> None:
                 visual.dtype,
                 visual.hidden_size,
                 visual.num_heads,
+                visual.num_grid_per_side,
                 visual.patch_embed.patch_size,
                 visual.patch_embed.temporal_patch_size,
                 visual.spatial_merge_size,

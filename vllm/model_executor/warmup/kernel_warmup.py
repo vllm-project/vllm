@@ -43,6 +43,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+def _should_run_qwen3_vl_vision_warmup(worker: "Worker") -> bool:
+    mm_config = worker.vllm_config.model_config.multimodal_config
+    return mm_config is not None and mm_config.skip_mm_profiling
+
+
 def kernel_warmup(worker: "Worker"):
     from vllm.model_executor.warmup.minimax_m3_msa_warmup import (
         minimax_m3_msa_warmup,
@@ -87,7 +92,8 @@ def kernel_warmup(worker: "Worker"):
         deep_gemm_warmup(model, max_tokens)
 
     minimax_m3_msa_warmup(worker)
-    qwen3_vl_vision_warmup(worker.get_model())
+    if _should_run_qwen3_vl_vision_warmup(worker):
+        qwen3_vl_vision_warmup(worker.get_model())
 
     enable_flashinfer_autotune = (
         worker.vllm_config.kernel_config.enable_flashinfer_autotune
