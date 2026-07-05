@@ -406,7 +406,7 @@ def test_fused_moe_int64_overflow(workspace_init):
     Reproduces the scenario from PR #34279.
     """
     # ~12 GB GPU memory needed for intermediate caches
-    free_mem = torch.accelerator.get_memory_info()[0]
+    free_mem = torch.cuda.mem_get_info()[0]
     if free_mem < 12 * 1024**3:
         pytest.skip("Insufficient GPU memory for overflow test")
 
