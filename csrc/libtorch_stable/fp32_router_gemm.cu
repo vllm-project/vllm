@@ -211,9 +211,9 @@ static bool isBlackwellFamily() {
 template <typename InputT, int kNumTokens, int kNumExperts, int kHiddenDim>
 void invokeFp32RouterGemm(float* output, InputT const* mat_a,
                           float const* mat_b, cudaStream_t stream) {
-  // Geometry tuned on B300 for GLM-5.2 (E=256, H=6144), bf16 activation,
-  // under a production-fidelity harness (CUDA-graph replay, per-layer cold
-  // weights). One-wave wide blocks beat the legacy 128-thread geometry:
+  // Geometry tuned on B300 per supported shape, bf16 activation, under a
+  // production-fidelity harness (CUDA-graph replay, per-layer cold weights).
+  // GLM-5.2 (E=256, H=6144):
   //   M <= 4        : BS=768, EPB=1 (2.7us vs cast+cuBLAS 8.1us at M=1)
   //   M in [5, 15]
   //   or odd        : BS=384, EPB=2 (crossover vs BS=768 measured in (4, 8))
@@ -237,6 +237,50 @@ void invokeFp32RouterGemm(float* output, InputT const* mat_a,
                            kHiddenDim, 2>(output, mat_a, mat_b, stream);
     } else {
       launchFp32RouterGemm<InputT, 384, 2, kNumTokens, kNumExperts,
+                           kHiddenDim>(output, mat_a, mat_b, stream);
+    }
+  } else if constexpr (std::is_same_v<InputT, __nv_bfloat16> &&
+                       kNumExperts == 128 && kHiddenDim == 6144) {
+    // MiniMax-M3. Legacy 128/1 only fills 128 blocks and pays the same
+    // accumulator register cliffs; B300 sweep:
+    //   even M in [6, 16] : BS=384, EPB=1, 2 token groups (1.26-1.43x)
+    //   even M >= 18      : BS=192, EPB=1, 2 token groups (1.59-1.66x)
+    //   M <= 5 / odd      : BS=384, EPB=1 (1.03-1.19x)
+    if (!isBlackwellFamily()) {
+      launchFp32RouterGemm<InputT, 128, 1, kNumTokens, kNumExperts,
+                           kHiddenDim>(output, mat_a, mat_b, stream);
+      return;
+    }
+    if constexpr (kNumTokens >= 18 && kNumTokens % 2 == 0) {
+      launchFp32RouterGemm<InputT, 192, 1, kNumTokens, kNumExperts,
+                           kHiddenDim, 2>(output, mat_a, mat_b, stream);
+    } else if constexpr (kNumTokens >= 6 && kNumTokens % 2 == 0) {
+      launchFp32RouterGemm<InputT, 384, 1, kNumTokens, kNumExperts,
+                           kHiddenDim, 2>(output, mat_a, mat_b, stream);
+    } else {
+      launchFp32RouterGemm<InputT, 384, 1, kNumTokens, kNumExperts,
+                           kHiddenDim>(output, mat_a, mat_b, stream);
+    }
+  } else if constexpr (std::is_same_v<InputT, __nv_bfloat16> &&
+                       kNumExperts == 256 && kHiddenDim == 3072) {
+    // MiniMax-M2/M2.5. The 3.1MB weight is latency-floor bound at small M
+    // (legacy already optimal); token groups win only at even M >= 8
+    // (1.05-1.17x). EPB crossover measured between 12 and 16.
+    if (!isBlackwellFamily()) {
+      launchFp32RouterGemm<InputT, 128, 1, kNumTokens, kNumExperts,
+                           kHiddenDim>(output, mat_a, mat_b, stream);
+      return;
+    }
+    if constexpr (kNumTokens >= 16 && kNumTokens % 2 == 0) {
+      launchFp32RouterGemm<InputT, 192, 2, kNumTokens, kNumExperts,
+                           kHiddenDim, 2>(output, mat_a, mat_b, stream);
+    } else if constexpr (kNumTokens >= 8 && kNumTokens <= 12 &&
+                         kNumTokens % 2 == 0) {
+      // M=14 measured 0.91x on this branch; it stays on legacy.
+      launchFp32RouterGemm<InputT, 192, 1, kNumTokens, kNumExperts,
+                           kHiddenDim, 2>(output, mat_a, mat_b, stream);
+    } else {
+      launchFp32RouterGemm<InputT, 128, 1, kNumTokens, kNumExperts,
                            kHiddenDim>(output, mat_a, mat_b, stream);
     }
   } else {
