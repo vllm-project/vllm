@@ -37,9 +37,6 @@ from vllm.distributed import (
 )
 from vllm.distributed.kv_events import BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake import rdma_utils
-from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.mooncake_utils import (
-    get_mooncake_dp_engine_index,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.mooncake.store.coordinator import (  # noqa: E501
     ExternalCachedBlockPool,
     MooncakeStoreCoordinator,
@@ -966,7 +963,7 @@ class MooncakeStoreWorker:
         model_config = vllm_config.model_config
         parallel_config = vllm_config.parallel_config
 
-        self.dp_rank = get_mooncake_dp_engine_index(parallel_config)
+        self.dp_rank = parallel_config.data_parallel_index
         self.tp_rank = get_tensor_model_parallel_rank()
         self.tp_size = get_tensor_model_parallel_world_size()
         self.pp_size = parallel_config.pipeline_parallel_size
@@ -1720,7 +1717,7 @@ class LookupKeyClient:
 def get_zmq_rpc_path_lookup(vllm_config: VllmConfig) -> str:
     """Construct IPC path for ZMQ lookup socket."""
     assert vllm_config.kv_transfer_config is not None
-    dp_rank = get_mooncake_dp_engine_index(vllm_config.parallel_config)
+    dp_rank = vllm_config.parallel_config.data_parallel_index
     base_url = envs.VLLM_RPC_BASE_PATH
     rpc_port = 0
     hostname = socket.gethostname()
