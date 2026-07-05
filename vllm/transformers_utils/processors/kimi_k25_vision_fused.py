@@ -3,6 +3,7 @@
 """Optimized CPU image processor for Kimi-K2.5/K2.6 vision chunks."""
 
 import io
+import json
 import math
 from typing import Any
 
@@ -324,3 +325,26 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
             "grid_thws": torch.from_numpy(grid_thws_np),
         }
         return BatchFeature(data=data, tensor_type=return_tensors)
+
+    def __repr__(self):
+        return f"KimiK25FusedVisionProcessor(media_proc_cfg={self.media_proc_cfg})"
+
+    def to_dict(self) -> dict[str, Any]:
+        output = super().to_dict()
+        output["media_proc_cfg"] = self.media_proc_cfg
+        if "media_processor" in output:
+            del output["media_processor"]
+        return output
+
+    @classmethod
+    def from_dict(cls, config_dict: dict[str, Any], **kwargs):
+        config = config_dict.copy()
+        media_proc_cfg = config.pop("media_proc_cfg", {})
+        return cls(media_proc_cfg=media_proc_cfg, **config, **kwargs)
+
+    def to_json_string(self):
+        dictionary = self.to_dict()
+        for key, value in dictionary.items():
+            if hasattr(value, "tolist"):
+                dictionary[key] = value.tolist()
+        return json.dumps(dictionary, indent=2, sort_keys=True) + "\n"
