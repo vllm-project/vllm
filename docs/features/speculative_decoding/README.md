@@ -11,6 +11,7 @@ vLLM supports a variety of methods of speculative decoding. Model-based methods 
 - [EAGLE](eagle.md)
 - [Multi-Token Prediction (MTP)](mtp.md)
 - [Draft Model](draft_model.md)
+- [DFlash / Domino](dflash.md)
 - [Parallel Draft Model (PARD)](parallel_draft_model.md)
 - [Multi-Layer Perceptron](mlp.md)
 - [N-Gram](n_gram.md)
@@ -29,6 +30,7 @@ depend on your model family, traffic pattern, hardware, and sampling settings.
 | EAGLE | High gain | Medium to high gain | Strong general-purpose model-based method. |
 | MTP | High gain | Medium to high gain | Best when the target model has native MTP support. |
 | Draft model | High gain | Medium gain | Needs a separate draft model. |
+| DFlash / Domino | High gain | Medium to high gain | Parallel drafter with optional causal correction (Domino). |
 | Parallel Draft Model | High gain | Medium to high gain | Low draft model latency. |
 | MLP speculator | Medium to high gain | Medium gain | Good when compatible MLP speculators are available. |
 | N-gram | Low to medium gain | Medium gain | Lightweight and easy to enable. |
@@ -78,7 +80,7 @@ only apply to model-based methods such as `draft_model`, `mtp`, `eagle3`, and
 
 | Key | Type | Default | Allowed values / meaning |
 | --- | --- | --- | --- |
-| `method` | `string` | `None` | Speculation method. Common values include `draft_model`, `ngram`, `suffix`, `mtp`, `eagle3`, and `dflash`. If omitted, vLLM infers the method from the provided configuration when possible. |
+| `method` | `string` | `None` | Speculation method. Common values include `draft_model`, `ngram`, `suffix`, `mtp`, `eagle3`, and `dflash`. If omitted, vLLM infers the method from the provided configuration when possible. For Domino (causal correction head), use `dflash` with `projector_type="domino"` in `dflash_config`. |
 | `model` | `string` | `None` | Draft model, EAGLE head, or auxiliary model identifier. For `ngram`, `ngram_gpu`, `suffix`, and `mtp`, this can often be omitted. |
 | `num_speculative_tokens` | `integer > 0` | `None` | Number of speculative tokens to propose per step. Required for methods that do not infer it from model metadata. |
 | `draft_tensor_parallel_size` | `integer >= 1` | `None` | Tensor parallel size for the draft model. |
@@ -142,6 +144,31 @@ vllm serve <target-model> \
     "suffix_decoding_min_token_prob": 0.1
   }'
 ```
+
+#### DFlash / Domino
+
+DFlash is a parallel drafter that produces all K draft tokens in a single forward
+pass. Domino extends DFlash with a lightweight causal correction head (GRU +
+low-rank MLP) that refines the parallel base logits using causal state from
+previous draft tokens. Domino is enabled by setting `projector_type="domino"` in
+the checkpoint's `dflash_config`.
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `mask_token_id` | `int` | Required | Token ID used for masked hidden states in the DFlash draft model. Must be set inside `dflash_config`. |
+
+Domino-specific `dflash_config` fields (set in the checkpoint):
+
+| Key | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `projector_type` | `string` | `"dflash"` | Set to `"domino"` to enable the Domino causal correction head. |
+| `gru_hidden_dim` | `int` | `1024` | GRU hidden dimension for the Domino correction head. |
+| `emb_dim` | `int` | `256` | Bottleneck dimension for the low-rank correction MLP. |
+| `pure_draft_prefix_len` | `int` | `1` | Number of prefix positions sampled from base logits without Domino correction. |
+| `shift_label` | `bool` | `true` | Whether to shift labels for Domino training. |
+
+Domino draft models can be trained using the
+[vllm-project/speculators](speculators.md) library.
 
 #### Cross-Vocabulary Draft Models (TLI)
 
