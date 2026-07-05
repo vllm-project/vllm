@@ -14,7 +14,7 @@ Usage:
         --port 8192 \
         --prefiller-host 127.0.0.1 --prefiller-port 8100 \
         --decoder-host   127.0.0.1 --decoder-port  8200 \
-        --p2p-connector-host 127.0.0.1 --p2p-connector-port 7777
+        --p2p-connector-host 127.0.0.1 --p2p-connector-port 5710
 """
 
 import argparse
@@ -111,8 +111,9 @@ def parse_args():
     p.add_argument(
         "--p2p-connector-port",
         type=int,
-        default=7777,
-        help="Port of the prefiller's P2PConnector ZMQ socket",
+        default=int(os.getenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5710")),
+        help="Port of the prefiller's P2PConnector ZMQ socket "
+        "(default: $VLLM_P2P_SIDE_CHANNEL_PORT or 5710)",
     )
     # P2PConnector coordinates of the decoder — injected into prefill requests
     # so the prefiller's submit_store can resolve the peer to push KV to.
@@ -125,8 +126,9 @@ def parse_args():
     p.add_argument(
         "--decoder-p2p-connector-port",
         type=int,
-        default=7778,
-        help="Port of the decoder's P2PConnector ZMQ socket",
+        default=int(os.getenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5710")) + 1,
+        help="Port of the decoder's P2PConnector ZMQ socket "
+        "(default: $VLLM_P2P_SIDE_CHANNEL_PORT + 1 or 5711)",
     )
     p.add_argument(
         "--decoder-first",

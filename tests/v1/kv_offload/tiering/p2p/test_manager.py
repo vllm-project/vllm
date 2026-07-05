@@ -1373,3 +1373,51 @@ class TestConnectionDeathMidTransfer:
         assert (900, False) not in finishes
         assert (900, True) not in finishes
         assert "req-store" in mgr_a._unbound_stores
+
+
+# ---------------------------------------------------------------------------
+# Tests for host/port resolution in __init__ (env-var defaults)
+# ---------------------------------------------------------------------------
+
+
+class TestBindHostPortDefaults:
+    """host/port fall back to VLLM_P2P_SIDE_CHANNEL_* when not in config."""
+
+    @staticmethod
+    def _construct(monkeypatch, **kwargs) -> P2PSecondaryTierManager:
+        """Build a manager with the transports/file-mapper stubbed out."""
+        monkeypatch.setattr(
+            manager_module,
+            "FileMapper",
+            SimpleNamespace(
+                from_offloading_spec=lambda **_: SimpleNamespace(
+                    get_run_config=lambda: {}
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            manager_module, "NixlTransport", lambda *a, **k: SimpleNamespace()
+        )
+        monkeypatch.setattr(
+            manager_module, "ZmqTransport", lambda *a, **k: SimpleNamespace()
+        )
+        spec = SimpleNamespace(block_size_factor=1)
+        return P2PSecondaryTierManager(spec, memoryview(b""), **kwargs)
+
+    def test_defaults_from_env_unset(self, monkeypatch):
+        monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
+        monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
+        mgr = self._construct(monkeypatch)
+        assert mgr._local_id == "localhost:5710"
+
+    def test_env_override(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_SIDE_CHANNEL_HOST", "10.1.2.3")
+        monkeypatch.setenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5799")
+        mgr = self._construct(monkeypatch)
+        assert mgr._local_id == "10.1.2.3:5799"
+
+    def test_explicit_config_wins(self, monkeypatch):
+        monkeypatch.setenv("VLLM_P2P_SIDE_CHANNEL_HOST", "10.1.2.3")
+        monkeypatch.setenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5799")
+        mgr = self._construct(monkeypatch, host="0.0.0.0", port=6001)
+        assert mgr._local_id == "0.0.0.0:6001"

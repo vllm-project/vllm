@@ -127,12 +127,19 @@ The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances o
 | Key | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `type` | yes | — | Must be `p2p`. |
-| `host` | no | `0.0.0.0` | Address the control socket binds to. |
-| `port` | no | `7777` | Port for the control socket. Must be reachable from peers. |
+| `host` | no | `$VLLM_P2P_SIDE_CHANNEL_HOST` (`localhost`) | Address the control socket binds to. When omitted, resolves from the env var below. |
+| `port` | no | `$VLLM_P2P_SIDE_CHANNEL_PORT` (`5710`) | Port for the control socket. Must be reachable from peers. When omitted, resolves from the env var below. |
 | `backends` | no | `["UCX"]` | NIXL transport backends. See [NixlConnector Usage Guide](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin) for available backends and selection guidance. |
 | `num_threads` | no | `4` | NIXL agent worker threads. Only used when `backends` is UCX-only; ignored when any non-UCX backend is requested. |
 
 The `backends` and `num_threads` options mirror the conditional logic used by [`NixlConnector`](nixl_connector_usage.md#selecting-a-nixl-transport-backend-plugin): when any non-UCX backend is configured, NIXL is initialised with `backends=...`; otherwise it falls back to a UCX-only agent with the configured `num_threads`. This lets the P2P tier use a different transport (e.g. `MOONCAKE`, `GDS_MT`, `LIBFABRIC`) than the main `NixlConnector` running in the same process.
+
+#### Environment Variables
+
+Rather than embedding `host`/`port` in each `secondary_tiers` entry, set them once at deploy time via environment variables (mirroring `VLLM_NIXL_SIDE_CHANNEL_HOST`/`VLLM_NIXL_SIDE_CHANNEL_PORT`). Explicit `host`/`port` config keys, when present, take precedence.
+
+- `VLLM_P2P_SIDE_CHANNEL_HOST` (default `localhost`): address the P2P control socket binds to. Leave as `localhost` when prefiller and decoder share a host; set to the node IP for cross-host P/D.
+- `VLLM_P2P_SIDE_CHANNEL_PORT` (default `5710`): port the P2P control socket binds to. The peer's port is still passed as `remote_port` in `kv_transfer_params` — use this value as the well-known default. Unlike NIXL, there is **no** data-parallel-index increment; the P2P tier binds a single control socket per engine. When a prefiller and decoder run on the *same* host, give one side a different port (e.g. `5711`) to avoid a bind collision.
 
 ## Tuning Tips
 

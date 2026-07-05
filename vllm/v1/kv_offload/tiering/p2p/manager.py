@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING
 
 from typing_extensions import override
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.v1.kv_offload.base import (
     LookupResult,
@@ -111,8 +112,8 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         offloading_spec: OffloadingSpec,
         primary_kv_view: memoryview,
         tier_type: str = "p2p",
-        host: str = "0.0.0.0",
-        port: int = 7777,
+        host: str | None = None,
+        port: int | None = None,
         backends: list[str] | None = None,
         num_threads: int = 4,
         **kwargs,
@@ -130,9 +131,12 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             primary_kv_view: Memoryview over the CPU primary tier; the
                 NIXL agent registers this region for RDMA transfers.
             tier_type: Tier identifier (defaults to ``"p2p"``).
-            host: Address the ZMQ control socket binds to.
+            host: Address the ZMQ control socket binds to. Defaults to
+                ``VLLM_P2P_SIDE_CHANNEL_HOST`` (``localhost``) when not
+                set; override to the node IP for cross-host P/D.
             port: Port for the ZMQ control socket. Must be reachable
-                from peers.
+                from peers. Defaults to ``VLLM_P2P_SIDE_CHANNEL_PORT``
+                (``5710``) when not set.
             backends: NIXL transport backends (e.g. ``["UCX"]``,
                 ``["MOONCAKE"]``, ``["LIBFABRIC"]``). Defaults to
                 ``["UCX"]``. When any non-UCX backend is requested, the
@@ -145,6 +149,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             **kwargs: Reserved for future tier-specific options.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
+        if host is None:
+            host = envs.VLLM_P2P_SIDE_CHANNEL_HOST
+        if port is None:
+            port = envs.VLLM_P2P_SIDE_CHANNEL_PORT
         port = int(port)
         self._local_id = f"{host}:{port}"
 

@@ -200,6 +200,8 @@ if TYPE_CHECKING:
     VLLM_DISABLE_REQUEST_ID_RANDOMIZATION: bool = False
     VLLM_NIXL_SIDE_CHANNEL_HOST: str = "localhost"
     VLLM_NIXL_SIDE_CHANNEL_PORT: int = 5600
+    VLLM_P2P_SIDE_CHANNEL_HOST: str = "localhost"
+    VLLM_P2P_SIDE_CHANNEL_PORT: int = 5710
     VLLM_MOONCAKE_BOOTSTRAP_PORT: int = 8998
     VLLM_MOONCAKE_STORE_TIER_LOG: bool = False
     VLLM_MOONCAKE_LOAD_RECV_THREADS: int = 1
@@ -1539,6 +1541,14 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Port used for NIXL handshake between remote agents.
     "VLLM_NIXL_SIDE_CHANNEL_PORT": lambda: int(
         os.getenv("VLLM_NIXL_SIDE_CHANNEL_PORT", "5600")
+    ),
+    # IP address the P2P KV-offload control socket binds to.
+    "VLLM_P2P_SIDE_CHANNEL_HOST": lambda: os.getenv(
+        "VLLM_P2P_SIDE_CHANNEL_HOST", "localhost"
+    ),
+    # Port the P2P KV-offload control socket binds to.
+    "VLLM_P2P_SIDE_CHANNEL_PORT": lambda: int(
+        os.getenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5710")
     ),
     # Port used for Mooncake handshake between remote agents.
     "VLLM_MOONCAKE_BOOTSTRAP_PORT": lambda: int(
