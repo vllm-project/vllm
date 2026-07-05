@@ -341,11 +341,16 @@ class RequestState:
         prompt_token_ids = self.prompt_token_ids
         if prompt_token_ids is None and self.prompt_embeds is not None:
             prompt_token_ids = [0] * len(self.prompt_embeds)
-        assert prompt_token_ids is not None
+        omit_prompt_token_ids = (
+            self.streaming_input and self.output_kind == RequestOutputKind.DELTA
+        )
+        if not omit_prompt_token_ids:
+            assert prompt_token_ids is not None
 
         first_output = outputs[0]
         if isinstance(first_output, PoolingOutput):
             assert len(outputs) == 1
+            assert prompt_token_ids is not None
             return PoolingRequestOutput(
                 request_id=external_req_id,
                 outputs=first_output,
@@ -364,7 +369,7 @@ class RequestState:
             request_id=external_req_id,  # request_id is what was provided externally
             lora_request=self.lora_request,
             prompt=self.prompt,
-            prompt_token_ids=prompt_token_ids,
+            prompt_token_ids=None if omit_prompt_token_ids else prompt_token_ids,
             prompt_logprobs=prompt_logprobs,
             outputs=cast(list[CompletionOutput], outputs),
             finished=finished,

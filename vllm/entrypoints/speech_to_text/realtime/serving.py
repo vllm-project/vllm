@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import time
 from collections.abc import AsyncGenerator
 from functools import cached_property
 from typing import Literal, cast
@@ -71,6 +72,11 @@ class OpenAIServingRealtime(GenerateBaseServing):
         """
         model_config = self.model_config
         renderer = self.renderer
+        build_realtime_engine_input = getattr(
+            self.model_cls, "build_realtime_engine_input", None
+        )
+        stream_id = id(input_stream)
+        frame_idx = 0
 
         # mypy is being stupid
         # TODO(Patrick) - fix this
@@ -82,7 +88,16 @@ class OpenAIServingRealtime(GenerateBaseServing):
         )
 
         async for prompt in stream_input_iter:
-            parsed_prompt = parse_model_prompt(model_config, prompt)
-            (engine_input,) = await renderer.render_cmpl_async([parsed_prompt])
+            if build_realtime_engine_input is not None:
+                engine_input = build_realtime_engine_input(
+                    prompt,
+                    model_config,
+                    f"voxtral-realtime-{stream_id}-{frame_idx}",
+                    time.time(),
+                )
+                frame_idx += 1
+            else:
+                parsed_prompt = parse_model_prompt(model_config, prompt)
+                (engine_input,) = await renderer.render_cmpl_async([parsed_prompt])
 
             yield StreamingInput(prompt=engine_input)
