@@ -598,7 +598,7 @@ class _ShutdownFakeData:
             return list(self._still_queue[0])
         return []
 
-    def poll(self):
+    def poll(self, owner=None):
         self.poll_calls += 1
 
         class _Empty:
@@ -831,7 +831,7 @@ class _FakeData:
         self._inflight_done.append(tid)
         return tid
 
-    def poll(self):
+    def poll(self, owner=None):
         from vllm.v1.kv_offload.tiering.p2p.data.base import PollResult
 
         done = self._inflight_done[:]
