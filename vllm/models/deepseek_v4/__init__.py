@@ -24,7 +24,7 @@ elif current_platform.is_xpu():
     from .xpu.model import DeepseekV4ForCausalLM  # type: ignore[assignment]
     from .xpu.mtp import DeepSeekV4MTP  # type: ignore[assignment]
 
-    DSparkDeepseekV4ForCausalLM = None  # type: ignore[assignment]
+    DSparkDeepseekV4ForCausalLM = None  # type: ignore[assignment, misc]
 else:
     from .nvidia.dspark import (  # type: ignore[assignment]
         DSparkDeepseekV4ForCausalLM,
