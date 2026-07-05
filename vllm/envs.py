@@ -289,6 +289,7 @@ if TYPE_CHECKING:
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
     VLLM_PREFIX_CACHE_RETENTION_INTERVAL: int | None = None
+    VLLM_DEBUG_PREFIX_CACHE_TRACE: bool = False
 
 
 def get_default_cache_root():
@@ -1080,6 +1081,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
         int(os.environ["VLLM_PREFIX_CACHE_RETENTION_INTERVAL"])
         if "VLLM_PREFIX_CACHE_RETENTION_INTERVAL" in os.environ
         else None
+    ),
+    # Enable verbose prefix-cache trace logs for local debugging.
+    "VLLM_DEBUG_PREFIX_CACHE_TRACE": lambda: bool(
+        int(os.environ.get("VLLM_DEBUG_PREFIX_CACHE_TRACE", "0"))
     ),
     # a local directory to look in for unrecognized LoRA adapters.
     # only works if plugins are enabled and

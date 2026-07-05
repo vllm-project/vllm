@@ -95,7 +95,10 @@ class KnormFullAttentionManager(FullAttentionManager):
         return evict_blocks * self.block_size
 
     def remove_skipped_blocks(
-        self, request_id: str, total_computed_tokens: int
+        self,
+        request_id: str,
+        total_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
     ) -> None:
         """Remove the *least important* blocks from the prefix.
 
