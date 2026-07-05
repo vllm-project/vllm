@@ -133,6 +133,7 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
+from vllm.v1.attention.backends.short_conv_attn import ShortConvAttentionMetadataBuilder
 from vllm.v1.attention.backends.utils import (
     NULL_BLOCK_ID,
     create_fast_prefill_custom_backend,
@@ -2442,7 +2443,12 @@ class GPUModelRunner(
 
             extra_attn_metadata_args = {}
             if use_spec_decode and isinstance(
-                builder, (Mamba2AttentionMetadataBuilder, GDNAttentionMetadataBuilder)
+                builder,
+                (
+                    Mamba2AttentionMetadataBuilder,
+                    GDNAttentionMetadataBuilder,
+                    ShortConvAttentionMetadataBuilder,
+                ),
             ):
                 assert ubid is None, "UBatching not supported with GDN yet"
                 extra_attn_metadata_args = dict(

@@ -192,9 +192,14 @@ class MambaStateShapeCalculator:
         tp_world_size: int,
         intermediate_size: int,
         conv_kernel: int,
+        num_spec: int = 0,
     ) -> tuple[tuple[int, int]]:
         conv_dim = divide(intermediate_size, tp_world_size)
-        conv_state_shape = cls._orient_conv_shape(conv_dim, conv_kernel - 1)
+        # Speculative decode needs a wider conv state so the spec-aware
+        # causal_conv1d_update sliding window has room to roll back rejected
+        # tokens (kernel uses state_len = width-1 + (seqlen-1)). Mirror
+        # mamba2_state_shape, which adds num_spec for the same reason.
+        conv_state_shape = cls._orient_conv_shape(conv_dim, conv_kernel - 1 + num_spec)
         return (conv_state_shape,)
 
     @classmethod
