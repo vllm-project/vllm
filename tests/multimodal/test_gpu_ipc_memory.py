@@ -3,16 +3,49 @@
 
 import threading
 import time
+from types import SimpleNamespace
 
 import pytest
 
+import vllm.multimodal.gpu_ipc_memory as gpu_ipc_memory
 from vllm.multimodal.gpu_ipc_memory import (
     MultiModalGPUMemoryPool,
+    get_mm_gpu_ipc_memory_reservation,
     get_mm_gpu_ipc_pool,
     maybe_init_mm_gpu_ipc_pool,
     set_mm_gpu_ipc_pool,
 )
+from vllm.multimodal.video import (
+    PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
+    PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+    PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
+    PYNVVIDEOCODEC_VIDEO_BACKEND,
+)
 from vllm.utils.mem_constants import GiB_bytes
+
+
+def _mm_config(
+    *,
+    mm_ipc_gpu_memory_gb: float = 0,
+    video_backend: str | None = None,
+    codec_backend: str | None = None,
+) -> SimpleNamespace:
+    video_kwargs = {}
+    if video_backend is not None:
+        video_kwargs["video_backend"] = video_backend
+    if codec_backend is not None:
+        video_kwargs["backend"] = codec_backend
+    return SimpleNamespace(
+        mm_ipc_gpu_memory_gb=mm_ipc_gpu_memory_gb,
+        media_io_kwargs={"video": video_kwargs} if video_kwargs else {},
+    )
+
+
+def _pynvvideocodec_decoder_budget(api_process_count: int = 1) -> int:
+    return api_process_count * (
+        PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES * PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
+        + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+    )
 
 
 def test_acquire_release_accounting():
@@ -143,3 +176,91 @@ def test_global_pool_splits_budget_across_api_processes():
 def test_global_pool_rejects_invalid_api_process_count():
     with pytest.raises(ValueError):
         maybe_init_mm_gpu_ipc_pool(2, api_process_count=0)
+
+
+@pytest.mark.parametrize("video_backend", [None, "opencv"])
+def test_mm_gpu_ipc_reservation_raw_frame_budget_only(
+    monkeypatch: pytest.MonkeyPatch,
+    video_backend: str | None,
+):
+    monkeypatch.setattr(
+        gpu_ipc_memory.envs,
+        "VLLM_VIDEO_LOADER_BACKEND",
+        "opencv",
+    )
+
+    reservation = get_mm_gpu_ipc_memory_reservation(
+        _mm_config(mm_ipc_gpu_memory_gb=0.25, video_backend=video_backend)
+    )
+
+    assert reservation.raw_frame_bytes == int(0.25 * GiB_bytes)
+    assert reservation.decoder_bytes == 0
+    assert reservation.total_bytes == int(0.25 * GiB_bytes)
+
+
+@pytest.mark.parametrize(
+    ("video_backend", "codec_backend"),
+    [
+        (PYNVVIDEOCODEC_VIDEO_BACKEND, None),
+        (None, PYNVVIDEOCODEC_VIDEO_BACKEND),
+    ],
+)
+def test_mm_gpu_ipc_reservation_includes_pynvvideocodec_decoder_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    video_backend: str | None,
+    codec_backend: str | None,
+):
+    monkeypatch.setattr(
+        gpu_ipc_memory.envs,
+        "VLLM_VIDEO_LOADER_BACKEND",
+        "opencv",
+    )
+
+    reservation = get_mm_gpu_ipc_memory_reservation(
+        _mm_config(
+            mm_ipc_gpu_memory_gb=0.25,
+            video_backend=video_backend,
+            codec_backend=codec_backend,
+        )
+    )
+
+    assert reservation.raw_frame_bytes == int(0.25 * GiB_bytes)
+    assert reservation.decoder_bytes == _pynvvideocodec_decoder_budget()
+    assert reservation.total_bytes == (
+        int(0.25 * GiB_bytes) + _pynvvideocodec_decoder_budget()
+    )
+
+
+def test_mm_gpu_ipc_reservation_uses_env_video_backend(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        gpu_ipc_memory.envs,
+        "VLLM_VIDEO_LOADER_BACKEND",
+        PYNVVIDEOCODEC_VIDEO_BACKEND,
+    )
+
+    reservation = get_mm_gpu_ipc_memory_reservation(_mm_config())
+
+    assert reservation.decoder_bytes == _pynvvideocodec_decoder_budget()
+    assert reservation.total_bytes == _pynvvideocodec_decoder_budget()
+
+
+def test_mm_gpu_ipc_reservation_scales_pynvvideocodec_budget_by_api_servers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        gpu_ipc_memory.envs,
+        "VLLM_VIDEO_LOADER_BACKEND",
+        PYNVVIDEOCODEC_VIDEO_BACKEND,
+    )
+
+    reservation = get_mm_gpu_ipc_memory_reservation(_mm_config(), api_process_count=3)
+
+    assert reservation.api_process_count == 3
+    assert reservation.decoder_bytes == _pynvvideocodec_decoder_budget(
+        api_process_count=3
+    )
+    assert reservation.total_bytes == _pynvvideocodec_decoder_budget(
+        api_process_count=3
+    )

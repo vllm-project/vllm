@@ -17,11 +17,76 @@ amount out of its KV-cache budget so the headroom physically exists.
 """
 
 import threading
+from dataclasses import dataclass
+from typing import Any
 
+import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.mem_constants import GiB_bytes
 
 logger = init_logger(__name__)
+
+
+@dataclass(frozen=True)
+class MultiModalGPUMemoryReservation:
+    raw_frame_bytes: int = 0
+    decoder_bytes: int = 0
+    per_server_decoder_bytes: int = 0
+    api_process_count: int = 1
+
+    @property
+    def total_bytes(self) -> int:
+        return self.raw_frame_bytes + self.decoder_bytes
+
+
+def _uses_pynvvideocodec_video_backend(mm_config: Any) -> bool:
+    from vllm.multimodal.video import PYNVVIDEOCODEC_VIDEO_BACKEND
+
+    media_io_kwargs = getattr(mm_config, "media_io_kwargs", {}) or {}
+    video_kwargs = media_io_kwargs.get("video", {})
+    video_loader_backend = (
+        video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
+    )
+    codec_backend = video_kwargs.get("backend")
+    return (
+        video_loader_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+        or codec_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+    )
+
+
+def get_mm_gpu_ipc_memory_reservation(
+    mm_config: Any | None,
+    api_process_count: int = 1,
+) -> MultiModalGPUMemoryReservation:
+    """Return the frontend multimodal GPU memory budget to reserve."""
+    num_api_servers = max(1, api_process_count)
+    if mm_config is None:
+        return MultiModalGPUMemoryReservation(api_process_count=num_api_servers)
+
+    raw_frame_bytes = int(getattr(mm_config, "mm_ipc_gpu_memory_gb", 0) * GiB_bytes)
+    per_server_decoder_bytes = 0
+    decoder_bytes = 0
+    if _uses_pynvvideocodec_video_backend(mm_config):
+        from vllm.multimodal.video import (
+            PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
+            PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+            PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
+        )
+
+        # Each API server process has its own decoder surfaces and CUDA context.
+        per_server_decoder_bytes = (
+            PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+            * PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
+            + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+        )
+        decoder_bytes = num_api_servers * per_server_decoder_bytes
+
+    return MultiModalGPUMemoryReservation(
+        raw_frame_bytes=raw_frame_bytes,
+        decoder_bytes=decoder_bytes,
+        per_server_decoder_bytes=per_server_decoder_bytes,
+        api_process_count=num_api_servers,
+    )
 
 
 class MultiModalGPUMemoryLease:
