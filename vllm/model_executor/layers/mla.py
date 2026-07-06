@@ -118,6 +118,14 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             use_sparse=self.is_sparse,
             indexer=self.indexer,
             topk_indices_buffer=mla_modules.topk_indices_buffer,
+            rotary_emb=self.rotary_emb,
+        )
+
+        # when the decode impl fuses RoPE into its Q-prep kernel
+        # (fused_qk_rope_concat_and_cache_mla), defer the main RoPE here and
+        # pass positions down to the impl as a forward() argument.
+        self._defer_rope_to_fused_kernel = self.rotary_emb is not None and getattr(
+            self.mla_attn.impl, "use_fused_qk_rope_cache", False
         )
 
         self.prefix = prefix
@@ -172,7 +180,10 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             heads *= q_proj_layer.group_size
         q = q.view(-1, heads, self.qk_head_dim)
 
-        if self.rotary_emb is not None:
+        fused_positions: torch.Tensor | None = None
+        if self._defer_rope_to_fused_kernel:
+            fused_positions = positions
+        elif self.rotary_emb is not None:
             q[..., self.qk_nope_head_dim :], k_pe = self.rotary_emb(
                 positions, q[..., self.qk_nope_head_dim :], k_pe
             )
@@ -193,6 +204,7 @@ class MultiHeadLatentAttentionWrapper(PluggableLayer):
             k_pe,
             output_shape=(hidden_states.shape[0], self.num_heads * self.v_head_dim),
             q_dcp_replicated=q_dcp_replicated,
+            positions=fused_positions,
         )
 
         return self.o_proj(attn_out)[0]
