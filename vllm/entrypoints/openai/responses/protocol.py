@@ -435,6 +435,20 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
+    def check_logprobs(cls, data):
+        if not isinstance(data, dict):
+            return data
+        include = data.get("include")
+        if (
+            isinstance(include, list)
+            and "message.output_text.logprobs" in include
+            and data.get("top_logprobs") is None
+        ):
+            data["top_logprobs"] = 0
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
     def validate_background(cls, data):
         if not data.get("background"):
             return data

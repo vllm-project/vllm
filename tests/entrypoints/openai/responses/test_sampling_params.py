@@ -83,6 +83,19 @@ class TestResponsesRequestSamplingParams:
         assert sampling_params.stop == []  # Empty list
         assert sampling_params.extra_args == {}  # Empty dict
 
+    def test_logprobs_with_null_top_logprobs(self):
+        request = ResponsesRequest(
+            model="test-model",
+            input="test input",
+            include=["message.output_text.logprobs"],
+            top_logprobs=None,
+        )
+
+        sampling_params = request.to_sampling_params(default_max_tokens=1000)
+
+        assert request.top_logprobs == 0
+        assert sampling_params.logprobs == 0
+
     def test_seed_bounds_validation(self):
         """Test that seed values outside torch.long bounds are rejected."""
         # Test seed below minimum

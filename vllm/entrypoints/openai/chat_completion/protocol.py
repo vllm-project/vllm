@@ -753,6 +753,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                     parameter="prompt_logprobs",
                     value=prompt_logprobs,
                 )
+        if data.get("logprobs") and data.get("top_logprobs") is None:
+            data["top_logprobs"] = 0
+
         if (top_logprobs := data.get("top_logprobs")) is not None:
             if top_logprobs < 0 and top_logprobs != -1:
                 raise VLLMValidationError(
@@ -1037,6 +1040,8 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     def check_batch_mode(cls, data: Any) -> Any:
         if isinstance(data, BatchChatCompletionRequest):
             data = data.model_dump(exclude_unset=True)
+        if data.get("logprobs") and data.get("top_logprobs") is None:
+            data["top_logprobs"] = 0
         if data.get("use_beam_search"):
             raise ValueError(
                 "Batch chat completions do not support beam search. "

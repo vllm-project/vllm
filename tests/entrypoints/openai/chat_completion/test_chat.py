@@ -16,6 +16,7 @@ from openai import BadRequestError
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.openai.chat_completion.protocol import (
+    BatchChatCompletionRequest,
     ChatCompletionRequest,
 )
 from vllm.sampling_params import SamplingParams
@@ -1009,6 +1010,31 @@ def test_chat_completion_request_n_parameter_default():
 
     # SamplingParams.from_optional converts None to 1
     assert sampling_params.n == 1, f"Expected n=1 (default), got n={sampling_params.n}"
+
+
+def test_chat_completion_request_logprobs_with_null_top_logprobs():
+    request = ChatCompletionRequest(
+        model="test-model",
+        messages=[{"role": "user", "content": "Hello"}],
+        logprobs=True,
+        top_logprobs=None,
+    )
+
+    assert request.top_logprobs == 0
+    assert request.to_sampling_params(16, {}).logprobs == 0
+
+    batch_request = BatchChatCompletionRequest(
+        model="test-model",
+        messages=[[{"role": "user", "content": "Hello"}]],
+        logprobs=True,
+        top_logprobs=None,
+    )
+
+    assert batch_request.top_logprobs == 0
+    assert (
+        batch_request.to_chat_completion_request(batch_request.messages[0]).top_logprobs
+        == 0
+    )
 
 
 def test_chat_completion_request_accepts_model_specific_reasoning_effort():
