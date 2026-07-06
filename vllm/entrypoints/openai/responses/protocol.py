@@ -375,7 +375,7 @@ class ResponsesRequest(OpenAIBaseModel):
         # Structured output
         structured_outputs = self.structured_outputs
 
-        # Also check text.format for OpenAI-style json_schema
+        # Also check text.format for OpenAI-style structured outputs
         if self.text is not None and self.text.format is not None:
             if structured_outputs is not None:
                 raise VLLMValidationError(
@@ -392,6 +392,8 @@ class ResponsesRequest(OpenAIBaseModel):
                     # --follow-imports skip hides the class definition but also hides
                     # multiple third party conflicts, so best of both evils
                 )
+            elif response_format.type == "json_object":
+                structured_outputs = StructuredOutputsParams(json_object=True)
 
         stop = self.stop if self.stop else []
         if isinstance(stop, str):
