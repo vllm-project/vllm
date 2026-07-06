@@ -153,6 +153,12 @@ class Sampler:
         expanded_local_pos: torch.Tensor,
         skip_top_k_top_p: bool = False,
     ) -> torch.Tensor:
+        if not self._requires_logits_processing(idx_mapping_np):
+            # Gumbel sampling converts loaded logits to FP32 in registers.
+            # Avoid materializing a full FP32 copy when no sampling parameter
+            # changes the logits.
+            return logits
+
         # Copy logits to a new FP32 tensor.
         logits = torch.empty_like(logits, dtype=torch.float32).copy_(logits)
 
@@ -194,6 +200,24 @@ class Sampler:
         return self.sampling_states.apply_top_k_top_p(
             logits, expanded_idx_mapping, idx_mapping_np
         )
+
+    def _requires_logits_processing(self, idx_mapping_np: np.ndarray) -> bool:
+        if np.any(self.logit_bias_state.use_logit_bias[idx_mapping_np]):
+            return True
+        if np.any(self.penalties_state.use_penalty[idx_mapping_np]):
+            return True
+        if np.any(self.bad_words_state.num_bad_words.np[idx_mapping_np] > 0):
+            return True
+
+        states = self.sampling_states
+        temperatures = states.temperature.np[idx_mapping_np]
+        if np.any((temperatures != 0.0) & (temperatures != 1.0)):
+            return True
+        if np.any(states.min_p.np[idx_mapping_np] != 0.0):
+            return True
+        if np.any(states.top_k.np[idx_mapping_np] != states.vocab_size):
+            return True
+        return bool(np.any(states.top_p.np[idx_mapping_np] != 1.0))
 
     def sample(
         self,

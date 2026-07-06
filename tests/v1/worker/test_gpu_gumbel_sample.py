@@ -183,6 +183,41 @@ def test_greedy_temperature_zero_returns_argmax():
     assert torch.equal(sampled, logits.argmax(dim=-1))
 
 
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("temperature", [0.0, 1.0])
+def test_low_precision_input_matches_fp32_materialization(
+    dtype: torch.dtype, temperature: float
+):
+    """In-kernel FP32 conversion matches materializing FP32 logits first."""
+    torch.manual_seed(0)
+    num_reqs = 32
+    vocab_size = 4096
+    logits = torch.randn(num_reqs, vocab_size, device=DEVICE, dtype=dtype)
+    idx_mapping = torch.arange(num_reqs, dtype=torch.int32, device=DEVICE)
+    temp = torch.full((num_reqs,), temperature, dtype=torch.float32, device=DEVICE)
+    seed = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+    pos = torch.arange(num_reqs, dtype=torch.int64, device=DEVICE)
+
+    sampled = gumbel_sample(
+        logits,
+        idx_mapping,
+        temp,
+        seed,
+        pos,
+        apply_temperature=False,
+    )
+    sampled_from_fp32 = gumbel_sample(
+        logits.float(),
+        idx_mapping,
+        temp,
+        seed,
+        pos,
+        apply_temperature=False,
+    )
+
+    assert torch.equal(sampled, sampled_from_fp32)
+
+
 def test_zero_count_tokens_are_never_sampled():
     """Count 0 -> -inf logit -> probability 0; must never be selected."""
     counts = _make_heavy_tailed_counts(seed=7)
