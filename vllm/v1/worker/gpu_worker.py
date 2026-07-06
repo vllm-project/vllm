@@ -986,40 +986,35 @@ class Worker(WorkerBase):
             )
         return "draft" if include_draft else "model"
 
-    def _initialize_draft_weight_update(self) -> nn.Module:
+    def _get_draft_weight_update_target(self) -> tuple[nn.Module, Any]:
         draft_model = self.get_draft_model()
         if draft_model is None:
             raise RuntimeError(
                 "Draft model weight update requested, but no draft model is configured."
             )
 
-        if not getattr(self, "_draft_weight_update_active", False):
-            from vllm.model_executor.model_loader.reload import (
-                initialize_layerwise_reload,
+        speculative_config = self.speculative_config
+        if speculative_config is None or speculative_config.draft_model_config is None:
+            raise RuntimeError(
+                "Draft model weight update requested, but no draft model "
+                "config is configured."
             )
 
-            initialize_layerwise_reload(draft_model)
-            self._draft_weight_update_active = True
+        return draft_model, speculative_config.draft_model_config
 
-        return draft_model
-
-    def _update_draft_weights(self, update_info: dict) -> None:
+    def _start_draft_weight_update(self) -> None:
         assert self.weight_transfer_engine is not None
 
-        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
-        if getattr(typed_update_info, "num_updates_list", None) is not None:
-            raise ValueError(
-                "Sparse weight updates for the draft model are not supported."
-            )
+        if getattr(self, "_draft_weight_update_active", False):
+            return
 
-        draft_model = self._initialize_draft_weight_update()
-        original_model = self.weight_transfer_engine.model
-        try:
-            self.weight_transfer_engine.model = draft_model
-            self.weight_transfer_engine.receive_weights(typed_update_info)
-            torch.accelerator.synchronize()
-        finally:
-            self.weight_transfer_engine.model = original_model
+        draft_model, draft_model_config = self._get_draft_weight_update_target()
+        self.weight_transfer_engine.finish_weight_update()
+        self.weight_transfer_engine.set_weight_update_target(
+            draft_model, draft_model_config
+        )
+        self.weight_transfer_engine.start_weight_update()
+        self._draft_weight_update_active = True
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
@@ -1321,12 +1316,19 @@ class Worker(WorkerBase):
         try:
             target_model = self._get_weight_update_target(include_draft)
             if target_model == "model":
+                if self._draft_weight_update_active:
+                    raise RuntimeError(
+                        "Cannot update the target model after starting a draft "
+                        "model weight update in the same session."
+                    )
                 self.weight_transfer_engine.update_weights(update_info)
             else:
-                self._update_draft_weights(update_info)
+                self._start_draft_weight_update()
+                self.weight_transfer_engine.update_weights(update_info)
         except BaseException:
             self._weight_update_active = False
             self._draft_weight_update_active = False
+            self.weight_transfer_engine.reset_weight_update_target()
             raise
 
     def finish_weight_update(self) -> None:
@@ -1339,31 +1341,8 @@ class Worker(WorkerBase):
                 "finish_weight_update called without a matching start_weight_update."
             )
 
-        if self._draft_weight_update_active:
-            from vllm.model_executor.model_loader.reload import (
-                finalize_layerwise_reload,
-            )
-
-            draft_model = self.get_draft_model()
-            if draft_model is None:
-                raise RuntimeError(
-                    "Draft model weight update requested, but no draft model "
-                    "is configured."
-                )
-            speculative_config = self.speculative_config
-            if (
-                speculative_config is None
-                or speculative_config.draft_model_config is None
-            ):
-                raise RuntimeError(
-                    "Draft model weight update requested, but no draft model "
-                    "config is configured."
-                )
-            finalize_layerwise_reload(
-                draft_model, speculative_config.draft_model_config
-            )
-
         self.weight_transfer_engine.finish_weight_update()
+        self.weight_transfer_engine.reset_weight_update_target()
         self._weight_update_active = False
         self._draft_weight_update_active = False
 
