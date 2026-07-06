@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
+from mistral_common.tokens.tokenizers.base import SpecialTokens
 
 from tests.reasoning.utils import run_reasoning_extraction_mistral
 from vllm.reasoning import ReasoningParser, ReasoningParserManager
@@ -16,6 +17,11 @@ def mistral_tokenizer():
         "mistralai/Magistral-Small-2509"
     )
     return mistral_tokenizer
+
+
+@pytest.fixture(scope="module")
+def mistral_parser(mistral_tokenizer: MistralTokenizer) -> ReasoningParser:
+    return ReasoningParserManager.get_reasoning_parser(parser_name)(mistral_tokenizer)
 
 
 INVALID_SIMPLE_REASONING = {
@@ -261,6 +267,7 @@ def test_mistral_reasoning(
     streaming: bool,
     param_dict: dict,
     mistral_tokenizer: MistralTokenizer,
+    mistral_parser: ReasoningParser,
 ):
     output = param_dict["output"]
 
@@ -306,19 +313,15 @@ def test_mistral_reasoning(
     else:
         output_tokens += mistral_tokenizer.tokenizer.encode(output, False, False)
 
-    parser: ReasoningParser = ReasoningParserManager.get_reasoning_parser(parser_name)(
-        mistral_tokenizer
-    )
-
     reasoning, content = run_reasoning_extraction_mistral(
-        parser, output_tokens, streaming=streaming
+        mistral_parser, output_tokens, streaming=streaming
     )
 
     assert reasoning == param_dict["reasoning"]
     assert content == param_dict["content"]
 
     # Test is_reasoning_end
-    is_reasoning_end = parser.is_reasoning_end(output_tokens)
+    is_reasoning_end = mistral_parser.is_reasoning_end(output_tokens)
     assert is_reasoning_end == param_dict["is_reasoning_end"]
 
     # Test extract_content
@@ -338,11 +341,306 @@ def test_mistral_reasoning(
             before_token_ids = []
             left_to_encode = param_dict["content"]
 
-        content_tokens = parser.extract_content_ids(output_tokens)
+        content_tokens = mistral_parser.extract_content_ids(output_tokens)
         expected_token_ids = before_token_ids + mistral_tokenizer.tokenizer.encode(
             left_to_encode, bos=False, eos=False
         )
         assert content_tokens == expected_token_ids
     else:
-        content = parser.extract_content_ids(output_tokens)
+        content = mistral_parser.extract_content_ids(output_tokens)
         assert content == []
+
+
+def _encode(mistral_tokenizer: MistralTokenizer, text: str) -> list[int]:
+    return mistral_tokenizer.tokenizer.encode(text, False, False)
+
+
+def test_is_reasoning_end_ignores_prompt_example_think_block(
+    mistral_tokenizer: MistralTokenizer,
+    mistral_parser: ReasoningParser,
+):
+    begin_think = mistral_tokenizer.instruct.BEGIN_THINK
+    end_think = mistral_tokenizer.instruct.END_THINK
+    begin_system = mistral_tokenizer.tokenizer.get_special_token(
+        SpecialTokens.begin_system
+    )
+    end_system = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.end_system)
+    begin_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.begin_inst)
+    end_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.end_inst)
+
+    prompt = (
+        [begin_system]
+        + _encode(mistral_tokenizer, "You are a helpful assistant. For example:")
+        + [begin_think]
+        + _encode(mistral_tokenizer, "example reasoning")
+        + [end_think]
+        + _encode(mistral_tokenizer, "done")
+        + [end_system]
+        + [begin_inst]
+        + _encode(mistral_tokenizer, "What is the capital of France?")
+        + [end_inst]
+    )
+
+    assert mistral_parser.is_reasoning_end(prompt) is False
+
+
+def test_is_reasoning_end_ignores_tool_result_think_block(
+    mistral_tokenizer: MistralTokenizer,
+    mistral_parser: ReasoningParser,
+):
+    begin_think = mistral_tokenizer.instruct.BEGIN_THINK
+    end_think = mistral_tokenizer.instruct.END_THINK
+    begin_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.begin_inst)
+    end_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.end_inst)
+    begin_tool_results = mistral_tokenizer.tokenizer.get_special_token(
+        SpecialTokens.begin_tool_results
+    )
+    end_tool_results = mistral_tokenizer.tokenizer.get_special_token(
+        SpecialTokens.end_tool_results
+    )
+
+    input_ids = (
+        [begin_inst]
+        + _encode(mistral_tokenizer, "call a tool")
+        + [end_inst]
+        + [begin_tool_results]
+        + [begin_think]
+        + _encode(mistral_tokenizer, "tool-side reasoning")
+        + [end_think]
+        + _encode(mistral_tokenizer, "tool output")
+        + [end_tool_results]
+    )
+
+    assert mistral_parser.is_reasoning_end(input_ids) is False
+
+
+def test_is_reasoning_end_prior_turn_reasoning_hidden(
+    mistral_tokenizer: MistralTokenizer,
+    mistral_parser: ReasoningParser,
+):
+    begin_think = mistral_tokenizer.instruct.BEGIN_THINK
+    end_think = mistral_tokenizer.instruct.END_THINK
+    begin_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.begin_inst)
+    end_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.end_inst)
+    eos = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.eos)
+
+    input_ids = (
+        [end_inst]
+        + [begin_think]
+        + _encode(mistral_tokenizer, "reasoning for the first turn")
+        + [end_think]
+        + _encode(mistral_tokenizer, "first answer")
+        + [eos]
+        + [begin_inst]
+        + _encode(mistral_tokenizer, "second question")
+        + [end_inst]
+    )
+
+    assert mistral_parser.is_reasoning_end(input_ids) is False
+
+
+def test_is_reasoning_end_continuation_true(
+    mistral_tokenizer: MistralTokenizer,
+    mistral_parser: ReasoningParser,
+):
+    begin_think = mistral_tokenizer.instruct.BEGIN_THINK
+    end_think = mistral_tokenizer.instruct.END_THINK
+    end_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.end_inst)
+
+    input_ids = (
+        [end_inst]
+        + [begin_think]
+        + _encode(mistral_tokenizer, "current turn reasoning")
+        + [end_think]
+        + _encode(mistral_tokenizer, "partial answer so far")
+    )
+
+    assert mistral_parser.is_reasoning_end(input_ids) is True
+
+
+def test_streaming_reconstruction_extracts_reasoning(
+    mistral_tokenizer: MistralTokenizer,
+    mistral_parser: ReasoningParser,
+):
+    begin_think = mistral_tokenizer.instruct.BEGIN_THINK
+    end_think = mistral_tokenizer.instruct.END_THINK
+    reasoning_text = "Let me think about this"
+    answer_text = "The answer is 42"
+
+    tokens = (
+        [begin_think]
+        + _encode(mistral_tokenizer, reasoning_text)
+        + [end_think]
+        + _encode(mistral_tokenizer, answer_text)
+    )
+
+    reasoning, content = run_reasoning_extraction_mistral(
+        mistral_parser, tokens, streaming=True
+    )
+
+    assert reasoning == reasoning_text
+    assert content == answer_text
+
+
+def test_is_reasoning_end_streaming_skips_when_only_prompt_example(
+    mistral_tokenizer: MistralTokenizer,
+    mistral_parser: ReasoningParser,
+):
+    begin_think = mistral_tokenizer.instruct.BEGIN_THINK
+    end_think = mistral_tokenizer.instruct.END_THINK
+    begin_system = mistral_tokenizer.tokenizer.get_special_token(
+        SpecialTokens.begin_system
+    )
+    end_system = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.end_system)
+    begin_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.begin_inst)
+    end_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.end_inst)
+
+    input_ids = (
+        [begin_system]
+        + _encode(mistral_tokenizer, "System prompt. Example:")
+        + [begin_think]
+        + _encode(mistral_tokenizer, "example reasoning")
+        + [end_think]
+        + _encode(mistral_tokenizer, "example answer")
+        + [end_system]
+        + [begin_inst]
+        + _encode(mistral_tokenizer, "user question")
+        + [end_inst]
+    )
+    delta_ids = _encode(mistral_tokenizer, "answer")
+
+    assert mistral_parser.is_reasoning_end_streaming(input_ids, delta_ids) is True
+
+
+def test_is_reasoning_end_streaming_active_reasoning(
+    mistral_tokenizer: MistralTokenizer,
+    mistral_parser: ReasoningParser,
+):
+    begin_think = mistral_tokenizer.instruct.BEGIN_THINK
+    end_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.end_inst)
+
+    reasoning_tokens = _encode(mistral_tokenizer, "still reasoning")
+    input_ids = [end_inst] + [begin_think] + reasoning_tokens
+    delta_ids = _encode(mistral_tokenizer, "reasoning")
+
+    assert mistral_parser.is_reasoning_end_streaming(input_ids, delta_ids) is False
+
+
+def test_is_reasoning_end_streaming_ends_on_delta_end_token(
+    mistral_tokenizer: MistralTokenizer,
+    mistral_parser: ReasoningParser,
+):
+    begin_think = mistral_tokenizer.instruct.BEGIN_THINK
+    end_think = mistral_tokenizer.instruct.END_THINK
+    end_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.end_inst)
+
+    input_ids = (
+        [end_inst] + [begin_think] + _encode(mistral_tokenizer, "reasoning so far")
+    )
+    delta_ids = [end_think]
+
+    assert mistral_parser.is_reasoning_end_streaming(input_ids, delta_ids) is True
+
+
+def test_is_reasoning_end_streaming_skips_when_only_tool_result_example(
+    mistral_tokenizer: MistralTokenizer,
+    mistral_parser: ReasoningParser,
+):
+    begin_think = mistral_tokenizer.instruct.BEGIN_THINK
+    end_think = mistral_tokenizer.instruct.END_THINK
+    begin_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.begin_inst)
+    end_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.end_inst)
+    begin_tool_results = mistral_tokenizer.tokenizer.get_special_token(
+        SpecialTokens.begin_tool_results
+    )
+    end_tool_results = mistral_tokenizer.tokenizer.get_special_token(
+        SpecialTokens.end_tool_results
+    )
+
+    input_ids = (
+        [begin_inst]
+        + _encode(mistral_tokenizer, "call a tool")
+        + [end_inst]
+        + [begin_tool_results]
+        + [begin_think]
+        + _encode(mistral_tokenizer, "tool-side reasoning")
+        + [end_think]
+        + _encode(mistral_tokenizer, "tool output")
+        + [end_tool_results]
+    )
+    delta_ids = _encode(mistral_tokenizer, "answer")
+
+    assert mistral_parser.is_reasoning_end_streaming(input_ids, delta_ids) is True
+
+
+def test_is_reasoning_end_streaming_skips_after_prior_turn(
+    mistral_tokenizer: MistralTokenizer,
+    mistral_parser: ReasoningParser,
+):
+    begin_think = mistral_tokenizer.instruct.BEGIN_THINK
+    end_think = mistral_tokenizer.instruct.END_THINK
+    begin_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.begin_inst)
+    end_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.end_inst)
+    eos = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.eos)
+
+    input_ids = (
+        [end_inst]
+        + [begin_think]
+        + _encode(mistral_tokenizer, "r1")
+        + [end_think]
+        + _encode(mistral_tokenizer, "a1")
+        + [eos]
+        + [begin_inst]
+        + _encode(mistral_tokenizer, "q2")
+        + [end_inst]
+    )
+    delta_ids = _encode(mistral_tokenizer, "answer")
+
+    assert mistral_parser.is_reasoning_end_streaming(input_ids, delta_ids) is True
+
+
+def test_is_reasoning_end_streaming_active_reasoning_with_prompt_example(
+    mistral_tokenizer: MistralTokenizer,
+    mistral_parser: ReasoningParser,
+):
+    begin_think = mistral_tokenizer.instruct.BEGIN_THINK
+    end_think = mistral_tokenizer.instruct.END_THINK
+    begin_system = mistral_tokenizer.tokenizer.get_special_token(
+        SpecialTokens.begin_system
+    )
+    end_system = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.end_system)
+    begin_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.begin_inst)
+    end_inst = mistral_tokenizer.tokenizer.get_special_token(SpecialTokens.end_inst)
+
+    input_ids = (
+        [begin_system]
+        + _encode(mistral_tokenizer, "sys")
+        + [begin_think]
+        + _encode(mistral_tokenizer, "example")
+        + [end_think]
+        + _encode(mistral_tokenizer, "done")
+        + [end_system]
+        + [begin_inst]
+        + _encode(mistral_tokenizer, "q")
+        + [end_inst]
+        + [begin_think]
+        + _encode(mistral_tokenizer, "model reasoning now")
+    )
+    delta_ids = _encode(mistral_tokenizer, "reasoning")
+
+    assert mistral_parser.is_reasoning_end_streaming(input_ids, delta_ids) is False
+
+
+def test_streaming_reconstruction_no_reasoning(
+    mistral_tokenizer: MistralTokenizer,
+    mistral_parser: ReasoningParser,
+):
+    content_text = "Just the answer, no thinking"
+    tokens = _encode(mistral_tokenizer, content_text)
+
+    reasoning, content = run_reasoning_extraction_mistral(
+        mistral_parser, tokens, streaming=True
+    )
+
+    assert reasoning is None
+    assert content == content_text
