@@ -807,6 +807,7 @@ class SpeculativeConfig:
                 elif (
                     "dspark" in self.draft_model_config.model.lower()
                     or "Qwen3DSparkModel" in self.draft_model_config.architectures
+                    or "Gemma4DSparkModel" in self.draft_model_config.architectures
                 ):
                     self.method = "dspark"
                 elif self.draft_model_config.hf_config.model_type == "medusa":
@@ -857,6 +858,7 @@ class SpeculativeConfig:
 
                 if self.method == "dspark" and (
                     "Qwen3DSparkModel" not in self.draft_model_config.architectures
+                    and "Gemma4DSparkModel" not in self.draft_model_config.architectures
                 ):
                     # DeepSeek-V4 DSpark reuses the full DeepSeek-V4 config
                     # and its weights ship in the target checkpoint.
@@ -865,6 +867,23 @@ class SpeculativeConfig:
                         "DSparkDraftModel"
                     ]
                     self.update_arch_()
+                elif (
+                    self.method == "dspark"
+                    and "Gemma4DSparkModel" in self.draft_model_config.architectures
+                ):
+                    # Normalize the self-contained Gemma4 draft's config keys to
+                    # the DSpark conventions.
+                    hf = self.draft_model_config.hf_config
+                    if (
+                        getattr(hf, "dspark_target_layer_ids", None) is None
+                        and getattr(hf, "target_layer_ids", None) is not None
+                    ):
+                        hf.dspark_target_layer_ids = hf.target_layer_ids
+                    if (
+                        getattr(hf, "n_predict", None) is None
+                        and getattr(hf, "block_size", None) is not None
+                    ):
+                        hf.n_predict = hf.block_size
 
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True

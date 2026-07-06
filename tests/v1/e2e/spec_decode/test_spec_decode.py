@@ -10,7 +10,12 @@ import pytest
 import torch
 from tqdm import tqdm
 
-from tests.evals.gsm8k.gsm8k_eval import _build_gsm8k_prompts, evaluate_gsm8k_offline
+from tests.evals.gsm8k.gsm8k_eval import (
+    _build_gsm8k_prompts,
+    evaluate_gsm8k_offline,
+    get_answer_value,
+    load_gsm8k_data,
+)
 from tests.utils import (
     get_attn_backend_list_based_on_platform,
     large_gpu_mark,
@@ -283,6 +288,85 @@ def test_suffix_decoding_acceptance(
     del spec_llm
     torch.accelerator.empty_cache()
     cleanup_dist_env_and_memory()
+
+
+@pytest.mark.slow_test
+@large_gpu_mark(min_gb=80)
+def test_gemma4_dspark_correctness_and_acceptance_rate(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """
+    E2E test for Gemma4 DSpark speculative decoding: acceptance rate/length
+    regression coverage plus GSM8K correctness, at temperature=1.0 to exercise
+    the probabilistic draft-sampling/rejection-sampling path (not just greedy).
+
+    Uses google/gemma-4-12B-it as target with the dspark_gemma4_12b_block7 draft
+    model. Exercises the full Gemma4 DSpark path (draft build over the reused
+    base classes DFlashQwen3Model / Qwen3DSparkForCausalLM / Gemma4MTP* /
+    DSparkMarkovHead, the fused context-KV precompute, the Markov head, and
+    rejection sampling), so it fails if any base class drifts out of sync.
+
+    gemma-4-12B is instruct-tuned, so GSM8K is run in chat format (raw few-shot
+    completion collapses to a few percent). Reference: measured over 8 runs of
+    200 GSM8K questions at temperature=1.0 (prefix caching disabled):
+      accuracy:        min=0.900 max=0.925 mean=0.916
+      acceptance_rate: min=0.706 max=0.734 mean=0.719
+      acceptance_len:  min=5.943 max=6.135 mean=6.035
+    Thresholds set conservatively to 10% to avoid flaking due to unlucky sampling
+    """
+    monkeypatch.setenv("VLLM_USE_FLASHINFER_SAMPLER", "0")
+
+    spec_llm = LLM(
+        model="google/gemma-4-12B-it",
+        trust_remote_code=True,
+        speculative_config={
+            "method": "dspark",
+            "model": "deepseek-ai/dspark_gemma4_12b_block7",
+            "num_speculative_tokens": 7,
+            "draft_sample_method": "probabilistic",
+        },
+        max_model_len=8192,
+        max_num_seqs=32,
+        gpu_memory_utilization=0.8,
+        enforce_eager=True,
+        enable_prefix_caching=False,
+        disable_log_stats=False,
+    )
+    try:
+        _, test_data = load_gsm8k_data()
+        num_questions = 200
+        instruction = (
+            "\n\nThink step by step and give the final numeric answer after '#### '."
+        )
+        chats = [
+            [{"role": "user", "content": test_data[i]["question"] + instruction}]
+            for i in range(num_questions)
+        ]
+        labels = [
+            get_answer_value(test_data[i]["answer"]) for i in range(num_questions)
+        ]
+
+        outputs = spec_llm.chat(chats, SamplingParams(temperature=1.0, max_tokens=512))
+        preds = [get_answer_value(o.outputs[0].text) for o in outputs]
+        n_correct = sum(p == gold for p, gold in zip(preds, labels))
+        gsm8k_accuracy = n_correct / num_questions
+
+        metrics = spec_llm.get_metrics()
+        acceptance_rate = compute_acceptance_rate(metrics)
+        acceptance_len = compute_acceptance_len(metrics)
+        print(
+            f"Gemma4 DSpark acceptance_rate={acceptance_rate:.2f}, "
+            f"acceptance_len={acceptance_len:.2f}, "
+            f"gsm8k_accuracy={gsm8k_accuracy:.3f}"
+        )
+
+        assert acceptance_rate >= 0.719 * 0.9
+        assert acceptance_len >= 6.035 * 0.9
+        assert gsm8k_accuracy >= 0.916 * 0.9
+    finally:
+        del spec_llm
+        torch.accelerator.empty_cache()
+        cleanup_dist_env_and_memory()
 
 
 @pytest.mark.parametrize(
