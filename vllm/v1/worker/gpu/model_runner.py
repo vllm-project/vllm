@@ -1169,7 +1169,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
-        verification_capacity_manager = self.verification_capacity_manager
         num_toks = scheduler_output.total_num_scheduled_tokens
         max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
@@ -1177,7 +1176,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if (
             not dummy_run
             and scheduler_output.scheduled_spec_decode_tokens
-            and verification_capacity_manager is not None
+            and self.verification_capacity_manager is not None
         ):
             uniform_tok_count = None
             if not scheduler_output.scheduled_new_reqs:
@@ -1493,10 +1492,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # ensuring that `copy_event` is recorded before calling postprocess.
         # This sequencing may slightly reduce latency as async D2H copy does not
         # need to wait for the postprocess to finish.
-        verification_capacity_manager = self.verification_capacity_manager
         postprocess_input_batch = input_batch
-        if verification_capacity_manager is not None:
-            postprocess_input_batch = verification_capacity_manager.restore_batch(
+        if self.verification_capacity_manager is not None:
+            postprocess_input_batch = self.verification_capacity_manager.restore_batch(
                 input_batch
             )
         self.postprocess_sampled(
@@ -1541,9 +1539,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
-            verification_capacity_manager = self.verification_capacity_manager
-            if verification_capacity_manager is not None:
-                verification_capacity_manager.restore_batch(
+            if self.verification_capacity_manager is not None:
+                self.verification_capacity_manager.restore_batch(
                     input_batch,
                     draft_token_capacity,
                 )
