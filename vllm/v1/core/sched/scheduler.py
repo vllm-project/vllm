@@ -27,6 +27,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStat
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
     RoutedExpertsManager,
+    require_full_attn_group_id,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.multimodal.encoder_budget import MultiModalBudget
@@ -335,9 +336,18 @@ class Scheduler(SchedulerInterface):
                 "parallelism (dcp_world_size > 1 or pcp_world_size > 1)"
             )
 
+            num_offload_blocks = None
+            block_size_factor = 1
+            if self.connector is not None:
+                num_offload_blocks, block_size_factor = (
+                    self._validate_routed_experts_offload(kv_cache_config)
+                )
+
             self.routed_experts_manager = RoutedExpertsManager(
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,
+                num_offload_blocks=num_offload_blocks,
+                block_size_factor=block_size_factor,
             )
             # Snapshot block IDs before forward because async scheduling may
             # release or reassign them before model output is processed.
@@ -348,6 +358,52 @@ class Scheduler(SchedulerInterface):
         # In-flight requests still prefilling (prefill chunks + in-progress
         # async KV loads). Their remaining-block reservation gates async loads.
         self._inflight_prefills: set[Request] = set()
+
+    def _validate_routed_experts_offload(
+        self, kv_cache_config: KVCacheConfig
+    ) -> tuple[int, int]:
+        """Validate the KV connector for offloaded routed experts.
+
+        The CPU OffloadingConnector stores/loads routing rows on the
+        scheduler side, following the KV blocks' offload transfer jobs.
+
+        Returns:
+            The number of offload blocks and the block-size factor.
+
+        Raises:
+            ValueError: On any unsupported connector / spec combination.
+        """
+        from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (  # noqa: E501
+            OffloadingConnector,
+        )
+        from vllm.v1.kv_offload.cpu.spec import CPUOffloadingSpec
+
+        if not isinstance(self.connector, OffloadingConnector):
+            raise ValueError(
+                "--enable-return-routed-experts only supports the CPU "
+                f"OffloadingConnector; got {type(self.connector).__name__}"
+            )
+        connector_scheduler = self.connector.connector_scheduler
+        assert connector_scheduler is not None, (
+            "OffloadingConnector must provide a connector scheduler"
+        )
+        if not isinstance(connector_scheduler.spec, CPUOffloadingSpec):
+            raise ValueError(
+                "--enable-return-routed-experts only supports "
+                "CPUOffloadingSpec; "
+                f"got {type(connector_scheduler.spec).__name__}"
+            )
+        require_full_attn_group_id(kv_cache_config)
+        if connector_scheduler.spec.num_blocks <= 0:
+            raise ValueError(
+                "--enable-return-routed-experts with KV offload requires "
+                "a non-empty CPU offload block pool; increase "
+                "kv_offloading_size / cpu_bytes_to_use."
+            )
+        return (
+            connector_scheduler.spec.num_blocks,
+            connector_scheduler.config.block_size_factor,
+        )
 
     def _mamba_block_aligned_split(
         self,
@@ -1635,6 +1691,11 @@ class Scheduler(SchedulerInterface):
             for request_id in model_runner_output.req_ids:
                 routing_offsets[request_id] = offset
                 offset += num_scheduled_tokens[request_id]
+
+        if self.enable_return_routed_experts and self.connector is not None:
+            self.routed_experts_manager.apply_offload_transfers(
+                scheduler_output.kv_connector_metadata
+            )
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
