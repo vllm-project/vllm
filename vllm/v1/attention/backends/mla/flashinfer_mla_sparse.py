@@ -29,8 +29,7 @@ from vllm.v1.attention.backend import (
     SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
-    get_shared_phys_buffers,
-    sparse_conv_cache_enabled,
+    phys_shadow,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
@@ -461,16 +460,17 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
                 return_valid_counts=True,
             )
-        elif sparse_conv_cache_enabled():
+        elif (shadow := phys_shadow(self.topk_indices_buffer)) is not None:
             # skip_topk layers reuse the previous fresh layer's PHYSICAL
             # indices: the logical top-k indices are shared (one buffer for
             # the whole forward) and block_table/req_id are per-step constant,
             # so re-converting them per layer produces identical output. This
             # covers both the backbone (index_topk_freq > 1) and MTP draft
-            # steps 1+ (index_share_for_mtp_iteration sets skip_topk). The
-            # fresh/skip split is fixed per captured graph, so the branch is
-            # cudagraph-safe.
-            phys_buf, seq_buf = get_shared_phys_buffers(self.topk_indices_buffer)
+            # steps 1+ (index_share_for_mtp_iteration sets skip_topk; the
+            # draft compact re-arranges the shadow together with the logical
+            # buffer). The fresh/skip split is fixed per captured graph, so
+            # the branch is cudagraph-safe.
+            phys_buf, seq_buf = shadow
             wrote_fresh = getattr(layer, "indexer", None) is not None and not getattr(
                 layer, "skip_topk", False
             )

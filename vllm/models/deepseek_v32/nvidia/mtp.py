@@ -34,6 +34,10 @@ from vllm.model_executor.models.utils import (
 )
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.v1.attention.backends.mla.sparse_utils import (
+    phys_shadow,
+    register_phys_shadow,
+)
 
 from .kernels import fused_eh_norm
 from .fused_ops import fused_allreduce_rms_norm
@@ -71,6 +75,7 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             dtype=torch.int32,
             device=current_platform.device_type,
         )
+        register_phys_shadow(topk_indices_buffer)
         self.shared_head = SharedHead(
             config=config, prefix=prefix, quant_config=quant_config
         )
@@ -168,6 +173,15 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
             if self_attn is not None and hasattr(self_attn, "topk_indices_buffer"):
                 topk_indices_buffer = self_attn.topk_indices_buffer
                 topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
+                # The physical-index shadow mirrors this buffer row-wise
+                # (shadow[j] == convert(logical[j])); re-arrange it the same
+                # way or skip_topk draft steps read the step-0 multi-token
+                # layout's rows for the wrong tokens/requests.
+                shadow = phys_shadow(topk_indices_buffer)
+                if shadow is not None:
+                    phys, seq = shadow
+                    phys[:num_slots] = phys[slot_ids]
+                    seq[:num_slots] = seq[slot_ids]
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)

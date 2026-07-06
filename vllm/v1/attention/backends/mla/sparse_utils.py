@@ -346,55 +346,47 @@ def triton_filter_and_convert_dcp_index(
     return out
 
 
-# --- Shared physical-index cache (DSA index_topk_freq > 1) -------------------
+# --- Physical-index shadow (DSA index_topk_freq > 1) -------------------------
 # GLM-5.2 uses index_topk_freq=4: only ~1/4 of layers write a fresh top-k into
 # the single shared topk_indices_buffer; the rest reuse it. Since block_table
 # and req_id_per_token are constant within a decode step, the physical indices
 # (block_table lookup of the logical top-k) are identical across a freq-group.
-# We convert once on the fresh layer into a STABLE shared buffer and let skip
-# layers read it -- eliminating ~3/4 of the per-layer convert kernels. The
-# stable buffer + per-layer-constant fresh/skip decision keep this cudagraph-safe.
-import os as _os  # noqa: E402
+# Fresh layers convert once into a STABLE shadow of the logical buffer and
+# skip layers read it -- eliminating ~3/4 of the per-layer convert kernels.
+#
+# Invariant: shadow[j] == convert(logical[j]) row-wise. Whoever re-arranges
+# the logical buffer (e.g. the MTP draft compact between the multi-token
+# step-0 layout and the single-token steps-1+ layout) must apply the same
+# gather to the shadow.
+#
+# Shadows are registered ONLY at buffer creation time (model init, never
+# inside cudagraph capture) via register_phys_shadow; every other access is
+# the read-only phys_shadow lookup, so addresses are stable across graph
+# replays and no allocation can happen during capture.
 import weakref as _weakref  # noqa: E402
 
-_SPARSE_CONV_CACHE = _os.environ.get("VLLM_SPARSE_CONV_CACHE", "1") == "1"
-# Keyed by (id, data_ptr, shape, device, dtype) of the logical topk buffer:
-# id alone could be reused by a new tensor after the old one is collected.
-# Entries are dropped by a weakref finalizer when the owning buffer dies, so
-# reload/multi-init in one process does not accumulate the (large) phys
-# buffers and a recycled id can never hit a stale entry.
-_PhysKey = tuple[int, int, tuple[int, ...], str, torch.dtype]
-_PHYS_BUFS: dict[_PhysKey, tuple[torch.Tensor, torch.Tensor]] = {}
+_PHYS_SHADOWS: dict[int, tuple[torch.Tensor, torch.Tensor]] = {}
 
 
-def sparse_conv_cache_enabled() -> bool:
-    return _SPARSE_CONV_CACHE
+def register_phys_shadow(topk_buf: torch.Tensor) -> None:
+    """Allocate the (physical-index, valid-count) shadow for a logical top-k
+    buffer. Call once where the buffer is created. The finalizer drops the
+    entry with the owning buffer, so a recycled id can never alias a stale
+    shadow."""
+    key = id(topk_buf)
+    if key not in _PHYS_SHADOWS:
+        _PHYS_SHADOWS[key] = (
+            torch.empty_like(topk_buf),
+            torch.empty(
+                topk_buf.shape[0], dtype=torch.int32, device=topk_buf.device
+            ),
+        )
+        _weakref.finalize(topk_buf, _PHYS_SHADOWS.pop, key, None)
 
 
-def clear_shared_phys_buffers() -> None:
-    """Drop all cached physical-index buffers (tests / explicit teardown)."""
-    _PHYS_BUFS.clear()
-
-
-def get_shared_phys_buffers(
+def phys_shadow(
     topk_buf: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Stable [max_tokens, num_topk] physical-index buffer + [max_tokens] seq_lens,
-    keyed by the logical topk buffer's allocation signature (id, data_ptr,
-    shape, device, dtype). Allocated once (at warmup, before cudagraph
-    capture) so the address stays fixed across graph replays."""
-    key: _PhysKey = (
-        id(topk_buf),
-        topk_buf.data_ptr(),
-        tuple(topk_buf.shape),
-        str(topk_buf.device),
-        topk_buf.dtype,
-    )
-    e = _PHYS_BUFS.get(key)
-    if e is None:
-        phys = torch.empty_like(topk_buf)
-        seq = torch.empty(topk_buf.shape[0], dtype=torch.int32, device=topk_buf.device)
-        e = (phys, seq)
-        _PHYS_BUFS[key] = e
-        _weakref.finalize(topk_buf, _PHYS_BUFS.pop, key, None)
-    return e
+) -> tuple[torch.Tensor, torch.Tensor] | None:
+    """The registered shadow for this buffer, or None if it was never
+    registered. Never allocates; capture-safe."""
+    return _PHYS_SHADOWS.get(id(topk_buf))
