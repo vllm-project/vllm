@@ -36,12 +36,12 @@ jobs:
       ASCEND_E2E_USE_SUDO: ${{ vars.VLLM_HUST_ASCEND_E2E_USE_SUDO || '1' }}
       ASCEND_E2E_ROOT_HELPER: ${{ vars.VLLM_HUST_ASCEND_E2E_ROOT_HELPER || '' }}
       SOC_VERSION: ascend910b3
-      TARGET_REPO_URL: git@github.com:${{ github.repository }}.git
+      TARGET_REPO_URL: ${{ github.event_name == 'pull_request' && format('https://github.com/{0}.git', github.repository) || format('git@github.com:{0}.git', github.repository) }}
       TARGET_REPO_SHA: ${{ github.sha }}
       VLLM_ASCEND_HUST_REPO: ${{ github.workspace }}/vllm-ascend-hust
-      VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/vllm-ascend-hust.git
+      VLLM_ASCEND_HUST_REPO_URL: ${{ github.event_name == 'pull_request' && 'https://github.com/vLLM-HUST/vllm-ascend-hust.git' || 'git@github.com:vLLM-HUST/vllm-ascend-hust.git' }}
       HUST_ASCEND_MANAGER_REPO: ${{ github.workspace }}/ascend-runtime-manager
-      HUST_ASCEND_MANAGER_REPO_URL: git@github.com:vLLM-HUST/ascend-runtime-manager.git
+      HUST_ASCEND_MANAGER_REPO_URL: ${{ github.event_name == 'pull_request' && 'https://github.com/vLLM-HUST/ascend-runtime-manager.git' || 'git@github.com:vLLM-HUST/ascend-runtime-manager.git' }}
       VLLM_USE_PRECOMPILED: "0"
 
     steps:
