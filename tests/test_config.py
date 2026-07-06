@@ -28,6 +28,7 @@ from vllm.config import (
 from vllm.config.compilation import CompilationMode, CUDAGraphMode
 from vllm.config.kernel import IrOpPriorityConfig
 from vllm.config.load import LoadConfig
+from vllm.config.speculative import _should_default_rocm_eagle3_attention_backend
 from vllm.config.utils import get_field
 from vllm.config.vllm import (
     OPTIMIZATION_LEVEL_TO_CONFIG,
@@ -35,6 +36,7 @@ from vllm.config.vllm import (
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backend import AttentionCGSupport
+from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 DEVICE_TYPE = current_platform.device_type
 
@@ -269,6 +271,87 @@ def test_is_default_v2_model_runner_model(model_config, expected):
     config = SimpleNamespace(model_config=model_config)
 
     assert VllmConfig._is_default_v2_model_runner_model(config) is expected
+
+
+@pytest.mark.parametrize(
+    (
+        "method",
+        "attention_backend",
+        "draft_model_config",
+        "is_rocm",
+        "expected",
+    ),
+    [
+        (
+            "eagle3",
+            None,
+            SimpleNamespace(architectures=["LlamaForCausalLMEagle3"]),
+            True,
+            True,
+        ),
+        (
+            "eagle3",
+            AttentionBackendEnum.ROCM_ATTN,
+            SimpleNamespace(architectures=["LlamaForCausalLMEagle3"]),
+            True,
+            False,
+        ),
+        (
+            "eagle3",
+            None,
+            SimpleNamespace(architectures=["LlamaForCausalLMEagle3"]),
+            False,
+            False,
+        ),
+        (
+            "eagle3",
+            None,
+            SimpleNamespace(architectures=["Eagle3Qwen3ForCausalLM"]),
+            True,
+            False,
+        ),
+        (
+            "eagle3",
+            None,
+            SimpleNamespace(
+                architectures=[],
+                hf_config=SimpleNamespace(architectures=["Eagle3LlamaForCausalLM"]),
+            ),
+            True,
+            True,
+        ),
+    ],
+)
+def test_should_default_rocm_eagle3_attention_backend(
+    method, attention_backend, draft_model_config, is_rocm, expected
+):
+    assert (
+        _should_default_rocm_eagle3_attention_backend(
+            method,
+            attention_backend,
+            draft_model_config,
+            is_rocm=is_rocm,
+        )
+        is expected
+    )
+
+
+def test_rocm_eagle3_lite_llama_defaults_to_aiter_unified_attention(
+    monkeypatch,
+):
+    monkeypatch.setattr(current_platform, "is_rocm", lambda: True)
+    speculative_config = SimpleNamespace(
+        method="eagle3",
+        attention_backend=None,
+        draft_model_config=SimpleNamespace(architectures=["LlamaForCausalLMEagle3"]),
+    )
+
+    SpeculativeConfig._maybe_default_rocm_eagle3_attention_backend(speculative_config)
+
+    assert (
+        speculative_config.attention_backend
+        is AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+    )
 
 
 @pytest.mark.skip_global_cleanup

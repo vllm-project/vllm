@@ -74,6 +74,41 @@ RejectionSampleMethod = Literal["standard", "synthetic", "block"]
 DraftSampleMethod = Literal["greedy", "probabilistic"]
 
 
+_LLAMA_EAGLE3_DRAFT_ARCHITECTURES = frozenset(
+    ("Eagle3LlamaForCausalLM", "LlamaForCausalLMEagle3")
+)
+
+
+def _has_llama_eagle3_draft_architecture(
+    draft_model_config: ModelConfig | None,
+) -> bool:
+    if draft_model_config is None:
+        return False
+
+    architectures = getattr(draft_model_config, "architectures", None) or ()
+    if _LLAMA_EAGLE3_DRAFT_ARCHITECTURES.intersection(architectures):
+        return True
+
+    hf_config = getattr(draft_model_config, "hf_config", None)
+    hf_architectures = getattr(hf_config, "architectures", None) or ()
+    return bool(_LLAMA_EAGLE3_DRAFT_ARCHITECTURES.intersection(hf_architectures))
+
+
+def _should_default_rocm_eagle3_attention_backend(
+    method: SpeculativeMethod | None,
+    attention_backend: AttentionBackendEnum | None,
+    draft_model_config: ModelConfig | None,
+    *,
+    is_rocm: bool,
+) -> bool:
+    return (
+        is_rocm
+        and attention_backend is None
+        and method == "eagle3"
+        and _has_llama_eagle3_draft_architecture(draft_model_config)
+    )
+
+
 @config
 class SpeculativeConfig:
     """Configuration for speculative decoding."""
@@ -869,6 +904,8 @@ class SpeculativeConfig:
                 if self.method in ("dflash", "dspark"):
                     self.parallel_drafting = True
 
+                self._maybe_default_rocm_eagle3_attention_backend()
+
                 if self.num_speculative_tokens is not None and hasattr(
                     self.draft_model_config.hf_config, "num_lookahead_tokens"
                 ):
@@ -921,6 +958,23 @@ class SpeculativeConfig:
                     )
                 )
         return self
+
+    def _maybe_default_rocm_eagle3_attention_backend(self) -> None:
+        from vllm.platforms import current_platform
+
+        if not _should_default_rocm_eagle3_attention_backend(
+            self.method,
+            self.attention_backend,
+            self.draft_model_config,
+            is_rocm=current_platform.is_rocm(),
+        ):
+            return
+
+        self.attention_backend = AttentionBackendEnum.ROCM_AITER_UNIFIED_ATTN
+        logger.info_once(
+            "Using ROCM_AITER_UNIFIED_ATTN for ROCm EAGLE3 Llama draft model "
+            "attention. Set speculative_config.attention_backend to override."
+        )
 
     def _validate_suffix_decoding(self):
         if not has_arctic_inference():
