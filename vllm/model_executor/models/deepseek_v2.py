@@ -117,6 +117,19 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _get_moe_router_dtype(
+    config: DeepseekV2Config | DeepseekV3Config,
+) -> torch.dtype | None:
+    router_dtype = getattr(config, "moe_router_dtype", None)
+    if getattr(config, "model_type", None) == "glm_moe_dsa":
+        # Older GLM-5/5.2 configs require fp32 routing but do not expose
+        # moe_router_dtype yet.
+        return torch.float32
+    if router_dtype == "float32":
+        return torch.float32
+    return None
+
+
 class DeepseekAttention(nn.Module):
     """Normal MHA implementation used by Deepseek v1."""
 
@@ -288,9 +301,13 @@ class DeepseekV2MoE(nn.Module):
                 "Only silu is supported for now."
             )
 
+        self.router_dtype = _get_moe_router_dtype(config)
         self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
+            params_dtype=self.router_dtype,
+            out_dtype=self.router_dtype,
+            force_fp32_compute=self.router_dtype == torch.float32,
             prefix=f"{prefix}.gate",
         )
         if getattr(config, "topk_method", None) == "noaux_tc":
@@ -321,6 +338,7 @@ class DeepseekV2MoE(nn.Module):
         if (
             self.is_rocm_aiter_moe_enabled
             and self.gate.e_score_correction_bias is not None
+            and self.gate.out_dtype is None
         ):
             # Accumulates in fp32; avoids bf16->fp32 cast.
             self.gate.set_out_dtype(self.gate.weight.dtype)
@@ -695,6 +713,7 @@ class Indexer(nn.Module):
         )
 
         self.is_inplace_rope = is_inplace_rope
+        self.n_head_scale = self.n_head**-0.5
         self.use_fused_indexer_q = (
             current_platform.is_cuda()
             and self.quant_block_size == self.head_dim
@@ -743,15 +762,16 @@ class Indexer(nn.Module):
                 rotary_emb.cos_sin_cache,
                 weights,
                 self.softmax_scale,
-                self.n_head**-0.5,
+                self.n_head_scale,
                 rotary_emb.is_neox_style,
             )
 
             # rotate only the MQA K
-            q_dummy = torch.empty_like(k_pe.unsqueeze(1))
-            _, k_pe = rotary_emb(positions, q_dummy, k_pe.unsqueeze(1))
-            k_pe = k_pe.reshape(-1, 1, self.rope_dim)
-            k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+            k_pe = k_pe.unsqueeze(1)
+            q_dummy = torch.empty_like(k_pe)
+            _, k_pe = rotary_emb(positions, q_dummy, k_pe)
+            k_pe = k_pe.reshape(-1, self.rope_dim)
+            k = torch.cat([k_pe, k_nope], dim=-1)
 
             return self.indexer_op(hidden_states, q_fp8, k, weights)
         else:
@@ -772,13 +792,13 @@ class Indexer(nn.Module):
             # Note: RoPE (NeoX) can introduce extra leading dimensions during
             # compilation so we need to reshape back to token-flattened shapes
             q_pe = q_pe.reshape(-1, self.n_head, self.rope_dim)
-            k_pe = k_pe.reshape(-1, 1, self.rope_dim)
+            k_pe = k_pe.reshape(-1, self.rope_dim)
 
             # `rotary_emb` is shape-preserving; `q_pe` is already
             # [num_tokens, n_head, rope_dim].
             q = torch.cat([q_pe, q_nope], dim=-1)
-            # `k_pe` is [num_tokens, 1, rope_dim] (MQA).
-            k = torch.cat([k_pe.squeeze(-2), k_nope], dim=-1)
+            # `k_pe` is [num_tokens, rope_dim] (MQA).
+            k = torch.cat([k_pe, k_nope], dim=-1)
 
         # we only quant q here since k quant is fused with cache insertion
         q = q.view(-1, self.head_dim)
@@ -789,12 +809,9 @@ class Indexer(nn.Module):
             use_ue8m0=self.scale_fmt is not None,
         )
         q_fp8 = q_fp8.view(-1, self.n_head, self.head_dim)
-        q_scale = q_scale.view(-1, self.n_head, 1)
+        q_scale = q_scale.view(-1, self.n_head)
 
-        weights = (
-            weights.unsqueeze(-1) * q_scale * self.softmax_scale * self.n_head**-0.5
-        )
-        weights = weights.squeeze(-1)
+        weights = weights * q_scale * self.softmax_scale * self.n_head_scale
 
         return self.indexer_op(hidden_states, q_fp8, k, weights)
 
@@ -1269,13 +1286,10 @@ class DeepseekV2DecoderLayer(nn.Module):
             hidden_states = tensor_model_parallel_all_gather(hidden_states, 0)
             hidden_states = hidden_states[:full_num_tokens]
 
-        attn_kwargs = {
-            "positions": positions,
-            "hidden_states": hidden_states,
-        }
-        if not self.use_mha:
-            attn_kwargs["llama_4_scaling"] = llama_4_scaling
-        hidden_states = self.self_attn(**attn_kwargs)
+        if self.use_mha:
+            hidden_states = self.self_attn(positions, hidden_states)
+        else:
+            hidden_states = self.self_attn(positions, hidden_states, llama_4_scaling)
 
         if (
             not isinstance(self.self_attn, DeepseekAttention)
@@ -1291,15 +1305,11 @@ class DeepseekV2DecoderLayer(nn.Module):
                 residual *= 1.0 / self.routed_scaling_factor
 
         if self.use_sequence_parallel_moe:
-            sp_remainder = (
-                hidden_states.shape[0] % get_tensor_model_parallel_world_size()
-            )
+            tp_world_size = get_tensor_model_parallel_world_size()
+            # small trick using minus, eg. -17 % 8 = 7
+            sp_pad = (-hidden_states.shape[0]) % tp_world_size
             # pad if not divisible by world size
-            if sp_remainder:
-                sp_pad = get_tensor_model_parallel_world_size() - sp_remainder
-                hidden_states = torch.nn.functional.pad(
-                    hidden_states, (0, 0, 0, sp_pad)
-                )
+            hidden_states = torch.nn.functional.pad(hidden_states, (0, 0, 0, sp_pad))
             hidden_states = tensor_model_parallel_reduce_scatter(hidden_states, 0)
             if not input_is_sequence_parallel:
                 residual = sequence_parallel_chunk(residual)
@@ -1445,6 +1455,8 @@ class DeepseekV2Model(nn.Module):
                 hidden_states, residual = combined_states.split(
                     [self.hidden_size, self.hidden_size], dim=-1
                 )
+                # fused_add_rms_norm requires a contiguous residual
+                residual = residual.contiguous()
             if idx in self.aux_hidden_state_layers:
                 aux_hidden_state = hidden_states + residual
                 if aux_hidden_state.shape[0] != positions.shape[0]:
@@ -1469,6 +1481,8 @@ class DeepseekV2Model(nn.Module):
             hidden_states, residual = combined_states.split(
                 [self.hidden_size, self.hidden_size], dim=-1
             )
+            # fused_add_rms_norm requires a contiguous residual
+            residual = residual.contiguous()
 
         if self.end_layer in self.aux_hidden_state_layers:
             aux_hidden_states.append(hidden_states + residual)
@@ -1497,7 +1511,10 @@ class DeepseekV2Model(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
-        _pending_wk_fp8: dict = {}  # When WK is in FP8, we dequant to BF16 for fusion
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
+        if _pending_wk_fp8 is None:
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
+
         indexer_fused_mapping = [
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
