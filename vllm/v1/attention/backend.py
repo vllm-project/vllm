@@ -747,6 +747,10 @@ class AttentionImplBase(ABC, Generic[T]):
     method - subclasses define their own forward interfaces.
     """
 
+    # Whether this impl uses a sparse (top-k) attention path. Used by MLA to
+    # route between the dense-MHA prefill and sparse-MQA paths.
+    is_sparse: ClassVar[bool] = False
+
     # Required attributes that all impls should have
     num_heads: int
     head_size: int
@@ -912,7 +916,13 @@ class AttentionImpl(AttentionImplBase[T], Generic[T]):
 
 
 class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
-    """MLA attention implementation with forward_mqa and forward_mha methods."""
+    """MLA attention interface (dense and sparse).
+
+    Concrete impls implement ``forward_mqa`` (decode); ``forward_mha`` (dense
+    prefill) is provided by ``MLACommonBaseImpl``. ``is_sparse`` (on
+    ``AttentionImplBase``) marks impls that use the sparse top-k MQA path so the
+    layer can route accordingly.
+    """
 
     @abstractmethod
     def __init__(
@@ -940,7 +950,6 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
     ) -> None:
         raise NotImplementedError
 
-    @abstractmethod
     def forward_mha(
         self,
         q: torch.Tensor,
@@ -952,7 +961,11 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
     ) -> None:
-        """MHA-style prefill forward pass."""
+        """MHA-style (dense) prefill forward pass.
+
+        Provided by ``MLACommonBaseImpl``; impls without a dense prefill path
+        (e.g. sparse MQA-only backends) leave this unimplemented.
+        """
         raise NotImplementedError
 
     @abstractmethod
@@ -978,96 +991,6 @@ class MLAAttentionImpl(AttentionImplBase[T], Generic[T]):
             kFp8Dynamic128Sym,
             kFp8Dynamic64Sym,
         )
-
-    def do_kv_cache_update(
-        self,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_cache: torch.Tensor,
-        slot_mapping: torch.Tensor,
-        kv_cache_dtype: str,
-        k_scale: torch.Tensor,
-    ) -> None:
-        if kv_cache.numel() == 0:
-            return
-        from vllm import _custom_ops as ops
-
-        ops.concat_and_cache_mla(
-            kv_c_normed,
-            k_pe.squeeze(1),
-            kv_cache,
-            slot_mapping.flatten(),
-            kv_cache_dtype=kv_cache_dtype,
-            scale=k_scale,
-        )
-
-
-class SparseMLAAttentionImpl(AttentionImplBase[T], Generic[T]):
-    """Sparse MLA attention. Subclass SparseMLACommonImpl for forward_mha."""
-
-    def fused_output_quant_supported(self, quant_key: "QuantKey"):
-        """
-        Does this attention implementation support fused output quantization.
-        Since MLA quantization is done manually in forward_impl (common code),
-        all MLA backends support it by default.
-        """
-        return quant_key in (
-            kFp8StaticTensorSym,
-            kNvfp4Dynamic,
-            kFp8Dynamic128Sym,
-            kFp8Dynamic64Sym,
-        )
-
-    @abstractmethod
-    def __init__(
-        self,
-        num_heads: int,
-        head_size: int,
-        scale: float,
-        num_kv_heads: int,
-        alibi_slopes: list[float] | None,
-        sliding_window: int | None,
-        kv_cache_dtype: str,
-        logits_soft_cap: float | None,
-        attn_type: str,
-        kv_sharing_target_layer_name: str | None,
-        # MLA Specific Arguments
-        q_lora_rank: int | None,
-        kv_lora_rank: int,
-        qk_nope_head_dim: int,
-        qk_rope_head_dim: int,
-        qk_head_dim: int,
-        v_head_dim: int,
-        kv_b_proj: "ColumnParallelLinear",
-        indexer: object | None = None,
-        q_pad_num_heads: int | None = None,
-    ) -> None:
-        raise NotImplementedError
-
-    def forward_mha(
-        self,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: T,
-        k_scale: torch.Tensor,
-        output: torch.Tensor,
-        output_scale: torch.Tensor | None = None,
-    ) -> None:
-        """MHA-style forward pass."""
-        raise NotImplementedError
-
-    @abstractmethod
-    def forward_mqa(
-        self,
-        q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: T,
-        layer: AttentionLayer,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        """MQA-style forward pass."""
-        raise NotImplementedError
 
     def do_kv_cache_update(
         self,

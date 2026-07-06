@@ -11,8 +11,8 @@ from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
-    SparseMLAChunkedContextMetadata,
     SparseMLACommonImpl,
     SparseMLACommonMetadataBuilder,
     dense_mha_fa4_available,
@@ -26,8 +26,8 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionType,
     CommonAttentionMetadata,
+    MLAAttentionImpl,
     MultipleOf,
-    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
@@ -83,7 +83,7 @@ class FlashInferMLASparseTRTLLMBackend(_FlashInferMLASparseBackendBase):
         return [32, 64]
 
     @staticmethod
-    def get_impl_cls() -> type[SparseMLAAttentionImpl]:
+    def get_impl_cls() -> type[MLAAttentionImpl]:
         return FlashInferMLASparseImpl
 
     @classmethod
@@ -160,7 +160,7 @@ class FlashInferMLASparseSM120Backend(_FlashInferMLASparseBackendBase):
         return [64, 256]
 
     @staticmethod
-    def get_impl_cls() -> type[SparseMLAAttentionImpl]:
+    def get_impl_cls() -> type[MLAAttentionImpl]:
         from vllm.v1.attention.backends.mla.flashinfer_mla_sparse_sm120 import (
             FlashInferMLASparseSM120Impl,
         )
@@ -256,11 +256,7 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
     num_decodes: int
     num_prefills: int
     num_decode_tokens: int
-    prefill_query_start_loc: torch.Tensor | None = None
-    prefill_max_query_len: int = 0
-    has_context: bool = False
-    prefill_query_lens_cpu: torch.Tensor | None = None
-    chunked_context: SparseMLAChunkedContextMetadata | None = None
+    prefill: MLACommonPrefillMetadata | None = None
 
     # Sparse-specific
     block_size: int = 64

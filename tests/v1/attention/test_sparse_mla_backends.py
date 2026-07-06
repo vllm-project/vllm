@@ -442,6 +442,23 @@ def test_sparse_backend_decode_correctness(
         scale=kv_cache_scale,
     )
 
+    # The sparse builder clones the layer's dense-MHA prefill backend from
+    # static_forward_context; register a mock layer carrying one.
+    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+
+    prefill_backend = get_mla_prefill_backend(vllm_config)(
+        num_heads=num_heads,
+        scale=scale,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        vllm_config=vllm_config,
+    )
+    vllm_config.compilation_config.static_forward_context["placeholder"] = (
+        SimpleNamespace(prefill_backend=prefill_backend)
+    )
+
     builder_cls = backend_cls.get_builder_cls()
     builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
     metadata = builder.build(
@@ -891,8 +908,28 @@ def test_sparse_backend_prefill_correctness(
         kv_cache_dtype=kv_cache_dtype,
     )
 
+    # The sparse builder clones the layer's dense-MHA prefill backend from
+    # static_forward_context; register a mock layer carrying one.
+    from vllm.v1.attention.backends.mla.prefill import get_mla_prefill_backend
+
+    prefill_backend = get_mla_prefill_backend(vllm_config)(
+        num_heads=num_heads,
+        scale=scale,
+        kv_lora_rank=kv_lora_rank,
+        qk_nope_head_dim=qk_nope_head_dim,
+        qk_rope_head_dim=qk_rope_head_dim,
+        v_head_dim=v_head_dim,
+        vllm_config=vllm_config,
+    )
+    vllm_config.compilation_config.static_forward_context["placeholder"] = (
+        SimpleNamespace(prefill_backend=prefill_backend)
+    )
+
     builder_cls = backend_cls.get_builder_cls()
     builder = builder_cls(kv_cache_spec, ["placeholder"], vllm_config, device)
+    # Drive the queries through the dense-MHA prefill path directly (the routing
+    # threshold would otherwise classify these short queries as MQA decodes).
+    builder.reorder_batch_threshold = 1
     metadata = builder.build(
         common_prefix_len=0, common_attn_metadata=common_attn_metadata
     )

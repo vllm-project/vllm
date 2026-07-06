@@ -259,7 +259,6 @@ from vllm.v1.attention.backend import (
     AttentionType,
     CommonAttentionMetadata,
     MLAAttentionImpl,
-    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.prefill import (
     MLAPrefillBackend,
@@ -693,8 +692,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         if fp8_attention and self.kv_cache_dtype != "fp8_ds_mla":
             kv_cache = kv_cache.view(current_platform.fp8_dtype())
 
-        is_sparse_impl = isinstance(self.impl, SparseMLAAttentionImpl)
-
         assert (
             attn_metadata.num_decodes is not None
             and attn_metadata.num_prefills is not None
@@ -705,7 +702,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
 
         # Sparse MLA can use dense MHA while the sequence is short enough that
         # the sparse top-k would cover the full sequence anyway.
-        if is_sparse_impl and num_mha_tokens > 0:
+        if self.impl.is_sparse and num_mha_tokens > 0:
             max_seq_len = attn_metadata.max_seq_len  # type: ignore[union-attr]
             use_mha = (
                 getattr(self.impl, "_fa4_available", False)
@@ -815,7 +812,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
             # call decode attn
-            if not is_sparse_impl:
+            if not self.impl.is_sparse:
                 assert attn_metadata.decode is not None
             attn_out, lse = self.impl.forward_mqa(mqa_q, kv_cache, attn_metadata, self)  # type: ignore[attr-defined]
 
@@ -1993,19 +1990,15 @@ def reorg_kvcache(
     return reorganized_kv_c_normed, reorganized_k_pe
 
 
-class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
-    """
-    NOTE: Please read the comment at the top of the file before trying to
-    understand this class
-    """
+class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
+    """Shared MLA base carrying dense-MHA prefill (new tokens + chunked context)
+    for both dense and sparse impls; delegates attention to the selected
+    MLAPrefillBackend. Subclasses extend ``__init__`` with their own extras and
+    implement ``forward_mqa`` (decode); metadata must expose ``.prefill``
+    (MLACommonPrefillMetadata) and ``.num_prefills``. Subclasses must also set
+    ``_use_flashinfer_concat_mla_k``."""
 
-    def fused_output_quant_supported(self, quant_key):
-        return quant_key in (
-            kFp8StaticTensorSym,
-            kNvfp4Dynamic,
-            kFp8Dynamic128Sym,
-            kFp8Dynamic64Sym,
-        )
+    _use_flashinfer_concat_mla_k: bool
 
     def __init__(
         self,
@@ -2013,60 +2006,25 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         head_size: int,
         scale: float,
         num_kv_heads: int,
-        alibi_slopes: list[float] | None,
-        sliding_window: int | None,
         kv_cache_dtype: str,
-        logits_soft_cap: float | None,
-        attn_type: str,
-        kv_sharing_target_layer_name: str | None,
-        # MLA Specific Arguments
-        q_lora_rank: int | None,
         kv_lora_rank: int,
         qk_nope_head_dim: int,
         qk_rope_head_dim: int,
         qk_head_dim: int,
         v_head_dim: int,
         kv_b_proj: ColumnParallelLinear,
-        # DSV3.2 MLA Specific Arguments
-        indexer: object | None = None,
-        q_pad_num_heads: int | None = None,
     ) -> None:
-        if kv_sharing_target_layer_name is not None:
-            raise NotImplementedError("KV sharing is not supported for MLA")
-
         self.num_heads = num_heads
         self.head_size = head_size
         self.scale = float(scale)
         self.num_kv_heads = num_kv_heads
         self.kv_cache_dtype = kv_cache_dtype
-
-        self.q_lora_rank = q_lora_rank
         self.kv_lora_rank = kv_lora_rank
         self.qk_nope_head_dim = qk_nope_head_dim
         self.qk_rope_head_dim = qk_rope_head_dim
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
-        self.indexer = indexer
-        self.q_pad_num_heads = q_pad_num_heads
-        self.supports_quant_query_input = True
-        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
-
-        # Use flashinfer's optimized concat_mla_k kernel when available.
-        # The kernel is optimized for DeepSeek V3 dimensions:
-        # num_heads=128, nope_dim=128, rope_dim=64
-        self._use_flashinfer_concat_mla_k = (
-            has_flashinfer()
-            and (self.num_heads == 128)
-            and (self.qk_nope_head_dim == 128)
-            and (self.qk_rope_head_dim == 64)
-        )
-
-        self.dcp_world_size: int = -1
-
-        self.cp_kv_cache_interleave_size: int = (
-            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
-        )
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor
@@ -2103,11 +2061,11 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self,
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
+        attn_metadata: A,
         k_scale: torch.Tensor,
     ):
-        assert attn_metadata.prefill is not None
-        prefill_metadata = attn_metadata.prefill
+        assert attn_metadata.prefill is not None  # type: ignore[attr-defined]
+        prefill_metadata = attn_metadata.prefill  # type: ignore[attr-defined]
         assert prefill_metadata.prefill_backend is not None
         assert prefill_metadata.chunked_context is not None
 
@@ -2142,7 +2100,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     dst=workspace,
                     block_table=prefill_metadata.block_table,
                     cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
-                    batch_size=attn_metadata.num_prefills,
+                    batch_size=attn_metadata.num_prefills,  # type: ignore[attr-defined]
                     seq_starts=prefill_metadata.chunked_context.starts[i],
                 )
 
@@ -2210,12 +2168,12 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self,
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
+        attn_metadata: A,
         k_scale: torch.Tensor,
         dcp_world_size: int,
     ):
-        assert attn_metadata.prefill is not None
-        prefill_metadata = attn_metadata.prefill
+        assert attn_metadata.prefill is not None  # type: ignore[attr-defined]
+        prefill_metadata = attn_metadata.prefill  # type: ignore[attr-defined]
         assert prefill_metadata.prefill_backend is not None
         assert prefill_metadata.chunked_context is not None
         assert prefill_metadata.chunked_context.padded_local_chunk_seq_lens is not None
@@ -2261,7 +2219,7 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
                     dst=workspace,
                     block_table=prefill_metadata.block_table,
                     cu_seq_lens=padded_local_cu_seq_lens,
-                    batch_size=attn_metadata.num_prefills,
+                    batch_size=attn_metadata.num_prefills,  # type: ignore[attr-defined]
                     seq_starts=prefill_metadata.chunked_context.starts[i],
                 )
             # workspace
@@ -2355,15 +2313,15 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: MLACommonMetadata,
+        attn_metadata: A,
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
     ) -> None:
-        assert attn_metadata.prefill is not None
+        assert attn_metadata.prefill is not None  # type: ignore[attr-defined]
         assert self.dcp_world_size != -1
 
-        prefill_metadata = attn_metadata.prefill
+        prefill_metadata = attn_metadata.prefill  # type: ignore[attr-defined]
         assert prefill_metadata.prefill_backend is not None
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
 
@@ -2431,6 +2389,83 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             assert isinstance(output_prefill, torch.Tensor)
             output_prefill = output_prefill.flatten(start_dim=-2)
             output.copy_(output_prefill)
+
+
+class MLACommonImpl(MLACommonBaseImpl[M], Generic[M]):
+    """
+    NOTE: Please read the comment at the top of the file before trying to
+    understand this class
+    """
+
+    def fused_output_quant_supported(self, quant_key):
+        return quant_key in (
+            kFp8StaticTensorSym,
+            kNvfp4Dynamic,
+            kFp8Dynamic128Sym,
+            kFp8Dynamic64Sym,
+        )
+
+    def __init__(
+        self,
+        num_heads: int,
+        head_size: int,
+        scale: float,
+        num_kv_heads: int,
+        alibi_slopes: list[float] | None,
+        sliding_window: int | None,
+        kv_cache_dtype: str,
+        logits_soft_cap: float | None,
+        attn_type: str,
+        kv_sharing_target_layer_name: str | None,
+        # MLA Specific Arguments
+        q_lora_rank: int | None,
+        kv_lora_rank: int,
+        qk_nope_head_dim: int,
+        qk_rope_head_dim: int,
+        qk_head_dim: int,
+        v_head_dim: int,
+        kv_b_proj: ColumnParallelLinear,
+        # DSV3.2 MLA Specific Arguments
+        indexer: object | None = None,
+        q_pad_num_heads: int | None = None,
+    ) -> None:
+        if kv_sharing_target_layer_name is not None:
+            raise NotImplementedError("KV sharing is not supported for MLA")
+
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            kv_cache_dtype,
+            kv_lora_rank,
+            qk_nope_head_dim,
+            qk_rope_head_dim,
+            qk_head_dim,
+            v_head_dim,
+            kv_b_proj,
+        )
+        self.q_lora_rank = q_lora_rank
+        self.indexer = indexer
+        self.q_pad_num_heads = q_pad_num_heads
+        self.supports_quant_query_input = True
+        self.is_aiter_triton_fp8_bmm_enabled = rocm_aiter_ops.is_fp8bmm_enabled()
+
+        # Use flashinfer's optimized concat_mla_k kernel when available.
+        # The kernel is optimized for DeepSeek V3 dimensions:
+        # num_heads=128, nope_dim=128, rope_dim=64
+        self._use_flashinfer_concat_mla_k = (
+            has_flashinfer()
+            and (self.num_heads == 128)
+            and (self.qk_nope_head_dim == 128)
+            and (self.qk_rope_head_dim == 64)
+        )
+
+        self.dcp_world_size: int = -1
+
+        self.cp_kv_cache_interleave_size: int = (
+            get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
+        )
 
     @abstractmethod
     def forward_mqa(

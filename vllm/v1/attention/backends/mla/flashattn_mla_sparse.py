@@ -8,8 +8,8 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
+from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
-    SparseMLAChunkedContextMetadata,
     SparseMLACommonImpl,
     SparseMLACommonMetadataBuilder,
     dense_mha_fa4_available,
@@ -20,8 +20,8 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionLayer,
     AttentionMetadata,
+    MLAAttentionImpl,
     MultipleOf,
-    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 from vllm.v1.attention.backends.mla.sparse_utils import (
@@ -52,7 +52,7 @@ class FlashAttnMLASparseBackend(AttentionBackend):
         return FlashAttnMLASparseMetadataBuilder
 
     @staticmethod
-    def get_impl_cls() -> type[SparseMLAAttentionImpl[Any]]:
+    def get_impl_cls() -> type[MLAAttentionImpl[Any]]:
         return FlashAttnMLASparseImpl
 
     @classmethod
@@ -133,11 +133,7 @@ class FlashAttnMLASparseMetadata(AttentionMetadata):
     num_decodes: int = 0
     num_prefills: int = 0
     num_decode_tokens: int = 0
-    prefill_query_start_loc: torch.Tensor | None = None
-    prefill_max_query_len: int = 0
-    has_context: bool = False
-    prefill_query_lens_cpu: torch.Tensor | None = None
-    chunked_context: SparseMLAChunkedContextMetadata | None = None
+    prefill: MLACommonPrefillMetadata | None = None
 
 
 class FlashAttnMLASparseMetadataBuilder(

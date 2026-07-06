@@ -76,7 +76,9 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         )
         qk_head_dim = qk_nope_head_dim + qk_rope_head_dim
         self.flash_attn_varlen_func = flash_attn_varlen_func
-        self.vllm_flash_attn_version = get_flash_attn_version(head_size=qk_head_dim)
+        self.vllm_flash_attn_version = get_flash_attn_version(
+            head_size=qk_head_dim, head_size_v=v_head_dim
+        )
         if self.vllm_flash_attn_version is not None:
             self.flash_attn_varlen_func = functools.partial(
                 flash_attn_varlen_func, fa_version=self.vllm_flash_attn_version

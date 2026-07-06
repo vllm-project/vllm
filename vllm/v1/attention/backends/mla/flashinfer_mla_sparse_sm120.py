@@ -9,7 +9,7 @@ import torch
 from vllm.v1.attention.backend import (
     AttentionLayer,
     AttentionType,
-    SparseMLAAttentionImpl,
+    MLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.flashinfer_mla_sparse import (
     FlashInferMLASparseMetadata,
@@ -29,8 +29,10 @@ def _kv_scale_format_for_model(model_type: str | None) -> str:
     return "pow2_fp32"
 
 
-class FlashInferMLASparseSM120Impl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata]):
+class FlashInferMLASparseSM120Impl(MLAAttentionImpl[FlashInferMLASparseMetadata]):
     """SM120 FlashInfer sparse-MLA implementation."""
+
+    is_sparse = True
 
     def __init__(
         self,

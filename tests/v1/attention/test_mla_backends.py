@@ -933,6 +933,11 @@ def run_attention_backend(
 @pytest.mark.parametrize("kv_cache_dtype", ["auto", "fp8", "fp8_e4m3"])
 @pytest.mark.parametrize(("q_scale", "k_scale"), [(1.0, 1.0), (2.0, 3.0)])
 @pytest.mark.parametrize("prefill_backend", PREFILL_BACKENDS_TO_TEST)
+@pytest.mark.parametrize(
+    ("qk_nope_head_dim", "v_head_dim"),
+    [(128, 128), (192, 256)],
+    ids=["deepseek", "glm"],
+)
 def test_backend_correctness(
     default_vllm_config,
     dist_init,
@@ -944,6 +949,8 @@ def test_backend_correctness(
     q_scale: float,
     k_scale: float,
     prefill_backend: MLAPrefillBackendEnum,
+    qk_nope_head_dim: int,
+    v_head_dim: int,
 ):
     """
     Test that all backends produce similar outputs to a reference implementation
@@ -992,9 +999,9 @@ def test_backend_correctness(
             MLAPrefillSelectorConfig(
                 dtype=torch.bfloat16,
                 mla_dimensions=MLADimensions(
-                    qk_nope_head_dim=128,
+                    qk_nope_head_dim=qk_nope_head_dim,
                     qk_rope_head_dim=64,
-                    v_head_dim=128,
+                    v_head_dim=v_head_dim,
                 ),
             ),
         )
@@ -1070,8 +1077,9 @@ def test_backend_correctness(
     dtype = _convert_dtype_to_torch(vllm_config.model_config.dtype)
     kv_lora_rank = 512
     qk_rope_head_dim = 64
-    qk_nope_head_dim = 128
-    v_head_dim = 128
+    # qk_nope_head_dim / v_head_dim are parametrized (DeepSeek 128/128 vs
+    # GLM-style symmetric 192/256). kv_lora_rank + qk_rope_head_dim (the latent
+    # KV cache head_size) is unaffected, so the model config stays consistent.
     total_head_size = kv_lora_rank + qk_rope_head_dim
     assert kv_lora_rank + qk_rope_head_dim == head_size, (
         f"MLA dimensions don't match: {total_head_size} != {head_size}"

@@ -9,8 +9,8 @@ from vllm import _custom_ops as ops
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
+from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillMetadata
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
-    SparseMLAChunkedContextMetadata,
     SparseMLACommonImpl,
     SparseMLACommonMetadataBuilder,
     dense_mha_fa4_available,
@@ -163,11 +163,7 @@ class FlashMLASparseMetadata(AttentionMetadata):
     num_prefills: int = 0
     num_decode_tokens: int = 0
     seq_lens: torch.Tensor | None = None
-    prefill_query_start_loc: torch.Tensor | None = None
-    prefill_max_query_len: int = 0
-    has_context: bool = False
-    prefill_query_lens_cpu: torch.Tensor | None = None
-    chunked_context: SparseMLAChunkedContextMetadata | None = None
+    prefill: MLACommonPrefillMetadata | None = None
 
     @dataclass
     class FP8KernelMetadata:

@@ -2,31 +2,28 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Shared forward_mha implementation and metadata builder for sparse MLA backends."""
 
-from dataclasses import dataclass
 from shutil import which
 from typing import TYPE_CHECKING, Generic, TypeVar
 
 import numpy as np
 import torch
 
-from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention.mla_attention import get_mla_dims
+from vllm.model_executor.layers.attention.mla_attention import (
+    MLACommonBaseImpl,
+    MLACommonPrefillMetadata,
+    get_mla_dims,
+)
 from vllm.platforms import current_platform
 from vllm.utils.flashinfer import has_flashinfer
 from vllm.utils.math_utils import cdiv, round_down
-from vllm.utils.torch_utils import is_quantized_kv_cache, np_to_pinned_tensor
+from vllm.utils.torch_utils import np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionMetadataBuilder,
-    SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
-from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
-from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
-    flash_attn_varlen_func,
-)
 
 if TYPE_CHECKING:
     from vllm.config import VllmConfig
@@ -43,21 +40,6 @@ def dense_mha_fa4_available(qk_head_dim: int) -> bool:
     """Whether an FA4 (>=v4) varlen kernel exists for this qk_head_dim."""
     fa_version = get_flash_attn_version(head_size=qk_head_dim)
     return fa_version is not None and fa_version >= 4
-
-
-@dataclass
-class SparseMLAChunkedContextMetadata:
-    cu_seq_lens: torch.Tensor
-    starts: torch.Tensor
-    starts_cpu: torch.Tensor
-    seq_tot: list[int]
-    max_seq_lens: list[int]
-    seq_lens_cpu: torch.Tensor
-    context_lens_cpu: torch.Tensor
-    workspace: torch.Tensor
-    token_to_seq: torch.Tensor
-    chunk_total_token: list[int]
-    prefill_tokens_with_context: int | None
 
 
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
@@ -92,6 +74,12 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dtype=self.model_config.dtype,
             device=device,
         )
+        # Dense-MHA prefill runs through the shared MLA prefill backend (FA4 /
+        # TRT-LLM ragged / FlashInfer), selected per layer. Each builder gets its
+        # own clone since the backend caches per-forward metadata.
+        self._prefill_backend = vllm_config.compilation_config.static_forward_context[
+            layer_names[0]
+        ].prefill_backend.clone()
 
     @staticmethod
     def determine_chunked_prefill_workspace_size(vllm_config: "VllmConfig") -> int:
@@ -135,7 +123,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         num_decodes: int,
         num_prefills: int,
         prefill_query_lens_cpu: torch.Tensor | None,
-    ) -> SparseMLAChunkedContextMetadata | None:
+    ) -> "MLACommonPrefillMetadata.ChunkedContextMetadata | None":
         if num_prefills == 0 or prefill_query_lens_cpu is None:
             return None
 
@@ -195,17 +183,15 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         prefill_qsl_cpu = qsl_cpu[num_decodes:] - qsl_cpu[num_decodes]
         prefill_tokens_with_context = prefill_qsl_cpu[num_prefills_with_context].item()
 
-        return SparseMLAChunkedContextMetadata(
+        return MLACommonPrefillMetadata.ChunkedContextMetadata(
             cu_seq_lens=cu_seq_lens_cpu.to(self.device, non_blocking=True),
             starts=chunk_starts.to(self.device, non_blocking=True),
-            starts_cpu=chunk_starts,
             seq_tot=chunk_seq_lens.sum(dim=1).tolist(),
             max_seq_lens=chunk_seq_lens.max(dim=1).values.tolist(),
-            seq_lens_cpu=chunk_seq_lens,
-            context_lens_cpu=context_lens_cpu,
+            seq_lens=chunk_seq_lens,
             workspace=self.chunked_prefill_workspace,
             token_to_seq=token_to_seq_cpu.to(self.device, non_blocking=True),
-            chunk_total_token=chunk_total_token.tolist(),
+            chunk_total_token=chunk_total_token,
             prefill_tokens_with_context=prefill_tokens_with_context,
         )
 
@@ -226,13 +212,24 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             prefill_max_query_len,
             prefill_query_lens_cpu,
         ) = self._build_prefill_fields(common_attn_metadata, num_decodes, num_prefills)
-        chunked_context = self._build_chunked_context_fields(
-            common_attn_metadata,
-            num_decodes,
-            num_prefills,
-            prefill_query_lens_cpu,
-        )
-        has_context = chunked_context is not None
+
+        prefill: MLACommonPrefillMetadata | None = None
+        if num_prefills > 0:
+            prefill = MLACommonPrefillMetadata(
+                block_table=common_attn_metadata.block_table_tensor[num_decodes:, ...],
+                query_start_loc=prefill_query_start_loc,
+                max_query_len=prefill_max_query_len,
+                chunked_context=self._build_chunked_context_fields(
+                    common_attn_metadata,
+                    num_decodes,
+                    num_prefills,
+                    prefill_query_lens_cpu,
+                ),
+                q_data_type=self.model_config.dtype,
+                output_dtype=self.model_config.dtype,
+                prefill_backend=self._prefill_backend,
+            )
+            self._prefill_backend.prepare_metadata(prefill)
 
         return self.metadata_cls(  # type: ignore[call-arg]
             num_reqs=common_attn_metadata.num_reqs,
@@ -249,11 +246,7 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             num_decodes=num_decodes,
             num_prefills=num_prefills,
             num_decode_tokens=num_decode_tokens,
-            prefill_query_start_loc=prefill_query_start_loc,
-            prefill_max_query_len=prefill_max_query_len,
-            has_context=has_context,
-            prefill_query_lens_cpu=prefill_query_lens_cpu,
-            chunked_context=chunked_context,
+            prefill=prefill,
         )
 
     @staticmethod
@@ -286,8 +279,11 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
         )
 
 
-class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
-    """Shared forward_mha for sparse MLA. Subclasses implement forward_mqa."""
+class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
+    """Sparse MLA base: shared dense-MHA prefill (from MLACommonBaseImpl) plus the
+    sparse top-k MQA decode path. Subclasses implement forward_mqa."""
+
+    is_sparse = True
 
     def __init__(
         self,
@@ -313,18 +309,19 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
         topk_indices_buffer: torch.Tensor | None = None,
         q_pad_num_heads: int | None = None,
     ) -> None:
-        self.num_heads = num_heads
-        self.head_size = head_size
-        self.scale = float(scale)
-        self.num_kv_heads = num_kv_heads
-        self.kv_cache_dtype = kv_cache_dtype
-
-        self.kv_lora_rank = kv_lora_rank
-        self.qk_nope_head_dim = qk_nope_head_dim
-        self.qk_rope_head_dim = qk_rope_head_dim
-        self.qk_head_dim = qk_head_dim
-        self.v_head_dim = v_head_dim
-        self.kv_b_proj = kv_b_proj
+        super().__init__(
+            num_heads,
+            head_size,
+            scale,
+            num_kv_heads,
+            kv_cache_dtype,
+            kv_lora_rank,
+            qk_nope_head_dim,
+            qk_rope_head_dim,
+            qk_head_dim,
+            v_head_dim,
+            kv_b_proj,
+        )
 
         # The indexer carries the shared buffer for normal layers and tests;
         # the explicitly-passed buffer covers backbone skip layers, whose
@@ -343,196 +340,4 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             and (self.num_heads == 128)
             and (self.qk_nope_head_dim == 128)
             and (self.qk_rope_head_dim == 64)
-        )
-
-    def _concat_k_nope_k_pe(
-        self, k_nope: torch.Tensor, k_pe: torch.Tensor
-    ) -> torch.Tensor:
-        k = torch.empty(
-            (*k_nope.shape[:-1], k_nope.shape[-1] + k_pe.shape[-1]),
-            dtype=k_nope.dtype,
-            device=k_nope.device,
-        )
-        if self._use_flashinfer_concat_mla_k:
-            torch.ops.vllm.flashinfer_concat_mla_k(k, k_nope, k_pe)
-        else:
-            k[..., : k_nope.shape[-1]] = k_nope
-            k[..., k_nope.shape[-1] :] = k_pe
-        return k
-
-    def _project_kv(
-        self, kv_c_normed: torch.Tensor, k_pe: torch.Tensor
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
-            -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
-        )
-        k_nope, v = kv_nope.split([self.qk_nope_head_dim, self.v_head_dim], dim=-1)
-        return self._concat_k_nope_k_pe(k_nope, k_pe), v
-
-    def _run_dense_mha(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        cu_seqlens_q: torch.Tensor,
-        cu_seqlens_k: torch.Tensor,
-        max_seqlen_q: int,
-        max_seqlen_k: int,
-        causal: bool,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        attn_out, lse = flash_attn_varlen_func(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_k=cu_seqlens_k,
-            max_seqlen_q=max_seqlen_q,
-            max_seqlen_k=max_seqlen_k,
-            softmax_scale=self.scale,
-            causal=causal,
-            return_softmax_lse=True,
-            fa_version=4,
-        )
-        return attn_out, lse
-
-    def _compute_context_mha(
-        self,
-        q: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: T,
-        k_scale: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        chunked_context = attn_metadata.chunked_context  # type: ignore[attr-defined]
-        assert chunked_context is not None
-        output = None
-        output_lse = None
-        merge_output = None
-        merge_output_lse = None
-        workspace = chunked_context.workspace
-
-        for i, toks in enumerate(chunked_context.seq_tot):
-            if toks == 0:
-                continue
-            ops.gather_and_maybe_dequant_cache(
-                src_cache=kv_c_and_k_pe_cache,
-                dst=workspace,
-                block_table=attn_metadata.block_table,  # type: ignore[attr-defined]
-                cu_seq_lens=chunked_context.cu_seq_lens[i],
-                token_to_seq=chunked_context.token_to_seq[i],
-                num_tokens=chunked_context.chunk_total_token[i],
-                kv_cache_dtype=self.kv_cache_dtype,
-                scale=k_scale,
-                seq_starts=chunked_context.starts[i],
-            )
-
-            chunk_kv_c = workspace[:toks, : self.kv_lora_rank]
-            chunk_k_pe = workspace[:toks, self.kv_lora_rank :].unsqueeze(1)
-            k, v = self._project_kv(chunk_kv_c, chunk_k_pe)
-            attn_out, lse = self._run_dense_mha(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=attn_metadata.prefill_query_start_loc,  # type: ignore[attr-defined]
-                cu_seqlens_k=chunked_context.cu_seq_lens[i],
-                max_seqlen_q=attn_metadata.prefill_max_query_len,  # type: ignore[attr-defined]
-                max_seqlen_k=chunked_context.max_seq_lens[i],
-                causal=False,
-            )
-
-            if output is None:
-                output = attn_out
-                output_lse = lse
-            else:
-                if merge_output is None:
-                    assert output_lse is not None
-                    merge_output = torch.empty_like(output)
-                    merge_output_lse = torch.empty_like(output_lse)
-                assert output_lse is not None and merge_output_lse is not None
-                merge_attn_states(
-                    output=merge_output,
-                    output_lse=merge_output_lse,
-                    prefix_output=output,
-                    prefix_lse=output_lse,
-                    suffix_output=attn_out,
-                    suffix_lse=lse,
-                )
-                output, merge_output = merge_output, output
-                output_lse, merge_output_lse = merge_output_lse, output_lse
-
-        assert output is not None and output_lse is not None
-        return output, output_lse
-
-    def forward_mha(
-        self,
-        q: torch.Tensor,
-        kv_c_normed: torch.Tensor,
-        k_pe: torch.Tensor,
-        kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: T,
-        k_scale: torch.Tensor,
-        output: torch.Tensor,
-        output_scale: torch.Tensor | None = None,
-    ) -> None:
-        del output_scale
-        if is_quantized_kv_cache(self.kv_cache_dtype):
-            raise NotImplementedError(
-                "Sparse MLA forward_mha with FP8 KV cache not yet supported"
-            )
-        if not self._fa4_available:
-            raise NotImplementedError(
-                "Sparse MLA forward_mha requires FA4 (SM100+). "
-                "On SM90, all tokens are routed through forward_mqa."
-            )
-
-        cu_seqlens = attn_metadata.prefill_query_start_loc  # type: ignore[attr-defined]
-        max_seq_len = attn_metadata.prefill_max_query_len  # type: ignore[attr-defined]
-        prefill_query_lens_cpu = attn_metadata.prefill_query_lens_cpu  # type: ignore[attr-defined]
-        assert prefill_query_lens_cpu is not None
-
-        k, v = self._project_kv(kv_c_normed, k_pe)
-
-        has_context = attn_metadata.has_context  # type: ignore[attr-defined]
-        if not has_context:
-            attn_out, _ = self._run_dense_mha(
-                q=q,
-                k=k,
-                v=v,
-                cu_seqlens_q=cu_seqlens,
-                cu_seqlens_k=cu_seqlens,
-                max_seqlen_q=max_seq_len,
-                max_seqlen_k=max_seq_len,
-                causal=True,
-            )
-            attn_out = attn_out[..., : self.v_head_dim]
-            output.copy_(attn_out.flatten(start_dim=-2))
-            return
-
-        chunked_context = attn_metadata.chunked_context  # type: ignore[attr-defined]
-        assert chunked_context is not None
-        suffix_output, suffix_lse = self._run_dense_mha(
-            q=q,
-            k=k,
-            v=v,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_k=cu_seqlens,
-            max_seqlen_q=max_seq_len,
-            max_seqlen_k=max_seq_len,
-            causal=True,
-        )
-        context_result = self._compute_context_mha(
-            q=q,
-            kv_c_and_k_pe_cache=kv_c_and_k_pe_cache,
-            attn_metadata=attn_metadata,
-            k_scale=k_scale,
-        )
-        context_output, context_lse = context_result
-
-        merged_output = output.view(-1, self.num_heads, self.v_head_dim)
-        merge_attn_states(
-            output=merged_output,
-            prefix_output=context_output[..., : self.v_head_dim],
-            prefix_lse=context_lse,
-            suffix_output=suffix_output[..., : self.v_head_dim],
-            suffix_lse=suffix_lse,
-            prefill_tokens_with_context=chunked_context.prefill_tokens_with_context,
         )
