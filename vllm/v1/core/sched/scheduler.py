@@ -88,9 +88,19 @@ class Scheduler(SchedulerInterface):
         self.observability_config = vllm_config.observability_config
         self.kv_metrics_collector: KVCacheMetricsCollector | None = None
         if self.observability_config.kv_cache_metrics:
-            self.kv_metrics_collector = KVCacheMetricsCollector(
-                self.observability_config.kv_cache_metrics_sample,
-            )
+            if self.log_stats:
+                self.kv_metrics_collector = KVCacheMetricsCollector(
+                    self.observability_config.kv_cache_metrics_sample,
+                )
+            else:
+                # Eviction events are only drained via make_stats(), which is
+                # a no-op when stats logging is disabled; collecting them
+                # would grow the event buffer without bound.
+                logger.warning(
+                    "kv_cache_metrics is ignored because stats logging is "
+                    "disabled. Remove --disable-log-stats to collect KV "
+                    "cache metrics."
+                )
         self.structured_output_manager = structured_output_manager
         self.is_encoder_decoder = vllm_config.model_config.is_encoder_decoder
 

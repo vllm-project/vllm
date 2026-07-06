@@ -582,15 +582,13 @@ class BlockPool:
         Returns:
             True if the block is evicted, False otherwise.
         """
-        # Clean up metrics tracking first to prevent leaks
-        if self.metrics_collector:
-            self.metrics_collector.on_block_evicted(block)
-
         evicted_hashes = self._remove_cached_block_hashes(block)
         if not evicted_hashes:
             # The block doesn't have hash, eviction is not needed
             return False
 
+        if self.metrics_collector:
+            self.metrics_collector.on_block_evicted(block)
         self._emit_block_removed_events(evicted_hashes)
         return True
 
