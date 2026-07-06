@@ -65,6 +65,11 @@ else:
 
 logger = init_logger(__name__)
 
+
+def _normalize_debug_dump_path(path: Path | str) -> Path:
+    return Path(path).expanduser().absolute()
+
+
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
         "DeepseekV2ForCausalLM",
@@ -1567,11 +1572,11 @@ class VllmConfig:
             self.scheduler_config.disable_hybrid_kv_cache_manager = False
 
         if self.compilation_config.debug_dump_path:
-            self.compilation_config.debug_dump_path = (
-                self.compilation_config.debug_dump_path.absolute().expanduser()
+            self.compilation_config.debug_dump_path = _normalize_debug_dump_path(
+                self.compilation_config.debug_dump_path
             )
         if envs.VLLM_DEBUG_DUMP_PATH is not None:
-            env_path = Path(envs.VLLM_DEBUG_DUMP_PATH).absolute().expanduser()
+            env_path = _normalize_debug_dump_path(envs.VLLM_DEBUG_DUMP_PATH)
             if self.compilation_config.debug_dump_path:
                 logger.warning(
                     "Config-specified debug dump path is overridden"
