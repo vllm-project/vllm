@@ -95,7 +95,11 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
 
         self._verify_pooling_task(pooling_task)
 
-        prompts_seq = prompt_to_seq(prompts)
+        if isinstance(prompts, dict) and "data" in prompts:
+            prompts_seq = [prompts]
+        else:
+            prompts_seq = prompt_to_seq(prompts)
+
         num_requests = len(prompts_seq)
 
         if isinstance(lora_request, Sequence):
@@ -105,12 +109,11 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                     f"and lora_request ({len(lora_request)}) must be the same."
                 )
 
-        if isinstance(pooling_params, Sequence):
-            if len(pooling_params) != num_requests:
-                raise ValueError(
-                    f"The lengths of prompts ({num_requests}) "
-                    f"and params ({len(pooling_params)}) must be the same."
-                )
+        if isinstance(pooling_params, Sequence) and len(pooling_params) != num_requests:
+            raise ValueError(
+                f"The lengths of prompts ({num_requests}) "
+                f"and params ({len(pooling_params)}) must be the same."
+            )
 
         assert pooling_task is not None and pooling_task in self.pooling_io_processors
 
@@ -453,7 +456,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         outputs: list[PoolingRequestOutput] = []
         total_in_toks = 0
         total_out_toks = 0
-        added_request_ids = set()
+        added_request_ids: set[str] = set()
 
         def pre_process(ctx):
             engine_inputs = io_processor.pre_process_offline(ctx)
