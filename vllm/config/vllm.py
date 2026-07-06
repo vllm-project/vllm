@@ -808,6 +808,31 @@ class VllmConfig:
         # This is the same for all backends
         self.kv_transfer_config.kv_role = "kv_both"
 
+    def _verify_return_routed_experts_kv_compatibility(self) -> None:
+        """Reject unsupported KV transfer connectors for routed-experts returns."""
+        if self.model_config is None or not (
+            self.model_config.enable_return_routed_experts
+        ):
+            return
+        kv_transfer_config = self.kv_transfer_config
+        if kv_transfer_config is None or not kv_transfer_config.is_kv_transfer_instance:
+            return
+        offloading_spec_name = kv_transfer_config.kv_connector_extra_config.get(
+            "spec_name", "CPUOffloadingSpec"
+        )
+        uses_supported_cpu_offload = (
+            kv_transfer_config.kv_connector == "OffloadingConnector"
+            and kv_transfer_config.kv_role == "kv_both"
+            and offloading_spec_name == "CPUOffloadingSpec"
+        )
+        if not uses_supported_cpu_offload:
+            raise ValueError(
+                "--enable-return-routed-experts only supports the CPU KV "
+                "offload connector (OffloadingConnector + CPUOffloadingSpec) "
+                "with kv_role=kv_both; PD disaggregation and other KV "
+                "connectors are not supported."
+            )
+
     def _verify_kv_transfer_compat(self) -> None:
         """Reject configurations that silently corrupt KV transfers."""
         if (
@@ -871,26 +896,12 @@ class VllmConfig:
         if (
             self.model_config is not None
             and self.model_config.enable_return_routed_experts
+            and self.parallel_config.pipeline_parallel_size > 1
         ):
-            if self.parallel_config.pipeline_parallel_size > 1:
-                raise ValueError(
-                    "--enable-return-routed-experts is incompatible with "
-                    "pipeline parallelism (PP > 1)."
-                )
-
-            # Incompatible with any KV connector — covers both PD disaggregation
-            # (kv_producer/kv_consumer: routing captured on P can't reach D) and
-            # single-instance KV offload/sharing (kv_both: slot_mapping semantics
-            # change when KV blocks live outside local GPU memory, breaking the
-            # slot-indexed routed_experts buffer).
-            if (
-                self.kv_transfer_config is not None
-                and self.kv_transfer_config.is_kv_transfer_instance
-            ):
-                raise ValueError(
-                    "--enable-return-routed-experts is incompatible with KV "
-                    "connectors (PD disaggregation, KV cache offload)."
-                )
+            raise ValueError(
+                "--enable-return-routed-experts is incompatible with "
+                "pipeline parallelism (PP > 1)."
+            )
 
         if self.lora_config is not None:
             self.lora_config.verify_with_model_config(self.model_config)
@@ -1524,6 +1535,8 @@ class VllmConfig:
         # Resolve kv_offloading-derived connector name into kv_transfer_config
         # before the HMA check below, which inspects the connector class.
         self._post_init_kv_transfer_config()
+
+        self._verify_return_routed_experts_kv_compatibility()
 
         # Hybrid KV cache manager (HMA) runtime rules:
         # - Explicit enable (--no-disable-kv-cache-manager): error if runtime
