@@ -10,8 +10,10 @@ import os
 from contextlib import contextmanager
 from typing import Any
 
+import regex as re
 import torch
 from packaging import version
+from pathvalidate import sanitize_filename
 
 import vllm.envs as envs
 from vllm import _custom_ops as ops
@@ -53,7 +55,10 @@ def get_ssm_config_file_name(
 
 
 def get_ssm_device_name() -> str:
-    return current_platform.get_device_name().replace(" ", "_")
+    name = current_platform.get_device_name()
+    name = re.sub(r"[\s/-]+", "_", name)
+    name = sanitize_filename(name)
+    return name
 
 
 def _canonical_cache_dtype(cache_dtype: str) -> str:
