@@ -29,6 +29,8 @@ from vllm.v1.attention.backend import (
     SparseMLAAttentionImpl,
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
+    get_shared_phys_buffers,
+    sparse_conv_cache_enabled,
     triton_convert_req_index_to_global_index,
     triton_filter_and_convert_dcp_index,
 )
@@ -459,6 +461,35 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
                 NUM_TOPK_TOKENS=topk_indices.shape[1],
                 return_valid_counts=True,
             )
+        elif sparse_conv_cache_enabled():
+            # skip_topk layers reuse the previous fresh layer's PHYSICAL
+            # indices: the logical top-k indices are shared (one buffer for
+            # the whole forward) and block_table/req_id are per-step constant,
+            # so re-converting them per layer produces identical output. This
+            # covers both the backbone (index_topk_freq > 1) and MTP draft
+            # steps 1+ (index_share_for_mtp_iteration sets skip_topk). The
+            # fresh/skip split is fixed per captured graph, so the branch is
+            # cudagraph-safe.
+            phys_buf, seq_buf = get_shared_phys_buffers(self.topk_indices_buffer)
+            wrote_fresh = getattr(layer, "indexer", None) is not None and not getattr(
+                layer, "skip_topk", False
+            )
+            if wrote_fresh:
+                topk_indices_physical, seq_lens = (
+                    triton_convert_req_index_to_global_index(
+                        attn_metadata.req_id_per_token[:num_actual_toks],
+                        attn_metadata.block_table,
+                        topk_indices,
+                        BLOCK_SIZE=attn_metadata.block_size,
+                        NUM_TOPK_TOKENS=topk_indices.shape[1],
+                        return_valid_counts=True,
+                        out=phys_buf[:num_actual_toks],
+                        valid_counts_out=seq_buf[:num_actual_toks],
+                    )
+                )
+            else:
+                topk_indices_physical = phys_buf[:num_actual_toks]
+                seq_lens = seq_buf[:num_actual_toks]
         else:
             topk_indices_physical, seq_lens = triton_convert_req_index_to_global_index(
                 attn_metadata.req_id_per_token[:num_actual_toks],

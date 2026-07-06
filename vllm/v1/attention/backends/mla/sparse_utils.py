@@ -128,6 +128,8 @@ def triton_convert_req_index_to_global_index(
     prefill_workspace_request_ids: torch.Tensor | None = None,
     prefill_workspace_starts: torch.Tensor | None = None,
     return_valid_counts: bool = False,
+    out: torch.Tensor | None = None,
+    valid_counts_out: torch.Tensor | None = None,
 ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     out[token_id, indice_id] =
@@ -173,14 +175,20 @@ def triton_convert_req_index_to_global_index(
     req_id_c = req_id.contiguous()
     block_table_c = block_table.contiguous()
     token_indices_c = token_indices.contiguous()
-    out = torch.empty_like(token_indices_c)
+    # `out`/`valid_counts_out` allow writing into a stable pre-allocated buffer
+    # (used by the shared-physical-index cache to stay cudagraph-safe).
+    out = torch.empty_like(token_indices_c) if out is None else out
 
     # Allocate valid count buffer if needed (must be zero-initialized for atomics)
     valid_counts: torch.Tensor | None = None
     if return_valid_counts:
-        valid_counts = torch.zeros(
-            num_tokens, dtype=torch.int32, device=token_indices.device
-        )
+        if valid_counts_out is None:
+            valid_counts = torch.zeros(
+                num_tokens, dtype=torch.int32, device=token_indices.device
+            )
+        else:
+            valid_counts = valid_counts_out
+            valid_counts.zero_()
 
     # Strides in elements
     bt_stride0, bt_stride1 = block_table_c.stride()
@@ -336,3 +344,57 @@ def triton_filter_and_convert_dcp_index(
         assert valid_counts is not None
         return out, valid_counts
     return out
+
+
+# --- Shared physical-index cache (DSA index_topk_freq > 1) -------------------
+# GLM-5.2 uses index_topk_freq=4: only ~1/4 of layers write a fresh top-k into
+# the single shared topk_indices_buffer; the rest reuse it. Since block_table
+# and req_id_per_token are constant within a decode step, the physical indices
+# (block_table lookup of the logical top-k) are identical across a freq-group.
+# We convert once on the fresh layer into a STABLE shared buffer and let skip
+# layers read it -- eliminating ~3/4 of the per-layer convert kernels. The
+# stable buffer + per-layer-constant fresh/skip decision keep this cudagraph-safe.
+import os as _os  # noqa: E402
+import weakref as _weakref  # noqa: E402
+
+_SPARSE_CONV_CACHE = _os.environ.get("VLLM_SPARSE_CONV_CACHE", "1") == "1"
+# Keyed by (id, data_ptr, shape, device, dtype) of the logical topk buffer:
+# id alone could be reused by a new tensor after the old one is collected.
+# Entries are dropped by a weakref finalizer when the owning buffer dies, so
+# reload/multi-init in one process does not accumulate the (large) phys
+# buffers and a recycled id can never hit a stale entry.
+_PhysKey = tuple[int, int, tuple[int, ...], str, torch.dtype]
+_PHYS_BUFS: dict[_PhysKey, tuple[torch.Tensor, torch.Tensor]] = {}
+
+
+def sparse_conv_cache_enabled() -> bool:
+    return _SPARSE_CONV_CACHE
+
+
+def clear_shared_phys_buffers() -> None:
+    """Drop all cached physical-index buffers (tests / explicit teardown)."""
+    _PHYS_BUFS.clear()
+
+
+def get_shared_phys_buffers(
+    topk_buf: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Stable [max_tokens, num_topk] physical-index buffer + [max_tokens] seq_lens,
+    keyed by the logical topk buffer's allocation signature (id, data_ptr,
+    shape, device, dtype). Allocated once (at warmup, before cudagraph
+    capture) so the address stays fixed across graph replays."""
+    key: _PhysKey = (
+        id(topk_buf),
+        topk_buf.data_ptr(),
+        tuple(topk_buf.shape),
+        str(topk_buf.device),
+        topk_buf.dtype,
+    )
+    e = _PHYS_BUFS.get(key)
+    if e is None:
+        phys = torch.empty_like(topk_buf)
+        seq = torch.empty(topk_buf.shape[0], dtype=torch.int32, device=topk_buf.device)
+        e = (phys, seq)
+        _PHYS_BUFS[key] = e
+        _weakref.finalize(topk_buf, _PHYS_BUFS.pop, key, None)
+    return e
