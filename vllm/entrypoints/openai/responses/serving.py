@@ -1499,6 +1499,7 @@ class OpenAIServingResponses(GenerateBaseServing):
                 )
             )
 
+            streamed_function_calls: list[ResponseFunctionToolCall] = []
             try:
                 async for event_data in processor(
                     request,
@@ -1511,6 +1512,12 @@ class OpenAIServingResponses(GenerateBaseServing):
                     created_time,
                     _increment_sequence_number_and_return,
                 ):
+                    if (
+                        not self.use_harmony
+                        and event_data.type == "response.output_item.done"
+                        and isinstance(event_data.item, ResponseFunctionToolCall)
+                    ):
+                        streamed_function_calls.append(event_data.item)
                     yield event_data
             except GenerationError as e:
                 error_json = self._convert_generation_error_to_streaming_response(e)
@@ -1535,6 +1542,18 @@ class OpenAIServingResponses(GenerateBaseServing):
                 request_metadata,
                 created_time=created_time,
             )
+            if (
+                not self.use_harmony
+                and streamed_function_calls
+                and isinstance(final_response, ResponsesResponse)
+            ):
+                streamed_calls = iter(streamed_function_calls)
+                final_response.output = [
+                    next(streamed_calls, item)
+                    if isinstance(item, ResponseFunctionToolCall)
+                    else item
+                    for item in final_response.output
+                ]
             yield _increment_sequence_number_and_return(
                 ResponseCompletedEvent(
                     type="response.completed",
