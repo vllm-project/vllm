@@ -34,9 +34,6 @@ if current_platform.is_tpu():
     ]
     MAX_WAIT_SECONDS = 600
 
-if current_platform.is_xpu():
-    DEFAULT_ARGS.extend(["--max-num-seqs", "64"])
-
 
 def run_test(more_args):
     """Run the end to end accuracy test."""
