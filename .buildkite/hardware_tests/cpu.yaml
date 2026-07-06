@@ -48,7 +48,9 @@ steps:
     - |
       bash .buildkite/scripts/hardware_ci/run-cpu-test.sh 5m "
       OMP_NUM_THREADS=1 pytest -x -v -s \
-        tests/v1/worker/test_cpu_worker.py \
+        tests/v1/worker/test_cpu_worker.py::test_get_cpushm_dist_ident_uses_dp_rendezvous \
+        tests/v1/worker/test_cpu_worker.py::test_cpu_platform_rejects_only_hybrid_tp_dp_ep \
+        tests/v1/worker/test_cpu_worker.py::test_cpu_platform_allows_dp_only_ep \
         tests/distributed/test_cpu_communicator.py::test_cpu_ep_dispatch_combine_ragged \
         tests/distributed/test_cpu_communicator.py::test_cpu_ep_dispatch_propagates_padding_mask \
         tests/distributed/test_cpu_communicator.py::test_cpu_ep_compile_ragged_fastpath \
