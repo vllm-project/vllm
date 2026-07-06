@@ -227,14 +227,14 @@ class DeepseekCompressor(nn.Module):
         # compressor, which needs an fp32 scratch [max_batched, 512] for
         # the intermediate compressed_kv.
         # Currently only tested on ROCm
-        self._use_split_compressor = (
+        self._use_two_stage_fused_compressor = (
             current_platform.is_rocm() and head_dim == 512 and not self.overlap
         )
         self.max_num_batched_tokens = (
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self._compress_scratch: torch.Tensor | None = None
-        if self._use_split_compressor:
+        if self._use_two_stage_fused_compressor:
             self._compress_scratch = torch.empty(
                 self.max_num_batched_tokens,
                 self.head_dim,
@@ -393,7 +393,7 @@ class DeepseekCompressor(nn.Module):
                 store_full_fp8=store_full_fp8,
                 fp8_scale=fp8_scale,
             )
-        elif self._use_split_compressor:
+        elif self._use_two_stage_fused_compressor:
             # head=512 cr>=128 (no overlap): two-pass split compressor on the
             # prefill suffix, single-pass on the decode prefix.
             compress_norm_rope_store_fn = compress_norm_rope_store_two_stage_triton
