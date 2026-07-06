@@ -168,11 +168,7 @@ if flashinfer_comm is not None:
         element_size = allreduce_in.element_size()
         current_tensor_size = num_tokens * hidden_size * element_size
         max_tensor_size = max_token_num * hidden_size * element_size
-        assert current_tensor_size <= max_tensor_size, (
-            f"Current tensor size {current_tensor_size} is larger than "
-            f"max token num {max_token_num} * hidden size {hidden_size} * "
-            f"element size {element_size}"
-        )
+        oversize = current_tensor_size > max_tensor_size
         curr_device = current_platform.get_device_capability()
         device_capability = curr_device.to_int() if curr_device is not None else None
         # Get one shot input size limit for the current world size
@@ -195,6 +191,47 @@ if flashinfer_comm is not None:
         get_workspace_fn = (
             get_fi_ar_quant_workspace if is_quant_pattern else get_fi_ar_workspace
         )
+
+        orig_norm_out = norm_out
+
+        def unfused_fallback() -> None:
+            # Fused-path equivalent honoring the op's output-buffer contract:
+            # with norm_out given, normed -> norm_out and the new residual ->
+            # the allreduce_in buffer; otherwise normed -> allreduce_in and
+            # the new residual -> the residual buffer. Runs fine during CUDA
+            # graph capture (the branch is resolved per captured shape).
+            #
+            # weight_bias mirrors the fused kernel's gamma offset (Gemma
+            # patterns pass 1.0 for rms_norm(x, weight + 1)); fold it into
+            # the gamma in fp32 like the reference before the plain rms_norm.
+            gamma = (
+                rms_gamma
+                if weight_bias == 0.0
+                else (rms_gamma.float() + weight_bias).to(rms_gamma.dtype)
+            )
+            reduced = tensor_model_parallel_all_reduce(allreduce_in)
+            new_residual = reduced + residual
+            if orig_norm_out is None:
+                torch.ops._C.rms_norm(allreduce_in, new_residual, gamma, rms_eps)
+                residual.copy_(new_residual)
+            else:
+                torch.ops._C.rms_norm(orig_norm_out, new_residual, gamma, rms_eps)
+                allreduce_in.copy_(new_residual)
+
+        if oversize:
+            assert not is_quant_pattern, (
+                "flashinfer fused allreduce: input exceeds the workspace budget "
+                "and the unfused fallback does not cover quant patterns"
+            )
+            logger.warning_once(
+                "fused allreduce+rmsnorm: %d tokens exceeds the workspace "
+                "budget (max_token_num=%d); using the unfused fallback for "
+                "this shape.",
+                num_tokens,
+                max_token_num,
+            )
+            unfused_fallback()
+            return
         workspace = get_workspace_fn(
             world_size=world_size,
             rank=get_tensor_model_parallel_rank(),
@@ -235,37 +272,62 @@ if flashinfer_comm is not None:
         if mnnvl_auto:
             use_oneshot = None
 
-        flashinfer_comm.allreduce_fusion(
-            input=allreduce_in,
-            workspace=workspace,
-            pattern=pattern_code,
-            launch_with_pdl=launch_with_pdl,
-            output=None,
-            residual_out=residual_out,
-            norm_out=norm_out,
-            quant_out=quant_out,
-            scale_out=scale_out,
-            residual_in=residual,
-            rms_gamma=rms_gamma,
-            rms_eps=rms_eps,
-            scale_factor=scale_factor,
-            layout_code=layout_code,
-            use_oneshot=use_oneshot,
-            fp32_acc=fp32_acc,
-            weight_bias=weight_bias,
-            # The one-shot Lamport all-reduce signals PDL completion before its
-            # output buffer is committed when trigger_completion_at_end is
-            # False, so the next PDL-launched kernel can read the uninitialized
-            # Lamport buffer and produce NaN. This only fires for
-            # num_tokens <= PDL_ADVANCE_LAUNCH_TOKENS (the batch=1 / spec-decode
-            # shapes, where the one-shot path is always selected). Complete at
-            # the end for the one-shot path; the two-shot path is synchronized
-            # and keeps the early completion. Related one-shot instability in
-            # the same kernel: flashinfer-ai/flashinfer#1223.
-            trigger_completion_at_end=True
-            if mnnvl_auto
-            else (use_oneshot or num_tokens > PDL_ADVANCE_LAUNCH_TOKENS),
-        )
+        try:
+            flashinfer_comm.allreduce_fusion(
+                input=allreduce_in,
+                workspace=workspace,
+                pattern=pattern_code,
+                launch_with_pdl=launch_with_pdl,
+                output=None,
+                residual_out=residual_out,
+                norm_out=norm_out,
+                quant_out=quant_out,
+                scale_out=scale_out,
+                residual_in=residual,
+                rms_gamma=rms_gamma,
+                rms_eps=rms_eps,
+                scale_factor=scale_factor,
+                layout_code=layout_code,
+                use_oneshot=use_oneshot,
+                fp32_acc=fp32_acc,
+                weight_bias=weight_bias,
+                # The one-shot Lamport all-reduce signals PDL completion before
+                # its output buffer is committed when trigger_completion_at_end
+                # is False, so the next PDL-launched kernel can read the
+                # uninitialized Lamport buffer and produce NaN. This only fires
+                # for num_tokens <= PDL_ADVANCE_LAUNCH_TOKENS (the batch=1 /
+                # spec-decode shapes, where the one-shot path is always
+                # selected). Complete at the end for the one-shot path; the
+                # two-shot path is synchronized and keeps the early completion.
+                # Related one-shot instability in the same kernel:
+                # flashinfer-ai/flashinfer#1223.
+                trigger_completion_at_end=True
+                if mnnvl_auto
+                else (use_oneshot or num_tokens > PDL_ADVANCE_LAUNCH_TOKENS),
+            )
+        except ValueError as e:
+            # The globally cached workspace can be smaller than this call's
+            # budget (it is created once by whichever caller runs first, and
+            # the mnnvl workspace's is_buffer_size_sufficient() checks trtllm
+            # metadata, so vllm-side accounting cannot see the real capacity).
+            # flashinfer raises before launching anything, so falling back
+            # mid-capture is safe. Observed with spec-decode draft graphs
+            # whose token count (max_num_reqs * (1 + num_spec)) exceeds the
+            # workspace sized for the fusion threshold.
+            assert not is_quant_pattern, (
+                "flashinfer fused allreduce failed and the unfused fallback "
+                f"does not cover quant patterns: {e}"
+            )
+            logger.warning_once(
+                "flashinfer fused allreduce+rmsnorm unavailable for this "
+                "shape (num_tokens=%d, max_token_num=%d, world_size=%d): %s. "
+                "Using the unfused fallback.",
+                num_tokens,
+                max_token_num,
+                world_size,
+                e,
+            )
+            unfused_fallback()
 
     def call_trtllm_fused_allreduce_norm_fake(
         allreduce_in: torch.Tensor,
