@@ -1560,16 +1560,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # not have a speculator (i.e. self.speculator is None)
             verification_capacity_manager = self.verification_capacity_manager
             if verification_capacity_manager is not None:
-                verification_capacity_manager.try_update_draft_token_capacities()
-                if draft_token_capacity is not None:
-                    verification_capacity_manager.set_draft_token_capacities(
-                        input_batch.req_ids,
-                        input_batch.idx_mapping_np,
-                        draft_token_capacity,
-                        self.num_speculative_steps,
-                    )
-                else:
-                    verification_capacity_manager.clear()
+                verification_capacity_manager.update_draft_token_capacities(
+                    input_batch,
+                    draft_token_capacity,
+                )
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],

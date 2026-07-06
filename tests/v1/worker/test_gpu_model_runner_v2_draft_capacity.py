@@ -139,7 +139,6 @@ def test_capacity_based_verification_manager_updates_cpu_capacities():
         input_batch.req_ids,
         input_batch.idx_mapping_np,
         draft_token_capacity,
-        num_draft_tokens=3,
     )
     assert handler.copy_event_pending
 

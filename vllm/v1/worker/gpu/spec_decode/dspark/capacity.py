@@ -229,11 +229,10 @@ class CapacityBasedVerificationManager:
         req_ids: list[str],
         idx_mapping_np: np.ndarray,
         draft_token_capacity: torch.Tensor,
-        num_draft_tokens: int,
     ) -> None:
         self.req_ids = list(req_ids)
         self.idx_mapping_np = idx_mapping_np
-        self.num_draft_tokens = num_draft_tokens
+        self.num_draft_tokens = self.req_states.num_speculative_steps
         self.copied_draft_token_capacity_np = None
         self.copy_event_pending = False
 
@@ -244,6 +243,21 @@ class CapacityBasedVerificationManager:
             draft_token_capacity.record_stream(self.copy_stream)
             self.copy_event.record()
             self.copy_event_pending = True
+
+    def update_draft_token_capacities(
+        self,
+        input_batch: "InputBatch",
+        draft_token_capacity: torch.Tensor | None,
+    ) -> None:
+        self.try_update_draft_token_capacities()
+        if draft_token_capacity is None:
+            self.clear()
+            return
+        self.set_draft_token_capacities(
+            input_batch.req_ids,
+            input_batch.idx_mapping_np,
+            draft_token_capacity,
+        )
 
     def try_update_draft_token_capacities(self) -> bool:
         if self.copied_draft_token_capacity_np is None:
