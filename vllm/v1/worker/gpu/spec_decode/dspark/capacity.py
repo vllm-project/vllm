@@ -6,6 +6,11 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
+from vllm.v1.worker.gpu.spec_decode.decompaction import (
+    SamplerDecompactionBuffers,
+    SamplerDecompactionMetadata,
+    prepare_sampler_decompaction_from_counts,
+)
 
 
 def get_draft_token_capacity(
@@ -81,11 +86,15 @@ def get_effective_scheduled_token_counts(
     return int(num_scheduled_tokens.sum()), int(num_scheduled_tokens.max())
 
 
-class DraftTokenCapacityHandler:
-    def __init__(self, device: torch.device | None = None):
+class CapacityBasedVerificationManager:
+    def __init__(self, max_num_tokens: int, device: torch.device):
         self.device = device
         self.copy_stream = torch.cuda.Stream(device)
         self.copy_event = torch.Event()
+        self.sampler_decompaction_buffers = SamplerDecompactionBuffers.make(
+            max_num_tokens,
+            device,
+        )
 
         self.req_ids: list[str] = []
         self.idx_mapping_np: np.ndarray | None = None
@@ -156,6 +165,43 @@ class DraftTokenCapacityHandler:
             active
         ]
         return True
+
+    def prepare_sampler_decompaction(
+        self,
+        compact_cu_num_logits: torch.Tensor,
+        compact_query_start_loc: torch.Tensor,
+        idx_mapping: torch.Tensor,
+        positions: torch.Tensor,
+        last_sampled_tokens: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        num_scheduled_tokens_before_capacity: np.ndarray,
+        scheduled_draft_tokens_per_req: np.ndarray,
+        pruned_draft_tokens_per_req: np.ndarray,
+        num_bonus_tokens: int,
+        num_reqs: int,
+        num_reqs_padded: int,
+        max_num_reqs: int,
+        num_new_sampled_tokens: int = 1,
+    ) -> SamplerDecompactionMetadata | None:
+        if not np.any(pruned_draft_tokens_per_req > 0):
+            return None
+        return prepare_sampler_decompaction_from_counts(
+            compact_cu_num_logits,
+            compact_query_start_loc,
+            idx_mapping,
+            positions,
+            last_sampled_tokens,
+            draft_tokens,
+            num_scheduled_tokens_before_capacity,
+            scheduled_draft_tokens_per_req,
+            num_bonus_tokens,
+            num_reqs,
+            num_reqs_padded,
+            max_num_reqs,
+            self.device,
+            self.sampler_decompaction_buffers,
+            num_new_sampled_tokens,
+        )
 
 
 @triton.jit

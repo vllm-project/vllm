@@ -21,7 +21,7 @@ from vllm.v1.worker.gpu.spec_decode.decompaction import (
     prepare_sampler_decompaction_metadata,
 )
 from vllm.v1.worker.gpu.spec_decode.dspark.capacity import (
-    DraftTokenCapacityHandler,
+    CapacityBasedVerificationManager,
     compute_draft_token_capacity_from_confidence,
     get_effective_scheduled_token_counts,
 )
@@ -111,9 +111,9 @@ def test_compute_draft_token_capacity_keeps_threshold_ties():
     assert draft_token_capacity.cpu().tolist() == [1, 1]
 
 
-def test_draft_token_capacity_handler_updates_cpu_capacities():
+def test_capacity_based_verification_manager_updates_cpu_capacities():
     device = torch.device("cuda")
-    handler = DraftTokenCapacityHandler(device)
+    handler = CapacityBasedVerificationManager(max_num_tokens=16, device=device)
     input_batch: Any = SimpleNamespace(
         req_ids=["req0", "req1"],
         idx_mapping_np=np.array([2, 0], dtype=np.int32),
