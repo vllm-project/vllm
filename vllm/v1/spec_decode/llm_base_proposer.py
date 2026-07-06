@@ -1008,10 +1008,11 @@ class SpecDecodeBaseProposer:
         if self.method == "mtp":
             # DeepSeek-family MTP (deepseek_mtp.py) recycles the post-final-
             # norm hidden, so its forward returns (logit_hidden,
-            # recycle_hidden). Other MTP families return a single tensor.
-            return "DeepSeekMTPModel" in (
-                self.draft_model_config.hf_config.architectures or []
-            )
+            # recycle_hidden). GigaChat 3.5 MTP (gigachat3_5_mtp.py) mirrors the
+            # same contract. Other MTP families return a single tensor.
+            tuple_archs = ("DeepSeekMTPModel", "GigaChat35MTPModel")
+            archs = self.draft_model_config.hf_config.architectures or []
+            return any(a in tuple_archs for a in archs)
         return self.method not in ("mtp", "draft_model", "dflash")
 
     def prepare_next_token_ids_cpu(

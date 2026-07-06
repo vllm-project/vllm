@@ -286,6 +286,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
         min_transformers_version="5.0.0",
     ),
     "Gemma3nForCausalLM": _HfExamplesInfo("google/gemma-3n-E2B-it"),
+    "GigaChat35ForCausalLM": _HfExamplesInfo("ai-sage/GigaChat3.5-432B-A28B"),
     "GlmForCausalLM": _HfExamplesInfo("zai-org/glm-4-9b-chat-hf"),
     "Glm4ForCausalLM": _HfExamplesInfo("zai-org/GLM-4-9B-0414"),
     "Glm4MoeForCausalLM": _HfExamplesInfo("zai-org/GLM-4.5"),
@@ -1593,6 +1594,10 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "ExtractHiddenStatesModel": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
         speculative_method="extract_hidden_states",
+    ),
+    "GigaChat35MTPModel": _HfExamplesInfo(
+        "ai-sage/GigaChat3.5-432B-A28B",
+        speculative_model="ai-sage/GigaChat3.5-432B-A28B",
     ),
     "Glm4MoeMTPModel": _HfExamplesInfo(
         "zai-org/GLM-4.5",

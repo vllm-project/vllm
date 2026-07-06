@@ -33,6 +33,7 @@ logger = init_logger(__name__)
 
 MTPModelTypes = Literal[
     "deepseek_mtp",
+    "gigachat3_5_mtp",
     "mimo_mtp",
     "mimo_v2_mtp",
     "glm4_moe_mtp",
@@ -461,6 +462,14 @@ class SpeculativeConfig:
             n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
             hf_config.update(
                 {"n_predict": n_predict, "architectures": ["Qwen3NextMTP"]}
+            )
+
+        if hf_config.model_type == "gigachat3_5":
+            hf_config.model_type = "gigachat3_5_mtp"
+        if hf_config.model_type == "gigachat3_5_mtp":
+            n_predict = getattr(hf_config, "num_nextn_predict_layers", None)
+            hf_config.update(
+                {"n_predict": n_predict, "architectures": ["GigaChat35MTPModel"]}
             )
 
         if hf_config.model_type == "exaone_moe":

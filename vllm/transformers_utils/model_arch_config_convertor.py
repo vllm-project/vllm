@@ -262,6 +262,8 @@ class ModelArchConfigConvertorBase:
             "deepseek_v32",
             "deepseek_v4",
             "deepseek_mtp",
+            "gigachat3_5",
+            "gigachat3_5_mtp",
             "glm_moe_dsa",
             "glm4_moe_lite",
             "glm4_moe_lite_mtp",

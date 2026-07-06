@@ -182,6 +182,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "gigachat3_tool_parser",
         "GigaChat3ToolParser",
     ),
+    "gigachat35": (
+        "gigachat35_tool_parser",
+        "GigaChat35ToolParser",
+    ),
     "functiongemma": (
         "functiongemma_tool_parser",
         "FunctionGemmaToolParser",
