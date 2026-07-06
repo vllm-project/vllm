@@ -761,13 +761,10 @@ class OpenAIServingChat(GenerateBaseServing):
                 # In streaming, metrics ride on this final usage chunk, which is
                 # only emitted when usage reporting is enabled (i.e.
                 # ``stream_options.include_usage=true`` or
-                # ``--enable-force-include-usage``). Without forced usage, a client
-                # must set both ``include_metrics`` and
-                # ``stream_options.include_usage`` to receive metrics.
+                # ``--enable-force-include-usage``).
                 stream_per_request_metrics: PerRequestTimingMetrics | None = None
                 if (
                     self.enable_per_request_metrics
-                    and request.include_metrics
                     # See note in chat_completion_full_generator: suppress for n>1.
                     and (request.n or 1) == 1
                 ):
@@ -1031,7 +1028,6 @@ class OpenAIServingChat(GenerateBaseServing):
         per_request_metrics: PerRequestTimingMetrics | None = None
         if (
             self.enable_per_request_metrics
-            and request.include_metrics
             # Timing metrics describe a single generation stream. For n>1 the
             # returned stats belong to only one of the n sequences, so they
             # cannot be accurately attributed to the request; suppress instead.

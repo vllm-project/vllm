@@ -25,11 +25,8 @@ from vllm.entrypoints.serve.utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
-from vllm.logger import init_logger
 from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-logger = init_logger(__name__)
 
 
 class LoRAParserAction(argparse.Action):
@@ -135,10 +132,7 @@ class BaseFrontendArgs:
     enable_prompt_tokens_details: bool = False
     """If set to True, enable prompt_tokens_details in usage."""
     enable_per_request_metrics: bool = False
-    """If set to True, enable per-request timing metrics in API responses.
-    When enabled, requests that include `include_metrics=True` will receive
-    timing metrics (TTFT, generation time, queue time, ITL, tokens/s) in
-    the response body."""
+    """If set to True, include per-request timing metrics in API responses."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
@@ -403,17 +397,12 @@ def validate_parsed_serve_args(args: argparse.Namespace):
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
 
-    # Per-request timing metrics are derived from the engine's RequestStateStats,
-    # which are only tracked when statistics logging is enabled. Warn (rather than
-    # fail) so the server still starts, but the operator knows the metrics will be
-    # null until stat logging is re-enabled.
     if getattr(args, "enable_per_request_metrics", False) and getattr(
         args, "disable_log_stats", False
     ):
-        logger.warning(
-            "--enable-per-request-metrics is set but engine statistics logging "
-            "is disabled (--disable-log-stats). Per-request timing metrics depend "
-            "on engine statistics and will be null until stat logging is enabled."
+        raise ValueError(
+            "Error: --enable-per-request-metrics requires engine statistics "
+            "logging; remove --disable-log-stats to enable per-request metrics."
         )
 
     if args.data_parallel_multi_port_external_lb:

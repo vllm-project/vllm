@@ -457,13 +457,10 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 # In streaming, metrics ride on this final usage chunk, which is
                 # only emitted when usage reporting is enabled (i.e.
                 # ``stream_options.include_usage=true`` or
-                # ``--enable-force-include-usage``). Without forced usage, a client
-                # must set both ``include_metrics`` and
-                # ``stream_options.include_usage`` to receive metrics.
+                # ``--enable-force-include-usage``).
                 stream_per_request_metrics: PerRequestTimingMetrics | None = None
                 if (
                     self.enable_per_request_metrics
-                    and request.include_metrics
                     # See note in request_output_to_completion_response: suppress
                     # when not attributable to one stream (multi-prompt or n>1).
                     and num_prompts == 1
@@ -620,7 +617,6 @@ class OpenAIServingCompletion(GenerateBaseServing):
         per_request_metrics: PerRequestTimingMetrics | None = None
         if (
             self.enable_per_request_metrics
-            and request.include_metrics
             # Metrics describe a single generation stream, so suppress them when
             # they cannot be attributed to one: multiple prompts (timestamps
             # span prompts) or n>1 (stats belong to one of the n sequences).

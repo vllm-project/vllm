@@ -13,10 +13,8 @@ Start the server with `--enable-per-request-metrics`:
 vllm serve meta-llama/Llama-3.1-8B-Instruct --enable-per-request-metrics
 ```
 
-Then set `include_metrics: true` in the request body to receive metrics for
-that request. Metrics are only computed when both the server flag and the
-per-request parameter are set, which avoids throughput overhead for clients
-that do not need them.
+When this flag is set, supported API responses include metrics for each
+attributable request.
 
 !!! note
     At high concurrency, enabling per-request metrics computation may introduce
@@ -25,7 +23,7 @@ that do not need them.
 
 ## Response Format
 
-When `include_metrics: true` is sent, the response includes a `metrics` object:
+When per-request metrics are enabled, the response includes a `metrics` object:
 
 ```json
 {
@@ -67,8 +65,8 @@ request.
     accurately attributed to the request as a whole. Token usage
     (`prompt_tokens`, `completion_tokens`) remains accurate in these cases.
     Per-request metrics also require server-side statistics logging, which is
-    on by default; they are unavailable when the server is started with
-    `--disable-log-stats`.
+    on by default. vLLM rejects `--enable-per-request-metrics` when
+    `--disable-log-stats` is also set.
 
 ## Example Request
 
@@ -82,7 +80,6 @@ request.
     response = client.chat.completions.create(
         model="meta-llama/Llama-3.1-8B-Instruct",
         messages=[{"role": "user", "content": "What is the capital of France?"}],
-        extra_body={"include_metrics": True},
     )
 
     print(response.usage)
@@ -95,8 +92,8 @@ request.
     chunk sent after all content chunks). That chunk is only emitted when usage
     reporting is enabled with `stream_options.include_usage: true` or forced
     server-side with `--enable-force-include-usage`. Without forced usage, a
-    streaming client must set **both** `include_metrics: true` **and**
-    `stream_options.include_usage: true` to receive metrics.
+    streaming client must set `stream_options.include_usage: true` to receive
+    metrics.
 
     ```python
     from openai import OpenAI
@@ -108,7 +105,6 @@ request.
         messages=[{"role": "user", "content": "What is the capital of France?"}],
         stream=True,
         stream_options={"include_usage": True},
-        extra_body={"include_metrics": True},
     )
 
     for chunk in stream:
@@ -120,9 +116,9 @@ request.
 ## Completions API
 
 Per-request metrics are also available on the `/v1/completions` endpoint using
-the same `include_metrics` request parameter and the same `metrics` response
-field. As with `n > 1`, metrics are omitted for requests with multiple prompts,
-because the timing data cannot be attributed to a single prompt's generation.
+the same `metrics` response field. As with `n > 1`, metrics are omitted for
+requests with multiple prompts, because the timing data cannot be attributed to
+a single prompt's generation.
 
 ## Relationship to Prometheus Metrics
 

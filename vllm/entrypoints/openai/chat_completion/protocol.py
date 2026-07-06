@@ -457,8 +457,6 @@ class ChatCompletionRequest(OpenAIBaseModel):
         "can detect such behavior and terminate early, saving time and tokens.",
     )
 
-    include_metrics: bool = False
-
     # --8<-- [end:chat-completion-extra-params]
 
     @model_validator(mode="before")

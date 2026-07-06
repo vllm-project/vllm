@@ -213,8 +213,6 @@ class CompletionRequest(OpenAIBaseModel):
         ),
     )
 
-    include_metrics: bool = False
-
     # --8<-- [end:completion-extra-params]
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
