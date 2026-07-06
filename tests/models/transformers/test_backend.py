@@ -24,6 +24,17 @@ def get_model(arch: str) -> str:
     return model_info.default
 
 
+def get_num_fused(model) -> tuple[int, int]:
+    from vllm.model_executor.layers.linear import (
+        MergedColumnParallelLinear,
+        QKVParallelLinear,
+    )
+
+    glu = sum(isinstance(m, MergedColumnParallelLinear) for m in model.modules())
+    qkv = sum(isinstance(m, QKVParallelLinear) for m in model.modules())
+    return glu, qkv
+
+
 def check_implementation(
     runner_ref: type[HfRunner | VllmRunner],
     runner_test: type[VllmRunner],
@@ -34,16 +45,6 @@ def check_implementation(
     num_fused: tuple[int, int] = (1, 1),
     **kwargs,
 ):
-    def get_num_fused(model) -> tuple[int, int]:
-        from vllm.model_executor.layers.linear import (
-            MergedColumnParallelLinear,
-            QKVParallelLinear,
-        )
-
-        glu = sum(isinstance(m, MergedColumnParallelLinear) for m in model.modules())
-        qkv = sum(isinstance(m, QKVParallelLinear) for m in model.modules())
-        return glu, qkv
-
     if kwargs_ref is None:
         kwargs_ref = {}
     if kwargs_test is None:
