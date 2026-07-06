@@ -29,6 +29,7 @@ _ROUTABLE_EAGER_OPS = frozenset(
         "per_token_group_fp8_quant",
         "dynamic_per_token_scaled_fp8_quant",
         "rms_norm_dynamic_per_token_quant",
+        "rms_norm_per_block_quant",
     }
 )
 _helion_ready: dict[str, bool] = {}

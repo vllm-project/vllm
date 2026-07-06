@@ -482,7 +482,10 @@ def rms_norm_per_block_quant(
         tma_alignment
     )
 
-    torch.ops._C.rms_norm_per_block_quant(
+    from vllm.kernels.helion.routing import route_quant
+
+    route_quant(
+        "rms_norm_per_block_quant",
         output,
         input,
         weight,
