@@ -3,7 +3,7 @@ use std::collections::BTreeSet;
 use vllm_engine_core_client::protocol::logprobs::TokenLogprob;
 use vllm_engine_core_client::protocol::lora::LoraRequest;
 use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
-use vllm_llm::{FinishReason, GenerateOutputStreamExt, GenerateRequest, TokenUsage};
+use vllm_llm::{FinishReason, GenerateOutputStreamExt, GenerateRequest};
 
 use crate::error::Result;
 
@@ -31,8 +31,6 @@ pub struct BeamSearchOutput {
     pub prompt_token_ids: Vec<u32>,
     /// Best beams after beam search, sorted by score.
     pub beams: Vec<BeamSearchBeam>,
-    /// Aggregated token usage across all beam search steps.
-    pub usage: TokenUsage,
 }
 
 /// Configuration for one beam search invocation.
@@ -91,8 +89,6 @@ pub(crate) async fn run_beam_search(
 ) -> Result<BeamSearchOutput> {
     let beam_width = config.beam_width.max(1) as usize;
     let logprobs_num = 2 * beam_width;
-
-    let prompt_len = prompt_token_ids.len();
 
     let mut all_beams: Vec<BeamSearchBeam> = vec![BeamSearchBeam {
         tokens: prompt_token_ids.clone(),
@@ -245,18 +241,8 @@ pub(crate) async fn run_beam_search(
 
     let best_beams: Vec<BeamSearchBeam> = completed.into_iter().take(beam_width).collect();
 
-    let output_token_count = best_beams
-        .first()
-        .map(|beam| beam.tokens.len().saturating_sub(prompt_len))
-        .unwrap_or(0);
-
     Ok(BeamSearchOutput {
         prompt_token_ids,
         beams: best_beams,
-        usage: TokenUsage {
-            prompt_token_count: prompt_len,
-            output_token_count,
-            cached_token_count: 0,
-        },
     })
 }

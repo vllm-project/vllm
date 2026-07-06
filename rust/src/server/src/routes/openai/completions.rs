@@ -266,7 +266,17 @@ async fn collect_beam_search_completion(
     }: ResponseOptions,
     tokenizer: &dyn Tokenizer,
 ) -> CompletionResponse {
-    let usage = Usage::from_token_usage(beam_result.usage, enable_prompt_tokens_details);
+    let prompt_len = beam_result.prompt_token_ids.len();
+    let output_tokens: usize = beam_result
+        .beams
+        .iter()
+        .map(|b| b.tokens.len().saturating_sub(prompt_len))
+        .sum();
+    let usage = Usage::from_counts(
+        prompt_len,
+        output_tokens,
+        enable_prompt_tokens_details.then_some(0),
+    );
 
     let choices: Vec<CompletionChoice> = beam_result
         .beams
