@@ -129,7 +129,7 @@ Add attribution using commit trailers such as `Co-authored-by:` (other projects 
 ```text
 Your commit message here
 
-Co-authored-by: Cursor Agent
+Co-authored-by: Agent Name Here
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
