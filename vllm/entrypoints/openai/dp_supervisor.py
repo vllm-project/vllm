@@ -126,6 +126,7 @@ def _build_vllm_dp_server_args(
     child_args.data_parallel_multi_port_external_lb = False
     child_args.data_parallel_supervisor_port = None
     child_args.api_server_count = 1
+    child_args.enable_snapshot_post_startup = False
     child_args.device_ids = _build_device_ids(args, local_rank)
     return child_args
 
@@ -405,6 +406,17 @@ class DPSupervisor:
                     # This conditional avoids a potential race condition
                     # where shutdown is set, THEN the probe returns true.
                     if not self._shutdown_event.is_set():
+                        if not self._is_ready and getattr(
+                            self.args, "enable_snapshot_post_startup", False
+                        ):
+                            from vllm.engine.snapshot.manager import (
+                                SnapshotManager,
+                            )
+
+                            logger.info("All DP children ready. Triggering snapshot...")
+                            provider = getattr(self.args, "snapshot_provider", None)
+                            mgr = SnapshotManager(provider)
+                            await asyncio.to_thread(mgr.run_snapshot)
                         self._is_ready = True
                 elif self._is_ready:
                     # Once ready, any failure in the probe means vLLM is dead.
@@ -455,7 +467,12 @@ class DPSupervisor:
                 if probe_task.done():
                     # Extract exception if it crashed, or log failure
                     exc = probe_task.exception() if not probe_task.cancelled() else None
-                    logger.info("DPSupervisor probe task stopped. Exception: %s", exc)
+                    if exc is not None:
+                        logger.error(
+                            "DPSupervisor probe task failed with exception: %s", exc
+                        )
+                        raise exc
+                    logger.info("DPSupervisor probe task stopped clean/cancelled.")
                     break
 
                 # Sleep for probe_interval seconds or until a shutdown.

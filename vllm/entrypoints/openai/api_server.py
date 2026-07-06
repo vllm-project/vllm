@@ -299,6 +299,7 @@ async def init_app_state(
     state: State,
     args: Namespace,
     supported_tasks: tuple["SupportedTask", ...] | None = None,
+    client_config: dict[str, Any] | None = None,
 ) -> None:
     vllm_config = engine_client.vllm_config
 
@@ -337,6 +338,7 @@ async def init_app_state(
     state.log_stats = not args.disable_log_stats
     state.vllm_config = vllm_config
     state.args = args
+    state.client_config = client_config or {}
     resolved_chat_template = load_chat_template(args.chat_template)
 
     # Merge default_mm_loras into the static lora_modules
@@ -594,6 +596,7 @@ async def build_and_serve(
     listen_address: str,
     sock: socket.socket,
     args: Namespace,
+    client_config: dict[str, Any] | None = None,
     **uvicorn_kwargs,
 ) -> asyncio.Task:
     """Build FastAPI app, initialize state, and start serving.
@@ -611,7 +614,13 @@ async def build_and_serve(
 
     logger.info("Supported tasks: %s", supported_tasks)
     app = build_app(args, supported_tasks, model_config)
-    await init_app_state(engine_client, app.state, args, supported_tasks)
+    await init_app_state(
+        engine_client,
+        app.state,
+        args,
+        supported_tasks,
+        client_config=client_config,
+    )
 
     logger.info("Starting vLLM server on %s", listen_address)
 
@@ -714,7 +723,12 @@ async def run_server_worker(
         client_config=client_config,
     ) as engine_client:
         shutdown_task = await build_and_serve(
-            engine_client, listen_address, sock, args, **uvicorn_kwargs
+            engine_client,
+            listen_address,
+            sock,
+            args,
+            client_config=client_config,
+            **uvicorn_kwargs,
         )
     # NB: Await server shutdown only after the backend context is exited
     try:
