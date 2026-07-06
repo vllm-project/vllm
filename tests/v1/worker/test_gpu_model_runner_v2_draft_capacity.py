@@ -25,6 +25,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.capacity import (
     compute_draft_token_capacity_from_confidence,
     get_effective_scheduled_token_counts,
 )
+from vllm.v1.worker.gpu.states import RequestState
 
 
 def test_compute_draft_token_capacity_from_confidence_uses_global_prefix_order():
@@ -113,19 +114,21 @@ def test_compute_draft_token_capacity_keeps_threshold_ties():
 
 def test_capacity_based_verification_manager_updates_cpu_capacities():
     device = torch.device("cuda")
-    draft_token_capacity_np = np.full(4, 3, dtype=np.int32)
-    handler = CapacityBasedVerificationManager(
-        max_num_tokens=16,
+    req_states = RequestState(
         max_num_reqs=4,
-        draft_token_capacity_np=draft_token_capacity_np,
-        num_computed_tokens=torch.zeros(4, dtype=torch.int32, device=device),
-        prefill_len=torch.zeros(4, dtype=torch.int32, device=device),
-        next_prefill_tokens=torch.zeros(4, dtype=torch.int32, device=device),
-        all_token_ids=torch.zeros((4, 4), dtype=torch.int32, device=device),
-        last_sampled_tokens=torch.zeros((4, 1), dtype=torch.int64, device=device),
-        draft_tokens=torch.zeros((4, 3), dtype=torch.int64, device=device),
+        max_model_len=4,
+        max_num_batched_tokens=16,
+        num_speculative_steps=3,
+        vocab_size=32,
         device=device,
     )
+    handler = CapacityBasedVerificationManager(
+        max_num_tokens=16,
+        req_states=req_states,
+        device=device,
+    )
+    handler.add_request("req0", 2)
+    handler.add_request("req1", 0)
     input_batch: Any = SimpleNamespace(
         req_ids=["req0", "req1"],
         idx_mapping_np=np.array([2, 0], dtype=np.int32),
@@ -141,16 +144,13 @@ def test_capacity_based_verification_manager_updates_cpu_capacities():
     assert handler.copy_event_pending
 
     torch.accelerator.synchronize()
-    assert handler.try_update_draft_token_capacities(
-        {"req0": 2, "req1": 0},
-    )
-    assert draft_token_capacity_np.tolist() == [2, 3, 1, 3]
+    assert handler.try_update_draft_token_capacities()
+    assert handler.req_states.draft_token_capacity_np.tolist() == [2, 3, 1, 3]
 
-    draft_token_capacity_np.fill(3)
-    assert handler.try_update_draft_token_capacities(
-        {"req1": 0},
-    )
-    assert draft_token_capacity_np.tolist() == [2, 3, 3, 3]
+    handler.remove_request("req0")
+    handler.req_states.draft_token_capacity_np.fill(3)
+    assert handler.try_update_draft_token_capacities()
+    assert handler.req_states.draft_token_capacity_np.tolist() == [2, 3, 3, 3]
 
 
 def test_effective_scheduled_token_counts_apply_capacity_before_dispatch():

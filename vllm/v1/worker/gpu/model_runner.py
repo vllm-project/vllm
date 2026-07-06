@@ -106,7 +106,6 @@ from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.capacity import (
     CapacityBasedVerificationManager,
     get_draft_token_capacity,
-    get_effective_scheduled_token_counts,
     get_scheduled_draft_token_counts,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
@@ -228,14 +227,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if getattr(self.speculator, "use_draft_token_capacity", False):
             self.verification_capacity_manager = CapacityBasedVerificationManager(
                 self.max_num_tokens,
-                self.max_num_reqs,
-                self.req_states.draft_token_capacity_np,
-                self.req_states.num_computed_tokens.gpu,
-                self.req_states.prefill_len.gpu,
-                self.req_states.next_prefill_tokens,
-                self.req_states.all_token_ids.gpu,
-                self.req_states.last_sampled_tokens,
-                self.req_states.draft_tokens,
+                self.req_states,
                 self.device,
             )
         else:
@@ -758,6 +750,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         req_idx = self.req_states.remove_request(req_id)
         if req_idx is None:
             return False
+        if self.verification_capacity_manager is not None:
+            self.verification_capacity_manager.remove_request(req_id)
         if self.pp_handler is not None:
             self.pp_handler.on_req_idx_freed(req_idx)
         if self.encoder_cache is not None:
@@ -809,6 +803,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 max_tokens=sampling_params.max_tokens if sampling_params else 1,  # type: ignore[arg-type]
             )
             req_index = self.req_states.req_id_to_index[req_id]
+            if self.verification_capacity_manager is not None:
+                self.verification_capacity_manager.add_request(req_id, req_index)
 
             if self.encoder_cache is not None:
                 self.encoder_cache.add_request(req_id, new_req_data.mm_features)
@@ -1122,7 +1118,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     sampler_output.num_sampled,
                     sampler_output.num_rejected,
                     input_batch,
-                    self.req_states.prefill_len.gpu,
                 )
             )
 
@@ -1185,13 +1180,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         verification_capacity_manager = self.verification_capacity_manager
         if not dummy_run and verification_capacity_manager is not None:
-            verification_capacity_manager.try_update_draft_token_capacities(
-                self.req_states.req_id_to_index,
-            )
-            num_toks, max_query_len = get_effective_scheduled_token_counts(
-                scheduler_output,
-                self.req_states.req_id_to_index,
-                self.req_states.draft_token_capacity_np,
+            verification_capacity_manager.try_update_draft_token_capacities()
+            num_toks, max_query_len = (
+                verification_capacity_manager.get_effective_scheduled_token_counts(
+                    scheduler_output,
+                )
             )
         else:
             num_toks = scheduler_output.total_num_scheduled_tokens
@@ -1567,9 +1560,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # not have a speculator (i.e. self.speculator is None)
             verification_capacity_manager = self.verification_capacity_manager
             if verification_capacity_manager is not None:
-                verification_capacity_manager.try_update_draft_token_capacities(
-                    self.req_states.req_id_to_index,
-                )
+                verification_capacity_manager.try_update_draft_token_capacities()
                 if draft_token_capacity is not None:
                     verification_capacity_manager.set_draft_token_capacities(
                         input_batch.req_ids,

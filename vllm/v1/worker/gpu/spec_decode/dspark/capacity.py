@@ -25,6 +25,7 @@ from vllm.v1.worker.gpu.spec_decode.decompaction import (
 
 if TYPE_CHECKING:
     from vllm.v1.worker.gpu.input_batch import InputBatch
+    from vllm.v1.worker.gpu.states import RequestState
 
 
 @dataclass
@@ -33,6 +34,34 @@ class _SamplerDecompactionState:
     scheduled_draft_tokens_per_req: np.ndarray
     pruned_draft_tokens_per_req: np.ndarray
     num_bonus_tokens: int
+
+
+class VerificationCapacityRequestStates:
+    def __init__(self, req_states: "RequestState"):
+        self.max_num_reqs = req_states.max_num_reqs
+        self.num_speculative_steps = req_states.num_speculative_steps
+        self.req_id_to_index: dict[str, int] = {}
+
+        self.draft_token_capacity_np = np.full(
+            self.max_num_reqs,
+            self.num_speculative_steps,
+            dtype=np.int32,
+        )
+        self.num_computed_tokens = req_states.num_computed_tokens.gpu
+        self.prefill_len = req_states.prefill_len.gpu
+        self.next_prefill_tokens = req_states.next_prefill_tokens
+        self.all_token_ids = req_states.all_token_ids.gpu
+        self.last_sampled_tokens = req_states.last_sampled_tokens
+        self.draft_tokens = req_states.draft_tokens
+
+    def add_request(self, req_id: str, req_idx: int) -> None:
+        self.req_id_to_index[req_id] = req_idx
+        self.draft_token_capacity_np[req_idx] = self.num_speculative_steps
+
+    def remove_request(self, req_id: str) -> None:
+        req_idx = self.req_id_to_index.pop(req_id, None)
+        if req_idx is not None:
+            self.draft_token_capacity_np[req_idx] = self.num_speculative_steps
 
 
 def get_draft_token_capacity(
@@ -112,25 +141,11 @@ class CapacityBasedVerificationManager:
     def __init__(
         self,
         max_num_tokens: int,
-        max_num_reqs: int,
-        draft_token_capacity_np: np.ndarray,
-        num_computed_tokens: torch.Tensor,
-        prefill_len: torch.Tensor,
-        next_prefill_tokens: torch.Tensor,
-        all_token_ids: torch.Tensor,
-        last_sampled_tokens: torch.Tensor,
-        draft_tokens: torch.Tensor,
+        req_states: "RequestState",
         device: torch.device,
     ):
         self.device = device
-        self.max_num_reqs = max_num_reqs
-        self.draft_token_capacity_np = draft_token_capacity_np
-        self.num_computed_tokens = num_computed_tokens
-        self.prefill_len = prefill_len
-        self.next_prefill_tokens = next_prefill_tokens
-        self.all_token_ids = all_token_ids
-        self.last_sampled_tokens = last_sampled_tokens
-        self.draft_tokens = draft_tokens
+        self.req_states = VerificationCapacityRequestStates(req_states)
         self.copy_stream = torch.cuda.Stream(device)
         self.copy_event = torch.Event()
         self.sampler_decompaction_buffers = SamplerDecompactionBuffers.make(
@@ -155,6 +170,12 @@ class CapacityBasedVerificationManager:
         self._sampler_decompaction_state = None
         self.sampler_decompaction = None
 
+    def add_request(self, req_id: str, req_idx: int) -> None:
+        self.req_states.add_request(req_id, req_idx)
+
+    def remove_request(self, req_id: str) -> None:
+        self.req_states.remove_request(req_id)
+
     def _trim_counts(
         self,
         input_batch: "InputBatch",
@@ -171,7 +192,7 @@ class CapacityBasedVerificationManager:
             input_batch.num_scheduled_tokens,
             scheduled_draft_tokens_per_req,
             input_batch.idx_mapping_np,
-            self.draft_token_capacity_np,
+            self.req_states.draft_token_capacity_np,
         )
         self._sampler_decompaction_state = _SamplerDecompactionState(
             num_scheduled_tokens_before_capacity=num_scheduled_tokens_before_capacity,
@@ -224,10 +245,7 @@ class CapacityBasedVerificationManager:
             self.copy_event.record()
             self.copy_event_pending = True
 
-    def try_update_draft_token_capacities(
-        self,
-        req_id_to_index: dict[str, int],
-    ) -> bool:
+    def try_update_draft_token_capacities(self) -> bool:
         if self.copied_draft_token_capacity_np is None:
             return False
         if not self._copy_ready():
@@ -235,11 +253,21 @@ class CapacityBasedVerificationManager:
         draft_token_capacities = self._get_draft_token_capacities()
         assert draft_token_capacities is not None
         assert self.idx_mapping_np is not None
-        active = np.isin(self.req_ids, tuple(req_id_to_index))
-        self.draft_token_capacity_np[self.idx_mapping_np[active]] = (
+        active = np.isin(self.req_ids, tuple(self.req_states.req_id_to_index))
+        self.req_states.draft_token_capacity_np[self.idx_mapping_np[active]] = (
             draft_token_capacities[active]
         )
         return True
+
+    def get_effective_scheduled_token_counts(
+        self,
+        scheduler_output: SchedulerOutput,
+    ) -> tuple[int, int]:
+        return get_effective_scheduled_token_counts(
+            scheduler_output,
+            self.req_states.req_id_to_index,
+            self.req_states.draft_token_capacity_np,
+        )
 
     def _prepare_sampler_decompaction(
         self,
@@ -255,14 +283,14 @@ class CapacityBasedVerificationManager:
             input_batch.query_start_loc,
             input_batch.idx_mapping,
             input_batch.positions,
-            self.last_sampled_tokens,
-            self.draft_tokens,
+            self.req_states.last_sampled_tokens,
+            self.req_states.draft_tokens,
             state.num_scheduled_tokens_before_capacity,
             state.scheduled_draft_tokens_per_req,
             state.num_bonus_tokens,
             input_batch.num_reqs,
             input_batch.num_reqs_after_padding,
-            self.max_num_reqs,
+            self.req_states.max_num_reqs,
             self.device,
             self.sampler_decompaction_buffers,
             state.num_bonus_tokens,
@@ -300,7 +328,7 @@ class CapacityBasedVerificationManager:
             max(1, int(num_logits.max())),
         )
 
-        query_start_loc_np = np.empty(self.max_num_reqs + 1, dtype=np.int32)
+        query_start_loc_np = np.empty(self.req_states.max_num_reqs + 1, dtype=np.int32)
         query_start_loc_np[0] = 0
         np.cumsum(
             num_scheduled_tokens,
@@ -318,28 +346,28 @@ class CapacityBasedVerificationManager:
         if np.any(input_batch.is_prefilling_np):
             prepare_prefill_inputs(
                 input_batch.input_ids,
-                self.next_prefill_tokens,
+                self.req_states.next_prefill_tokens,
                 input_batch.idx_mapping,
                 input_batch.query_start_loc,
-                self.all_token_ids,
-                self.prefill_len,
-                self.num_computed_tokens,
+                self.req_states.all_token_ids,
+                self.req_states.prefill_len,
+                self.req_states.num_computed_tokens,
             )
         prepare_pos_seq_lens(
             input_batch.idx_mapping,
             input_batch.query_start_loc,
-            self.num_computed_tokens,
+            self.req_states.num_computed_tokens,
             input_batch.positions,
             input_batch.seq_lens,
         )
         input_batch.logits_indices = combine_sampled_and_draft_tokens(
             input_batch.input_ids,
             input_batch.idx_mapping,
-            self.last_sampled_tokens,
+            self.req_states.last_sampled_tokens,
             input_batch.query_start_loc,
             input_batch.seq_lens,
-            self.prefill_len,
-            self.draft_tokens,
+            self.req_states.prefill_len,
+            self.req_states.draft_tokens,
             input_batch.cu_num_logits,
             int(input_batch.cu_num_logits_np[-1]),
             num_bonus_tokens,
@@ -392,7 +420,6 @@ class CapacityBasedVerificationManager:
         num_sampled: torch.Tensor,
         num_rejected: torch.Tensor,
         input_batch: "InputBatch",
-        prefill_lens: torch.Tensor,
     ) -> torch.Tensor:
         if self.sampler_decompaction is None:
             return num_rejected
@@ -401,7 +428,7 @@ class CapacityBasedVerificationManager:
             input_batch.seq_lens,
             input_batch.cu_num_logits,
             input_batch.idx_mapping,
-            prefill_lens,
+            self.req_states.prefill_len,
         )
         return num_rejected
 
