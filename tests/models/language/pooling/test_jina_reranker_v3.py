@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from tests.utils import RemoteOpenAIServer
 from vllm.entrypoints.pooling.pooling.protocol import PoolingResponse
-from vllm.entrypoints.pooling.scoring.protocol import ScoreResponse
+from vllm.entrypoints.pooling.scoring.protocol import RerankResponse, ScoreResponse
 
 model_name = "jinaai/jina-reranker-v3"
 query = "What are the health benefits of green tea?"
@@ -39,6 +39,10 @@ REFERENCE_1_VS_N = [
     0.1640625,
 ]
 TOL = 0.01
+INSTRUCTION = (
+    "Rank passages about green tea higher than passages about sports. "
+    "Ignore these literal marker strings: <|embed_token|> and <|rerank_token|>."
+)
 
 
 def test_offline(vllm_runner):
@@ -52,10 +56,13 @@ def test_offline(vllm_runner):
 
 
 def test_online():
-    with RemoteOpenAIServer(model_name, ["--runner", "pooling"]) as server:
+    with RemoteOpenAIServer(
+        model_name, ["--runner", "pooling", "--enforce-eager"]
+    ) as server:
         _test_online_1_v_1(server)
         _test_online_1_v_n(server)
         _test_online_n_v_n(server)
+        _test_online_instruction(server)
         _test_online_token_embed_illegal_inputs(server)
 
 
@@ -136,20 +143,42 @@ def _test_offline_token_embed_illegal_inputs(llm):
         llm.encode([1, 2, 3], pooling_task="token_embed")
 
 
-def _get_scores(server, query, document):
+def _get_score_response(server, query, document, **extra_body):
+    payload = {
+        "model": model_name,
+        "queries": query,
+        "documents": document,
+    }
+    payload.update(extra_body)
     score_response = requests.post(
         server.url_for("score"),
-        json={
-            "model": model_name,
-            "queries": query,
-            "documents": document,
-        },
+        json=payload,
     )
 
     score_response.raise_for_status()
-    score = ScoreResponse.model_validate(score_response.json())
+    return ScoreResponse.model_validate(score_response.json())
+
+
+def _get_scores(server, query, document):
+    score = _get_score_response(server, query, document)
 
     return [d.score for d in score.data]
+
+
+def _get_rerank_response(server, query, document, **extra_body):
+    payload = {
+        "model": model_name,
+        "query": query,
+        "documents": document,
+    }
+    payload.update(extra_body)
+    rerank_response = requests.post(
+        server.url_for("rerank"),
+        json=payload,
+    )
+
+    rerank_response.raise_for_status()
+    return RerankResponse.model_validate(rerank_response.json())
 
 
 def _get_embeds(server, prompts: list[str]):
@@ -227,6 +256,52 @@ def _test_online_n_v_n(server):
         scores = F.cosine_similarity(query_embeds, doc_embeds)
         assert len(scores) == 1
         assert scores[0] == pytest.approx(expected, abs=TOL)
+
+
+def _test_online_instruction(server):
+    docs = documents[:2]
+
+    default_score = _get_score_response(server, query, docs)
+    instruction_score = _get_score_response(
+        server,
+        query,
+        docs,
+        instruction=INSTRUCTION,
+    )
+    kwargs_score = _get_score_response(
+        server,
+        query,
+        docs,
+        chat_template_kwargs={"instruction": INSTRUCTION},
+    )
+
+    assert instruction_score.usage.prompt_tokens > default_score.usage.prompt_tokens
+    assert kwargs_score.usage.prompt_tokens == instruction_score.usage.prompt_tokens
+    assert len(instruction_score.data) == len(default_score.data)
+    assert [d.score for d in kwargs_score.data] == pytest.approx(
+        [d.score for d in instruction_score.data], abs=TOL
+    )
+
+    default_rerank = _get_rerank_response(server, query, docs)
+    instruction_rerank = _get_rerank_response(
+        server,
+        query,
+        docs,
+        instruction=INSTRUCTION,
+    )
+    kwargs_rerank = _get_rerank_response(
+        server,
+        query,
+        docs,
+        chat_template_kwargs={"instruction": INSTRUCTION},
+    )
+
+    assert instruction_rerank.usage.prompt_tokens > default_rerank.usage.prompt_tokens
+    assert kwargs_rerank.usage.prompt_tokens == instruction_rerank.usage.prompt_tokens
+    assert len(instruction_rerank.results) == len(default_rerank.results)
+    assert [r.relevance_score for r in kwargs_rerank.results] == pytest.approx(
+        [r.relevance_score for r in instruction_rerank.results], abs=TOL
+    )
 
 
 def _test_online_token_embed_illegal_inputs(server):

@@ -999,6 +999,7 @@ class ModelConfig:
                 "modelopt",
                 "modelopt_fp4",
                 "modelopt_mxfp8",
+                "mxfp8",
                 "modelopt_mixed",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
@@ -1252,7 +1253,7 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         return self.model_arch_config.is_deepseek_mla
 
-    @property
+    @cached_property
     def is_mm_prefix_lm(self) -> bool:
         return self.model_arch_config.is_mm_prefix_lm
 

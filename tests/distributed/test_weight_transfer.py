@@ -205,7 +205,7 @@ class TestNCCLEngineParsing:
         return NCCLWeightTransferEngine(
             config,
             create_mock_vllm_config(),
-            "cuda",
+            torch.device("cuda"),
             MagicMock(spec=torch.nn.Module),
         )
 
@@ -254,21 +254,30 @@ class TestEngineRegistry:
     def test_create_engine_nccl(self):
         config = WeightTransferConfig(backend="nccl")
         engine = WeightTransferEngineFactory.create_engine(
-            config, create_mock_vllm_config(), "cuda", MagicMock(spec=torch.nn.Module)
+            config,
+            create_mock_vllm_config(),
+            torch.device("cuda"),
+            MagicMock(spec=torch.nn.Module),
         )
         assert isinstance(engine, NCCLWeightTransferEngine)
 
     def test_create_engine_ipc(self):
         config = WeightTransferConfig(backend="ipc")
         engine = WeightTransferEngineFactory.create_engine(
-            config, create_mock_vllm_config(), "cuda", MagicMock(spec=torch.nn.Module)
+            config,
+            create_mock_vllm_config(),
+            torch.device("cuda"),
+            MagicMock(spec=torch.nn.Module),
         )
         assert isinstance(engine, IPCWeightTransferEngine)
 
     def test_create_engine_sparse_nccl(self):
         config = WeightTransferConfig(backend="sparse_nccl")
         engine = WeightTransferEngineFactory.create_engine(
-            config, create_mock_vllm_config(), "cuda", MagicMock(spec=torch.nn.Module)
+            config,
+            create_mock_vllm_config(),
+            torch.device("cuda"),
+            MagicMock(spec=torch.nn.Module),
         )
         assert isinstance(engine, SparseNCCLWeightTransferEngine)
 
@@ -278,7 +287,7 @@ class TestEngineRegistry:
             WeightTransferEngineFactory.create_engine(
                 config,
                 create_mock_vllm_config(),
-                "cuda",
+                torch.device("cuda"),
                 MagicMock(spec=torch.nn.Module),
             )
 
@@ -298,7 +307,7 @@ class TestSparseNCCLPatchApplication:
     def _make_engine(self, model):
         config = WeightTransferConfig(backend="sparse_nccl")
         return SparseNCCLWeightTransferEngine(
-            config, create_mock_vllm_config(), "cpu", model
+            config, create_mock_vllm_config(), torch.device("cpu"), model
         )
 
     def _make_model(self, numel: int = 8):
@@ -396,7 +405,10 @@ def test_nccl_receive_weights_without_init_raises():
 
     config = WeightTransferConfig(backend="nccl")
     engine = NCCLWeightTransferEngine(
-        config, create_mock_vllm_config(), "cuda", MagicMock(spec=torch.nn.Module)
+        config,
+        create_mock_vllm_config(),
+        torch.device("cuda"),
+        MagicMock(spec=torch.nn.Module),
     )
 
     update_info = NCCLWeightTransferUpdateInfo(
@@ -414,7 +426,10 @@ def test_sparse_nccl_receive_weights_without_init_raises():
 
     config = WeightTransferConfig(backend="sparse_nccl")
     engine = SparseNCCLWeightTransferEngine(
-        config, create_mock_vllm_config(), "cuda", MagicMock(spec=torch.nn.Module)
+        config,
+        create_mock_vllm_config(),
+        torch.device("cuda"),
+        MagicMock(spec=torch.nn.Module),
     )
 
     update_info = SparseNCCLWeightTransferUpdateInfo(
@@ -511,7 +526,9 @@ def inference_receive_tensor(
     vllm_config.model_config = MagicMock()
 
     recorder = Recorder()
-    engine = NCCLWeightTransferEngine(config, vllm_config, "cuda", recorder)
+    engine = NCCLWeightTransferEngine(
+        config, vllm_config, torch.device("cuda"), recorder
+    )
     # Transport-only test: bypass the set_current_vllm_config context that
     # receive_weights enters, since vllm_config here is a mock.
     import vllm.config as _vllm_config_mod
@@ -678,7 +695,9 @@ def inference_receive_sparse_tensor(
         num_updates_list=[3],
     )
 
-    engine = SparseNCCLWeightTransferEngine(config, vllm_config, "cuda", model)
+    engine = SparseNCCLWeightTransferEngine(
+        config, vllm_config, torch.device("cuda"), model
+    )
     from vllm.distributed.weight_transfer.nccl_common import (
         NCCLWeightTransferInitInfo,
     )
@@ -893,7 +912,7 @@ class TestIPCEngineParsing:
         return IPCWeightTransferEngine(
             config,
             create_mock_vllm_config(),
-            "cuda",
+            torch.device("cuda"),
             MagicMock(spec=torch.nn.Module),
         )
 
@@ -1188,7 +1207,10 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
 
     config = IPCWeightTransferConfig(packed=False)
     engine = IPCWeightTransferEngine(
-        config, create_mock_vllm_config(), "cuda", MagicMock(spec=torch.nn.Module)
+        config,
+        create_mock_vllm_config(),
+        torch.device("cuda:0"),
+        MagicMock(spec=torch.nn.Module),
     )
 
     dummy_tensor = torch.ones(10, 10, device="cuda:0")

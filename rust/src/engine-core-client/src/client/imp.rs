@@ -15,9 +15,9 @@ use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, Uti
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::{LoraInfoExporter, record_scheduler_stats};
+use crate::metrics::{LoraInfoExporter, SchedulerStatsRecorder};
 use crate::protocol::encode_msgpack;
-use crate::protocol::output::{ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs};
+use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
 use crate::protocol::request::EngineCoreRequestType;
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
@@ -29,6 +29,7 @@ pub(crate) struct ClientInner {
     /// The runtime handle used for sending messages to the engine.
     handle: Handle,
     model_name: String,
+    scheduler_stats_recorder: SchedulerStatsRecorder,
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
     health_error: ArcSwapOption<Error>,
@@ -43,10 +44,13 @@ impl ClientInner {
         model_name: String,
         engines: &[ConnectedEngine],
     ) -> Self {
+        let scheduler_stats_recorder =
+            SchedulerStatsRecorder::new(&METRICS.scheduler, &model_name, engines);
         Self {
             input_send,
             handle,
             model_name,
+            scheduler_stats_recorder,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
             utility_reg: Mutex::new(UtilityRegistry::default()),
             health_error: ArcSwapOption::empty(),
@@ -351,8 +355,8 @@ pub(crate) async fn run_output_dispatcher_loop(
                 )),
             }?;
 
-            match outputs.classify() {
-                ClassifiedEngineCoreOutputs::RequestBatch(batch) => {
+            match outputs {
+                EngineCoreOutputs::RequestBatch(batch) => {
                     let senders = inner.take_senders_for_outputs(&batch.outputs);
                     for (output, sender) in batch.outputs.into_iter().zip(senders) {
                         let request_id = output.request_id.clone();
@@ -389,12 +393,7 @@ pub(crate) async fn run_output_dispatcher_loop(
                                 "dropping scheduler stats for unknown engine"
                             );
                         }
-                        record_scheduler_stats(
-                            &METRICS.scheduler,
-                            inner.model_name(),
-                            batch.engine_index,
-                            scheduler_stats,
-                        );
+                        inner.scheduler_stats_recorder.record(batch.engine_index, scheduler_stats);
                     }
 
                     // The engine's scheduler stats never carry adapter names;
@@ -403,7 +402,7 @@ pub(crate) async fn run_output_dispatcher_loop(
                     let (running, waiting) = inner.lora_adapter_states();
                     lora_info.update(&METRICS.scheduler, running, waiting);
                 }
-                ClassifiedEngineCoreOutputs::Utility(utility) => {
+                EngineCoreOutputs::Utility(utility) => {
                     let call_id = utility.output.call_id;
                     if inner.resolve_utility_output(utility.output) {
                         trace!(
@@ -419,8 +418,7 @@ pub(crate) async fn run_output_dispatcher_loop(
                         );
                     }
                 }
-                other @ (ClassifiedEngineCoreOutputs::DpControl { .. }
-                | ClassifiedEngineCoreOutputs::Other(_)) => {
+                other => {
                     Err::<(), _>(unexpected_dispatcher_output!(
                         "received unexpected output on main dispatcher path: {other:?}"
                     ))?;
