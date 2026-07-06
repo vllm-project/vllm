@@ -12,6 +12,12 @@ from ..registry import HF_EXAMPLE_MODELS
 from ..utils import check_embeddings_close, check_logprobs_close
 
 
+@pytest.fixture(scope="function", autouse=True)
+def enable_pickle(monkeypatch):
+    """`LLM.apply_model` requires pickling a function."""
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
+
+
 def get_model(arch: str) -> str:
     model_info = HF_EXAMPLE_MODELS.get_hf_info(arch)
     model_info.check_transformers_version(on_fail="skip")
