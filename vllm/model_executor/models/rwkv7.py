@@ -43,7 +43,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsAttentionFree,
-    SupportsMambaPrefixCaching,
     SupportsPP,
 )
 from vllm.sequence import IntermediateTensors
@@ -1952,7 +1951,6 @@ class RWKV7ForCausalLM(
     HasInnerState,
     IsAttentionFree,
     SupportsPP,
-    SupportsMambaPrefixCaching,
 ):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()

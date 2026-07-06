@@ -1,0 +1,381 @@
+# RWKV7 upstream prep TODO / handoff list
+
+更新时间：2026-07-06
+工作目录：/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-upstream
+当前分支：rwkv7-upstream-prep
+当前 HEAD：bdefee996 (Add RWKV7 model support)
+
+## 目标
+基于 rwkv7 的最小核心接入版本，剥离不符合 vLLM 主线设计风格的内容，整理成更适合 upstream 到 vLLM 主线的形态。
+
+## 本地规则 / 约定
+1. 环境优先使用 `vllm`。
+2. 但仓库 AGENTS.md 明确要求：
+   - 不要使用 system `python3`
+   - 不要使用裸 `pip` / `pip install`
+   - Python / pytest / lint 命令优先走 `uv` 和 `.venv/bin/python`
+3. 实操上可按下面理解执行：
+   - shell / conda 环境：优先 `vllm`
+   - Python 相关命令：优先遵守仓库 AGENTS.md 的 `uv` + `.venv/bin/python` 规则
+4. adapter-align (`/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-dev`, branch: `codex/rwkv7-adapter-align`) 仅作为参考源，不要整包搬运。
+5. 当前先不要引入 reasoning / tool parser / renderers / serving / io logging / tmp / benchmark / chat-template / no-thinking 等特化逻辑。
+6. 当前项目内 `.venv` 已补齐，创建方式为：
+   - `UV_CACHE_DIR=/tmp/uv-cache uv venv .venv --python /mnt/data/anaconda3/envs/vllm/bin/python --system-site-packages`
+7. 每次代码修改后，必须补：
+   - 至少一轮与改动直接相关的 unit tests
+   - 至少一轮相关 regression tests
+8. 覆盖率目标：对本轮新增/修改代码，尽量达到 **85%+**；若工具/依赖/环境阻塞，必须在 handoff / todo 中明确写出原因。
+9. 当前如果 GPU 正在被占用：
+   - 暂时不要启动占显存的测试
+   - 优先跑 CPU / 轻量回归，并记录 GPU 回归 pending
+10. 当前已知测试坑：
+   - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1` 往往比默认 pytest 更稳定
+   - 沙箱内本地端口绑定可能失败
+   - 当前环境里可能缺少 `vllm_flash_attn` CUDA 扩展，导致部分测试在 collection/import 阶段失败
+11. 由于 `.venv` 复用了 `vllm` 环境的 `--system-site-packages`，其中已有一个指向 `vllm-dev` 的 editable 安装；为了确保测试的是当前分支代码，pytest 命令需要显式把当前仓库放到 `PYTHONPATH` 最前面：
+   - `PYTHONPATH=/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-upstream:/tmp ...`
+
+## 2026-07-06 测试 / 验证补充
+- [x] 新增最小上游收敛断言：
+  - `test_rwkv7_uses_base_mamba_model_config`
+  - `test_rwkv7_does_not_declare_mamba_prefix_caching_support`
+- [x] 确认 CPU-only 测试导入链 workaround：
+  - 在 `/tmp/sitecustomize.py` 中把 `vllm.platforms.current_platform` 强制到 `UnspecifiedPlatform`
+  - 避开 `fa_utils.py -> vllm.vllm_flash_attn` 的 CUDA 扩展导入
+- [x] 确认当前分支测试必须显式加：
+  - `PYTHONPATH=/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-upstream:/tmp`
+  - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1`
+- [x] 跑通当前轮非显存回归 / 单测（显式 nodeid，避免误匹配 `*_cuda` 用例）：
+
+```bash
+PYTHONPATH=/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-upstream:/tmp \
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
+.venv/bin/python -m pytest -v \
+  tests/model_executor/test_rwkv7.py::test_rwkv7_mamba_state_copy_function_types \
+  tests/model_executor/test_rwkv7.py::test_rwkv7_uses_base_mamba_model_config \
+  tests/model_executor/test_rwkv7.py::test_rwkv7_does_not_declare_mamba_prefix_caching_support \
+  tests/model_executor/test_rwkv7.py::test_rwkv7_block_forward_without_metadata \
+  tests/model_executor/test_rwkv7.py::test_rwkv7_block_registers_static_forward_context \
+  tests/model_executor/test_rwkv7.py::test_rwkv7_block_updates_cached_states \
+  tests/model_executor/test_rwkv7.py::test_rwkv7_block_batches_decode_tokens_without_changing_results \
+  tests/model_executor/test_rwkv7.py::test_rwkv7_block_batches_prefill_tokens_without_changing_results \
+  tests/model_executor/test_rwkv7.py::test_rwkv7_block_uses_fp32_runtime_state_dtype \
+  tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_writes_aligned_states \
+  tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_batches_multiple_sequences \
+  tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_decode_writes_next_block_slot
+```
+
+结果：`12 passed`（CPU-only；未主动启动新的占显存测试）
+
+- [x] 变更覆盖率 fallback 记录：
+  - `coverage run` 当前失败：`TypeError: object of type '_OpNamespace' has no len()`
+  - `pytest-cov` 当前失败：`torchvision roi_align` meta registration 冲突
+  - 改用 `sys.settrace` 临时追踪 `/tmp/rwkv7_changed_line_trace.json`
+  - 已确认当前 source 改动中的可执行变更行被命中：
+    - `vllm/model_executor/models/config.py:656`
+    - `vllm/model_executor/models/rwkv7.py:1949-1953`
+  - 对本轮 source 文件“仍存在的可执行变更行”，fallback 命中率可视为 `100%`；被删除代码行不再计入运行时覆盖率
+
+- [ ] GPU / 显存相关 parity / CUDA 回归依然 pending
+  - 用户要求当前暂不启动占显存测试
+
+
+## 已完成
+- [x] 阅读 `/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-upstream/rwkv7_upstream_handoff.md`
+- [x] 阅读 `/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-upstream/AGENTS.md`
+- [x] 阅读 `/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-upstream/docs/contributing/editing-agent-instructions.md`
+- [x] 阅读官方文档：
+  - https://docs.vllm.ai/en/stable/contributing/
+  - https://docs.vllm.ai/en/latest/contributing/#documentation
+- [x] 核对当前分支状态：`rwkv7-upstream-prep`
+- [x] 核对当前 HEAD：`bdefee996` (`Add RWKV7 model support`)
+- [x] 盘点当前提交的主要改动文件（12 个文件，约 4109 行新增）
+- [x] 对当前分支做首轮 upstream prep 分类：keep / rewrite / defer
+- [x] 识别出一个明确的 collateral change：
+  - `vllm/model_executor/layers/fla/ops/__init__.py` 中删除了 `fused_post_conv_prep` 的导出
+  - 但仓库现有代码和测试仍依赖该符号：
+    - `vllm/model_executor/layers/mamba/gdn_linear_attn.py`
+    - `tests/kernels/test_fused_gdn_post_conv.py`
+- [x] 确认当前分支尚未真正完成“upstream prep”，本质上仍接近原始 RWKV7 接入提交
+
+## 首轮结论
+### 大概率保留（最小接线）
+- `vllm/model_executor/models/registry.py`
+- `vllm/model_executor/models/config.py`
+- `vllm/transformers_utils/config.py`
+- `vllm/transformers_utils/configs/__init__.py`
+- `vllm/transformers_utils/configs/rwkv7.py`
+- `tests/models/registry.py`
+
+### 重点重写 / 瘦身
+- `vllm/model_executor/models/rwkv7.py`
+  - 当前混合了模型本体、runtime policy、cache 策略、packed prefill、fused recurrent、custom op、fallback 等逻辑
+- `vllm/v1/attention/backends/linear_attn.py`
+  - 当前为 RWKV7 增加的 metadata 很可能主要服务于 cache-all / checkpoint 路径，容易污染通用 backend
+- `vllm/model_executor/models/config.py`
+  - RWKV7 专属默认策略（如 mamba cache mode / cudagraph mode override）需要强 justification，或后置处理
+
+### 建议延后
+- `vllm/model_executor/layers/fla/ops/rwkv7.py`
+- fused recurrent
+- packed prefill
+- cache-all checkpoint emission
+- piecewise cudagraph workaround
+- RWKV7 专用 env var 开关
+- 大量 parity / perf-ish tests
+
+## 官方规则中与当前工作最相关的点
+1. 不能提交 pure-agent PR；人类提交者必须 review、验证、跑测试。
+2. 不要做低价值 busywork PR。
+3. 如果修改 user-facing behavior，PR 需要补 `docs/`。
+4. 大改动若超过官方阈值（文档写明 major architectural changes >500 LOC，且不含 kernel/data/config/test），应考虑先有 issue / RFC。
+
+## 下一步待办
+- [x] 先还原无关 collateral change：修复 `vllm/model_executor/layers/fla/ops/__init__.py` 对现有导出的破坏（已恢复 `fused_post_conv_prep` 的 import/__all__ 导出）
+- [x] 重新确认 `rwkv7.py` 中哪些属于“模型本体必要逻辑”，哪些属于“优化 / workaround / runtime policy”（已补充“rwkv7.py 细化盘点（2026-07-03）”）
+- [ ] 评估 `linear_attn.py` 中 RWKV7 特化字段是否能从首个 upstream PR 中剥离
+- [ ] 评估 `vllm/model_executor/models/config.py` 中 RWKV7 默认策略是否应拆到后续 PR
+- [ ] 收缩首个 upstream-ready PR 的范围，只保留 core model support 所必需的部分
+- [ ] 将测试拆层：保留最小 correctness tests，延后 parity / perf-ish / checkpoint-heavy tests
+- [ ] 判断是否需要先起 issue / RFC 再继续提交上游化改动
+- [ ] 最终准备 duplicate-work checks（真正准备提 PR 前执行）：
+  - `gh issue view <issue_number> --repo vllm-project/vllm --comments`
+  - `gh pr list --repo vllm-project/vllm --state open --search "<issue_number> in:body"`
+  - `gh pr list --repo vllm-project/vllm --state open --search "<short area keywords>"`
+
+## 备注
+- 当前工作区存在未跟踪文件：`rwkv7_upstream_handoff.md`
+- 该文件属于本地交接文档，不应直接进入未来 upstream PR
+- 当前 HEAD 提交已经带有 AI attribution；未来如面向 upstream，需以官方 contributing 文档为准处理 PR 披露与提交说明
+
+## 本次进展（2026-07-03）
+- 已恢复 `vllm/model_executor/layers/fla/ops/__init__.py` 中被误删的 `fused_post_conv_prep` 导出。
+- 已用 `git diff --check -- vllm/model_executor/layers/fla/ops/__init__.py` 做基础检查。
+
+## rwkv7.py 细化盘点（2026-07-03）
+
+### 文件结构概览
+- 顶层辅助函数：activation / token shift / cache-all 边界与 checkpoint helper / custom-op 包装
+- 基础模块：
+  - `RWKV7LoRA`
+  - `RWKV7GroupNorm`
+  - `RWKV7FeedForward`
+- 核心注意力模块：`RWKV7Attention`
+- 核心 block：`RWKV7Block`
+- 顶层模型：`RWKV7Model`
+- 顶层 CausalLM：`RWKV7ForCausalLM`
+
+### 更细分类
+#### A. 作为首个 upstream-ready core PR，大概率应保留
+1. RWKV7 基础结构与参数接线
+   - `RWKV7LoRA`
+   - `RWKV7GroupNorm`
+   - `RWKV7FeedForward`
+   - `RWKV7Attention` 中非 cache-all / 非 checkpoint 的基本投影与输出逻辑
+   - `RWKV7Block` 的基本 residual + norm + attn + ffn 结构
+   - `RWKV7Model` / `RWKV7ForCausalLM` 的 embedding / lm_head / PP 接线
+2. 最小状态缓存接口
+   - `get_state_dtype`
+   - `get_state_shape`
+   - `get_mamba_state_dtype_from_config`
+   - `get_mamba_state_shape_from_config`
+   - `get_mamba_state_copy_func`
+   - `SupportsMambaPrefixCaching` / `HasInnerState` / `IsAttentionFree` 这组接口声明
+3. 明确的首版限制
+   - `config.attn is not None` 时直接 `NotImplementedError`
+   - `value_dim` 按层变化时直接 `NotImplementedError`
+   这些限制有利于把首个 PR 范围收窄到“最小纯 RWKV7 core support”。
+
+#### B. 可能保留，但需要 justification 或后续简化
+1. 统一使用 `RWKV7_RUNTIME_DTYPE = torch.float32`
+   - 这更像数值稳定性要求，而不是单纯优化。
+   - 如果 correctness 依赖它，可以保留；但需要在 PR 说明里明确原因。
+2. `v_first` 在层间和 PP 间的传递
+   - 这看起来是 RWKV7 架构本身需要，不像可选优化。
+   - 因此大概率应保留。
+3. `static_forward_context` 注册与 block-level custom op
+   - 仓库中已有类似模式（如 `olmo_hybrid.py`, `bailing_moe_linear.py`）。
+   - 但 RWKV7 现在同时有 `rwkv7_attention` 和 `rwkv7_block_forward` 两层 custom op，复杂度偏高。
+   - 首个 upstream PR 更适合论证“是否真的需要保留两层 custom op”，否则 reviewer 容易认为过重。
+
+#### C. 很适合从首个 upstream PR 中后置/剥离
+1. cache-all 相关辅助函数
+   - `_rwkv7_cache_all_boundary_positions`
+   - `_rwkv7_collect_recurrent_checkpoint_states`
+   - `_rwkv7_checkpoint_offsets_from_counts`
+2. `RWKV7Attention` 中 cache-all / checkpoint 发射路径
+   - `forward_prefill_cache_all`
+   - `forward_prefill_batch_cache_all`
+3. `RWKV7Block` 中 cache-all 专门分支
+   - `_run_prefill_sequence_cache_all`
+   - `_run_prefill_batch_cache_all`
+   - `_forward_runtime` 中 `cache_all = ...` 以及其后整段 cache-all 特化逻辑
+4. 与上述逻辑配套的 metadata 扩张
+   - 当前 `linear_attn.py` 为 RWKV7 增加的多组 block index / num_computed_tokens 字段，主要就是为了支撑 cache-all 路径。
+   - 这类改动很像第二阶段优化，不像首个 core support 必需项。
+5. RWKV7 专用 env var 开关
+   - `RWKV7_DISABLE_FUSED_PREFILL`
+   - `RWKV7_DISABLE_FUSED_RECURRENT`
+   - 这类模型私有环境变量通常不适合作为首个 upstream 核心 PR 的一部分。
+6. config 中的策略覆盖
+   - prefix caching 默认强制 `align`
+   - post optimization 默认把 cudagraph 从 `FULL_AND_PIECEWISE` 改成 `PIECEWISE`
+   - 这些都更像 workaround / rollout policy，而不是 core model definition。
+
+#### D. 当前最值得怀疑、应该优先再审的部分
+1. `rwkv7_attention` 这层 custom op 是否必要
+   - 当前 `RWKV7Block` 本身已经有 `rwkv7_block_forward` 包装。
+   - 如果 block 级 custom op 足够，则 attention 级 custom op 可能是重复复杂度。
+2. packed prefill 是否必须在首个 PR 就上
+   - 当前 `_rwkv7_packed_prefill_enabled()` 同时影响 prefill 分支与 fused recurrent 选择。
+   - reviewer 很可能更愿意先接收“逐序列 correctness 路径”，再单独上 batched/packed prefill 优化。
+3. `vllm/config/compilation.py` 中追加 `vllm::rwkv7_block_forward`
+   - 如果首个 PR 不保留 block-level custom op / piecewise graph 依赖，则这部分可一并后置。
+
+### 测试文件的对应拆分建议
+首个 upstream-ready core PR 更适合优先保留：
+- 基础 block forward correctness
+- 基础缓存状态更新
+- state shape / copy func / prefix caching interface 声明
+- 最小 prefill/decode correctness
+
+更适合后置到优化 PR：
+- fused recurrent reference parity
+- checkpoint state parity
+- cache-all prefill / cache-all decode
+- cudagraph mode override 相关测试
+- mamba_cache_mode 默认策略相关测试
+- 大体量 reference parity / perf-ish tests
+
+### 当前倾向性的首个 PR 范围
+如果目标是“更像 vLLM upstream 会先接受的版本”，当前更建议首个 PR 逼近以下范围：
+- HF config + registry + model registry
+- 最小 RWKV7 core block/model/CausalLM 接线
+- 基础 decode / prefill correctness
+- 最小 inner-state / prefix-caching interface 接线
+- 不先携带 cache-all / checkpoint emission / model-specific env toggles / 强策略 override
+
+## linear_attn.py 细化盘点（2026-07-03）
+目标文件：`/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-upstream/vllm/v1/attention/backends/linear_attn.py`
+
+对比 `HEAD^` 后可确认：RWKV7 在这个文件里的改动非常集中，主要只有两类：
+1. 新增 `cdiv` import。
+2. `LinearAttentionMetadata` / `LinearAttentionMetadataBuilder.build()` 为 `mamba_cache_mode == "all"` 增加额外 metadata：
+   - `num_computed_tokens`
+   - `block_idx_last_computed_token`
+   - `block_idx_first_scheduled_token`
+   - `block_idx_last_scheduled_token`
+
+### 结论
+- 这些新增字段不是 linear attention backend 的通用需求，而是 **RWKV7 cache-all / checkpoint emission 路径专用**。
+- 当前仓库里，新增字段的直接消费方基本只有：
+  - `vllm/model_executor/models/rwkv7.py`
+- 现有其他 linear-attn / mamba 消费者（如 `vllm/model_executor/layers/mamba/linear_attn.py`、`vllm/model_executor/models/bailing_moe_linear.py`）只依赖原有基础字段，不需要这些 RWKV7 专属 block-index metadata。
+- 因此，如果首个 upstream PR 明确 **不包含 cache-all / checkpoint emission**，那么：
+  - `linear_attn.py` 可以直接收回到更接近上游原状的版本；
+  - 也就是去掉 `cache_mode == "all"` 的这套 RWKV7 metadata 膨胀；
+  - 通用 backend 不应为单模型的临时优化路径背额外复杂度。
+
+### 对首个 upstream PR 的建议
+- **建议移除** `linear_attn.py` 中这组 RWKV7 专属 metadata 扩展。
+- 同步要求：`rwkv7.py` 中依赖这些字段的 cache-all 分支也应一起移除 / 延后。
+
+## config.py 细化盘点（2026-07-03）
+目标文件：`/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-upstream/vllm/model_executor/models/config.py`
+
+### 现状拆解
+当前新增的 `RWKV7ForCausalLMConfig` 主要做了两件事：
+1. `verify_and_update_config()`
+   - 当 `enable_prefix_caching=True` 且用户未显式设置 `mamba_cache_mode`（即仍为 `none`）时，先强制改成 `align`；
+   - 然后再调用通用 `MambaModelConfig.verify_and_update_config()`。
+2. `apply_post_optimization_level_defaults()`
+   - 试图把 `FULL_AND_PIECEWISE` 强制降成 `PIECEWISE`。
+
+### 进一步判断
+- 第 1 点本质上是 **临时 runtime policy / workaround**，不是 RWKV7 架构接线本身的必要组成。
+- 它存在的根因是：当前 `RWKV7ForCausalLM` 声明了 `SupportsMambaPrefixCaching`，于是通用 `MambaModelConfig` 会把 prefix caching 默认模式推到 `all`；
+  但本分支里真正完整依赖 `all` 模式的，是后面那套 cache-all / checkpoint emission 路径，而这套恰恰是首个 upstream PR 最应该后置的部分。
+- 第 2 点目前看起来还是 **未接线的死代码**：全仓库检索 `apply_post_optimization_level_defaults`，只有定义，没有调用方。
+
+### 一个更干净的首版收敛方案（更推荐）
+如果首个 upstream PR 目标是“先上最小 core support，再补 cache-all / 专项优化”，则更合理的收敛方式是：
+1. **首版先不声明 `SupportsMambaPrefixCaching`**；
+2. `MODELS_CONFIG_MAP["RWKV7ForCausalLM"]` 直接回落到通用 `MambaModelConfig`；
+3. 这样当开启 prefix caching 时，通用逻辑会自然选择更保守的 `align` 路径，而不是 `all`；
+4. 等后续单独补齐 cache-all / checkpoint emission 后，再考虑把 RWKV7 重新声明为 `SupportsMambaPrefixCaching`。
+
+### 这样做的好处
+- 可以直接删除 `RWKV7ForCausalLMConfig` 这整个 RWKV7 专属 policy 类。
+- 可以顺带删除：
+  - `config.py` 中 `CUDAGraphMode` 的 RWKV7 专属 import / override；
+  - 测试里针对 `RWKV7ForCausalLMConfig` 的临时策略测试；
+  - 那个当前没有调用方的 `apply_post_optimization_level_defaults()`。
+- 这样更符合 upstream 习惯：
+  - **模型结构接线** 和 **runtime 策略 workaround** 分开；
+  - 不在首个模型接入 PR 里塞入“为了绕过当前实现缺口而加的默认策略覆盖”。
+
+### 若不想一次改动这么大
+保守备选方案：
+- 暂时保留 `RWKV7ForCausalLMConfig.verify_and_update_config()` 中的 `align` 默认策略；
+- 但至少先删除未调用的 `apply_post_optimization_level_defaults()`；
+- 同时把对应测试标为后续可删除项。
+
+## 首个 upstream-ready PR 建议范围（第二版，2026-07-03）
+### 建议保留
+- HF config / auto-config 注册
+- model registry wiring
+- `rwkv7.py` 中最小 block / model / causal LM 结构
+- 最小 inner-state shape / dtype / copy-func 接口
+- 最小 prefill + decode correctness
+- 明确限制：
+  - 暂不支持 hybrid `config.attn`
+  - 暂不支持 per-layer varying `value_dim`
+
+### 建议首版移除 / 后置
+- `linear_attn.py` 里的 RWKV7 cache-all metadata 扩展
+- `rwkv7.py` 中所有 cache-all / checkpoint emission 路径
+- packed prefill
+- fused recurrent 特化路径
+- RWKV7 专属 env var 开关
+- `RWKV7ForCausalLMConfig` 这类临时 policy override（优先考虑直接去掉）
+- 针对这些策略 / cache-all 路径写的测试
+
+## 下一步建议（更具体）
+1. 在代码层面尝试一个“更小首版”收缩：
+   - 去掉 `RWKV7ForCausalLM` 的 `SupportsMambaPrefixCaching` 声明；
+   - 去掉 `config.py` 里的 `RWKV7ForCausalLMConfig`；
+   - 更新对应测试预期。
+2. 然后再收掉 `linear_attn.py` 的 RWKV7 专属 metadata 扩展，并同步删除 `rwkv7.py` 的 cache-all 分支。
+3. 最后把 `tests/model_executor/test_rwkv7.py` 拆成“core correctness 保留”和“优化/策略类后置”两层。
+
+## 本轮已落地的代码收缩（2026-07-03）
+- [x] `vllm/model_executor/models/rwkv7.py`
+  - 去掉 `RWKV7ForCausalLM` 对 `SupportsMambaPrefixCaching` 的首版声明。
+- [x] `vllm/model_executor/models/config.py`
+  - 删除 `RWKV7ForCausalLMConfig` 这层 RWKV7 专属 runtime policy 包装。
+  - `MODELS_CONFIG_MAP["RWKV7ForCausalLM"]` 回落到通用 `MambaModelConfig`。
+  - 同步删除未发现调用方的 `apply_post_optimization_level_defaults()` 相关代码。
+- [x] `tests/model_executor/test_rwkv7.py`
+  - 删除针对 `RWKV7ForCausalLMConfig` / `supports_mamba_prefix_caching` / cudagraph override 的策略型测试。
+
+## 本轮验证情况（2026-07-03）
+- [x] 已执行：
+  - `git diff --check -- vllm/model_executor/models/rwkv7.py vllm/model_executor/models/config.py tests/model_executor/test_rwkv7.py`
+- [x] 已补齐 `.venv/bin/python`：
+  - 使用 `vllm` 解释器创建：
+    `UV_CACHE_DIR=/tmp/uv-cache uv venv .venv --python /mnt/data/anaconda3/envs/vllm/bin/python --system-site-packages`
+- [x] 已验证 `.venv` 可导入关键依赖：
+  - `torch`
+  - `pytest`
+  - `transformers`
+- [x] 已跑 1 个轻量 CPU 单测：
+  - `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest tests/model_executor/test_rwkv7.py -k mamba_state_copy_function_types -v`
+  - 结果：`1 passed`
+- [ ] 已尝试更完整的 CPU 回归，但当前仍有环境阻塞：
+  - 关闭自动插件加载前：会遇到 `torch` docstring 重复导入异常
+  - 沙箱内跑分布式相关测试时：本地端口绑定被限制
+  - 非沙箱 + 选定子集继续跑时：会遇到 `vllm.vllm_flash_attn` CUDA 扩展缺失导致 collection/import 失败
+- [ ] 覆盖率 85% 目标：
+  - 当前尚未达成
+  - 直接原因：`coverage/pytest-cov` 路径与当前 `torch` / 扩展导入环境仍存在冲突，需后续继续收敛测试执行方式
+  - 若后续要继续跑 pytest，需要先按仓库规则补齐 `.venv` 环境。

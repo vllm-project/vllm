@@ -4,7 +4,6 @@
 import os
 import sys
 from pathlib import Path
-from types import SimpleNamespace
 
 import torch
 from transformers import AutoTokenizer
@@ -17,7 +16,6 @@ from vllm.config import (
     VllmConfig,
     set_current_vllm_config,
 )
-from vllm.config.compilation import CUDAGraphMode
 from vllm.distributed import cleanup_dist_env_and_memory
 from vllm.distributed.parallel_state import (
     ensure_model_parallel_initialized,
@@ -34,7 +32,7 @@ from vllm.model_executor.layers.fla.ops import (
     rwkv7_recurrent_reference,
     rwkv7_recurrent_reference_with_checkpoints,
 )
-from vllm.model_executor.models.config import RWKV7ForCausalLMConfig
+from vllm.model_executor.models.config import MambaModelConfig, MODELS_CONFIG_MAP
 from vllm.model_executor.models.rwkv7 import RWKV7Block, RWKV7ForCausalLM
 from vllm.transformers_utils.configs.rwkv7 import RWKV7Config
 from vllm.utils.network_utils import get_open_port
@@ -814,114 +812,12 @@ def test_rwkv7_mamba_state_copy_function_types():
     )
 
 
-def test_rwkv7_declares_mamba_prefix_caching_support():
-    assert getattr(RWKV7ForCausalLM, "supports_mamba_prefix_caching", False) is True
+def test_rwkv7_uses_base_mamba_model_config():
+    assert MODELS_CONFIG_MAP["RWKV7ForCausalLM"] is MambaModelConfig
 
 
-def test_rwkv7_config_allows_non_eager_when_cudagraphs_are_enabled():
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            enforce_eager=False,
-            supports_mamba_prefix_caching=False,
-            architecture="RWKV7ForCausalLM",
-            max_model_len=2048,
-        ),
-        cache_config=SimpleNamespace(
-            enable_prefix_caching=False,
-            mamba_cache_mode="none",
-            mamba_block_size=None,
-            block_size=16,
-        ),
-        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE),
-        scheduler_config=SimpleNamespace(enable_chunked_prefill=True),
-    )
-
-    RWKV7ForCausalLMConfig.verify_and_update_config(vllm_config)
-
-    assert vllm_config.model_config.enforce_eager is False
-
-
-def test_rwkv7_config_allows_non_eager_when_cudagraphs_are_disabled():
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            enforce_eager=False,
-            supports_mamba_prefix_caching=False,
-            architecture="RWKV7ForCausalLM",
-            max_model_len=2048,
-        ),
-        cache_config=SimpleNamespace(
-            enable_prefix_caching=False,
-            mamba_cache_mode="none",
-            mamba_block_size=None,
-            block_size=16,
-        ),
-        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.NONE),
-        scheduler_config=SimpleNamespace(enable_chunked_prefill=True),
-    )
-
-    RWKV7ForCausalLMConfig.verify_and_update_config(vllm_config)
-
-    assert vllm_config.model_config.enforce_eager is False
-
-
-def test_rwkv7_config_defaults_mamba_cache_align_when_prefix_caching_is_enabled():
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            enforce_eager=False,
-            supports_mamba_prefix_caching=True,
-            architecture="RWKV7ForCausalLM",
-            max_model_len=2048,
-        ),
-        cache_config=SimpleNamespace(
-            enable_prefix_caching=True,
-            mamba_cache_mode="none",
-            mamba_block_size=None,
-            block_size=16,
-        ),
-        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE),
-        scheduler_config=SimpleNamespace(enable_chunked_prefill=True),
-    )
-
-    RWKV7ForCausalLMConfig.verify_and_update_config(vllm_config)
-
-    assert vllm_config.cache_config.mamba_cache_mode == "align"
-    assert vllm_config.cache_config.mamba_block_size == 16
-
-
-def test_rwkv7_config_preserves_explicit_mamba_cache_all():
-    vllm_config = SimpleNamespace(
-        model_config=SimpleNamespace(
-            enforce_eager=False,
-            supports_mamba_prefix_caching=True,
-            architecture="RWKV7ForCausalLM",
-            max_model_len=2048,
-        ),
-        cache_config=SimpleNamespace(
-            enable_prefix_caching=True,
-            mamba_cache_mode="all",
-            mamba_block_size=None,
-            block_size=16,
-        ),
-        compilation_config=SimpleNamespace(cudagraph_mode=CUDAGraphMode.PIECEWISE),
-        scheduler_config=SimpleNamespace(enable_chunked_prefill=True),
-    )
-
-    RWKV7ForCausalLMConfig.verify_and_update_config(vllm_config)
-
-    assert vllm_config.cache_config.mamba_cache_mode == "all"
-    assert vllm_config.cache_config.mamba_block_size == 16
-
-
-def test_rwkv7_post_optimization_defaults_choose_piecewise():
-    vllm_config = SimpleNamespace(
-        compilation_config=SimpleNamespace(
-            cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE
-        )
-    )
-
-    RWKV7ForCausalLMConfig.apply_post_optimization_level_defaults(vllm_config)
-
-    assert vllm_config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+def test_rwkv7_does_not_declare_mamba_prefix_caching_support():
+    assert getattr(RWKV7ForCausalLM, "supports_mamba_prefix_caching", False) is False
 
 
 def test_rwkv7_block_uses_fp32_runtime_state_dtype():
