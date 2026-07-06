@@ -14,6 +14,7 @@ from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import MergedColumnParallelLinear
 from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     compress_norm_rope_store_triton,
+    compress_norm_rope_store_two_stage_triton,
 )
 from vllm.models.deepseek_v4.common.ops.fused_indexer_q import MXFP4_BLOCK_SIZE
 from vllm.models.deepseek_v4.common.ops.save_partial_states import (
@@ -222,9 +223,10 @@ class DeepseekCompressor(nn.Module):
         self.overlap = compress_ratio == 4
         self.coff = 1 + self.overlap
 
-        # ROCm head=512 cr>=128 no-overlap deep gather uses the two-pass
-        # split-KV compressor, which needs an fp32 scratch [max_batched, 512] for
-        # the intermediate compressed_kv. Allocated lazily pre-cudagraph
+        # The head=512 cr>=128 no-overlap deep gather uses the two-stage
+        # compressor, which needs an fp32 scratch [max_batched, 512] for
+        # the intermediate compressed_kv.
+        # Currently only tested on ROCm
         self._use_split_compressor = (
             current_platform.is_rocm() and head_dim == 512 and not self.overlap
         )
@@ -232,6 +234,13 @@ class DeepseekCompressor(nn.Module):
             vllm_config.scheduler_config.max_num_batched_tokens
         )
         self._compress_scratch: torch.Tensor | None = None
+        if self._use_split_compressor:
+            self._compress_scratch = torch.empty(
+                self.max_num_batched_tokens,
+                self.head_dim,
+                dtype=torch.float32,
+                device=self.device,
+            )
 
         state_dtype = torch.float32
         self.ape = nn.Parameter(
@@ -296,21 +305,6 @@ class DeepseekCompressor(nn.Module):
         positions: torch.Tensor,
         rotary_emb,
     ) -> None:
-        # Allocate the split-compressor scratch on the first non-capturing
-        # forward (the profiling / warmup pass runs eagerly before cudagraph
-        # capture, where allocation is illegal). Sized to the max batch so it
-        # covers every captured shape.
-        if (
-            self._use_split_compressor
-            and self._compress_scratch is None
-            and not torch.cuda.is_current_stream_capturing()
-        ):
-            self._compress_scratch = torch.empty(
-                self.max_num_batched_tokens,
-                self.head_dim,
-                dtype=torch.float32,
-                device=self.device,
-            )
         # Each of shape [num_tokens, coff * self.head_dim]
         # input bf16, output are fp32
         kv, score = kv_score.split(
@@ -399,13 +393,18 @@ class DeepseekCompressor(nn.Module):
                 store_full_fp8=store_full_fp8,
                 fp8_scale=fp8_scale,
             )
-        else:
-            # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
-            compress_norm_rope_store_fn = compress_norm_rope_store_triton
+        elif self._use_split_compressor:
+            # head=512 cr>=128 (no overlap): two-pass split compressor on the
+            # prefill suffix, single-pass on the decode prefix.
+            compress_norm_rope_store_fn = compress_norm_rope_store_two_stage_triton
             extra_kwargs = {
                 "num_decode_tokens": state_metadata.num_decode_tokens,
                 "compress_scratch": self._compress_scratch,
             }
+        else:
+            # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
+            compress_norm_rope_store_fn = compress_norm_rope_store_triton
+            extra_kwargs = {}
 
         compress_norm_rope_store_fn(
             state_cache=state_cache,
