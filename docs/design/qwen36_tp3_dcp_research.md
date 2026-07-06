@@ -85,7 +85,9 @@ headroom.
 
 ### Agent-stable no-MTP profile
 
-For the agent-oriented profile, a tighter no-MTP configuration reached:
+For the agent-oriented profile on the Qwen3.6-style MoE/NVFP4 model family
+(`protoLabsAI/Agents-A1-NVFP4` / 35B-A3B class), a tighter no-MTP configuration
+reached:
 
 - `--max-model-len 128K`
 - `--max-num-seqs 8`
@@ -113,6 +115,45 @@ Rejected tighter profiles:
 
 The memory target cannot be chosen only from the final reserved KV blocks.
 Transient prefill workspaces need explicit headroom.
+
+### MoE / Agents-A1 status
+
+The MoE branch is an important success case, not just a side experiment. It
+proved that TP3 plus expert parallelism can make the three-GPU machine useful
+for a 35B-A3B-class agent model.
+
+Working profile highlights:
+
+- `TP=3` with expert parallelism enabled;
+- Model Runner V2;
+- `max_num_seqs=8`;
+- long-context agent serving in the 128K class;
+- vision profile also reached stable startup and request handling;
+- direct agent test traffic completed without engine death in the stable memory
+  profile.
+
+The practical compromise is the MoE backend. On this SM120/NVFP4 stack, Marlin
+is currently the reliable backend. Native FlashInfer/CuTeDSL MoE paths are still
+research debt: they are the route to higher performance, but local and upstream
+signals show correctness/performance instability on desktop/prosumer Blackwell
+for FP4 MoE grouped GEMM.
+
+DFlash on MoE is still worth keeping in scope. Experimental runs showed
+approximately the `100 tok/s` class, which is materially higher than the dense
+27B TP3 MTP path. This needs a proper controlled benchmark because the first
+results mix several moving parts:
+
+- MoE backend choice: Marlin vs FlashInfer/CuTeDSL;
+- speculative method: built-in MTP vs DFlash/external drafter;
+- context length and prefill workspace pressure;
+- concurrency level;
+- acceptance rate by prompt type.
+
+The next MoE decision should not be based on a single throughput number. The
+correct promotion rule is: keep Marlin as the stable baseline, then test DFlash
+or other draft paths only if they preserve agent stability at `max_num_seqs=8`
+and improve either aggregate throughput or per-request latency without reducing
+the usable long-context KV budget too much.
 
 ### MTP status
 
@@ -391,6 +432,9 @@ Dense 27B:
 - agent stability was achieved at `128K`, `max_num_seqs=8`, `gpu_util=0.87` for
   the MoE vision profile and `0.92` for the no-MTP text-oriented profile, but
   higher utilization failed on transient workspaces.
+- DFlash-style speculation is especially interesting for MoE because early
+  experiments reached the `~100 tok/s` class, but this must be remeasured against
+  a stable Marlin baseline with acceptance metrics and agent success criteria.
 
 ## Upstream Research References
 
