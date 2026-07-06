@@ -1408,8 +1408,6 @@ class AiterFlashAttentionImpl(AttentionImpl):
             assert k_scale is not None and v_scale is not None, (
                 "k_scale and v_scale are required for shuffled update"
             )
-            # TODO: Add correct KV cache handling for hybrid model. KV cache
-            # may not be contiguous if mamba state exists.
             reshape_and_cache_shuffle_triton(
                 key,
                 value,

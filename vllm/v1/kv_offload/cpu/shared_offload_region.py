@@ -7,6 +7,7 @@ import time
 import torch
 
 from vllm.logger import init_logger
+from vllm.platforms import current_platform
 
 logger = init_logger(__name__)
 
@@ -171,12 +172,15 @@ class SharedOffloadRegion:
 
     def cleanup(self) -> None:
         if self.is_pinned and self._base is not None:
-            base_ptr = self._base.data_ptr()
-            result = torch.cuda.cudart().cudaHostUnregister(base_ptr)
-            if result.value != 0:
-                logger.warning(
-                    "cudaHostUnregister failed for rank=%d (code=%d)", self.rank, result
-                )
+            if current_platform.is_cuda_alike():
+                base_ptr = self._base.data_ptr()
+                result = torch.cuda.cudart().cudaHostUnregister(base_ptr)
+                if result.value != 0:
+                    logger.warning(
+                        "cudaHostUnregister failed for rank=%d (code=%d)",
+                        self.rank,
+                        result,
+                    )
             self.is_pinned = False
         # Release views before _base: each view holds a _base reference and a
         # direct StorageImpl reference.  Freeing views first lets both refcounts

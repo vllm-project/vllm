@@ -156,7 +156,6 @@ def eagle_prepare_inputs_padded_kernel(
     # cumulative sum (first entry is the first value, not zero).
     cu_draft_curr = tl.load(cu_num_draft_tokens_ptr + req_idx)
 
-    num_draft_tokens = 0
     if req_idx == 0:
         num_draft_tokens = cu_draft_curr
     else:

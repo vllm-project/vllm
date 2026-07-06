@@ -9,7 +9,7 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -31,6 +31,7 @@ from vllm.v1.attention.backends.mla.rocm_aiter_mla import (
     AiterMLAHelper,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.worker.workspace import current_workspace_manager
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
@@ -535,7 +536,17 @@ class ROCMAiterMLASparseMetadataBuilder(
             self._num_attention_heads,
             clamped_seq_lens.tobytes(),
         )
-        if metadata_key != self._prev_metadata_key:
+        # The persistent MLA kernel is numerically wrong for multi-token prefill
+        # batches; errors compound across chunked prefill and break long-context
+        # decode (vllm#47042). Use it only for decode and single-chunk prefills,
+        # not chunked-prefill continuations (>1 query token, seq_len > query_len).
+        step_query_lens = seg_lengths
+        total_seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs].numpy()
+        is_chunked_continuation = (step_query_lens > 1) & (
+            total_seq_lens > step_query_lens
+        )
+        use_persistent = not is_chunked_continuation.any()
+        if use_persistent and metadata_key != self._prev_metadata_key:
             from aiter import get_mla_metadata_v1
 
             get_mla_metadata_v1(
@@ -575,7 +586,7 @@ class ROCMAiterMLASparseMetadataBuilder(
             paged_kv_last_page_len=paged_kv_last_page_len,
             paged_kv_indices=paged_kv_indices,
             paged_kv_indptr=paged_kv_indptr,
-            work_meta_data=self._mla_work_meta_data,
+            work_meta_data=self._mla_work_meta_data if use_persistent else None,
             work_indptr=self._mla_work_indptr,
             work_info_set=self._mla_work_info_set,
             reduce_indptr=self._mla_reduce_indptr,
@@ -628,7 +639,7 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         attn_type: str,
         kv_sharing_target_layer_name: str | None,
         # MLA Specific Arguments
-        topk_indice_buffer: torch.Tensor | None = None,
+        topk_indices_buffer: torch.Tensor | None = None,
         indexer: "Indexer | None" = None,
         **mla_args,
     ) -> None:
@@ -641,8 +652,19 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         self.kv_cache_dtype = kv_cache_dtype
         self.kv_lora_rank: int = mla_args["kv_lora_rank"]
         self.softmax_scale = scale
-        assert indexer is not None
-        self.topk_indices_buffer: torch.Tensor | None = indexer.topk_indices_buffer
+        # The indexer carries the shared buffer for normal layers and tests;
+        # the explicitly-passed buffer covers backbone skip layers, whose
+        # indexer is not constructed (see deepseek_v2.py).
+        self.topk_indices_buffer: torch.Tensor | None = (
+            indexer.topk_indices_buffer if indexer is not None else topk_indices_buffer
+        )
+
+        vllm_config = get_current_vllm_config()
+        max_tokens = vllm_config.scheduler_config.max_num_batched_tokens
+        q_concat_shape = (max_tokens, num_heads, head_size)
+        (self.q_concat_buffer,) = current_workspace_manager().get_simultaneous(
+            (q_concat_shape, vllm_config.model_config.dtype),
+        )
 
     def _forward_mla(
         self,
@@ -701,9 +723,16 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         # NOTE(lucas): for the sparse FlashMLA kernels the kernels want to use
         # MQA 576/512 approach for both prefill and decode
 
-        # Concatenate q if it's a tuple (ql_nope, q_pe)
+        fp8_attention = self.kv_cache_dtype.startswith("fp8")
         if isinstance(q, tuple):
-            q = torch.cat(q, dim=-1)
+            ql_nope, q_pe = q
+            if fp8_attention:
+                q = layer._decode_concat_quant_fp8_op(  # type: ignore[attr-defined]
+                    ql_nope, q_pe, layer._q_scale
+                )
+            else:
+                q = self.q_concat_buffer[: ql_nope.shape[0]]
+                ops.concat_mla_q(ql_nope, q_pe, q)
 
         num_actual_toks = attn_metadata.num_actual_tokens
 
@@ -722,12 +751,12 @@ class ROCMAiterMLASparseImpl(SparseMLAAttentionImpl[ROCMAiterMLASparseMetadata])
         )
 
         # write the latent and rope to kv cache
-        fp8_attention = self.kv_cache_dtype.startswith("fp8")
         if fp8_attention:
-            original_q_shape = q.shape
             kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.view(current_platform.fp8_dtype())
-            q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
-            q = q.view(original_q_shape)
+            if q.dtype != current_platform.fp8_dtype():
+                original_q_shape = q.shape
+                q, _ = ops.scaled_fp8_quant(q.view(q.shape[0], -1), layer._q_scale)
+                q = q.view(original_q_shape)
         mla_padded_q = AiterMLAHelper.get_mla_padded_q(self.num_heads, q)
         attn_out = self._forward_mla(
             layer, mla_padded_q, kv_c_and_k_pe_cache, attn_metadata
