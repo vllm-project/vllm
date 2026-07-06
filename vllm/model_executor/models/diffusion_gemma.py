@@ -663,12 +663,6 @@ class DiffusionGemmaRequestStates:
         self.vocab_size = vocab_size
         self.max_denoising_steps = max_denoising_steps
         self.stability_threshold = stability_threshold
-        # The checkpoint's ``stability_threshold`` is the HF convention: ``k``
-        # means stop once the argmax canvas repeats ``k`` times, i.e. ``k + 1``
-        # identical canvases. The stability check below uses a sliding window of
-        # ``W`` canvases, so the window must be ``stability_threshold + 1`` to
-        # avoid ``stability_threshold == 1`` committing early.
-        self.stability_window = stability_threshold + 1
         self.device = device
 
         self.is_encoder_phase = torch.zeros(
@@ -687,7 +681,7 @@ class DiffusionGemmaRequestStates:
         # Accepted canvas history for stability check
         self.accepted_canvas_history = torch.zeros(
             max_num_reqs,
-            self.stability_window,
+            stability_threshold,
             canvas_length,
             dtype=torch.int64,
             device=device,
@@ -812,7 +806,10 @@ class DiffusionGemmaModelState(ModelState):
             max_denoising_steps=max_denoising_steps,
             device=device,
             hidden_size=text_config.hidden_size,
-            stability_threshold=self.gen_config["stability_threshold"],
+            # In Transformers, `stability_threshold=1` (the default) means the current
+            # step must match the previous step. In vLLM, the history buffer includes
+            # the current step, so we add 1 to match the same behavior.
+            stability_threshold=self.gen_config["stability_threshold"] + 1,
         )
         self._req_id_to_index: dict[str, int] = {}
 
@@ -1303,7 +1300,7 @@ class DiffusionSampler:
             confidence_threshold=self.confidence_threshold,
             vocab_size=self.vocab_size,
             CL=self.canvas_length,
-            ST=states.stability_window,
+            ST=states.stability_threshold,
             entropy_bound=self.entropy_bound,
         )
 
