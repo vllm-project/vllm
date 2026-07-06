@@ -551,6 +551,7 @@ else
   fi
 
   docker run \
+    -t -i \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
     --network=host \
