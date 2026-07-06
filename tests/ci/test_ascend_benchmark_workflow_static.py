@@ -163,6 +163,19 @@ def test_benchmark_script_does_not_default_pr_hardware_to_b3():
     assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-910B3}" not in script
 
 
+def test_ascend_benchmark_installs_no_build_isolation_build_dependencies():
+    text = workflow_text()
+    stage2_script = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/scripts/perfgate_stage2_rebase_and_benchmark.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "--no-build-isolation" in text
+    assert '"setuptools-rust>=1.9.0"' in text
+    assert "--no-build-isolation" in stage2_script
+    assert '"setuptools-rust>=1.9.0"' in stage2_script
+
+
 def test_perfgate_spec_resolver_uses_benchmark_registry():
     script = (
         Path(__file__).resolve().parents[2]

@@ -36,3 +36,11 @@ def test_pr_inference_workflows_checkout_with_https_without_ssh_known_hosts():
             "HUST_ASCEND_MANAGER_REPO_URL: git@github.com:vLLM-HUST/"
             "ascend-runtime-manager.git"
         ) not in env_block
+
+
+def test_inference_workflows_install_no_build_isolation_build_dependencies():
+    for workflow_path in WORKFLOW_PATHS:
+        text = workflow_path.read_text(encoding="utf-8")
+
+        assert "--no-build-isolation" in text
+        assert '"setuptools-rust>=1.9.0"' in text
