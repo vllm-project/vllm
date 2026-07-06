@@ -202,7 +202,7 @@ steps:
   - vllm/multimodal
   - examples/
   commands:
-    - uv pip install tensorizer # for tensorizer test
+    - pip install --no-deps tensorizer # for tensorizer test
      # for basic
     - python3 basic/offline_inference/chat.py
     - python3 basic/offline_inference/generate.py --model facebook/opt-125m
