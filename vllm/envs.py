@@ -133,6 +133,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_USE_AITER_FP4BMM: bool = True
     VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION: bool = False
     VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS: bool = False
+    VLLM_ROCM_USE_AITER_QWEN3_QKV_ROPE_CACHE: bool = False
     VLLM_ROCM_USE_AITER_TRITON_GEMM: bool = True
     VLLM_ROCM_USE_SKINNY_GEMM: bool = True
     VLLM_ROCM_FP8_PADDING: bool = True
@@ -1220,6 +1221,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # By default is disabled.
     "VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER_FUSION_SHARED_EXPERTS", "False").lower()
+        in ("true", "1")
+    ),
+    # Whether to use the AITER fused Qwen3/Qwen3Next QKV split, QK RMSNorm,
+    # RoPE, and KV-cache update path. Requires VLLM_ROCM_USE_AITER.
+    # By default is disabled.
+    "VLLM_ROCM_USE_AITER_QWEN3_QKV_ROPE_CACHE": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_QWEN3_QKV_ROPE_CACHE", "False").lower()
         in ("true", "1")
     ),
     # Whether to use aiter triton kernels for gemm ops.

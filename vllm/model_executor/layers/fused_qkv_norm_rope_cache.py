@@ -20,7 +20,10 @@ from vllm.v1.attention.backend import AttentionType
 
 @cache
 def is_aiter_fused_qkv_norm_rope_cache_available() -> bool:
-    if not current_platform.is_rocm() or not rocm_aiter_ops.is_enabled():
+    if (
+        not current_platform.is_rocm()
+        or not rocm_aiter_ops.is_qwen3_qkv_rope_cache_enabled()
+    ):
         return False
     try:
         from aiter.ops.triton.rope.fused_qkv_split_qk_norm_rope_cache import (  # noqa: F401
