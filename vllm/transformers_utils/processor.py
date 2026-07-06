@@ -18,6 +18,7 @@ from transformers.audio_utils import AudioInput
 from transformers.feature_extraction_utils import FeatureExtractionMixin
 from transformers.image_processing_utils import BaseImageProcessor
 from transformers.image_utils import ImageInput
+from transformers.models.auto.video_processing_auto import VIDEO_PROCESSOR_MAPPING_NAMES
 from transformers.processing_utils import ProcessorMixin
 from transformers.video_processing_utils import BaseVideoProcessor
 from transformers.video_utils import VideoInput
@@ -25,7 +26,6 @@ from typing_extensions import TypeVar
 
 from vllm.logger import init_logger
 from vllm.transformers_utils import processors
-from vllm.transformers_utils.gguf_utils import is_gguf
 from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 from vllm.transformers_utils.utils import convert_model_repo_to_path
 from vllm.utils.func_utils import get_allowed_kwarg_only_overrides
@@ -81,6 +81,7 @@ _transformers_v4_compatibility_import()
 _transformers_v4_compatibility_init()
 
 _P = TypeVar("_P", bound=ProcessorMixin, default=ProcessorMixin)
+_I = TypeVar("_I", bound=BaseImageProcessor, default=BaseImageProcessor)
 _V = TypeVar("_V", bound=BaseVideoProcessor, default=BaseVideoProcessor)
 
 
@@ -170,6 +171,15 @@ def get_video_processor_cls_name_from_config(
         config = get_hf_file_to_dict(file, processor_name, revision=revision)
         if config and "video_processor_type" in config:
             return config["video_processor_type"]
+
+    # Some models ship no explicit ``video_processor_type`` in their
+    # preprocessor config. Fall back to transformers' ``model_type`` -> video
+    # processor mapping so these still resolve to their registered loader
+    # instead of the generic opencv fallback. The mapping is ``None`` for a
+    # given type when torchvision is unavailable; callers then use opencv.
+    model_config = get_hf_file_to_dict("config.json", processor_name, revision=revision)
+    if model_config and "model_type" in model_config:
+        return VIDEO_PROCESSOR_MAPPING_NAMES.get(model_config["model_type"])
     return None
 
 
@@ -181,17 +191,8 @@ _cached_get_video_processor_cls_name = lru_cache(
 def get_video_processor_cls_name(
     model_config: "ModelConfig",
 ) -> str | None:
-    if is_gguf(model_config.model):
-        assert not is_gguf(model_config.tokenizer), (
-            "For multimodal GGUF models, the original tokenizer "
-            "should be used to correctly load video processor metadata."
-        )
-        model = model_config.tokenizer
-        revision = model_config.tokenizer_revision
-    else:
-        model = model_config.model
-        revision = model_config.revision
-
+    model = model_config.model
+    revision = model_config.revision
     return _cached_get_video_processor_cls_name(model, revision=revision)
 
 
@@ -375,20 +376,9 @@ def cached_processor_from_config(
     processor_cls: type[_P] | tuple[type[_P], ...] = ProcessorMixin,
     **kwargs: Any,
 ) -> _P:
-    if is_gguf(model_config.model):
-        assert not is_gguf(model_config.tokenizer), (
-            "For multimodal GGUF models, the original tokenizer "
-            "should be used to correctly load processor."
-        )
-        model = model_config.tokenizer
-        revision = model_config.tokenizer_revision
-    else:
-        model = model_config.model
-        revision = model_config.revision
-
     return cached_get_processor_without_dynamic_kwargs(
-        model,
-        revision=revision,
+        model_config.model,
+        revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         processor_cls=processor_cls,  # type: ignore[arg-type]
         **_merge_mm_kwargs(model_config, processor_cls, **kwargs),
@@ -451,12 +441,14 @@ def get_image_processor(
     *args: Any,
     revision: str | None = None,
     trust_remote_code: bool = False,
+    processor_cls_overrides: type[_I] | None = None,
     **kwargs: Any,
 ):
     """Load an image processor for the given model name via HuggingFace."""
     try:
         processor_name = convert_model_repo_to_path(processor_name)
-        processor = AutoImageProcessor.from_pretrained(
+        processor_cls = processor_cls_overrides or AutoImageProcessor
+        processor = processor_cls.from_pretrained(
             processor_name,
             *args,
             revision=revision,
@@ -489,19 +481,9 @@ def cached_image_processor_from_config(
     model_config: "ModelConfig",
     **kwargs: Any,
 ):
-    if is_gguf(model_config.model):
-        assert not is_gguf(model_config.tokenizer), (
-            "For multimodal GGUF models, the original tokenizer "
-            "should be used to correctly load image processor."
-        )
-        model = model_config.tokenizer
-        revision = model_config.tokenizer_revision
-    else:
-        model = model_config.model
-        revision = model_config.revision
     return cached_get_image_processor(
-        model,
-        revision=revision,
+        model_config.model,
+        revision=model_config.revision,
         trust_remote_code=model_config.trust_remote_code,
         **_merge_mm_kwargs(model_config, AutoImageProcessor, **kwargs),
     )

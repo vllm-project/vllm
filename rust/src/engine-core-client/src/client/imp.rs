@@ -1,9 +1,11 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
@@ -13,19 +15,21 @@ use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, Uti
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::{LoraInfoExporter, record_scheduler_stats};
+use crate::metrics::{LoraInfoExporter, SchedulerStatsRecorder};
+use crate::protocol::encode_msgpack;
+use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
+use crate::protocol::request::EngineCoreRequestType;
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
-use crate::protocol::{
-    ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequestType,
-    encode_msgpack,
-};
 use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
 
 pub(crate) struct ClientInner {
     input_send: RouterSendHalf,
+    /// The runtime handle used for sending messages to the engine.
+    handle: Handle,
     model_name: String,
+    scheduler_stats_recorder: SchedulerStatsRecorder,
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
     health_error: ArcSwapOption<Error>,
@@ -36,12 +40,17 @@ impl ClientInner {
     /// handshake completes.
     pub fn new(
         input_send: RouterSendHalf,
+        handle: Handle,
         model_name: String,
         engines: &[ConnectedEngine],
     ) -> Self {
+        let scheduler_stats_recorder =
+            SchedulerStatsRecorder::new(&METRICS.scheduler, &model_name, engines);
         Self {
             input_send,
+            handle,
             model_name,
+            scheduler_stats_recorder,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
             utility_reg: Mutex::new(UtilityRegistry::default()),
             health_error: ArcSwapOption::empty(),
@@ -126,6 +135,20 @@ impl ClientInner {
         self.request_reg.lock().finish_many(request_ids)
     }
 
+    /// Finalize client-initiated aborts by pushing a terminal `Abort` output
+    /// down each request's stream and removing it from the registry. Returns
+    /// the request ids that were still active. See [`RequestRegistry::abort_many`].
+    pub fn abort_requests_locally<'a>(
+        &self,
+        request_ids: impl IntoIterator<Item = &'a String>,
+    ) -> Vec<String> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        self.request_reg.lock().abort_many(request_ids, timestamp)
+    }
+
     /// Apply one scheduler stats update for the given engine to the local
     /// routing state. Returns `false` if the engine is unknown to the
     /// client.
@@ -198,9 +221,19 @@ impl ClientInner {
         // frames instead of always producing a single msgpack frame.
         let payload = encode_msgpack(payload)?;
         let mut input_send = self.input_send.clone();
-        transport::send_message(&mut input_send, engine_id, request_type.to_frame(), payload)
-            .await?;
-        Ok(())
+        let engine_id = engine_id.clone();
+
+        self.handle
+            .spawn(async move {
+                transport::send_message(
+                    &mut input_send,
+                    &engine_id,
+                    request_type.to_frame(),
+                    payload,
+                )
+                .await
+            })
+            .await?
     }
 
     /// Handle an abort request by sending the abort message to the engine.
@@ -322,8 +355,8 @@ pub(crate) async fn run_output_dispatcher_loop(
                 )),
             }?;
 
-            match outputs.classify() {
-                ClassifiedEngineCoreOutputs::RequestBatch(batch) => {
+            match outputs {
+                EngineCoreOutputs::RequestBatch(batch) => {
                     let senders = inner.take_senders_for_outputs(&batch.outputs);
                     for (output, sender) in batch.outputs.into_iter().zip(senders) {
                         let request_id = output.request_id.clone();
@@ -360,12 +393,7 @@ pub(crate) async fn run_output_dispatcher_loop(
                                 "dropping scheduler stats for unknown engine"
                             );
                         }
-                        record_scheduler_stats(
-                            &METRICS.scheduler,
-                            inner.model_name(),
-                            batch.engine_index,
-                            scheduler_stats,
-                        );
+                        inner.scheduler_stats_recorder.record(batch.engine_index, scheduler_stats);
                     }
 
                     // The engine's scheduler stats never carry adapter names;
@@ -374,7 +402,7 @@ pub(crate) async fn run_output_dispatcher_loop(
                     let (running, waiting) = inner.lora_adapter_states();
                     lora_info.update(&METRICS.scheduler, running, waiting);
                 }
-                ClassifiedEngineCoreOutputs::Utility(utility) => {
+                EngineCoreOutputs::Utility(utility) => {
                     let call_id = utility.output.call_id;
                     if inner.resolve_utility_output(utility.output) {
                         trace!(
@@ -390,8 +418,7 @@ pub(crate) async fn run_output_dispatcher_loop(
                         );
                     }
                 }
-                other @ (ClassifiedEngineCoreOutputs::DpControl { .. }
-                | ClassifiedEngineCoreOutputs::Other(_)) => {
+                other => {
                     Err::<(), _>(unexpected_dispatcher_output!(
                         "received unexpected output on main dispatcher path: {other:?}"
                     ))?;
@@ -419,6 +446,7 @@ mod tests {
         let (send, _) = socket.split();
         ClientInner::new(
             send,
+            Handle::current(),
             "test-model".to_string(),
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),

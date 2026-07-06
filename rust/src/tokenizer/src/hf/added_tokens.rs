@@ -1,10 +1,11 @@
+use std::fs;
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use thiserror_ext::AsReport as _;
 use tracing::warn;
 
 use crate::Result;
-
-use std::{fs, path::Path};
 
 /// Minimal `tokenizer.json` projection used to patch `added_tokens` while
 /// preserving the rest of the tokenizer definition verbatim.

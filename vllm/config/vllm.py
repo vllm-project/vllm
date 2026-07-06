@@ -67,9 +67,9 @@ logger = init_logger(__name__)
 
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
-        "LlamaForCausalLM",
-        "MistralForCausalLM",
-        "Qwen3ForCausalLM",
+        "DeepseekV2ForCausalLM",
+        "Qwen2MoeForCausalLM",
+        "GraniteMoeForCausalLM",
     }
 )
 
@@ -126,13 +126,7 @@ def enable_act_fusion(cfg: "VllmConfig") -> bool:
 
 
 def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
-    """Enable if TP > 1, PP == 1, Hopper/Blackwell, and flashinfer installed.
-
-    Gated off for PP > 1: the fused op's GPU-side peer-signal spin-wait
-    assumes byte-identical kernel launches across TP peers, but concurrent
-    independent warmup of multiple TP subgroups lets ranks pick divergent
-    FlashInfer launch configs and deadlock.
-    """
+    """Enable if TP > 1 and Hopper/Blackwell and flashinfer installed."""
     from vllm.platforms import current_platform
     from vllm.utils.flashinfer import has_flashinfer
 
@@ -145,7 +139,6 @@ def enable_allreduce_rms_fusion(cfg: "VllmConfig") -> bool:
 
     return (
         cfg.parallel_config.tensor_parallel_size > 1
-        and cfg.parallel_config.pipeline_parallel_size == 1
         and current_platform.is_cuda()
         and has_flashinfer()
         and (
@@ -528,6 +521,16 @@ class VllmConfig:
         if use_v2_model_runner is not None:
             return use_v2_model_runner
 
+        # DSpark is implemented only by the V2 GPU model runner, and DeepSeek-V4
+        # is not otherwise a default-V2 architecture, so force V2 for it. If V2
+        # is unsupported for the rest of the config, _validate_v2_model_runner
+        # raises rather than silently falling back to V1 (which can't run dspark).
+        if (
+            self.speculative_config is not None
+            and self.speculative_config.method == "dspark"
+        ):
+            return True
+
         if self.model_config is not None and self.model_config.is_diffusion:
             return True
 
@@ -559,13 +562,16 @@ class VllmConfig:
         if model_config.runner_type != "generate":
             return False
 
-        architectures = getattr(model_config, "architectures", [])
-        if not any(
-            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
-        ):
+        if getattr(model_config, "is_hybrid", False):
             return False
 
-        return not model_config.is_moe and not model_config.is_quantized
+        if getattr(model_config, "is_attention_free", False):
+            return False
+        architectures = getattr(model_config, "architectures", [])
+        return (
+            any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures)
+            or not model_config.is_moe
+        )
 
     @property
     def needs_dp_coordinator(self) -> bool:
@@ -762,6 +768,25 @@ class VllmConfig:
 
         apply_recursive(self, defaults)
 
+    def _maybe_override_dynamic_sd_cudagraph_mode(self) -> None:
+        speculative_config = self.speculative_config
+        if (
+            speculative_config is None
+            or not speculative_config.uses_dynamic_speculative_decoding()
+            or not self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            or self.use_v2_model_runner
+        ):
+            return
+
+        logger.warning_once(
+            "Dynamic speculative decoding changes the target verification "
+            "length at runtime. Overriding cudagraph_mode from %s to "
+            "PIECEWISE for reliability. Use VLLM_USE_V2_MODEL_RUNNER=1 "
+            "if you want to use full CUDA graphs.",
+            self.compilation_config.cudagraph_mode.name,
+        )
+        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
     def _post_init_kv_transfer_config(self) -> None:
         """Update KVTransferConfig based on top-level configs in VllmConfig.
 
@@ -921,25 +946,38 @@ class VllmConfig:
                     model_type,
                 )
 
+        from vllm.platforms import current_platform
         from vllm.v1.executor.abstract import Executor
 
         executor_backend = self.parallel_config.distributed_executor_backend
         executor_class = Executor.get_class(self)
         executor_supports_async_sched = executor_class.supports_async_scheduling()
+        uses_rocm_deepep_ht_dbo = (
+            current_platform.is_rocm()
+            and self.parallel_config.enable_dbo
+            and self.parallel_config.all2all_backend == "deepep_high_throughput"
+        )
 
         if self.scheduler_config.async_scheduling:
             # Async scheduling explicitly enabled, hard fail any incompatibilities.
             # Currently, async scheduling only support eagle speculative
             # decoding.
+            if uses_rocm_deepep_ht_dbo:
+                raise ValueError(
+                    "Async scheduling is not compatible with ROCm DeepEP "
+                    "high-throughput DBO. Please use --no-async-scheduling or "
+                    "select a different all2all backend."
+                )
             if self.speculative_config is not None:
                 if (
                     self.speculative_config.method not in get_args(EagleModelTypes)
                     and self.speculative_config.method not in get_args(NgramGPUTypes)
                     and self.speculative_config.method != "draft_model"
+                    and self.speculative_config.method != "dspark"
                 ):
                     raise ValueError(
                         "Currently, async scheduling is only supported "
-                        "with EAGLE/MTP/Draft Model/NGram GPU kind of "
+                        "with EAGLE/MTP/Draft Model/NGram GPU/DSpark kind of "
                         "speculative decoding"
                     )
                 if self.speculative_config.disable_padded_drafter_batch:
@@ -967,6 +1005,7 @@ class VllmConfig:
                 self.speculative_config is not None
                 and self.speculative_config.method not in get_args(EagleModelTypes)
                 and self.speculative_config.method not in get_args(NgramGPUTypes)
+                and self.speculative_config.method != "dspark"
             ):
                 logger.warning_once(
                     "Async scheduling not supported with %s-based "
@@ -988,6 +1027,13 @@ class VllmConfig:
                     "Async scheduling will be disabled because it is not supported "
                     "with the `%s` distributed executor backend. ",
                     executor_backend,
+                )
+                self.scheduler_config.async_scheduling = False
+            elif uses_rocm_deepep_ht_dbo:
+                logger.warning_once(
+                    "Async scheduling is disabled for ROCm DeepEP "
+                    "high-throughput DBO because that combination can corrupt "
+                    "DP+EP generation accuracy."
                 )
                 self.scheduler_config.async_scheduling = False
             else:
@@ -1034,8 +1080,6 @@ class VllmConfig:
                 "VLLM_WORKER_MULTIPROC_METHOD set to spawn"
             )
 
-        from vllm.platforms import current_platform
-
         if (
             self.model_config is not None
             and self.scheduler_config.enable_chunked_prefill
@@ -1063,20 +1107,26 @@ class VllmConfig:
             )
             self.compilation_config.mode = CompilationMode.NONE
 
-        # DeepSeek V4's model classes don't carry @support_torch_compile —
+        # For model classes don't carry @support_torch_compile —
         # the breakable cudagraph is the supported PIECEWISE path. Auto-enable
         # it unless the user has explicitly opted out via the env var.
         if (
             self.model_config is not None
             and "VLLM_USE_BREAKABLE_CUDAGRAPH" not in os.environ
             and any(
-                a in ("DeepseekV4ForCausalLM", "DeepSeekV4MTPModel")
+                a
+                in (
+                    "DeepseekV4ForCausalLM",
+                    "DeepSeekV4MTPModel",
+                    "MiniMaxM3SparseForCausalLM",
+                    "MiniMaxM3SparseForConditionalGeneration",
+                )
                 for a in self.model_config.architectures
             )
         ):
             os.environ["VLLM_USE_BREAKABLE_CUDAGRAPH"] = "1"
             logger.info_once(
-                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1 for DeepSeek V4. "
+                "Auto-enabling VLLM_USE_BREAKABLE_CUDAGRAPH=1. "
                 "Set VLLM_USE_BREAKABLE_CUDAGRAPH=0 to opt out."
             )
 
@@ -1150,6 +1200,8 @@ class VllmConfig:
                 "KernelConfig.enable_flashinfer_autotune must be set after applying "
                 "optimization level defaults."
             )
+
+        self._maybe_override_dynamic_sd_cudagraph_mode()
 
         if (
             self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
@@ -1411,12 +1463,14 @@ class VllmConfig:
             assert a2a_backend in [
                 "deepep_low_latency",
                 "deepep_high_throughput",
+                "nixl_ep",
             ], (
-                "Microbatching currently only supports the deepep_low_latency and "
-                f"deepep_high_throughput all2all backend. {a2a_backend} is not "
-                "supported. To fix use --all2all-backend=deepep_low_latency or "
-                "--all2all-backend=deepep_high_throughput and install the DeepEP"
-                " kernels."
+                "Microbatching currently only supports the deepep_low_latency, "
+                "deepep_high_throughput, and nixl_ep all2all backends. "
+                f"{a2a_backend} is not supported. To fix use "
+                "--all2all-backend=deepep_low_latency, "
+                "--all2all-backend=deepep_high_throughput, or "
+                "--all2all-backend=nixl_ep and install the matching kernels."
             )
 
             if not self.model_config.disable_cascade_attn:
@@ -1796,8 +1850,13 @@ class VllmConfig:
             tp_size = self.parallel_config.tensor_parallel_size
             from vllm._aiter_ops import rocm_aiter_ops
 
-            if rocm_aiter_ops.is_enabled():
-                max_size = rocm_aiter_ops.get_aiter_allreduce_max_size()
+            max_size: int | None = None
+            if rocm_aiter_ops.is_custom_all_reduce_enabled():
+                from vllm.distributed.device_communicators.aiter_custom_all_reduce import (  # noqa: E501
+                    AiterCustomAllreduce,
+                )
+
+                max_size = AiterCustomAllreduce.effective_max_size()
             else:
                 max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
             if max_size is not None and self.model_config is not None:
@@ -1882,12 +1941,21 @@ class VllmConfig:
         if architecture is None:
             return
 
+        from vllm.model_executor.models import ModelRegistry
         from vllm.model_executor.models.config import (
             MODELS_CONFIG_MAP,
             HybridAttentionMambaModelConfig,
         )
 
         cls = MODELS_CONFIG_MAP.get(architecture, None)
+        if cls is None:
+            # `architecture` may be an HF base-model name (e.g. "Mamba2Model"
+            # when `architectures` is omitted); normalize to the resolved arch
+            # so per-arch config hooks are not skipped.
+            architecture = ModelRegistry._normalize_arch(
+                architecture, self.model_config
+            )
+            cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
 
@@ -1977,13 +2045,6 @@ class VllmConfig:
         model_config = self.model_config
         speculative_config = self.speculative_config
 
-        if (
-            model_config is not None
-            and model_config.has_inner_state
-            and self.cache_config.mamba_cache_mode == "align"
-        ):
-            unsupported.append("hybrid/mamba models with align cache mode")
-
         if self.parallel_config.prefill_context_parallel_size > 1:
             unsupported.append("prefill context parallelism")
 
@@ -1996,18 +2057,33 @@ class VllmConfig:
         ):
             unsupported.append("sequence parallelism")
 
+        # V2 does not implement the external_launcher (torchrun) PP-output
+        # broadcast that V1 uses to keep all ranks in sync (broadcast_pp_output).
+        if (
+            self.parallel_config.distributed_executor_backend == "external_launcher"
+            and self.parallel_config.pipeline_parallel_size > 1
+        ):
+            unsupported.append("pipeline parallelism with external_launcher")
+
         if speculative_config is not None:
             # TODO: ngram / ngram_gpu are not supported by the v2 model runner yet
             if speculative_config.method in ("ngram", "ngram_gpu"):
                 unsupported.append("ngram/ngram_gpu speculative decoding")
-            elif speculative_config.method not in ("eagle", "eagle3", "mtp", "dflash"):
+            elif speculative_config.method not in (
+                "eagle",
+                "eagle3",
+                "mtp",
+                "dflash",
+                "dspark",
+            ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
 
-            # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle)
-            # DFlash uses parallel drafting natively in V2 via DFlashSpeculator.
+            # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
+            # DFlash and DSpark use parallel drafting natively in V2 via their
+            # own speculators.
             if (
                 speculative_config.parallel_drafting
-                and speculative_config.method != "dflash"
+                and speculative_config.method not in ("dflash", "dspark")
             ):
                 unsupported.append("parallel drafting for EAGLE speculative decoding")
 
@@ -2019,6 +2095,9 @@ class VllmConfig:
 
         if self.parallel_config.enable_dbo:
             unsupported.append("dual batch overlap")
+
+        if self.parallel_config.enable_elastic_ep:
+            unsupported.append("elastic expert parallelism")
 
         if model_config is not None and model_config.enable_return_routed_experts:
             # Will be added by https://github.com/vllm-project/vllm/pull/38163
@@ -2117,10 +2196,6 @@ class VllmConfig:
                 "Chunked MM input is required because we need the flexibility "
                 "to schedule a multiple of block_size tokens even if they are "
                 "in the middle of a mm input"
-            )
-            # TODO: support align mamba cache mode for model runner v2
-            assert not envs.VLLM_USE_V2_MODEL_RUNNER, (
-                "Model Runner V2 has not yet supported mamba_cache_mode='align'. "
             )
 
     @model_validator(mode="after")
