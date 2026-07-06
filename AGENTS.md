@@ -29,6 +29,7 @@ Do not open one-off PRs for tiny edits (single typo, isolated style change, one 
 - PR descriptions for AI-assisted work **must** include:
     - Why this is not duplicating an existing PR.
     - Test commands run and results.
+    - Model evaluation results when the change affects output, accuracy, or serving.
     - Clear statement that AI assistance was used.
 
 ### Fail-closed behavior
@@ -66,48 +67,30 @@ VLLM_USE_PRECOMPILED=1 uv pip install -e . --torch-backend=auto
 uv pip install -e . --torch-backend=auto
 ```
 
-### Running tests
+### Tests
 
 > Requires [Environment setup](#environment-setup) and [Installing dependencies](#installing-dependencies).
 
 ```bash
-# Install test dependencies.
-# requirements/test/cuda.txt is pinned to x86_64; on other platforms, use the
-# unpinned source file instead:
-uv pip install -r requirements/test/cuda.in    # resolves for current platform
-# Or on x86_64:
-uv pip install -r requirements/test/cuda.txt
+# Install test dependencies (use cuda.in on non-x86_64):
+uv pip install -r requirements/test/cuda.in
 
-# Run a specific test file (use .venv/bin/python directly;
-# `source activate` does not persist in non-interactive shells):
+# Run a specific test file:
 .venv/bin/python -m pytest tests/path/to/test_file.py -v
 ```
 
-### Adding tests
+When adding tests:
 
-- **Reuse before create.** Search the area you changed for an existing test file,
-  `conftest.py` fixtures, and shared helpers. Add cases there instead of opening
-  a new file or bespoke harness. Create a new test file only when no nearby suite
-  covers the behavior.
+- **Reuse before create.** Extend existing test files, `conftest.py` fixtures, and
+  helpers; add a new file only when no nearby suite fits.
 - **Test behavior, not structure.** Assert observable outcomes through public
-  APIs and user-visible contracts. Do not lock tests to internal fields, call
-  order, or refactorable implementation details.
-- **Every test needs a reason.** Prefer regression tests for bugs you fixed and
-  checks on paths that are easy to break accidentally. Skip trivial wiring,
-  one-line passthroughs, and getters — passing coverage there adds CI cost
-  without signal.
-- **Match scope to the change.** Whole features and end-to-end flows belong in
-  integration-style tests that reuse existing suite setup. Reach for isolated
-  unit tests only when the logic is self-contained and a behavioral test would
-  be too indirect.
-- **Extend shared infrastructure.** Parameterize over existing fixtures instead
-  of copy-pasting cases. When you need a helper that others will reuse, add it to
-  the local `conftest.py` or shared test utilities — not inline in one test.
-- **Keep tests independent and reliable.** Each test must stand alone: no ordering
-  assumptions, no leaked global state, no timing guesses. A flaky test is worse
-  than no test; failure messages should say what broke and why.
-- **Follow nearby examples.** Before writing new patterns, read stable tests in
-  the same directory and match their style, fixtures, and assertions.
+  APIs; skip trivial wiring and implementation-locked checks.
+- **Every test needs a reason.** Prefer regression tests and paths that break
+  easily; flaky tests are worse than no tests.
+- **No one-off kernel benchmarks in `tests/`.** Put kernel perf work in
+  `benchmarks/kernels/`; prove correctness in existing pytest suites.
+- **Run model evals for model-affecting changes.** Search `tests/evals/` or use
+  `vllm bench` and include results in the PR — do not wait for reviewers to ask.
 
 For model-specific requirements, see
 [`docs/contributing/model/tests.md`](docs/contributing/model/tests.md).
@@ -136,23 +119,17 @@ Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#3
 
 ### Coding style guidelines
 
-Follow these rules for all code changes in this repository:
-
-- Try to match existing code style.
-- Code should be self-documenting and self-explanatory.
-- Keep comments and docstrings minimal and concise.
+- Match existing code style; keep comments and docstrings minimal.
 - Assume the reader is familiar with vLLM.
 
 ### Commit messages
 
-Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`). For example:
+Add attribution using commit trailers such as `Co-authored-by:` (other projects use `Assisted-by:` or `Generated-by:`):
 
 ```text
 Your commit message here
 
-Co-authored-by: GitHub Copilot
-Co-authored-by: Claude
-Co-authored-by: gemini-code-assist
+Co-authored-by: Cursor Agent
 Signed-off-by: Your Name <your.email@example.com>
 ```
 
