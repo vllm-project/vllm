@@ -131,12 +131,13 @@ class EmbedIOProcessor(PoolingIOProcessor):
                 )
 
             prompt_token_ids = cast(list[int], token_ids)
+            cache_salt = engine_input.get("cache_salt", None)
 
             for chunk_idx, chunk_tokens in enumerate(
                 chunk_list(prompt_token_ids, max_model_len)
             ):
                 chunked_engine_inputs.append(
-                    tokens_input(prompt_token_ids=chunk_tokens)
+                    tokens_input(prompt_token_ids=chunk_tokens, cache_salt=cache_salt)
                 )
                 prompt_request_ids.append(
                     f"{request_id}-prompt-{prompt_idx}-chunk-{chunk_idx}"
