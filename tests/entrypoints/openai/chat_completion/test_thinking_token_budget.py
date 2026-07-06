@@ -72,8 +72,7 @@ def server():
         "0.4",
         "--no-async-scheduling",
     ]
-    env_dict = {"VLLM_USE_V2_MODEL_RUNNER": "1"}
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -89,8 +88,7 @@ def server_with_auto_reasoning_config():
         "0.4",
         "--no-async-scheduling",
     ]
-    env_dict = {"VLLM_USE_V2_MODEL_RUNNER": "1"}
-    with RemoteOpenAIServer(MODEL_NAME, args, env_dict=env_dict) as remote_server:
+    with RemoteOpenAIServer(MODEL_NAME, args) as remote_server:
         yield remote_server
 
 
@@ -124,7 +122,7 @@ def server_qwen35_fp8_mtp_tp2():
             }
         ),
     ]
-    env_dict: dict[str, str] = {"VLLM_USE_V2_MODEL_RUNNER": "1"}
+    env_dict: dict[str, str] = {}
     # With 4+ GPUs, run TP=2 on physical devices 2,3 so module-scoped 0.6B servers
     # on 0,1 do not exhaust memory on the same devices as this worker.
     if current_platform.device_count() >= 4:
