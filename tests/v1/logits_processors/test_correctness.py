@@ -20,7 +20,11 @@ from tests.v1.sample.utils import (
 )
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
-from vllm.sampling_params import SamplingParams, validate_thinking_token_budget
+from vllm.sampling_params import (
+    SamplingParams,
+    StructuredOutputsParams,
+    validate_thinking_token_budget,
+)
 from vllm.utils.platform_utils import is_pin_memory_available
 from vllm.v1.sample.logits_processor import (
     BatchUpdate,
@@ -370,7 +374,7 @@ def _min_tokens_validate(
 
     # Validate min-token logits processor state
     if min_tok:
-        (_, out_tok, all_stop_token_ids) = min_tok
+        (_, out_tok, all_stop_token_ids, _) = min_tok
         num_out_tokens = len(out_tok)
         if num_out_tokens != ref_num_out_tokens:
             _raise_error_invalid(
@@ -445,6 +449,69 @@ def _min_tokens_validate(
                     request_params=request_params,
                     step_idx=step_idx,
                 )
+
+
+def _make_min_tokens_processor() -> MinTokensLogitsProcessor:
+    return MinTokensLogitsProcessor(VllmConfig(), torch.device("cpu"), False)
+
+
+def test_min_tokens_keeps_all_masked_behavior_without_structured_output():
+    processor = _make_min_tokens_processor()
+    processor.update_state(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(min_tokens=2, stop_token_ids=[0]),
+                    None,
+                    [],
+                )
+            ],
+            moved=(),
+        )
+    )
+
+    logits = torch.full((1, 3), -float("inf"))
+    logits[0, 0] = 1.0
+
+    processor.apply(logits)
+
+    assert torch.isneginf(logits).all()
+
+
+def test_min_tokens_restores_all_masked_structured_output_stop_token():
+    processor = _make_min_tokens_processor()
+    processor.update_state(
+        BatchUpdate(
+            batch_size=1,
+            removed=(),
+            added=[
+                (
+                    0,
+                    SamplingParams(
+                        min_tokens=2,
+                        stop_token_ids=[0],
+                        structured_outputs=StructuredOutputsParams(
+                            json={"type": "boolean"}
+                        ),
+                    ),
+                    None,
+                    [],
+                )
+            ],
+            moved=(),
+        )
+    )
+
+    logits = torch.full((1, 3), -float("inf"))
+    logits[0, 0] = 1.0
+
+    processor.apply(logits)
+
+    assert logits[0, 0] == 1.0
+    assert torch.isneginf(logits[0, 1:]).all()
 
 
 def _thinking_budget_params(kwargs: dict) -> None:

@@ -168,10 +168,15 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     ):
         # index -> (min_toks, output_token_ids, stop_token_ids)
         self.device = device
-        self.min_toks: dict[int, tuple[int, Sequence[int], set[int]]] = {}
+        self.min_toks: dict[int, tuple[int, Sequence[int], set[int], bool]] = {}
 
         # (req_idx_tensor,eos_tok_id_tensor)
         self.logits_slice: tuple[torch.Tensor, torch.Tensor] = (
+            self._device_tensor([], torch.int32),
+            self._device_tensor([], torch.int32),
+        )
+
+        self.preserve_logits_slice: tuple[torch.Tensor, torch.Tensor] = (
             self._device_tensor([], torch.int32),
             self._device_tensor([], torch.int32),
         )
@@ -188,11 +193,16 @@ class MinTokensLogitsProcessor(LogitsProcessor):
     @staticmethod
     def add_request(
         params: SamplingParams, _: list[int] | None, output_tok_ids: list[int]
-    ) -> tuple[int, Sequence[int], set[int]] | None:
+    ) -> tuple[int, Sequence[int], set[int], bool] | None:
         min_tokens = params.min_tokens
         if not min_tokens or len(output_tok_ids) >= min_tokens:
             return None
-        return min_tokens, output_tok_ids, params.all_stop_token_ids
+        return (
+            min_tokens,
+            output_tok_ids,
+            params.all_stop_token_ids,
+            params.structured_outputs is not None,
+        )
 
     def update_state(self, batch_update: BatchUpdate | None):
         needs_update = process_dict_updates(
@@ -202,7 +212,7 @@ class MinTokensLogitsProcessor(LogitsProcessor):
             # Check for any requests that have attained their min tokens.
             to_remove = tuple(
                 index
-                for index, (min_toks, out_tok_ids, _) in self.min_toks.items()
+                for index, (min_toks, out_tok_ids, _, _) in self.min_toks.items()
                 if len(out_tok_ids) >= min_toks
             )
             if to_remove:
@@ -214,13 +224,27 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         if needs_update:
             reqs: list[int] = []
             tok_ids: list[int] = []
-            for req, (_, _, stop_tok_ids) in self.min_toks.items():
+            preserve_reqs: list[int] = []
+            preserve_tok_ids: list[int] = []
+            for req, (
+                _,
+                _,
+                stop_tok_ids,
+                uses_structured_output,
+            ) in self.min_toks.items():
                 reqs.extend([req] * len(stop_tok_ids))
                 tok_ids.extend(stop_tok_ids)
+                if uses_structured_output:
+                    preserve_reqs.extend([req] * len(stop_tok_ids))
+                    preserve_tok_ids.extend(stop_tok_ids)
 
             self.logits_slice = (
                 self._device_tensor(reqs, torch.int32),
                 self._device_tensor(tok_ids, torch.int32),
+            )
+            self.preserve_logits_slice = (
+                self._device_tensor(preserve_reqs, torch.int32),
+                self._device_tensor(preserve_tok_ids, torch.int32),
             )
 
     def _device_tensor(self, data: list, dtype: torch.dtype) -> torch.Tensor:
@@ -230,22 +254,28 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         self,
         logits: torch.Tensor,
         logits_slice: tuple[torch.Tensor, torch.Tensor],
+        preserve_logits_slice: tuple[torch.Tensor, torch.Tensor],
     ) -> None:
-        stop_logits = logits[logits_slice].clone()
+        if preserve_logits_slice[0].numel() == 0:
+            logits.index_put_(logits_slice, self.neg_inf_tensor)
+            return
+
+        stop_logits = logits[preserve_logits_slice].clone()
         logits.index_put_(logits_slice, self.neg_inf_tensor)
 
-        empty_rows = torch.isneginf(logits).all(dim=-1)
-        restore_mask = empty_rows[logits_slice[0]]
+        restore_mask = torch.isneginf(logits[preserve_logits_slice[0]]).all(dim=-1)
         restore_slice = (
-            logits_slice[0][restore_mask],
-            logits_slice[1][restore_mask],
+            preserve_logits_slice[0][restore_mask],
+            preserve_logits_slice[1][restore_mask],
         )
         logits.index_put_(restore_slice, stop_logits[restore_mask])
 
     def apply(self, logits: torch.Tensor) -> torch.Tensor:
         if self.min_toks:
             # Inhibit EOS token for requests which have not reached min length.
-            self._mask_stop_token_logits(logits, self.logits_slice)
+            self._mask_stop_token_logits(
+                logits, self.logits_slice, self.preserve_logits_slice
+            )
         return logits
 
     def apply_with_spec_decode(
@@ -267,8 +297,19 @@ class MinTokensLogitsProcessor(LogitsProcessor):
         cumsum = np.concatenate([[0], np.cumsum(num_draft_arr)])
 
         entries = [
-            (req_idx, min_tok, len(out_tok_ids), list(stop_tok_ids))
-            for req_idx, (min_tok, out_tok_ids, stop_tok_ids) in self.min_toks.items()
+            (
+                req_idx,
+                min_tok,
+                len(out_tok_ids),
+                list(stop_tok_ids),
+                uses_structured_output,
+            )
+            for req_idx, (
+                min_tok,
+                out_tok_ids,
+                stop_tok_ids,
+                uses_structured_output,
+            ) in self.min_toks.items()
             if stop_tok_ids
         ]
 
@@ -277,8 +318,10 @@ class MinTokensLogitsProcessor(LogitsProcessor):
 
         all_rows: list[np.ndarray] = []  # row indices to mask
         all_toks: list[np.ndarray] = []  # stop-token ids at those rows
+        preserve_rows: list[np.ndarray] = []
+        preserve_toks: list[np.ndarray] = []
 
-        for req_idx, min_tok, current_len, stop_toks in entries:
+        for req_idx, min_tok, current_len, stop_toks, uses_structured_output in entries:
             remaining = min_tok - current_len
             # How many leading draft positions still need stop-token masking.
             n_mask = int(min(max(remaining, 0), num_draft_arr[req_idx]))
@@ -287,18 +330,33 @@ class MinTokensLogitsProcessor(LogitsProcessor):
                 offset = cumsum[req_idx]
                 row_indices = np.arange(offset, offset + n_mask, dtype=np.int64)
                 n_stop = len(stop_toks)
-                all_rows.append(np.repeat(row_indices, n_stop))
-                all_toks.append(np.tile(stop_toks, n_mask))
+                rows = np.repeat(row_indices, n_stop)
+                toks = np.tile(stop_toks, n_mask)
+                all_rows.append(rows)
+                all_toks.append(toks)
+                if uses_structured_output:
+                    preserve_rows.append(rows)
+                    preserve_toks.append(toks)
 
         if all_rows:
             rows_arr = np.concatenate(all_rows)
             toks_arr = np.concatenate(all_toks)
+            if preserve_rows:
+                preserve_rows_arr = np.concatenate(preserve_rows)
+                preserve_toks_arr = np.concatenate(preserve_toks)
+            else:
+                preserve_rows_arr = np.array([], dtype=np.int64)
+                preserve_toks_arr = np.array([], dtype=np.int64)
             # (row_indices, token_indices) for index_put_ to set -inf.
             logits_slice = (
                 async_tensor_h2d(rows_arr, device=self.device),
                 async_tensor_h2d(toks_arr, device=self.device),
             )
-            self._mask_stop_token_logits(logits, logits_slice)
+            preserve_logits_slice = (
+                async_tensor_h2d(preserve_rows_arr, device=self.device),
+                async_tensor_h2d(preserve_toks_arr, device=self.device),
+            )
+            self._mask_stop_token_logits(logits, logits_slice, preserve_logits_slice)
 
         return logits
 
