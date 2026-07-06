@@ -45,6 +45,7 @@ class SingleTypeKVCacheManager(ABC):
         scheduler_block_size: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        needs_kv_cache_zeroing: bool = False,
         max_admission_blocks_per_request: int | None = None,
     ) -> None:
         """
@@ -55,6 +56,8 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_group_id: The id of the kv cache group of this manager.
             scheduler_block_size: The scheduling granularity (LCM of all group
                 block sizes); a multiple of this manager's ``block_size``.
+            needs_kv_cache_zeroing: Whether worker-side KV cache zeroing needs
+                newly allocated block IDs from this manager.
             max_admission_blocks_per_request: Recycling-aware per-request
                 block cap used by `get_num_blocks_to_allocate`. Only set for
                 spec types that recycle blocks across chunks (SWA,
@@ -73,6 +76,7 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool = block_pool
         self.enable_caching = enable_caching
         self._max_admission_blocks_per_request = max_admission_blocks_per_request
+        self.needs_kv_cache_zeroing = needs_kv_cache_zeroing
         self.new_block_ids: list[int] = []
 
         # Mapping from request ID to blocks to track the blocks allocated
@@ -268,7 +272,7 @@ class SingleTypeKVCacheManager(ABC):
             cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
         )
         req_blocks.extend(allocated_blocks)
-        if type(self.kv_cache_spec) in (
+        if self.needs_kv_cache_zeroing and type(self.kv_cache_spec) in (
             FullAttentionSpec,
             TQFullAttentionSpec,
             MLAAttentionSpec,
@@ -301,7 +305,7 @@ class SingleTypeKVCacheManager(ABC):
         else:
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
-            if type(self.kv_cache_spec) in (
+            if self.needs_kv_cache_zeroing and type(self.kv_cache_spec) in (
                 FullAttentionSpec,
                 TQFullAttentionSpec,
                 MLAAttentionSpec,
