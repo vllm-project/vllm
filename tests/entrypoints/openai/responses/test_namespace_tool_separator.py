@@ -62,7 +62,6 @@ async def test_namespace_tool_separator(client: openai.AsyncOpenAI, model_name: 
         model=model_name,
         input=prompt,
         tools=tools,
-        tool_choice={"type": "function", "name": FLAT_TOOL_NAME},
         temperature=0.0,
     )
 
@@ -83,7 +82,6 @@ async def test_namespace_tool_separator_streaming(
         model=model_name,
         input=prompt,
         tools=tools,
-        tool_choice={"type": "function", "name": FLAT_TOOL_NAME},
         temperature=0.0,
         stream=True,
     )
