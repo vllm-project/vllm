@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import aiohttp
 import asyncio
 import atexit
 import contextlib
@@ -14,6 +13,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 from urllib.request import url2pathname
 
+import aiohttp
 import numpy as np
 import numpy.typing as npt
 import requests
