@@ -472,7 +472,7 @@ steps:
   commands:
   - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
-  - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
   - pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
@@ -1301,7 +1301,7 @@ steps:
 #----------------------------------------------------------  mi300 · kernels  ----------------------------------------------------------#
 
 - label: vLLM IR Tests # TBD
-  timeout_in_minutes: 30
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
@@ -1350,7 +1350,7 @@ steps:
   - pytest -v -s kernels/core --ignore=kernels/core/test_minimax_reduce_rms.py  kernels/test_concat_mla_q.py kernels/test_top_k_per_row.py
 
 - label: Kernels KDA Test # TBD
-  timeout_in_minutes: 30
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
@@ -1558,7 +1558,7 @@ steps:
   - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_eagle_dp.py
 
 - label: Model Runner V2 Pipeline Parallelism (4 GPUs) # TBD
-  timeout_in_minutes: 60
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_4
   num_gpus: 4
@@ -1577,7 +1577,7 @@ steps:
   - pytest -v -s distributed/test_pp_cudagraph.py -k "not ray"
 
 - label: Model Runner V2 Spec Decode # TBD
-  timeout_in_minutes: 45
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
@@ -1604,7 +1604,7 @@ steps:
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
-  parallelism: 2
+  parallelism: 6
   working_dir: "/vllm-workspace/tests"
   source_file_dependencies:
   - vllm/model_executor/models/
@@ -1637,10 +1637,10 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models/test_terratorch.py
-  - tests/models/test_transformers.py
+  - tests/models/transformers/test_backend.py
   - tests/models/test_registry.py
   commands:
-  - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
+  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
@@ -1860,7 +1860,7 @@ steps:
   - examples/
   commands:
   - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/test_transformers.py
+  - pytest -v -s tests/models/transformers/test_backend.py
   - pytest -v -s tests/models/multimodal/test_mapping.py
   - python3 examples/basic/offline_inference/chat.py
   - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl
@@ -1915,7 +1915,7 @@ steps:
   - pytest -v -s plugins_tests/lora_resolvers # unit tests for in-tree lora resolver plugins
 
 - label: GGUF Plugin # TBD
-  timeout_in_minutes: 30
+  timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
   agent_pool: mi300_1
   optional: true
@@ -2439,6 +2439,59 @@ steps:
   - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
   - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
+- label: Hybrid SSM NixlConnector PD prefix cache test (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/v1/core/sched/
+  - vllm/v1/core/kv_cache_coordinator.py
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_mamba_prefix_cache_test.sh
+
+- label: MultiConnector (Nixl+Offloading) PD accuracy (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
+
+- label: MultiConnector (Nixl+Offloading) PD edge cases (2 GPUs) # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_2
+  num_gpus: 2
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+  - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+  - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+  - tests/v1/kv_connector/nixl_integration/
+  - vllm/platforms/rocm.py
+  commands:
+  - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+  - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/run_multi_connector_edge_case_test.sh
+
 - label: V1 e2e (4 GPUs) # TBD
   timeout_in_minutes: 180
   mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
@@ -2729,15 +2782,19 @@ steps:
   - vllm/envs.py
   - examples/offline_inference/data_parallel.py
   - tests/distributed/test_context_parallel.py
+  - tests/distributed/test_rocm_aiter_custom_ar.py
   - tests/distributed/test_rocm_quick_reduce.py
   - tests/distributed/test_quick_all_reduce.py
+  - tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
   - tests/v1/distributed/test_dbo.py
   - tests/utils.py
   commands:
   - pytest -v -s tests/distributed/test_context_parallel.py
-  - pytest -v -s tests/v1/distributed/test_dbo.py
+  - pytest -v -s tests/distributed/test_rocm_aiter_custom_ar.py
+  - pytest -v -s tests/v1/e2e/general/test_rocm_aiter_custom_ar.py
   - pytest -v -s tests/distributed/test_rocm_quick_reduce.py
   - pytest -v -s tests/distributed/test_quick_all_reduce.py
+  - pytest -v -s tests/v1/distributed/test_dbo.py
 
 #--------------------------------------------------------  mi355 · entrypoints  --------------------------------------------------------#
 
