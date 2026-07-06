@@ -11,11 +11,12 @@ from pydantic import ValidationError
 from vllm.config.multimodal import MultiModalConfig
 from vllm.entrypoints.openai.completion.protocol import CompletionRequest
 from vllm.entrypoints.openai.completion.serving import OpenAIServingCompletion
-from vllm.entrypoints.openai.engine.protocol import GenerationError
+from vllm.entrypoints.openai.engine.protocol import ErrorResponse, GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.scale_out.render.serving import ServingRender
 from vllm.outputs import CompletionOutput, RequestOutput
+from vllm.renderers.deepseek_v4 import DeepseekV4Renderer
 from vllm.renderers.hf import HfRenderer
 from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tokenizers.registry import cached_tokenizer_from_config
@@ -23,6 +24,9 @@ from vllm.v1.engine.async_llm import AsyncLLM
 
 MODEL_NAME = "openai-community/gpt2"
 MODEL_NAME_SHORT = "gpt2"
+DEEPSEEK_V4_FIM_BEGIN = "<｜fim▁begin｜>"
+DEEPSEEK_V4_FIM_HOLE = "<｜fim▁hole｜>"
+DEEPSEEK_V4_FIM_END = "<｜fim▁end｜>"
 BASE_MODEL_PATHS = [
     BaseModelPath(name=MODEL_NAME, model_path=MODEL_NAME),
     BaseModelPath(name=MODEL_NAME_SHORT, model_path=MODEL_NAME_SHORT),
@@ -98,6 +102,179 @@ def _build_renderer(model_config: MockModelConfig):
         MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
         cached_tokenizer_from_config(model_config),
     )
+
+
+def _build_online_renderer_for_completion(
+    model_config: MockModelConfig,
+    renderer: Any | None = None,
+) -> OnlineRenderer:
+    if renderer is None:
+        renderer = MagicMock()
+        renderer.render_completion_suffix.return_value = None
+
+    return OnlineRenderer(
+        model_config=model_config,
+        renderer=renderer,
+        request_logger=None,
+        chat_template=None,
+        chat_template_content_format="auto",
+    )
+
+
+def _deepseek_v4_suffix_renderer(
+    model_config: MockModelConfig,
+) -> DeepseekV4Renderer:
+    return DeepseekV4Renderer(
+        MockVllmConfig(model_config, parallel_config=MockParallelConfig()),
+        None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_completion_suffix_uses_renderer_capability():
+    model_config = MockModelConfig()
+    online_renderer = _build_online_renderer_for_completion(
+        model_config,
+        renderer=_deepseek_v4_suffix_renderer(model_config),
+    )
+    online_renderer.preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="def fib(n):\n    return ",
+        suffix="\n\nprint(fib(10))",
+        max_tokens=64,
+    )
+
+    result = await online_renderer.render_completion(request)
+
+    assert result == [{"ok": True}]
+    online_renderer.preprocess_completion.assert_awaited_once()
+    assert online_renderer.preprocess_completion.call_args.kwargs["prompt_input"] == (
+        f"{DEEPSEEK_V4_FIM_BEGIN}def fib(n):\n    return "
+        f"{DEEPSEEK_V4_FIM_HOLE}\n\nprint(fib(10))"
+        f"{DEEPSEEK_V4_FIM_END}"
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_completion_suffix_supports_text_prompt_list():
+    model_config = MockModelConfig()
+    online_renderer = _build_online_renderer_for_completion(
+        model_config,
+        renderer=_deepseek_v4_suffix_renderer(model_config),
+    )
+    online_renderer.preprocess_completion = AsyncMock(return_value=[{"ok": True}])
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=["prefix A", "prefix B"],
+        suffix=" suffix",
+    )
+
+    result = await online_renderer.render_completion(request)
+
+    assert result == [{"ok": True}]
+    assert online_renderer.preprocess_completion.call_args.kwargs["prompt_input"] == [
+        f"{DEEPSEEK_V4_FIM_BEGIN}prefix A"
+        f"{DEEPSEEK_V4_FIM_HOLE} suffix{DEEPSEEK_V4_FIM_END}",
+        f"{DEEPSEEK_V4_FIM_BEGIN}prefix B"
+        f"{DEEPSEEK_V4_FIM_HOLE} suffix{DEEPSEEK_V4_FIM_END}",
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_completion_suffix_rejects_renderer_without_fim_support():
+    model_config = MockModelConfig()
+    online_renderer = _build_online_renderer_for_completion(model_config)
+    online_renderer.preprocess_completion = AsyncMock()
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="prefix",
+        suffix="suffix",
+    )
+
+    result = await online_renderer.render_completion(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert "FIM completion rendering" in result.error.message
+    online_renderer.preprocess_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_completion_suffix_rejects_echo():
+    model_config = MockModelConfig()
+    online_renderer = _build_online_renderer_for_completion(
+        model_config,
+        renderer=_deepseek_v4_suffix_renderer(model_config),
+    )
+    online_renderer.preprocess_completion = AsyncMock()
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="prefix",
+        suffix="suffix",
+        echo=True,
+    )
+
+    result = await online_renderer.render_completion(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert "Echo is unsupported with suffix" in result.error.message
+    online_renderer.preprocess_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+async def test_completion_suffix_rejects_prompt_embeds():
+    model_config = MockModelConfig()
+    online_renderer = _build_online_renderer_for_completion(
+        model_config,
+        renderer=_deepseek_v4_suffix_renderer(model_config),
+    )
+    online_renderer.preprocess_completion = AsyncMock()
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt="prefix",
+        suffix="suffix",
+        prompt_embeds=b"embeds",
+    )
+
+    result = await online_renderer.render_completion(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert "suffix is not supported with prompt_embeds" in result.error.message
+    online_renderer.preprocess_completion.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skip_global_cleanup
+@pytest.mark.parametrize("prompt", ([1, 2, 3], [[1, 2, 3]]))
+async def test_completion_suffix_rejects_token_prompt(prompt):
+    model_config = MockModelConfig()
+    online_renderer = _build_online_renderer_for_completion(
+        model_config,
+        renderer=_deepseek_v4_suffix_renderer(model_config),
+    )
+    online_renderer.preprocess_completion = AsyncMock()
+
+    request = CompletionRequest(
+        model=MODEL_NAME,
+        prompt=prompt,
+        suffix="suffix",
+    )
+
+    result = await online_renderer.render_completion(request)
+
+    assert isinstance(result, ErrorResponse)
+    assert "requires text prompt input" in result.error.message
+    online_renderer.preprocess_completion.assert_not_awaited()
 
 
 @pytest.mark.asyncio
