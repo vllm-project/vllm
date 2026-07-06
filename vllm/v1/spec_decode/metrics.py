@@ -3,6 +3,7 @@
 
 import time
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 import prometheus_client
@@ -47,6 +48,65 @@ class SpecDecodingStats:
             self.num_accepted_tokens_per_pos[i] += 1
         for i in range(num_draft_tokens):
             self.num_draft_tokens_per_pos[i] += 1
+
+
+@dataclass
+class SpecDecodeRequestStats:
+    """Per-request speculative decoding statistics.
+
+    Accumulated across all scheduler steps for a single request,
+    then attached to EngineCoreOutput on request finish.
+    """
+
+    num_draft_tokens: int = 0
+    num_accepted_tokens: int = 0
+    num_steps: int = 0
+    num_accepted_per_pos: list[int] = field(default_factory=list)
+    num_drafted_per_pos: list[int] = field(default_factory=list)
+    per_step_accepted: list[int] = field(default_factory=list)
+    per_step_drafted: list[int] = field(default_factory=list)
+
+    def observe(
+        self, num_draft_tokens: int, num_accepted_tokens: int, num_spec_tokens: int
+    ):
+        self.num_steps += 1
+        self.num_draft_tokens += num_draft_tokens
+        self.num_accepted_tokens += num_accepted_tokens
+        self.per_step_accepted.append(num_accepted_tokens)
+        self.per_step_drafted.append(num_draft_tokens)
+        if not self.num_accepted_per_pos:
+            self.num_accepted_per_pos = [0] * num_spec_tokens
+            self.num_drafted_per_pos = [0] * num_spec_tokens
+        for i in range(num_accepted_tokens):
+            self.num_accepted_per_pos[i] += 1
+        for i in range(num_draft_tokens):
+            self.num_drafted_per_pos[i] += 1
+
+    def to_dict(self, detailed: bool = False) -> dict[str, Any]:
+        acceptance_rate = (
+            self.num_accepted_tokens / self.num_draft_tokens
+            if self.num_draft_tokens > 0
+            else 0.0
+        )
+        mean_accepted_length = (
+            1 + self.num_accepted_tokens / self.num_steps if self.num_steps > 0 else 0.0
+        )
+        per_pos_rates = [
+            a / d if d > 0 else 0.0
+            for a, d in zip(self.num_accepted_per_pos, self.num_drafted_per_pos)
+        ]
+        result: dict[str, Any] = {
+            "num_drafted_tokens": self.num_draft_tokens,
+            "num_accepted_tokens": self.num_accepted_tokens,
+            "draft_acceptance_rate": round(acceptance_rate, 4),
+            "num_draft_steps": self.num_steps,
+            "mean_accepted_length_per_step": round(mean_accepted_length, 2),
+            "per_position_acceptance_rates": [round(r, 4) for r in per_pos_rates],
+        }
+        if detailed:
+            result["per_step_accepted"] = self.per_step_accepted
+            result["per_step_drafted"] = self.per_step_drafted
+        return result
 
 
 class SpecDecodingLogging:

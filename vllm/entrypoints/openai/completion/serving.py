@@ -71,6 +71,12 @@ class OpenAIServingCompletion(GenerateBaseServing):
 
         self.online_renderer = online_renderer
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
+        spec_config = getattr(engine_client.vllm_config, "speculative_config", None)
+        self.speculative_decoding_stats_level = (
+            getattr(spec_config, "stats_reporting_level", "none")
+            if spec_config is not None
+            else "none"
+        )
         self.enable_force_include_usage = enable_force_include_usage
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
@@ -434,6 +440,15 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     response_json = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {response_json}\n\n"
 
+            spec_decode_stats_dict = None
+            if (
+                self.speculative_decoding_stats_level != "none"
+                and getattr(res, "spec_decode_stats", None) is not None
+            ):
+                spec_decode_stats_dict = res.spec_decode_stats.to_dict(
+                    detailed=self.speculative_decoding_stats_level == "detailed"
+                )
+
             total_prompt_tokens = sum(num_prompt_tokens)
             total_completion_tokens = sum(previous_num_tokens)
             final_usage_info = UsageInfo(
@@ -455,6 +470,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     choices=[],
                     usage=final_usage_info,
                     system_fingerprint=self.system_fingerprint,
+                    speculative_decoding_stats=spec_decode_stats_dict,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=False, exclude_none=True
@@ -591,6 +607,15 @@ class OpenAIServingCompletion(GenerateBaseServing):
         request_metadata.final_usage_info = usage
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
+        spec_decode_stats_dict = None
+        if (
+            self.speculative_decoding_stats_level != "none"
+            and final_res_batch
+            and getattr(final_res_batch[0], "spec_decode_stats", None) is not None
+        ):
+            spec_decode_stats_dict = final_res_batch[0].spec_decode_stats.to_dict(
+                detailed=self.speculative_decoding_stats_level == "detailed"
+            )
         return CompletionResponse(
             id=request_id,
             created=created_time,
@@ -599,6 +624,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
             usage=usage,
             system_fingerprint=self.system_fingerprint,
             kv_transfer_params=kv_transfer_params,
+            speculative_decoding_stats=spec_decode_stats_dict,
         )
 
     def _create_completion_logprobs(

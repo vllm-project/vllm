@@ -193,6 +193,7 @@ class BaseFrontendArgs:
         frontend_kwargs["tool_call_parser"]["metavar"] = (
             f"{{{parsers_str}}} or name registered in --tool-parser-plugin"
         )
+
         return frontend_kwargs
 
     @classmethod

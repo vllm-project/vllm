@@ -18,6 +18,7 @@ from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
+from vllm.v1.spec_decode.metrics import SpecDecodeRequestStats
 
 # Type for pause_generation mode parameter.
 # - "abort": Abort all in-flight requests immediately (default).
@@ -199,6 +200,8 @@ class EngineCoreOutput(
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0
+
+    spec_decode_stats: SpecDecodeRequestStats | None = None
 
     @property
     def finished(self) -> bool:

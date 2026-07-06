@@ -161,6 +161,12 @@ class SpeculativeConfig:
     requires the speculative model be trained to support parallel drafting.
     Only compatible with EAGLE and draft model methods."""
 
+    # Per-request statistics reporting
+    stats_reporting_level: Literal["none", "summary", "detailed"] = "none"
+    """Level of per-request speculative decoding statistics to include
+    in the API response. 'none' disables, 'summary' includes aggregate
+    stats, 'detailed' adds per-step acceptance arrays."""
+
     # required configuration params passed from engine
     target_model_config: SkipValidation[ModelConfig] = None  # type: ignore
     """The configuration of the target model."""

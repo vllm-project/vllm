@@ -623,6 +623,7 @@ class EngineArgs:
     spec_method: str | None = None
     spec_model: str | None = None
     spec_tokens: int | None = None
+    spec_stats_level: str | None = None
     diffusion_config: dict[str, Any] | None = None
 
     show_hidden_metrics_for_version: str | None = (
@@ -1513,6 +1514,12 @@ class EngineArgs:
         vllm_group.add_argument(
             "--spec-tokens", **speculative_kwargs["num_speculative_tokens"]
         )
+        stats_level_kwargs = speculative_kwargs["stats_reporting_level"]
+        stats_level_kwargs["default"] = None
+        vllm_group.add_argument(
+            "--spec-stats-level",
+            **stats_level_kwargs,
+        )
         vllm_kwargs["diffusion_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument(
             "--diffusion-config", "-dc", **vllm_kwargs["diffusion_config"]
@@ -1718,6 +1725,7 @@ class EngineArgs:
             ("--spec-method", "method", self.spec_method),
             ("--spec-model", "model", self.spec_model),
             ("--spec-tokens", "num_speculative_tokens", self.spec_tokens),
+            ("--spec-stats-level", "stats_reporting_level", self.spec_stats_level),
         ):
             if value is None:
                 continue

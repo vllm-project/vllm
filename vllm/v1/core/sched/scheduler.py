@@ -58,7 +58,10 @@ from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
 from vllm.v1.outputs import DraftTokenIds, KVConnectorOutput, ModelRunnerOutput
 from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.dynamic.utils import build_dynamic_sd_schedule_lookup
-from vllm.v1.spec_decode.metrics import SpecDecodingStats
+from vllm.v1.spec_decode.metrics import (
+    SpecDecodeRequestStats,
+    SpecDecodingStats,
+)
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
 
@@ -1611,6 +1614,18 @@ class Scheduler(SchedulerInterface):
                     request_id=req_id,
                 )
 
+                effective_draft = num_draft_tokens
+                if scheduler_output.num_invalid_spec_tokens:
+                    effective_draft -= scheduler_output.num_invalid_spec_tokens.get(
+                        req_id, 0
+                    )
+                if effective_draft > 0:
+                    if request.spec_decode_stats is None:
+                        request.spec_decode_stats = SpecDecodeRequestStats()
+                    request.spec_decode_stats.observe(
+                        effective_draft, num_accepted, self.num_spec_tokens
+                    )
+
             # Free encoder inputs only after the step has actually executed.
             if request.has_encoder_inputs:
                 self._free_encoder_inputs(request)
@@ -1748,6 +1763,11 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        spec_decode_stats=(
+                            request.spec_decode_stats
+                            if finish_reason is not None
+                            else None
+                        ),
                     )
                 )
             else:

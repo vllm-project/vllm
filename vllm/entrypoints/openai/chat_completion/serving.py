@@ -160,6 +160,12 @@ class OpenAIServingChat(GenerateBaseServing):
         self.exclude_tools_when_tool_choice_none = exclude_tools_when_tool_choice_none
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
+        spec_config = getattr(engine_client.vllm_config, "speculative_config", None)
+        self.speculative_decoding_stats_level = (
+            getattr(spec_config, "stats_reporting_level", "none")
+            if spec_config is not None
+            else "none"
+        )
         self.enable_force_include_usage = enable_force_include_usage
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -423,6 +429,7 @@ class OpenAIServingChat(GenerateBaseServing):
         finish_reason_sent = [False] * num_choices
         num_prompt_tokens = 0
         num_cached_tokens = None
+        spec_decode_stats_dict: dict[str, Any] | None = None
         tools_streamed = [False] * num_choices
 
         if isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam):
@@ -737,6 +744,14 @@ class OpenAIServingChat(GenerateBaseServing):
                     data = chunk.model_dump_json(exclude_unset=True)
                     yield f"data: {data}\n\n"
 
+            if (
+                self.speculative_decoding_stats_level != "none"
+                and getattr(res, "spec_decode_stats", None) is not None
+            ):
+                spec_decode_stats_dict = res.spec_decode_stats.to_dict(
+                    detailed=self.speculative_decoding_stats_level == "detailed"
+                )
+
             # once the final token is handled, if stream_options.include_usage
             # is sent, send the usage
             if include_usage:
@@ -760,6 +775,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     model=model_name,
                     usage=final_usage,
                     system_fingerprint=self.system_fingerprint,
+                    speculative_decoding_stats=spec_decode_stats_dict,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=True, exclude_none=True
@@ -1019,6 +1035,14 @@ class OpenAIServingChat(GenerateBaseServing):
             ),
             prompt_text=prompt_text,
             kv_transfer_params=final_res.kv_transfer_params,
+            speculative_decoding_stats=(
+                final_res.spec_decode_stats.to_dict(
+                    detailed=self.speculative_decoding_stats_level == "detailed"
+                )
+                if self.speculative_decoding_stats_level != "none"
+                and getattr(final_res, "spec_decode_stats", None) is not None
+                else None
+            ),
         )
 
         # Log complete response if output logging is enabled

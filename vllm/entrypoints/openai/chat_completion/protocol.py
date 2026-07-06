@@ -133,6 +133,7 @@ class ChatCompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    speculative_decoding_stats: dict[str, Any] | None = None
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -160,6 +161,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     # Rendered prompt text from chat templating (only set when
     # ``return_prompt_text=True`` on the request); only sent on the first chunk.
     prompt_text: str | None = None
+    speculative_decoding_stats: dict[str, Any] | None = None
 
 
 class ChatCompletionToolsParam(OpenAIBaseModel):
