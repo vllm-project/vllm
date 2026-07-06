@@ -115,6 +115,25 @@ def verify_events(
     assert tuple(stores) == to_key_sets(expected_stores)
 
 
+def test_cpu_eviction_removed_precedes_stored():
+    """An eviction is announced before the store that reuses its capacity."""
+    manager = make_cpu_manager(num_blocks=2, enable_events=True)
+
+    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    list(manager.take_events())
+
+    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX)
+    manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
+
+    events = list(manager.take_events())
+    removed_idx = [i for i, event in enumerate(events) if event.removed]
+    stored_idx = [i for i, event in enumerate(events) if not event.removed]
+    assert removed_idx and stored_idx, events
+    assert max(removed_idx) < min(stored_idx)
+    assert all(event.medium == manager.medium for event in events)
+
+
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
 def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
     """
