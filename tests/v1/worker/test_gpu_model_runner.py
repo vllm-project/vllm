@@ -1582,6 +1582,106 @@ def test_is_uniform_decode() -> None:
     )
 
 
+def test_compute_force_uniform_decode() -> None:
+    # Non-hybrid models
+    assert (
+        GPUModelRunner._compute_force_uniform_decode(
+            _schedule_new_request("req_0"), is_hybrid=False
+        )
+        is None
+    )
+    assert (
+        GPUModelRunner._compute_force_uniform_decode(
+            _schedule_cached_requests(
+                ["req_0"],
+                num_scheduled_tokens={"req_0": 1},
+                new_token_ids=[[1]],
+                num_computed_tokens=[5],
+                num_output_tokens=[5],
+            ),
+            is_hybrid=False,
+        )
+        is None
+    )
+
+    # Hybrid model: a brand-new (prefill) request is a context request.
+    assert (
+        GPUModelRunner._compute_force_uniform_decode(
+            _schedule_new_request("req_0"), is_hybrid=True
+        )
+        is False
+    )
+
+    # Hybrid model: a chunked-prefill cached request (num_output_tokens == 0)
+    # is still a context request.
+    assert (
+        GPUModelRunner._compute_force_uniform_decode(
+            _schedule_cached_requests(
+                ["req_0"],
+                num_scheduled_tokens={"req_0": 3},
+                new_token_ids=[[1]],
+                num_computed_tokens=[3],
+                num_output_tokens=[0],
+            ),
+            is_hybrid=True,
+        )
+        is False
+    )
+
+    # Hybrid model: a decode-only cached request (num_output_tokens > 0) has no
+    # context request, so the heuristic decides (None).
+    assert (
+        GPUModelRunner._compute_force_uniform_decode(
+            _schedule_cached_requests(
+                ["req_0"],
+                num_scheduled_tokens={"req_0": 1},
+                new_token_ids=[[1]],
+                num_computed_tokens=[5],
+                num_output_tokens=[5],
+            ),
+            is_hybrid=True,
+        )
+        is None
+    )
+
+    # Hybrid model: a mixed batch (one prefill + one decode) still contains a
+    # context request and must not be treated as uniform decode.
+    mixed = SchedulerOutput(
+        scheduled_new_reqs=[
+            NewRequestData(
+                req_id="prefill_req",
+                prompt_token_ids=[1, 2, 3],
+                mm_features=[],
+                sampling_params=SamplingParams(),
+                pooling_params=None,
+                block_ids=([0],),
+                num_computed_tokens=0,
+                lora_request=None,
+            )
+        ],
+        scheduled_cached_reqs=CachedRequestData(
+            req_ids=["decode_req"],
+            resumed_req_ids=set(),
+            new_token_ids=[[1]],
+            all_token_ids={},
+            new_block_ids=[None],
+            num_computed_tokens=[5],
+            num_output_tokens=[5],
+        ),
+        num_scheduled_tokens={"prefill_req": 3, "decode_req": 1},
+        total_num_scheduled_tokens=4,
+        scheduled_spec_decode_tokens={},
+        scheduled_encoder_inputs={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+    assert (
+        GPUModelRunner._compute_force_uniform_decode(mixed, is_hybrid=True)
+        is False
+    )
+
+
 @pytest.mark.skipif(
     not current_platform.is_cuda(),
     reason="Attention backend FLASHINFER is only supported on CUDA.",

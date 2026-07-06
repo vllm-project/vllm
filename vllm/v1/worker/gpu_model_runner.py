@@ -3831,6 +3831,26 @@ class GPUModelRunner(
             else force_uniform_decode
         )
 
+    @staticmethod
+    def _compute_force_uniform_decode(
+        scheduler_output: "SchedulerOutput",
+        is_hybrid: bool,
+    ) -> bool | None:
+        """
+        Compute `force_uniform_decode` for the current iteration.
+
+        For hybrid models, a batch that still contains any context (prefill)
+        request must not be classified as a uniform decode batch, otherwise the
+        prefill tokens would be misclassified as decode tokens. Non-hybrid models
+        defer to the default heuristic.
+        """
+        if not is_hybrid:
+            return None
+        iteration_details = compute_iteration_details(scheduler_output)
+        if iteration_details.num_ctx_requests > 0:
+            return False
+        return None
+
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -4164,11 +4184,9 @@ class GPUModelRunner(
                     scheduler_output.num_common_prefix_blocks,
                 )
 
-            force_uniform_decode = None
-            if self.model_config.is_hybrid:
-                iteration_details = compute_iteration_details(scheduler_output)
-                if iteration_details.num_ctx_requests > 0:
-                    force_uniform_decode = False
+            force_uniform_decode = self._compute_force_uniform_decode(
+                scheduler_output, self.model_config.is_hybrid
+            )
 
             (
                 cudagraph_mode,
