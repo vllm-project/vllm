@@ -15,6 +15,7 @@ endif()
 #
 set(ENABLE_X86_ISA $ENV{VLLM_CPU_X86})
 set(ENABLE_ARM_BF16 $ENV{VLLM_CPU_ARM_BF16})
+set(ENABLE_RVV_BF16 $ENV{VLLM_CPU_RVV_BF16})
 
 include_directories("${CMAKE_SOURCE_DIR}/csrc")
 
@@ -109,6 +110,13 @@ else()
     if (ENABLE_ARM_BF16)
         set(ARM_BF16_FOUND ON)
         message(STATUS "ARM BF16 support enabled via VLLM_CPU_ARM_BF16 environment variable")
+    endif()
+    # Some kernels (e.g. Bianbu on Spacemit X100) do not report zvfbfmin
+    # in /proc/cpuinfo despite hardware support. VLLM_CPU_RVV_BF16=1
+    # overrides the detection result.
+    if (ENABLE_RVV_BF16)
+        set(RVV_BF16_FOUND ON)
+        message(STATUS "RVV BF16 support enabled via VLLM_CPU_RVV_BF16 environment variable")
     endif()
 endif()
 
@@ -205,9 +213,9 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
         if(NOT DEFINED VLLM_RVV_VLEN AND (RVV_FP16_FOUND OR RVV_BF16_FOUND))
             message(FATAL_ERROR
                 "RISC-V RVV is available but VLEN could not be auto-detected. "
-                "Please specify VLEN explicitly:\n"
-                "  -DVLLM_RVV_VLEN=128   (for VLEN=128 hardware)\n"
-                "  -DVLLM_RVV_VLEN=256   (for VLEN=256 hardware, e.g. Spacemit X100)")
+                "Please specify VLEN explicitly via CMAKE_ARGS:\n"
+                "  CMAKE_ARGS='-DVLLM_RVV_VLEN=128'   (for VLEN=128 hardware)\n"
+                "  CMAKE_ARGS='-DVLLM_RVV_VLEN=256'   (for VLEN=256 hardware, e.g. Spacemit X100)")
         endif()
     endif()
     if(VLLM_RVV_VLEN AND VLLM_RVV_VLEN GREATER 0)
@@ -219,7 +227,7 @@ elseif (CMAKE_SYSTEM_PROCESSOR MATCHES "riscv64")
             message(STATUS "BF16 extension detected")
             set(MARCH_FLAGS -march=rv64gcv_zvfh_zfbfmin_zvfbfmin_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
         elseif(RVV_FP16_FOUND)
-            message(WARNING "BF16 functionality is not available")
+            message(WARNING "BF16 functionality is not available.")
             set(MARCH_FLAGS -march=rv64gcv_zvfh_zvl${VLLM_RVV_VLEN}b -mrvv-vector-bits=zvl -mabi=lp64d)
         else()
             message(STATUS "compile riscv with scalar (no FP16/BF16)")
