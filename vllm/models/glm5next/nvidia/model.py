@@ -95,12 +95,8 @@ class Glm5NextDecoderLayer(nn.Module):
 
         if config.is_kda_layer(layer_idx):
             self.self_attn = Glm5NextLinearAttention(
-                layer_idx=layer_idx,
-                hidden_size=config.hidden_size,
-                quant_config=None,  # KDA projections are BF16 in checkpoint
-                cache_config=cache_config,
-                model_config=config,
-                rms_norm_eps=config.rms_norm_eps,
+                config=config,
+                vllm_config=vllm_config,
                 prefix=f"{prefix}.self_attn",
             )
         else:

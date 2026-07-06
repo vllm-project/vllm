@@ -261,11 +261,13 @@ def _reshape_attention_kv_cache(
         )
     else:
         # No padding — safe to use a contiguous view. For co-located (concat)
-        # groups, view only this layer's own region of the shared tensor via
-        # storage_offset.
+        # groups, view only this layer's own region of the shared tensor: the
+        # indexer sits at storage_offset 0 and the MLA immediately after it, so
+        # slice whenever the raw tensor is larger than this layer's own region
+        # (the offset-0 indexer case is not covered by ``if storage_offset``).
         base = kv_raw_tensor.view(dtype)
-        if storage_offset:
-            region_numel = prod(permuted_kv_cache_shape)
+        region_numel = prod(permuted_kv_cache_shape)
+        if base.numel() != region_numel:
             base = base[storage_offset : storage_offset + region_numel]
         kv_cache = base.view(permuted_kv_cache_shape)
 
