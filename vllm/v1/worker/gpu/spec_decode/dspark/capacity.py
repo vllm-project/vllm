@@ -9,6 +9,7 @@ import torch
 from vllm.triton_utils import tl, triton
 from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
+from vllm.v1.worker.gpu.input_batch import get_num_sampled_and_rejected
 from vllm.v1.worker.gpu.spec_decode.decompaction import (
     SamplerDecompactionBuffers,
     SamplerDecompactionMetadata,
@@ -119,6 +120,7 @@ class CapacityBasedVerificationManager:
         self.num_draft_tokens: int = 0
         self.copy_event_pending = False
         self._sampler_decompaction_state: _SamplerDecompactionState | None = None
+        self.sampler_decompaction: SamplerDecompactionMetadata | None = None
 
     def clear(self) -> None:
         self.req_ids = []
@@ -127,6 +129,7 @@ class CapacityBasedVerificationManager:
         self.num_draft_tokens = 0
         self.copy_event_pending = False
         self._sampler_decompaction_state = None
+        self.sampler_decompaction = None
 
     def apply_draft_token_capacity(
         self,
@@ -252,12 +255,36 @@ class CapacityBasedVerificationManager:
     def trim_batch(self, input_batch: "InputBatch") -> "InputBatch":
         if input_batch.num_draft_tokens == 0:
             self._sampler_decompaction_state = None
-            input_batch.sampler_decompaction = None
+            self.sampler_decompaction = None
             return input_batch
-        input_batch.sampler_decompaction = self._prepare_sampler_decompaction(
-            input_batch
-        )
+        self.sampler_decompaction = self._prepare_sampler_decompaction(input_batch)
         return input_batch
+
+    def get_num_rejected_for_next_step(
+        self,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        input_batch: "InputBatch",
+        prefill_lens: torch.Tensor,
+    ) -> torch.Tensor:
+        if self.sampler_decompaction is None:
+            return num_rejected
+        _, num_rejected = get_num_sampled_and_rejected(
+            num_sampled,
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            prefill_lens,
+        )
+        return num_rejected
+
+    def get_postprocess_query_start_loc(
+        self,
+        input_batch: "InputBatch",
+    ) -> torch.Tensor:
+        if self.sampler_decompaction is None:
+            return input_batch.query_start_loc
+        return self.sampler_decompaction.query_start_loc
 
 
 @triton.jit

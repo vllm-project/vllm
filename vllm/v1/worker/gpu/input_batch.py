@@ -1,20 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from __future__ import annotations
-
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
 
 import numpy as np
 import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.utils import random_uuid
-
-if TYPE_CHECKING:
-    from vllm.v1.worker.gpu.spec_decode.decompaction import (
-        SamplerDecompactionMetadata,
-    )
 
 
 class InputBuffers:
@@ -109,20 +101,9 @@ class InputBatch:
 
     max_req_tokens: int | None = None
 
-    # Sampler-only logical metadata used when verifier inputs are compacted by
-    # DSpark draft-token capacity. Target forward/attention keep using the
-    # compact fields above.
-    sampler_decompaction: SamplerDecompactionMetadata | None = None
-
     @property
     def max_query_len(self) -> int:
         return self.max_req_tokens or self.num_scheduled_tokens.max().item()
-
-    @property
-    def postprocess_query_start_loc(self) -> torch.Tensor:
-        if self.sampler_decompaction is not None:
-            return self.sampler_decompaction.query_start_loc
-        return self.query_start_loc
 
     @classmethod
     def make_dummy(
@@ -130,7 +111,7 @@ class InputBatch:
         num_reqs: int,
         num_tokens: int,
         input_buffers: InputBuffers,
-    ) -> InputBatch:
+    ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
 

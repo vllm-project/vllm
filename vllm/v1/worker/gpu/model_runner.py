@@ -77,7 +77,6 @@ from vllm.v1.worker.gpu.input_batch import (
     InputBuffers,
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
-    get_num_sampled_and_rejected,
     post_update,
     post_update_num_computed_tokens,
     prepare_pos_seq_lens,
@@ -1098,19 +1097,19 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
+                self.capacity_verification_manager.sampler_decompaction,
             )
 
         assert sampler_output.num_sampled is not None
         assert sampler_output.num_rejected is not None
-        num_rejected_for_next_step = sampler_output.num_rejected
-        if input_batch.sampler_decompaction is not None:
-            _, num_rejected_for_next_step = get_num_sampled_and_rejected(
+        num_rejected_for_next_step = (
+            self.capacity_verification_manager.get_num_rejected_for_next_step(
                 sampler_output.num_sampled,
-                input_batch.seq_lens,
-                input_batch.cu_num_logits,
-                input_batch.idx_mapping,
+                sampler_output.num_rejected,
+                input_batch,
                 self.req_states.prefill_len.gpu,
             )
+        )
 
         return sampler_output, sampler_output.num_sampled, num_rejected_for_next_step
 
@@ -1508,7 +1507,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             sampler_output.sampled_token_ids,
             num_sampled,
             num_rejected_for_postprocess,
-            input_batch.postprocess_query_start_loc,
+            self.capacity_verification_manager.get_postprocess_query_start_loc(
+                input_batch
+            ),
         )
 
         if self.speculator is not None:

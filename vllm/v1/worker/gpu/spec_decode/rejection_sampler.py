@@ -15,6 +15,7 @@ from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
+from vllm.v1.worker.gpu.spec_decode.decompaction import SamplerDecompactionMetadata
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
@@ -103,6 +104,7 @@ class RejectionSampler:
         logits: torch.Tensor,
         input_batch: InputBatch,
         draft_logits: torch.Tensor | None = None,
+        decompaction: SamplerDecompactionMetadata | None = None,
     ) -> SamplerOutput:
         # NOTE(woosuk): We intentionally compute num_nans before sampling to make clear
         # that num_nans is computed before applying penalties and temperature.
@@ -118,7 +120,6 @@ class RejectionSampler:
             draft_sampled,
             input_batch.expanded_local_pos,
         )
-        decompaction = input_batch.sampler_decompaction
         rejection_draft_sampled = draft_sampled
         rejection_cu_num_logits = input_batch.cu_num_logits
         rejection_pos = pos
