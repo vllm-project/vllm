@@ -246,6 +246,11 @@ INSTANTIATE_ALL_M(4, 512, 6144)
 // and every alternative loses — cublasLt top-8 3.6TB/s wall, DeepGEMM
 // 0.71x, wmma+cp.async custom 0.30x pending a TMA rewrite).
 INSTANTIATE_ALL_M(4, 2624, 6144)
+// DSv3.2 (TP8) siblings of the GLM shapes above, same dual-chip matrix:
+//   fused_qkv_a (2112, 7168), 30MB: wins M<=2 (M=1 1.30-1.34x)
+//   MTP eh_proj (7168, 14336), 205MB: wins M<=2 (M=1 1.12-1.16x)
+INSTANTIATE_ALL_M(4, 2112, 7168)
+INSTANTIATE_ALL_M(2, 7168, 14336)
 
 #undef INSTANTIATE_ALL_M
 #undef INSTANTIATE

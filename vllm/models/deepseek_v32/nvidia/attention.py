@@ -335,24 +335,33 @@ class DeepseekV32Attention(MLAAttention):
         )
         # Decode-M GEMM dispatch for the bf16 A/B projections, measured on
         # B300 and B200 (graph replay + rotating weights vs fp64):
-        # bf16_skinny_gemm wins at M <= 2, dsv3_fused_a_gemm at 3 <= M <= 16,
-        # cuBLAS above. Blackwell-only: the boundaries and the fused_a
-        # tile_m=32 choice are tied to the 148/152-SM single-wave geometry.
+        # bf16_skinny_gemm for M <= skinny_max, dsv3_fused_a_gemm up to
+        # M = 16, cuBLAS above. Blackwell-only: the boundaries and the
+        # fused_a tile choices are tied to the 148/152-SM single-wave
+        # geometry. DSv3.2 q_b has no skinny tier (K=1536 does not fit the
+        # GEMV's 128x8 K-step; fused_a still wins 1.6-1.8x there).
         # Quantized linear methods may not register .weight until
         # process_weights_after_loading (e.g. compressed-tensors NVFP4
         # registers weight_packed at init) — probe with getattr.
-        qkv_a_weight = getattr(self.fused_qkv_a_proj, "weight", None)
-        q_b_weight = getattr(self.q_b_proj, "weight", None)
-        self._skinny_gemm_ok = (
+        # (N, K) -> skinny_max
+        qkv_a_dispatch = {(2624, 6144): 2, (2112, 7168): 2}
+        q_b_dispatch = {(2048, 2048): 2, (3072, 1536): 0}
+        ok = (
             current_platform.is_device_capability_family(100)
             and hasattr(torch.ops._C, "bf16_skinny_gemm")
             and hasattr(torch.ops._C, "dsv3_fused_a_gemm")
-            and qkv_a_weight is not None
-            and qkv_a_weight.dtype == torch.bfloat16
-            and tuple(qkv_a_weight.shape) == (2624, 6144)
-            and q_b_weight is not None
-            and q_b_weight.dtype == torch.bfloat16
-            and tuple(q_b_weight.shape) == (2048, 2048)
+        )
+        qkv_a_weight = getattr(self.fused_qkv_a_proj, "weight", None)
+        q_b_weight = getattr(self.q_b_proj, "weight", None)
+        self._qkv_a_skinny_max = (
+            qkv_a_dispatch.get(tuple(qkv_a_weight.shape))
+            if ok and qkv_a_weight is not None and qkv_a_weight.dtype == torch.bfloat16
+            else None
+        )
+        self._q_b_skinny_max = (
+            q_b_dispatch.get(tuple(q_b_weight.shape))
+            if ok and q_b_weight is not None and q_b_weight.dtype == torch.bfloat16
+            else None
         )
 
         # Lightning indexer uses its own RoPE; interleave maps to non-NeoX.
@@ -363,9 +372,11 @@ class DeepseekV32Attention(MLAAttention):
             is_neox_style=not getattr(config, "indexer_rope_interleave", False),
         )
 
-    def _decode_m_gemm(self, x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
-        """x @ weight.T for decode M <= 16 (see _skinny_gemm_ok)."""
-        if x.shape[0] <= 2:
+    def _decode_m_gemm(
+        self, x: torch.Tensor, weight: torch.Tensor, skinny_max: int
+    ) -> torch.Tensor:
+        """x @ weight.T for decode M <= 16."""
+        if x.shape[0] <= skinny_max:
             return ops.bf16_skinny_gemm(x, weight)
         out = torch.empty((x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device)
         ops.dsv3_fused_a_gemm(out, x, weight.t())
@@ -377,8 +388,12 @@ class DeepseekV32Attention(MLAAttention):
         hidden_states: torch.Tensor,
     ) -> torch.Tensor:
         # Captured: A-projections (+ indexer A-GEMM on indexer layers).
-        if self._skinny_gemm_ok and hidden_states.shape[0] <= 16:
-            qkv_lora = self._decode_m_gemm(hidden_states, self.fused_qkv_a_proj.weight)
+        if self._qkv_a_skinny_max is not None and hidden_states.shape[0] <= 16:
+            qkv_lora = self._decode_m_gemm(
+                hidden_states,
+                self.fused_qkv_a_proj.weight,
+                self._qkv_a_skinny_max,
+            )
         else:
             qkv_lora = self.fused_qkv_a_proj(hidden_states)[0]
         q_c, kv_c, k_pe = qkv_lora.split(
@@ -486,8 +501,8 @@ class DeepseekV32Attention(MLAAttention):
             index_rope_interleave=self._index_rope_interleave,
         )
 
-        if self._skinny_gemm_ok and q_c.shape[0] <= 16:
-            q = self._decode_m_gemm(q_c, self.q_b_proj.weight)
+        if self._q_b_skinny_max is not None and q_c.shape[0] <= 16:
+            q = self._decode_m_gemm(q_c, self.q_b_proj.weight, self._q_b_skinny_max)
         else:
             q = self.q_b_proj(q_c)[0]
         q = q.view(-1, self.num_local_heads, self.qk_head_dim)

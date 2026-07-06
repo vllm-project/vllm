@@ -23,6 +23,8 @@ static inline bool bf16_skinny_gemm_supported(int n, int k) {
   // family loses to cuBLAS at larger M).
   if (k == 2048 && n == 2048) return true;  // q_b_proj (TP8)
   if (k == 6144 && n == 2624) return true;  // fused_qkv_a (wire M <= 2 only)
+  if (k == 7168 && n == 2112) return true;  // DSv3.2 fused_qkv_a (M <= 2)
+  if (k == 14336 && n == 7168) return true;  // DSv3.2 eh_proj (M <= 2)
   if (k == 6144 && n == 512) return true;   // shared-expert gate_up (TP8)
   return false;
 }
@@ -82,6 +84,12 @@ static void dispatchBf16SkinnyGemm(int n, int k, int num_tokens,
         num_tokens, output, mat_a, mat_b, out_stride, stream);
   } else if (n == 2624 && k == 6144) {
     SkinnyLoopUnroller<4, 2624, 6144, 1, SKINNY_MAX_TOKENS>::unroll(
+        num_tokens, output, mat_a, mat_b, out_stride, stream);
+  } else if (n == 2112 && k == 7168) {
+    SkinnyLoopUnroller<4, 2112, 7168, 1, SKINNY_MAX_TOKENS>::unroll(
+        num_tokens, output, mat_a, mat_b, out_stride, stream);
+  } else if (n == 7168 && k == 14336) {
+    SkinnyLoopUnroller<2, 7168, 14336, 1, SKINNY_MAX_TOKENS>::unroll(
         num_tokens, output, mat_a, mat_b, out_stride, stream);
   } else if (n == 512 && k == 6144) {
     SkinnyLoopUnroller<4, 512, 6144, 1, SKINNY_MAX_TOKENS>::unroll(

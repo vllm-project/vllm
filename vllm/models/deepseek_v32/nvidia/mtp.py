@@ -51,17 +51,18 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
-        # bf16 skinny GEMM for the (6144, 12288) eh_proj: wins only at M <= 3
-        # on B300 (23.3/26.1/27.4us vs cuBLAS ~27.6); cuBLAS splitK holds
-        # from M=4 up (151MB weight streams at 5.6TB/s there).
-        # Shape-gated: the kernel only instantiates the GLM-5.2 geometry;
-        # DeepSeek-V3-family (hidden 7168 -> weight (7168, 14336)) must stay
-        # on cuBLAS.
-        self._eh_skinny_ok = (
-            current_platform.is_device_capability_family(100)
+        # bf16 skinny GEMM for the eh_proj, B300+B200 measured: GLM-5.2
+        # (6144, 12288) wins at M <= 3, DSv3.2 (7168, 14336) at M <= 2;
+        # cuBLAS holds above (the 151/205MB weights stream at ~5.7TB/s).
+        eh_dispatch = {(6144, 12288): 3, (7168, 14336): 2}
+        eh_weight = getattr(self.eh_proj, "weight", None)
+        self._eh_skinny_max = (
+            eh_dispatch.get(tuple(eh_weight.shape), 0)
+            if current_platform.is_device_capability_family(100)
             and hasattr(torch.ops._C, "bf16_skinny_gemm")
-            and self.eh_proj.weight.dtype == torch.bfloat16
-            and tuple(self.eh_proj.weight.shape) == (6144, 12288)
+            and eh_weight is not None
+            and eh_weight.dtype == torch.bfloat16
+            else 0
         )
 
         topk_indices_buffer = torch.empty(
@@ -99,8 +100,7 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             self.enorm.variance_epsilon,
         )
         if (
-            self._eh_skinny_ok
-            and eh_input.shape[0] <= 3
+            eh_input.shape[0] <= self._eh_skinny_max
             and eh_input.dtype == torch.bfloat16
         ):
             hidden_states = ops.bf16_skinny_gemm(eh_input, self.eh_proj.weight)
