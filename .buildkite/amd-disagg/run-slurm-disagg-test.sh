@@ -136,47 +136,44 @@ if [[ "${WAIT}" != "1" ]]; then
     exit 0
 fi
 
-# --- WAIT=1: poll until the job leaves the queue (timeout-guarded) --------------
-# Every scheduler call is wrapped in `timeout` so a hung/absent squeue/sacct
-# (e.g. on Spur) degrades to a break instead of blocking the caller forever.
-echo "[slurm-submit] WAIT=1: polling scheduler until job ${JOB_ID} finishes" >&2
-while :; do
-    STATE=$(timeout 15 squeue -j "${JOB_ID}" -h -o "%T" 2>/dev/null || echo "")
-    [[ -z "${STATE}" ]] && break
-    case "${STATE}" in COMPLETED|FAILED|CANCELLED|TIMEOUT|NODE_FAIL) break ;; esac
-    sleep 15
+# --- WAIT=1: poll NFS job log for PASS/FAIL (Spur-safe) -----------------------
+# squeue/sacct are unreliable on Spur login nodes (empty/hang). Do not treat an
+# empty squeue as "job finished" while the log has no gate verdict yet.
+echo "[slurm-submit] WAIT=1: polling ${LOG_FILE} for gate (timeout ${TIME_LIMIT})" >&2
+_h=0 _m=0 _s=0
+IFS=: read -r _h _m _s <<< "${TIME_LIMIT}"
+WAIT_DEADLINE=$(( $(date +%s) + 10#${_h}*3600 + 10#${_m}*60 + 10#${_s:-0} ))
+unset -v _h _m _s
+
+STATE=""
+RC=1
+while [[ $(date +%s) -lt ${WAIT_DEADLINE} ]]; do
+    if grep -aqE '(PASS|FAIL): ' "${LOG_FILE}" 2>/dev/null; then
+        if grep -aqE 'FAIL: ' "${LOG_FILE}" 2>/dev/null; then
+            STATE="FAILED"
+            RC=1
+        else
+            STATE="COMPLETED"
+            RC=0
+        fi
+        break
+    fi
+    _sq=$(timeout 15 squeue -j "${JOB_ID}" -h -o "%T" 2>/dev/null || true)
+    case "${_sq}" in
+        FAILED|CANCELLED|TIMEOUT|NODE_FAIL)
+            STATE="${_sq}"
+            RC=1
+            break
+            ;;
+    esac
+    unset -v _sq
+    sleep 30
 done
 
-# ---- determine pass/fail -----------------------------------------------------
-# Derive the result from BOTH the final SLURM state AND the exit code. sacct
-# reports the *main* job row's ExitCode as 0:0 even for a CANCELLED/TIMEOUT job
-# (the signal only shows on the .batch/.<step> rows), so trusting ExitCode alone
-# would mask an aborted run as success — a false green. We therefore:
-#   1) read the main row's State + ExitCode (code:signal),
-#   2) promote a signal-kill (code 0, signal !=0) to a non-zero rc, and
-#   3) treat any non-COMPLETED terminal state as a failure.
-# The GSM8K gate itself rides the exit code: vllm_disagg.sh's
-# run_accuracy returns 1 when exact_match < ACCURACY_THRESHOLD, which propagates
-# srun -> batch `exit` -> State=FAILED ExitCode=1:0 -> RC=1 here.
-STATE=$(timeout 15 sacct -j "${JOB_ID}" -n -o State 2>/dev/null | awk 'NR==1{print $1}')
-read -r RC SIG < <(timeout 15 sacct -j "${JOB_ID}" -n -o ExitCode 2>/dev/null \
-    | awk -F: 'NR==1{gsub(/[^0-9]/,"",$1); gsub(/[^0-9]/,"",$2); print $1+0, $2+0; exit}')
-RC="${RC:-0}"; SIG="${SIG:-0}"
-[[ "${RC}" == "0" && "${SIG}" != "0" ]] && RC=$((128 + SIG))
-
-# If sacct is unavailable (Spur), fall back to the gate verdict in the job log.
-if [[ -z "${STATE:-}" ]]; then
-    if grep -aqE '^PASS: |PASS: ' "${LOG_FILE}" 2>/dev/null; then STATE="COMPLETED"; RC=0
-    elif grep -aqE '^FAIL: |FAIL: ' "${LOG_FILE}" 2>/dev/null; then STATE="FAILED"; RC=1; fi
+if [[ -z "${STATE}" ]]; then
+    echo "[slurm-submit] WARN: no gate verdict before ${TIME_LIMIT}; failing" >&2
+    RC=1
 fi
-
-case "${STATE:-}" in
-    COMPLETED) : ;;                                  # genuine success (incl. accuracy PASS)
-    "")        echo "[slurm-submit] WARN: no scheduler state for ${JOB_ID}; treating as failure" >&2
-               [[ "${RC}" == "0" ]] && RC=1 ;;
-    *)         echo "[slurm-submit] state=${STATE} is not COMPLETED -> failing" >&2
-               [[ "${RC}" == "0" ]] && RC=1 ;;
-esac
 
 # Surface the accuracy gate verdict (if any) from the job log — to stderr.
 GATE_LINE=$(grep -aE '(PASS|FAIL): ' "${LOG_FILE}" 2>/dev/null | tail -n1 || true)
