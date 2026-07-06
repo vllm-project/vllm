@@ -144,6 +144,13 @@ too_many_arguments = "allow"
 [profile.dev]
 panic = "abort"
 
+# Speed up cold tokenizer construction in tests.
+[profile.dev.package]
+fastokens = { opt-level = 3 }
+regex-automata = { opt-level = 3 }
+serde_json = { opt-level = 3 }
+tokenizers = { opt-level = 3 }
+
 [profile.release]
 lto = "thin"
 panic = "abort"
