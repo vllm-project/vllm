@@ -5,7 +5,25 @@ import sys
 from types import ModuleType, SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 import torch
+
+from vllm.platforms import current_platform
+
+if not current_platform.is_rocm():
+    pytest.skip(
+        "ROCm AITER sparse MLA metadata sync test requires ROCm.",
+        allow_module_level=True,
+    )
+
+from vllm._aiter_ops import is_aiter_found_and_supported
+
+if not is_aiter_found_and_supported():
+    pytest.skip(
+        "ROCm AITER sparse MLA metadata sync test requires a supported AITER "
+        "installation.",
+        allow_module_level=True,
+    )
 
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.mla import rocm_aiter_mla_sparse as sparse_mod
