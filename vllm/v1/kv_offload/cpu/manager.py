@@ -150,7 +150,7 @@ class CPUOffloadingManager(OffloadingManager):
 
     @override
     def touch(self, keys: Collection[OffloadKey], req_context: ReqContext) -> None:
-        self._policy.touch(keys)
+        self._policy.touch(keys, req_context)
 
     @override
     def complete_load(
