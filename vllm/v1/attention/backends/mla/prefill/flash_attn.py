@@ -3,8 +3,9 @@
 """FlashAttention backend for MLA prefill."""
 
 import functools
+from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import torch
 
@@ -228,6 +229,11 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
             fa_version=fa_version,
         )
 
+    @staticmethod
+    def kernel(*args: Any, **kwargs: Any) -> Any:
+        assert flash_attn_varlen_func is not None
+        return flash_attn_varlen_func(*args, **kwargs)
+
     def compile(self, compile_key: CompileKey) -> None:
         assert compile_flash_attn_varlen_func_from_specs is not None
         window_size = (
@@ -252,6 +258,18 @@ class FA4MLAPrefillKernel(VllmJitKernel["FA4MLAPrefillKernel.CompileKey"]):
             fa_version=compile_key.fa_version,
             num_splits=compile_key.num_splits,
         )
+
+    def __call__(
+        self,
+        *,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        runtime_kernel: Callable[..., Any] | None = None,
+        **kwargs: Any,
+    ) -> Any:
+        kernel = self.kernel if runtime_kernel is None else runtime_kernel
+        return kernel(q=q, k=k, v=v, **kwargs)
 
 
 FA4_MLA_PREFILL_KERNEL = FA4MLAPrefillKernel()
@@ -360,10 +378,11 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
         if envs.VLLM_BATCH_INVARIANT:
             kwargs["num_splits"] = 1
 
-        attn_out = self.flash_attn_varlen_func(
+        attn_out = FA4_MLA_PREFILL_KERNEL(
             q=q,
             k=k,
             v=maybe_padded_v,
+            runtime_kernel=self.flash_attn_varlen_func,
             softmax_scale=softmax_scale,
             **kwargs,
         )

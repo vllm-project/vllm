@@ -283,3 +283,8 @@ class VllmJitKernel(Generic[CompileKeyT], ABC):
     def compile(self, compile_key: CompileKeyT) -> None:
         """Compile one warmup key."""
         raise NotImplementedError
+
+    def warmup(self, *args: Any, **kwargs: Any) -> None:
+        """Compile this kernel's warmup keys."""
+        for compile_key in self.get_warmup_keys(*args, **kwargs):
+            self.compile(compile_key)

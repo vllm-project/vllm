@@ -293,6 +293,37 @@ class ComputePrefillMetadataKernel(
     class CompileKey:
         BLOCK_SIZE: int
 
+    @staticmethod
+    @triton.jit(do_not_specialize=["num_prefills", "num_decodes", "window_size"])
+    def kernel(
+        # Outputs
+        prefill_gather_lens_ptr,
+        # Inputs
+        seq_lens_ptr,
+        query_start_loc_ptr,
+        num_prefills,
+        num_decodes,
+        window_size,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        """Compute prefill gather_lens in a single pass."""
+        offset = tl.arange(0, BLOCK_SIZE)
+        mask = offset < num_prefills
+        # SM12x + Triton 3.6 raises IMA on out-of-bounds address arithmetic for
+        # masked-off lanes even though the load mask gates the actual read, so
+        # clamp the offset. Caller guarantees num_prefills > 0.
+        safe_offset = tl.minimum(offset, num_prefills - 1)
+
+        seq_len = tl.load(seq_lens_ptr + num_decodes + safe_offset, mask=mask)
+        qsl_start = tl.load(query_start_loc_ptr + num_decodes + safe_offset, mask=mask)
+        qsl_end = tl.load(query_start_loc_ptr + num_decodes + safe_offset + 1, mask=mask)
+
+        query_len = qsl_end - qsl_start
+        prefix_len = seq_len - query_len
+        gather_len = query_len + tl.minimum(prefix_len, window_size - 1)
+
+        tl.store(prefill_gather_lens_ptr + offset, gather_len, mask=mask)
+
     def dispatch(  # type: ignore[override]
         self,
         *,
@@ -316,7 +347,7 @@ class ComputePrefillMetadataKernel(
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(_compute_prefill_metadata_kernel, "warmup", None)
+        warmup = getattr(self.kernel, "warmup", None)
         assert warmup is not None
         int32_ptr = TritonWarmupTensor(torch.int32)
         warmup(
@@ -330,8 +361,32 @@ class ComputePrefillMetadataKernel(
             grid=(1,),
         )
 
+    def __call__(
+        self,
+        prefill_gather_lens: torch.Tensor,
+        seq_lens: torch.Tensor,
+        query_start_loc: torch.Tensor,
+        num_prefills: int,
+        num_decodes: int,
+        window_size: int,
+    ) -> None:
+        compile_key = self.dispatch(num_prefills=num_prefills)
+        self.kernel[(1,)](
+            prefill_gather_lens,
+            seq_lens,
+            query_start_loc,
+            num_prefills,
+            num_decodes,
+            window_size,
+            BLOCK_SIZE=compile_key.BLOCK_SIZE,
+        )
+
 _COMPUTE_PREFILL_METADATA_KERNEL = ComputePrefillMetadataKernel()
 ComputePrefillMetadataKernelCompileKey = ComputePrefillMetadataKernel.CompileKey
+assert_compile_key_matches_triton(
+    _COMPUTE_PREFILL_METADATA_KERNEL,
+    ComputePrefillMetadataKernel.kernel,
+)
 
 
 class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
@@ -611,14 +666,13 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
             pfx_gather_lens = torch.empty(
                 num_prefills, dtype=torch.int32, device=seq_lens.device
             )
-            _compute_prefill_metadata_kernel[(1,)](
+            _COMPUTE_PREFILL_METADATA_KERNEL(
                 pfx_gather_lens,
                 seq_lens,
                 query_start_loc,
                 num_prefills,
                 num_decodes,
                 self.window_size,
-                BLOCK_SIZE=triton.next_power_of_2(num_prefills),
             )
 
             result["prefill_seq_lens"] = seq_lens[num_decodes:]
@@ -634,42 +688,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         return result
 
-
-@triton.jit(do_not_specialize=["num_prefills", "num_decodes", "window_size"])
-def _compute_prefill_metadata_kernel(
-    # Outputs
-    prefill_gather_lens_ptr,
-    # Inputs
-    seq_lens_ptr,
-    query_start_loc_ptr,
-    num_prefills,
-    num_decodes,
-    window_size,
-    BLOCK_SIZE: tl.constexpr,
-):
-    """Compute prefill gather_lens in a single pass."""
-    offset = tl.arange(0, BLOCK_SIZE)
-    mask = offset < num_prefills
-    # SM12x + Triton 3.6 raises IMA on out-of-bounds address arithmetic for
-    # masked-off lanes even though the load mask gates the actual read, so
-    # clamp the offset. Caller guarantees num_prefills > 0.
-    safe_offset = tl.minimum(offset, num_prefills - 1)
-
-    seq_len = tl.load(seq_lens_ptr + num_decodes + safe_offset, mask=mask)
-    qsl_start = tl.load(query_start_loc_ptr + num_decodes + safe_offset, mask=mask)
-    qsl_end = tl.load(query_start_loc_ptr + num_decodes + safe_offset + 1, mask=mask)
-
-    query_len = qsl_end - qsl_start
-    prefix_len = seq_len - query_len
-    gather_len = query_len + tl.minimum(prefix_len, window_size - 1)
-
-    tl.store(prefill_gather_lens_ptr + offset, gather_len, mask=mask)
-
-
-assert_compile_key_matches_triton(
-    _COMPUTE_PREFILL_METADATA_KERNEL,
-    _compute_prefill_metadata_kernel,
-)
 
 
 @triton.jit(do_not_specialize=["token_offset"])

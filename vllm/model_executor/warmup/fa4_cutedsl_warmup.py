@@ -24,7 +24,4 @@ def fa4_cutedsl_warmup(worker: "Worker") -> None:
     if backend_cls.get_name() != "FLASH_ATTN":
         return
 
-    for compile_key in flash_attn.FA4_MLA_PREFILL_KERNEL.get_warmup_keys(
-        vllm_config
-    ):
-        flash_attn.FA4_MLA_PREFILL_KERNEL.compile(compile_key)
+    flash_attn.FA4_MLA_PREFILL_KERNEL.warmup(vllm_config)

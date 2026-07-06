@@ -217,6 +217,83 @@ class BuildPrefillChunkMetadataKernel(
         COMPRESS_RATIO: int
         input_variant: TritonPointerInputVariant
 
+    @staticmethod
+    @triton.jit
+    def kernel(
+        # Inputs
+        query_start_loc_ptr,
+        uncompressed_seq_lens_ptr,
+        cu_compressed_seq_lens_ptr,
+        # Row-start base for cu_seq_len_ks/ke: local cumulative lens under DCP,
+        # aliases cu_compressed_seq_lens_ptr otherwise.
+        row_start_cu_compressed_seq_lens_ptr,
+        # Outputs
+        token_to_seq_ptr,
+        cu_compressed_seq_len_ks_ptr,
+        cu_compressed_seq_len_ke_ptr,
+        query_slice_start,
+        query_slice_stop,
+        DCP_RANK,
+        DCP_WORLD,
+        DCP_INTERLEAVE,
+        BLOCK_SIZE: tl.constexpr,
+        COMPRESS_RATIO: tl.constexpr,
+    ):
+        batch_idx = tl.program_id(0)
+
+        query_start = tl.load(query_start_loc_ptr + batch_idx)
+        query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
+        query_len = query_end - query_start
+
+        seq_start = tl.load(cu_compressed_seq_lens_ptr + batch_idx)
+        seq_end = tl.load(cu_compressed_seq_lens_ptr + batch_idx + 1)
+        compressed_seq_len = seq_end - seq_start
+
+        # Row start for the (possibly localized) cu_seq_len_ks/ke. Equals seq_start
+        # when DCP is disabled (the pointer aliases cu_compressed_seq_lens_ptr).
+        row_start = tl.load(row_start_cu_compressed_seq_lens_ptr + batch_idx)
+
+        uncompressed_seq_len = tl.load(uncompressed_seq_lens_ptr + batch_idx)
+        start_pos = uncompressed_seq_len - query_len
+
+        for i in range(0, query_len, BLOCK_SIZE):
+            offset = i + tl.arange(0, BLOCK_SIZE)
+            abs_pos = query_start + offset
+            mask = (
+                (offset < query_len)
+                & (abs_pos >= query_slice_start)
+                & (abs_pos < query_slice_stop)
+            )
+            out_pos = abs_pos - query_slice_start
+
+            # cu_seq_len_ks: row start in the gathered K buffer.
+            tl.store(cu_compressed_seq_len_ks_ptr + out_pos, row_start, mask=mask)
+
+            # cu_seq_len_ke: row start + per-token context length. Under DCP the
+            # global per-token length is sharded across ranks.
+            global_ctx = start_pos + 1 + offset
+            len_per_token = global_ctx // COMPRESS_RATIO
+            if DCP_WORLD > 1:
+                # Per-rank local context length under interleave-aware DCP, matching
+                # get_dcp_local_seq_lens. K == 1 reduces to (len + world-1-rank)//world.
+                base = (len_per_token // DCP_INTERLEAVE // DCP_WORLD) * DCP_INTERLEAVE
+                remainder = len_per_token - base * DCP_WORLD
+                remainder = tl.minimum(
+                    tl.maximum(remainder - DCP_RANK * DCP_INTERLEAVE, 0), DCP_INTERLEAVE
+                )
+                len_per_token = base + remainder
+            tl.store(
+                cu_compressed_seq_len_ke_ptr + out_pos,
+                row_start + len_per_token,
+                mask=mask,
+            )
+
+        # Compute token_to_seq
+        for i in range(0, compressed_seq_len, BLOCK_SIZE):
+            offset = i + tl.arange(0, BLOCK_SIZE)
+            mask = offset < compressed_seq_len
+            tl.store(token_to_seq_ptr + seq_start + offset, batch_idx, mask=mask)
+
     def dispatch(  # type: ignore[override]
         self,
         *,
@@ -243,6 +320,10 @@ class BuildPrefillChunkMetadataKernel(
     def get_warmup_keys(self, vllm_config: VllmConfig) -> list[CompileKey]:
         max_tokens = max(1, min(vllm_config.scheduler_config.max_num_batched_tokens, 8))
         hf_config = vllm_config.model_config.hf_config
+        parallel_config = vllm_config.parallel_config
+        dcp_world = parallel_config.decode_context_parallel_size
+        dcp_interleave = parallel_config.cp_kv_cache_interleave_size
+        dcp_rank = get_dcp_group().rank_in_group if dcp_world > 1 else 0
         compress_ratios = tuple(
             int(ratio)
             for ratio in (getattr(hf_config, "compress_ratios", None) or (1,))
@@ -250,16 +331,16 @@ class BuildPrefillChunkMetadataKernel(
         return self._trace_dispatch(self.dispatch)(
             query_slice_start=WarmupIntRange(0, 2),
             query_slice_stop=(1, 2 * max_tokens - 1, 2 * max_tokens),
-            DCP_RANK=0,
-            DCP_WORLD=1,
-            DCP_INTERLEAVE=1,
+            DCP_RANK=dcp_rank,
+            DCP_WORLD=dcp_world,
+            DCP_INTERLEAVE=dcp_interleave,
             BLOCK_SIZE=1024,
             COMPRESS_RATIO=list(compress_ratios),
             input_variant=_BUILD_PREFILL_CHUNK_METADATA_INPUT_VARIANTS,
         )
 
     def compile(self, compile_key: CompileKey) -> None:
-        warmup = getattr(_build_prefill_chunk_metadata_kernel, "warmup", None)
+        warmup = getattr(self.kernel, "warmup", None)
         assert warmup is not None
         int32_ptr = TritonWarmupTensor(torch.int32)
         warmup(
@@ -280,8 +361,48 @@ class BuildPrefillChunkMetadataKernel(
             grid=(1,),
         )
 
+    def __call__(
+        self,
+        query_start_loc: torch.Tensor,
+        uncompressed_seq_lens: torch.Tensor,
+        cu_compressed_seq_lens: torch.Tensor,
+        row_start_cu_compressed_seq_lens: torch.Tensor,
+        token_to_seq: torch.Tensor,
+        cu_compressed_seq_len_ks: torch.Tensor,
+        cu_compressed_seq_len_ke: torch.Tensor,
+        query_slice_start: int,
+        query_slice_stop: int,
+        DCP_RANK: int,
+        DCP_WORLD: int,
+        DCP_INTERLEAVE: int,
+        *,
+        num_reqs: int,
+        COMPRESS_RATIO: int,
+    ) -> None:
+        self.kernel[(num_reqs,)](
+            query_start_loc,
+            uncompressed_seq_lens,
+            cu_compressed_seq_lens,
+            row_start_cu_compressed_seq_lens,
+            token_to_seq,
+            cu_compressed_seq_len_ks,
+            cu_compressed_seq_len_ke,
+            query_slice_start,
+            query_slice_stop,
+            DCP_RANK,
+            DCP_WORLD,
+            DCP_INTERLEAVE,
+            BLOCK_SIZE=_BUILD_PREFILL_CHUNK_METADATA_BLOCK_SIZE,
+            COMPRESS_RATIO=COMPRESS_RATIO,
+        )
+
 _BUILD_PREFILL_CHUNK_METADATA_KERNEL = BuildPrefillChunkMetadataKernel()
 PrefillChunkMetadataKernelCompileKey = BuildPrefillChunkMetadataKernel.CompileKey
+assert_compile_key_matches_triton(
+    _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
+    BuildPrefillChunkMetadataKernel.kernel,
+    extra_compile_key_fields=("input_variant",),
+)
 
 
 @dataclass
@@ -921,7 +1042,7 @@ def build_prefill_chunk_metadata(
 
     # Under DCP the kernel writes this rank's local row bounds into
     # cu_seq_len_ks/ke; otherwise local_cu_seq_lens aliases cu_seq_lens.
-    _build_prefill_chunk_metadata_kernel[(num_reqs,)](
+    _BUILD_PREFILL_CHUNK_METADATA_KERNEL(
         query_start_loc,
         uncompressed_seq_lens[start_idx:end_idx],
         cu_seq_lens,
@@ -934,7 +1055,7 @@ def build_prefill_chunk_metadata(
         dcp_rank,
         dcp_world_size,
         cp_kv_cache_interleave_size,
-        BLOCK_SIZE=1024,
+        num_reqs=num_reqs,
         COMPRESS_RATIO=compress_ratio,
     )
 
@@ -961,87 +1082,3 @@ def build_prefill_chunk_metadata(
         local_total_seq_lens=local_total_seq_lens,
         max_local_total_seq_lens=max_local_total_seq_lens,
     )
-
-
-@triton.jit
-def _build_prefill_chunk_metadata_kernel(
-    # Inputs
-    query_start_loc_ptr,
-    uncompressed_seq_lens_ptr,
-    cu_compressed_seq_lens_ptr,
-    # Row-start base for cu_seq_len_ks/ke: local cumulative lens under DCP,
-    # aliases cu_compressed_seq_lens_ptr otherwise.
-    row_start_cu_compressed_seq_lens_ptr,
-    # Outputs
-    token_to_seq_ptr,
-    cu_compressed_seq_len_ks_ptr,
-    cu_compressed_seq_len_ke_ptr,
-    query_slice_start,
-    query_slice_stop,
-    DCP_RANK,
-    DCP_WORLD,
-    DCP_INTERLEAVE,
-    BLOCK_SIZE: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-):
-    batch_idx = tl.program_id(0)
-
-    query_start = tl.load(query_start_loc_ptr + batch_idx)
-    query_end = tl.load(query_start_loc_ptr + batch_idx + 1)
-    query_len = query_end - query_start
-
-    seq_start = tl.load(cu_compressed_seq_lens_ptr + batch_idx)
-    seq_end = tl.load(cu_compressed_seq_lens_ptr + batch_idx + 1)
-    compressed_seq_len = seq_end - seq_start
-
-    # Row start for the (possibly localized) cu_seq_len_ks/ke. Equals seq_start
-    # when DCP is disabled (the pointer aliases cu_compressed_seq_lens_ptr).
-    row_start = tl.load(row_start_cu_compressed_seq_lens_ptr + batch_idx)
-
-    uncompressed_seq_len = tl.load(uncompressed_seq_lens_ptr + batch_idx)
-    start_pos = uncompressed_seq_len - query_len
-
-    for i in range(0, query_len, BLOCK_SIZE):
-        offset = i + tl.arange(0, BLOCK_SIZE)
-        abs_pos = query_start + offset
-        mask = (
-            (offset < query_len)
-            & (abs_pos >= query_slice_start)
-            & (abs_pos < query_slice_stop)
-        )
-        out_pos = abs_pos - query_slice_start
-
-        # cu_seq_len_ks: row start in the gathered K buffer.
-        tl.store(cu_compressed_seq_len_ks_ptr + out_pos, row_start, mask=mask)
-
-        # cu_seq_len_ke: row start + per-token context length. Under DCP the
-        # global per-token length is sharded across ranks.
-        global_ctx = start_pos + 1 + offset
-        len_per_token = global_ctx // COMPRESS_RATIO
-        if DCP_WORLD > 1:
-            # Per-rank local context length under interleave-aware DCP, matching
-            # get_dcp_local_seq_lens. K == 1 reduces to (len + world-1-rank)//world.
-            base = (len_per_token // DCP_INTERLEAVE // DCP_WORLD) * DCP_INTERLEAVE
-            remainder = len_per_token - base * DCP_WORLD
-            remainder = tl.minimum(
-                tl.maximum(remainder - DCP_RANK * DCP_INTERLEAVE, 0), DCP_INTERLEAVE
-            )
-            len_per_token = base + remainder
-        tl.store(
-            cu_compressed_seq_len_ke_ptr + out_pos,
-            row_start + len_per_token,
-            mask=mask,
-        )
-
-    # Compute token_to_seq
-    for i in range(0, compressed_seq_len, BLOCK_SIZE):
-        offset = i + tl.arange(0, BLOCK_SIZE)
-        mask = offset < compressed_seq_len
-        tl.store(token_to_seq_ptr + seq_start + offset, batch_idx, mask=mask)
-
-
-assert_compile_key_matches_triton(
-    _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
-    _build_prefill_chunk_metadata_kernel,
-    extra_compile_key_fields=("input_variant",),
-)

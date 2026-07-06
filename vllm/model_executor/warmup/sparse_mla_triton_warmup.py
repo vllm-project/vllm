@@ -61,10 +61,7 @@ def _compile_sparse_swa_prefill_metadata_kernel(
         _COMPUTE_PREFILL_METADATA_KERNEL,
     )
 
-    for compile_key in _COMPUTE_PREFILL_METADATA_KERNEL.get_warmup_keys(
-        vllm_config
-    ):
-        _COMPUTE_PREFILL_METADATA_KERNEL.compile(compile_key)
+    _COMPUTE_PREFILL_METADATA_KERNEL.warmup(vllm_config)
 
 
 def _compile_prefill_chunk_metadata_kernel(
@@ -74,10 +71,7 @@ def _compile_prefill_chunk_metadata_kernel(
         _BUILD_PREFILL_CHUNK_METADATA_KERNEL,
     )
 
-    for compile_key in _BUILD_PREFILL_CHUNK_METADATA_KERNEL.get_warmup_keys(
-        vllm_config
-    ):
-        _BUILD_PREFILL_CHUNK_METADATA_KERNEL.compile(compile_key)
+    _BUILD_PREFILL_CHUNK_METADATA_KERNEL.warmup(vllm_config)
 
 
 def _compile_combine_topk_swa_indices_kernel(
@@ -87,10 +81,7 @@ def _compile_combine_topk_swa_indices_kernel(
         _COMBINE_TOPK_SWA_INDICES_KERNEL,
     )
 
-    for compile_key in _COMBINE_TOPK_SWA_INDICES_KERNEL.get_warmup_keys(
-        vllm_config
-    ):
-        _COMBINE_TOPK_SWA_INDICES_KERNEL.compile(compile_key)
+    _COMBINE_TOPK_SWA_INDICES_KERNEL.warmup(vllm_config)
 
 
 def sparse_mla_triton_warmup(worker: "Worker") -> None:
