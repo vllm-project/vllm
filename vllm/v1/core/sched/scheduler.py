@@ -1588,8 +1588,12 @@ class Scheduler(SchedulerInterface):
             scheduled_spec_token_ids = (
                 scheduler_output.scheduled_spec_decode_tokens.get(req_id)
             )
-            if scheduled_spec_token_ids and (
-                generated_token_ids or self.num_sampled_tokens_per_step == 0
+            # Skip a stale frame still pending discard (async_tokens_to_discard
+            # > 0): its pre-reset rejection count would underflow the counters.
+            if (
+                scheduled_spec_token_ids
+                and (generated_token_ids or self.num_sampled_tokens_per_step == 0)
+                and request.async_tokens_to_discard == 0
             ):
                 num_draft_tokens = len(scheduled_spec_token_ids)
                 num_sampled = self.num_sampled_tokens_per_step

@@ -404,7 +404,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         For prefill, we use chunked prefill to align with the indexer's chunking.
         """
-        num_reqs = common_attn_metadata.num_reqs
         seq_lens = common_attn_metadata.seq_lens
         query_start_loc = common_attn_metadata.query_start_loc
         query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
@@ -420,10 +419,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         # NOTE: Ensure all metadata tensors maintain fixed memory addresses
         # for CUDA graph compatibility.
-        query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        x = torch.repeat_interleave(torch.arange(num_reqs), query_lens).pin_memory()
-        token_to_req_indices = self.token_to_req_indices[: x.shape[0]]
-        token_to_req_indices.copy_(x, non_blocking=True)
+        token_to_req_indices = common_attn_metadata.token_to_req_indices(
+            self.token_to_req_indices
+        )
 
         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
         is_valid_token.copy_(slot_mapping >= 0)

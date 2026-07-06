@@ -19,6 +19,12 @@ from vllm.entrypoints.chat_utils import (
     ConversationMessage,
     make_tool_call_id,
 )
+from vllm.entrypoints.generate.base.serving import (
+    GenerateBaseServing,
+    GenerationError,
+    clamp_prompt_logprobs,
+    format_token_id_placeholder,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
     ChatCompletionLogProbs,
@@ -39,12 +45,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     RequestResponseMetadata,
     ToolCall,
     UsageInfo,
-)
-from vllm.entrypoints.openai.engine.serving import (
-    GenerationError,
-    OpenAIServing,
-    clamp_prompt_logprobs,
-    format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
@@ -76,7 +76,7 @@ def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
     counted in ``usage.prompt_tokens``.
     """
     mm_placeholders = cast(
-        "MultiModalPlaceholders | None", engine_input.get("mm_placeholders")
+        MultiModalPlaceholders | None, engine_input.get("mm_placeholders")
     )
     return {
         modality: sum(p.length for p in ranges)
@@ -101,7 +101,7 @@ def _make_prompt_tokens_details(
     )
 
 
-class OpenAIServingChat(OpenAIServing):
+class OpenAIServingChat(GenerateBaseServing):
     def __init__(
         self,
         engine_client: EngineClient,

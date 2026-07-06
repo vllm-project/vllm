@@ -265,7 +265,7 @@ class OnlineRenderer:
         chat_template_kwargs: dict[str, Any] | None,
         trust_request_chat_template: bool,
     ) -> ErrorResponse | None:
-        """Copied from OpenAIServing._validate_chat_template."""
+        """Copied from GenerateBaseServing._validate_chat_template."""
         if not trust_request_chat_template and (
             request_chat_template is not None
             or (
@@ -288,7 +288,7 @@ class OnlineRenderer:
         *,
         skip_mm_cache: bool = False,
     ) -> list[EngineInput]:
-        """Copied from OpenAIServing._preprocess_completion."""
+        """Copied from GenerateBaseServing._preprocess_completion."""
         prompts = list[SingletonPrompt | bytes]()
         if prompt_embeds is not None:  # embeds take higher priority
             prompts.extend(prompt_to_seq(prompt_embeds))
@@ -303,7 +303,7 @@ class OnlineRenderer:
         *,
         skip_mm_cache: bool = False,
     ) -> list[EngineInput]:
-        """Copied from OpenAIServing._preprocess_cmpl."""
+        """Copied from GenerateBaseServing._preprocess_cmpl."""
         renderer = self.renderer
         model_config = self.model_config
 
@@ -340,7 +340,7 @@ class OnlineRenderer:
         *,
         skip_mm_cache: bool = False,
     ) -> tuple[list[ConversationMessage], list[EngineInput]]:
-        """Copied from OpenAIServing._preprocess_chat."""
+        """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
         mm_config = self.model_config.multimodal_config
 

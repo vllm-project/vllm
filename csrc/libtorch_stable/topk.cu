@@ -22,6 +22,8 @@ void launch_persistent_topk(const torch::stable::Tensor& logits,
                             int64_t max_seq_len) {
   namespace P = vllm::persistent;
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      logits.get_device_index());
   const int64_t num_rows = logits.size(0);
   const int64_t stride = logits.stride(0);
   const cudaStream_t stream = get_current_cuda_stream();
@@ -291,6 +293,9 @@ void persistent_topk(const torch::stable::Tensor& logits,
   STD_TORCH_CHECK(
       k == 512 || k == 1024 || k == 2048,
       "persistent_topk supports k=512, k=1024, or k=2048, got k=", k);
+
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      logits.get_device_index());
 
   if (k == 512) {
     launch_persistent_topk<512>(logits, lengths, output, workspace,
