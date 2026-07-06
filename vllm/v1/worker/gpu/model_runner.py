@@ -1483,7 +1483,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 input_batch=input_batch,
                 attn_metadata=attn_metadata,
                 slot_mappings=slot_mappings_by_layer,
-                spec_hidden_states=spec_hidden_states,
+                last_hidden_states=spec_hidden_states,
                 aux_hidden_states=aux_hidden_states,
                 num_sampled=num_sampled,
                 num_rejected=num_rejected,

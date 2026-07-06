@@ -316,8 +316,10 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                 hidden_states=self.hidden_states[:num_tokens],
                 inputs_embeds=inputs_embeds,
             )
-            pp_group = get_pp_group()
-            if not pp_group.is_first_rank and intermediate_tensors is not None:
+            # Only consult the PP group when there are PP intermediate
+            # tensors to consume: at PP=1 (and in unit tests) no PP group is
+            # initialized and none is needed.
+            if intermediate_tensors is not None and not get_pp_group().is_first_rank:
                 n = num_tokens
                 new_tensors = {
                     k: v[:n].copy_(intermediate_tensors.tensors[k][:n])
