@@ -38,6 +38,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatMessage,
 )
 from vllm.entrypoints.openai.engine.protocol import (
+    CompletionTokenUsageInfo,
     DeltaMessage,
     ErrorResponse,
     FunctionCall,
@@ -431,6 +432,7 @@ class OpenAIServingChat(GenerateBaseServing):
             tool_choice_function_name = None
 
         previous_texts = [""] * num_choices
+        per_choice_token_ids: list[list[int]] = [[] for _ in range(num_choices)]
 
         try:
             if self.parser_cls is not None:
@@ -616,6 +618,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
                     # set the previous values for the next iteration
                     previous_num_tokens[i] += len(output.token_ids)
+                    per_choice_token_ids[i].extend(output.token_ids)
 
                     # if the message delta is None (e.g. because it was a
                     # "control token" for tool calls or the parser otherwise
@@ -751,6 +754,22 @@ class OpenAIServingChat(GenerateBaseServing):
                     num_cached_tokens,
                     mm_token_counts,
                 )
+
+                if self.reasoning_parser_cls:
+                    reasoning_parser = self.reasoning_parser_cls(
+                        tokenizer,
+                        chat_template_kwargs=(
+                            self._effective_chat_template_kwargs(request)
+                        ),
+                    )
+                    reasoning_count = sum(
+                        reasoning_parser.count_reasoning_tokens(ids)
+                        for ids in per_choice_token_ids
+                        if ids
+                    )
+                    final_usage.completion_tokens_details = CompletionTokenUsageInfo(
+                        reasoning_tokens=reasoning_count,
+                    )
 
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
@@ -1000,6 +1019,19 @@ class OpenAIServingChat(GenerateBaseServing):
             final_res.num_cached_tokens,
             mm_token_counts,
         )
+
+        if self.reasoning_parser_cls:
+            reasoning_parser = self.reasoning_parser_cls(
+                tokenizer,
+                chat_template_kwargs=self._effective_chat_template_kwargs(request),
+            )
+            reasoning_count = sum(
+                reasoning_parser.count_reasoning_tokens(output.token_ids)
+                for output in final_res.outputs
+            )
+            usage.completion_tokens_details = CompletionTokenUsageInfo(
+                reasoning_tokens=reasoning_count,
+            )
 
         request_metadata.final_usage_info = usage
 
