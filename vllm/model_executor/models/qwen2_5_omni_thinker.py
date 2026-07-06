@@ -167,6 +167,7 @@ def merge_interleaved_embeddings(
     is_multimodal: torch.Tensor,
     num_video: int,
     num_audio: int,
+    embedding_modalities: Sequence[str] | None = None,
 ) -> torch.Tensor:
     """
     Merge embeddings for interleaved audio-in-video sequences.
@@ -175,48 +176,69 @@ def merge_interleaved_embeddings(
     the token sequence, but embeddings are provided as separate contiguous
     tensors (video first, then audio). This function reorders video and audio
     embeddings to match sequence position order and scatters them efficiently.
+    It also supports image embeddings in the same interleaved request.
 
     Args:
         inputs_embeds: The input embeddings tensor to merge into.
-        multimodal_embeddings: List of embedding tensors (video, audio, other).
+        multimodal_embeddings: List of embedding tensors (video, audio, image).
         is_video: Boolean mask for video token positions.
         is_audio: Boolean mask for audio token positions.
         is_multimodal: Boolean mask for all multimodal token positions.
         num_video: Total count of video tokens.
         num_audio: Total count of audio tokens.
+        embedding_modalities: Modality for each embedding tensor.
 
     Returns:
         The merged inputs_embeds tensor with multimodal embeddings scattered
         to their correct positions.
     """
-    # Categorize embeddings by modality based on token counts.
-    # Embeddings come grouped by modality but order varies (e.g., image, video, audio
-    # or video, audio depending on input kwargs order).
-    video_embeds: list[torch.Tensor] = []
-    audio_embeds: list[torch.Tensor] = []
-    other_embeds: list[torch.Tensor] = []
-    video_remaining = num_video
-    audio_remaining = num_audio
 
-    for emb in multimodal_embeddings:
-        n = emb.shape[0]
-        if video_remaining > 0 and n <= video_remaining:
-            video_embeds.append(emb)
-            video_remaining -= n
-        elif audio_remaining > 0 and n <= audio_remaining:
-            audio_embeds.append(emb)
-            audio_remaining -= n
-        else:
-            other_embeds.append(emb)
+    def _merge_embedding_group(
+        mask: torch.Tensor,
+        embeddings: Sequence[torch.Tensor],
+        modality: str,
+    ) -> None:
+        num_expected_tokens = mask.sum().item()
+        num_actual_tokens = sum(embedding.shape[0] for embedding in embeddings)
+        if num_actual_tokens != num_expected_tokens:
+            raise ValueError(
+                f"Attempted to assign {num_actual_tokens} {modality} tokens "
+                f"to {num_expected_tokens} placeholders"
+            )
+        if embeddings:
+            inputs_embeds[mask] = torch.cat(list(embeddings), dim=0)
 
-    # Scatter each modality to its positions
-    if video_embeds:
-        inputs_embeds[is_video] = torch.cat(video_embeds, dim=0)
-    if audio_embeds:
-        inputs_embeds[is_audio] = torch.cat(audio_embeds, dim=0)
-    if other_embeds:
-        other_mask = is_multimodal & ~is_video & ~is_audio
-        inputs_embeds[other_mask] = torch.cat(other_embeds, dim=0)
+    # Qwen Omni multimodal placeholders are image/video/audio; after excluding
+    # video and audio positions, the remaining multimodal positions are images.
+    is_image = is_multimodal & ~is_video & ~is_audio
+    num_image = is_image.sum().item()
+
+    if embedding_modalities is None or len(embedding_modalities) != len(
+        multimodal_embeddings
+    ):
+        raise ValueError(
+            "Embedding modalities must match multimodal_embeddings length"
+        )
+
+    video_embeds = [
+        embedding
+        for embedding, modality in zip(multimodal_embeddings, embedding_modalities)
+        if modality == "video"
+    ]
+    audio_embeds = [
+        embedding
+        for embedding, modality in zip(multimodal_embeddings, embedding_modalities)
+        if modality == "audio"
+    ]
+    image_embeds = [
+        embedding
+        for embedding, modality in zip(multimodal_embeddings, embedding_modalities)
+        if modality == "image"
+    ]
+
+    _merge_embedding_group(is_video, video_embeds, "video")
+    _merge_embedding_group(is_audio, audio_embeds, "audio")
+    _merge_embedding_group(is_image, image_embeds, "image")
 
     return inputs_embeds
 
@@ -1471,6 +1493,9 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 is_multimodal,
                 num_video,
                 num_audio,
+                embedding_modalities=getattr(
+                    self, "_last_embedding_modalities", None
+                ),
             )
 
         # Default: standard merge (no interleaving), same as parent class

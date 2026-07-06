@@ -374,6 +374,7 @@ class TestMergeInterleavedEmbeddings:
             is_multimodal,
             num_video,
             num_audio,
+            embedding_modalities=("video", "audio"),
         )
 
         video_pos = is_video.nonzero(as_tuple=True)[0]
