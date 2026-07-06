@@ -403,6 +403,59 @@ Research items:
 4. Revisit native FP4 MoE only when SM120/SM12x correctness and performance
    issues are resolved upstream.
 
+## Testing Methodology
+
+The local validation is not just "the server started." It combines vLLM-style
+benchmarking ideas with end-to-end agent workload checks.
+
+Relevant vLLM methodology:
+
+- unit tests for sharding/math invariants where the behavior is deterministic;
+- `vllm bench serve` for online server throughput/latency, including custom
+  datasets and OpenAI-compatible request paths;
+- `vllm bench throughput` for offline throughput isolation;
+- `vllm bench latency` for lower-level latency measurements;
+- benchmark sweeps to compare serve parameters while keeping server settings
+  controlled and resetting caches between runs;
+- SPEED-Bench-style speculative decoding measurement for acceptance rate,
+  acceptance length, and throughput across prompt-length buckets;
+- production-oriented benchmarking with realistic request rate and concurrency,
+  not only a single synthetic prompt.
+
+For this hardware research, the most important follow-up benchmark shape is:
+
+- no-MTP vs MTP vs DFlash/external drafter;
+- 10-20 warmed sequential requests at fixed 256/512 generated tokens;
+- concurrency 4 and 8 for aggregate throughput;
+- long-prefill smoke at 128K-150K;
+- separate text, vision, and agent-tool workloads;
+- record TTFT, TPOT/decode throughput, output throughput, acceptance rate, and
+  peak/free GPU memory.
+
+The local agent harness adds an end-to-end workload layer that plain vLLM
+benchmarks do not cover. It runs real agent CLIs (`qwen`, `codex`, `claude`,
+`hermes`, and optionally `opencode`) inside containers configured to use only
+the local vLLM endpoint (`host.docker.internal:8902`) with dummy API keys. The
+summary files record:
+
+- whether container internet was available;
+- whether the local model endpoint was available;
+- whether each agent passed its task;
+- whether internet was used;
+- whether the local model was used.
+
+The agent task is intentionally closer to a real coding-agent loop than a raw
+completion benchmark: the agent must interact with a workspace and complete a
+small edit/test-style task. This catches failures that a one-shot chat request
+does not reveal, including server disconnects, request-path incompatibilities,
+tool-call/rendering issues, long prompt handling, and memory instability under
+multiple independent clients.
+
+These agent tests are not a replacement for upstream unit tests or vLLM
+benchmarks. They are a hardware/workload acceptance gate: a serving profile is
+not considered stable for this project unless it can survive both synthetic
+long-context tests and agent-style traffic.
+
 ## Intercommunication Research Direction
 
 Current stable communication mode is PyNCCL:
@@ -527,6 +580,10 @@ Dense 27B:
    - 10-20 warmed sequential requests;
    - 256 and 512 generated tokens;
    - then concurrency 4 and 8.
-6. Build and pin FlashInfer autotune caches separately from production startup.
-7. Keep PyNCCL as the stable interconnect baseline until a measured custom path
+6. Add vLLM benchmark artifacts for the promoted profiles:
+   - `vllm bench serve` or GuideLLM for online throughput/latency;
+   - SPEED-Bench-style speculative decoding metrics for MTP/DFlash;
+   - agent harness summaries for real coding-agent traffic.
+7. Build and pin FlashInfer autotune caches separately from production startup.
+8. Keep PyNCCL as the stable interconnect baseline until a measured custom path
    beats it without long-context instability.
