@@ -135,6 +135,10 @@ def process_weights_after_loading(
         if isinstance(module, HpcModule):
             module.process_weights_after_loading(model)
 
+    # Model-level post-load hook, after the per-layer quant finalize.
+    if hasattr(model, "process_weights_after_loading"):
+        model.process_weights_after_loading()
+
     # Needed for torchao model reloading via model.reload_weights
     # @kylesayrs @jerryzh168 this can be removed if callers move to `reload_weights`
     if model_config.quantization == "torchao":
