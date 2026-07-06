@@ -46,6 +46,10 @@ class ObjStoreConfig:
             "endpoint_override": self.endpoint_override,
             "scheme": self.scheme,
         }
+        # Omit empty optional fields so the NIXL OBJ plugin's underlying
+        # AWS SDK can fall back to its default credential provider chain
+        # (IAM roles, env vars, credential files, etc.).
+        # https://github.com/ai-dynamo/nixl/blob/main/src/plugins/obj/README.md
         for key in ("access_key", "secret_key", "session_token",
                      "region", "ca_bundle"):
             value = getattr(self, key)
