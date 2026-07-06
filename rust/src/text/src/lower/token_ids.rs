@@ -1,7 +1,7 @@
 use std::result::Result;
 
 use thiserror::Error;
-use vllm_engine_core_client::protocol::EngineCoreSamplingParams;
+use vllm_engine_core_client::protocol::sampling::EngineCoreSamplingParams;
 
 use crate::SamplingLimits;
 
