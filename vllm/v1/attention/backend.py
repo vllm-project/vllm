@@ -409,13 +409,6 @@ T = TypeVar("T", bound=AttentionMetadata)
 
 
 @dataclass
-class DecodeStepMetadata:
-    query_start_loc: torch.Tensor
-    seq_lens: torch.Tensor
-    block_table_tensor: torch.Tensor
-
-
-@dataclass
 class CommonAttentionMetadata:
     """
     Per-batch attention metadata, shared across layers and backends.
@@ -756,11 +749,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
             fast_build=True,
         )
 
-    def refresh_for_decode_step(
-        self,
-        metadata: M,
-        decode_step_metadata: DecodeStepMetadata,
-    ) -> None:
+    def refresh_meta_for_draft_decodes(self, metadata: M) -> None:
         pass
 
     def use_cascade_attention(

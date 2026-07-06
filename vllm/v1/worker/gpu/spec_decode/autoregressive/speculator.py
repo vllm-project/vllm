@@ -10,7 +10,6 @@ from vllm.forward_context import BatchDescriptor, set_forward_context
 from vllm.logger import init_logger
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.triton_utils import tl, triton
-from vllm.v1.attention.backend import DecodeStepMetadata
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
@@ -427,6 +426,13 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
         idx_mapping = self.idx_mapping[:num_reqs]
         positions = self.input_buffers.positions[:num_reqs]
         query_start_loc = self.input_buffers.query_start_loc[: num_reqs + 1]
+        # self.attn_groups is grouped by KV-cache/attention group; flatten it
+        # once so draft decode refresh can stay at the AttentionGroup boundary.
+        attn_groups = (
+            [g for groups in self.attn_groups for g in groups]
+            if attn_metadata is not None
+            else []
+        )
 
         for step in range(1, self.num_speculative_steps):
             self.current_draft_step.fill_(step)
@@ -474,25 +480,8 @@ class AutoRegressiveSpeculator(DraftModelSpeculator):
                         positions,
                         num_tokens_padded,
                     )
-
-                # refresh position-dependent metadata (DeepSeek V4 MTP)
-                num_reqs_padded = num_tokens_padded
-                for group_idx, attn_groups in enumerate(self.attn_groups):
-                    decode_step_metadata = DecodeStepMetadata(
-                        query_start_loc=self.input_buffers.query_start_loc[
-                            : num_reqs_padded + 1
-                        ],
-                        seq_lens=self.input_buffers.seq_lens[:num_reqs_padded],
-                        block_table_tensor=self.block_tables.input_block_tables[
-                            group_idx
-                        ][:num_reqs_padded],
-                    )
-                    for attn_group in attn_groups:
-                        metadata = attn_metadata[attn_group.layer_names[0]]
-                        attn_group.get_metadata_builder(0).refresh_for_decode_step(
-                            metadata,
-                            decode_step_metadata,
-                        )
+                for attn_group in attn_groups:
+                    attn_group.refresh_meta_for_draft_decodes(attn_metadata)
 
 
 @triton.jit

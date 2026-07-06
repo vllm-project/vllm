@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections import defaultdict
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
@@ -277,6 +277,13 @@ class AttentionGroup:
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id
         return self.metadata_builders[ubatch_id]
+
+    def refresh_meta_for_draft_decodes(
+        self,
+        attn_metadata: Mapping[str, Any],
+    ) -> None:
+        metadata = attn_metadata[self.layer_names[0]]
+        self.get_metadata_builder().refresh_meta_for_draft_decodes(metadata)
 
 
 def select_common_block_size(
