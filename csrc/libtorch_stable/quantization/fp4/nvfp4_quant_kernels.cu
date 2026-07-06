@@ -49,6 +49,11 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
 
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  cudaGridDependencySynchronize();
+  cudaTriggerProgrammaticLaunchCompletion();
+#endif
+
   // Precompute SF layout parameter (constant for entire kernel).
   int32_t const numKTiles = (outputCols + 63) / 64;
 
@@ -122,6 +127,11 @@ __global__ void __launch_bounds__(512, VLLM_BLOCKS_PER_SM(512))
       (CVT_FP4_SF_VEC_SIZE / CVT_FP4_ELTS_PER_THREAD);
   static_assert(sizeof(PackedVec) == sizeof(Type) * CVT_FP4_ELTS_PER_THREAD,
                 "Vec size is not matched.");
+
+#if (defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900))
+  cudaGridDependencySynchronize();
+  cudaTriggerProgrammaticLaunchCompletion();
+#endif
 
   int32_t const colIdx = blockDim.x * blockIdx.y + threadIdx.x;
   int elem_idx = colIdx * CVT_FP4_ELTS_PER_THREAD;
@@ -201,6 +211,8 @@ void scaled_fp4_quant_sm1xxa(torch::stable::Tensor const& output,
   const torch::stable::accelerator::DeviceGuard device_guard(
       input.get_device_index());
   auto stream = get_current_cuda_stream(input.get_device_index());
+  auto* device_props = get_device_prop();
+  int const sm_version = device_props->major * 10 + device_props->minor;
 
   int output_sf_n_unpadded = int(output_n / CVT_FP4_SF_VEC_SIZE);
 
@@ -224,7 +236,18 @@ void scaled_fp4_quant_sm1xxa(torch::stable::Tensor const& output,
         input.scalar_type(), "nvfp4_quant_kernel", [&] {
           using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
           auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
-          vllm::cvt_fp16_to_fp4<cuda_type, false><<<grid, block, 0, stream>>>(
+          cudaLaunchConfig_t config = {};
+          config.gridDim = grid;
+          config.blockDim = block;
+          config.dynamicSmemBytes = 0;
+          config.stream = stream;
+          cudaLaunchAttribute attrs[1];
+          attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+          attrs[0].val.programmaticStreamSerializationAllowed = 1;
+          config.numAttrs = (sm_version >= 90) ? 1 : 0;
+          config.attrs = attrs;
+          cudaLaunchKernelEx(
+              &config, vllm::cvt_fp16_to_fp4<cuda_type, false>,
               m, n, output_n, num_padded_cols, input_ptr, input_sf_ptr,
               reinterpret_cast<uint32_t*>(output_ptr),
               reinterpret_cast<uint32_t*>(sf_out));
@@ -240,12 +263,21 @@ void scaled_fp4_quant_sm1xxa(torch::stable::Tensor const& output,
         input.scalar_type(), "nvfp4_quant_kernel", [&] {
           using cuda_type = vllm::CUDATypeConverter<scalar_t>::Type;
           auto input_ptr = static_cast<cuda_type const*>(input.data_ptr());
-          vllm::cvt_fp16_to_fp4_sf_major<cuda_type, false>
-              <<<grid, block, 0, stream>>>(
-                  m, n, output_n, output_sf_n_unpadded, num_packed_cols,
-                  input_ptr, input_sf_ptr,
-                  reinterpret_cast<uint32_t*>(output_ptr),
-                  reinterpret_cast<uint32_t*>(sf_out));
+          cudaLaunchConfig_t config = {};
+          config.gridDim = grid;
+          config.blockDim = block;
+          config.dynamicSmemBytes = 0;
+          config.stream = stream;
+          cudaLaunchAttribute attrs[1];
+          attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+          attrs[0].val.programmaticStreamSerializationAllowed = 1;
+          config.numAttrs = (sm_version >= 90) ? 1 : 0;
+          config.attrs = attrs;
+          cudaLaunchKernelEx(
+              &config, vllm::cvt_fp16_to_fp4_sf_major<cuda_type, false>, m, n,
+              output_n, output_sf_n_unpadded, num_packed_cols, input_ptr,
+              input_sf_ptr, reinterpret_cast<uint32_t*>(output_ptr),
+              reinterpret_cast<uint32_t*>(sf_out));
         });
   }
 }
