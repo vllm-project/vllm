@@ -85,30 +85,29 @@ uv pip install -r requirements/test/cuda.txt
 
 ### Adding tests
 
-Before writing a test, search the area you changed for an existing file and
-harness to extend. Prefer adding cases to an existing test module and reusing
-`conftest.py` fixtures, parametrization, and helpers in `tests/` over creating
-a new file or bespoke setup. Add a new test file only when no nearby suite covers
-the behavior.
-
-Write tests that protect **observable behavior and regression-prone paths**, not
-trivial wiring or implementation details that refactors should be free to
-change. A passing test is not meaningful by itself — coverage of code that cannot
-break (simple getters, one-line passthroughs) adds CI cost without signal.
-
-Principles borrowed from large open-source projects:
-
-- **Linux kernel** ([testing overview](https://docs.kernel.org/dev-tools/testing-overview.html)):
-  match test scope to the code — behavior and whole features through their
-  public interface; isolated units only when a regression test needs direct
-  access. Fix a bug, then add a test so it stays fixed.
-- **Kubernetes** ([writing good e2e tests](https://github.com/kubernetes/community/blob/main/contributors/devel/sig-testing/writing-good-e2e-tests.md)):
-  reuse shared framework utilities and constants; extend them when something is
-  generally useful. Follow stable nearby tests. Flaky tests are worse than no
-  tests — make failures actionable.
-- **PyTorch** ([test infrastructure](https://pytorch.org/blog/understanding-pytorchs-test-infrastructure/)):
-  parameterize over existing fixtures instead of copy-pasting cases. Test through
-  public APIs; keep tests atomic with no order or global-state dependencies.
+- **Reuse before create.** Search the area you changed for an existing test file,
+  `conftest.py` fixtures, and shared helpers. Add cases there instead of opening
+  a new file or bespoke harness. Create a new test file only when no nearby suite
+  covers the behavior.
+- **Test behavior, not structure.** Assert observable outcomes through public
+  APIs and user-visible contracts. Do not lock tests to internal fields, call
+  order, or refactorable implementation details.
+- **Every test needs a reason.** Prefer regression tests for bugs you fixed and
+  checks on paths that are easy to break accidentally. Skip trivial wiring,
+  one-line passthroughs, and getters — passing coverage there adds CI cost
+  without signal.
+- **Match scope to the change.** Whole features and end-to-end flows belong in
+  integration-style tests that reuse existing suite setup. Reach for isolated
+  unit tests only when the logic is self-contained and a behavioral test would
+  be too indirect.
+- **Extend shared infrastructure.** Parameterize over existing fixtures instead
+  of copy-pasting cases. When you need a helper that others will reuse, add it to
+  the local `conftest.py` or shared test utilities — not inline in one test.
+- **Keep tests independent and reliable.** Each test must stand alone: no ordering
+  assumptions, no leaked global state, no timing guesses. A flaky test is worse
+  than no test; failure messages should say what broke and why.
+- **Follow nearby examples.** Before writing new patterns, read stable tests in
+  the same directory and match their style, fixtures, and assertions.
 
 For model-specific requirements, see
 [`docs/contributing/model/tests.md`](docs/contributing/model/tests.md).
