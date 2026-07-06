@@ -236,7 +236,7 @@ class IPCWeightTransferEngine(
         # `with torch.device(self.device)` by the caller, so the current device
         # is not guaranteed to match self.device. The IPC tensors must be
         # rebuilt on the device the model lives on.
-        device_index = torch.accelerator.current_device_index()
+        device_index = self.device.index
 
         if update_info.packed:
             assert update_info.tensor_sizes is not None
