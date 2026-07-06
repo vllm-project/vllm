@@ -201,6 +201,23 @@ def _get_model(llm: LLM):
     return llm.llm_engine.model_executor.driver_worker.worker.model_runner.model
 
 
+def _teardown_engine():
+    """Release an engine before creating another in the same process.
+
+    Beyond the usual dist/memory cleanup, drop the cached CUDA-graph memory
+    pool. The pool handle is a class-level attribute on the platform; reusing
+    it for the next engine's graph capture triggers a `use_count > 0` assert
+    in the caching allocator once the previous engine has been torn down.
+    Scoped to these tests, which are the only ones creating two
+    cudagraph-capturing engines back-to-back in one process.
+    """
+    torch.accelerator.empty_cache()
+    cleanup_dist_env_and_memory()
+    from vllm.platforms import current_platform
+
+    current_platform.__class__._global_graph_pool = None
+
+
 @create_new_process_for_each_test()
 def _run_anymodel_e2e(case: _Case):
     os.environ["VLLM_ENABLE_V1_MULTIPROCESSING"] = "0"
@@ -249,8 +266,7 @@ def _run_anymodel_parity():
     base_llm = LLM(_PARITY_MODEL, enforce_eager=False, gpu_memory_utilization=0.4)
     base_text = base_llm.generate([prompt], sampling)[0].outputs[0].text
     del base_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+    _teardown_engine()
 
     anymodel_llm = LLM(
         _PARITY_MODEL,
@@ -390,8 +406,7 @@ def _run_anymodel_throughput_parity():
     base_llm = LLM(_PARITY_MODEL, **common)
     base_time, base_tokens, base_ids = _time_generate(base_llm)
     del base_llm
-    torch.accelerator.empty_cache()
-    cleanup_dist_env_and_memory()
+    _teardown_engine()
 
     any_llm = LLM(_PARITY_MODEL, hf_overrides=_identity_anymodel_overrides, **common)
     any_time, any_tokens, any_ids = _time_generate(any_llm)
