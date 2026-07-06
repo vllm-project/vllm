@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 from enum import Enum
 from functools import partial
+import os
 from typing import ClassVar
 
 import numpy as np
@@ -89,6 +90,33 @@ FP4_DTYPE = torch.uint8
 logger = init_logger(__name__)
 
 trtllm_workspace_buffer = None
+
+
+def _dcp_debug_sync(label: str, *tensors: torch.Tensor) -> None:
+    if os.environ.get("VLLM_EXP_DCP_DEBUG") != "1":
+        return
+    if tensors:
+        device = tensors[0].device
+    else:
+        device = torch.cuda.current_device()
+    torch.cuda.synchronize(device)
+    free_mem, total_mem = torch.cuda.mem_get_info(device)
+    tensor_desc = [
+        {
+            "shape": tuple(t.shape),
+            "stride": tuple(t.stride()),
+            "dtype": str(t.dtype),
+            "contig": t.is_contiguous(),
+        }
+        for t in tensors
+    ]
+    logger.warning(
+        "DCP debug %s tensors=%s free=%.2fGiB total=%.2fGiB",
+        label,
+        tensor_desc,
+        free_mem / (1024**3),
+        total_mem / (1024**3),
+    )
 
 
 def _get_trtllm_workspace_buffer():
@@ -291,9 +319,11 @@ class BatchDCPPrefillWrapper:
         value: torch.Tensor,
         out: torch.Tensor,
     ):
+        _dcp_debug_sync("prefill.start", prefill_query, key, value, out)
         prefill_query_across_dcp = get_dcp_group().all_gather(
             prefill_query.contiguous(), dim=1
         )
+        _dcp_debug_sync("prefill.after_all_gather", prefill_query_across_dcp)
         output_context_tmp, lse_context_tmp = self._context.run(
             prefill_query_across_dcp,
             kv_cache_permute,
@@ -301,12 +331,16 @@ class BatchDCPPrefillWrapper:
             v_scale=layer._v_scale_float,
             return_lse=True,
         )
+        _dcp_debug_sync(
+            "prefill.after_context", output_context_tmp, lse_context_tmp
+        )
         output_context, lse_context = self._dcp_combine(
             output_context_tmp,
             lse_context_tmp,
             get_dcp_group(),
             return_lse=True,
         )
+        _dcp_debug_sync("prefill.after_combine", output_context, lse_context)
         lse_context = lse_context.transpose(0, 1).contiguous()
 
         output_query, lse_query = self._new_tokens.run(
@@ -315,6 +349,7 @@ class BatchDCPPrefillWrapper:
             value,
             return_lse=True,
         )
+        _dcp_debug_sync("prefill.after_new_tokens", output_query, lse_query)
         lse_query = lse_query.transpose(0, 1).contiguous()
 
         merge_attn_states(
@@ -324,6 +359,7 @@ class BatchDCPPrefillWrapper:
             output_query,
             lse_query,
         )
+        _dcp_debug_sync("prefill.after_merge", out)
         return out
 
 

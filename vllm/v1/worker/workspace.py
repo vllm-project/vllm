@@ -153,12 +153,23 @@ class WorkspaceManager:
                     )
                 return "unknown"
 
-            if self._locked:
+            if self._locked and (
+                os.environ.get("VLLM_EXP_ALLOW_LOCKED_WORKSPACE_GROWTH") != "1"
+            ):
                 raise AssertionError(
                     f"Workspace is locked but allocation from '{get_caller_info()}' "
                     f"requires {required_bytes / _MB:.2f} MB, current size is "
                     f"{current_size / _MB:.2f} MB. "
                     "Workspace growth is not allowed after locking."
+                )
+            if self._locked:
+                logger.warning(
+                    "Growing locked workspace from '%s': %.2f MB -> %.2f MB. "
+                    "This is experimental and should be replaced by warmup-time "
+                    "workspace reservation.",
+                    get_caller_info(),
+                    current_size / _MB,
+                    required_bytes / _MB,
                 )
 
             # Only resize the requesting ubatch's workspace.  Other

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 
 import torch
 from torch.distributed import ProcessGroup
@@ -330,13 +331,52 @@ class CudaCommunicator(DeviceCommunicatorBase):
             # Convert negative dim to positive.
             dim += input_.dim()
 
-        # Note: This will produce an incorrect answer if we don't make
-        # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
-        input_tensor = input_.movedim(0, dim).contiguous()
+        # The common path scatters along dim by moving it to the leading
+        # dimension, then materializing a contiguous NCCL input. For DCP
+        # attention outputs ([tokens, heads, head_dim], scatter on heads),
+        # that layout would produce an intermediate [heads/world, tokens, dim]
+        # output and then allocate another contiguous [tokens, heads/world, dim]
+        # copy. Long-prefill DCP runs are sensitive to that extra peak. Shape
+        # the NCCL input as [world, tokens, local_heads, dim] instead so NCCL
+        # writes the final layout directly.
+        use_dim1_3d_final_layout = (
+            dim == 1
+            and input_.dim() == 3
+            and input_.shape[dim] % world_size == 0
+            and not should_nccl_symm_mem_ag_rs()
+        )
+        if use_dim1_3d_final_layout:
+            local_heads = input_.shape[1] // world_size
+            input_tensor = (
+                input_.reshape(input_.shape[0], world_size, local_heads, input_.shape[2])
+                .movedim(1, 0)
+                .contiguous()
+            )
+            output_shape = (input_.shape[0], local_heads, input_.shape[2])
+        else:
+            # Note: This will produce an incorrect answer if we don't make
+            # the input_tensor contiguous. Possible bug in reduce_scatter_tensor?
+            input_tensor = input_.movedim(0, dim).contiguous()
 
         assert input_tensor.shape[0] % world_size == 0
-        chunk_size = input_tensor.shape[0] // world_size
-        output_shape = (chunk_size,) + input_tensor.shape[1:]
+        if not use_dim1_3d_final_layout:
+            chunk_size = input_tensor.shape[0] // world_size
+            output_shape = (chunk_size,) + input_tensor.shape[1:]
+
+        if os.environ.get("VLLM_EXP_DCP_DEBUG") == "1":
+            free_mem, total_mem = torch.cuda.mem_get_info(input_tensor.device)
+            logger.warning(
+                "reduce_scatter debug rank=%s dim=%s input=%s nccl_input=%s "
+                "output=%s final_layout=%s free=%.2fGiB total=%.2fGiB",
+                self.rank_in_group,
+                dim,
+                tuple(input_.shape),
+                tuple(input_tensor.shape),
+                tuple(output_shape),
+                use_dim1_3d_final_layout,
+                free_mem / (1024**3),
+                total_mem / (1024**3),
+            )
 
         if should_nccl_symm_mem_ag_rs():
             output = self._reduce_scatter_symm_mem(input_tensor)
@@ -347,6 +387,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             pynccl_comm.reduce_scatter(output, input_tensor)
 
         # Reshape before returning
+        if use_dim1_3d_final_layout:
+            return output
         return output.movedim(0, dim).contiguous()
 
     def reduce_scatterv(
