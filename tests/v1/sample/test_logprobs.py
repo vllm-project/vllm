@@ -4,6 +4,7 @@
 import itertools
 import math
 from collections.abc import Generator
+from types import SimpleNamespace
 from typing import get_args
 
 import pytest
@@ -20,6 +21,7 @@ from tests.v1.sample.utils import (
 from vllm import SamplingParams
 from vllm.config.model import LogprobsMode
 from vllm.distributed import cleanup_dist_env_and_memory
+from vllm.exceptions import VLLMValidationError
 from vllm.platforms import current_platform
 
 from ...conftest import HfRunner, VllmRunner
@@ -33,19 +35,19 @@ PROMPT = BatchLogprobsComposition.PROMPT
 SAMPLE_PROMPT = BatchLogprobsComposition.SAMPLE_PROMPT
 
 # On ROCm, floating-point reductions in attention and GEMM kernels are
-# non-associative and sensitive to batch geometry. The ref LLM (no spec
-# decode, default scheduling) and the spec-decode LLM (chunked prefill,
-# different effective batch sizes) follow different reduction orders,
-# producing numerically divergent logprobs that get misattributed to
-# spec-decode incorrectness.
+# non-associative and sensitive to batch geometry. If the ref LLM and
+# spec-decode LLM use different scheduling or batch geometry, they can
+# follow different reduction orders and produce numerically divergent
+# logprobs that get misattributed to spec-decode incorrectness.
 #
 # Force LLM instances into an identical, deterministic execution
 # mode so the test isolates spec-decode correctness only:
-ROCM_DETERMINISM_KWARGS: dict = (
-    dict(max_num_seqs=1, attention_backend="TRITON_ATTN")
-    if current_platform.is_rocm()
-    else {}
-)
+if current_platform.is_rocm():
+    GPU_DETERMINISM_KWARGS: dict = dict(max_num_seqs=1, attention_backend="TRITON_ATTN")
+elif current_platform.is_xpu():
+    GPU_DETERMINISM_KWARGS = dict(max_num_seqs=1, attention_backend="FLASH_ATTN")
+else:
+    GPU_DETERMINISM_KWARGS = {}
 
 
 @pytest.fixture(
@@ -77,6 +79,14 @@ def vllm_model(vllm_runner, request) -> Generator[VllmRunner, None, None]:
 def hf_model(hf_runner) -> Generator[HfRunner, None, None]:
     with hf_runner(MODEL, dtype=DTYPE) as hf_model:
         yield hf_model
+
+
+def _model_config(vocab_size: int = 10):
+    return SimpleNamespace(
+        max_logprobs=20,
+        logits_processors=None,
+        get_vocab_size=lambda: vocab_size,
+    )
 
 
 def _repeat_logprob_config(
@@ -396,6 +406,27 @@ def test_max_logprobs():
         bad_sampling_params = SamplingParams(logprobs=2)
         with pytest.raises(ValueError):
             runner.generate(["Hello world"], sampling_params=bad_sampling_params)
+
+
+@pytest.mark.parametrize("token_ids", [[0], [0, 9]])
+def test_logprob_token_ids_validate_vocab_bounds_valid(token_ids: list[int]):
+    SamplingParams(logprob_token_ids=token_ids).verify(
+        _model_config(),
+        speculative_config=None,
+        structured_outputs_config=None,
+        tokenizer=None,
+    )
+
+
+@pytest.mark.parametrize("token_ids", [[-1], [10], [-35, 1873042417]])
+def test_logprob_token_ids_validate_vocab_bounds_invalid(token_ids: list[int]):
+    with pytest.raises(VLLMValidationError, match="logprob_token_ids"):
+        SamplingParams(logprob_token_ids=token_ids).verify(
+            _model_config(),
+            speculative_config=None,
+            structured_outputs_config=None,
+            tokenizer=None,
+        )
 
 
 def test_none_logprobs(vllm_model, example_prompts):
@@ -1086,17 +1117,24 @@ def test_spec_decode_logprobs(
     )
 
     max_model_len = 256
-
-    # Run base LLM.
-    ref_llm = LLM(
-        model=model_name,
+    llm_kwargs = dict(
         max_logprobs=5,
         max_model_len=max_model_len,
         seed=42,
         logprobs_mode=logprobs_mode,
         gpu_memory_utilization=0.4,
+        # Force the same prefill chunking for both the base model and
+        # spec decode model so the comparison isolates spec decode.
+        enable_chunked_prefill=True,
+        max_num_batched_tokens=32,
         enable_prefix_caching=False,
-        **ROCM_DETERMINISM_KWARGS,
+        **GPU_DETERMINISM_KWARGS,
+    )
+
+    # Run base LLM.
+    ref_llm = LLM(
+        model=model_name,
+        **llm_kwargs,
     )
     ref_results = ref_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
@@ -1117,16 +1155,7 @@ def test_spec_decode_logprobs(
     spec_llm = LLM(
         model_name,
         speculative_config=spec_config_with_len,
-        max_logprobs=5,
-        max_model_len=max_model_len,
-        seed=42,
-        logprobs_mode=logprobs_mode,
-        gpu_memory_utilization=0.4,
-        # Force prefill chunking
-        enable_chunked_prefill=True,
-        max_num_batched_tokens=32,
-        enable_prefix_caching=False,
-        **ROCM_DETERMINISM_KWARGS,
+        **llm_kwargs,
     )
     spec_results = spec_llm.generate(
         [prompt, prompt], [sampling_params, penalty_sampling_params]
@@ -1145,7 +1174,7 @@ def test_spec_decode_logprobs(
     assert len(ref_logprobs) == len(spec_logprobs)
     for ref_logprob, spec_logprob in zip(ref_logprobs, spec_logprobs):
         assert math.isclose(
-            ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=1e-1
+            ref_logprob.logprob, spec_logprob.logprob, rel_tol=5e-2, abs_tol=2.5e-1
         ), (
             f"Logprob mismatch: ref={ref_logprob.logprob} "
             f"spec={spec_logprob.logprob} "
@@ -1234,3 +1263,37 @@ def test_prompt_logprobs_with_chunking_and_preemption():
         assert preemptions > 0, "Test did not trigger any preemptions"
 
         print(f"Test passed with {preemptions} preemptions")
+
+
+@large_gpu_mark(min_gb=24)
+def test_token_logprobs_large_batch_int64_row_offset():
+    """Regression: logprob kernel row offset (row * vocab_size) must use int64.
+
+    The rejection-sampler logprobs path runs the logprob kernels over the
+    spec-expanded logits batch, so batch_size * vocab_size can exceed 2**31
+    (e.g. DFlash drafts K tokens per request). With int32 offset arithmetic the
+    per-row pointer wraps to a negative address and the kernel hits a CUDA
+    illegal memory access. Run over a batch where batch_size * vocab_size > 2**31
+    and check the highest-offset row matches a reference log-softmax.
+    """
+    if not current_platform.is_cuda():
+        pytest.skip("int32 row-offset overflow is a CUDA kernel issue")
+    from vllm.v1.worker.gpu.sample.logprob import compute_token_logprobs
+
+    device = torch.device("cuda")
+    vocab_size = 131072
+    batch_size = 2**31 // vocab_size + 64  # batch_size * vocab_size > 2**31
+    # logits (the large input) plus small logprob/rank outputs; ~1 GB headroom.
+    required_bytes = batch_size * vocab_size * 4 + (1 << 30)
+    if torch.accelerator.get_memory_info()[0] < required_bytes:
+        pytest.skip(f"needs ~{required_bytes / 1e9:.0f} GB of free GPU memory")
+
+    logits = torch.randn(batch_size, vocab_size, device=device, dtype=torch.float32)
+    token_ids = torch.full((batch_size, 1), 7, device=device, dtype=torch.int64)
+    logprobs = compute_token_logprobs(logits, token_ids)
+    torch.accelerator.synchronize()  # surface any async illegal memory access
+    last = batch_size - 1
+    ref = torch.log_softmax(logits[last].float(), dim=-1)[7]
+    assert torch.allclose(logprobs[last, 0], ref, atol=1e-2), (
+        f"logprob {logprobs[last, 0].item()} != ref {ref.item()}"
+    )

@@ -27,8 +27,10 @@ logger = init_logger(__name__)
 try:
     from amdsmi import (
         AmdSmiException,
+        AmdSmiMemoryType,
         amdsmi_get_gpu_asic_info,
         amdsmi_get_gpu_device_uuid,
+        amdsmi_get_gpu_memory_total,
         amdsmi_get_processor_handles,
         amdsmi_init,
         amdsmi_shut_down,
@@ -44,6 +46,11 @@ except ImportError as e:
     logger.warning("Failed to import from vllm._C with %r", e)
 
 # import custom ops, trigger op registration
+try:
+    import vllm._C_stable_libtorch  # noqa: F401
+except ImportError as e:
+    logger.warning("Failed to import from vllm._C_stable_libtorch with %r", e)
+
 try:
     import vllm._rocm_C  # noqa: F401
 except ImportError as e:
@@ -112,6 +119,14 @@ def _sync_hip_cuda_env_vars():
     hip_val = os.environ.get("HIP_VISIBLE_DEVICES") or None
     cuda_val = os.environ.get("CUDA_VISIBLE_DEVICES") or None
 
+    if cuda_val is not None:
+        logger.warning_once(
+            "Using CUDA_VISIBLE_DEVICES on ROCm is deprecated and support "
+            "will be removed in vLLM v0.26.0. Please use HIP_VISIBLE_DEVICES "
+            "instead.",
+            scope="process",
+        )
+
     if hip_val is not None and cuda_val is not None:
         if hip_val != cuda_val:
             raise ValueError(
@@ -128,6 +143,7 @@ def _sync_hip_cuda_env_vars():
 
 # Sync at import time - catches misconfigurations from process start.
 _sync_hip_cuda_env_vars()
+
 
 # AMDSMI utils
 # Note that NVML is not affected by `{CUDA/HIP}_VISIBLE_DEVICES`,
@@ -161,6 +177,14 @@ def _query_gcn_arch_from_amdsmi() -> str:
     raise RuntimeError("amdsmi did not return valid GCN arch")
 
 
+@with_amdsmi_context
+def _query_total_memory_from_amdsmi(physical_device_id: int) -> int:
+    """Query total VRAM (bytes) from amdsmi. Raises if not available."""
+    handles = amdsmi_get_processor_handles()
+    handle = handles[physical_device_id]
+    return amdsmi_get_gpu_memory_total(handle, AmdSmiMemoryType.VRAM)
+
+
 def _get_gcn_arch() -> str:
     """
     Get GCN arch via amdsmi (no CUDA init), fallback to torch.cuda.
@@ -185,6 +209,9 @@ def _get_gcn_arch() -> str:
 _GCN_ARCH = _get_gcn_arch()
 
 _ON_GFX1X = any(arch in _GCN_ARCH for arch in ["gfx11", "gfx12"])
+_ON_GFX11 = "gfx11" in _GCN_ARCH
+_ON_GFX1100 = "gfx1100" in _GCN_ARCH
+_ON_GFX1151 = "gfx1151" in _GCN_ARCH
 _ON_GFX12X = any(arch in _GCN_ARCH for arch in ["gfx12"])
 _ON_MI3XX = any(arch in _GCN_ARCH for arch in ["gfx942", "gfx950"])
 _ON_GFX9 = any(arch in _GCN_ARCH for arch in ["gfx90a", "gfx942", "gfx950"])
@@ -268,6 +295,18 @@ def on_gfx1x() -> bool:
     return _ON_GFX1X
 
 
+def on_gfx11() -> bool:
+    return _ON_GFX11
+
+
+def on_gfx1100() -> bool:
+    return _ON_GFX1100
+
+
+def on_gfx1151() -> bool:
+    return _ON_GFX1151
+
+
 def on_gfx12x() -> bool:
     return _ON_GFX12X
 
@@ -290,6 +329,17 @@ def on_gfx942() -> bool:
 
 def on_gfx950() -> bool:
     return _ON_GFX950
+
+
+# Enable HIP online tuning early, before hipBLASLt initializes.
+# Turn on hipBLASLt online tuning if use AITER hipBLASLt GEMM.
+if (
+    envs.VLLM_ROCM_USE_AITER
+    and envs.VLLM_ROCM_USE_AITER_LINEAR
+    and envs.VLLM_ROCM_USE_AITER_LINEAR_HIPBMM
+    and on_mi3xx()
+):
+    os.environ["HIP_ONLINE_TUNING"] = "1"
 
 
 @cache
@@ -357,6 +407,7 @@ def flash_attn_triton_available() -> bool:
 def _get_backend_priorities(
     use_mla: bool,
     use_sparse: bool,
+    use_kv_connector: bool = False,
 ) -> list[AttentionBackendEnum]:
     from vllm._aiter_ops import is_aiter_found_and_supported, rocm_aiter_ops
 
@@ -375,9 +426,11 @@ def _get_backend_priorities(
                 AttentionBackendEnum.TRITON_MLA,
             ]
 
-    backends = [
-        AttentionBackendEnum.ROCM_ATTN,
-    ]
+    backends = []
+    # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
+    # incompatible with KV connectors that require blocks-first layout.
+    if not use_kv_connector:
+        backends.append(AttentionBackendEnum.ROCM_ATTN)
     if rocm_aiter_ops.is_mha_enabled():
         backends.append(AttentionBackendEnum.ROCM_AITER_FA)
     if is_aiter_found_and_supported():
@@ -405,13 +458,14 @@ class RocmPlatform(Platform):
 
     supported_quantization: list[str] = [
         "awq",
+        "auto_awq",
         "awq_marlin",  # will be overwritten with awq
         "gptq",
-        "gptq_marlin",  # will be overwritten with gptq
+        "auto_gptq",
         "fp8",
+        "deepseek_v4_fp8",
         "compressed-tensors",
         "fbgemm_fp8",
-        "gguf",
         "quark",
         "mxfp4",
         "mxfp8",
@@ -423,6 +477,7 @@ class RocmPlatform(Platform):
         "modelopt_mixed",
         "fp8_per_tensor",
         "fp8_per_block",
+        "fp8_per_channel",
         "online",
         "gpt_oss_mxfp4",
     ]
@@ -454,6 +509,7 @@ class RocmPlatform(Platform):
         backend_priorities = _get_backend_priorities(
             attn_selector_config.use_mla,
             attn_selector_config.use_sparse,
+            attn_selector_config.use_kv_connector,
         )
         for priority, backend in enumerate(backend_priorities):
             try:
@@ -687,27 +743,31 @@ class RocmPlatform(Platform):
 
     @classmethod
     def get_device_total_memory(cls, device_id: int = 0) -> int:
-        device_props = torch.cuda.get_device_properties(device_id)
-        return device_props.total_memory
+        # Query total VRAM via amdsmi so we don't initialize a HIP context in
+        # the calling process. torch.cuda.get_device_properties() creates a
+        # HIP context, which makes vLLM fall back from `fork` to `spawn` for
+        # worker processes. Keeping this query context-free preserves `fork`
+        # where it is otherwise valid (e.g. out-of-tree models registered in
+        # the parent process).
+        try:
+            physical_device_id = cls.device_id_to_physical_device_id(device_id)
+            return _query_total_memory_from_amdsmi(physical_device_id)
+        except Exception as e:
+            logger.debug("Failed to get total memory via amdsmi: %s", e)
+            logger.warning_once(
+                "Failed to get total memory via amdsmi, falling back to "
+                "torch.cuda. This will initialize CUDA."
+            )
+        return torch.cuda.get_device_properties(device_id).total_memory
 
     @classmethod
     def apply_config_platform_defaults(cls, vllm_config: "VllmConfig") -> None:
         from vllm._aiter_ops import rocm_aiter_ops
-        from vllm.config.compilation import CUDAGraphMode
 
         compilation_config = vllm_config.compilation_config
-        is_eager_execution = compilation_config.cudagraph_mode == CUDAGraphMode.NONE
         use_aiter_fused_moe = rocm_aiter_ops.is_fused_moe_enabled()
-        use_aiter_rms_norm = rocm_aiter_ops.is_rmsnorm_enabled()
         use_aiter_fp8_linear = rocm_aiter_ops.is_linear_fp8_enabled()
         use_aiter_fused_se = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled()
-        #  Aiter rms norm perform best when CUDA Graph capture is enabled.
-        if (
-            use_aiter_rms_norm
-            and not is_eager_execution
-            and "-rms_norm" not in compilation_config.custom_ops
-        ):
-            compilation_config.custom_ops.append("+rms_norm")
 
         if use_aiter_fp8_linear and "-quant_fp8" not in compilation_config.custom_ops:
             compilation_config.custom_ops.append("+quant_fp8")
@@ -904,8 +964,8 @@ class RocmPlatform(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from src_cache to dst_cache on GPU."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.to(dst_cache.device)
+        _src_cache = src_cache[src_block_indices]
+        dst_cache[dst_block_indices] = _src_cache.to(dst_cache.device)
 
     @classmethod
     def swap_out_blocks_to_host(
@@ -916,8 +976,8 @@ class RocmPlatform(Platform):
         dst_block_indices: torch.Tensor,
     ) -> None:
         """Copy blocks from GPU to host (CPU)."""
-        _src_cache = src_cache[:, src_block_indices]
-        dst_cache[:, dst_block_indices] = _src_cache.cpu()
+        _src_cache = src_cache[src_block_indices]
+        dst_cache[dst_block_indices] = _src_cache.cpu()
 
     @classmethod
     def support_hybrid_kv_cache(cls) -> bool:
@@ -939,7 +999,7 @@ class RocmPlatform(Platform):
     def get_default_ir_op_priority(
         cls, vllm_config: "VllmConfig"
     ) -> "IrOpPriorityConfig":
-        from vllm.config.compilation import CompilationMode
+        from vllm.config.compilation import CompilationMode, CUDAGraphMode
         from vllm.config.kernel import IrOpPriorityConfig
 
         # Native used by default when compiling,
@@ -949,12 +1009,10 @@ class RocmPlatform(Platform):
         using_inductor = cc.backend == "inductor" and cc.mode != CompilationMode.NONE
         default = ["native"] if using_inductor else ["vllm_c", "native"]
 
-        # This (mostly) preserves previous CustomOp behavior
-        # Necessary on ROCm because it's common that users
-        # enable rms_norm to use the aiter kernel.
+        #  Aiter rms norm perform best when CUDA Graph capture is enabled.
         # TODO(luka/TJ) remove env vars completely
         if (
-            cc.is_custom_op_enabled("rms_norm")
+            cc.cudagraph_mode != CUDAGraphMode.NONE
             and envs.VLLM_ROCM_USE_AITER
             and envs.VLLM_ROCM_USE_AITER_RMSNORM
         ):
@@ -962,7 +1020,9 @@ class RocmPlatform(Platform):
         else:
             rms_norm = default
 
-        return IrOpPriorityConfig.with_default(default, rms_norm=rms_norm)
+        return IrOpPriorityConfig.with_default(
+            default, rms_norm=rms_norm, fused_add_rms_norm=rms_norm
+        )
 
     @classmethod
     @with_amdsmi_context

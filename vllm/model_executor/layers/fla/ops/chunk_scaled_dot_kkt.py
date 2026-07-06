@@ -83,7 +83,7 @@ def chunk_scaled_dot_kkt_fwd_kernel(
         )
         b_k = tl.load(p_k, boundary_check=(0, 1))
         b_kb = b_k * b_beta[:, None]
-        b_A += tl.dot(b_kb.to(b_k.dtype), tl.trans(b_k))
+        b_A += tl.dot(b_kb, tl.trans(b_k).to(b_kb.dtype))
 
     if USE_G:
         p_g = tl.make_block_ptr(g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,))

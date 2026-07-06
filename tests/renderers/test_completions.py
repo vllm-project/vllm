@@ -39,6 +39,11 @@ class MockModelConfig:
     is_encoder_decoder: bool = False
     is_multimodal_model: bool = False
     renderer_num_workers: int = 1
+    hidden_size: int = 768
+    dtype: torch.dtype = torch.float32
+
+    def get_hidden_size(self) -> int:
+        return self.hidden_size
 
 
 @dataclass
@@ -59,12 +64,14 @@ class DummyTokenizer:
 
     def __post_init__(self) -> None:
         self._captured_encode_kwargs: dict = {}
+        self._captured_text_len: int = 0
 
     def decode(self, tokens: list[int]):
         return str(tokens)
 
     def encode(self, text: str, **kwargs):
         self._captured_encode_kwargs = kwargs
+        self._captured_text_len = len(text)
 
         in_length = len(text)
         truncation = kwargs.get("truncation")
@@ -73,6 +80,11 @@ class DummyTokenizer:
             return list(range(min(in_length, max_length)))
 
         return list(range(in_length))
+
+    def __call__(self, text: str, **kwargs):
+        # BaseRenderer._tokenize_prompt calls the tokenizer via __call__ (to
+        # unify the output type), so mirror a real tokenizer's BatchEncoding.
+        return {"input_ids": self.encode(text, **kwargs)}
 
 
 def _build_renderer(
@@ -356,6 +368,85 @@ class TestRenderPrompt:
         assert results[0]["prompt_token_ids"] == tokens
         assert results[0]["prompt"] == "[1, 2, 3, 4]"
 
+    def test_explicit_side_tokenizer_unbounded(self):
+        renderer = _build_renderer(MockModelConfig())
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 500)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=4,
+                truncation_side="left",
+            ),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 4
+
+        kwargs = renderer.tokenizer._captured_encode_kwargs
+        assert kwargs["truncation"] is False
+
+    def test_explicit_side_left_text(self):
+        renderer = _build_renderer(MockModelConfig())
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 50)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=5,
+                truncation_side="left",
+            ),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 5
+        assert results[0]["prompt_token_ids"] == list(range(45, 50))
+
+    def test_explicit_side_right_text(self):
+        renderer = _build_renderer(MockModelConfig())
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 50)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=5,
+                truncation_side="right",
+            ),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 5
+        assert results[0]["prompt_token_ids"] == list(range(5))
+
+    def test_explicit_side_text_pretokenization_guard(self):
+        renderer = _build_renderer(MockModelConfig(), max_chars_per_token=1)
+
+        prompts = renderer.render_prompts(
+            _preprocess_prompt(renderer.model_config, "x" * 500)
+        )
+        results = renderer.tokenize_prompts(
+            prompts,
+            TokenizeParams(
+                max_total_tokens=100,
+                truncate_prompt_tokens=4,
+                truncation_side="left",
+            ),
+        )
+
+        assert len(results) == 1
+        assert len(results[0]["prompt_token_ids"]) == 4
+
+        assert renderer.tokenizer._captured_text_len <= 100
+
 
 class TestRenderEmbedPrompt:
     def _create_test_embed_bytes(self, tensor: torch.Tensor) -> bytes:
@@ -384,12 +475,13 @@ class TestRenderEmbedPrompt:
         assert torch.equal(results[0]["prompt_embeds"], tensor_input)
 
     def test_multiple_prompt_embeds(self):
-        renderer = _build_renderer(MockModelConfig())
+        hidden_size = 512
+        renderer = _build_renderer(MockModelConfig(hidden_size=hidden_size))
 
         # Create multiple test tensors
         tensor_inputs = [
-            torch.randn(8, 512, dtype=torch.float32),
-            torch.randn(12, 512, dtype=torch.float32),
+            torch.randn(8, hidden_size, dtype=torch.float32),
+            torch.randn(12, hidden_size, dtype=torch.float32),
         ]
 
         prompts = renderer.render_prompts(
@@ -432,13 +524,15 @@ class TestRenderEmbedPrompt:
         assert torch.equal(results[0]["prompt_embeds"], expected)
 
     def test_prompt_embed_different_dtypes(self):
-        renderer = _build_renderer(MockModelConfig())
-
+        hidden_size = 256
         # Test different supported dtypes
         dtypes = [torch.float32, torch.float16, torch.bfloat16]
 
         for dtype in dtypes:
-            tensor_input = torch.randn(5, 256, dtype=dtype)
+            renderer = _build_renderer(
+                MockModelConfig(hidden_size=hidden_size, dtype=dtype)
+            )
+            tensor_input = torch.randn(5, hidden_size, dtype=dtype)
 
             prompts = renderer.render_prompts(
                 _preprocess_prompt(
@@ -474,10 +568,11 @@ class TestRenderEmbedPrompt:
         assert results[0]["prompt_embeds"].shape == (10, 768)
 
     def test_both_prompts_and_embeds(self):
-        renderer = _build_renderer(MockModelConfig())
+        hidden_size = 256
+        renderer = _build_renderer(MockModelConfig(hidden_size=hidden_size))
 
         text_input = "Hello world"
-        tensor_input = torch.randn(5, 256, dtype=torch.float32)
+        tensor_input = torch.randn(5, hidden_size, dtype=torch.float32)
 
         prompts = renderer.render_prompts(
             _preprocess_prompt(

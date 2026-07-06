@@ -272,6 +272,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.connector = None
     scheduler.structured_output_manager = Mock()
     scheduler.structured_output_manager.should_advance.return_value = True
+    scheduler.structured_output_manager.trim_reasoning_for_advance.side_effect = (
+        lambda request, new_token_ids: new_token_ids
+    )
     scheduler.requests = {request.request_id: request}
     scheduler.running = [request]
     scheduler.waiting = Mock()
@@ -282,7 +285,9 @@ def test_abort_request_when_structured_output_fsm_cannot_advance():
     scheduler.finished_req_ids_dict = None
     scheduler.vllm_config = Mock()
     scheduler.vllm_config.model_config.enable_return_routed_experts = False
+    scheduler.enable_return_routed_experts = False
     scheduler.recompute_kv_load_failures = False
+    scheduler.defer_block_free = False
     scheduler.make_stats = Mock(return_value=None)
     scheduler.max_model_len = 128
 

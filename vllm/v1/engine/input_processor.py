@@ -49,6 +49,7 @@ class InputProcessor:
         self.speculative_config = vllm_config.speculative_config
         self.structured_outputs_config = vllm_config.structured_outputs_config
         self.observability_config = vllm_config.observability_config
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
 
         self.generation_config_fields = model_config.try_get_generation_config()
 
@@ -98,15 +99,22 @@ class InputProcessor:
                 self.tokenizer,
             )
 
-            if params.thinking_token_budget is not None and (
-                self.vllm_config.reasoning_config is None
-                or not self.vllm_config.reasoning_config.enabled
-            ):
-                raise ValueError(
-                    "thinking_token_budget is set but reasoning_config is "
-                    "not configured. Please set --reasoning-config to use "
-                    "thinking_token_budget."
-                )
+            if params.thinking_token_budget is not None:
+                if (
+                    self.vllm_config.reasoning_config is None
+                    or not self.vllm_config.reasoning_config.enabled
+                ):
+                    raise ValueError(
+                        "thinking_token_budget is set but reasoning_config is "
+                        "not configured. Please set --reasoning-parser "
+                        "and/or --reasoning-config to use thinking_token_budget."
+                    )
+                if self.use_v2_model_runner:
+                    raise ValueError(
+                        "thinking_token_budget is not yet supported by the V2 "
+                        "model runner. Run vLLM with VLLM_USE_V2_MODEL_RUNNER=0 "
+                        "to use thinking_token_budget."
+                    )
         elif isinstance(params, PoolingParams):
             supported_pooling_tasks = [
                 task for task in supported_tasks if task in POOLING_TASKS
@@ -292,11 +300,13 @@ class InputProcessor:
 
         # Mypy can be conservative for TypedDict unions; normalize access.
         if decoder_inputs["type"] == "embeds":
-            prompt_token_ids = None
             prompt_embeds = decoder_inputs["prompt_embeds"]
+            prompt_token_ids = decoder_inputs.get("prompt_token_ids")
+            prompt_is_token_ids = decoder_inputs.get("is_token_ids")
         else:
             prompt_token_ids = decoder_inputs["prompt_token_ids"]
             prompt_embeds = None
+            prompt_is_token_ids = None
 
         sampling_params = None
         pooling_params = None
@@ -361,6 +371,7 @@ class InputProcessor:
             request_id=request_id,
             prompt_token_ids=prompt_token_ids,
             prompt_embeds=prompt_embeds,
+            prompt_is_token_ids=prompt_is_token_ids,
             mm_features=mm_features,
             sampling_params=sampling_params,
             pooling_params=pooling_params,

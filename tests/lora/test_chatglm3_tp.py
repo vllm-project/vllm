@@ -1,9 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import pytest
+
 import vllm
 import vllm.config
 from vllm.lora.request import LoRARequest
+from vllm.platforms import current_platform
 
 from ..utils import create_new_process_for_each_test, multi_gpu_test
 
@@ -50,6 +53,9 @@ def do_sample(llm: vllm.LLM, lora_path: str, lora_id: int) -> list[str]:
     return generated_texts
 
 
+@pytest.mark.skipif(
+    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+)
 @create_new_process_for_each_test()
 def test_chatglm3_lora(chatglm3_lora_files):
     llm = vllm.LLM(
@@ -70,6 +76,9 @@ def test_chatglm3_lora(chatglm3_lora_files):
         assert output2[i] == EXPECTED_LORA_OUTPUT[i]
 
 
+@pytest.mark.skipif(
+    current_platform.is_cuda_alike(), reason="Skipping to avoid redundant model tests"
+)
 @multi_gpu_test(num_gpus=4)
 def test_chatglm3_lora_tp4(chatglm3_lora_files):
     llm = vllm.LLM(
@@ -106,6 +115,7 @@ def test_chatglm3_lora_tp4_fully_sharded_loras(chatglm3_lora_files):
         enable_lora=True,
         max_loras=2,
         max_lora_rank=64,
+        max_num_seqs=16,
         tensor_parallel_size=4,
         trust_remote_code=True,
         fully_sharded_loras=True,

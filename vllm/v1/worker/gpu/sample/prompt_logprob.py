@@ -44,10 +44,6 @@ class PromptLogprobsWorker:
         num_computed_tokens: torch.Tensor,
         # [max_num_reqs]
         prompt_lens: np.ndarray,
-        # [max_num_reqs]
-        prefill_lens: np.ndarray,
-        # [max_num_reqs]
-        num_computed_prefill_tokens: np.ndarray,
     ) -> dict[str, LogprobsTensors]:
         idx_mapping_np = input_batch.idx_mapping_np
         needs_prompt_logprobs = self.uses_prompt_logprobs[idx_mapping_np]
@@ -57,13 +53,11 @@ class PromptLogprobsWorker:
 
         num_prompt_logprobs = self.num_prompt_logprobs[idx_mapping_np]
         prompt_lens = prompt_lens[idx_mapping_np]
-        # NOTE(woosuk): -1 because the last prompt token's hidden state is not
-        # needed for prompt logprobs.
-        computed_prefill = num_computed_prefill_tokens[idx_mapping_np]
-        includes_prompt = computed_prefill < prompt_lens - 1
+        computed_prefill = input_batch.num_computed_prefill_tokens_np
+        includes_prompt = computed_prefill < prompt_lens
         # NOTE(woosuk): If the request was resumed after preemption, its prompt
         # logprobs must have been computed before preemption. Skip.
-        resumed_after_prompt = prompt_lens < prefill_lens[idx_mapping_np]
+        resumed_after_prompt = prompt_lens < input_batch.prefill_len_np
         needs_prompt_logprobs &= includes_prompt & ~resumed_after_prompt
         if not np.any(needs_prompt_logprobs):
             return {}
@@ -105,6 +99,7 @@ class PromptLogprobsWorker:
                 continue
 
             req_is_prompt_chunked = is_prompt_chunked[i]
+            req_num_prompt_logprobs = int(num_prompt_logprobs[i])
             start_idx = query_start_loc_np[i]
             end_idx = query_start_loc_np[i + 1]
             assert start_idx < end_idx, (
@@ -113,13 +108,18 @@ class PromptLogprobsWorker:
             if not req_is_prompt_chunked:
                 end_idx -= 1
 
+            width = (
+                prompt_logprobs.shape[1]
+                if req_num_prompt_logprobs == -1
+                else req_num_prompt_logprobs + 1
+            )
             # no logprobs if start_idx >= end_idx
             logprobs = (
                 None
                 if start_idx >= end_idx
                 else LogprobsTensors(
-                    logprob_token_ids=prompt_token_ids[start_idx:end_idx],
-                    logprobs=prompt_logprobs[start_idx:end_idx],
+                    logprob_token_ids=prompt_token_ids[start_idx:end_idx, :width],
+                    logprobs=prompt_logprobs[start_idx:end_idx, :width],
                     selected_token_ranks=prompt_ranks[start_idx:end_idx],
                 )
             )
@@ -247,7 +247,7 @@ def compute_prompt_logprobs_with_chunking(
             logprobs.append(token_logprobs)
             ranks.append(token_ranks)
         else:
-            # Legacy approach: use compute_topk_logprobs for specific number of top logprobs
+            # Legacy approach: use compute_topk_logprobs for specific top logprobs
             requested_num_prompt_logprobs = (
                 prompt_logits.shape[-1]
                 if num_prompt_logprobs == -1

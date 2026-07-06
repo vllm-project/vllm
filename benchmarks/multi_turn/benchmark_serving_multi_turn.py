@@ -65,6 +65,32 @@ class RequestArgs(NamedTuple):
     limit_min_tokens: int  # Use negative value for no limit
     limit_max_tokens: int  # Use negative value for no limit
     timeout_sec: int
+    send_conversation_id: bool
+    headers: dict[str, str]
+
+
+def parse_custom_header(header: str) -> tuple[str, str]:
+    separators = (":", "=")
+    for separator in separators:
+        if separator in header:
+            key, value = header.split(separator, 1)
+            key = key.strip()
+            value = value.strip()
+            if key:
+                return key, value
+            break
+    raise argparse.ArgumentTypeError(
+        "Headers must be provided as 'Header-Name: value' or 'Header-Name=value'"
+    )
+
+
+def build_request_headers(
+    api_key: str | None, custom_headers: list[tuple[str, str]] | None
+) -> dict[str, str]:
+    headers = dict(custom_headers or [])
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    return headers
 
 
 class BenchmarkArgs(NamedTuple):
@@ -218,12 +244,11 @@ async def send_request(
     max_tokens: int | None = None,
     timeout_sec: int = 120,
     conversation_id: str | None = None,
+    headers: dict[str, str] | None = None,
 ) -> ServerResponse:
     payload = {
         "model": model,
         "messages": messages,
-        "seed": 0,
-        "temperature": 0.0,
     }
 
     if conversation_id is not None:
@@ -233,13 +258,17 @@ async def send_request(
         payload["stream"] = True
         payload["stream_options"] = {"include_usage": False}
 
-    if min_tokens is not None:
-        payload["min_tokens"] = min_tokens
+    # if min_tokens is not None:
+    #     payload["min_tokens"] = min_tokens
 
     if max_tokens is not None:
         payload["max_tokens"] = max_tokens
 
-    headers = {"Content-Type": "application/json"}
+    request_headers = {"Content-Type": "application/json"}
+    if conversation_id is not None:
+        request_headers["X-Session-ID"] = str(conversation_id)
+    if headers is not None:
+        request_headers.update(headers)
 
     # Calculate the timeout for the request
     if max_tokens is not None:
@@ -265,7 +294,7 @@ async def send_request(
     most_recent_timestamp: int = start_time
 
     async with session.post(
-        url=chat_url, json=payload, headers=headers, timeout=timeout
+        url=chat_url, json=payload, headers=request_headers, timeout=timeout
     ) as response:
         http_status = HTTPStatus(response.status)
         if http_status == HTTPStatus.OK:
@@ -317,6 +346,8 @@ async def send_request(
             latency = time.perf_counter_ns() - start_time
 
     if ttft is None:
+        if stream:
+            valid_response = False
         # The response was a single chunk
         ttft = latency
 
@@ -423,7 +454,8 @@ async def send_turn(
         min_tokens,
         max_tokens,
         req_args.timeout_sec,
-        conversation_id=conv_id,
+        conversation_id=conv_id if req_args.send_conversation_id else None,
+        headers=req_args.headers,
     )
 
     if response.valid is False:
@@ -872,6 +904,7 @@ def get_client_config(
     # Arguments for API requests
     chat_url = f"{args.url}/v1/chat/completions"
     model_name = args.served_model_name if args.served_model_name else args.model
+    headers = build_request_headers(args.api_key, args.header)
 
     req_args = RequestArgs(
         chat_url=chat_url,
@@ -880,6 +913,8 @@ def get_client_config(
         limit_min_tokens=args.limit_min_tokens,
         limit_max_tokens=args.limit_max_tokens,
         timeout_sec=args.request_timeout_sec,
+        send_conversation_id=args.send_conversation_id,
+        headers=headers,
     )
 
     return client_args, req_args
@@ -1245,19 +1280,19 @@ def process_statistics(
         )
 
 
-async def get_server_info(url: str) -> None:
+async def get_server_info(url: str, headers: dict[str, str] | None = None) -> None:
     logger.info(f"{Color.BLUE}Collecting information from server: {url}{Color.RESET}")
     async with aiohttp.ClientSession() as session:
         # Get server version (not mandatory, "version" endpoint may not exist)
         url_version = f"{url}/version"
-        async with session.get(url_version) as response:
+        async with session.get(url_version, headers=headers) as response:
             if HTTPStatus(response.status) == HTTPStatus.OK:
                 text = await response.text()
                 logger.info(f"{Color.BLUE}Server version: {text}{Color.RESET}")
 
         # Get available models
         url_models = f"{url}/v1/models"
-        async with session.get(url_models) as response:
+        async with session.get(url_models, headers=headers) as response:
             if HTTPStatus(response.status) == HTTPStatus.OK:
                 text = await response.text()
                 logger.info(f"{Color.BLUE}Models:{Color.RESET}")
@@ -1321,6 +1356,22 @@ async def main() -> None:
         type=str,
         default="http://localhost:8000",
         help="Base URL for the LLM API server",
+    )
+
+    parser.add_argument(
+        "--api-key",
+        type=str,
+        default=None,
+        help="API key to send as an Authorization bearer token",
+    )
+    parser.add_argument(
+        "--header",
+        action="append",
+        type=parse_custom_header,
+        default=None,
+        metavar="KEY=VALUE",
+        help="Custom request header. Can be specified multiple times. "
+        "Accepts 'Header-Name: value' or 'Header-Name=value'.",
     )
 
     parser.add_argument(
@@ -1438,6 +1489,22 @@ async def main() -> None:
     )
 
     parser.add_argument(
+        "--send-conversation-id",
+        default=False,
+        action="store_true",
+        help=(
+            "Inject a `conversation_id` field into each Chat Completions "
+            "payload. This is a non-standard OpenAI extension consumed by "
+            "vLLM's disaggregated multi-turn proxy "
+            "(examples/disaggregated/disaggregated_serving/"
+            "disagg_proxy_multiturn.py) to key cross-turn KV cache reuse. "
+            "Leave disabled (default) when targeting strict "
+            "OpenAI-compatible endpoints; enable when benchmarking the "
+            "disaggregated proxy."
+        ),
+    )
+
+    parser.add_argument(
         "-e",
         "--excel-output",
         default=False,
@@ -1471,6 +1538,12 @@ async def main() -> None:
         help="Ignore the first X samples as warmup (X is a percentage)."
         " A comma separated list of percentages can be used "
         "(for example: --warmup-percentages=0%%,50%%)",
+    )
+
+    parser.add_argument(
+        "--trust-remote-code",
+        action="store_true",
+        help="Trust remote code when loading the tokenizer.",
     )
 
     args = parser.parse_args()
@@ -1515,9 +1588,12 @@ async def main() -> None:
     np.random.seed(args.seed)
 
     logger.info("Loading tokenizer")
-    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    tokenizer = AutoTokenizer.from_pretrained(
+        args.model, trust_remote_code=args.trust_remote_code
+    )
 
-    await get_server_info(args.url)
+    headers = build_request_headers(args.api_key, args.header)
+    await get_server_info(args.url, headers=headers)
 
     # Load the input file (either conversations of configuration file)
     logger.info(f"Reading input file: {args.input_file}")

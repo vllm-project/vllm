@@ -10,6 +10,7 @@ from vllm import PoolingParams, PoolingRequestOutput, TokensPrompt
 from vllm.inputs import EngineInput
 from vllm.renderers import TokenizeParams
 from vllm.renderers.hf import safe_apply_chat_template
+from vllm.renderers.inputs.preprocess import extract_target_prompt
 from vllm.tasks import PoolingTask
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -157,7 +158,7 @@ class BiEncoderIOProcessor(ScoringIOProcessor):
             tok_params,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in ("mm_processor_kwargs", "cache_salt", "chat_template_kwargs")
                 if (v := getattr(request, k, None)) is not None
             },
         )
@@ -384,7 +385,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             max_tokens_per_doc=max_tokens_per_doc,
             prompt_extras={
                 k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
+                for k in ("mm_processor_kwargs", "cache_salt", "chat_template_kwargs")
                 if (v := getattr(request, k, None)) is not None
             },
         )
@@ -407,6 +408,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             pooling_params=ctx.pooling_params
         )
 
+        prompt_extras = ctx.pooling_params.extra_kwargs if ctx.pooling_params else None
         engine_inputs, pooling_params_list = self._pre_process(
             ctx.prompts,
             tok_params,
@@ -414,6 +416,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             ctx.chat_template,
             max_tokens_per_query=max_tokens_per_query,
             max_tokens_per_doc=max_tokens_per_doc,
+            prompt_extras=prompt_extras,
         )
         ctx.pooling_params = pooling_params_list
         return engine_inputs
@@ -431,8 +434,16 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         max_tokens_per_doc: int = 0,
         prompt_extras: dict[str, Any] | None = None,
     ) -> tuple[Sequence[EngineInput], list[PoolingParams]]:
-        # todo: support prompt_extras
         arrival_time = time.time()
+        engine_prompt_extras = (
+            {
+                k: v
+                for k in ("mm_processor_kwargs", "cache_salt")
+                if (v := prompt_extras.get(k)) is not None
+            }
+            if prompt_extras
+            else None
+        )
 
         data_1 = scoring_data.data_1
         data_2 = scoring_data.data_2
@@ -453,17 +464,26 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                 chat_template=chat_template,
                 max_tokens_per_query=max_tokens_per_query,
                 max_tokens_per_doc=max_tokens_per_doc,
+                chat_template_kwargs=prompt_extras.get("chat_template_kwargs")
+                if prompt_extras
+                else None,
             )
 
             if token_type_ids := engine_prompt.pop("token_type_ids", None):
                 params = pooling_params.clone()
                 compressed = compress_token_type_ids(token_type_ids)
-                params.extra_kwargs = {"compressed_token_type_ids": compressed}
+                params.extra_kwargs = {
+                    **(params.extra_kwargs or {}),
+                    "compressed_token_type_ids": compressed,
+                }
                 pooling_params_list.append(params)
             else:
                 pooling_params_list.append(pooling_params)
 
             tok_params.apply_post_tokenization(self.tokenizer, engine_prompt)
+            if engine_prompt_extras:
+                target_prompt = extract_target_prompt(self.model_config, engine_prompt)
+                target_prompt.update(engine_prompt_extras)
             engine_inputs.append(
                 self.renderer.process_for_engine(engine_prompt, arrival_time)
             )
@@ -477,6 +497,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
         chat_template: str | None = None,
         max_tokens_per_query: int = 0,
         max_tokens_per_doc: int = 0,
+        chat_template_kwargs: dict[str, Any] | None = None,
     ):
         model_config = self.model_config
         tokenizer = self.tokenizer
@@ -556,6 +577,14 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
             # If that fails because there is no such template,
             # fall back to the default implementation.
             try:
+                _safe_kwargs = chat_template_kwargs or {}
+                _reserved = {"chat_template", "tools", "tokenize"}
+                _unexpected = _reserved & _safe_kwargs.keys()
+                if _unexpected:
+                    raise ValueError(
+                        "chat_template_kwargs contains reserved keys that "
+                        f"conflict with fixed scorer arguments: {_unexpected}"
+                    )
                 full_prompt = safe_apply_chat_template(
                     model_config,
                     tokenizer,
@@ -566,6 +595,7 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
                     chat_template=chat_template,
                     tools=None,
                     tokenize=False,
+                    **_safe_kwargs,
                 )
                 prompt_inputs = tokenizer(full_prompt, **encode_kwargs)
             except ChatTemplateResolutionError:
@@ -589,12 +619,6 @@ class CrossEncoderIOProcessor(ScoringIOProcessor):
 
 class JinaRankingIOProcessorMixin:
     @staticmethod
-    def sanitize_input(text: str, special_tokens: dict[str, str]) -> str:
-        for token in special_tokens.values():
-            text = text.replace(token, "")
-        return text
-
-    @staticmethod
     def format_docs_prompts_func(
         query: str,
         docs: list[str],
@@ -611,11 +635,13 @@ class JinaRankingIOProcessorMixin:
         if special_tokens is None:
             special_tokens = default_special_tokens
 
-        query = JinaRankingIOProcessorMixin.sanitize_input(query, special_tokens)
-        docs = [
-            JinaRankingIOProcessorMixin.sanitize_input(doc, special_tokens)
-            for doc in docs
-        ]
+        def sanitize_input(text: str) -> str:
+            for token in special_tokens.values():
+                text = text.replace(token, "")
+            return text
+
+        query = sanitize_input(query)
+        docs = [sanitize_input(doc) for doc in docs]
 
         prefix = (
             "<|im_start|>system\n"
@@ -638,6 +664,7 @@ class JinaRankingIOProcessorMixin:
         )
 
         if instruction:
+            instruction = sanitize_input(instruction)
             prompt += f"<instruct>\n{instruction}\n</instruct>\n"
 
         doc_prompts = [
@@ -673,12 +700,24 @@ class JinaRankingIOProcessor(LateInteractionIOProcessor, JinaRankingIOProcessorM
     ) -> Sequence[EngineInput]:
         queries = self.ensure_str(scoring_data.data_1)
         docs = self.ensure_str(scoring_data.data_2)
+        chat_template_kwargs = (
+            prompt_extras.get("chat_template_kwargs") if prompt_extras else None
+        )
+        instruction = (
+            chat_template_kwargs.get("instruction") if chat_template_kwargs else None
+        )
 
         if len(queries) == 1:
-            prompts = [self.format_docs_prompts_func(query=queries[0], docs=docs)]
+            prompts = [
+                self.format_docs_prompts_func(
+                    query=queries[0], docs=docs, instruction=instruction
+                )
+            ]
         else:
             prompts = [
-                self.format_docs_prompts_func(query=q, docs=[d])
+                self.format_docs_prompts_func(
+                    query=q, docs=[d], instruction=instruction
+                )
                 for q, d in zip(queries, docs)
             ]
 
