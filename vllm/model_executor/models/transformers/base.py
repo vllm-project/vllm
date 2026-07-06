@@ -337,6 +337,20 @@ class Base(
         nested_lm_head_pattern = re.compile(r"^model\.(.+\.)*(lm_head.+)")
         orig_to_new_regex[nested_lm_head_pattern] = r"\2"
 
+        # Some multimodal checkpoints nest vision tower weights under
+        # vision_tower.vision_model.*, while runtime modules expose
+        # vision_tower.* directly. Normalize these names when a vision tower is
+        # present to avoid missing-parameter load failures.
+        if getattr(self.config, "vision_config", None) is not None and any(
+            name == "vision_tower" for name, _ in self.model.named_children()
+        ):
+            orig_to_new_regex[
+                re.compile(r"^model\.vision_tower\.vision_model\.(.+)$")
+            ] = r"model.vision_tower.\1"
+            orig_to_new_regex[re.compile(r"^vision_tower\.vision_model\.(.+)$")] = (
+                r"vision_tower.\1"
+            )
+
         # Apply mapping to quantization config if needed
         self._maybe_apply_model_mapping()
 
