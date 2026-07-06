@@ -13,6 +13,7 @@ from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLAChunkedContextMetadata,
     SparseMLACommonImpl,
     SparseMLACommonMetadataBuilder,
+    dense_mha_fa4_available,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
@@ -257,8 +258,14 @@ class FlashMLASparseMetadataBuilder(
         # Route sparse MLA through MQA for short query chunks; larger chunks use
         # dense MHA prefill. The cutoff depends on the local TP q-head count.
         num_q_heads = self.model_config.get_num_attention_heads(parallel_config)
+        qk_head_dim = self.mla_dims.qk_nope_head_dim + self.mla_dims.qk_rope_head_dim
+        threshold = (
+            {16: 64, 32: 128, 64: 256, 128: 1024}.get(num_q_heads, 1024)
+            if dense_mha_fa4_available(qk_head_dim)
+            else 1
+        )
         self._init_reorder_batch_threshold(
-            {16: 64, 32: 128, 64: 256, 128: 1024}.get(num_q_heads, 1024),
+            threshold,
             supports_spec_as_decode=True,
         )
 

@@ -39,6 +39,12 @@ logger = init_logger(__name__)
 T = TypeVar("T", bound=AttentionMetadata)
 
 
+def dense_mha_fa4_available(qk_head_dim: int) -> bool:
+    """Whether an FA4 (>=v4) varlen kernel exists for this qk_head_dim."""
+    fa_version = get_flash_attn_version(head_size=qk_head_dim)
+    return fa_version is not None and fa_version >= 4
+
+
 @dataclass
 class SparseMLAChunkedContextMetadata:
     cu_seq_lens: torch.Tensor
@@ -329,8 +335,7 @@ class SparseMLACommonImpl(SparseMLAAttentionImpl[T], Generic[T]):
             else topk_indices_buffer
         )
 
-        fa_version = get_flash_attn_version(head_size=qk_head_dim)
-        self._fa4_available = fa_version is not None and fa_version >= 4
+        self._fa4_available = dense_mha_fa4_available(qk_head_dim)
 
         self._use_flashinfer_concat_mla_k = (
             has_flashinfer()
