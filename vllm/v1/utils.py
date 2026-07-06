@@ -31,6 +31,7 @@ from vllm.logger import init_logger
 from vllm.usage.usage_lib import UsageContext, is_usage_stats_enabled, usage_message
 from vllm.utils.network_utils import get_open_zmq_ipc_path, get_tcp_uri
 from vllm.utils.system_utils import decorate_logs, kill_process_tree, set_process_title
+from vllm.utils.torch_utils import PIN_MEMORY
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
@@ -114,7 +115,7 @@ class CpuGpuBuffer:
         *size: int | torch.SymInt,
         dtype: torch.dtype,
         device: torch.device,
-        pin_memory: bool,
+        pin_memory: bool = PIN_MEMORY,
         with_numpy: bool = True,
     ) -> None:
         # these buffers are mutable runtime state, so allocate them as normal
@@ -336,6 +337,7 @@ class RustFrontendProcessManager:
         args: argparse.Namespace,
         input_address: str,
         output_address: str,
+        engine_start_index: int,
         engine_count: int,
         stats_update_address: str | None = None,
     ):
@@ -354,6 +356,8 @@ class RustFrontendProcessManager:
             input_address,
             "--output-address",
             output_address,
+            "--engine-start-index",
+            str(engine_start_index),
             "--engine-count",
             str(engine_count),
         ]
@@ -361,10 +365,25 @@ class RustFrontendProcessManager:
             cmd.extend(["--coordinator-address", stats_update_address])
         from vllm.entrypoints.serve.utils.api_utils import jsonify_non_default_args
 
-        args_json = json.dumps(
-            jsonify_non_default_args(args, exclude={"api_server_count"}),
-            sort_keys=True,
+        args_dict = jsonify_non_default_args(
+            args,
+            exclude={
+                "api_server_count",
+                # Python passes the bootstrapped engine range explicitly.
+                "data_parallel_rank",
+                "data_parallel_external_lb",
+                "data_parallel_hybrid_lb",
+            },
         )
+        # The Rust `frontend` subcommand parses --args-json via serde_json,
+        # which bypasses clap and therefore ignores any `#[arg(env = ...)]`
+        # declarations on SharedRuntimeArgs fields. Forward the env-driven
+        # values explicitly so VLLM_ENGINE_READY_TIMEOUT_S and
+        # VLLM_HTTP_TIMEOUT_KEEP_ALIVE behave the same on both Python and Rust
+        # frontends.
+        args_dict["engine_ready_timeout_secs"] = envs.VLLM_ENGINE_READY_TIMEOUT_S
+        args_dict["http_timeout_keep_alive"] = envs.VLLM_HTTP_TIMEOUT_KEEP_ALIVE
+        args_json = json.dumps(args_dict, sort_keys=True)
         cmd.extend(["--args-json", args_json])
 
         logger.info("Launching Rust frontend: %s", " ".join(cmd))
@@ -638,29 +657,61 @@ def report_usage_stats(
 
     from vllm.model_executor.model_loader import get_architecture_class_name
 
+    model_config = vllm_config.model_config
+    scheduler_config = vllm_config.scheduler_config
     parallel_config = vllm_config.parallel_config
+    attention_config = vllm_config.attention_config
+    compilation_config = vllm_config.compilation_config
+    speculative_config = vllm_config.speculative_config
 
     # Prepare KV connector string if applicable
     kv_connector = None
     if vllm_config.kv_transfer_config is not None:
         kv_connector = vllm_config.kv_transfer_config.kv_connector
 
+    # Attention backend is None when set to "auto" (resolved at runtime per platform).
+    attention_backend = (
+        attention_config.backend.name if attention_config.backend is not None else None
+    )
+
+    # CompilationMode is an IntEnum; report the name for readability in dashboards.
+    compilation_mode = (
+        compilation_config.mode.name if compilation_config.mode is not None else None
+    )
+
+    # Speculative decoding fields default to None when spec decode is disabled.
+    spec_decode_method = (
+        speculative_config.method if speculative_config is not None else None
+    )
+    num_speculative_tokens = (
+        speculative_config.num_speculative_tokens
+        if speculative_config is not None
+        else None
+    )
+
+    if model_config.using_transformers_backend():
+        backend_cls = model_config._model_info.architecture
+        # Show what was wrapped e.g. TransformersForCausalLM(Starcoder2ForCausalLM)
+        architecture = f"{backend_cls}({model_config.architectures[0]})"
+    else:
+        architecture = get_architecture_class_name(model_config)
+
     usage_message.report_usage(
-        get_architecture_class_name(vllm_config.model_config),
+        architecture,
         usage_context,
         extra_kvs={
             # Common configuration
-            "dtype": str(vllm_config.model_config.dtype),
+            "dtype": str(model_config.dtype),
             "block_size": vllm_config.cache_config.block_size,
             "gpu_memory_utilization": vllm_config.cache_config.gpu_memory_utilization,
             "kv_cache_memory_bytes": vllm_config.cache_config.kv_cache_memory_bytes,
             # Quantization
-            "quantization": vllm_config.model_config.quantization,
+            "quantization": model_config.quantization,
             "kv_cache_dtype": str(vllm_config.cache_config.cache_dtype),
             # Feature flags
             "enable_lora": bool(vllm_config.lora_config),
             "enable_prefix_caching": vllm_config.cache_config.enable_prefix_caching,
-            "enforce_eager": vllm_config.model_config.enforce_eager,
+            "enforce_eager": model_config.enforce_eager,
             "disable_custom_all_reduce": parallel_config.disable_custom_all_reduce,
             # Distributed parallelism settings
             "tensor_parallel_size": parallel_config.tensor_parallel_size,
@@ -671,6 +722,21 @@ def report_usage_stats(
             "all2all_backend": parallel_config.all2all_backend,
             # KV connector used
             "kv_connector": kv_connector,
+            # Batching limits — tuning knobs operators commonly override
+            "max_model_len": model_config.max_model_len,
+            "max_num_seqs": scheduler_config.max_num_seqs,
+            "max_num_batched_tokens": scheduler_config.max_num_batched_tokens,
+            # Attention backend (user-requested; None = auto-selected at runtime)
+            "attention_backend": attention_backend,
+            # torch.compile mode (e.g. NONE, STOCK_TORCH_COMPILE, VLLM_COMPILE)
+            "compilation_mode": compilation_mode,
+            # Speculative decoding configuration
+            "spec_decode_method": spec_decode_method,
+            "num_speculative_tokens": num_speculative_tokens,
+            # Wide expert parallel: load balancer + redundant/total expert counts
+            "enable_eplb": parallel_config.enable_eplb,
+            "num_redundant_experts": parallel_config.eplb_config.num_redundant_experts,
+            "num_experts": model_config.get_num_experts(),
         },
     )
 

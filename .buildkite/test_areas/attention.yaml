@@ -15,7 +15,7 @@ steps:
     - pytest -v -s v1/attention
   mirror:
     amd:
-      device: mi300_1
+      device: mi325_1
       timeout_in_minutes: 70
       depends_on:
       - image-build-amd

@@ -19,6 +19,10 @@ steps:
       - image-build-xpu
     timeout_in_minutes: 30
     device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 2+
+      mem: 24+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -38,17 +42,46 @@ steps:
         python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager --kv-cache-dtype fp8 &&
         python3 examples/basic/offline_inference/generate.py --model nvidia/Llama-3.1-8B-Instruct-FP8 --block-size 64 --enforce-eager --quantization modelopt --kv-cache-dtype fp8 --attention-backend TRITON_ATTN --max-model-len 4096 &&
         python3 examples/basic/offline_inference/generate.py --model superjob/Qwen3-4B-Instruct-2507-GPTQ-Int4 --block-size 64 --enforce-eager --max-model-len 8192 &&
+        python3 examples/basic/offline_inference/generate.py --model TheBloke/TinyLlama-1.1B-Chat-v0.3-AWQ --block-size 64 --enforce-eager &&
         python3 examples/basic/offline_inference/generate.py --model ibm-research/PowerMoE-3b --block-size 64 --enforce-eager -tp 2 &&
         python3 examples/basic/offline_inference/generate.py --model ibm-research/PowerMoE-3b --block-size 64 --enforce-eager -tp 2 --enable-expert-parallel &&
         python3 examples/basic/offline_inference/generate.py --model superjob/Qwen3-4B-Instruct-2507-GPTQ-Int4 --max-model-len 8192 &&
         VLLM_XPU_FUSED_MOE_USE_REF=1 python3 examples/basic/offline_inference/generate.py --model Qwen/Qwen3-30B-A3B-Instruct-2507-FP8 --enforce-eager -tp 2 --max-model-len 8192 &&
         python3 examples/basic/offline_inference/generate.py --model INCModel/Qwen3-30B-A3B-Instruct-2507-MXFP4-LLMC --enforce-eager -tp 2 --max-model-len 8192
         '
+  - label: "XPU W8A8 FP8 Linear Examples"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 60
+    device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 24+
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+      VLLM_TEST_DEVICE: "xpu"
+    source_file_dependencies:
+      - vllm/
+      - .buildkite/intel_jobs/test-intel.yaml
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'python3 examples/basic/offline_inference/generate.py --linear-backend xpu --model RedHatAI/Meta-Llama-3.1-8B-Instruct-FP8 --enforce-eager --max-model-len 4096 &&
+        python3 examples/basic/offline_inference/generate.py --linear-backend xpu --model neuralmagic/Llama-3.2-1B-Instruct-FP8-dynamic --enforce-eager --max-model-len 4096 &&
+        python3 examples/basic/offline_inference/generate.py --linear-backend xpu --model meta-llama/Llama-3.2-1B-Instruct --quantization fp8 --enforce-eager --max-model-len 4096
+        '
   - label: "XPU V1 test"
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 30
     device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 16+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -66,13 +99,17 @@ steps:
         pytest -v -s v1/worker --ignore=v1/worker/test_gpu_model_runner.py --ignore=v1/worker/test_worker_memory_snapshot.py &&
         pytest -v -s v1/structured_output &&
         pytest -v -s v1/test_serial_utils.py &&
-        pytest -v -s v1/spec_decode --ignore=v1/spec_decode/test_max_len.py --ignore=v1/spec_decode/test_speculators_eagle3.py --ignore=v1/spec_decode/test_acceptance_length.py &&
+        pytest -v -s v1/spec_decode --ignore=v1/spec_decode/test_max_len.py --ignore=v1/spec_decode/test_speculators_eagle3.py --ignore=v1/spec_decode/test_acceptance_length.py --ignore=v1/spec_decode/test_speculators_correctness.py &&
         pytest -v -s v1/kv_connector/unit --ignore=v1/kv_connector/unit/test_multi_connector.py --ignore=v1/kv_connector/unit/test_example_connector.py --ignore=v1/kv_connector/unit/test_lmcache_integration.py --ignore=v1/kv_connector/unit/test_hf3fs_client.py --ignore=v1/kv_connector/unit/test_hf3fs_connector.py --ignore=v1/kv_connector/unit/test_hf3fs_metadata_server.py --ignore=v1/kv_connector/unit/test_offloading_connector.py'
   - label: "XPU server test"
     depends_on:
       - image-build-xpu
     timeout_in_minutes: 30
     device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 16+
     no_plugin: true
     env:
       REGISTRY: "public.ecr.aws/q9t5s3a7"
@@ -85,5 +122,49 @@ steps:
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
         'pip install av &&
         cd tests &&
-        pytest -v -s entrypoints/openai/chat_completion/test_audio_in_video.py &&
+        pytest -v -s entrypoints/multimodal/openai/chat_completion/test_audio_in_video.py &&
         pytest -v -s benchmarks/test_serve_cli.py'
+  - label: "XPU quantization test"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 30
+    device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 16+
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+    source_file_dependencies:
+      - vllm/
+      - .buildkite/intel_jobs/test-intel.yaml 
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'cd tests &&
+        pytest -v -s quantization/test_auto_round.py'
+  - label: "XPU compressed tensors FP8 test"
+    depends_on:
+      - image-build-xpu
+    timeout_in_minutes: 60
+    device: intel_gpu
+    agent_tags:
+      label: production
+      gpu: 1+
+      mem: 16+
+    no_plugin: true
+    env:
+      REGISTRY: "public.ecr.aws/q9t5s3a7"
+      REPO: "vllm-ci-test-repo"
+      VLLM_TEST_DEVICE: "xpu"
+    source_file_dependencies:
+      - vllm/
+      - tests/quantization/test_compressed_tensors.py
+      - .buildkite/intel_jobs/test-intel.yaml
+    commands:
+      - >-
+        bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+        'cd tests &&
+        pytest -v -s quantization/test_compressed_tensors.py::test_compressed_tensors_fp8'
