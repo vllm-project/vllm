@@ -14,6 +14,7 @@ from PIL import Image
 from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.utils import TensorType
 
+from vllm.transformers_utils.repo_utils import get_hf_file_to_dict
 from vllm.utils.import_utils import is_numba_available
 
 if is_numba_available():
@@ -341,6 +342,42 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
         config = config_dict.copy()
         media_proc_cfg = config.pop("media_proc_cfg", {})
         return cls(media_proc_cfg=media_proc_cfg, **config, **kwargs)
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: str,
+        *args: Any,
+        revision: str | None = "main",
+        **kwargs: Any,
+    ):
+        if args:
+            raise TypeError(
+                f"{cls.__name__}.from_pretrained does not accept positional "
+                f"arguments other than pretrained_model_name_or_path"
+            )
+
+        for loader_kwarg in (
+            "cache_dir",
+            "force_download",
+            "local_files_only",
+            "subfolder",
+            "token",
+            "trust_remote_code",
+        ):
+            kwargs.pop(loader_kwarg, None)
+
+        config_dict = get_hf_file_to_dict(
+            "preprocessor_config.json",
+            pretrained_model_name_or_path,
+            revision=revision,
+        )
+        if config_dict is None:
+            raise ValueError(
+                "Failed to load preprocessor_config.json for "
+                f"{pretrained_model_name_or_path}"
+            )
+        return cls.from_dict(config_dict, **kwargs)
 
     def to_json_string(self):
         dictionary = self.to_dict()
