@@ -632,8 +632,8 @@ class ParallelConfig:
 
     # The all_reduce at the end of attention (during o_proj) means that
     # inputs are replicated across each rank of the tensor parallel group.
-    # If using expert-parallelism, replicated tokens results in useless
-    # duplicate computation and communication.
+    # If using expert-parallelism with DeepEP All2All ops, replicated
+    # tokens results in useless duplicate computation and communication.
     #
     # In this case, ensure the input to the experts is sequence parallel
     # to avoid the excess work.
@@ -652,6 +652,7 @@ class ParallelConfig:
             )
             and self.enable_expert_parallel
             and self.tensor_parallel_size > 1
+            and self.data_parallel_size > 1
         )
 
     @property
