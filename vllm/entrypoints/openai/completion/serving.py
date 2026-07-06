@@ -16,6 +16,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     GenerationError,
+    build_per_request_timing_metrics,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -33,13 +34,6 @@ from vllm.entrypoints.openai.engine.protocol import (
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     UsageInfo,
-)
-from vllm.entrypoints.openai.engine.serving import (
-    GenerationError,
-    OpenAIServing,
-    build_per_request_timing_metrics,
-    clamp_prompt_logprobs,
-    format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage

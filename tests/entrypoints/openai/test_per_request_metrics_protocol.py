@@ -3,6 +3,9 @@
 
 import pytest
 
+from vllm.entrypoints.generate.base.serving import (
+    build_per_request_timing_metrics as _build_per_request_timing_metrics,
+)
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -17,9 +20,6 @@ from vllm.entrypoints.openai.completion.protocol import (
 from vllm.entrypoints.openai.engine.protocol import (
     PerRequestTimingMetrics,
     UsageInfo,
-)
-from vllm.entrypoints.openai.engine.serving import (
-    build_per_request_timing_metrics as _build_per_request_timing_metrics,
 )
 from vllm.v1.metrics.stats import RequestStateStats
 
