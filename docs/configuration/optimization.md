@@ -46,14 +46,14 @@ In V1, **chunked prefill is enabled by default whenever possible**. With chunked
 
 This policy has two benefits:
 
-- It improves ITL and generation decode because decode requests are prioritized.
+- It improves inter-token latency (ITL) and generation decode because decode requests are prioritized.
 - It helps achieve better GPU utilization by locating compute-bound (prefill) and memory-bound (decode) requests to the same batch.
 
 ### Performance Tuning with Chunked Prefill
 
 You can tune the performance by adjusting `max_num_batched_tokens`:
 
-- Smaller values (e.g., 2048) achieve better inter-token latency (ITL) because there are fewer prefills slowing down decodes.
+- Smaller values (e.g., 2048) achieve better ITL because there are fewer prefills slowing down decodes.
 - Higher values achieve better time to first token (TTFT) as you can process more prefill tokens in a batch.
 - For optimal throughput, we recommend setting `max_num_batched_tokens > 8192` especially for smaller models on large GPUs.
 - If `max_num_batched_tokens` is the same as `max_model_len`, that's almost the equivalent to the V0 default scheduling policy (except that it still prioritizes decodes).
@@ -109,7 +109,7 @@ from vllm import LLM
 
 # Combine pipeline and tensor parallelism
 llm = LLM(
-    model="meta-llama/Llama-3.3-70B-Instruct,
+    model="meta-llama/Llama-3.3-70B-Instruct",
     tensor_parallel_size=4,
     pipeline_parallel_size=2,
 )
@@ -155,9 +155,9 @@ switch to `--physcpubind=<cpu-list> --membind=<node>`.
 
 These `--numa-bind*` options only apply to GPU execution processes. They do not
 configure the CPU backend's separate thread-affinity controls. Automatic
-GPU-to-NUMA detection is currently implemented for CUDA/NVML-based platforms;
-other GPU backends must provide explicit binding lists if they use these
-options.
+GPU-to-NUMA detection is currently implemented for CUDA/NVML-based as well as
+ROCM-based platforms; other GPU backends must provide explicit binding lists if
+they use these options.
 
 `--numa-bind-nodes` takes one non-negative NUMA node index per visible GPU, in
 the same order as the GPU indices.
@@ -269,6 +269,40 @@ Known supported models (with corresponding benchmarks):
 - Step3 (<https://github.com/vllm-project/vllm/pull/22697>)
 
 ## Input Processing
+
+### fastokens Backend
+
+By default vLLM uses the standard Hugging Face `tokenizers` library to power
+the fast tokenizer. For BPE tokenizers (Qwen, Llama, DeepSeek, GPT-OSS, etc.)
+you can switch to the [fastokens](https://github.com/crusoecloud/fastokens)
+Rust backend, a drop-in replacement that's substantially faster on
+encode/decode and on streaming detokenization. `VLLM_USE_FASTOKENS` is
+available in vLLM v0.23.0 and later. If your installed vLLM version does not
+recognize the environment variable, upgrade vLLM before enabling the override:
+
+```console
+VLLM_USE_FASTOKENS=1 vllm serve Qwen/Qwen3-8B
+```
+
+Equivalent in the offline API:
+
+```python
+import os
+os.environ["VLLM_USE_FASTOKENS"] = "1"
+
+from vllm import LLM
+llm = LLM(model="Qwen/Qwen3-8B")
+```
+
+The `fastokens` Python package (>= 0.2.0) must be installed; if it isn't,
+vLLM raises a clear `ImportError` at tokenizer load. The override applies to
+any `--tokenizer-mode` that ends up loading an HF fast tokenizer (`hf`,
+`deepseek_v32`, `deepseek_v4`, …). Models that don't use the HF
+fast tokenizer (`mistral`, `kimi_audio`) ignore the flag.
+
+Tokenizer-bound workloads — long shared prefixes, bursty short prompts,
+batch detokenization — see the largest wins. If your bottleneck is GPU
+prefill/decode, the tokenizer change is unlikely to be visible end-to-end.
 
 ### Parallel Processing
 

@@ -7,10 +7,16 @@ import torch
 from torch.nn import functional as F
 
 from vllm import _custom_ops as ops
-from vllm._custom_ops import cpu_fused_moe, cpu_prepack_moe_weight
+from vllm._custom_ops import (
+    CPUQuantMethod,
+    cpu_fused_moe,
+    cpu_prepack_moe_weight,
+    fused_experts_cpu,
+)
 from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.quantization.utils.layer_utils import replace_parameter
+from vllm.platforms import CpuArchEnum, current_platform
 from vllm.utils.torch_utils import direct_register_custom_op
 
 _CPU_MOE_LAYER_CACHE = {}
@@ -48,6 +54,10 @@ _CPU_MOE_ACT_FN: dict[MoEActivation, Callable[[torch.Tensor], torch.Tensor]] = {
     MoEActivation.SILU: SiluAndMul.forward_native,
     MoEActivation.SWIGLUOAI: _swigluoai_forward_native,
     MoEActivation.GELU: _gelu_and_mul,
+    MoEActivation.GELU_TANH: (
+        lambda x: F.gelu(x[..., : x.shape[-1] // 2], approximate="tanh")
+        * x[..., x.shape[-1] // 2 :]
+    ),
 }
 
 
@@ -195,23 +205,25 @@ class SGLFusedMOE:
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        torch.ops._C.fused_experts_cpu(
+        return fused_experts_cpu(
             x,
             layer.w13_weight,
             layer.w2_weight,
             topk_weights,
             topk_ids,
-            True,
-            False,
-            False,
-            None,
-            None,
-            None,
-            None,
-            None,
-            True,
+            False,  # inplace
+            CPUQuantMethod.UNQUANT,  # moe_comp_method
+            None,  # w1_scale
+            None,  # w2_scale
+            None,  # w1_zero
+            None,  # w2_zero
+            None,  # block_size
+            None,  # w1_bias
+            None,  # w2_bias
+            None,  # alpha
+            None,  # limit
+            True,  # is_vnni
         )
-        return x
 
 
 class CPUFusedMOE:
@@ -300,6 +312,17 @@ class CPUFusedMOE:
 
         if supports_amx:
             return False, "none"
+
+        supports_neon = current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+        if supports_neon:
+            if (
+                dtype == torch.bfloat16
+                and w13_input_size % 4 == 0
+                and w2_input_size % 4 == 0
+            ):
+                return True, "neon"
+            else:
+                return False, "none"
 
         return True, "vec"
 

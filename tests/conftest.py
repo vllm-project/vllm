@@ -51,6 +51,7 @@ from vllm import LLM, SamplingParams, envs
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset
 from vllm.assets.video import VideoAsset
+from vllm.config.cache import CacheConfig
 from vllm.config.model import ConvertOption, RunnerOption, _get_and_verify_dtype
 from vllm.connections import global_http_connection
 from vllm.distributed import (
@@ -63,6 +64,7 @@ from vllm.logprobs import Logprob
 from vllm.multimodal.media import MediaWithBytes
 from vllm.multimodal.utils import fetch_image
 from vllm.outputs import RequestOutput
+from vllm.platforms import current_platform
 from vllm.sampling_params import BeamSearchParams
 from vllm.transformers_utils.utils import maybe_model_redirect
 from vllm.utils.collection_utils import is_list_of
@@ -224,19 +226,28 @@ def init_test_http_connection():
 def dist_init():
     from tests.utils import ensure_current_vllm_config
 
-    temp_file = tempfile.mkstemp()[1]
+    # Close the fd returned by mkstemp; FileStore opens the path itself.
+    # Leaving it open leaks one FD per test and eventually exhausts the
+    # ulimit, causing FileStore's destructor to throw c10::DistStoreError
+    # ("Too many open files") during gc and abort the process.
+    fd, temp_file = tempfile.mkstemp()
+    os.close(fd)
 
-    with ensure_current_vllm_config():
-        init_distributed_environment(
-            world_size=1,
-            rank=0,
-            distributed_init_method=f"file://{temp_file}",
-            local_rank=0,
-            backend="nccl",
-        )
-        initialize_model_parallel(1, 1)
-        yield
-    cleanup_dist_env_and_memory()
+    try:
+        with ensure_current_vllm_config():
+            init_distributed_environment(
+                world_size=1,
+                rank=0,
+                distributed_init_method=f"file://{temp_file}",
+                local_rank=0,
+                backend="nccl",
+            )
+            initialize_model_parallel(1, 1)
+            yield
+        cleanup_dist_env_and_memory()
+    finally:
+        with contextlib.suppress(OSError):
+            os.unlink(temp_file)
 
 
 @pytest.fixture
@@ -371,6 +382,8 @@ class HfRunner:
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
+        tokenizer_name: str | None = None,
+        processor: Any | None = None,
         # Set this to avoid hanging issue
         default_torch_num_threads: int | None = None,
     ) -> None:
@@ -391,6 +404,8 @@ class HfRunner:
                 is_cross_encoder=is_cross_encoder,
                 skip_tokenizer_init=skip_tokenizer_init,
                 auto_cls=auto_cls,
+                tokenizer_name=tokenizer_name,
+                processor=processor,
             )
 
     def _init(
@@ -405,6 +420,8 @@ class HfRunner:
         is_cross_encoder: bool = False,
         skip_tokenizer_init: bool = False,
         auto_cls: type[_BaseAutoModelClass] = AutoModelForCausalLM,
+        tokenizer_name: str | None = None,
+        processor: Any | None = None,
     ) -> None:
         model_name = maybe_model_redirect(model_name)
         self.model_name = model_name
@@ -484,20 +501,27 @@ class HfRunner:
         if not skip_tokenizer_init:
             self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
                 AutoTokenizer.from_pretrained(
-                    model_name,
+                    tokenizer_name or model_name,
                     trust_remote_code=trust_remote_code,
                 )
             )
 
-        # don't put this import at the top level
-        # it will call torch.accelerator.device_count()
-        from transformers import AutoProcessor
+        if processor is not None:
+            self.processor = processor
+        else:
+            # don't put this import at the top level
+            # it will call torch.accelerator.device_count()
+            from transformers import AutoProcessor
 
-        self.processor = AutoProcessor.from_pretrained(
-            model_name,
-            trust_remote_code=trust_remote_code,
-        )
+            self.processor = AutoProcessor.from_pretrained(
+                model_name,
+                trust_remote_code=trust_remote_code,
+            )
         if skip_tokenizer_init:
+            if self.processor is None:
+                raise ValueError(
+                    "skip_tokenizer_init=True requires processor initialization."
+                )
             self.tokenizer = self.processor.tokenizer
 
     def get_inputs(
@@ -520,6 +544,12 @@ class HfRunner:
         all_inputs: list[BatchFeature | BatchEncoding | dict[str, torch.Tensor]] = []
         for i, prompt in enumerate(prompts):
             if isinstance(prompt, str):
+                if self.processor is None:
+                    raise RuntimeError(
+                        "HfRunner.processor is not initialized. "
+                        "Pass processor=... to HfRunner or set "
+                        "hf_model.processor before generation."
+                    )
                 # Create a copy to avoid modifying the original dict
                 processor_kwargs = (
                     tokenization_kwargs.copy()
@@ -617,6 +647,10 @@ class HfRunner:
                 use_cache=True,
                 **kwargs,
             )
+            if self.processor is None:
+                raise RuntimeError(
+                    "HfRunner.processor is not initialized; cannot decode output."
+                )
             output_str = self.processor.batch_decode(
                 output_ids,
                 skip_special_tokens=True,
@@ -762,10 +796,15 @@ class HfRunner:
         audios: PromptAudioInput | None = None,
         videos: PromptVideoInput | None = None,
         use_cache: bool = True,
+        tokenization_kwargs: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> list[TokensTextLogprobs]:
         all_inputs = self.get_inputs(
-            prompts, images=images, videos=videos, audios=audios
+            prompts,
+            images=images,
+            videos=videos,
+            audios=audios,
+            tokenization_kwargs=tokenization_kwargs,
         )
 
         all_logprobs: list[list[dict[int, float]]] = []
@@ -814,11 +853,38 @@ class HfRunner:
         return self.model.predict(prompts, *args, convert_to_tensor=True, **kwargs)
 
     def __enter__(self):
+        if current_platform.is_rocm():
+            # Record starting memory usage stats on ROCm so that we can wait for
+            # memory to roughly settle back below these levels on shutdown. This is
+            # helpful in cases where the HfRunner is initialized after significant GPU
+            # memory is already occupied, e.g. in
+            # tests/basic_correctness/test_basic_correctness.py::test_models_distributed
+            from tests.utils import (
+                get_physical_device_indices,
+                record_gpu_memory_usage_stats,
+            )
+
+            if (device_count := current_platform.device_count()) > 0:
+                devices = get_physical_device_indices(devices=list(range(device_count)))
+                mem_usage_stats = record_gpu_memory_usage_stats(devices=devices)
+                self.threshold_ratios = {
+                    device: 0.05 + mem_used / mem_tot
+                    for device, (mem_used, mem_tot) in mem_usage_stats.items()
+                }
         return self
 
     def __exit__(self, exc_type, exc_value, traceback):
+        from tests.utils import wait_for_rocm_memory_to_settle
+
         del self.model
         cleanup_dist_env_and_memory()
+        # ROCm frees VRAM lazily; wait so a runner started right after this HF
+        # model exits does not OOM on its startup memory guard.
+        wait_for_rocm_memory_to_settle(
+            threshold_ratio=getattr(self, "threshold_ratios", None)
+        )
+        if hasattr(self, "threshold_ratios"):
+            del self.threshold_ratios
 
 
 @pytest.fixture(scope="session")
@@ -881,6 +947,20 @@ class VllmRunner:
                 kwargs["compilation_config"]["cudagraph_capture_sizes"].append(
                     num_speculative_tokens + 1
                 )
+
+        from vllm.platforms import current_platform
+
+        if current_platform.is_rocm():
+            gpu_memory_utilization = kwargs.get(
+                "gpu_memory_utilization",
+                CacheConfig.gpu_memory_utilization,
+            )
+            # V1 startup requires free_memory >= total * gpu_memory_utilization.
+            # ROCm CI can hand a test a device that is still lazily releasing
+            # VRAM from a previous process, so wait before constructing LLM.
+            from tests.utils import wait_for_rocm_memory_to_settle
+
+            wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
 
         with init_ctx:
             self.llm = LLM(
@@ -973,6 +1053,8 @@ class VllmRunner:
             req_sample_output_ids: list[list[int]] = []
             req_sample_output_strs: list[str] = []
             req_logprobs = []
+            if req_output.prompt_logprobs:
+                req_logprobs.extend(req_output.prompt_logprobs)
             for sample in req_output.outputs:
                 output_str = sample.text
                 output_ids = list(sample.token_ids)
@@ -1182,10 +1264,6 @@ class VllmRunner:
         req_outputs = self.llm.encode(prompts, pooling_task="token_classify")
         return [req_output.outputs.data for req_output in req_outputs]
 
-    def reward(self, prompts: list[str]) -> list[list[float]]:
-        req_outputs = self.llm.reward(prompts)
-        return [req_output.outputs.data for req_output in req_outputs]
-
     def score(
         self,
         text_1: list[str] | str,
@@ -1208,18 +1286,40 @@ class VllmRunner:
     def __enter__(self):
         return self
 
+    def _wait_for_rocm_memory_release(self, gpu_memory_utilization: float) -> None:
+        from tests.utils import wait_for_rocm_memory_to_settle
+
+        # V1 startup requires free_memory >= total * gpu_memory_utilization.
+        # Wait for the complementary used-memory ratio so the next runner does
+        # not fail the startup guard immediately after this runner exits. The
+        # wait is bounded so cleanup failures fail this test instead of hanging.
+        wait_for_rocm_memory_to_settle(threshold_ratio=1.0 - gpu_memory_utilization)
+
     def __exit__(self, exc_type, exc_value, traceback):
         # Explicitly shutdown the engine core to release GPU resources
         # This is needed because when executing consecutive tests, the GC
         # might not be fast enough in shutting down the llm engine. This can lead to OOMs
         # because when the next test starts some GPU memory is still in use.
+        gpu_memory_utilization = (
+            self.llm.llm_engine.vllm_config.cache_config.gpu_memory_utilization
+        )
+        from vllm.platforms import current_platform
+
         try:
-            self.llm.llm_engine.engine_core.shutdown()
+            # Give the engine core time to run its own graceful shutdown
+            # (model_executor teardown + empty_cache + process-group destroy)
+            # before the process manager SIGKILLs it at the default 5s. On ROCm
+            # a hard kill leaves the whole allocation for the driver's slow async
+            # VRAM reclamation, which starves the next test's startup.
+            shutdown_timeout = 60.0 if current_platform.is_rocm() else None
+            self.llm.llm_engine.engine_core.shutdown(timeout=shutdown_timeout)
         except Exception:
             # Ignore shutdown errors as cleanup will still proceed
             pass
         del self.llm
+        torch._dynamo.reset()
         cleanup_dist_env_and_memory()
+        self._wait_for_rocm_memory_release(gpu_memory_utilization)
 
 
 @pytest.fixture(scope="session")
@@ -1487,7 +1587,13 @@ class AssetHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.debug(
+                "Client disconnected while serving test asset %s: %r", filename, e
+            )
+            self.close_connection = True
 
 
 def _find_free_port() -> int:
@@ -1661,3 +1767,44 @@ def disable_log_dedup(monkeypatch):
     logger._print_warning_once = original_print_warning_once
     logger._print_info_once = original_print_info_once
     logger._print_debug_once = original_print_debug_once
+
+
+@pytest.fixture(scope="function")
+def fake_vllm_ir(monkeypatch):
+    """
+    Pytest fixture to allow isolated IR op registration in tests.
+
+    Replaces IrOp.registry with an empty dict and swaps ``vllm_ir_torch_lib`` for a
+    fresh ``Library`` with a unique namespace per test (see ``Library.ns``).
+
+    Torch keeps registrations for the process lifetime; reusing the fragment
+    name ``vllm_ir`` and defining the same op string again can segfault. A
+    random library name keeps each fixture run on a disjoint namespace.
+
+    The test Library is kept alive until after monkeypatch teardown so PyTorch's
+    C++ state is not freed while references may still exist.
+
+    Usage:
+        def test_my_ir_op(fake_vllm_ir):
+            @vllm.ir.register_op
+            def my_test_op(x: torch.Tensor) -> torch.Tensor:
+                return x * 2
+
+            result = my_test_op(torch.tensor([1, 2, 3]))
+            # Registry and library cleaned up automatically after the test
+    """
+    import secrets
+
+    from torch.library import Library
+    from vllm.ir.op import IrOp
+
+    monkeypatch.setattr(IrOp, "registry", {})
+
+    # Keep a local reference so the Library is not GC'd before monkeypatch
+    # teardown restores the original reference.
+    test_lib = Library(f"vllm_ir_{secrets.token_hex(8)}", "FRAGMENT")
+    monkeypatch.setattr("vllm.ir.op.vllm_ir_torch_lib", test_lib)
+
+    yield
+
+    del test_lib

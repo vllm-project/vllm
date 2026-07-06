@@ -37,6 +37,7 @@ from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
     GateLinear,
     activation_without_mul,
+    fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -63,9 +64,12 @@ from vllm.model_executor.model_loader.weight_utils import (
     maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
     HasInnerState,
     IsHybrid,
     MixtureOfExperts,
+    SupportsEagle,
+    SupportsEagle3,
     SupportsLoRA,
     SupportsMambaPrefixCaching,
     SupportsPP,
@@ -225,7 +229,6 @@ class NemotronHMoE(nn.Module):
             scoring_func="sigmoid",
             e_score_correction_bias=self.gate.e_score_correction_bias,
             activation=activation_without_mul(config.mlp_hidden_act),
-            is_act_and_mul=False,  # non-gated MoE
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
@@ -538,7 +541,7 @@ ALL_DECODER_LAYER_TYPES = {
 
 
 @support_torch_compile
-class NemotronHModel(nn.Module):
+class NemotronHModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -604,11 +607,17 @@ class NemotronHModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = self._maybe_add_hidden_state([], 0, hidden_states, residual)
+        for idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer)
+        ):
             hidden_states, residual = layer(
                 positions=positions,
                 hidden_states=hidden_states,
                 residual=residual,
+            )
+            self._maybe_add_hidden_state(
+                aux_hidden_states, idx + 1, hidden_states, residual
             )
 
         if not get_pp_group().is_last_rank:
@@ -616,6 +625,9 @@ class NemotronHModel(nn.Module):
                 {"hidden_states": hidden_states, "residual": residual}
             )
         hidden_states, _ = self.norm_f(hidden_states, residual)
+
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def is_spec_layer(self, config: NemotronHConfig, weight_name: str) -> bool:
@@ -652,7 +664,7 @@ class NemotronHModel(nn.Module):
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         if self.has_moe:
             # (param_name, weight_name, expert_id, shard_id)
-            expert_params_mapping = FusedMoE.make_expert_params_mapping(
+            expert_params_mapping = fused_moe_make_expert_params_mapping(
                 # - FusedMoe.w1 (aka gate_proj) should be up_proj since that's
                 #   what the activation is applied to
                 # - FusedMoe.w3 (aka up_proj) should be ignored since we're
@@ -766,6 +778,8 @@ class NemotronHForCausalLM(
     HasInnerState,
     SupportsLoRA,
     SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
     IsHybrid,
     SupportsQuant,
     MixtureOfExperts,
@@ -860,6 +874,7 @@ class NemotronHForCausalLM(
         self.lm_head = ParallelLMHead(
             config.vocab_size,
             config.hidden_size,
+            quant_config=self.quant_config,
             prefix=maybe_prefix(prefix, "lm_head"),
         )
 
@@ -871,7 +886,6 @@ class NemotronHForCausalLM(
 
         # Set MoE hyperparameters
         if self.model.has_moe:
-            self.expert_weights = []
             self.num_expert_groups = config.n_group
 
             self.moe_layers = []

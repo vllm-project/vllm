@@ -1,0 +1,95 @@
+use thiserror::Error;
+use thiserror_ext::Macro;
+
+type BoxedError = Box<dyn std::error::Error + Send + Sync>;
+
+#[derive(Debug, Error, Macro)]
+#[thiserror_ext(macro(path = "crate::error"))]
+pub enum Error {
+    #[error("chat request must contain at least one message")]
+    EmptyMessages,
+    #[error("cannot continue the final message when the last message is not from the assistant")]
+    ContinueFinalAssistantWithoutFinalAssistant,
+    #[error("chat template is required but none was configured")]
+    MissingChatTemplate,
+    #[error("chat template error: {0}")]
+    ChatTemplate(String),
+    #[error("multimodal input is not supported by this chat renderer")]
+    UnsupportedMultimodalRenderer,
+    #[error("unsupported multimodal content: {0}")]
+    UnsupportedMultimodalContent(&'static str),
+    #[error("multimodal preprocessing error: {0}")]
+    Multimodal(#[message] String),
+    #[error("{kind} parsing is not available for model `{model_id}`")]
+    ParserUnavailableForModel {
+        kind: &'static str,
+        model_id: String,
+    },
+    #[error("{kind} parsing is disabled by frontend configuration")]
+    ParserDisabled { kind: &'static str },
+    #[error(
+        "{kind} parser `{name}` is not registered{}",
+        available_parser_hint(.available_names)
+    )]
+    ParserUnavailableByName {
+        kind: &'static str,
+        name: String,
+        available_names: Vec<String>,
+    },
+    #[error("failed to initialize {kind} parser `{name}`")]
+    ParserInitialization {
+        kind: &'static str,
+        name: String,
+        #[source]
+        error: BoxedError,
+    },
+    #[error(
+        "gpt_oss uses native Harmony output parsing; generic {kind} parser override `{selection}` is not supported"
+    )]
+    HarmonyParserOverrideUnsupported {
+        kind: &'static str,
+        selection: String,
+    },
+    #[error("harmony output parsing failed")]
+    HarmonyOutputParsing {
+        #[source]
+        error: BoxedError,
+    },
+    #[error(
+        "this model's maximum context length is {max_model_len} tokens, \
+         but the prompt contains {prompt_len} input tokens"
+    )]
+    PromptTooLong { max_model_len: u32, prompt_len: u32 },
+    #[error("chat request stream `{request_id}` closed before terminal output")]
+    StreamClosedBeforeTerminalOutput { request_id: String },
+    #[error("tool call stream state is inconsistent: {message}")]
+    ToolCallStreamInvariant { message: String },
+    #[error("failed to build structural tag: {message}")]
+    StructuralTag { message: String },
+    #[error(transparent)]
+    Text(#[from] vllm_text::Error),
+    #[error(transparent)]
+    Tokenizer(#[from] vllm_tokenizer::TokenizerError),
+}
+
+pub type Result<T> = std::result::Result<T, Error>;
+
+impl Error {
+    /// Whether this error represents invalid user request parameters.
+    pub fn is_request_validation_error(&self) -> bool {
+        match self {
+            Self::PromptTooLong { .. } => true,
+            Self::Text(error) => error.is_request_validation_error(),
+            _ => false,
+        }
+    }
+}
+
+/// Format the available-parser suffix used in user-facing error messages.
+fn available_parser_hint(available_names: &[String]) -> String {
+    if available_names.is_empty() {
+        String::new()
+    } else {
+        format!(" (choose from: {})", available_names.join(", "))
+    }
+}
