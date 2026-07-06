@@ -24,7 +24,7 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
-        self.copy_event = torch.Event()
+        self.copy_event = torch.cuda.Event()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -81,7 +81,7 @@ class AsyncPoolingOutput(AsyncModelRunnerOutput):
         self.model_runner_output = model_runner_output
         self.pooler_output = pooler_output
         self.is_valid = is_valid
-        self.copy_event = torch.Event()
+        self.copy_event = torch.cuda.Event()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)

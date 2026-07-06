@@ -170,8 +170,8 @@ def benchmark_config(
                 graph.replay()
             torch.accelerator.synchronize()
 
-            start = torch.Event(enable_timing=True)
-            end = torch.Event(enable_timing=True)
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
             latencies: list[float] = []
             for _ in range(num_iters):
                 start.record()
