@@ -108,6 +108,7 @@ from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
     CutlassNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.emulation import (
+    EmulationA16NvFp4LinearKernel,
     EmulationNvFp4LinearKernel,
 )
 from vllm.model_executor.kernels.linear.nvfp4.fbgemm import (
@@ -888,8 +889,22 @@ def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
             )
             force_kernel = EmulationNvFp4LinearKernel
     elif linear_backend == "auto" and use_a16:
-        # Force a16 (Marlin) when running weight-only quantization.
-        force_kernel = MarlinNvFp4LinearKernel
+        # Force a16 (Marlin) when running weight-only quantization. If the
+        # Marlin FP4 kernels are unavailable in this build/platform, fall
+        # back to the weight-only emulation kernel instead of failing at
+        # weight-processing time: W4A16 checkpoints stay loadable (slowly)
+        # for correctness work on builds without the Marlin extensions.
+        marlin_supported, marlin_reason = MarlinNvFp4LinearKernel.is_supported()
+        if marlin_supported:
+            force_kernel = MarlinNvFp4LinearKernel
+        else:
+            logger.warning_once(
+                "MarlinNvFp4LinearKernel is not supported (%s); falling back "
+                "to EmulationA16NvFp4LinearKernel for W4A16 NVFP4 linear "
+                "layers. This is a correctness fallback and will be slow.",
+                marlin_reason,
+            )
+            force_kernel = EmulationA16NvFp4LinearKernel
 
     if force_kernel is not None:
         is_supported, reason = force_kernel.is_supported()
@@ -1054,6 +1069,7 @@ __all__ = [
     "XPUMxFp8LinearKernel",
     "EmulationMxfp8LinearKernel",
     "CutlassNvFp4LinearKernel",
+    "EmulationA16NvFp4LinearKernel",
     "EmulationNvFp4LinearKernel",
     "FbgemmNvFp4LinearKernel",
     "FlashInferCuteDslNvFp4LinearKernel",
