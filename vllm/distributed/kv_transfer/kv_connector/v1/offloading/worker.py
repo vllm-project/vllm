@@ -5,34 +5,26 @@ from dataclasses import replace
 
 import torch
 
-from vllm.config import get_layers_from_vllm_config
-from vllm.distributed.kv_transfer.kv_connector.v1.metrics import (
-    KVConnectorStats,
-)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
     OffloadingConnectorMetadata,
+    OffloadingWorkerMetadata,
     ReqId,
 )
-from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
-    OffloadingConnectorStats,
-)
 from vllm.logger import init_logger
-from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import AttentionBackend
 from vllm.v1.kv_cache_interface import (
     AttentionSpec,
     MambaSpec,
     UniformTypeKVCacheSpecs,
 )
-from vllm.v1.kv_offload.spec import (
+from vllm.v1.kv_offload.base import (
     CanonicalKVCacheRef,
     CanonicalKVCaches,
     CanonicalKVCacheTensor,
+    GPULoadStoreSpec,
+    LoadStoreSpec,
     OffloadingSpec,
-)
-from vllm.v1.kv_offload.worker.worker import (
     OffloadingWorker,
-    TransferSpec,
 )
 
 logger = init_logger(__name__)
@@ -43,59 +35,41 @@ class OffloadingConnectorWorker:
 
     def __init__(self, spec: OffloadingSpec):
         self.spec = spec
-        self.worker = OffloadingWorker()
+        self.worker: OffloadingWorker | None = None
 
-        self._job_counter = 0
+        # job_id -> req_id for in-flight loads.
+        self._load_jobs: dict[int, ReqId] = {}
+        self._unsubmitted_store_jobs: list[
+            tuple[int, GPULoadStoreSpec, LoadStoreSpec]
+        ] = []
+        self._connector_worker_meta = OffloadingWorkerMetadata()
 
-        self.kv_connector_stats = OffloadingConnectorStats()
-        # req_id -> (job_id, store)
-        self._jobs: dict[int, tuple[ReqId, bool]] = {}
-        # req_id -> active job IDs
-        self._load_job: dict[ReqId, int] = {}
-        # req_id -> set(active job IDs)
-        self._store_jobs = defaultdict[ReqId, set[int]](set)
-        # list of store jobs pending submission (job_id, transfer_spec)
-        self._unsubmitted_store_jobs: list[tuple[int, TransferSpec]] = []
-
-        self._finished_reqs_waiting_for_store: set[ReqId] = set()
-
-    def _generate_job_id(self) -> int:
-        job_id = self._job_counter
-        self._job_counter = job_id + 1
-        return job_id
-
-    def _register_handlers(self, kv_caches: CanonicalKVCaches):
-        for src_cls, dst_cls, handler in self.spec.get_handlers(kv_caches):
-            self.worker.register_handler(src_cls, dst_cls, handler)
+    def _init_worker(self, kv_caches: CanonicalKVCaches) -> None:
+        self.worker = self.spec.get_worker(kv_caches)
 
     def register_kv_caches(
         self, kv_caches: dict[str, torch.Tensor | list[torch.Tensor]]
     ):
-        layer_names = list(kv_caches.keys())
-        layers = get_layers_from_vllm_config(
-            self.spec.vllm_config,
-            AttentionLayerBase,  # type: ignore[type-abstract]
-            layer_names,
-        )
-        attn_backends = {
-            layer_name: layers[layer_name].get_attn_backend()
-            for layer_name in layer_names
-            if layer_name in layers
+        kv_cache_config = self.spec.kv_cache_config
+        num_blocks = kv_cache_config.num_blocks
+
+        # Packed layouts (e.g. DSv4) set block_stride > 0; their tensors use
+        # stride(0) as the manager-block stride (equals total_num_bytes_per_block).
+        # General (non-packed) layouts size the tensor at page_size_bytes per
+        # manager block, so page_size_bytes is the correct offloading stride.
+        layer_is_packed: dict[str, bool] = {
+            ln: bool(kv_tensor.block_stride)
+            for kv_tensor in kv_cache_config.kv_cache_tensors
+            for ln in kv_tensor.shared_by
         }
 
-        num_blocks = self.spec.kv_cache_config.num_blocks
-
-        # layer_name -> list of matching KV cache tensors
-        # such that each tensor starts with the num_blocks dimension.
-        # FlashAttention layers which use the (2, num_blocks, ...) layout
-        # will possibly map to 2 tensors, one per K and one per V.
-        # All other layers will probably map to a single tensor.
+        # layer_name -> (num_blocks, page_size_bytes) tensor
         tensors_per_block: dict[str, tuple[torch.Tensor, ...]] = {}
         # layer_name -> size of (un-padded) page in bytes
         unpadded_page_size_bytes: dict[str, int] = {}
         # layer_name -> size of page in bytes
         page_size_bytes: dict[str, int] = {}
-        for kv_cache_group in self.spec.kv_cache_config.kv_cache_groups:
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
             group_layer_names = kv_cache_group.layer_names
             group_kv_cache_spec = kv_cache_group.kv_cache_spec
             if isinstance(group_kv_cache_spec, UniformTypeKVCacheSpecs):
@@ -109,68 +83,31 @@ class OffloadingConnectorWorker:
                 if isinstance(layer_kv_cache_spec, AttentionSpec):
                     layer_kv_cache = kv_caches[layer_name]
                     assert isinstance(layer_kv_cache, torch.Tensor)
-                    assert layer_kv_cache.storage_offset() == 0
 
-                    # get the logical dimension for num_blocks
-                    test_shape = attn_backends[layer_name].get_kv_cache_shape(
-                        num_blocks=1234,
-                        block_size=16,
-                        num_kv_heads=1,
-                        head_size=256,
+                    page = layer_kv_cache_spec.page_size_bytes
+                    elem_size = layer_kv_cache.element_size()
+                    byte_offset = layer_kv_cache.storage_offset() * elem_size
+                    block_stride_bytes = (
+                        layer_kv_cache.stride(0) * elem_size
+                        if layer_is_packed[layer_name]
+                        else page
                     )
-                    num_blocks_logical_dim = test_shape.index(1234)
-
-                    # sort the logical dimensions by stride (high to low)
-                    # to get a physical-to-logical mapping:
-                    # physical_to_logical[physical_pos] = logical_dim
-                    logical_strides = layer_kv_cache.stride()
-                    physical_to_logical = sorted(
-                        range(len(logical_strides)),
-                        key=lambda idx: logical_strides[idx],
-                        reverse=True,
+                    tensors_per_block[layer_name] = (
+                        torch.tensor(
+                            [],
+                            dtype=torch.int8,
+                            device=layer_kv_cache.device,
+                        ).set_(
+                            layer_kv_cache.untyped_storage(),
+                            byte_offset,
+                            (num_blocks, page),
+                            (block_stride_bytes, 1),
+                        ),
                     )
-
-                    num_blocks_physical_dim = physical_to_logical.index(
-                        num_blocks_logical_dim
+                    page_size_bytes[layer_name] = layer_kv_cache_spec.page_size_bytes
+                    unpadded_page_size_bytes[layer_name] = (
+                        layer_kv_cache_spec.real_page_size_bytes
                     )
-                    if num_blocks_physical_dim == 0:
-                        storage = layer_kv_cache.untyped_storage()
-                        page = layer_kv_cache_spec.page_size_bytes
-                        tensors_per_block[layer_name] = (
-                            torch.tensor(
-                                [],
-                                dtype=torch.int8,
-                                device=layer_kv_cache.device,
-                            )
-                            .set_(storage)
-                            .view(num_blocks, page),
-                        )
-                        page_size_bytes[layer_name] = (
-                            layer_kv_cache_spec.page_size_bytes
-                        )
-                    else:
-                        # Flash Attention case: (2, num_blocks, ...)
-                        assert test_shape[0] == 2
-                        assert physical_to_logical[0] == 0
-                        assert num_blocks_physical_dim == 1
-
-                        # unbind the tensor to separate K and V tensors
-                        half_page_size = layer_kv_cache_spec.page_size_bytes // 2
-                        storage = layer_kv_cache.untyped_storage()
-                        raw = (
-                            torch.tensor(
-                                [],
-                                dtype=torch.int8,
-                                device=layer_kv_cache.device,
-                            )
-                            .set_(storage)
-                            .view(2, num_blocks, half_page_size)
-                        )
-                        tensors_per_block[layer_name] = tuple(raw.unbind(0))
-
-                        page_size_bytes[layer_name] = half_page_size
-
-                    unpadded_page_size_bytes[layer_name] = page_size_bytes[layer_name]
 
                 elif isinstance(layer_kv_cache_spec, MambaSpec):
                     state_tensors = kv_caches[layer_name]
@@ -200,10 +137,46 @@ class OffloadingConnectorWorker:
                 else:
                     raise NotImplementedError
 
+        packed_kv_cache_tensor = next(
+            (
+                t
+                for t in kv_cache_config.kv_cache_tensors
+                if t.block_stride and t.shared_by
+            ),
+            None,
+        )
+        if packed_kv_cache_tensor is not None:
+            (tensor,) = tensors_per_block[packed_kv_cache_tensor.shared_by[0]]
+            block_stride = tensor.stride(0)
+            packed_tensor = tensor.as_strided(
+                (num_blocks, block_stride),
+                (block_stride, 1),
+                storage_offset=0,
+            )
+            self._init_worker(
+                CanonicalKVCaches(
+                    [CanonicalKVCacheTensor(packed_tensor, block_stride)],
+                    [
+                        [CanonicalKVCacheRef(0, block_stride)]
+                        for _ in kv_cache_config.kv_cache_groups
+                    ],
+                )
+            )
+            return
+
         block_tensors: list[CanonicalKVCacheTensor] = []
         block_data_refs: dict[str, list[CanonicalKVCacheRef]] = defaultdict(list)
-        for kv_cache_tensor in self.spec.kv_cache_config.kv_cache_tensors:
-            tensor_layer_names = kv_cache_tensor.shared_by
+        for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
+            # Filter to layers that were actually processed above.
+            # Packed KV allocation emits KVCacheTensor entries for
+            # every (tuple_idx, page_size) slot; slots where no group has a
+            # layer at that index produce an empty shared_by (reserved memory
+            # with no corresponding model layer).
+            tensor_layer_names = [
+                n for n in kv_cache_tensor.shared_by if n in tensors_per_block
+            ]
+            if not tensor_layer_names:
+                continue
 
             # verify all layers in the group reference the exact same tensors
             assert len({len(tensors_per_block[n]) for n in tensor_layer_names}) == 1
@@ -235,7 +208,7 @@ class OffloadingConnectorWorker:
                     )
 
         group_data_refs: list[list[CanonicalKVCacheRef]] = []
-        for kv_cache_group in self.spec.kv_cache_config.kv_cache_groups:
+        for kv_cache_group in kv_cache_config.kv_cache_groups:
             group_refs: list[CanonicalKVCacheRef] = []
             for layer_name in kv_cache_group.layer_names:
                 group_refs += block_data_refs[layer_name]
@@ -246,7 +219,7 @@ class OffloadingConnectorWorker:
             group_data_refs=group_data_refs,
         )
 
-        self._register_handlers(canonical_kv_caches)
+        self._init_worker(canonical_kv_caches)
 
     def register_cross_layers_kv_cache(
         self, kv_cache: torch.Tensor, attn_backend: type[AttentionBackend]
@@ -293,114 +266,89 @@ class OffloadingConnectorWorker:
             tensors=[kv_cache_tensor], group_data_refs=[[kv_cache_data_ref]]
         )
 
-        self._register_handlers(canonical_kv_caches)
+        self._init_worker(canonical_kv_caches)
 
     def handle_preemptions(self, kv_connector_metadata: OffloadingConnectorMetadata):
-        for job_id, transfer_spec in self._unsubmitted_store_jobs:
-            success = self.worker.transfer_async(job_id, transfer_spec)
+        assert self.worker is not None
+        for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
+            success = self.worker.submit_store(job_id, src_spec, dst_spec)
             assert success
         self._unsubmitted_store_jobs.clear()
 
-        for req_id in kv_connector_metadata.reqs_to_flush or ():
-            job_ids = self._store_jobs.get(req_id)
-            if job_ids:
-                self.worker.wait(job_ids)
+        if kv_connector_metadata.jobs_to_flush:
+            self.worker.wait(kv_connector_metadata.jobs_to_flush)
 
     def start_kv_transfers(self, metadata: OffloadingConnectorMetadata):
-        for job_id, transfer_spec in self._unsubmitted_store_jobs:
-            success = self.worker.transfer_async(job_id, transfer_spec)
+        assert self.worker is not None
+        for job_id, src_spec, dst_spec in self._unsubmitted_store_jobs:
+            success = self.worker.submit_store(job_id, src_spec, dst_spec)
             assert success
         self._unsubmitted_store_jobs.clear()
 
-        for req_id, transfer_spec in metadata.reqs_to_load.items():
-            job_id = self._generate_job_id()
-            self._jobs[job_id] = (req_id, False)
-            assert req_id not in self._load_job
-            self._load_job[req_id] = job_id
-            success = self.worker.transfer_async(job_id, transfer_spec)
+        for job_id, entry in metadata.load_jobs.items():
+            self._load_jobs[job_id] = entry.req_id
+            assert isinstance(entry.dst_spec, GPULoadStoreSpec)
+            success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
             assert success
 
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
-        for req_id, transfer_spec in metadata.reqs_to_store.items():
-            job_id = self._generate_job_id()
-            self._jobs[job_id] = (req_id, True)
-            self._store_jobs[req_id].add(job_id)
-            # NOTE(orozery): defer the store to the beginning of the next engine step,
-            # so that offloading starts AFTER transfers related to token sampling,
-            # thereby avoiding delays to token generation due to offloading.
-            self._unsubmitted_store_jobs.append((job_id, transfer_spec))
+        for job_id, entry in metadata.store_jobs.items():
+            # NOTE(orozery): defer the store to the beginning of the next
+            # engine step, so that offloading starts AFTER transfers related
+            # to token sampling, thereby avoiding delays to token generation.
+            assert isinstance(entry.src_spec, GPULoadStoreSpec)
+            self._unsubmitted_store_jobs.append(
+                (job_id, entry.src_spec, entry.dst_spec)
+            )
 
     def get_finished(self, finished_req_ids: set[str]) -> tuple[set[str], set[str]]:
         """
-        Notifies worker-side connector ids of requests that have
-        finished generating tokens.
-        Returns a list of request IDs that finished loading or storing.
-
         Returns:
-            ids of requests that have finished asynchronous transfer
-            tuple of (sending/saving ids, recving/loading ids).
+            tuple of (finished_sending, finished_recving). Stores never
+            emit finished_sending — the scheduler tracks store completion
+            via kv_connector_worker_meta.completed_jobs and fences any
+            block reuse via jobs_to_flush. Loads still emit
+            finished_recving so the base scheduler can resume requests
+            blocked on remote KV (and free aborted-during-load reqs).
         """
-        finished_sending = set()
-        finished_recving = set()
+        assert self.worker is not None
+        finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
             # we currently do not support job failures
             job_id = transfer_result.job_id
             assert transfer_result.success
-            req_id, store = self._jobs.pop(job_id)
+            is_load = job_id in self._load_jobs
             if (
-                transfer_result.transfer_time
+                transfer_result.transfer_time is not None
                 and transfer_result.transfer_size is not None
-                and transfer_result.transfer_type is not None
             ):
-                self.kv_connector_stats.record_transfer(
-                    num_bytes=transfer_result.transfer_size,
-                    time=transfer_result.transfer_time,
-                    transfer_type=transfer_result.transfer_type,
+                if is_load:
+                    stats = self._connector_worker_meta.transfer_stats.load
+                else:
+                    stats = self._connector_worker_meta.transfer_stats.store
+                stats.record(
+                    transfer_result.transfer_size,
+                    transfer_result.transfer_time,
                 )
-            if store:
-                req_jobs = self._store_jobs[req_id]
-                req_jobs.remove(job_id)
-                if req_jobs:
-                    continue
 
-                if req_id in self._finished_reqs_waiting_for_store:
-                    self._finished_reqs_waiting_for_store.remove(req_id)
-                    finished_sending.add(req_id)
-                    del self._store_jobs[req_id]
-            else:
-                req_job = self._load_job[req_id]
-                assert job_id == req_job
-                del self._load_job[req_id]
+            self._connector_worker_meta.mark_completed(job_id)
+            req_id = self._load_jobs.pop(job_id, None)
+            if req_id is not None:
                 finished_recving.add(req_id)
 
-        for req_id in finished_req_ids:
-            pending_req_jobs = self._store_jobs.get(req_id)
-            if pending_req_jobs:
-                self._finished_reqs_waiting_for_store.add(req_id)
-            elif pending_req_jobs is not None:
-                finished_sending.add(req_id)
-                del self._store_jobs[req_id]
+        return set(), finished_recving
 
-        return finished_sending, finished_recving
-
-    def get_kv_connector_stats(self) -> KVConnectorStats | None:
-        """
-        Get the KV transfer stats for the connector.
-        """
-
-        if self.kv_connector_stats.is_empty():
+    def build_connector_worker_meta(self) -> OffloadingWorkerMetadata | None:
+        """Return completed transfer job IDs since the last call."""
+        if not self._connector_worker_meta.completed_jobs:
             return None
-        # Clear stats for next iteration
-        kv_connector_stats = self.kv_connector_stats
-        self.kv_connector_stats = OffloadingConnectorStats()
-        return kv_connector_stats
+        meta = self._connector_worker_meta
+        self._connector_worker_meta = OffloadingWorkerMetadata()
+        return meta
 
     def shutdown(self) -> None:
-        # Drop deferred store jobs: there is no point in submitting
-        # them during shutdown.
         self._unsubmitted_store_jobs.clear()
-        self._jobs.clear()
-        self._load_job.clear()
-        self._store_jobs.clear()
-        self._finished_reqs_waiting_for_store.clear()
-        self.worker.shutdown()
+        self._load_jobs.clear()
+        self._connector_worker_meta = OffloadingWorkerMetadata()
+        if self.worker is not None:
+            self.worker.shutdown()

@@ -1,7 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from dataclasses import dataclass
 from typing import Any
+
+import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
@@ -18,6 +21,7 @@ _ROCM_FLASH_ATTN_AVAILABLE = False
 if current_platform.is_cuda():
     from vllm._custom_ops import reshape_and_cache_flash
     from vllm.vllm_flash_attn import (  # type: ignore[attr-defined]
+        compile_flash_attn_varlen_func_from_specs,
         flash_attn_varlen_func,
         get_scheduler_metadata,
     )
@@ -28,10 +32,13 @@ elif current_platform.is_xpu():
 
     reshape_and_cache_flash = ops.reshape_and_cache_flash
     flash_attn_varlen_func = xpu_ops.flash_attn_varlen_func  # type: ignore[assignment]
+    compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
     get_scheduler_metadata = xpu_ops.get_scheduler_metadata  # type: ignore[assignment]
 elif current_platform.is_rocm():
     try:
         from flash_attn import flash_attn_varlen_func  # type: ignore[no-redef]
+
+        compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
 
         # Mark that upstream flash-attn is available on ROCm
         _ROCM_FLASH_ATTN_AVAILABLE = True
@@ -43,6 +50,8 @@ elif current_platform.is_rocm():
                 "to be installed. Please install flash-attn first."
             )
 
+        compile_flash_attn_varlen_func_from_specs = None  # type: ignore[assignment]
+
     # ROCm doesn't use scheduler metadata (FA3 feature), provide stub
     def get_scheduler_metadata(*args: Any, **kwargs: Any) -> None:  # type: ignore[misc]
         return None
@@ -53,8 +62,78 @@ elif current_platform.is_rocm():
     reshape_and_cache_flash = ops.reshape_and_cache_flash
 
 
+@dataclass(frozen=True)
+class FlashAttentionCuTeDSLCompileSpec:
+    """High-level FA4 compile-only request used by vLLM warmup.
+
+    This is not the CuTeDSL cache key. FA4 owns the selector that maps these
+    serving inputs to the actual compile-static fields: tile sizes, q_stage,
+    Split-KV, scheduler choice, layout-presence booleans, dtype/head dims,
+    arch, and related fields.
+    """
+
+    q_shape: tuple[int, ...]
+    k_shape: tuple[int, ...]
+    v_shape: tuple[int, ...]
+    q_dtype: torch.dtype
+    max_seqlen_q: int
+    max_seqlen_k: int
+    softmax_scale: float
+    causal: bool
+    fa_version: int
+    v_stride: tuple[int, ...] | None = None
+    cu_seqlens_q_shape: tuple[int, ...] | None = None
+    cu_seqlens_k_shape: tuple[int, ...] | None = None
+    window_size: tuple[int, int] | None = None
+    return_softmax_lse: bool = False
+    num_splits: int = 0
+
+    def compile(self) -> None:
+        assert compile_flash_attn_varlen_func_from_specs is not None
+        window_size = list(self.window_size) if self.window_size is not None else None
+        compile_flash_attn_varlen_func_from_specs(
+            q_shape=self.q_shape,
+            k_shape=self.k_shape,
+            v_shape=self.v_shape,
+            q_dtype=self.q_dtype,
+            v_stride=self.v_stride,
+            cu_seqlens_q_shape=self.cu_seqlens_q_shape,
+            cu_seqlens_k_shape=self.cu_seqlens_k_shape,
+            max_seqlen_q=self.max_seqlen_q,
+            max_seqlen_k=self.max_seqlen_k,
+            softmax_scale=self.softmax_scale,
+            causal=self.causal,
+            window_size=window_size,
+            return_softmax_lse=self.return_softmax_lse,
+            fa_version=self.fa_version,
+            num_splits=self.num_splits,
+        )
+
+    def request_key(self) -> tuple[object, ...]:
+        return (
+            self.q_shape,
+            self.k_shape,
+            self.v_shape,
+            self.q_dtype,
+            self.max_seqlen_q,
+            self.max_seqlen_k,
+            self.softmax_scale,
+            self.causal,
+            self.fa_version,
+            self.v_stride,
+            self.cu_seqlens_q_shape,
+            self.cu_seqlens_k_shape,
+            self.window_size,
+            self.return_softmax_lse,
+            self.num_splits,
+        )
+
+
 def get_flash_attn_version(
-    requires_alibi: bool = False, head_size: int | None = None
+    requires_alibi: bool = False,
+    head_size: int | None = None,
+    head_size_v: int | None = None,
+    has_sinks: bool = False,
 ) -> int | None:
     if current_platform.is_xpu():
         return 2
@@ -112,13 +191,42 @@ def get_flash_attn_version(
             )
             fa_version = 2
 
+        # Some FA3 unsupported SM90 cases can use FA4 when available.
+        if (
+            fa_version == 3
+            and device_capability.major == 9
+            and is_fa_version_supported(4)
+        ):
+            upgrade_reason = None
+            if head_size is not None and head_size > 256:
+                upgrade_reason = f"FA3 does not support head_size={head_size} on SM90"
+            elif (
+                has_sinks
+                and head_size is not None
+                and head_size_v is not None
+                and head_size != head_size_v
+            ):
+                upgrade_reason = "Diff-KV with sinks"
+            elif (
+                vllm_config is not None
+                and vllm_config.model_config is not None
+                and vllm_config.model_config.is_diffusion
+            ):
+                upgrade_reason = "Per-sequence causal (dynamic_causal) requires FA4"
+            if upgrade_reason:
+                logger.info_once(
+                    "%s: upgrading FlashAttention 3 -> 4",
+                    upgrade_reason,
+                    scope="local",
+                )
+                fa_version = 4
+
         # FA4 currently uses batch-shape-dependent scheduling
         # heuristics on SM100+, which breaks batch invariance.
         if envs.VLLM_BATCH_INVARIANT and fa_version == 4:
             logger.warning_once(
                 "Cannot use FA version 4 with batch invariance, "
                 "defaulting to FA version 2.",
-                scope="local",
             )
             fa_version = 2
 
@@ -165,15 +273,6 @@ def is_fa_version_supported(fa_version: int) -> bool:
         return False
 
 
-def flash_attn_supports_fp8() -> bool:
-    if current_platform.is_xpu():
-        return True
-    return (
-        get_flash_attn_version() == 3
-        and current_platform.is_device_capability_family(90)
-    )
-
-
 def flash_attn_supports_quant_query_input() -> bool:
     return not current_platform.is_xpu()
 
@@ -181,8 +280,7 @@ def flash_attn_supports_quant_query_input() -> bool:
 def flash_attn_supports_sinks() -> bool:
     if current_platform.is_xpu():
         return True
-    else:
-        return get_flash_attn_version() == 3
+    return get_flash_attn_version() in (3, 4)
 
 
 def flash_attn_supports_mla():

@@ -9,7 +9,7 @@ from transformers import PretrainedConfig
 
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import RoutedExperts
 from vllm.model_executor.layers.linear import (
     LinearBase,
     LinearMethodBase,
@@ -25,6 +25,7 @@ from vllm.model_executor.layers.quantization.quark.quark_moe import (  # noqa: E
     QuarkMoEMethod,
 )
 from vllm.model_executor.layers.quantization.quark.schemes import (
+    QuarkNVFP4,
     QuarkOCP_MX,
     QuarkScheme,
     QuarkW4A8_MXFP4_FP8,
@@ -47,7 +48,7 @@ logger = init_logger(__name__)
 
 # model_type values that use dynamic MXFP4 re-quantization for
 # OCP MX fp4 Quark checkpoints
-_DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3"})
+_DEEPSEEK_V3_FAMILY_MODEL_TYPES = frozenset({"deepseek_v3", "deepseek_v32"})
 
 
 class QuarkConfig(QuantizationConfig):
@@ -65,6 +66,10 @@ class QuarkConfig(QuantizationConfig):
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
+        # Note : this flag is kept disabled because the overhead of
+        # dynamic mxfp4 quantization negates the performance gains
+        # that come from shifting to mxfp4. It is left here in case
+        # we want to re-enable it in the future.
         self.dynamic_mxfp4_quant = False
 
     def maybe_update_config(
@@ -73,7 +78,10 @@ class QuarkConfig(QuantizationConfig):
         hf_config: PretrainedConfig | None = None,
         revision: str | None = None,
     ):
-        """Enable dynamic MXFP4 only for DeepSeek-V3-family + fp4 Quark checkpoints."""
+        """Enable dynamic MXFP4 only for DeepSeek-V3-family fp4 checkpoints."""
+
+        if hf_config is None:
+            return
 
         if (
             getattr(hf_config, "model_type", None)
@@ -82,7 +90,7 @@ class QuarkConfig(QuantizationConfig):
             return
 
         quant_config = getattr(hf_config, "quantization_config", None)
-        if quant_config is not None:
+        if isinstance(quant_config, dict):
             quant_dtype = (
                 quant_config.get("global_quant_config", {})
                 .get("weight", {})
@@ -111,10 +119,11 @@ class QuarkConfig(QuantizationConfig):
         Interface for models to update module names referenced in
         quantization configs in order to reflect the vllm model structure
 
-        :param hf_to_vllm_mapper: maps from hf model structure (the assumed
-            structure of the qconfig) to vllm model structure
+        Args:
+            hf_to_vllm_mapper: maps from hf model structure (the assumed
+                structure of the qconfig) to vllm model structure
         """
-        quant_config_with_hf_to_vllm_mapper = {}
+        quant_config_with_hf_to_vllm_mapper: dict[str, Any] = {}
 
         for k, v in self.quant_config.items():
             if isinstance(v, list):
@@ -160,7 +169,7 @@ class QuarkConfig(QuantizationConfig):
         if isinstance(layer, Attention):
             return QuarkKVCacheMethod(self)
 
-        if isinstance(layer, FusedMoE):
+        if isinstance(layer, RoutedExperts):
             return QuarkMoEMethod.get_moe_method(self, module=layer, layer_name=prefix)
         return None
 
@@ -420,6 +429,54 @@ class QuarkConfig(QuantizationConfig):
             and is_weight_symmetric
         )
 
+    def _is_nvfp4(
+        self,
+        weight_quant: dict[str, Any] | list[dict[str, Any]] | None,
+        input_quant: dict[str, Any] | list[dict[str, Any]] | None,
+    ) -> bool:
+        # Confirm weights and input quantized.
+        if weight_quant is None or input_quant is None:
+            return False
+
+        # Confirm both weight_quant and input_quant are lists with 2 elements
+        if not isinstance(weight_quant, list) or len(weight_quant) != 2:
+            return False
+        if not isinstance(input_quant, list) or len(input_quant) != 2:
+            return False
+
+        # First element should be fp4 with per_group quantization
+        is_fp4_per_group_weight = (
+            weight_quant[0].get("dtype") == "fp4"
+            and weight_quant[0].get("qscheme") == "per_group"
+            and weight_quant[0].get("group_size") == 16
+            and not weight_quant[0].get("is_dynamic")
+        )
+        is_fp4_per_group_input = (
+            input_quant[0].get("dtype") == "fp4"
+            and input_quant[0].get("qscheme") == "per_group"
+            and input_quant[0].get("group_size") == 16
+            and input_quant[0].get("is_dynamic")
+        )
+
+        # Second element should be fp8_e4m3 with per_tensor quantization
+        is_fp8_per_tensor_weight = (
+            weight_quant[1].get("dtype") == "fp8_e4m3"
+            and weight_quant[1].get("qscheme") == "per_tensor"
+            and not weight_quant[1].get("is_dynamic")
+        )
+        is_fp8_per_tensor_input = (
+            input_quant[1].get("dtype") == "fp8_e4m3"
+            and input_quant[1].get("qscheme") == "per_tensor"
+            and not input_quant[1].get("is_dynamic")
+        )
+
+        return (
+            is_fp4_per_group_weight  # type: ignore[return-value]
+            and is_fp4_per_group_input
+            and is_fp8_per_tensor_weight
+            and is_fp8_per_tensor_input
+        )
+
     def _is_w_ocp_mx_a_x(
         self, weight_quant: dict[str, Any] | None, input_quant: dict[str, Any] | None
     ) -> bool:
@@ -568,7 +625,9 @@ class QuarkConfig(QuantizationConfig):
         weight_config = cast(dict[str, Any], config.get("weight"))
         input_config = cast(dict[str, Any], config.get("input_tensors"))
 
-        if self._is_fp8_w8a8(weight_config, input_config):
+        if self._is_nvfp4(weight_config, input_config):
+            return QuarkNVFP4()
+        elif self._is_fp8_w8a8(weight_config, input_config):
             is_fp8_w8a8_supported = self._check_scheme_supported(
                 QuarkW8A8Fp8.get_min_capability(), error=False
             )
@@ -620,26 +679,17 @@ class QuarkConfig(QuantizationConfig):
 
         return scheme
 
-    def get_cache_scale(self, name: str) -> str | None:
-        """
-        Check whether the param name matches the format for k/v cache scales
-        in quark. If this is the case, return its equivalent param name
-        expected by vLLM
-
-        :param name: param name
-        :return: matching param name for KV cache scale in vLLM
-        """
-        if name.endswith(".output_scale") and ".k_proj" in name:
-            return name.replace(".k_proj.output_scale", ".attn.k_scale")
-        if name.endswith(".output_scale") and ".v_proj" in name:
-            return name.replace(".v_proj.output_scale", ".attn.v_scale")
-        if name.endswith(".output_scale") and ".q_proj" in name:
-            return name.replace(".q_proj.output_scale", ".attn.q_scale")
-        if name.endswith("self_attn.prob_output_scale"):
-            return name.replace(".prob_output_scale", ".attn.prob_scale")
-
-        # If no matches, return None
-        return None
+    @staticmethod
+    def get_cache_scale_mapper() -> "WeightsMapper":
+        """Map Quark KV-cache scale names to vLLM names."""
+        orig_to_new_suffix = {
+            ".k_proj.output_scale": ".attn.k_scale",
+            ".v_proj.output_scale": ".attn.v_scale",
+            ".q_proj.output_scale": ".attn.q_scale",
+            ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
+        }
+        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=orig_to_new_suffix)
+        return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
 
 class QuarkLinearMethod(LinearMethodBase):
@@ -708,7 +758,9 @@ class QuarkKVCacheMethod(BaseKVCacheMethod):
         """
         Validator for the kv cache configuration. Useful for controlling the
         kv cache quantization schemes, that are being supported in vLLM
-        :param kv_cache_config: the quark kv cache scheme
+
+        Args:
+            kv_cache_config: the quark kv cache scheme
         """
         if kv_cache_config is None:
             return

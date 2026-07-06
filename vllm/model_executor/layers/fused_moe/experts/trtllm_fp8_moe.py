@@ -56,6 +56,35 @@ class TrtLlmFp8ExpertsBase:
         self.moe_config = moe_config
         self.quant_config = quant_config
 
+        # Per-expert SwiGLU parameters from quant_config (MXFP8 + Swiglu only).
+        device = torch.accelerator.current_device_index()
+        if quant_config.gemm1_alpha is not None:
+            self.gemm1_alpha = torch.tensor(
+                [quant_config.gemm1_alpha] * self.local_num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_alpha = None
+
+        if quant_config.gemm1_beta is not None:
+            self.gemm1_beta = torch.tensor(
+                [quant_config.gemm1_beta] * self.local_num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_beta = None
+
+        if quant_config.gemm1_clamp_limit is not None:
+            self.gemm1_clamp_limit = torch.tensor(
+                [quant_config.gemm1_clamp_limit] * self.local_num_experts,
+                dtype=torch.float32,
+                device=device,
+            )
+        else:
+            self.gemm1_clamp_limit = None
+
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
@@ -77,8 +106,12 @@ class TrtLlmFp8ExpertsBase:
 
     @staticmethod
     def _supports_activation(activation: MoEActivation) -> bool:
-        """Supports only SiLU and RELU^2 non-gated activation."""
-        return activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
+        """Supports SiLU, SwiGLU-OAI (uninterleaved), and RELU^2 non-gated."""
+        return activation in [
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.RELU2_NO_MUL,
+        ]
 
     @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
@@ -88,17 +121,19 @@ class TrtLlmFp8ExpertsBase:
             or moe_parallel_config.use_ag_rs_all2all_kernels
         ) and not moe_parallel_config.enable_eplb
 
-    def supports_chunking(self) -> bool:
-        return False
-
-    def supports_expert_map(self) -> bool:
-        return False
-
 
 class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
     """
     Fp8 TRTLLM-Gen MoE kernels. Supports modular interface.
     """
+
+    @staticmethod
+    def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
+        return (
+            not moe_parallel_config.use_all2all_kernels
+            or moe_parallel_config.use_ag_rs_all2all_kernels
+            or moe_parallel_config.use_deepep_v2_kernels
+        ) and not moe_parallel_config.enable_eplb
 
     @staticmethod
     def _supports_quant_scheme(
@@ -175,13 +210,6 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
         # Pack topk ids and weights into format expected by the kernel.
         packed_topk_ids = trtllm_moe_pack_topk_ids_weights(topk_ids, topk_weights)
 
-        # trtllm_fp8_block_scale_routed_moe does not support autotuning
-        # so skip this kernel during dummy run for autotuning.
-        import vllm.utils.flashinfer as fi_utils
-
-        if fi_utils._is_fi_autotuning:
-            return
-
         assert a1q_scale is not None
 
         is_mxfp8 = self.quant_config.block_shape == [1, 32]
@@ -196,34 +224,32 @@ class TrtLlmFp8ExpertsModular(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsModular):
             weight_layout = WeightLayout.BlockMajorK
             hidden_states_scale = a1q_scale.t().contiguous()
 
-        # `trtllm_fp8_block_scale_routed_moe` has a bug and does not write to the
-        # output tensor in-place so we need to manually copy the result to the
-        # output tensor
-        # https://github.com/flashinfer-ai/flashinfer/issues/2703
-        result = flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
+        flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
             topk_ids=packed_topk_ids,
             routing_bias=None,
             hidden_states=hidden_states,
             hidden_states_scale=hidden_states_scale,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale,
             num_experts=global_num_experts,
-            top_k=self.topk,
+            top_k=topk_ids.size(1),
             n_group=None,
             topk_group=None,
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
             routed_scaling_factor=None,
-            routing_method_type=1,
+            routing_method_type=1,  # not used
             use_shuffled_weight=use_shuffled_weight,
             weight_layout=weight_layout,
             fp8_quantization_type=fp8_quant_type,
-            # output=output,
+            output=output,
         )
-        output.copy_(result)
 
 
 class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolithic):
@@ -275,21 +301,7 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         router_logits_dtype: torch.dtype | None,
         routing_method: RoutingMethodType,
     ) -> bool:
-        """
-        The FlashInfer TRTLLM FP8 kernel expects bfloat16 router_logits by default.
-        DeepSeekV3 routing supports float32 router_logits (converted internally).
-        Simulated routing generates synthetic decisions and is agnostic to dtype.
-        """
-        if router_logits_dtype == torch.float32:
-            # DeepSeekV3 routing handles float32 logits internally.
-            # Simulated routing generates synthetic decisions, so the
-            # kernel doesn't care about the actual logits dtype.
-            # https://github.com/flashinfer-ai/flashinfer/issues/2469
-            return routing_method in (
-                RoutingMethodType.DeepSeekV3,
-                RoutingMethodType.Simulated,
-            )
-        return True
+        return router_logits_dtype in [torch.bfloat16, torch.float32]
 
     @staticmethod
     def _supports_routing_method(
@@ -308,18 +320,24 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             # NOTE(rob): potentially allow others here. This is a conservative list.
             return routing_method in [
                 RoutingMethodType.DeepSeekV3,
-                RoutingMethodType.Simulated,
                 RoutingMethodType.Renormalize,
                 RoutingMethodType.RenormalizeNaive,
+                RoutingMethodType.SigmoidRenorm,
+                RoutingMethodType.Sigmoid,
+                RoutingMethodType.MiniMax2,
+                RoutingMethodType.Simulated,
             ]
         elif (weight_key, activation_key) == (kFp8StaticTensorSym, kFp8StaticTensorSym):
             # NOTE(dbari): as above, potentially allow others here.
             return routing_method in [
                 RoutingMethodType.DeepSeekV3,
                 RoutingMethodType.Llama4,
-                RoutingMethodType.Simulated,
                 RoutingMethodType.Renormalize,
                 RoutingMethodType.RenormalizeNaive,
+                RoutingMethodType.SigmoidRenorm,
+                RoutingMethodType.Sigmoid,
+                RoutingMethodType.MiniMax2,
+                RoutingMethodType.Simulated,
             ]
         else:
             raise ValueError("Unsupported quantization scheme.")
@@ -345,9 +363,13 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
 
         assert not apply_router_weight_on_input
-        assert activation == MoEActivation.SILU
+        assert activation in [
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+            MoEActivation.RELU2_NO_MUL,
+        ]
+        activation_type = activation_to_flashinfer_int(activation)
         assert self.topk <= global_num_experts
-        assert self.topk <= 10
         assert global_num_experts % 4 == 0
         assert self.quant_config.block_shape in [[128, 128], [1, 32]]
         # Kernel expects #experts <= #threads 512
@@ -355,39 +377,40 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
         # TODO: fuse into the quant kernel.
         assert a1q_scale is not None
 
-        if self.routing_method_type == RoutingMethodType.DeepSeekV3:
-            router_logits = router_logits.to(torch.float32)
-
-        # Currently FI requires bfloat16 routing bias.
-        # https://github.com/flashinfer-ai/flashinfer/issues/2909
-        if e_score_correction_bias is not None:
-            e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
-
         is_mxfp8 = self.quant_config.block_shape == [1, 32]
         if is_mxfp8:
             fp8_quant_type = Fp8QuantizationType.MxFp8
             use_shuffled_weight = True
             weight_layout = WeightLayout.MajorK
             hidden_states_scale = a1q_scale
+            # FlashInfer expects None for non-grouped MXFP8 routing configs.
+            n_group = num_expert_group or None
+            selected_topk_group = topk_group or None
         else:
+            assert self.topk <= 10
             fp8_quant_type = Fp8QuantizationType.DeepSeekFp8
             use_shuffled_weight = True
             weight_layout = WeightLayout.BlockMajorK
             hidden_states_scale = a1q_scale.t().contiguous()
+            n_group = num_expert_group or 0
+            selected_topk_group = topk_group or 0
 
-        return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(
+        kwargs = dict(
             routing_logits=router_logits,
             routing_bias=e_score_correction_bias,
             hidden_states=hidden_states,
             hidden_states_scale=hidden_states_scale,
             gemm1_weights=w1,
             gemm1_weights_scale=self.quant_config.w1_scale,
+            gemm1_alpha=self.gemm1_alpha,
+            gemm1_beta=self.gemm1_beta,
+            gemm1_clamp_limit=self.gemm1_clamp_limit,
             gemm2_weights=w2,
             gemm2_weights_scale=self.quant_config.w2_scale,
             num_experts=global_num_experts,
             top_k=self.topk,
-            n_group=(num_expert_group or 0),
-            topk_group=(topk_group or 0),
+            n_group=n_group,
+            topk_group=selected_topk_group,
             intermediate_size=self.intermediate_size_per_partition,
             local_expert_offset=self.ep_rank * self.local_num_experts,
             local_num_experts=self.local_num_experts,
@@ -397,6 +420,9 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             weight_layout=weight_layout,
             fp8_quantization_type=fp8_quant_type,
         )
+        if is_mxfp8 or activation == MoEActivation.RELU2_NO_MUL:
+            kwargs["activation_type"] = activation_type
+        return flashinfer.fused_moe.trtllm_fp8_block_scale_moe(**kwargs)
 
     def _apply_per_tensor(
         self,
@@ -428,15 +454,6 @@ class TrtLlmFp8ExpertsMonolithic(TrtLlmFp8ExpertsBase, mk.FusedMoEExpertsMonolit
             assert apply_router_weight_on_input
         else:
             assert not apply_router_weight_on_input
-
-        # The DeepSeekV3 routing method requires float32 router logits.
-        if self.routing_method_type == RoutingMethodType.DeepSeekV3:
-            router_logits = router_logits.to(torch.float32)
-
-        # Currently FI requires bfloat16 routing bias.
-        # https://github.com/flashinfer-ai/flashinfer/issues/2909
-        if e_score_correction_bias is not None:
-            e_score_correction_bias = e_score_correction_bias.to(torch.bfloat16)
 
         out = flashinfer.fused_moe.trtllm_fp8_per_tensor_scale_moe(
             routing_logits=router_logits,

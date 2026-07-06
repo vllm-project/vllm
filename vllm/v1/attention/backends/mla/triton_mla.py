@@ -12,19 +12,70 @@ from vllm.model_executor.layers.attention.mla_attention import (
     MLACommonBackend,
     MLACommonImpl,
     MLACommonMetadata,
+    MLACommonMetadataBuilder,
 )
 from vllm.platforms import current_platform
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import triton
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
+    AttentionCGSupport,
     AttentionLayer,
     AttentionType,
     MultipleOf,
 )
 from vllm.v1.attention.ops.triton_decode_attention import decode_attention_fwd
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    is_workspace_manager_initialized,
+)
 
 logger = init_logger(__name__)
+
+# num_kv_splits selection (shared by forward_mqa and the workspace reservation
+# so the two cannot drift). Both are hardware dependent.
+_MIN_WORK_PER_SPLIT = 512
+_SPLIT_OCCUPANCY_MULTIPLIER = 2
+
+
+def _compute_num_kv_splits(max_seq_len: int, sm_count: int) -> int:
+    # Power of 2 to avoid excessive kernel instantiations, capped by an SM-based
+    # maximum (occupancy multiplier allows multiple blocks per SM
+    # for latency hiding).
+    ideal_splits = triton.next_power_of_2(max(1, max_seq_len // _MIN_WORK_PER_SPLIT))
+    max_splits = sm_count * _SPLIT_OCCUPANCY_MULTIPLIER
+    return min(ideal_splits, max_splits)
+
+
+class TritonMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
+    _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        self._reserve_attn_logits_workspace()
+
+    def _reserve_attn_logits_workspace(self) -> None:
+        """Pre-size the shared workspace for the decode split-KV attn logits.
+
+        Reserving at the worst case (max_model_len -> max num_kv_splits,
+        max_num_seqs decode tokens) before warmup/cudagraph capture means the
+        per-call ``get_simultaneous`` in ``forward_mqa`` never has to grow the
+        buffer at runtime (which would raise once the workspace is locked).
+        """
+        if not is_workspace_manager_initialized():
+            return
+        # Decode reorder threshold is 1, so decode tokens <= max_num_seqs.
+        B = self.vllm_config.scheduler_config.max_num_seqs
+        # DCP all-gathers the query heads before forward_mqa.
+        q_num_heads = self.num_heads * self.dcp_world_size
+        max_splits = _compute_num_kv_splits(
+            self.model_config.max_model_len,
+            current_platform.num_compute_units(),
+        )
+        lse_dim = self.mla_dims.kv_lora_rank + 1
+        current_workspace_manager().get_simultaneous(
+            ((B, q_num_heads, max_splits, lse_dim), torch.float32),
+        )
 
 
 class TritonMLABackend(MLACommonBackend):
@@ -52,12 +103,28 @@ class TritonMLABackend(MLACommonBackend):
         return block_size % 16 == 0
 
     @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        if include_num_layers_dimension:
+            return (1, 0, 2, 3)
+        return (0, 1, 2)
+
+    @staticmethod
     def get_name() -> str:
         return "TRITON_MLA"
+
+    @classmethod
+    def supports_batch_invariance(cls) -> bool:
+        return True
 
     @staticmethod
     def get_impl_cls() -> type["TritonMLAImpl"]:
         return TritonMLAImpl
+
+    @staticmethod
+    def get_builder_cls() -> type["TritonMLAMetadataBuilder"]:
+        return TritonMLAMetadataBuilder
 
     @classmethod
     def supports_compute_capability(cls, capability: DeviceCapability) -> bool:
@@ -119,18 +186,6 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         self._sm_count = current_platform.num_compute_units()
 
-    def _flash_attn_varlen_diff_headdims(
-        self, q, k, v, return_softmax_lse=False, softmax_scale=None, **kwargs
-    ):
-        return super()._flash_attn_varlen_diff_headdims(
-            q,
-            k,
-            v,
-            return_softmax_lse=return_softmax_lse,
-            softmax_scale=softmax_scale,
-            **kwargs,
-        )
-
     def forward_mqa(
         self,
         q: torch.Tensor | tuple[torch.Tensor, torch.Tensor],
@@ -156,35 +211,25 @@ class TritonMLAImpl(MLACommonImpl[MLACommonMetadata]):
         if envs.VLLM_BATCH_INVARIANT:
             num_kv_splits = 1
         else:
-            # Minimum work per split
-            # hardware dependent
-            min_work_per_split = 512
+            num_kv_splits = _compute_num_kv_splits(
+                attn_metadata.max_seq_len, self._sm_count
+            )
 
-            ideal_splits = max(1, attn_metadata.max_seq_len // min_work_per_split)
-
-            # use power of 2 to avoid excessive kernel instantiations
-            ideal_splits = triton.next_power_of_2(ideal_splits)
-
-            # Calculate SM-based maximum splits with occupancy multiplier
-            # 2-4x allows multiple blocks per SM for latency hiding
-            # hardware dependent
-            occupancy_multiplier = 2
-            max_splits = self._sm_count * occupancy_multiplier
-            num_kv_splits = min(ideal_splits, max_splits)
-
-        # TODO(lucas) Allocate ahead of time
-        attn_logits = torch.empty(
-            (
-                B,
-                q_num_heads,
-                num_kv_splits,
-                # NOTE: the +1 stores the LogSumExp (LSE) that the stage2
-                # kernel uses to merge partial attention outputs across splits.
-                self.kv_lora_rank + 1,
-            ),
-            dtype=torch.float32,
-            device=q.device,
-        )
+        # NOTE: the +1 stores the LogSumExp (LSE) that the stage2 kernel uses to
+        # merge partial attention outputs across splits. The scratch is served
+        # from the shared workspace (reserved at max in the metadata builder), so
+        # there is no per-call allocation on the decode hot path. Fall back to a
+        # direct allocation when the workspace manager is not initialized (e.g.
+        # unit tests without a GPUModelRunner).
+        logits_shape = (B, q_num_heads, num_kv_splits, self.kv_lora_rank + 1)
+        if is_workspace_manager_initialized():
+            (attn_logits,) = current_workspace_manager().get_simultaneous(
+                (logits_shape, torch.float32),
+            )
+        else:
+            attn_logits = torch.empty(
+                logits_shape, dtype=torch.float32, device=q.device
+            )
 
         # Add a head dim of 1
         kv_c_and_k_pe_cache = kv_c_and_k_pe_cache.unsqueeze(2)

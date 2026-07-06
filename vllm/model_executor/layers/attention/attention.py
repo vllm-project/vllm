@@ -1,12 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import torch
 import torch.nn as nn
 
 import vllm.envs as envs
+from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.config import CacheConfig, get_current_vllm_config
 from vllm.config.vllm import VllmConfig
 from vllm.forward_context import ForwardContext, get_forward_context
@@ -33,6 +34,7 @@ from vllm.utils.torch_utils import (
 )
 from vllm.v1.attention.backend import (
     AttentionBackend,
+    AttentionMetadata,
     AttentionType,
 )
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -88,6 +90,35 @@ def should_load_quant_weights(quant_method: QuantizeMethodBase | None) -> bool:
     return quant_method is not None and not isinstance(
         quant_method, UnquantizedLinearMethod
     )
+
+
+def _largest_kernel_block_within(
+    attn_backend: "type[AttentionBackend]",
+    per_token_bytes: int,
+    page_budget: int | None,
+    fallback: int,
+) -> int:
+    """Largest supported kernel block size whose page fits in ``page_budget``.
+
+    A padded spec (e.g. skip-quant layer) that pads its page up to a large shared page
+    wastes ``page_budget - block*per_token`` bytes per block. Picking the largest kernel
+    block whose natural page still fits under ``page_budget`` minimizes that waste.
+    Falls back to the smallest supported block when ``page_budget`` is None (no padding
+    — the block is handled by ``unify``'s integer scaling instead) or nothing fits.
+    """
+    from vllm.v1.attention.backend import MultipleOf
+
+    sizes = attn_backend.get_supported_kernel_block_sizes()
+    candidates = [s for s in sizes if isinstance(s, int)]
+    if not candidates:
+        candidates = [s.base for s in sizes if isinstance(s, MultipleOf)]
+    if not candidates:
+        return fallback
+    smallest = min(candidates)
+    if not page_budget or per_token_bytes <= 0:
+        return smallest
+    fitting = [b for b in candidates if b * per_token_bytes <= page_budget]
+    return max(fitting) if fitting else smallest
 
 
 def set_default_quant_scales(layer: nn.Module, register_buffer: bool = False) -> None:
@@ -164,7 +195,21 @@ def _init_kv_cache_quant(
         # TODO (mgoin): kv cache dtype should be specified in the FP8
         # checkpoint config and become the "auto" behavior
         if layer.kv_cache_dtype == "fp8_e5m2":
-            raise ValueError("fp8_e5m2 kv-cache is not supported with fp8 checkpoints.")
+            # A compressed-tensors checkpoint stores fp8 KV scales only when it
+            # declares a kv_cache_scheme; weight-only ones declare none and must
+            # keep fp8_e5m2, the only fp8 KV dtype usable on Ampere.
+            from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors import (  # noqa: E501
+                CompressedTensorsConfig,
+                CompressedTensorsKVCacheMethod,
+            )
+
+            if not isinstance(quant_method, CompressedTensorsKVCacheMethod) or (
+                cast(CompressedTensorsConfig, quant_method.quant_config).kv_cache_scheme
+                is not None
+            ):
+                raise ValueError(
+                    "fp8_e5m2 kv-cache is not supported with fp8 checkpoints."
+                )
         # If quantization is enabled, we make "k_scale" and "v_scale"
         # parameters so that it can be loaded from the model checkpoint.
         # The k/v_scale will then be converted back to native float32
@@ -200,6 +245,7 @@ class Attention(nn.Module, AttentionLayerBase):
         prefix: str = "",
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
+        mm_prefix_clamp_sliding_window: bool = False,
         attn_backend: type[AttentionBackend] | None = None,
         head_size_v: int | None = None,
         **extra_impl_args,
@@ -209,6 +255,7 @@ class Attention(nn.Module, AttentionLayerBase):
         `self.kv_cache`.
         """
         super().__init__()
+        sliding_window: int | None
         if per_layer_sliding_window is not None:
             # per-layer sliding window
             sliding_window = per_layer_sliding_window
@@ -226,9 +273,14 @@ class Attention(nn.Module, AttentionLayerBase):
             kv_cache_dtype = "auto"
             calculate_kv_scales = False
 
-        # llm-compressor mdls need to set cache_dtype to "fp8" manually.
+        # llm-compressor models declare an FP8 KV-cache scheme in their
+        # checkpoint config. Honor it only when the user did not explicitly
+        # pick a kv_cache_dtype; an explicit choice (e.g. bfloat16) must win.
+        # The "auto" case is normally resolved upstream in
+        # resolve_kv_cache_dtype_string, but we re-apply here defensively in
+        # case anything bypassed that path.
         kv_cache_scheme = getattr(quant_config, "kv_cache_scheme", None)
-        if kv_cache_scheme is not None:
+        if kv_cache_scheme is not None and kv_cache_dtype == "auto":
             kv_cache_dtype = "fp8"
             calculate_kv_scales = False
             if cache_config is not None:
@@ -330,12 +382,40 @@ class Attention(nn.Module, AttentionLayerBase):
             logger.warning_once(
                 "Disabling prefix caching for FLASHINFER/TRITON_MLA "
                 "with batch invariance, as it is not yet supported.",
-                scope="local",
             )
             cache_config.enable_prefix_caching = False
 
+        if extra_impl_args.get("chunk_lookback", -1) > -1:
+            assert self.attn_backend.get_name() == "TRITON_ATTN", (
+                f"Chunked attention with lookback requires the Triton backend, "
+                f"but got {self.attn_backend.get_name()}."
+            )
+
+        if self.attn_backend.get_name() == "FLEX_ATTENTION":
+            block_m = vllm_config.attention_config.flex_attn_block_m
+            block_n = vllm_config.attention_config.flex_attn_block_n
+
+            if envs.VLLM_BATCH_INVARIANT and cache_config is not None:
+                if block_m is not None and block_m > cache_config.block_size:
+                    raise ValueError(
+                        f"flex_attn_block_m ({block_m}) must be "
+                        f"<= cache block size ({cache_config.block_size}) for "
+                        f"batch invariance"
+                    )
+                if block_n is not None and block_n > cache_config.block_size:
+                    raise ValueError(
+                        f"flex_attn_block_n ({block_n}) must be "
+                        f"<= cache block size ({cache_config.block_size}) for "
+                        f"batch invariance"
+                    )
+
+            if block_m is not None:
+                extra_impl_args.setdefault("block_m", block_m)
+            if block_n is not None:
+                extra_impl_args.setdefault("block_n", block_n)
+
         impl_cls = self.attn_backend.get_impl_cls()
-        self.impl = impl_cls(
+        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an AttentionImpl subclass
             num_heads,
             head_size,
             scale,
@@ -370,6 +450,9 @@ class Attention(nn.Module, AttentionLayerBase):
                 compilation_config.static_forward_context,
             )
         self.kv_sharing_target_layer_name = kv_sharing_target_layer_name
+        # Gemma4: clamp mm_prefix bidirectional ranges by the sliding window
+        # (read by the Triton backend impl). Default False for all other models.
+        self.mm_prefix_clamp_sliding_window = mm_prefix_clamp_sliding_window
 
         # use a placeholder kv cache tensor during init, which will be replaced
         # by bind_kv_cache
@@ -378,10 +461,6 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # Initialize KV cache quantization attributes
         _init_kv_cache_quant(self, quant_config, prefix)
-
-        # Initialize TurboQuant buffers (Pi, S, centroids) if tq cache dtype
-        if kv_cache_dtype.startswith("turboquant_"):
-            self._init_turboquant_buffers(kv_cache_dtype, head_size, prefix)
 
         # for attn backends supporting query quantization
         self.query_quant = None
@@ -403,50 +482,6 @@ class Attention(nn.Module, AttentionLayerBase):
                 else GroupShape.PER_TENSOR,
             )
 
-    def _init_turboquant_buffers(
-        self, cache_dtype: str, head_size: int, prefix: str
-    ) -> None:
-        """Initialize TurboQuant centroids for Lloyd-Max quantization."""
-        from vllm.model_executor.layers.quantization.turboquant.centroids import (
-            get_centroids,
-        )
-        from vllm.model_executor.layers.quantization.turboquant.config import (
-            TurboQuantConfig,
-        )
-
-        tq_config = TurboQuantConfig.from_cache_dtype(cache_dtype, head_size)
-
-        self.register_buffer(
-            "_tq_centroids",
-            get_centroids(head_size, tq_config.centroid_bits),
-        )
-        self._tq_config = tq_config
-
-        # Pre-allocate decode intermediate buffers so model.to(device) moves
-        # them to GPU *before* the memory profiler runs.  Without this the
-        # profiler gives all free memory to KV cache blocks and the first
-        # decode OOMs when these buffers are lazily allocated.
-        _vllm_cfg = get_current_vllm_config()
-        B = _vllm_cfg.scheduler_config.max_num_seqs
-        Hq = self.num_heads
-        S = _vllm_cfg.attention_config.tq_max_kv_splits_for_cuda_graph
-        D = head_size
-        self.register_buffer(
-            "_tq_mid_o_buf",
-            torch.empty(B, Hq, S, D + 1, dtype=torch.float32),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_tq_output_buf",
-            torch.empty(B, Hq, D, dtype=torch.float32),
-            persistent=False,
-        )
-        self.register_buffer(
-            "_tq_lse_buf",
-            torch.empty(B, Hq, dtype=torch.float32),
-            persistent=False,
-        )
-
     def forward(
         self,
         query: torch.Tensor,
@@ -456,6 +491,7 @@ class Attention(nn.Module, AttentionLayerBase):
         # shape does not match the query shape, so we optionally let the model
         # definition specify the output tensor shape.
         output_shape: torch.Size | None = None,
+        output_dtype: torch.dtype | None = None,
     ) -> torch.Tensor:
         """
         The KV cache is stored inside this class and is accessed via
@@ -470,7 +506,8 @@ class Attention(nn.Module, AttentionLayerBase):
             torch.ops.vllm.maybe_calc_kv_scales(
                 query, key, value, _encode_layer_name(self.layer_name)
             )
-        output_dtype = query.dtype
+        if output_dtype is None:
+            output_dtype = query.dtype
         if self.query_quant is not None:
             # quantizing with a simple torch operation enables
             # torch.compile to fuse this into previous ops
@@ -576,23 +613,52 @@ class Attention(nn.Module, AttentionLayerBase):
     def get_attn_backend(self) -> type[AttentionBackend]:
         return self.attn_backend
 
-    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+    def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec | None:
         # Block size may get updated after model loading, refresh it
         block_size = vllm_config.cache_config.block_size
-        # Should not be called for enc-dec or encoder-only attention.
+        # Encoder-only attention is prefill-only and keeps no autoregressive KV
+        # cache. In hybrid models (e.g. Qwen3.5 / ColQwen3.5: GatedDeltaNet
+        # linear_attention interleaved with full_attention) the runner iterates
+        # every attention module to build the KV-cache spec, so an ENCODER_ONLY
+        # full_attention layer reaches here; it contributes no KV cache group.
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            return None
+        # Should not be called for enc-dec attention.
         assert self.attn_type == AttentionType.DECODER
         quant_mode = get_kv_quant_mode(self.kv_cache_dtype)
         if self.sliding_window is not None:
             assert not vllm_config.model_config.use_mla, (
                 "MLA is not supported for slidingwindow"
             )
-            return SlidingWindowSpec(
-                block_size=block_size,
+            # SW chooses its own block_size, decoupled from the user's
+            # ``--block-size`` (which only constrains primary attention).
+            # When this SW layer is a padded spec (skip-quant: its page is
+            # padded up to ``skip_page_size_padded``), pick the largest kernel
+            # block that still fits the shared page so we waste fewer padding
+            # bytes per block. Otherwise (page_size_padded is None) the smallest
+            # block is fine — ``unify`` scales it up by an integer ratio.
+            shared_page = vllm_config.cache_config.skip_page_size_padded
+            sw_per_token = SlidingWindowSpec(
+                block_size=1,
                 num_kv_heads=self.num_kv_heads,
                 head_size=self.head_size,
+                head_size_v=self.head_size_v,
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
+            ).real_page_size_bytes
+            sw_block_size = _largest_kernel_block_within(
+                self.attn_backend, sw_per_token, shared_page, block_size
+            )
+            return SlidingWindowSpec(
+                block_size=sw_block_size,
+                num_kv_heads=self.num_kv_heads,
+                head_size=self.head_size,
+                head_size_v=self.head_size_v,
+                dtype=self.kv_cache_torch_dtype,
+                kv_quant_mode=quant_mode,
+                sliding_window=self.sliding_window,
+                page_size_padded=shared_page,
             )
         elif self.kv_cache_dtype.startswith("turboquant_"):
             from vllm.model_executor.layers.quantization.turboquant.config import (
@@ -680,9 +746,16 @@ def get_attention_context(
         extracted from the forward context.
     """
     forward_context: ForwardContext = get_forward_context()
-    attn_metadata = forward_context.attn_metadata
-    if isinstance(attn_metadata, dict):
-        attn_metadata = attn_metadata[layer_name]
+    attn_metadata_raw = forward_context.attn_metadata
+    attn_metadata: AttentionMetadata
+    if isinstance(attn_metadata_raw, dict):
+        attn_metadata = attn_metadata_raw[layer_name]
+    elif isinstance(attn_metadata_raw, list):
+        # list[dict[str, AttentionMetadata]]: used in speculative decoding
+        # where [0] is the base-model (non-speculative) metadata dict.
+        attn_metadata = attn_metadata_raw[0][layer_name]
+    else:
+        attn_metadata = attn_metadata_raw
     attn_layer: Attention | MLAAttention = forward_context.no_compile_layers[layer_name]
     kv_cache = attn_layer.kv_cache
     slot_mapping = forward_context.slot_mapping
@@ -708,7 +781,7 @@ def unified_kv_cache_update(
         assert hasattr(attn_layer.impl, "do_kv_cache_update"), (
             f"{attn_layer.impl.__class__.__name__} does not support kv cache update"
         )
-        attn_layer.impl.do_kv_cache_update(
+        attn_layer.impl.do_kv_cache_update(  # type: ignore[attr-defined]
             attn_layer,
             key,
             value,
@@ -735,6 +808,7 @@ direct_register_custom_op(
 )
 
 
+@eager_break_during_capture
 @maybe_transfer_kv_layer
 def unified_attention_with_output(
     query: torch.Tensor,

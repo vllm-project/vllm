@@ -36,7 +36,10 @@ from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import get_pp_group, get_tensor_model_parallel_world_size
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     QKVParallelLinear,
@@ -257,7 +260,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 prefix=f"{prefix}.text_experts_gate",
             )
 
-            self.text_experts = SharedFusedMoE(
+            self.text_experts = FusedMoE(
                 shared_experts=self.shared_experts,
                 num_experts=config.moe_num_experts[0],
                 top_k=config.moe_k,
@@ -294,7 +297,7 @@ class Ernie4_5_VLMoeMoE(nn.Module):
                 prefix=f"{prefix}.vision_experts_gate",
             )
 
-            self.vision_experts = SharedFusedMoE(
+            self.vision_experts = FusedMoE(
                 shared_experts=self.shared_experts,
                 num_experts=config.moe_num_experts[1],
                 top_k=config.moe_k,
@@ -649,7 +652,7 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
 
         # Params for weights, fp8 weight scales, fp8 activation scales
         # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -694,12 +697,18 @@ class Ernie4_5_VLMoeForCausalLM(nn.Module, SupportsPP):
                     moe_offset = int(name.split(".")[-3])
                     vision_expert_start_idx = self.config.moe_num_experts[0]
                     is_text_expert = moe_offset <= vision_expert_start_idx - 1
+                    routed_experts = (
+                        ".routed_experts" if ("w13_" in name or "w2_" in name) else ""
+                    )
                     if is_text_expert:
-                        name = name.replace(".experts.", ".text_experts.")
+                        name = name.replace(
+                            ".experts", f".text_experts{routed_experts}"
+                        )
                     else:
+                        delta = moe_offset - vision_expert_start_idx
                         name = name.replace(
                             f".experts.{moe_offset}",
-                            f".vision_experts.{moe_offset - vision_expert_start_idx}",
+                            f".vision_experts{routed_experts}.{delta}",
                         )
 
                 for mapping in expert_params_mapping:

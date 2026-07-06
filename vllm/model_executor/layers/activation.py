@@ -151,6 +151,65 @@ class SiluAndMul(CustomOp):
         return self.forward_cuda(x)
 
 
+@CustomOp.register("silu_and_mul_with_clamp")
+class SiluAndMulWithClamp(CustomOp):
+    """SwiGLU activation with input clamping (used by some MoE shared experts).
+
+    Computes:
+        gate = clamp(x[..., :d], max=swiglu_limit)
+        up   = clamp(x[..., d:], min=-swiglu_limit, max=swiglu_limit)
+        out  = gate * sigmoid(alpha * gate) * (up + beta)
+    where d = x.shape[-1] // 2. The defaults alpha=1.0, beta=0.0 reduce this to
+    ``silu(gate) * up``; SwiGLU-OAI style models pass alpha (sigmoid scale) and
+    beta=1.0 (up bias).
+
+    Shapes:
+        x: (num_tokens, 2 * d) or (batch_size, seq_len, 2 * d)
+        return: (num_tokens, d) or (batch_size, seq_len, d)
+    """
+
+    def __init__(
+        self,
+        swiglu_limit: float,
+        alpha: float = 1.0,
+        beta: float = 0.0,
+        *,
+        compile_native: bool = True,
+    ):
+        super().__init__(compile_native=compile_native)
+        self.swiglu_limit = float(swiglu_limit)
+        self.alpha = float(alpha)
+        self.beta = float(beta)
+        if current_platform.is_rocm() or current_platform.is_xpu():
+            self._forward_method = self.forward_native
+        elif current_platform.is_cuda_alike():
+            self.op = torch.ops._C.silu_and_mul_with_clamp
+        elif current_platform.is_cpu():
+            self._forward_method = self.forward_native
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        gate = torch.clamp(x[..., :d], max=self.swiglu_limit)
+        up = torch.clamp(x[..., d:], min=-self.swiglu_limit, max=self.swiglu_limit)
+        return gate * torch.sigmoid(self.alpha * gate) * (up + self.beta)
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        d = x.shape[-1] // 2
+        output_shape = x.shape[:-1] + (d,)
+        out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
+        self.op(out, x, self.swiglu_limit, self.alpha, self.beta)
+        return out
+
+    def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
+
+    def extra_repr(self) -> str:
+        return (
+            f"swiglu_limit={self.swiglu_limit!r}, "
+            f"alpha={self.alpha!r}, beta={self.beta!r}"
+        )
+
+
 # --8<-- [start:mul_and_silu]
 @CustomOp.register("mul_and_silu")
 class MulAndSilu(CustomOp):
@@ -254,8 +313,10 @@ class GELU(CustomOp):
 
     def __init__(self):
         super().__init__()
-        if current_platform.get_cpu_architecture() == CpuArchEnum.ARM and hasattr(
-            torch.ops._C, "activation_lut_bf16"
+        if (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+            and hasattr(torch.ops._C, "activation_lut_bf16")
         ):
             self.op = torch.ops._C.activation_lut_bf16
         else:
@@ -268,6 +329,36 @@ class GELU(CustomOp):
         if self.op and x.dtype == torch.bfloat16 and x.is_contiguous():
             out = torch.empty_like(x)
             self.op(out, x, "gelu")
+            return out
+        return self.forward_native(x)
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        return self.forward_native(x)
+
+
+# --8<-- [start:gelu_tanh]
+@CustomOp.register("gelu_tanh")
+class GELUTanh(CustomOp):
+    # --8<-- [end:gelu_tanh]
+
+    def __init__(self):
+        super().__init__()
+        if (
+            current_platform.is_cpu()
+            and current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+            and hasattr(torch.ops._C, "gelu_tanh")
+        ):
+            self.op = torch.ops._C.gelu_tanh
+        else:
+            self.op = None
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        return F.gelu(x, approximate="tanh")
+
+    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        if self.op:
+            out = torch.empty_like(x)
+            self.op(out, x)
             return out
         return self.forward_native(x)
 
@@ -325,6 +416,11 @@ class GeluAndMul(CustomOp):
         out = torch.empty(output_shape, dtype=x.dtype, device=x.device)
         self.op(out, x)
         return out
+
+    def forward_cpu(self, x: torch.Tensor) -> torch.Tensor:
+        if self.op:
+            return self.forward_cuda(x)
+        return self.native(x)
 
     def forward_xpu(self, x: torch.Tensor) -> torch.Tensor:
         return self.forward_cuda(x)
@@ -666,25 +762,35 @@ _ACTIVATION_REGISTRY = LazyDict(
         "gelu": lambda: GELU(),
         "gelu_fast": lambda: FastGELU(),
         "gelu_new": lambda: NewGELU(),
-        "gelu_pytorch_tanh": lambda: (
-            # TODO:[ROCm] PyTorch native GELU with tanh is unstable with torch.compile
-            logger.warning_once(
-                "[ROCm] PyTorch's native GELU with tanh approximation is unstable. "
-                "Falling back to GELU(approximate='none')."
-            ),
-            nn.GELU(approximate="none"),
-        )[1]
-        if current_platform.is_rocm()
-        else nn.GELU(approximate="tanh"),
+        "gelu_pytorch_tanh": lambda: _get_gelu_pytorch_tanh(),
         "relu": lambda: nn.ReLU(),
         "relu2": lambda: ReLUSquaredActivation(),
         "silu": lambda: nn.SiLU(),
+        "swish": lambda: nn.SiLU(),
         "quick_gelu": lambda: QuickGELU(),
         "tanh": lambda: nn.Tanh(),
         "sigmoid": lambda: nn.Sigmoid(),
         "xielu": lambda: XIELU(),
     }
 )
+
+
+def _get_gelu_pytorch_tanh() -> nn.Module:
+    """Get PyTorch GELU with tanh approximation, with ROCm fallback
+    and fast GELU for ARM."""
+    if current_platform.is_rocm():
+        # TODO:[ROCm] PyTorch native GELU with tanh is unstable with torch.compile
+        logger.warning_once(
+            "[ROCm] PyTorch's native GELU with tanh approximation is unstable. "
+            "Falling back to GELU(approximate='none')."
+        )
+        return nn.GELU(approximate="none")
+    if (
+        current_platform.is_cpu()
+        and current_platform.get_cpu_architecture() == CpuArchEnum.ARM
+    ):
+        return GELUTanh()
+    return nn.GELU(approximate="tanh")
 
 
 def get_act_fn(act_fn_name: str) -> nn.Module:
@@ -703,20 +809,28 @@ def get_act_fn(act_fn_name: str) -> nn.Module:
     return _ACTIVATION_REGISTRY[act_fn_name]
 
 
-_ACTIVATION_AND_MUL_REGISTRY = LazyDict(
+_ACTIVATION_AND_MUL_REGISTRY: LazyDict[nn.Module] = LazyDict(
     {
         "gelu": lambda: GeluAndMul(),
+        "gelu_pytorch_tanh": lambda: GeluAndMul(approximate="tanh"),
         "silu": lambda: SiluAndMul(),
+        "swish": lambda: SiluAndMul(),
         "geglu": lambda: GeluAndMul(),
-        "swigluoai": lambda *args, **kwargs: SwigluOAIAndMul(*args, **kwargs),
+        "swigluoai": lambda: SwigluOAIAndMul(),
     }
 )
 
 
-def get_act_and_mul_fn(act_fn_name: str) -> nn.Module:
+def get_act_and_mul_fn(act_fn_name: str, *, compile_native: bool = True) -> nn.Module:
     """Get an activation-and-mul (i.e. SiluAndMul) function by name."""
     act_fn_name = act_fn_name.lower()
-    if act_fn_name not in _ACTIVATION_AND_MUL_REGISTRY:
-        raise ValueError(f"Activation function {act_fn_name!r} is not supported.")
 
-    return _ACTIVATION_AND_MUL_REGISTRY[act_fn_name]
+    if not compile_native and act_fn_name in ("silu", "swish"):
+        return SiluAndMul(compile_native=False)
+
+    try:
+        return _ACTIVATION_AND_MUL_REGISTRY[act_fn_name]
+    except KeyError:
+        raise ValueError(
+            f"Activation function {act_fn_name!r} is not supported."
+        ) from None

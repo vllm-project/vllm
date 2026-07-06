@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from transformers.configuration_utils import PretrainedConfig
 
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import CacheConfig, ModelConfig, VllmConfig, get_current_vllm_config
+from vllm.config import CacheConfig, VllmConfig
 from vllm.distributed import (
     get_pp_group,
     get_tensor_model_parallel_rank,
@@ -17,28 +17,21 @@ from vllm.distributed import (
 )
 from vllm.forward_context import get_forward_context
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fla.ops.layernorm_guard import (
-    RMSNormGated,
-    layernorm_fn,
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
 )
-from vllm.model_executor.layers.fused_moe import FusedMoE, SharedFusedMoE
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     MergedColumnParallelLinear,
-    QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
 )
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
-from vllm.model_executor.layers.mamba.abstract import MambaBase
-from vllm.model_executor.layers.mamba.linear_attn import (
-    MiniMaxText01LinearAttention,
-    MiniMaxText01LinearKernel,
-    MiniMaxText01RMSNormTP,
-    clear_linear_attention_cache_for_new_sequences,
-    linear_attention_decode,
-    linear_attention_prefill_and_mix,
+from vllm.model_executor.layers.mamba.linear.bailing_linear_attn import (
+    BailingMoELinearAttention,
+    _build_rope_parameters,
 )
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFuncCalculator,
@@ -59,7 +52,6 @@ from vllm.model_executor.model_loader.weight_utils import (
 from vllm.model_executor.models.bailing_moe import BailingMLP
 from vllm.sequence import IntermediateTensors
 from vllm.v1.attention.backend import AttentionMetadata
-from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
 from .interfaces import HasInnerState, IsHybrid, SupportsPP
 from .utils import (
@@ -80,25 +72,6 @@ def is_linear_layer(layer_idx, layer_group_size):
         return (layer_idx + 1) % layer_group_size != 0
     else:
         return False
-
-
-def _build_rope_parameters(config: PretrainedConfig) -> dict | None:
-    rope_parameters = copy.deepcopy(getattr(config, "rope_parameters", None)) or {}
-    if "rope_theta" not in rope_parameters and hasattr(config, "rope_theta"):
-        rope_parameters["rope_theta"] = config.rope_theta
-    if "partial_rotary_factor" not in rope_parameters and hasattr(
-        config, "partial_rotary_factor"
-    ):
-        rope_parameters["partial_rotary_factor"] = config.partial_rotary_factor
-
-    rope_scaling = getattr(config, "rope_scaling", None)
-    if isinstance(rope_scaling, dict):
-        rope_scaling = copy.deepcopy(rope_scaling)
-        if "type" in rope_scaling and "rope_type" not in rope_scaling:
-            rope_scaling["rope_type"] = rope_scaling.pop("type")
-        rope_parameters.update(rope_scaling)
-
-    return rope_parameters or None
 
 
 class BailingMoeV25MLAAttention(nn.Module):
@@ -201,14 +174,19 @@ class BailingMoeV25MLAAttention(nn.Module):
             self.q_a_layernorm = None
             self.q_b_proj = None
 
-        rope_parameters = _build_rope_parameters(config)
+        rope_parameters = _build_rope_parameters(config) or {}
+        # MLA rotates the full qk_rope_head_dim,
+        # partial_rotary_factor is for the linear-attn head only.
+        rope_parameters = {
+            k: v for k, v in rope_parameters.items() if k != "partial_rotary_factor"
+        }
+        rope_parameters["rope_dim"] = self.qk_rope_head_dim
         max_position = getattr(config, "max_position_embeddings", 8192)
         self.rotary_emb = get_rope(
             head_size=self.qk_rope_head_dim,
             max_position=max_position,
             is_neox_style=False,
-            rope_parameters=rope_parameters or None,
-            dtype=torch.float32,
+            rope_parameters=rope_parameters,
         )
 
         # Build MLAModules for MultiHeadLatentAttentionWrapper
@@ -305,7 +283,7 @@ class BailingMoeV25(nn.Module):
         self.hidden_size = config.hidden_size
         self.quant_config = quant_config
         self.num_shared_experts = config.num_shared_experts
-        self.score_function = getattr(config, "score_function", None)
+        self.score_function: str | None = getattr(config, "score_function", None)
         self.n_group = getattr(config, "n_group", None)
         self.topk_group = getattr(config, "topk_group", None)
         self.use_grouped_topk = self.n_group is not None and self.topk_group is not None
@@ -351,8 +329,8 @@ class BailingMoeV25(nn.Module):
         else:
             self.shared_experts = None
 
-        # Routed experts using SharedFusedMoE
-        self.experts = SharedFusedMoE(
+        # Routed experts using FusedMoE
+        self.experts = FusedMoE(
             shared_experts=self.shared_experts,
             num_experts=self.num_experts,
             top_k=self.top_k,
@@ -387,399 +365,15 @@ class BailingMoeV25(nn.Module):
         return final_hidden_states.view(num_tokens, hidden_size)
 
 
-BailingRMSNormTP = MiniMaxText01RMSNormTP
-
-
-class BailingGroupRMSNormGate(RMSNormGated):
-    def __init__(
-        self,
-        hidden_size,
-        eps=1e-5,
-        group_size=None,
-        norm_before_gate=True,
-        device=None,
-        dtype=None,
-    ):
-        super().__init__(
-            hidden_size,
-            eps=eps,
-            group_size=group_size,
-            norm_before_gate=norm_before_gate,
-            device=device,
-            dtype=dtype,
-            activation="sigmoid",
-        )
-        # Add custom weight loader for TP sharding
-        self.weight.weight_loader = self._weight_loader
-
-    @staticmethod
-    def _weight_loader(param: torch.nn.Parameter, loaded_weight: torch.Tensor) -> None:
-        """Load weight with TP sharding."""
-        tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
-        shard_size = loaded_weight.shape[0] // tp_size
-        shard = slice(tp_rank * shard_size, (tp_rank + 1) * shard_size)
-        param.data.copy_(loaded_weight[shard].contiguous())
-
-
-class BailingMoELinearAttention(nn.Module, MambaBase):
-    """
-    Bailing MoE Linear Attention implementation using minimax backend.
-
-    This implements the linear attention mechanism from sglang, adapted for vLLM's
-    v1 engine with MambaBase interface support.
-    """
-
-    @property
-    def mamba_type(self) -> str:
-        return "linear_attention"
-
-    def get_state_shape(self) -> tuple[tuple[int, ...], ...]:
-        """Return state shape for linear attention cache.
-
-        Must match the calculation in get_mamba_state_shape_from_config.
-        """
-        return MambaStateShapeCalculator.linear_attention_state_shape(
-            num_heads=self.total_num_heads,
-            tp_size=self.tp_size,
-            head_dim=self.head_dim,
-        )
-
-    def get_state_dtype(self) -> tuple[torch.dtype, ...]:
-        """Return state dtype for linear attention cache.
-
-        Must match the calculation in get_mamba_state_dtype_from_config.
-        """
-        return MambaStateDtypeCalculator.linear_attention_state_dtype(
-            self.model_config.dtype,
-            self.cache_config.mamba_cache_dtype,
-        )
-
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
-        layer_id: int = 0,
-        prefix: str = "linear_attn",
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
-    ):
-        super().__init__()
-
-        self.layer_id = layer_id
-        self.hidden_size = config.hidden_size
-        self.total_num_heads = config.num_attention_heads
-        self.total_kv_heads = config.num_attention_heads  # MHA
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
-        self.model_config = model_config
-        self.cache_config = cache_config
-        self.prefix = prefix
-
-        self.head_dim = (
-            config.head_dim
-            if hasattr(config, "head_dim")
-            else config.hidden_size // self.total_num_heads
-        )
-
-        self.hidden_inner_size = self.head_dim * self.total_num_heads
-        self.scaling = self.head_dim**-0.5
-
-        assert self.total_num_heads % self.tp_size == 0
-        self.tp_heads = self.total_num_heads // self.tp_size
-
-        self.max_position_embeddings = config.max_position_embeddings
-        self.rope_theta = getattr(config, "rope_theta", 600000)
-
-        self.tp_kv_heads = self.total_kv_heads // self.tp_size
-        self.q_size_per_rank = self.head_dim * self.tp_heads
-        self.kv_size_per_rank = self.head_dim * self.tp_kv_heads
-
-        self.use_qk_norm = getattr(config, "use_qk_norm", False)
-        self.linear_backend = "minimax"
-        self.linear_scale = self.linear_backend == "minimax"
-        self.linear_rope = getattr(config, "linear_rope", True)
-        if hasattr(config, "use_linear_silu"):
-            self.linear_silu = config.use_linear_silu
-        elif hasattr(config, "linear_silu"):
-            self.linear_silu = config.linear_silu
-        else:
-            self.linear_silu = False
-
-        # Block size for lightning attention
-        self.BLOCK = getattr(config, "block", 256)
-
-        self.query_key_value = QKVParallelLinear(
-            self.hidden_size,
-            self.head_dim,
-            self.total_num_heads,
-            self.total_num_heads,  # MHA: kv_heads = num_heads
-            bias=(config.use_bias or config.use_qkv_bias),
-            quant_config=quant_config,
-            prefix=f"{prefix}.query_key_value",
-        )
-
-        if self.use_qk_norm:
-            self.query_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-            self.key_layernorm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
-
-        self.g_proj = ColumnParallelLinear(
-            self.hidden_size,
-            self.hidden_inner_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.g_proj",
-        )
-        self.dense = RowParallelLinear(
-            self.hidden_inner_size,
-            self.hidden_size,
-            bias=config.use_bias,
-            quant_config=quant_config,
-            prefix=f"{prefix}.dense",
-            reduce_results=True,
-        )
-
-        self.group_norm_size = getattr(config, "group_norm_size", 1)
-        self.rms_norm_eps = float(getattr(config, "rms_norm_eps", 1e-5))
-        assert self.tp_size <= self.group_norm_size, (
-            "tp_size must be <= group_norm_size for local rms norm"
-        )
-        assert self.group_norm_size % self.tp_size == 0, (
-            "group_norm_size must be divisible by tp_size"
-        )
-
-        # When group_norm_size == 1, group_size equals hidden_size // tp_size
-        self.g_norm = BailingGroupRMSNormGate(
-            hidden_size=self.hidden_inner_size // self.tp_size,
-            eps=self.rms_norm_eps,
-            group_size=(
-                self.hidden_inner_size // self.group_norm_size
-                if self.group_norm_size > 1
-                else self.hidden_inner_size // self.tp_size
-            ),
-        )
-
-        # use fp32 rotary embedding
-        rope_parameters = _build_rope_parameters(config)
-
-        self.rotary_emb = get_rope(
-            self.head_dim,
-            max_position=self.max_position_embeddings,
-            is_neox_style=True,
-            dtype=torch.float32,
-            rope_parameters=rope_parameters or None,
-        )
-
-        # Build slope tensor for linear attention decay
-        num_hidden_layers = config.num_hidden_layers
-        slope_rate = MiniMaxText01LinearAttention._build_slope_tensor(
-            self.total_num_heads
-        )
-        if num_hidden_layers <= 1:
-            self.slope_rate = slope_rate * (1 + 1e-5)
-        else:
-            self.slope_rate = slope_rate * (
-                1 - layer_id / (num_hidden_layers - 1) + 1e-5
-            )
-        self.tp_slope = self.slope_rate[
-            self.tp_rank * self.tp_heads : (self.tp_rank + 1) * self.tp_heads
-        ].contiguous()
-
-        # Register for compilation
-        compilation_config = get_current_vllm_config().compilation_config
-        if prefix in compilation_config.static_forward_context:
-            raise ValueError(f"Duplicate layer name: {prefix}")
-        compilation_config.static_forward_context[prefix] = self
-
-    @staticmethod
-    def weight_direct_load(param: torch.Tensor, loaded_weight: torch.Tensor) -> None:
-        """Load weight for linear attention layers.
-
-        For FP8 quantized parameters, we need to use the weight_loader if available,
-        as it handles special cases like tensor parallelism sharding.
-        """
-        # Check if param has a weight_loader (for vLLM ModelWeightParameter)
-        weight_loader = getattr(param, "weight_loader", None)
-        if weight_loader is not None:
-            # Use the weight_loader which handles TP sharding and quantization
-            weight_loader(param, loaded_weight)
-        else:
-            # Fall back to direct copy for standard tensors
-            assert param.size() == loaded_weight.size(), (
-                f"Shape mismatch: {param.shape} vs {loaded_weight.shape}"
-            )
-            param.data.copy_(loaded_weight)
-
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> None:
-        """Forward method called by torch.ops.vllm.linear_attention"""
-        torch.ops.vllm.linear_attention(
-            hidden_states,
-            output,
-            positions,
-            self.prefix,
-        )
-
-    def _forward(
-        self,
-        hidden_states: torch.Tensor,
-        output: torch.Tensor,
-        positions: torch.Tensor,
-    ) -> None:
-        """Actual forward implementation."""
-        forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
-        if attn_metadata is not None:
-            assert isinstance(attn_metadata, dict)
-            attn_metadata = attn_metadata[self.prefix]
-            assert isinstance(attn_metadata, LinearAttentionMetadata)
-            num_actual_tokens = (
-                attn_metadata.num_prefill_tokens + attn_metadata.num_decode_tokens
-            )
-        else:
-            num_actual_tokens = hidden_states.shape[0]
-
-        # QKV projection
-        qkv, _ = self.query_key_value(hidden_states[:num_actual_tokens])
-
-        # use rotary_emb support fp32
-        qkv = qkv.to(torch.float32)
-        if self.linear_silu:
-            qkv = F.silu(qkv)
-
-        # Split q, k, v
-        q, k, v = torch.split(
-            qkv,
-            [self.q_size_per_rank, self.kv_size_per_rank, self.kv_size_per_rank],
-            dim=-1,
-        )
-
-        # Apply QK norm if needed
-        if self.use_qk_norm:
-            q = q.reshape(-1, self.tp_heads, self.head_dim)
-            k = k.reshape(-1, self.tp_kv_heads, self.head_dim)
-            q = layernorm_fn(
-                q,
-                self.query_layernorm.weight.data,
-                bias=None,
-                eps=self.rms_norm_eps,
-                is_rms_norm=True,
-            )
-            k = layernorm_fn(
-                k,
-                self.key_layernorm.weight.data,
-                bias=None,
-                eps=self.rms_norm_eps,
-                is_rms_norm=True,
-            )
-            q = q.reshape(-1, self.q_size_per_rank)
-            k = k.reshape(-1, self.kv_size_per_rank)
-
-        # Apply rotary embeddings
-        if self.linear_rope:
-            q, k = self.rotary_emb(positions[:num_actual_tokens], q, k)
-
-        # Reshape to [batch, heads, seq_len, head_dim]
-        q = q.view((qkv.shape[0], self.tp_heads, self.head_dim))
-        k = k.view((qkv.shape[0], self.tp_kv_heads, self.head_dim))
-        v = v.view((qkv.shape[0], self.tp_kv_heads, self.head_dim))
-
-        # Apply scaling if using minimax backend
-        if self.linear_scale:
-            q = q * self.scaling
-
-        # Get KV cache and state indices
-        if attn_metadata is not None:
-            kv_cache = self.kv_cache[0]
-            state_indices_tensor = attn_metadata.state_indices_tensor
-            clear_linear_attention_cache_for_new_sequences(
-                kv_cache, state_indices_tensor, attn_metadata
-            )
-
-        # Compute attention
-        decode_only = getattr(attn_metadata, "num_prefills", 0) == 0
-        if attn_metadata is None:
-            hidden = torch.empty(
-                (q.shape[0], q.shape[1] * q.shape[2]), device=q.device, dtype=q.dtype
-            )
-        else:
-            if not decode_only:
-                hidden = self._prefill_and_mix_infer(
-                    q, k, v, kv_cache, state_indices_tensor, attn_metadata
-                )
-            else:
-                hidden = self._decode_infer(
-                    q, k, v, kv_cache, state_indices_tensor, attn_metadata
-                )
-
-        # Apply group norm and gate (matching SGLang behavior)
-        gate, _ = self.g_proj(hidden_states[:num_actual_tokens])
-
-        if self.group_norm_size > 1:
-            hidden = self.g_norm(hidden, gate)
-        else:
-            hidden = self.g_norm(hidden)
-            hidden = F.sigmoid(gate) * hidden
-
-        hidden = hidden.to(hidden_states.dtype)
-
-        # Output projection
-        dense_out, _ = self.dense(hidden)
-        output[:num_actual_tokens] = dense_out
-
-    def _prefill_and_mix_infer(
-        self, q, k, v, kv_cache, state_indices_tensor, attn_metadata
-    ):
-        """Handle prefill (mixed with decode if any)."""
-        return linear_attention_prefill_and_mix(
-            q=q,
-            k=k,
-            v=v,
-            kv_cache=kv_cache,
-            state_indices_tensor=state_indices_tensor,
-            attn_metadata=attn_metadata,
-            slope_rate=self.tp_slope,
-            block_size=self.BLOCK,
-            decode_fn=self._decode_infer,
-            prefix_fn=MiniMaxText01LinearKernel.jit_linear_forward_prefix,
-            layer_idx=self.layer_id,
-        )
-
-    def _decode_infer(self, q, k, v, kv_cache, state_indices_tensor, attn_metadata):
-        """Handle decode (single token per sequence)."""
-        num_prefill_tokens = attn_metadata.num_prefill_tokens
-        num_prefills = attn_metadata.num_prefills
-        hidden = linear_attention_decode(
-            q,
-            k,
-            v,
-            kv_cache,
-            self.tp_slope,
-            state_indices_tensor,
-            q_start=num_prefill_tokens,
-            q_end=None,
-            slot_start=num_prefills,
-            slot_end=None,
-            block_size=32,
-        )
-        return hidden
-
-
 class BailingMoeV25DecoderLayer(nn.Module):
     """Decoder layer supporting both linear and full attention."""
 
     def __init__(
         self,
         config: PretrainedConfig,
-        quant_config: QuantizationConfig | None = None,
-        layer_id: int = 0,
+        vllm_config: VllmConfig,
         prefix: str = "layer",
-        model_config: ModelConfig | None = None,
-        cache_config: CacheConfig | None = None,
+        layer_id: int = 0,
     ) -> None:
         super().__init__()
         self.layer_id = layer_id
@@ -791,19 +385,16 @@ class BailingMoeV25DecoderLayer(nn.Module):
         if self.attention_type == 0:  # Linear attention
             self.self_attn = BailingMoELinearAttention(
                 config,
-                quant_config=quant_config,
-                layer_id=layer_id,
+                vllm_config,
                 prefix=f"{prefix}.self_attn",
-                model_config=model_config,
-                cache_config=cache_config,
             )
         else:  # Full attention
             self.self_attn = BailingMoeV25MLAAttention(
                 config,
-                quant_config=quant_config,
+                quant_config=vllm_config.quant_config,
                 layer_id=layer_id,
                 prefix=f"{prefix}.self_attn",
-                cache_config=cache_config,
+                cache_config=vllm_config.cache_config,
             )
 
         # MLP/MoE
@@ -814,7 +405,7 @@ class BailingMoeV25DecoderLayer(nn.Module):
         if is_moe_layer:
             self.mlp = BailingMoeV25(
                 config,
-                quant_config=quant_config,
+                quant_config=vllm_config.quant_config,
                 layer_id=layer_id,
                 prefix=f"{prefix}.mlp",
             )
@@ -822,7 +413,7 @@ class BailingMoeV25DecoderLayer(nn.Module):
             self.mlp = BailingMLP(
                 intermediate_size=config.intermediate_size,
                 config=config,
-                quant_config=quant_config,
+                quant_config=vllm_config.quant_config,
                 reduce_results=True,
                 prefix=f"{prefix}.mlp",
             )
@@ -885,10 +476,6 @@ class BailingMoeV25Model(nn.Module):
     ):
         super().__init__()
         config = vllm_config.model_config.hf_config
-        model_config = vllm_config.model_config
-        quant_config = vllm_config.quant_config
-        cache_config = vllm_config.cache_config
-
         self.config = config
         self.vocab_size = config.vocab_size
         self.embed_dim = config.hidden_size
@@ -923,11 +510,9 @@ class BailingMoeV25Model(nn.Module):
 
             return BailingMoeV25DecoderLayer(
                 config=layer_config,
-                quant_config=quant_config,
-                layer_id=layer_idx,
+                vllm_config=vllm_config,
                 prefix=prefix,
-                model_config=model_config,
-                cache_config=cache_config,
+                layer_id=layer_idx,
             )
 
         self.start_layer, self.end_layer, self.layers = make_layers(
@@ -947,6 +532,10 @@ class BailingMoeV25Model(nn.Module):
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.word_embeddings(input_ids)
+
+    @property
+    def embed_tokens(self) -> nn.Module:
+        return self.word_embeddings
 
     def forward(
         self,
@@ -990,7 +579,7 @@ class BailingMoeV25Model(nn.Module):
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
         """Get expert parameter mapping for MoE layers."""
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -1146,6 +735,7 @@ class BailingMoeV25ForCausalLM(nn.Module, HasInnerState, IsHybrid, SupportsPP):
                 config.vocab_size,
                 config.hidden_size,
                 quant_config=quant_config,
+                prefix=maybe_prefix(prefix, "lm_head"),
             )
             self.logits_processor = LogitsProcessor(config.vocab_size)
         else:
