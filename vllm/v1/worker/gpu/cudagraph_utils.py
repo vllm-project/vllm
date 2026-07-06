@@ -218,9 +218,15 @@ class CudaGraphManager:
                 self.decode_query_len - self.vllm_config.num_speculative_tokens
             )
             # Each entry is (range_start, range_end, num_speculative_tokens).
-            decode_query_lens = [
-                x[2] + num_new_sampled_tokens_per_step for x in num_spec_per_batch_size
-            ]
+            # K=0 disables drafting at that concurrency; skip it here since no
+            # uniform decode graph is needed (and qlen=0 would divide by zero).
+            decode_query_lens = sorted(
+                {
+                    x[2] + num_new_sampled_tokens_per_step
+                    for x in num_spec_per_batch_size
+                    if x[2] + num_new_sampled_tokens_per_step > 0
+                }
+            )
         else:
             decode_query_lens = [self.decode_query_len]
 
