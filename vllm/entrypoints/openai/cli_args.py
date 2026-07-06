@@ -304,6 +304,14 @@ class FrontendArgs(BaseFrontendArgs):
     enable_flash_late_interaction: bool = True
     """If set, run pooling score MaxSim on GPU in the API server process.
     Can significantly improve late-interaction scoring performance."""
+    sleep_idle_ttl: float | None = None
+    """Automatically put the engine to sleep after this many seconds without
+    inference requests. Requires --enable-sleep-mode. The engine is woken up
+    automatically when the next inference request arrives. Not supported with
+    more than one API server process."""
+    sleep_idle_level: Literal[1, 2] = 1
+    """Sleep level used when the engine is put to sleep by --sleep-idle-ttl.
+    Waking up from level 2 reloads the model weights from the model source."""
 
     @classmethod
     def _customize_cli_kwargs(
@@ -397,6 +405,17 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+
+    if args.sleep_idle_ttl is not None:
+        if args.sleep_idle_ttl <= 0:
+            raise ValueError("Error: --sleep-idle-ttl must be positive")
+        if not args.enable_sleep_mode:
+            raise TypeError("Error: --sleep-idle-ttl requires --enable-sleep-mode")
+        if (args.api_server_count or 1) > 1 or args.data_parallel_size > 1:
+            raise TypeError(
+                "Error: --sleep-idle-ttl is not supported with multiple "
+                "API server processes"
+            )
 
     if args.data_parallel_multi_port_external_lb:
         from vllm.entrypoints.openai.dp_supervisor import (

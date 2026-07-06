@@ -548,6 +548,10 @@ async def lifespan(app: FastAPI):
         else:
             task = None
 
+        idle_sleep_manager = getattr(app.state, "idle_sleep_manager", None)
+        if idle_sleep_manager is not None:
+            idle_sleep_manager.start()
+
         # Mark the startup heap as static so that it's ignored by GC.
         # Reduces pause times of oldest generation collections.
         freeze_gc_heap()
@@ -556,6 +560,8 @@ async def lifespan(app: FastAPI):
         finally:
             if task is not None:
                 task.cancel()
+            if idle_sleep_manager is not None:
+                idle_sleep_manager.stop()
             for attr_name in (
                 "openai_serving_transcription",
                 "openai_serving_translation",

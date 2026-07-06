@@ -261,6 +261,11 @@ def build_app(
     # Add scaling middleware to check for scaling state
     app.add_middleware(ScalingMiddleware)
 
+    if getattr(args, "sleep_idle_ttl", None):
+        from vllm.entrypoints.serve.idle_sleep import IdleSleepMiddleware
+
+        app.add_middleware(IdleSleepMiddleware)
+
     if "realtime" in supported_tasks:
         # Add WebSocket metrics middleware
         from vllm.entrypoints.speech_to_text.factories import (
@@ -418,6 +423,17 @@ async def init_app_state(
 
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
+
+    if getattr(args, "sleep_idle_ttl", None):
+        if not vllm_config.model_config.enable_sleep_mode:
+            raise ValueError("--sleep-idle-ttl requires --enable-sleep-mode")
+        from vllm.entrypoints.serve.idle_sleep import IdleSleepManager
+
+        state.idle_sleep_manager = IdleSleepManager(
+            engine_client,
+            ttl=args.sleep_idle_ttl,
+            level=args.sleep_idle_level,
+        )
 
 
 async def init_render_app_state(
