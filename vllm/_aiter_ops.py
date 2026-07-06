@@ -469,14 +469,14 @@ def check_aiter_fused_qk_rmsnorm() -> bool:
             )
 
             _AITER_HAS_FUSED_QK_RMSNORM = True
-        except (ImportError, ModuleNotFoundError, AttributeError):
+        except (ImportError, ModuleNotFoundError, AttributeError, KeyError, RuntimeError):
             try:
                 from aiter.ops.fused_qk_norm_rope_cache_quant import (  # noqa: F401
                     fused_qk_rmsnorm,
                 )
 
                 _AITER_HAS_FUSED_QK_RMSNORM = True
-            except (ImportError, ModuleNotFoundError, AttributeError):
+            except (ImportError, ModuleNotFoundError, AttributeError, KeyError, RuntimeError):
                 _AITER_HAS_FUSED_QK_RMSNORM = False
     return _AITER_HAS_FUSED_QK_RMSNORM
 
