@@ -140,6 +140,7 @@ class CompressedTensorsW8A8Mxfp8MoEMethod(CompressedTensorsMoEMethod):
                 fp8_backend=self.fp8_backend,
                 experts_cls=self.experts_cls,
                 routing_tables=layer._expert_routing_tables(),
+                layer=layer,
             )
 
     def get_fused_moe_quant_config(
@@ -155,6 +156,7 @@ class CompressedTensorsW8A8Mxfp8MoEMethod(CompressedTensorsMoEMethod):
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
         )
 
     def maybe_make_prepare_finalize(
