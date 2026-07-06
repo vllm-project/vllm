@@ -3,12 +3,9 @@
 """Unit tests for PPHandler broadcast/draft relay and sparse MLA stale-buffer fix."""
 
 from types import SimpleNamespace
-from unittest import mock
 
 import pytest
 import torch
-
-from vllm.v1.worker.gpu.pp_utils import PPHandler
 
 
 class FakePPHandler:
@@ -35,22 +32,23 @@ class FakePPHandler:
 
 
 # ---------------------------------------------------------------------------
-# Fix #1: DeepSeekMTP implements SupportsPP
+# DeepSeekMTP under pipeline parallelism
 # ---------------------------------------------------------------------------
 
 
 def test_deepseek_mtp_implements_supports_pp():
-    """Verify DeepSeekMTP has the SupportsPP interface (Fix #1)."""
+    """DeepSeekMTP must pass the supports_pp() gate used at model resolution;
+    otherwise the engine refuses to build it under pipeline parallelism."""
     from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
-    from vllm.model_executor.layers.interfaces import SupportsPP
+    from vllm.model_executor.models.interfaces import supports_pp
 
-    assert issubclass(DeepSeekMTP, SupportsPP), (
+    assert supports_pp(DeepSeekMTP), (
         "DeepSeekMTP must implement SupportsPP to be built under PP"
     )
 
 
 def test_deepseek_mtp_has_make_empty_intermediate_tensors():
-    """Verify DeepSeekMTP provides make_empty_intermediate_tensors (Fix #1)."""
+    """DeepSeekMTP must provide make_empty_intermediate_tensors."""
     from vllm.model_executor.models.deepseek_mtp import DeepSeekMTP
 
     assert hasattr(DeepSeekMTP, "make_empty_intermediate_tensors"), (
@@ -59,7 +57,7 @@ def test_deepseek_mtp_has_make_empty_intermediate_tensors():
 
 
 # ---------------------------------------------------------------------------
-# Fix #2: PPHandler.broadcast() pads sampled_token_ids to max_sample_len
+# PPHandler.broadcast() pads sampled_token_ids to max_sample_len
 # ---------------------------------------------------------------------------
 
 
@@ -72,7 +70,8 @@ def test_deepseek_mtp_has_make_empty_intermediate_tensors():
     ],
 )
 def test_pphandler_broadcast_pads_to_max_sample_len(width, max_sample_len):
-    """Verify broadcast() pads sampled_token_ids to max_sample_len (Fix #2)."""
+    """broadcast() must pad sampled_token_ids to max_sample_len so the
+    NCCL send/recv element counts always match."""
     handler = FakePPHandler(max_sample_len=max_sample_len, is_last_rank=True)
     num_reqs = 4
     sampled = torch.zeros(num_reqs, width, dtype=torch.int64)
@@ -94,13 +93,13 @@ def test_pphandler_broadcast_no_pad_when_already_max():
 
 
 # ---------------------------------------------------------------------------
-# Fix #4: Stale topk_indices_buffer is read dynamically
+# Sparse MLA backends read topk_indices_buffer dynamically
 # ---------------------------------------------------------------------------
 
 
 def test_sparse_mla_backend_reads_topk_indices_buffer_dynamically():
-    """Verify sparse MLA backends read topk_indices_buffer dynamically via
-    self._indexer (Fix #4). After _maybe_share_lm_head replaces
+    """Sparse MLA backends must read topk_indices_buffer dynamically via
+    self._indexer: after _maybe_share_lm_head replaces
     Indexer.topk_indices_buffer, the impl must see the new buffer."""
 
     # Simulate the pattern used in all sparse MLA backends:
@@ -167,3 +166,5 @@ def test_sparse_mla_backend_handles_no_indexer():
     buffer = torch.ones(128, 128, dtype=torch.int32)
     impl = FakeSparseMLAImpl(indexer=None, topk_indices_buffer=buffer)
     assert impl.forward_mqa() is buffer
+
+
