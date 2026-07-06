@@ -5,7 +5,6 @@ import torch
 
 from vllm.triton_utils import tl, triton
 from vllm.v1.core.sched.output import SchedulerOutput
-from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 
 
@@ -157,25 +156,6 @@ class DraftTokenCapacityHandler:
             active
         ]
         return True
-
-    def trim_draft_token_ids(self, draft_token_ids: DraftTokenIds) -> DraftTokenIds:
-        if (
-            self.draft_token_capacity_np is None
-            or draft_token_ids.req_ids != self.req_ids
-        ):
-            return draft_token_ids
-        self._sync_copy()
-        draft_token_capacities = self._get_draft_token_capacities()
-        assert draft_token_capacities is not None
-        return DraftTokenIds(
-            draft_token_ids.req_ids,
-            [
-                token_ids[:capacity]
-                for token_ids, capacity in zip(
-                    draft_token_ids.draft_token_ids, draft_token_capacities
-                )
-            ],
-        )
 
 
 @triton.jit

@@ -13,7 +13,6 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA required for draft capacity tests", allow_module_level=True)
 
 from vllm.config.compilation import CUDAGraphMode
-from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
@@ -143,28 +142,6 @@ def test_draft_token_capacity_handler_updates_cpu_capacities():
         {"req1": 0},
     )
     assert draft_token_capacity_np.tolist() == [2, 3, 3, 3]
-
-
-def test_draft_token_capacity_handler_trims_structured_output_tokens():
-    device = torch.device("cuda")
-    handler = DraftTokenCapacityHandler(device)
-    draft_token_capacity = torch.tensor([1, 2], dtype=torch.int32, device=device)
-    handler.set_draft_token_capacities(
-        ["req0", "req1"],
-        np.array([0, 1], dtype=np.int32),
-        draft_token_capacity,
-        num_draft_tokens=3,
-    )
-
-    draft_token_ids = DraftTokenIds(
-        ["req0", "req1"],
-        [[11, 12, 13], [21, 22, 23]],
-    )
-
-    assert handler.trim_draft_token_ids(draft_token_ids).draft_token_ids == [
-        [11],
-        [21, 22],
-    ]
 
 
 def test_effective_scheduled_token_counts_apply_capacity_before_dispatch():

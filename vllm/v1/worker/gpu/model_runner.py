@@ -1597,10 +1597,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        draft_token_ids = self.draft_tokens_handler.get_draft_tokens()
-        if draft_token_ids is None:
-            return None
-        return self.draft_token_capacity_handler.trim_draft_token_ids(draft_token_ids)
+        return self.draft_tokens_handler.get_draft_tokens()
 
     @torch.inference_mode()
     @step_eplb_after()
