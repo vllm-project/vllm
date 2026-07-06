@@ -634,7 +634,12 @@ def per_token_group_quant_fp8(
     if (
         current_platform.is_cuda_alike() or current_platform.is_xpu()
     ) and x.is_contiguous():
-        torch.ops._C.per_token_group_fp8_quant(
+        from vllm.kernels.helion.routing import route_quant
+
+        # Helion under CUDA-graph capture, native _C in eager (see routing.py).
+        route_quant(
+            "per_token_group_fp8_quant",
+            torch.ops._C.per_token_group_fp8_quant,
             x,
             x_q,
             x_s,
