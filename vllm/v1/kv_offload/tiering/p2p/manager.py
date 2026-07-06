@@ -28,7 +28,6 @@ from vllm.v1.kv_offload.tiering.base import (
     JobResult,
     ScheduleEndContext,
     SecondaryTierManager,
-    TieringManagerReverseAPI,
 )
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
@@ -428,11 +427,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             time.sleep(_DRAIN_SLEEP_S)
 
     @override
-    def on_schedule_end(
-        self,
-        context: ScheduleEndContext,
-        reverse_api: TieringManagerReverseAPI | None = None,
-    ) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         return
 
     # ------------------------------------------------------------------

@@ -48,6 +48,7 @@ from vllm.v1.kv_offload.cpu.shared_offload_region import SharedOffloadRegion
 from vllm.v1.kv_offload.tiering.base import (
     JobId,
     JobMetadata,
+    ParentManager,
     SecondaryTierManager,
 )
 
@@ -120,6 +121,35 @@ class CPUPrimaryTierOffloadingManager(CPUOffloadingManager):
         self._mmap_region.cleanup()
 
 
+class _SecondaryTierFacingParent(ParentManager):
+    """Wrapper that implements ParentManager by delegating to the
+    TieringOffloadingManager with exclude_tier set to the origin tier."""
+
+    __slots__ = ("_m", "_origin")
+
+    def __init__(
+        self,
+        manager: "TieringOffloadingManager",
+        tier: SecondaryTierManager,
+    ):
+        self._m = manager
+        self._origin = tier
+
+    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+        return self._m.on_new_request(req_context, exclude_tier=self._origin)
+
+    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+        return self._m.lookup(key, req_context, exclude_tier=self._origin)
+
+    def create_store_job(
+        self, keys: Collection[OffloadKey], req_context: ReqContext
+    ) -> JobMetadata:
+        return self._m.create_store_job(keys, req_context)
+
+    def on_request_finished(self, req_context: ReqContext) -> None:
+        return self._m.on_request_finished(req_context, exclude_tier=self._origin)
+
+
 class TieringOffloadingManager(OffloadingManager):
     """
     Orchestrates multi-tier KV cache offloading.
@@ -180,6 +210,12 @@ class TieringOffloadingManager(OffloadingManager):
         # complete_store(), since complete_store() can still submit cascades.
         self._req_state: dict[str, RequestState] = {}
 
+        # Cached ParentManager wrappers for each secondary tier.
+        self._tier_parents: dict[SecondaryTierManager, _SecondaryTierFacingParent] = {
+            tier: _SecondaryTierFacingParent(self, tier)
+            for tier in self.secondary_tiers
+        }
+
     def _next_job_id(self) -> JobId:
         """Generate a unique job ID for async transfer tracking."""
         job_id = self._job_id_counter
@@ -235,7 +271,13 @@ class TieringOffloadingManager(OffloadingManager):
                     )
 
     @override
-    def lookup(self, key: OffloadKey, req_context: ReqContext) -> LookupResult:
+    def lookup(
+        self,
+        key: OffloadKey,
+        req_context: ReqContext,
+        *,
+        exclude_tier: SecondaryTierManager | None = None,
+    ) -> LookupResult:
         """
         Check whether a single block is offloaded and ready.
 
@@ -267,6 +309,8 @@ class TieringOffloadingManager(OffloadingManager):
 
         any_retry = False
         for tier in self.secondary_tiers:
+            if tier is exclude_tier:
+                continue
             result = tier.lookup(key, req_context)
             if result is LookupResult.HIT:
                 if not self._initiate_promotion(tier, key, req_context):
@@ -555,7 +599,12 @@ class TieringOffloadingManager(OffloadingManager):
         return job_metadata
 
     @override
-    def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
+    def on_new_request(
+        self,
+        req_context: ReqContext,
+        *,
+        exclude_tier: SecondaryTierManager | None = None,
+    ) -> RequestOffloadingContext:
         """
         Query each secondary tier for its offload policy preference.
 
@@ -564,6 +613,8 @@ class TieringOffloadingManager(OffloadingManager):
         """
         state = RequestState(req_context=req_context)
         for tier in self.secondary_tiers:
+            if tier is exclude_tier:
+                continue
             tier_ctx = tier.on_new_request(req_context)
             if tier_ctx.policy == OffloadPolicy.REQUEST_LEVEL:
                 if state.request_level_tiers is None:
@@ -579,13 +630,22 @@ class TieringOffloadingManager(OffloadingManager):
         return RequestOffloadingContext(policy=policy)
 
     @override
-    def on_request_finished(self, req_context: ReqContext) -> None:
+    def on_request_finished(
+        self,
+        req_context: ReqContext,
+        *,
+        exclude_tier: SecondaryTierManager | None = None,
+    ) -> None:
         self.primary_tier.on_request_finished(req_context)
         state = self._req_state[req_context.req_id]
         state.is_finished = True
-        self._maybe_finalize_request(req_context.req_id)
+        self._maybe_finalize_request(req_context.req_id, exclude_tier)
 
-    def _maybe_finalize_request(self, req_id: str) -> None:
+    def _maybe_finalize_request(
+        self,
+        req_id: str,
+        exclude_tier: SecondaryTierManager | None = None,
+    ) -> None:
         """Finalize secondary tiers once no more store cascades can be submitted.
 
         Finalization means forwarding on_request_finished() to secondary tiers.
@@ -599,6 +659,8 @@ class TieringOffloadingManager(OffloadingManager):
             return
 
         for tier in self.secondary_tiers:
+            if tier is exclude_tier:
+                continue
             tier.on_request_finished(state.req_context)
         del self._req_state[req_id]
 
@@ -612,9 +674,13 @@ class TieringOffloadingManager(OffloadingManager):
         """
         self._maybe_process_finished_jobs()
         self._processed_jobs_this_step = False
+
+        for tier in self.secondary_tiers:
+            tier.serve_external_requests(self._tier_parents[tier])
+
         self._flush_pending_promotions()
         for tier in self.secondary_tiers:
-            tier.on_schedule_end(context, reverse_api=self)
+            tier.on_schedule_end(context)
 
     @override
     def has_pending_work(self) -> bool:
