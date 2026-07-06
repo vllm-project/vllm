@@ -1095,17 +1095,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             assert self.rejection_sampler is not None
             assert self.speculator is not None
             verification_capacity_manager = self.verification_capacity_manager
-            decompaction = (
-                verification_capacity_manager.sampler_decompaction
-                if verification_capacity_manager is not None
-                else None
-            )
+            sampler_input_batch = input_batch
+            if verification_capacity_manager is not None:
+                sampler_input_batch = verification_capacity_manager.restore_batch(
+                    input_batch
+                )
             sampler_output = self.rejection_sampler(
                 logits,
-                input_batch,
+                sampler_input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
-                decompaction,
             )
 
         assert sampler_output.num_sampled is not None

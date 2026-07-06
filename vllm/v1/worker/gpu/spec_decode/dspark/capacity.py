@@ -452,10 +452,17 @@ class CapacityBasedVerificationManager:
     ) -> "InputBatch":
         if self.sampler_decompaction is None:
             return input_batch
-        return replace(
+        restored_batch = replace(
             input_batch,
             query_start_loc=self.sampler_decompaction.query_start_loc,
         )
+        object.__setattr__(restored_batch, "_compact_input_batch", input_batch)
+        object.__setattr__(
+            restored_batch,
+            "_sampler_decompaction",
+            self.sampler_decompaction,
+        )
+        return restored_batch
 
 
 @triton.jit
