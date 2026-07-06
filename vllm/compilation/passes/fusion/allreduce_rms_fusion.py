@@ -141,7 +141,7 @@ if flashinfer_comm is not None:
 
     MiB = 1024 * 1024
 
-    def call_flashinfer_fused_allreduce_norm(
+    def call_trtllm_fused_allreduce_norm(
         allreduce_in: torch.Tensor,
         residual: torch.Tensor,
         rms_gamma: torch.Tensor,
@@ -255,7 +255,7 @@ if flashinfer_comm is not None:
             or num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
         )
 
-    def call_flashinfer_fused_allreduce_norm_fake(
+    def call_trtllm_fused_allreduce_norm_fake(
         allreduce_in: torch.Tensor,
         residual: torch.Tensor,
         rms_gamma: torch.Tensor,
@@ -274,8 +274,8 @@ if flashinfer_comm is not None:
         pass
 
     direct_register_custom_op(
-        op_name="flashinfer_fused_allreduce_norm",
-        op_func=call_flashinfer_fused_allreduce_norm,
+        op_name="flashinfer_trtllm_fused_allreduce_norm",
+        op_func=call_trtllm_fused_allreduce_norm,
         mutates_args=[
             "allreduce_in",
             "residual",
@@ -283,10 +283,10 @@ if flashinfer_comm is not None:
             "quant_out",
             "scale_out",
         ],
-        fake_impl=call_flashinfer_fused_allreduce_norm_fake,
+        fake_impl=call_trtllm_fused_allreduce_norm_fake,
     )
-    flashinfer_fused_allreduce_norm = (
-        torch.ops.vllm.flashinfer_fused_allreduce_norm.default
+    flashinfer_trtllm_fused_allreduce_norm = (
+        torch.ops.vllm.flashinfer_trtllm_fused_allreduce_norm.default
     )
 
 
@@ -365,7 +365,7 @@ class AllReduceRMSNormPattern(BasePattern):
             rms_result = torch.empty_like(input)
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
-                flashinfer_fused_allreduce_norm,
+                flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
                 residual=residual,
                 norm_out=rms_result,
@@ -430,7 +430,7 @@ class AllReduceFusedAddRMSNormPattern(BasePattern):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
-                flashinfer_fused_allreduce_norm,
+                flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
                 residual=residual,
                 norm_out=None,
@@ -502,7 +502,7 @@ class AllReduceGemmaRMSNormPattern(BasePattern):
             rms_result = torch.empty_like(input)
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
-                flashinfer_fused_allreduce_norm,
+                flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
                 residual=residual,
                 norm_out=rms_result,
@@ -560,7 +560,7 @@ class AllReduceFusedAddGemmaRMSNormPattern(BasePattern):
         ) -> tuple[torch.Tensor, torch.Tensor]:
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
-                flashinfer_fused_allreduce_norm,
+                flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
                 residual=residual,
                 norm_out=None,
@@ -635,7 +635,7 @@ class AllReduceFusedRMSNormStaticQuantFP8Pattern(BasePattern):
             result_quant = torch.empty_like(input, dtype=self.quant_dtype)
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
-                flashinfer_fused_allreduce_norm,
+                flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
                 residual=residual,
                 norm_out=result_rms,
@@ -719,7 +719,7 @@ class AllReduceFusedAddRMSNormStaticQuantFP8Pattern(BasePattern):
             result_quant = torch.empty_like(input, dtype=self.quant_dtype)
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
-                flashinfer_fused_allreduce_norm,
+                flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
                 residual=residual,
                 norm_out=None,
@@ -805,7 +805,7 @@ class AllReduceFusedRMSNormStaticQuantNVFP4Pattern(BasePattern):
             result_rms = torch.empty_like(input)
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
-                flashinfer_fused_allreduce_norm,
+                flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
                 residual=residual,
                 norm_out=result_rms,
@@ -908,7 +908,7 @@ class AllReduceFusedAddRMSNormStaticQuantNVFP4Pattern(BasePattern):
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
             assert flashinfer_comm is not None, "FlashInfer must be enabled"
             allreduce = auto_functionalized(
-                flashinfer_fused_allreduce_norm,
+                flashinfer_trtllm_fused_allreduce_norm,
                 allreduce_in=input,
                 residual=residual,
                 norm_out=None,
