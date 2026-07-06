@@ -269,11 +269,17 @@ def _create_subgroups_split_group(
     must enter with the same ``split_ranks`` definition. Each rank receives
     the subgroup it belongs to.
     """
+    from vllm.distributed.utils import (
+        get_cpu_distributed_timeout_or_none,
+        get_distributed_timeout_or_none,
+    )
+
     device_backend_str = _device_backend_str(torch_distributed_backend)
     self_device_group = torch.distributed.split_group(
         split_ranks=group_ranks,
         group_desc=f"{group_name}:device",
         backend=device_backend_str,
+        timeout=get_distributed_timeout_or_none(),
     )
     # CPU subgroup: split_group requires the requested backend filter to
     # include the parent's default device type (= the device the parent PG
@@ -284,6 +290,7 @@ def _create_subgroups_split_group(
         split_ranks=group_ranks,
         group_desc=f"{group_name}:cpu",
         backend=f"cpu:gloo,{device_backend_str}",
+        timeout=get_cpu_distributed_timeout_or_none(),
     )
     return self_device_group, self_cpu_group
 

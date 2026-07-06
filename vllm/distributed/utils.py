@@ -626,6 +626,10 @@ def stateless_init_torch_distributed_process_group(
         gloo_timeout = get_cpu_distributed_timeout_or_none()
         if gloo_timeout is not None:
             timeout = gloo_timeout
+    else:
+        device_timeout = get_distributed_timeout_or_none()
+        if device_timeout is not None:
+            timeout = device_timeout
 
     if listen_socket is not None:
         store = create_tcp_store(
