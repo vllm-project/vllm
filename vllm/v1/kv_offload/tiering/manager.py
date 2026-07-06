@@ -140,7 +140,6 @@ class TieringOffloadingManager(OffloadingManager):
         self,
         primary_tier: CPUPrimaryTierOffloadingManager,
         secondary_tiers: list[SecondaryTierManager] | None = None,
-        enable_events: bool = False,
     ):
         """
         Initialize the TieringOffloadingManager.
@@ -149,14 +148,11 @@ class TieringOffloadingManager(OffloadingManager):
             primary_tier: The primary tier manager (CPU-based).
             secondary_tiers: List of secondary tier managers (e.g., Storage,
                             Network). Can be None or empty list.
-            enable_events: Whether to track offloading events
         """
         self.primary_tier: CPUPrimaryTierOffloadingManager = primary_tier
         self.secondary_tiers = secondary_tiers or []
 
         self._job_id_counter: int = 0
-        self.events: list[OffloadingEvent] | None = [] if enable_events else None
-
         # Job tracking: maps job_id to metadata for all in-flight transfers.
         # JobMetadata.is_promotion distinguishes direction:
         #   True:  secondary → primary (promotion)
@@ -500,7 +496,7 @@ class TieringOffloadingManager(OffloadingManager):
         keys: Collection[OffloadKey],
         req_context: ReqContext,
         success: bool = True,
-    ) -> list[OffloadKey]:
+    ) -> None:
         """
         Mark blocks as done storing from GPU to primary tier.
 
@@ -518,13 +514,9 @@ class TieringOffloadingManager(OffloadingManager):
             keys: Blocks that finished storing.
             success: Whether the GPU→primary transfer succeeded.
             req_context: Per-request context forwarded to primary.prepare_read().
-
-        Returns:
-            The primary-tier keys that transitioned to stored, for the
-            connector to emit the GPU->CPU Stored event.
         """
         # Step 1: Complete store in primary tier (makes blocks loadable)
-        stored_keys = self.primary_tier.complete_store(keys, req_context, success)
+        self.primary_tier.complete_store(keys, req_context, success)
 
         if success:
             # Step 2: Cascade to ALL secondary tiers
@@ -558,14 +550,6 @@ class TieringOffloadingManager(OffloadingManager):
         assert state.pending_primary_stores > 0
         state.pending_primary_stores -= 1
         self._maybe_finalize_request(req_id)
-
-        return stored_keys
-
-    @override
-    def medium(self) -> str | None:
-        # The parent store is GPU->primary(CPU); the connector emits that
-        # Stored event using this medium.
-        return self.primary_tier.medium()
 
     @override
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
@@ -640,16 +624,14 @@ class TieringOffloadingManager(OffloadingManager):
 
     @override
     def take_events(self) -> Iterable[OffloadingEvent]:
-        """Yield offloading events collected since the last call.
+        """Yield events owned by the primary and secondary tiers.
 
         Yields:
-            New OffloadingEvents collected since the last call.
+            New OffloadingEvents collected by each tier since the last call.
         """
-        if self.events is not None:
-            yield from self.events
-            self.events.clear()
-
         yield from self.primary_tier.take_events()
+        for tier in self.secondary_tiers:
+            yield from tier.take_events()
 
     @override
     def reset_cache(self) -> None:

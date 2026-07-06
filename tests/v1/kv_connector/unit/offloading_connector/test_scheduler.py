@@ -8,16 +8,13 @@ import torch
 
 from tests.v1.kv_connector.unit.offloading_connector.utils import (
     generate_store_output,
-    to_key,
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
-from vllm.distributed.kv_events import MEDIUM_CPU, BlockRemoved, BlockStored
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
 )
-from vllm.v1.core.kv_cache_utils import BlockHash, maybe_convert_block_hash
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheGroupSpec,
@@ -25,7 +22,6 @@ from vllm.v1.kv_cache_interface import (
 )
 from vllm.v1.kv_offload.base import (
     LookupResult,
-    OffloadingEvent,
     OffloadingManager,
     OffloadPolicy,
     ReqContext,
@@ -1076,131 +1072,6 @@ def test_complete_store_called_per_job(request_runner, async_scheduling: bool):
     # Finish: no store pending -> no further call.
     runner.run(decoded_tokens=[EOS_TOKEN_ID])
     assert runner.manager.complete_store.call_count == 0
-
-
-@pytest.mark.parametrize("async_scheduling", [True, False])
-def test_connector_emits_stored_from_complete_store(
-    request_runner, async_scheduling: bool
-):
-    """When a store completes, the connector emits a BlockStored built from the
-    keys complete_store returns, tagged with manager.medium()."""
-    gpu_block_size = 4
-    block_size_factor = 3
-    offloaded_block_size = gpu_block_size * block_size_factor
-    runner = request_runner(
-        block_size_factor=block_size_factor,
-        block_size=gpu_block_size,
-        num_gpu_blocks=100,
-        async_scheduling=async_scheduling,
-        extra_config_overrides={"self_describing_kv_events": False},
-    )
-    runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
-    )
-    # complete_store reports the keys it stored. Return a sentinel key that is
-    # NOT in the input store keys, so the test pins that the event is built from
-    # the RETURNED keys (not the input), tagged with manager.medium().
-    sentinel = to_key(987654)
-    runner.manager.complete_store.side_effect = lambda keys, req_context: [sentinel]
-    runner.manager.medium.return_value = MEDIUM_CPU
-    runner.manager.take_events.return_value = []
-
-    # The core scheduler drains connector.take_events() each step (publishing to
-    # the null publisher), so capture what it emits via a spy.
-    cs = runner.connector_scheduler
-    captured: list = []
-    original_take_events = cs.take_events
-
-    def _spy():
-        for event in original_take_events():
-            captured.append(event)
-            yield event
-
-    cs.take_events = _spy
-
-    runner.run(decoded_tokens=[0, 0], expected_stored=(0, 1, 2))
-    assert runner.manager.complete_store.call_count == 1
-
-    stored = [e for e in captured if isinstance(e, BlockStored)]
-    assert len(stored) == 1, captured
-    expected_hash = maybe_convert_block_hash(
-        BlockHash(get_offload_block_hash(sentinel))
-    )
-    assert stored[0].block_hashes == [expected_hash]
-    assert stored[0].medium == MEDIUM_CPU
-
-
-@pytest.mark.parametrize("async_scheduling", [True, False])
-def test_connector_skips_stored_when_medium_none(
-    request_runner, async_scheduling: bool
-):
-    """A manager that reports medium()==None emits no Stored events and captures
-    no per-store metadata, even with self-describing events enabled, so the
-    tracker does not accumulate uncleaned metadata."""
-    gpu_block_size = 4
-    block_size_factor = 3
-    offloaded_block_size = gpu_block_size * block_size_factor
-    runner = request_runner(
-        block_size_factor=block_size_factor,
-        block_size=gpu_block_size,
-        num_gpu_blocks=100,
-        async_scheduling=async_scheduling,
-    )
-    runner.new_request(token_ids=[0] * offloaded_block_size)
-    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
-        generate_store_output(keys)
-    )
-    runner.manager.complete_store.side_effect = lambda keys, req_context: list(keys)
-    runner.manager.medium.return_value = None
-    runner.manager.take_events.return_value = []
-
-    cs = runner.connector_scheduler
-    captured: list = []
-    original_take_events = cs.take_events
-
-    def _spy():
-        for event in original_take_events():
-            captured.append(event)
-            yield event
-
-    cs.take_events = _spy
-
-    runner.run(decoded_tokens=[0, 0], expected_stored=(0, 1, 2))
-    assert runner.manager.complete_store.call_count == 1
-
-    assert not [e for e in captured if isinstance(e, BlockStored)]
-    # record_store was gated off, so no metadata was captured (no leak).
-    assert cs._events_tracker._pending_event_metadata == {}
-
-
-def test_take_events_orders_removed_before_stored(request_runner):
-    """take_events drains the manager's events (eviction Removed) before the
-    Stored events queued by complete_store, preserving the Removed-before-Stored
-    wire order; pending Stored events are cleared after draining."""
-    runner = request_runner(
-        block_size=4,
-        num_gpu_blocks=100,
-        async_scheduling=False,
-        extra_config_overrides={"self_describing_kv_events": False},
-    )
-    cs = runner.connector_scheduler
-    cs.manager.medium.return_value = MEDIUM_CPU
-    cs.manager.take_events.return_value = [
-        OffloadingEvent(keys=to_keys([1]), medium=MEDIUM_CPU, removed=True)
-    ]
-    # Simulate the Stored event complete_store queued this step.
-    cs._pending_store_events.append(
-        OffloadingEvent(keys=to_keys([2]), medium=MEDIUM_CPU, removed=False)
-    )
-
-    events = list(cs.take_events())
-    removed_idx = [i for i, e in enumerate(events) if isinstance(e, BlockRemoved)]
-    stored_idx = [i for i, e in enumerate(events) if isinstance(e, BlockStored)]
-    assert removed_idx and stored_idx, events
-    assert max(removed_idx) < min(stored_idx)
-    assert all(e.medium == MEDIUM_CPU for e in events)
-    assert cs._pending_store_events == []
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])

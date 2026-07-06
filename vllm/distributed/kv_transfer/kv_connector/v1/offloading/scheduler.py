@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
-from itertools import chain, islice
+from itertools import islice
 from typing import Any, NamedTuple
 
 from vllm.distributed.kv_events import KVCacheEvent
@@ -36,7 +36,6 @@ from vllm.v1.kv_cache_interface import (
 from vllm.v1.kv_offload.base import (
     GPULoadStoreSpec,
     LookupResult,
-    OffloadingEvent,
     OffloadingManager,
     OffloadingSpec,
     OffloadKey,
@@ -375,21 +374,6 @@ class OffloadingConnectorScheduler:
         self._block_id_to_pending_jobs: dict[int, set[int]] = {}
 
         self._events_tracker = OffloadingEventsTracker(spec.kv_events_config)
-        self._emit_kv_events = spec.kv_events_config.enable_kv_cache_events
-        # Stored events produced by complete_store this step, drained (after the
-        # manager's eviction Removed events) in take_events().
-        self._pending_store_events: list[OffloadingEvent] = []
-
-    @property
-    def _stored_event_medium(self) -> str | None:
-        """The wire medium to tag this manager's Stored KV events with, or None
-        when no Stored event should be emitted (KV events disabled, or the
-        manager reports no medium). Used by both the prepare_store metadata
-        capture and the complete_store emission, so a manager that reports no
-        medium never leaves uncleaned tracker metadata behind."""
-        if not self._emit_kv_events:
-            return None
-        return self.manager.medium()
 
     def _generate_job_id(self) -> int:
         job_id = self._job_counter
@@ -951,7 +935,6 @@ class OffloadingConnectorScheduler:
             self._touch(req_status)
 
             keys_to_store = set(store_output.keys_to_store)
-            stored_event_medium = self._stored_event_medium
 
             group_sizes: list[int] = []
             block_indices: list[int] = []
@@ -977,13 +960,9 @@ class OffloadingConnectorScheduler:
 
                     offloaded_block_idx = start_block_idx + idx
 
-                    # Capture metadata only when a Stored event will actually be
-                    # emitted (same medium as complete_store); otherwise the
-                    # snapshot is never consumed and leaks.
-                    if stored_event_medium is not None:
-                        self._events_tracker.record_store(
-                            req, group_config, offloaded_block_idx, offload_key
-                        )
+                    self._events_tracker.record_store(
+                        req, group_config, offloaded_block_idx, offload_key
+                    )
 
                     gpu_block_idx = offloaded_block_idx * block_size_factor
                     for i in range(block_size_factor):
@@ -1158,18 +1137,7 @@ class OffloadingConnectorScheduler:
 
             req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
-                stored_keys = self.manager.complete_store(
-                    job_status.keys, req_status.req_context
-                )
-                medium = self._stored_event_medium
-                if medium is not None and stored_keys:
-                    self._pending_store_events.append(
-                        OffloadingEvent(
-                            keys=list(stored_keys),
-                            medium=medium,
-                            removed=False,
-                        )
-                    )
+                self.manager.complete_store(job_status.keys, req_status.req_context)
             else:
                 self.manager.complete_load(job_status.keys, req_status.req_context)
                 if self._blocks_being_loaded:
@@ -1257,19 +1225,8 @@ class OffloadingConnectorScheduler:
         Yields:
             ``BlockStored`` or ``BlockRemoved`` events corresponding to
             the underlying :class:`OffloadingEvent` stream.
-
-        The core scheduler drains this after each completion update, so a
-        Stored queued by complete_store is published in the same step and never
-        lingers into a later one.
         """
-        # Drain the manager's events (eviction Removed) before the Stored events
-        # this step's complete_store produced, preserving the Removed-before-
-        # Stored wire order.
-        pending_store_events = self._pending_store_events
-        self._pending_store_events = []
-        yield from self._events_tracker.take_events(
-            chain(self.manager.take_events(), pending_store_events)
-        )
+        yield from self._events_tracker.take_events(self.manager.take_events())
 
     def reset_cache(self) -> None:
         """Reset the offloading manager cache, evicting all stored blocks."""
@@ -1302,7 +1259,6 @@ class OffloadingConnectorScheduler:
         # The manager pool is empty; pending event payloads and announced
         # reference counts are stale.
         self._events_tracker.reset()
-        self._pending_store_events.clear()
 
         # Note: _current_batch_jobs_to_flush is intentionally NOT cleared.
         # The load flush IDs collected above must be delivered to workers.

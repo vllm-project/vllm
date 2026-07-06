@@ -115,33 +115,6 @@ def verify_events(
     assert tuple(stores) == to_key_sets(expected_stores)
 
 
-def test_cpu_manager_returns_stored_keys_and_emits_only_removed():
-    # After the event-responsibility cleanup the CPU manager no longer emits
-    # Stored events: complete_store returns the stored keys (the connector emits
-    # the Stored event from them), and the manager itself only emits eviction
-    # Removed events. The wire-order contract (Removed before Stored) is pinned
-    # at the connector level (see test_scheduler.py).
-    manager = make_cpu_manager(num_blocks=2, enable_events=True)
-
-    # Fill the 2-block cache. No eviction -> no events; complete_store returns
-    # the stored keys.
-    manager.prepare_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-    stored = manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-    assert set(stored) == set(to_keys([1, 2]))
-    assert list(manager.take_events()) == []
-
-    # Store a 3rd block: evicts one of {1, 2}, then stores 3.
-    manager.prepare_store(to_keys([3]), _EMPTY_REQ_CTX)
-    stored = manager.complete_store(to_keys([3]), _EMPTY_REQ_CTX)
-    assert set(stored) == set(to_keys([3]))
-
-    events = list(manager.take_events())
-    # Only the eviction Removed event is emitted; never a Stored.
-    assert events
-    assert all(e.removed for e in events)
-    assert all(e.medium == manager.medium() for e in events)
-
-
 @pytest.mark.parametrize("eviction_policy", ["lru", "arc"])
 def test_already_stored_block_not_evicted_during_prepare_store(eviction_policy):
     """
@@ -277,10 +250,9 @@ def test_cpu_manager():
     # no events so far
     assert list(cpu_manager.take_events()) == []
 
-    # complete store [1, 2]: returns the stored keys; emits no Stored event.
-    stored = cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-    assert set(stored) == set(to_keys([1, 2]))
-    verify_events(cpu_manager.take_events())
+    # complete store [1, 2]
+    cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+    verify_events(cpu_manager.take_events(), expected_stores=({1, 2},))
 
     # lookup [1, 2]
     assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT
@@ -362,10 +334,9 @@ def test_cpu_manager():
     assert cpu_manager.lookup(to_key(7), _EMPTY_REQ_CTX) is LookupResult.HIT
     assert cpu_manager.lookup(to_key(9), _EMPTY_REQ_CTX) is LookupResult.MISS
 
-    # The manager emits only eviction Removed events now (Stored events are
-    # emitted by the connector from complete_store's returned keys).
     verify_events(
         cpu_manager.take_events(),
+        expected_stores=({3, 4, 5}, {6, 7, 8}),
         expected_evictions=({4, 5, 2}, {8}),
     )
 
@@ -449,10 +420,9 @@ class TestARCPolicy:
         # no events so far
         assert list(cpu_manager.take_events()) == []
 
-        # complete store [1, 2]: returns the stored keys; emits no Stored event.
-        stored = cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
-        assert set(stored) == set(to_keys([1, 2]))
-        verify_events(cpu_manager.take_events())
+        # complete store [1, 2]
+        cpu_manager.complete_store(to_keys([1, 2]), _EMPTY_REQ_CTX)
+        verify_events(cpu_manager.take_events(), expected_stores=({1, 2},))
 
         # lookup [1, 2]
         assert cpu_manager.lookup(to_key(1), _EMPTY_REQ_CTX) is LookupResult.HIT
@@ -705,10 +675,9 @@ class TestARCPolicy:
         assert cpu_manager.lookup(to_key(2), _EMPTY_REQ_CTX) is LookupResult.HIT
         assert cpu_manager.lookup(to_key(3), _EMPTY_REQ_CTX) is LookupResult.HIT
 
-        # verify events: the manager emits only eviction Removed events now
-        # (Stored events are emitted by the connector from complete_store).
+        # verify events
         events = list(cpu_manager.take_events())
-        assert events and all(e.removed for e in events)
+        assert len(events) > 0  # should have store and eviction events
 
 
 def test_filter_reused_manager():
