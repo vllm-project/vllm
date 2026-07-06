@@ -4,6 +4,7 @@
 
 import math
 import sys
+from dataclasses import replace
 
 import pytest
 import torch
@@ -19,7 +20,12 @@ from vllm.model_executor.layers.fused_moe.config import (
 from vllm.model_executor.layers.fused_moe.expert_map_manager import (
     determine_expert_map,
 )
-from vllm.model_executor.layers.fused_moe.experts.cpu_moe import CPUExpertsFp8
+from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (
+    CPUExpertsFp8,
+    CPUExpertsInt4,
+    CPUExpertsInt8,
+    CPUExpertsMxfp4,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
@@ -120,6 +126,27 @@ def test_unquant_cpu_fused_moe_skip_padding(seed):
     torch.testing.assert_close(
         out_all_skipped, torch.zeros(M, K, dtype=out_all_skipped.dtype)
     )
+
+
+@pytest.mark.parametrize(
+    ("expert_cls", "supports_ep"),
+    [
+        (CPUExpertsFp8, True),
+        (CPUExpertsMxfp4, False),
+        (CPUExpertsInt4, False),
+        (CPUExpertsInt8, False),
+    ],
+    ids=["fp8", "mxfp4", "int4-w4a16", "int8-w8a8"],
+)
+def test_cpu_quant_expert_parallel_support_is_fail_closed(
+    expert_cls,
+    supports_ep,
+):
+    no_ep = FusedMoEParallelConfig.make_no_parallel()
+    with_ep = replace(no_ep, dp_size=2, ep_size=2, use_ep=True)
+
+    assert expert_cls._supports_parallel_config(no_ep)
+    assert expert_cls._supports_parallel_config(with_ep) is supports_ep
 
 
 # ===========================================================================

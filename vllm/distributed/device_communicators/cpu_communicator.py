@@ -304,6 +304,8 @@ class CpuCommunicator(DeviceCommunicatorBase):
             assert t.shape[0] == sizes[self.rank_in_group], (
                 f"{t.shape[0]} != {sizes[self.rank_in_group]}"
             )
+            if not any(sizes):
+                return t.new_empty((0,) + t.shape[1:])
 
         if isinstance(self.dist_module, _CPUSHMDistributed):
             if sizes is None:
@@ -361,11 +363,19 @@ class CpuCommunicator(DeviceCommunicatorBase):
         if dim < 0:
             dim += input_.dim()
 
-        out = input_.contiguous().clone()
-
         if sizes is not None:
             assert len(sizes) == self.world_size, f"{len(sizes)} != {self.world_size}"
-            assert out.shape[dim] == sum(sizes), f"{out.shape[dim]} != {sum(sizes)}"
+            assert input_.shape[dim] == sum(sizes), (
+                f"{input_.shape[dim]} != {sum(sizes)}"
+            )
+        else:
+            assert input_.shape[dim] % self.world_size == 0, (
+                "Implicit reduce_scatterv requires the scatter dimension "
+                f"{input_.shape[dim]} to be divisible by world_size "
+                f"{self.world_size}."
+            )
+
+        out = input_.contiguous().clone()
 
         self.dist_module.all_reduce(out, group=self.device_group)
 

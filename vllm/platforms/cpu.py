@@ -144,8 +144,12 @@ class CpuPlatform(Platform):
         scheduler_config.async_scheduling = False
 
         parallel_config = vllm_config.parallel_config
-        # TP>1 + DP>1 + EP on CPU is not supported yet.
-        if parallel_config.use_sequence_parallel_moe:
+        # Only the hybrid TP>1 + DP>1 + EP serving topology is blocked.
+        if (
+            parallel_config.enable_expert_parallel
+            and parallel_config.tensor_parallel_size > 1
+            and parallel_config.data_parallel_size > 1
+        ):
             raise NotImplementedError(
                 "CPU expert parallelism does not support tensor_parallel_size > 1 "
                 "with data_parallel_size > 1 yet."

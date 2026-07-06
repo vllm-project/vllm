@@ -1037,7 +1037,7 @@ at::Tensor fused_experts_cpu(
   int64_t buffer_size_nbytes =
       M * topk * N * 2 + M * topk * K * 2 +
       num_threads * BLOCK_M * K *
-          (moe_comp_method == CPUQuantMethod::INT8_W8A8 | moe_comp_method == CPUQuantMethod::INT4_W4A8 ? 1 : 2) +
+          (moe_comp_method == CPUQuantMethod::INT8_W8A8 || moe_comp_method == CPUQuantMethod::INT4_W4A8 ? 1 : 2) +
       num_threads * 2 * BLOCK_M * BLOCK_N * sizeof(float);
 
   if (moe_comp_method == CPUQuantMethod::INT8_W8A8) {
@@ -1214,7 +1214,7 @@ at::Tensor fused_experts_cpu(
           w1_scale.value().data_ptr<float>(),
           w2_scale.value().data_ptr<float>(),
           group_size,
-          topk_weights.data_ptr<float>(),
+          topk_weights_.data_ptr<float>(),
           sorted_ids,
           expert_ids,
           offsets,

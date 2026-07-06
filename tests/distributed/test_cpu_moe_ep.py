@@ -7,10 +7,9 @@ Validates the full dispatch → local-expert-skip compute → combine → TP
 all-reduce chain for the AgRsAll2AllManager + CPUExpertsFp8 path on CPU
 (gloo backend).
 
-Covers two topologies, both yielding EP=6:
-  - TP=1, DP=6 — pure expert parallelism baseline
-  - TP=2, DP=3 — hybrid TP+EP (TP-partner ranks own disjoint DP groups,
-    TP all-reduce at the end sums their partial contributions)
+Covers:
+  - TP=1, DP=6 — production CPU EP topology coverage
+  - TP=2, DP=3 — component-only hybrid TP+EP plumbing coverage
 
 Run: numactl -m 4 -N 4 .venv/bin/python -m pytest \
          tests/distributed/test_cpu_moe_ep.py -v
@@ -324,11 +323,10 @@ def test_cpu_moe_ep_dp6_tp1(params):
 
 @pytest.mark.distributed
 @pytest.mark.parametrize("params", _PARAMS, ids=["E12-div", "E10-nondiv"])
-def test_cpu_moe_ep_dp3_tp2(params):
-    """TP=2, DP=3: hybrid tensor+expert parallelism (EP=6).
+def test_cpu_moe_ep_component_dp3_tp2(params):
+    """Component-only TP=2, DP=3 hybrid tensor+expert coverage.
 
-    Each DP group has 2 TP workers. Dispatch/combine run over the DP group
-    (3 ranks); a TP all-reduce at the end sums the two TP-partners'
-    disjoint EP contributions to reconstruct the full expert mixture.
+    This bypasses CPUPlatform's full-model topology validation and only checks
+    the lower-level dispatch/combine + local-skip + TP all-reduce plumbing.
     """
     spawn_workers(_moe_ep_worker, world_size=6, tp_size=2, dp_size=3, params=params)

@@ -390,7 +390,7 @@ class CPUExpertsMxfp4(mk.FusedMoEExpertsMonolithic):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        return True
+        return not moe_parallel_config.use_ep
 
     @staticmethod
     def _supports_quant_scheme(
@@ -597,7 +597,7 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        return True
+        return not moe_parallel_config.use_ep
 
     @staticmethod
     def _supports_quant_scheme(
@@ -751,7 +751,7 @@ class CPUExpertsInt8(mk.FusedMoEExpertsMonolithic):
     def _supports_parallel_config(
         moe_parallel_config: FusedMoEParallelConfig,
     ) -> bool:
-        return True
+        return not moe_parallel_config.use_ep
 
     @staticmethod
     def _supports_quant_scheme(

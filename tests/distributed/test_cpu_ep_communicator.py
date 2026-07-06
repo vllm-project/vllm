@@ -533,6 +533,64 @@ def _uniform_sizes_shm_worker(
         report_worker_failure(rank, err_q, err)
 
 
+def _all_zero_gatherv_worker(
+    rank,
+    world_size,
+    tp_size,
+    dp_size,
+    port,
+    dp_port,
+    params,
+    err_q,
+):
+    try:
+        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_dp_zero_gather_{port}")
+        _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
+
+        from vllm.distributed.parallel_state import get_dp_group
+
+        sizes = [0] * dp_size
+        hidden = torch.empty((0, HIDDEN_SIZE), dtype=torch.float32)
+        gathered = get_dp_group().all_gatherv(hidden.clone(), sizes=sizes)
+
+        assert gathered.shape == (0, HIDDEN_SIZE)
+        assert gathered.numel() == 0
+
+        dist.barrier()
+    except Exception as err:
+        report_worker_failure(rank, err_q, err)
+
+
+def _implicit_uneven_reduce_scatterv_worker(
+    rank,
+    world_size,
+    tp_size,
+    dp_size,
+    port,
+    dp_port,
+    params,
+    err_q,
+):
+    try:
+        os.environ.setdefault(
+            "VLLM_DIST_IDENT", f"test_cpu_dp_uneven_reduce_scatterv_{port}"
+        )
+        _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
+
+        from vllm.distributed.parallel_state import get_dp_group
+
+        hidden = _filled(3, HIDDEN_SIZE, float(rank + 1))
+        with pytest.raises(
+            AssertionError,
+            match="Implicit reduce_scatterv requires the scatter dimension",
+        ):
+            get_dp_group().reduce_scatterv(hidden, dim=0, sizes=None)
+
+        dist.barrier()
+    except Exception as err:
+        report_worker_failure(rank, err_q, err)
+
+
 def _dp_shm_group_name_worker(
     rank,
     world_size,
@@ -732,6 +790,28 @@ def test_cpu_dp_all_gatherv_uniform_sizes_matches_direct_shm_gather():
         tp_size=1,
         dp_size=2,
         params=[2, 2],
+    )
+
+
+@pytest.mark.distributed
+def test_cpu_dp_all_gatherv_all_zero_rows():
+    spawn_workers(
+        _all_zero_gatherv_worker,
+        world_size=2,
+        tp_size=1,
+        dp_size=2,
+        params=None,
+    )
+
+
+@pytest.mark.distributed
+def test_cpu_dp_reduce_scatterv_implicit_sizes_require_even_split():
+    spawn_workers(
+        _implicit_uneven_reduce_scatterv_worker,
+        world_size=2,
+        tp_size=1,
+        dp_size=2,
+        params=None,
     )
 
 
