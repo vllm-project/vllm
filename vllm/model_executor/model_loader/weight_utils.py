@@ -701,11 +701,11 @@ def _get_available_ram_bytes() -> int:
         try:
             with open("/sys/fs/cgroup/memory.max", "r") as f:
                 cgroup_max = int(f.read())
+                if cgroup_max < mem_avail:
+                    mem_avail = cgroup_max
         except Exception:
             pass
 
-        if cgroup_max < mem_avail:
-            mem_avail = cgroup_max
 
     return mem_avail
 
