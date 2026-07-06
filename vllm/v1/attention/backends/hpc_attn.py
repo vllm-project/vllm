@@ -51,9 +51,9 @@ def _get_fp8_dtype_for_kv_cache(kv_cache_dtype: str) -> torch.dtype:
 
 
 def _hpc_decode_use_splitk(
-    splitk_seq_len_hint: int,
+    max_seq_len: int,
     num_decode_tokens: int,
-    num_heads: int,
+    num_qo_heads: int,
     num_kv_heads: int,
 ) -> bool:
     """Whether to enable split-K in the HPC decode kernel.
@@ -62,13 +62,13 @@ def _hpc_decode_use_splitk(
     """
     if num_decode_tokens < 8:
         return True
-    if 8 <= num_decode_tokens < 12 and splitk_seq_len_hint <= 1024:
+    if 8 <= num_decode_tokens < 12 and max_seq_len <= 1024:
         return False
-    if 12 <= num_decode_tokens < 16 and splitk_seq_len_hint <= 4096:
+    if 12 <= num_decode_tokens < 16 and max_seq_len <= 4096:
         return False
-    if 16 <= num_decode_tokens < 24 and splitk_seq_len_hint <= 8192:
+    if 16 <= num_decode_tokens < 24 and max_seq_len <= 8192:
         return False
-    if 24 <= num_decode_tokens and splitk_seq_len_hint <= 24576:
+    if 24 <= num_decode_tokens and max_seq_len <= 24576:
         return False
     return True
 
@@ -98,8 +98,8 @@ class HpcAttnMetadata(AttentionMetadata):
     """Cumulative query lengths for prefill requests (GPU tensor).
     shape = [num_prefills + 1]. None when num_prefills == 0."""
 
-    splitk_seq_len_hint: int = 0
-    """Upper bound on decode KV length used by ``_hpc_decode_use_splitk``."""
+    decode_splitk: bool = True
+    """Whether to enable split-K in the BF16 decode kernel."""
 
     # --- HPC RopeNorm pass-through fields ---
     # Set by HpcRopeNorm._forward_impl(); consumed & reset by
@@ -146,6 +146,9 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
         import hpc
 
         self.num_kv_heads = kv_cache_spec.num_kv_heads
+        self.num_qo_heads = vllm_config.model_config.get_num_attention_heads(
+            vllm_config.parallel_config
+        )
         self.hpc_dynamic_sched_attn_min_split_len = 1024
 
         # MTP constraint: HPC decode kernel only supports mtp in {0, 1, 2, 3}
@@ -199,12 +202,17 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
         self,
         common_attn_metadata: CommonAttentionMetadata,
     ) -> HpcAttnMetadata:
+        """Capture-time split-K uses ``max_model_len`` so the baked-in
+        choice stays valid for any replay length."""
         attn_metadata = self.build(
             common_prefix_len=0,
             common_attn_metadata=common_attn_metadata,
         )
-        attn_metadata.splitk_seq_len_hint = (
-            self.vllm_config.model_config.max_model_len
+        attn_metadata.decode_splitk = _hpc_decode_use_splitk(
+            self.vllm_config.model_config.max_model_len,
+            attn_metadata.num_decode_tokens,
+            self.num_qo_heads,
+            self.num_kv_heads,
         )
         return attn_metadata
 
@@ -240,9 +248,16 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
 
         seq_lens_decode = None
 
-        splitk_seq_len_hint = (
-            common_attn_metadata.max_seq_len if num_decodes > 0 else 0
-        )
+        # decode split-K.
+        if num_decodes > 0:
+            decode_splitk = _hpc_decode_use_splitk(
+                common_attn_metadata.max_seq_len,
+                num_decode_tokens,
+                self.num_qo_heads,
+                self.num_kv_heads,
+            )
+        else:
+            decode_splitk = True
         qo_indptr = None
         qo_indptr_decode = None
         if num_prefills > 0:
@@ -275,7 +290,7 @@ class HpcAttnMetadataBuilder(AttentionMetadataBuilder[HpcAttnMetadata]):
             num_prefills=num_prefills,
             num_prefill_tokens=num_prefill_tokens,
             max_query_len=max_query_len,
-            splitk_seq_len_hint=splitk_seq_len_hint,
+            decode_splitk=decode_splitk,
             slot_mapping=slot_mapping,
             seq_lens=seq_lens,
             block_table_tensor=block_table_tensor,
@@ -559,12 +574,6 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
             output_decode = output[:num_decode_tokens]
 
             mtp = attn_metadata.decode_query_len - 1
-            splitk = _hpc_decode_use_splitk(
-                attn_metadata.splitk_seq_len_hint,
-                num_decode_tokens,
-                self.num_heads,
-                self.num_kv_heads,
-            )
 
             if self.use_fp8:
                 hpc.attention_decode_fp8(
@@ -582,7 +591,7 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                     # splitk=(self.splitk if mtp == 0 else True),
                     new_kv_included=True,
                     quant_type=self._quant_type,
-                    splitk=splitk,
+                    splitk=True,
                     task_map=attn_metadata.task_map,
                     split_flag=hpc_split_k_flag,
                     output=output_decode,
@@ -597,7 +606,7 @@ class HpcAttentionImpl(AttentionImpl[HpcAttnMetadata]):
                     mtp=mtp,
                     output=output_decode,
                     new_kv_included=True,
-                    splitk=splitk,
+                    splitk=attn_metadata.decode_splitk,
                 )
 
         return output_padded
