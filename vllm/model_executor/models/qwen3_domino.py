@@ -165,12 +165,9 @@ class DominoQwen3Model(nn.Module):
             self.config.hidden_size,
             eps=self.config.rms_norm_eps,
         )
-        # --- END: copied from DFlashQwen3Model.__init__ ---
 
-        # --- Domino-specific layers ---
         assert drafter_config.get("projector_type", None) == "domino"
         self.gru_hidden_dim = drafter_config["gru_hidden_dim"]
-        self.emb_dim = drafter_config["emb_dim"]
 
         self.prefix_gru = DominoPrefixGRUCell(
             input_size=self.config.hidden_size,
@@ -201,8 +198,6 @@ class DominoQwen3Model(nn.Module):
         )
 
         self.embed_proj_act = nn.SiLU()
-
-    # --- BEGIN: methods copied from DFlashQwen3Model ---
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         embeds = self.embed_tokens(input_ids)
@@ -418,7 +413,8 @@ class DominoQwen3Model(nn.Module):
 class DominoQwen3ForCausalLM(Qwen3ForCausalLM):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         nn.Module.__init__(self)
-        self.config = vllm_config.speculative_config.draft_model_config.hf_config
+        self.draft_model_config = vllm_config.speculative_config.draft_model_config
+        self.config = self.draft_model_config.hf_config
         if getattr(self.config, "draft_vocab_size", None) is None:
             self.config.draft_vocab_size = getattr(self.config, "vocab_size", None)
         target_layer_num = vllm_config.model_config.get_num_layers(
@@ -522,7 +518,7 @@ class DominoQwen3ForCausalLM(Qwen3ForCausalLM):
         includes_embed_tokens = False
         for name, loaded_weight in weights:
             assert "mask_hidden" not in name, (
-                "DFlash should use mask_token_id to embed the padding hidden state"
+                "Domino should use mask_token_id to embed the padding hidden state"
             )
             if "t2d" in name:
                 continue

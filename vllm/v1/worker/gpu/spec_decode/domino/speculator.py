@@ -93,9 +93,9 @@ class DominoSpeculator(DraftModelSpeculator):
                 "for domino speculator"
             )
         self.gru_hidden_dim = gru_hidden_dim
-        self.gru_hidden_buffer = torch.zeros(
-            self.max_num_reqs, gru_hidden_dim, dtype=self.dtype, device=device
-        )
+        # self.gru_hidden_buffer = torch.zeros(
+        #     self.max_num_reqs, gru_hidden_dim, dtype=self.dtype, device=device
+        # )
         self._domino_cat_buf = torch.zeros(
             self.max_num_reqs,
             1,
@@ -327,7 +327,7 @@ class DominoSpeculator(DraftModelSpeculator):
         self.sample_indices.zero_()
         self.sample_pos.zero_()
         self.sample_idx_mapping.zero_()
-        self.gru_hidden_buffer.zero_()
+        # self.gru_hidden_buffer.zero_()
         assert self.query_cudagraph_manager is not None
         self.query_cudagraph_manager.capture(
             self._generate_draft,
@@ -402,7 +402,6 @@ class DominoSpeculator(DraftModelSpeculator):
         last_hidden_states: torch.Tensor,
         num_reqs: int,
     ) -> torch.Tensor:
-        assert self.gru_hidden_buffer is not None and self.is_domino
 
         K = self.num_speculative_steps
         draft_tokens = torch.zeros(
@@ -412,6 +411,7 @@ class DominoSpeculator(DraftModelSpeculator):
         )
         base_logits = self.model.compute_logits(last_hidden_states)
         begin_reqs = torch.arange(num_reqs, device=self.device) * self.num_query_per_req
+        # TODO
         base_draft = self._sample_single_token(
             base_logits[begin_reqs],
             0,
@@ -433,6 +433,7 @@ class DominoSpeculator(DraftModelSpeculator):
                 gru_hidden.unsqueeze(1)
             )
             bias = self.model.domino_mlp_forward(self._domino_cat_buf[:num_reqs])
+            # TODO
             current_token_id = self._sample_single_token(
                 logits_3d[:, i : i + 1, :] + bias,
                 0,
