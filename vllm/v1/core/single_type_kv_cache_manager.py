@@ -824,31 +824,27 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
                 if i >= shift and (i - shift) % per_segment >= per_segment - need:
                     mask[i - start_block] = True
 
-        # (2) Replay-boundary tail. ``get_computed_blocks`` caps hits at
-        # ``num_prompt - 1`` (to recompute the last token's logits), so an exact
-        # prompt replay can only land on the latest *fine*-aligned boundary.
-        # Sparse retention would otherwise skip it, so keep its tail explicitly.
-        if retention_interval is not None and num_prompt_tokens is not None:
-            latest = (num_prompt_tokens - 1) // alignment_tokens * alignment_tokens
-            prompt_end_block = latest // block_size + shift
-            for i in range(
-                max(start_block, prompt_end_block - need),
-                min(end_block, prompt_end_block),
-            ):
-                mask[i - start_block] = True
+        if retention_interval is not None:
 
-        # (3) Shared-prefix junction tail. A cross-request shared prefix
-        # (Marconi-style detection) ends before ``num_prompt``, so (2) would skip
-        # its window. Keep the ``need``-block tail ending on that boundary so the
-        # junction can serve a hit under sparse retention.
-        if retention_interval is not None and shared_prefix_boundary:
-            aligned = shared_prefix_boundary // alignment_tokens * alignment_tokens
-            junction_end_block = aligned // block_size + shift
-            for i in range(
-                max(start_block, junction_end_block - need),
-                min(end_block, junction_end_block),
-            ):
-                mask[i - start_block] = True
+            def _mark_reachable_tail(boundary_tokens: int):
+                aligned = boundary_tokens // alignment_tokens * alignment_tokens
+                end = aligned // block_size + shift
+                for j in range(max(start_block, end - need), min(end_block, end)):
+                    mask[j - start_block] = True
+
+            # (2) Replay-boundary tail. ``get_computed_blocks`` caps hits at
+            # ``num_prompt - 1`` (to recompute the last token's logits), so an exact
+            # prompt replay can only land on the latest *fine*-aligned boundary.
+            # Sparse retention would otherwise skip it, so keep its tail explicitly.
+            if num_prompt_tokens is not None:
+                _mark_reachable_tail(num_prompt_tokens - 1)
+
+            # (3) Shared-prefix junction tail. A cross-request shared prefix
+            # (Marconi-style detection) ends before ``num_prompt``, so (2) would skip
+            # its window. Keep the ``need``-block tail ending on that boundary so the
+            # junction can serve a hit under sparse retention.
+            if shared_prefix_boundary:
+                _mark_reachable_tail(shared_prefix_boundary)
 
         return mask
 
