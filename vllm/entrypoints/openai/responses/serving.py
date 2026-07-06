@@ -31,15 +31,15 @@ from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
     ChatTemplateContentFormatOption,
 )
+from vllm.entrypoints.generate.base.serving import (
+    GenerateBaseServing,
+    GenerationError,
+)
 from vllm.entrypoints.mcp.tool_server import ToolServer
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
-)
-from vllm.entrypoints.openai.engine.serving import (
-    GenerationError,
-    OpenAIServing,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.openai.parser.harmony_utils import (
@@ -147,7 +147,7 @@ def _extract_allowed_tools_from_mcp_requests(
     return allowed_tools_map
 
 
-class OpenAIServingResponses(OpenAIServing):
+class OpenAIServingResponses(GenerateBaseServing):
     def __init__(
         self,
         engine_client: EngineClient,
@@ -1073,6 +1073,7 @@ class OpenAIServingResponses(OpenAIServing):
                 content=content,
                 tool_calls=tool_calls,
                 logprobs=logprobs,
+                tools=request.tools,
             )
 
         # Fallback when no parser is configured
@@ -1339,7 +1340,7 @@ class OpenAIServingResponses(OpenAIServing):
             [StreamingResponsesResponse], StreamingResponsesResponse
         ],
     ) -> AsyncGenerator[StreamingResponsesResponse, None]:
-        processor = SimpleStreamingEventProcessor()
+        processor = SimpleStreamingEventProcessor(tools=request.tools)
 
         def _get_logprobs(
             output: CompletionOutput,
