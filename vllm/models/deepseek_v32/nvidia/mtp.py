@@ -217,6 +217,19 @@ class DeepseekV32MultiTokenPredictor(nn.Module):
         # second RMSNorm.
         return self.logits_processor(mtp_layer.shared_head.head, hidden_states)
 
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int = 0,
+    ) -> torch.Tensor:
+        # Greedy draft token ids via vocab-parallel local argmax: skips the
+        # full-vocab logits all-gather (use_local_argmax_reduction).
+        current_step_idx = spec_step_idx % self.num_mtp_layers
+        mtp_layer = self.layers[str(self.mtp_start_layer_idx + current_step_idx)]
+        return self.logits_processor.get_top_tokens(
+            mtp_layer.shared_head.head, hidden_states
+        )
+
 
 class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
@@ -264,6 +277,25 @@ class DeepseekV32MTP(nn.Module, DeepseekV2MixtureOfExperts):
         spec_step_idx: int = 0,
     ) -> torch.Tensor | None:
         return self.model.compute_logits(hidden_states, spec_step_idx)
+
+    def get_top_tokens(
+        self,
+        hidden_states: torch.Tensor,
+        spec_step_idx: int | None = None,
+    ) -> torch.Tensor:
+        # The V2 speculator calls this without spec_step_idx; that is only
+        # correct while a single MTP layer is cycled for every draft step
+        # (num_nextn_predict_layers == 1, as in GLM-5.2/DSV3.2). Guard the
+        # assumption so a future multi-layer MTP fails loudly instead of
+        # silently using step 0's head for every step.
+        if spec_step_idx is None:
+            assert self.model.num_mtp_layers == 1, (
+                "get_top_tokens called without spec_step_idx on a "
+                "multi-layer MTP; thread the draft step index through "
+                "the speculator."
+            )
+            spec_step_idx = 0
+        return self.model.get_top_tokens(hidden_states, spec_step_idx)
 
     def _rewrite_spec_layer_name(self, spec_layer: int, name: str) -> str:
         spec_layer_weight_names = [
