@@ -8,14 +8,8 @@ import torch
 from vllm.config import VllmConfig, get_layers_from_vllm_config
 from vllm.distributed import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
-from vllm.utils.math_utils import cdiv
 from vllm.v1.attention.backend import CommonAttentionMetadata
 from vllm.v1.attention.backends.utils import split_decodes_prefills_and_extends
-from vllm.v1.kv_cache_interface import (
-    KVCacheSpecKind,
-    MambaSpec,
-    get_kv_cache_spec_kind,
-)
 
 if TYPE_CHECKING:
     from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
@@ -131,36 +125,6 @@ def prepare_dcp_dummy_context_metadata(
     )
 
 
-def get_max_num_blocks_per_req(
-    kv_cache_spec: Any,
-    *,
-    cache_config: Any,
-    model_config: Any,
-    vllm_config: VllmConfig,
-    max_model_len: int,
-    max_encoder_len: int,
-) -> int:
-    if (
-        isinstance(kv_cache_spec, MambaSpec)
-        and cache_config.mamba_cache_mode == "align"
-    ):
-        return (
-            cdiv(model_config.max_model_len, kv_cache_spec.block_size)
-            + kv_cache_spec.num_speculative_blocks
-        )
-    if get_kv_cache_spec_kind(kv_cache_spec) != KVCacheSpecKind.MAMBA:
-        max_len = max(max_model_len, max_encoder_len)
-        cp_size = (
-            vllm_config.parallel_config.decode_context_parallel_size
-            * vllm_config.parallel_config.prefill_context_parallel_size
-        )
-        return cdiv(max_len, kv_cache_spec.block_size * cp_size)
-    return cdiv(
-        kv_cache_spec.max_memory_usage_bytes(vllm_config),
-        kv_cache_spec.page_size_bytes,
-    )
-
-
 def split_dcp_context_queries(
     query_start_loc: torch.Tensor,
     seq_lens_cpu_upper_bound: torch.Tensor | None,
@@ -173,11 +137,6 @@ def split_dcp_context_queries(
         return num_reqs, 0, num_actual_tokens, 0
     if seq_lens_cpu_upper_bound is None:
         return 0, num_reqs, 0, num_actual_tokens
-
-    if query_start_loc.is_cuda:
-        if torch.cuda.is_current_stream_capturing():
-            return 0, num_reqs, 0, num_actual_tokens
-        query_start_loc = query_start_loc.cpu()
 
     common_attn_metadata = cast(
         CommonAttentionMetadata,

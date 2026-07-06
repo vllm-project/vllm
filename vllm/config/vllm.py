@@ -2192,10 +2192,14 @@ class VllmConfig:
 
         # DCP interleave-size compatibility
         if self.parallel_config.decode_context_parallel_size > 1:
-            assert self.speculative_config is None, (
-                "DCP does not support speculative decoding yet. Please disable "
-                "speculative decoding or set decode_context_parallel_size=1."
-            )
+            # DCP + speculative decoding is supported for non-hybrid models;
+            # only the hybrid-attention path does not support it yet.
+            if self.model_config is not None and self.model_config.is_hybrid:
+                assert self.speculative_config is None, (
+                    "DCP does not support speculative decoding for "
+                    "hybrid-attention models yet. Please disable speculative "
+                    "decoding or set decode_context_parallel_size=1."
+                )
             if self.parallel_config.dcp_kv_cache_interleave_size > 1 and (
                 self.parallel_config.cp_kv_cache_interleave_size
                 != self.parallel_config.dcp_kv_cache_interleave_size
