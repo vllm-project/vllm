@@ -1,24 +1,21 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import typing
-
 import torch
 import torch.nn.functional as F
-from einops import rearrange
 from torch import nn
-from vllm.model_executor.layers.kda import KimiDeltaAttention
+from vllm.model_executor.layers.mamba.gdn.kimi_gdn_linear_attn import (
+    KimiGatedDeltaNetAttention,
+)
 
 from vllm.config import (
     CacheConfig,
-    ModelConfig,
     VllmConfig,
 )
 from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fla.ops.kda import fused_kda_gate
 from vllm.model_executor.layers.layernorm import LayerNorm, RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -511,38 +508,42 @@ class Glm5NextMLAAttention(nn.Module):
         output[:] = self.mla_attn(positions, hidden_states)
 
 
-class Glm5NextLinearAttention(KimiDeltaAttention):
-    """GLM5-Next variant of KDA"""
+class Glm5NextLinearAttention(KimiGatedDeltaNetAttention):
+    """GLM5-Next KDA layer.
+
+    The open checkpoints have ``linear_attn_config["lower_bound"] = None`` and
+    ``safe_gate = False``, so the upstream ``forward`` / ``_forward`` are used
+    unchanged (verified: ``chunk_kda`` with external ``fused_kda_gate`` and
+    ``chunk_kda_with_fused_gate`` produce identical output and final_state --
+    see ``tests/kernels/test_kda.py``). We only customize ``__init__``:
+
+    - KDA projections are kept BF16 even in FP8 checkpoints (no
+      ``weight_scale_inv`` is stored for them), so the quant config is stripped
+      while building the projection modules -- mirroring the MLA path, which
+      also passes ``quant_config=None``.
+    - The checkpoint stores ``A_log`` as a 1-D ``(num_heads,)`` tensor; the
+      upstream loader assumes the 4-D param shape, so a reshape-aware loader
+      is attached.
+    """
 
     def __init__(
         self,
-        layer_idx: int,
-        hidden_size: int,
-        quant_config: QuantizationConfig | None = None,
-        cache_config: CacheConfig | None = None,
-        model_config: ModelConfig | None = None,
-        rms_norm_eps: float = 1e-5,
+        config: Glm5NextConfig,
+        vllm_config: VllmConfig,
         prefix: str = "",
-        **kwargs,
     ) -> None:
-        super().__init__(
-            layer_idx,
-            hidden_size,
-            quant_config,
-            cache_config,
-            model_config,
-            rms_norm_eps,
-            prefix,
-        )
-        # The decoder passes the Glm5NextConfig as model_config; the base
-        # KimiDeltaAttention types it as ModelConfig | None, so cast for the
-        # GLM-specific linear_attn_config lookup. KDA layers are only built
-        # when linear_attn_config is populated.
-        glm_config = typing.cast(Glm5NextConfig, self.model_config)
-        linear_attn_config = glm_config.linear_attn_config
-        assert linear_attn_config is not None
-        self.lower_bound = linear_attn_config.get("lower_bound", None)
+        # KDA projections are BF16 in the checkpoint (no weight_scale_inv),
+        # even for FP8 checkpoints. The GDN base reads quant_config off
+        # vllm_config wholesale, so swap it to None just for this layer's
+        # construction and restore it afterwards (single-threaded init).
+        saved_quant = vllm_config.quant_config
+        vllm_config.quant_config = None
+        try:
+            super().__init__(config, vllm_config, prefix)
+        finally:
+            vllm_config.quant_config = saved_quant
 
+        # checkpoint A_log is 1-D (num_heads,); upstream loader assumes 4-D.
         def a_log_weight_loader(param: torch.Tensor, loaded_weight: torch.Tensor):
             if loaded_weight.dim() == 1:
                 loaded_weight = loaded_weight.view([1, 1, -1, 1])
@@ -550,50 +551,3 @@ class Glm5NextLinearAttention(KimiDeltaAttention):
 
         self.A_log.weight_loader = a_log_weight_loader
 
-    def forward(
-        self,
-        hidden_states: torch.Tensor,
-        positions: torch.Tensor,
-        output: torch.Tensor,
-    ) -> None:
-        num_tokens = hidden_states.size(0)
-
-        q = self.q_proj(hidden_states)[0]
-        k = self.k_proj(hidden_states)[0]
-        v = self.v_proj(hidden_states)[0]
-
-        beta = self.b_proj(hidden_states)[0].float().sigmoid()
-        beta = beta.unsqueeze(0)
-
-        g1 = self.f_b_proj(self.f_a_proj(hidden_states)[0])[0]
-        if self.lower_bound is not None:
-            g1 = naive_kda_lowerbound_gate(
-                g1, self.A_log, self.dt_bias, lower_bound=self.lower_bound
-            )
-        else:
-            g1 = fused_kda_gate(g1, self.A_log, self.head_dim, g_bias=self.dt_bias)
-        g1 = g1.unsqueeze(0)
-
-        g_proj_states = self.g_b_proj(self.g_a_proj(hidden_states)[0])[0]
-        g2 = rearrange(g_proj_states, "... (h d) -> ... h d", d=self.head_dim)
-
-        core_attn_out = torch.zeros(
-            (1, num_tokens, self.local_num_heads, self.head_dim),
-            dtype=hidden_states.dtype,
-            device=hidden_states.device,
-        )
-        torch.ops.vllm.kda_attention(
-            q,
-            k,
-            v,
-            g1,
-            beta,
-            core_attn_out,
-            self.prefix,
-        )
-
-        core_attn_out = self.o_norm(core_attn_out, g2)
-
-        core_attn_out = rearrange(core_attn_out, "1 n h d -> n (h d)")
-        projected = self.o_proj(core_attn_out)[0]
-        output[:] = projected
