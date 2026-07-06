@@ -11,6 +11,7 @@ from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL_NAME = "intfloat/multilingual-e5-small"
 
+
 @pytest.fixture(scope="module")
 def llm():
     llm = LLM(
@@ -29,7 +30,6 @@ def llm():
     cleanup_dist_env_and_memory()
 
 
-
 @pytest.mark.skip_global_cleanup
 def test_tiling_engine_basic(llm):
     """
@@ -39,6 +39,7 @@ def test_tiling_engine_basic(llm):
     prompts = ["Hello", "World"]
     outputs = llm.encode(prompts, pooling_task="embed")
     assert len(outputs) == len(prompts)
+
 
 @pytest.mark.skip_global_cleanup
 def test_tiling_engine_many_requests(llm):
@@ -63,28 +64,16 @@ def test_tiling_engine_with_pooling_params(llm):
     prompts = [f"Prompt {i}" for i in range(num_prompts)]
     pooling_params = [PoolingParams() for _ in range(num_prompts)]
 
-    outputs = llm.encode(
-        prompts,
-        pooling_params=pooling_params,
-        pooling_task="embed"
-    )
+    outputs = llm.encode(prompts, pooling_params=pooling_params, pooling_task="embed")
     assert len(outputs) == num_prompts
 
     # Single PoolingParams shared across all prompts
     single_param = PoolingParams()
-    outputs = llm.encode(
-        prompts,
-        pooling_params=single_param,
-        pooling_task="embed"
-    )
+    outputs = llm.encode(prompts, pooling_params=single_param, pooling_task="embed")
     assert len(outputs) == num_prompts
 
     # None PoolingParams should fall back to default
-    outputs = llm.encode(
-        prompts,
-        pooling_params=None,
-        pooling_task="embed"
-    )
+    outputs = llm.encode(prompts, pooling_params=None, pooling_task="embed")
     assert len(outputs) == num_prompts
 
 
@@ -107,9 +96,9 @@ def test_tiling_engine_abort_on_exception(llm):
             raise RuntimeError("Simulated engine error")
         return original_step()
 
-    with mock.patch.object(llm.llm_engine, 'step', side_effect=mocked_step):
+    with mock.patch.object(llm.llm_engine, "step", side_effect=mocked_step):
         # We expect an exception to be raised from encode
-        with mock.patch.object(llm.llm_engine, "abort_request") as mock_abort:
+        with mock.patch.object(llm.llm_engine, "abort_request") as mock_abort:  # noqa: SIM117
             with pytest.raises(RuntimeError, match="Simulated engine error"):
                 llm.encode(prompts, pooling_task="embed")
 
