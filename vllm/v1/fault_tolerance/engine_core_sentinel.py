@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """EngineCoreSentinel and fault_tolerant_wrapper for the engine core."""
 
+import json
 import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING
@@ -122,17 +123,17 @@ class EngineCoreSentinel:
             return {}
 
         parallel_config = engine.vllm_config.parallel_config
-        worker_key = f"ft_worker_dp_port_{self._dp_reinit_epoch}"
+        worker_key = f"ft_worker_dp_ports_{self._dp_reinit_epoch}"
         engine_key = f"ft_engine_dp_port_{self._dp_reinit_epoch}"
         self._dp_reinit_epoch += 1
 
         if parallel_config.data_parallel_rank == 0:
-            worker_port = get_open_port()
+            worker_ports = [get_open_port() for _ in range(parallel_config.world_size)]
             engine_port = get_open_port()
-            engine.dp_store.set(worker_key, str(worker_port).encode())
+            engine.dp_store.set(worker_key, json.dumps(worker_ports).encode())
             engine.dp_store.set(engine_key, str(engine_port).encode())
         else:
-            worker_port = int(engine.dp_store.get(worker_key).decode())
+            worker_ports = json.loads(engine.dp_store.get(worker_key).decode())
             engine_port = int(engine.dp_store.get(engine_key).decode())
 
         stateless_destroy_torch_distributed_process_group(engine.dp_group)
@@ -146,7 +147,7 @@ class EngineCoreSentinel:
                 return_store=True,
             )
         )
-        return {"new_stateless_dp_group_port": worker_port}
+        return {"new_stateless_dp_group_ports": worker_ports}
 
 
 def fault_tolerant_wrapper(busy_loop_func: Callable):
