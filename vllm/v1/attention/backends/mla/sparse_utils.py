@@ -377,9 +377,7 @@ def register_phys_shadow(topk_buf: torch.Tensor) -> None:
     if key not in _PHYS_SHADOWS:
         _PHYS_SHADOWS[key] = (
             torch.empty_like(topk_buf),
-            torch.empty(
-                topk_buf.shape[0], dtype=torch.int32, device=topk_buf.device
-            ),
+            torch.empty(topk_buf.shape[0], dtype=torch.int32, device=topk_buf.device),
         )
         _weakref.finalize(topk_buf, _PHYS_SHADOWS.pop, key, None)
 

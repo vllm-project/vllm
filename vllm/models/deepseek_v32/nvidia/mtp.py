@@ -39,8 +39,8 @@ from vllm.v1.attention.backends.mla.sparse_utils import (
     register_phys_shadow,
 )
 
-from .kernels import fused_eh_norm
 from .fused_ops import fused_allreduce_rms_norm
+from .kernels import fused_eh_norm
 from .model import DeepseekV32DecoderLayer
 
 
