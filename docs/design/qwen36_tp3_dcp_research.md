@@ -5,6 +5,34 @@ NVFP4 models on three independent PCIe Blackwell GPUs without NVLink. The
 goal is not only to fit a model, but to use all three GPUs productively for
 long-context agent workloads.
 
+## Problem Statement
+
+The test machine has three 16 GiB GPUs. In aggregate that is 48 GiB of VRAM,
+which is enough to make Qwen3.6 27B/35B-A3B long-context serving interesting.
+However, the machine is not a datacenter NVLink box:
+
+- no NVLink or shared VRAM;
+- asymmetric PCIe topology, effectively around `x8/x4/x4`;
+- stable communication currently uses conservative PyNCCL paths;
+- P2P, custom all-reduce, and symmetric-memory paths are limited or unstable on
+  this local Blackwell PCIe topology.
+
+Out of the box, this hardware class is awkward for vLLM. `TP=2` leaves one GPU
+underused, while `TP=3` is often rejected or degraded because Qwen3.6 model
+layouts contain dimensions that are not divisible by 3:
+
+- GQA/KV layouts;
+- full-attention heads in the MoE model;
+- MTP hidden projection size (`5120 % 3 != 0`);
+- DFlash draft attention heads (`32 % 3 != 0`);
+- DFlash draft MLP intermediate size (`17408 % 3 != 0`).
+
+The naive fallback is replication or a parallel group that technically starts
+but exposes too few useful KV tokens for 128K-150K agent workloads. The research
+question is therefore: can vLLM make `3 x 16 GiB` PCIe GPUs useful as one
+long-context serving pool, despite weak interconnect and non-divisible model
+geometry?
+
 ## Goals
 
 - Serve dense Qwen3.6 27B NVFP4 on `TP=3` despite uneven GQA/KV geometry.
@@ -18,11 +46,8 @@ long-context agent workloads.
 - Identify where vLLM memory estimation and placement are too conservative or
   too unaware of real transient workspace needs.
 
-The current test host has three 16 GiB GPUs. That makes the useful target a
-48 GiB aggregate-memory deployment, but without shared memory or NVLink. The
-correct strategy is therefore not to emulate a single large GPU blindly; it is
-to make the TP/DCP, KV-cache, draft-model, and communication layouts serve the
-topology.
+The correct strategy is not to emulate a single large GPU blindly; it is to make
+the TP/DCP, KV-cache, draft-model, and communication layouts serve the topology.
 
 The high-level outcome is already positive: this setup makes dense 27B usable
 with 150K context and `2x+` long-context concurrency on a 48 GiB aggregate
@@ -30,7 +55,9 @@ consumer/prosumer PCIe system. That is not comparable to a single 32 GiB RTX
 5090 memory budget: the single card can be faster, but it cannot provide the
 same long-context capacity. The current decode speed is roughly within a 2x
 factor of the single-card target while enabling workloads that did not fit
-there.
+there. This is a meaningful result precisely because the interconnect is only
+`x8/x4/x4`-class PCIe and the stable communication path is not a specialized
+NVLink all-reduce.
 
 ## Current Working Results
 
@@ -96,14 +123,17 @@ reached:
 Observed:
 
 - KV cache size: `481,689` logical tokens;
+- across three GPUs this corresponds to roughly `1,445,067` distributed
+  token-slots before accounting for the logical request view;
 - maximum concurrency for `131,072` tokens per request: `3.67x`;
 - direct agent smoke across `qwen`, `codex`, `claude`, and `hermes` completed
   with no CUDA OOM, HTTP 500, or EngineDeadError.
 
 Viewed physically, this is roughly in the "1.5M token-slot" class across three
-16 GiB GPUs, even though vLLM reports the logical request-level KV budget. This
-is the practical success: the three independent GPUs can be made to behave like
-a useful long-context serving pool for agent workloads.
+16 GiB GPUs, even though vLLM reports the logical request-level KV budget. The
+more exact stable observation was `481,689 * 3 = 1,445,067` distributed
+token-slots. This is the practical success: the three independent GPUs can be
+made to behave like a useful long-context serving pool for agent workloads.
 
 Rejected tighter profiles:
 
@@ -133,10 +163,12 @@ Working profile highlights:
   profile.
 
 The practical compromise is the MoE backend. On this SM120/NVFP4 stack, Marlin
-is currently the reliable backend. Native FlashInfer/CuTeDSL MoE paths are still
-research debt: they are the route to higher performance, but local and upstream
-signals show correctness/performance instability on desktop/prosumer Blackwell
-for FP4 MoE grouped GEMM.
+is currently the only backend that is both correct enough and stable enough for
+agent serving. Native FlashInfer/CuTeDSL MoE paths are still research debt:
+they are the route to higher performance, but local and upstream signals show
+correctness/performance instability on desktop/prosumer Blackwell for FP4 MoE
+grouped GEMM. In practice, FlashInfer/CuTeDSL MoE is not yet the production
+choice here; Marlin is.
 
 DFlash on MoE is still worth keeping in scope. Experimental runs showed
 approximately the `100 tok/s` class, which is materially higher than the dense
