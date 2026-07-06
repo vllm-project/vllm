@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     VLLM_ENGINE_READY_TIMEOUT_S: int = 600
     VLLM_API_KEY: str | None = None
     VLLM_DEBUG_LOG_API_SERVER_RESPONSE: bool = False
+    VLLM_KEEP_HISTORY_REASONING: bool = True
     VLLM_REQUEST_LOG_PATH: str | None = None
     VLLM_REQUEST_LOG_MAX_BYTES: int = 0
     VLLM_REQUEST_LOG_ROTATE_INTERVAL: str | None = None
@@ -640,6 +641,15 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to log responses from API Server for debugging
     "VLLM_DEBUG_LOG_API_SERVER_RESPONSE": lambda: os.environ.get(
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE", "False"
+    ).lower()
+    == "true",
+    # Whether to keep reasoning content from prior assistant turns when
+    # re-rendering a multi-turn conversation. When True (default), the
+    # reasoning of historical assistant messages is passed through to the
+    # chat template (rendered inside <think>...</think>). When False, prior
+    # reasoning is dropped so historical <think> blocks render empty.
+    "VLLM_KEEP_HISTORY_REASONING": lambda: os.environ.get(
+        "VLLM_KEEP_HISTORY_REASONING", "True"
     ).lower()
     == "true",
     # If set, the OpenAI-compatible API server will log every HTTP

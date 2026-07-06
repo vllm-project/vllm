@@ -1450,7 +1450,14 @@ def _parse_chat_message_content(
 ) -> list[ConversationMessage]:
     role = message["role"]
     content = message.get("content")
-    reasoning = message.get("reasoning")
+    # Historical assistant reasoning is only preserved when the deployment
+    # opts in via VLLM_KEEP_HISTORY_REASONING (default True). Accept both the
+    # vLLM-specific ``reasoning`` field and the OpenAI-style ``reasoning_content``
+    # key that some clients echo back.
+    if envs.VLLM_KEEP_HISTORY_REASONING:
+        reasoning = message.get("reasoning") or message.get("reasoning_content")
+    else:
+        reasoning = None
 
     if content is None:
         content = []
