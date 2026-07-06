@@ -1000,8 +1000,8 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     response_format: Any | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = Field(default_factory=list)
-    temperature: float | None = 0.7
-    top_p: float | None = 1.0
+    temperature: float | None = None
+    top_p: float | None = None
     user: str | None = None
     tool_choice: Literal["none"] | None = "none"
     include_reasoning: bool = True
@@ -1010,8 +1010,8 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     best_of: int | None = None
     use_beam_search: bool = False
     top_k: int | None = None
-    min_p: float | None = 0.0
-    repetition_penalty: float | None = 1.0
+    min_p: float | None = None
+    repetition_penalty: float | None = None
     length_penalty: float | None = 1.0
     early_stopping: bool = False
     structured_outputs: StructuredOutputsParams | None = None
@@ -1020,9 +1020,16 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     continue_final_message: bool = False
     chat_template: str | None = None
     chat_template_kwargs: dict[str, Any] | None = None
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None
+    mm_processor_kwargs: dict[str, Any] | None = None
+    priority: int = Field(default=0, ge=_INT64_MIN, le=_INT64_MAX)
+    cache_salt: str | None = None
     include_stop_str_in_output: bool = False
     guided_decoding_backend: str | None = None
     echo: bool = False
+    # None falls back to the server-level --return-tokens-as-token-ids default,
+    # matching ChatCompletionRequest.return_tokens_as_token_ids.
+    return_tokens_as_token_ids: bool | None = None
     return_token_ids: bool = False
 
     @model_validator(mode="before")
