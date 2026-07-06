@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable
 import torch
 import torch.nn as nn
 
+import vllm._custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.config import VllmConfig
 from vllm.distributed import tensor_model_parallel_all_reduce
@@ -50,6 +51,12 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         self.enorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.hnorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.eh_proj = nn.Linear(config.hidden_size * 2, config.hidden_size, bias=False)
+        # bf16 skinny GEMM for the (6144, 12288) eh_proj: wins only at M <= 3
+        # on B300 (23.3/26.1/27.4us vs cuBLAS ~27.6); cuBLAS splitK holds
+        # from M=4 up (151MB weight streams at 5.6TB/s there).
+        self._eh_skinny_ok = current_platform.is_device_capability_family(
+            100
+        ) and hasattr(torch.ops._C, "bf16_skinny_gemm")
 
         topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
@@ -85,7 +92,14 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
             self.hnorm.weight,
             self.enorm.variance_epsilon,
         )
-        hidden_states = self.eh_proj(eh_input)
+        if (
+            self._eh_skinny_ok
+            and eh_input.shape[0] <= 3
+            and self.eh_proj.weight.dtype == torch.bfloat16
+        ):
+            hidden_states = ops.bf16_skinny_gemm(eh_input, self.eh_proj.weight)
+        else:
+            hidden_states = self.eh_proj(eh_input)
         hidden_states, residual = self.mtp_block(
             positions=positions, hidden_states=hidden_states, residual=None
         )
