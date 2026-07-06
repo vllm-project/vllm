@@ -422,6 +422,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         non_causal_multi_token_decode: bool = False,
         sliding_window: int | None = None,
         prefill_backend_cls: type[MLAPrefillBackend] | None = None,
+        rotary_emb: nn.Module | None = None,
         **extra_impl_args,
     ):
         super().__init__()
@@ -556,6 +557,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         kv_b_proj._cpu_skip_gemm_dispatch = True
         self.use_direct_call = not current_platform.opaque_attention_op()
 
+        # the fused sparse-MLA Q-prep kernel folds the main RoPE into
+        # the decode kernel, so it needs the rotary embedding's cos/sin cache.
+        # Without a rotary embedding there is no RoPE to fold, so disable the
+        # fused path to keep the wrapper / KV-write / decode branches consistent.
+        self.rotary_emb = rotary_emb
+        self._fused_rope_cos_sin: tuple[torch.Tensor, torch.Tensor] | None = None
+        if getattr(self.impl, "use_fused_qk_rope_cache", False) and rotary_emb is None:
+            self.impl.use_fused_qk_rope_cache = False
+
         vllm_config = get_current_vllm_config()
         parallel_config = vllm_config.parallel_config
         self.use_pcp = parallel_config.prefill_context_parallel_size > 1
@@ -659,6 +669,14 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
         return self._chunked_prefill_workspace_size
 
+    def _get_fused_rope_cos_sin(self) -> tuple[torch.Tensor, torch.Tensor]:
+        """Split rotary_emb.cos_sin_cache into contiguous cos/sin halves."""
+        if self._fused_rope_cos_sin is None:
+            assert self.rotary_emb is not None
+            cos, sin = self.rotary_emb.cos_sin_cache.chunk(2, dim=-1)
+            self._fused_rope_cos_sin = (cos.contiguous(), sin.contiguous())
+        return self._fused_rope_cos_sin
+
     def forward(
         self,
         q: torch.Tensor,
@@ -666,6 +684,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         k_pe: torch.Tensor,
         output_shape: torch.Size | None = None,
         q_dcp_replicated: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if self.use_direct_call:
             forward_context: ForwardContext = get_forward_context()
@@ -714,6 +733,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 attn_metadata,
                 output=output,
                 q_dcp_replicated=q_dcp_replicated,
+                positions=positions,
             )
             return output
         else:
@@ -734,6 +754,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 encoded,
                 kv_cache_dummy_dep=kv_cache_dummy_dep,
                 q_dcp_replicated=q_dcp_replicated,
+                positions=positions,
             )
             return output
 
@@ -752,6 +773,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         quant_col_major: bool | None = None,
         quant_tma_aligned: bool | None = None,
         q_dcp_replicated: torch.Tensor | None = None,
+        positions: torch.Tensor | None = None,
     ) -> torch.Tensor:
         assert output is not None, "Output tensor must be provided."
 
@@ -955,7 +977,38 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 # Convert from (N, B, L) to (B, N, L)
                 mqa_ql_nope = mqa_ql_nope.transpose(0, 1)
 
-            if fp8_attention and self.impl.supports_quant_query_input:
+            use_fused_qk_rope_cache = (
+                is_sparse_impl
+                and getattr(self.impl, "use_fused_qk_rope_cache", False)
+                and self.rotary_emb is not None
+            )
+            if use_fused_qk_rope_cache:
+                # fold RoPE + Q-concat + KV-concat + KV-cache-write 
+                # into one kernel. positions is threaded in as a real argument
+                # (survives torch.compile / CUDA graph replay).
+                if positions is None:
+                    raise RuntimeError(
+                        "Fused MLA Q-prep is enabled but `positions` was not "
+                        "passed to MLAAttention.forward. The MLA wrapper must "
+                        "forward positions when impl.use_fused_qk_rope_cache is set."
+                    )
+                forward_context = get_forward_context()
+                slot_mapping = forward_context.slot_mapping[self.layer_name].flatten()
+                cos_cache, sin_cache = self._get_fused_rope_cos_sin()
+                mqa_q = self.impl.fused_qk_rope_concat_and_cache(  # type: ignore[attr-defined]
+                    self,
+                    mqa_ql_nope,
+                    mqa_q_pe,
+                    k_c_normed[:num_mqa_tokens],
+                    k_pe[:num_mqa_tokens],
+                    kv_cache,
+                    slot_mapping[:num_mqa_tokens],
+                    positions[:num_mqa_tokens],
+                    cos_cache,
+                    sin_cache,
+                    self.rotary_emb.is_neox_style,
+                )
+            elif fp8_attention and self.impl.supports_quant_query_input:
                 assert mqa_ql_nope.shape[0] == mqa_q_pe.shape[0]
                 assert mqa_ql_nope.shape[1] == mqa_q_pe.shape[1]
                 mqa_q = self._decode_concat_quant_fp8_op(
@@ -1315,6 +1368,7 @@ def unified_mla_attention_with_output(
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
     q_dcp_replicated: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> None:
     # kv_cache_dummy_dep is not used but accepting it creates a data dependency
     # that ensures torch.compile preserves ordering between KV cache update and
@@ -1336,6 +1390,7 @@ def unified_mla_attention_with_output(
         quant_col_major=quant_col_major,
         quant_tma_aligned=quant_tma_aligned,
         q_dcp_replicated=q_dcp_replicated,
+        positions=positions,
     )
 
 
@@ -1353,6 +1408,7 @@ def unified_mla_attention_with_output_fake(
     quant_col_major: bool | None = None,
     quant_tma_aligned: bool | None = None,
     q_dcp_replicated: torch.Tensor | None = None,
+    positions: torch.Tensor | None = None,
 ) -> None:
     return
 
