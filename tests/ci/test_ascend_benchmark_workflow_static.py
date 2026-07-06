@@ -120,6 +120,32 @@ def test_pr_checkout_urls_use_https_without_publish_ssh_key():
     assert "https://github.com/vLLM-HUST/vllm-ascend-hust.git" in text
 
 
+def test_benchmark_install_removes_conflicting_vllm_provider():
+    text = workflow_text()
+
+    install_step = text[
+        text.index("      - name: Prepare Ascend runtime and install repos") :
+        text.index("      - name: Verify installation")
+    ]
+
+    assert '"${PYTHON_BIN}" -m pip uninstall -y vllm vllm-hust' in install_step
+    assert (
+        '"${PYTHON_BIN}" scripts/ensure_vllm_provider.py --remove-conflicts'
+        in install_step
+    )
+    assert (
+        '          "${PYTHON_BIN}" scripts/ensure_vllm_provider.py\n'
+        in install_step
+    )
+    assert install_step.index(
+        '"${PYTHON_BIN}" scripts/ensure_vllm_provider.py --remove-conflicts'
+    ) < install_step.index(
+        '"${PYTHON_BIN}" -m pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]"'
+    ) < install_step.index(
+        '          "${PYTHON_BIN}" scripts/ensure_vllm_provider.py\n'
+    )
+
+
 def test_main_benchmark_defaults_match_ascend_main_config():
     text = workflow_text()
 
