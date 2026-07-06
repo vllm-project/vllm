@@ -17,6 +17,15 @@ However, the machine is not a datacenter NVLink box:
 - P2P, custom all-reduce, and symmetric-memory paths are limited or unstable on
   this local Blackwell PCIe topology.
 
+The budget angle is part of the motivation. As of July 2026 spot pricing,
+RTX 5060 Ti 16GB cards are commonly listed around the mid-`$500` range in US
+retail, so a `3 x 5060 Ti 16GB` setup is roughly a `$1.6K-$1.8K` GPU budget for
+48 GiB aggregate VRAM. By contrast, RTX 5090 32GB cards are difficult to buy at
+the `$1,999` MSRP and current market trackers commonly show new cards around
+`$4K+`. Prices are volatile, but the shape of the tradeoff is stable: the
+three-card system is much weaker as an interconnect topology, yet it can offer
+more aggregate VRAM at a materially lower GPU cost than a market-priced 5090.
+
 Out of the box, this hardware class is awkward for vLLM. `TP=2` leaves one GPU
 underused, while `TP=3` is often rejected or degraded because Qwen3.6 model
 layouts contain dimensions that are not divisible by 3:
@@ -483,6 +492,8 @@ Dense 27B:
 - FlashInfer SM12x vLLM CUTLASS backend issue: https://github.com/flashinfer-ai/flashinfer/issues/3013
 - vLLM Blackwell PCIe custom all-reduce discussion: https://discuss.vllm.ai/t/vllm-hangs-during-worker-initialization-on-blackwell-pcie-gpus-unless-disable-custom-all-reduce-is-used/2540
 - FlashInfer autotune OOM discussion: https://discuss.vllm.ai/t/getting-flashinfer-jit-autotuner-oom-detected/2565
+- RTX 5060 Ti 16GB retail examples: https://www.bestbuy.com/site/searchpage.jsp?id=pcat17071&st=rtx+5060+ti
+- RTX 5090 market-price tracker: https://bestvaluegpu.com/history/new-and-used-rtx-5090-price-history-and-specs/
 
 ## Recommended Next Work
 
