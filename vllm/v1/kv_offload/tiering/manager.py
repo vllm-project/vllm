@@ -299,6 +299,10 @@ class TieringOffloadingManager(OffloadingManager):
             MISS      — block not found in any tier, or primary is full
                         and cannot accept a promotion.
         """
+        # Poll first so a promotion that finished since the last call is
+        # already reflected as HIT (not stale HIT_PENDING/MISS) below, and
+        # so blocks freed by cascade or promotion completions are evictable
+        # in time for a promotion this lookup may initiate.
         self._maybe_process_finished_jobs()
 
         primary_hit = self.primary_tier.lookup(key, req_context)
@@ -403,8 +407,8 @@ class TieringOffloadingManager(OffloadingManager):
         """
         Prepare blocks to be loaded from primary tier to GPU.
 
-        CRITICAL: This method calls _maybe_process_finished_jobs() FIRST to ensure
-        that any completed promotions have been finalized and blocks are ready.
+        Callers only pass keys already confirmed HIT by lookup() earlier this
+        step.
 
         This increments ref_cnt on the blocks in the primary tier, protecting
         them from eviction during the transfer.
@@ -416,9 +420,6 @@ class TieringOffloadingManager(OffloadingManager):
         Returns:
             LoadStoreSpec for reading from primary tier.
         """
-        # Process completed promotions to ensure blocks are ready
-        self._maybe_process_finished_jobs()
-
         return self.primary_tier.prepare_load(keys, req_context)
 
     @override
@@ -471,8 +472,15 @@ class TieringOffloadingManager(OffloadingManager):
             evicted, or None if store cannot proceed.
         """
         # Step 1: Poll for completed async jobs FIRST
-        # This decrements ref_cnt on primary blocks that have been
-        # successfully transferred to secondary tiers.
+        # _process_finished_jobs() handles two kinds of completions here:
+        #  - Cascade completions (store to a secondary tier, either a local
+        #    cascade or a store job created for a remote requester via
+        #    create_store_job()): decrements ref_cnt on the primary blocks
+        #    that were read, making them evictable again once ref_cnt hits 0.
+        #  - Promotion completions (secondary->primary loads): sets a
+        #    not-yet-ready block's ref_cnt from -1 to 0 via complete_write(),
+        #    making it evictable for the first time.
+        # Both must be accounted for before the eviction decision below.
         self._maybe_process_finished_jobs()
 
         # Step 2: Store to primary tier (new blocks only).
@@ -672,6 +680,10 @@ class TieringOffloadingManager(OffloadingManager):
         Called once per scheduler step from
         OffloadingConnectorScheduler.build_connector_meta().
         """
+        # Catch-all poll: guarantees jobs are processed even on steps where
+        # lookup()/prepare_store() were never called (e.g. no requests
+        # scheduled but a tier still has_pending_work()), before the
+        # per-step gate below is reset for the next step.
         self._maybe_process_finished_jobs()
         self._processed_jobs_this_step = False
 
