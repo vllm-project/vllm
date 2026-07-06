@@ -148,6 +148,15 @@ class XPUPlatform(Platform):
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif attn_selector_config.use_mm_prefix:
+            # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
+            # multimodal prefix-LM bidirectional mask. Fall back to Triton
+            # Attention, which supports mm_prefix.
+            logger.warning_once(
+                "Flash Attention on XPU does not support multimodal prefix-LM "
+                "attention. Falling back to Triton Attention backend."
+            )
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif dtype == torch.float32:
             logger.warning_once(
                 "Flash Attention on XPU does not support float32 dtype. "
