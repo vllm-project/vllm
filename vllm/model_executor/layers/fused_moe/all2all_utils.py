@@ -5,7 +5,6 @@ from typing import Any
 
 import torch
 
-import vllm.envs as envs
 from vllm.config import get_current_vllm_config
 from vllm.distributed import (
     get_ep_group,
@@ -144,7 +143,7 @@ def maybe_make_prepare_finalize(
 
         # Opt-in XPU batched path: reorganize tokens into E x T x K locally
         # (no all-to-all) so BatchedTritonExperts (moe_mmk TD) can run.
-        if current_platform.is_xpu() and envs.VLLM_XPU_MOE_USE_BATCHED_TRITON:
+        if current_platform.is_xpu() and moe.moe_backend == "batched_triton":
             return BatchedPrepareAndFinalize(
                 max_num_tokens=moe.max_num_tokens,
                 num_local_experts=moe.num_local_experts,

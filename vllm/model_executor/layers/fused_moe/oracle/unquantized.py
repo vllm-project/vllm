@@ -45,20 +45,6 @@ class UnquantizedMoeBackend(Enum):
     OOT = "OOT"
 
 
-def use_xpu_batched_triton() -> bool:
-    """Run unquantized XPU MoE through BatchedTritonExperts (moe_mmk TD)
-    via the no-comms reference batched prepare/finalize. Default off."""
-    return current_platform.is_xpu() and envs.VLLM_XPU_MOE_USE_BATCHED_TRITON
-
-
-def xpu_priority_backends(use_batched_triton: bool) -> list[UnquantizedMoeBackend]:
-    """XPU backend priority: the batched-triton opt-in selects
-    BatchedTritonExperts (moe_mmk TD), otherwise the default XPUExperts."""
-    if use_batched_triton:
-        return [UnquantizedMoeBackend.BATCHED_TRITON]
-    return [UnquantizedMoeBackend.XPU]
-
-
 def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBackend]:
     """
     Get available backends in priority order based on platform and config.
@@ -107,7 +93,7 @@ def _get_priority_backends(moe_config: FusedMoEConfig) -> list[UnquantizedMoeBac
             _move_to_back(_AVAILABLE_BACKENDS, UnquantizedMoeBackend.FLASHINFER_CUTLASS)
 
     elif current_platform.is_xpu():
-        _AVAILABLE_BACKENDS = xpu_priority_backends(use_xpu_batched_triton())
+        _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.XPU]
     elif current_platform.is_cpu():
         _AVAILABLE_BACKENDS = [UnquantizedMoeBackend.CPU]
     return _AVAILABLE_BACKENDS
@@ -165,6 +151,7 @@ def map_unquantized_backend(runner_backend: MoEBackend) -> UnquantizedMoeBackend
     """Map user's MoEBackend to UnquantizedMoeBackend."""
     mapping = {
         "triton": UnquantizedMoeBackend.TRITON,
+        "batched_triton": UnquantizedMoeBackend.BATCHED_TRITON,
         "flashinfer_trtllm": UnquantizedMoeBackend.FLASHINFER_TRTLLM,
         "flashinfer_cutlass": UnquantizedMoeBackend.FLASHINFER_CUTLASS,
         "aiter": UnquantizedMoeBackend.AITER,
@@ -247,7 +234,7 @@ def select_unquantized_moe_backend(
     activation_format = (
         mk.FusedMoEActivationFormat.BatchedExperts
         if moe_config.moe_parallel_config.use_batched_activation_format
-        or use_xpu_batched_triton()
+        or moe_config.moe_backend == "batched_triton"
         else mk.FusedMoEActivationFormat.Standard
     )
 

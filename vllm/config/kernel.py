@@ -122,6 +122,7 @@ class IrOpPriorityConfig:
 MoEBackend = Literal[
     "auto",
     "triton",
+    "batched_triton",
     "deep_gemm",
     "deep_gemm_mega_moe",
     "cutlass",
@@ -186,6 +187,8 @@ class KernelConfig:
 
     - "auto": Automatically select the best backend based on model and hardware
     - "triton": Use Triton-based fused MoE kernels
+    - "batched_triton": Use batched Triton experts (moe_mmk); required for the
+      XPU AllGather/ReduceScatter expert-parallel path
     - "deep_gemm": Use DeepGEMM kernels (FP8 block-quantized only)
     - "deep_gemm_mega_moe": Use DeepGEMM mega MoE kernels
     - "cutlass": Use vLLM CUTLASS kernels
