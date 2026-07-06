@@ -261,6 +261,25 @@ def _find_cc_in_function(tree: ast.AST, func_name: str) -> str | None:
     return None
 
 
+def _find_exact_cc_in_function(tree: ast.AST, func_name: str) -> str | None:
+    """Find a compute capability from is_device_capability() calls in a function."""
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.FunctionDef) or node.name != func_name:
+            continue
+        for n in ast.walk(node):
+            if (
+                isinstance(n, ast.Call)
+                and isinstance(n.func, ast.Attribute)
+                and n.func.attr == "is_device_capability"
+                and n.args
+                and isinstance(n.args[0], ast.Constant)
+                and isinstance(n.args[0].value, int)
+            ):
+                capability = n.args[0].value
+                return f"{capability // 10}.{capability % 10}"
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Registry and file resolution
 # ---------------------------------------------------------------------------
@@ -1048,10 +1067,11 @@ def parse_flash_attn_features() -> dict[str, dict[str, Any]]:
 
 
 def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
-    """Parse flashinfer.py to detect TRTLLM-specific features.
+    """Parse flashinfer.py to detect FlashInfer TRTLLM API variants.
 
-    FLASHINFER uses TRTLLM attention on SM100 (Blackwell), which has different
-    capabilities (e.g., sink support) than native FlashInfer on earlier GPUs.
+    FLASHINFER uses XQA on SM90 and trtllm-gen on SM100 through FlashInfer's
+    TRTLLM decode API. These variants have different capabilities than native
+    FlashInfer.
     """
     if not FLASHINFER_UTILS_FILE.exists():
         return {}
@@ -1061,9 +1081,10 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
     except Exception:
         return {}
 
-    trtllm_compute_cap = _find_cc_in_function(tree, "supports_trtllm_attention")
+    xqa_compute_cap = _find_exact_cc_in_function(tree, "supports_trtllm_attention")
+    trtllm_gen_compute_cap = _find_cc_in_function(tree, "supports_trtllm_attention")
 
-    if not trtllm_compute_cap:
+    if not xqa_compute_cap and not trtllm_gen_compute_cap:
         return {}
 
     # KV cache dtypes that only work with a dedicated kernel (e.g. nvfp4
@@ -1073,12 +1094,17 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
 
     return {
         "native": {
-            # Native FlashInfer: everything except SM100
+            # Native FlashInfer path.
             "supports_sink": False,
         },
-        "trtllm": {
-            # TRTLLM pathway on Blackwell
-            "compute_capability": trtllm_compute_cap,
+        "xqa": {
+            # XQA decode path on Hopper.
+            "compute_capability": xqa_compute_cap,
+            "supports_sink": False,
+        },
+        "trtllm_gen": {
+            # trtllm-gen pathway on Blackwell.
+            "compute_capability": trtllm_gen_compute_cap,
             "supports_sink": True,
         },
         "exclude_kv_dtypes": kernel_only_kv_dtypes,
@@ -1086,7 +1112,7 @@ def parse_flashinfer_trtllm_features() -> dict[str, dict[str, Any]]:
 
 
 # ---------------------------------------------------------------------------
-# Backend variant expansion (FA2/FA3/FA4, FlashInfer native/TRTLLM)
+# Backend variant expansion (FA2/FA3/FA4, FlashInfer native/XQA/trtllm-gen)
 # ---------------------------------------------------------------------------
 
 
@@ -1146,7 +1172,7 @@ def _expand_flashinfer_variants(
     all_backends: list[dict[str, Any]],
     fi_features: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Expand FLASHINFER into native and TRTLLM variants."""
+    """Expand FLASHINFER into native, XQA, and trtllm-gen variants."""
     expanded = []
     for backend in all_backends:
         if backend["name"] != "FLASHINFER":
@@ -1157,9 +1183,8 @@ def _expand_flashinfer_variants(
         orig_cap = backend["compute_capability"]
         parts = orig_cap.replace(".x", "").split("-")
         min_cc = parts[0] if parts else "7"
-        trtllm_cc = fi_features["trtllm"]["compute_capability"]
 
-        # Create native entry (pre-Blackwell GPUs)
+        # Create native entry.
         native = backend.copy()
         native["version"] = "Native†"
         native["_sort_key"] = "FLASHINFER"
@@ -1176,16 +1201,36 @@ def _expand_flashinfer_variants(
                 if d not in exclude
             )
 
-        # Create TRTLLM entry
-        trtllm = backend.copy()
-        trtllm["version"] = "TRTLLM†"
-        trtllm["_sort_key"] = "FLASHINFER"
-        trtllm["_sort_order"] = 1
-        trtllm["compute_capability"] = trtllm_cc
-        trtllm["supports_sink"] = fi_features["trtllm"]["supports_sink"]
+        # Create XQA entry.
+        xqa = backend.copy()
+        xqa["version"] = "XQA†"
+        xqa["_sort_key"] = "FLASHINFER"
+        xqa["_sort_order"] = 1
+        xqa["compute_capability"] = fi_features["xqa"]["compute_capability"]
+        xqa["supports_sink"] = fi_features["xqa"]["supports_sink"]
+        xqa["supports_non_causal"] = False
+        if exclude:
+            xqa["kv_cache_dtypes"] = ", ".join(
+                d
+                for d in (d.strip() for d in xqa["kv_cache_dtypes"].split(","))
+                if d not in exclude
+            )
+
+        # Create trtllm-gen entry.
+        trtllm_gen = backend.copy()
+        trtllm_gen["version"] = "trtllm-gen†"
+        trtllm_gen["_sort_key"] = "FLASHINFER"
+        trtllm_gen["_sort_order"] = 2
+        trtllm_gen["compute_capability"] = fi_features["trtllm_gen"][
+            "compute_capability"
+        ]
+        trtllm_gen["supports_sink"] = fi_features["trtllm_gen"]["supports_sink"]
 
         expanded.append(native)
-        expanded.append(trtllm)
+        if fi_features["xqa"]["compute_capability"]:
+            expanded.append(xqa)
+        if fi_features["trtllm_gen"]["compute_capability"]:
+            expanded.append(trtllm_gen)
     return expanded
 
 
@@ -1788,8 +1833,10 @@ def generate_docs() -> str:
     footnotes = []
     if fi_features:
         footnotes.append(
-            "> **†** FlashInfer uses TRTLLM attention on Blackwell (SM100), which "
-            "supports sinks. Disable via `--attention-config.use_trtllm_attention=0`."
+            "> **†** FlashInfer Native is the regular FlashInfer path. XQA is the "
+            "SM90 decode path exposed through FlashInfer's TRTLLM decode API. "
+            "trtllm-gen is used on SM100 and supports sinks. Disable XQA/trtllm-gen "
+            "via `--attention-config.use_trtllm_attention=0`."
         )
     if fa_features:
         footnotes.append(
