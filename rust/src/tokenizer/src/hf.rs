@@ -195,8 +195,15 @@ impl Tokenizer for HuggingFaceTokenizer {
     }
 
     fn decode_is_context_independent(&self) -> bool {
-        // Other backends may carry a context-dependent decoder (e.g. Metaspace).
-        matches!(self.backend, Backend::FastokensByteLevel(_))
+        // Other decoders may be context-dependent (e.g. Metaspace).
+        match &self.backend {
+            Backend::FastokensByteLevel(_) => true,
+            Backend::Hf(t) => matches!(
+                t.get_decoder(),
+                Some(tokenizers::DecoderWrapper::ByteLevel(_))
+            ),
+            Backend::Fastokens(_) => false,
+        }
     }
 }
 

@@ -511,4 +511,95 @@ mod tests {
         assert_eq!(full_text, "你好A");
         assert_eq!(out, "你好A");
     }
+
+    /// GPT-2 byte-to-unicode map: printable/latin ranges map to themselves,
+    /// the remaining 68 bytes map to U+0100.. sequentially.
+    fn byte_char(b: u8) -> char {
+        fn keep(b: u8) -> bool {
+            (33..=126).contains(&b) || (161..=172).contains(&b) || (174..=255).contains(&b)
+        }
+        if keep(b) {
+            char::from_u32(u32::from(b)).unwrap()
+        } else {
+            let n = (0..b).filter(|&x| !keep(x)).count() as u32;
+            char::from_u32(256 + n).unwrap()
+        }
+    }
+
+    /// The prefix-reuse fast path assumes `decode(a ++ b) == decode(a) ++
+    /// decode(b)` at clean UTF-8 boundaries, with the `ends_with(FFFD)` guard
+    /// deferring emission across dirty ones. Stress that assumption with byte
+    /// streams that put invalid UTF-8 at and across token boundaries: streamed
+    /// output must always equal a one-shot decode of the same ids.
+    #[test]
+    fn adversarial_byte_streams_match_full_decode() {
+        use tempfile::tempdir;
+        use tokenizers::models::bpe::BPE;
+        use tokenizers::pre_tokenizers::byte_level::ByteLevel;
+        use tokenizers::{Tokenizer as HfTokenizer, decoders};
+
+        use crate::HuggingFaceTokenizer;
+
+        let vocab: tokenizers::models::bpe::Vocab = ByteLevel::alphabet()
+            .into_iter()
+            .enumerate()
+            .map(|(i, c)| (c.to_string(), i as u32))
+            .collect();
+        let model = BPE::builder()
+            .vocab_and_merges(vocab, vec![])
+            .build()
+            .expect("build byte-level bpe");
+        let mut hf = HfTokenizer::new(model);
+        hf.with_pre_tokenizer(Some(ByteLevel::default()));
+        hf.with_decoder(Some(decoders::byte_level::ByteLevel::default()));
+
+        let dir = tempdir().expect("create temp dir");
+        let path = dir.path().join("tokenizer.json");
+        hf.save(&path, false).expect("save tokenizer json");
+        let tokenizer = HuggingFaceTokenizer::new_hf(&path).expect("load hf wrapper");
+        assert!(tokenizer.decode_is_context_independent());
+
+        let id_for_byte = |b: u8| -> u32 {
+            tokenizer
+                .token_to_id(&byte_char(b).to_string())
+                .unwrap_or_else(|| panic!("no token for byte {b:#x}"))
+        };
+
+        let cases: &[(&str, &[u8])] = &[
+            (
+                "valid multibyte splits",
+                "Hello\u{4f60}\u{597d}\u{1F389}!".as_bytes(),
+            ),
+            ("lead byte then ascii", &[0xE4, 0x41, 0x42]),
+            ("stray continuation", &[0xA0, 0x41]),
+            ("permanently invalid", &[0xFF, 0xFE, 0x41]),
+            ("literal U+FFFD bytes", &[0xEF, 0xBF, 0xBD, 0x41]),
+            ("dangling lead at end (flush)", &[0x41, 0xE4, 0xBD]),
+            (
+                "invalid between valid",
+                &[0xE4, 0xBD, 0xA0, 0xFF, 0xE4, 0xBD, 0xA0],
+            ),
+            ("consecutive invalid runs", &[0xFF, 0xFF, 0xE4, 0xFF, 0x41]),
+        ];
+
+        for (name, bytes) in cases {
+            let ids: Vec<u32> = bytes.iter().map(|&b| id_for_byte(b)).collect();
+            let expected = tokenizer.decode(&ids, false).expect("full decode");
+
+            let mut stream = tokenizer.create_decode_stream(&[], false, 0);
+            let mut streamed = String::new();
+            for &id in &ids {
+                stream.push_token(id).expect("push token");
+                if let Some(chunk) = stream.next_chunk() {
+                    streamed.push_str(&chunk);
+                }
+            }
+            let (last_chunk, full_text) = stream.flush(None).expect("flush");
+            if let Some(chunk) = last_chunk {
+                streamed.push_str(&chunk);
+            }
+            assert_eq!(streamed, expected, "streamed != full decode: {name}");
+            assert_eq!(full_text, expected, "flush != full decode: {name}");
+        }
+    }
 }

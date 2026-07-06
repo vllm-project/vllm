@@ -123,6 +123,15 @@ fn bench_incremental_decode(c: &mut Criterion) {
     let mut group = c.benchmark_group("tokenizer_incremental_decode");
     group.throughput(Throughput::Elements(fixture.token_ids.len() as u64));
 
+    group.bench_function("fastokens", |b| {
+        b.iter(|| {
+            let mut stream = fixture.fastokens.create_decode_stream(&[], false, 0);
+            for &token_id in &fixture.token_ids {
+                stream.push_token(black_box(token_id)).expect("push token");
+            }
+            black_box(stream.output().len())
+        })
+    });
     group.bench_function("hf_tokenizers", |b| {
         b.iter(|| {
             let mut stream = fixture.hf.create_decode_stream(&[], false, 0);
