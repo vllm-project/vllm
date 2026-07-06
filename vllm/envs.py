@@ -191,6 +191,8 @@ if TYPE_CHECKING:
     VLLM_BLOCKSCALE_FP8_GEMM_FLASHINFER: bool = True
     VLLM_USE_FLASHINFER_MOE_INT4: bool = False
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
+    VLLM_FLASHINFER_AUTOTUNE_MODE: Literal["auto", "tune", "load", "skip"] = "auto"
+    VLLM_FLASHINFER_AUTOTUNE_LOAD_FILE: str | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
     VLLM_XGRAMMAR_CACHE_MB: int = 0
@@ -1569,6 +1571,22 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Override the directory for the FlashInfer autotune config cache.
     "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR": lambda: os.getenv(
         "VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR", None
+    ),
+    # Control FlashInfer autotune warmup behavior:
+    # - auto: use the vLLM kernel config default
+    # - tune: force autotune search and persist/load the resulting cache
+    # - load: load an existing cache without running autotune search
+    # - skip: do not run autotune or load a cache
+    "VLLM_FLASHINFER_AUTOTUNE_MODE": env_with_choices(
+        "VLLM_FLASHINFER_AUTOTUNE_MODE",
+        "auto",
+        ["auto", "tune", "load", "skip"],
+    ),
+    # Optional exact autotune config file to load in load mode. This lets a
+    # lower-memory cache-builder profile seed a high-utilization serving profile
+    # whose vLLM config hash differs.
+    "VLLM_FLASHINFER_AUTOTUNE_LOAD_FILE": lambda: os.getenv(
+        "VLLM_FLASHINFER_AUTOTUNE_LOAD_FILE", None
     ),
     # Flashinfer fused allreduce backend.
     "VLLM_FLASHINFER_ALLREDUCE_BACKEND": env_with_choices(
