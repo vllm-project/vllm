@@ -144,7 +144,13 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     to every rank so all ranks dispatch the same kernel tactic.
     """
     import vllm.utils.flashinfer as fi_utils
-    from vllm.distributed.parallel_state import get_world_group
+    from vllm.distributed.parallel_state import get_pp_group, get_world_group
+
+    def _dummy_run_with_logits(**kwargs) -> None:
+        _, last_hidden_states = runner._dummy_run(**kwargs)
+        # include LM head into autotune to avoid fallback to heuristic tactic at runtime
+        if get_pp_group().is_last_rank and not runner.is_pooling_model:
+            runner._dummy_sampler_run(last_hidden_states)
 
     use_persistent_cache = True
 
@@ -161,7 +167,7 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
 
     if not use_persistent_cache:
         with torch.inference_mode(), fi_utils.autotune():
-            runner._dummy_run(
+            _dummy_run_with_logits(
                 num_tokens=runner.scheduler_config.max_num_batched_tokens,
                 skip_eplb=True,
                 is_profile=True,
@@ -189,9 +195,9 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     with torch.inference_mode():
         if is_leader:
             with fi_utils.autotune(tune_mode=True, cache=str(cache_path)):
-                runner._dummy_run(**dummy_run_kwargs)
+                _dummy_run_with_logits(**dummy_run_kwargs)
         else:
-            runner._dummy_run(**dummy_run_kwargs)
+            _dummy_run_with_logits(**dummy_run_kwargs)
 
     # Broadcast autotune cache from rank 0 to all other ranks so every
     # rank loads the same set of chosen tactics.
