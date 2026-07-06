@@ -54,6 +54,147 @@ class Gemma3TextModelConfig(VerifyAndUpdateConfig):
         hf_config.is_causal = not hf_config.use_bidirectional_attention
 
 
+class UnlimitedOCRForCausalLMConfig(VerifyAndUpdateConfig):
+    @staticmethod
+    def verify_and_update_config(vllm_config: "VllmConfig") -> None:
+        """Configure Unlimited-OCR attention backends for R-SWA and vision.
+
+        Backend selection — controlled by the standard ``--attention-config``
+        CLI argument (priority order):
+
+          1. ``--attention-config '{"backend": "FLASH_ATTN"}'``
+             → FA4 + rswa_mask_mod.  Exact token-level R-SWA.
+               ``flash_attn_version`` is forced to 4 if not already set (R-SWA
+               mask_mod requires FA4; FA3 cannot express it).  Raises if FA4 is
+               not available on this device.
+
+          2. ``--attention-config '{"backend": "FLEX_ATTENTION"}'``
+             → FlexAttention R-SWA via Triton block mask.
+
+          3. ``--attention-config '{"backend": "TRITON_ATTN"}'``
+             → Triton unified attention with an R-SWA decode mask.
+
+          4. ``--attention-config '{"backend": "auto"}'`` (or omitted)
+             → Auto-detect: FA4 if available (H20/H100 SM90), else TritonAttention.
+
+        Regardless of backend, prefix caching is disabled for this model: R-SWA
+        decode-phase KV is not a pure causal function of the prefix (so decode
+        blocks are not reusable), and single-turn image-led OCR prompts rarely
+        hit the prefix cache.
+
+        Example — force FlexAttention even on a machine with FA4::
+
+            vllm serve baidu/Unlimited-OCR \\
+                --attention-config '{"backend": "FLEX_ATTENTION"}'
+        """
+        from vllm.v1.attention.backends.fa_utils import is_fa_version_supported
+        from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+        attn_config = vllm_config.attention_config
+        fa4_available = is_fa_version_supported(4)
+
+        # ── step 1: resolve backend ─────────────────────────────────────────
+        # None means the user did not explicitly specify a backend; auto-select.
+        if attn_config.backend is None:
+            attn_config.backend = (
+                AttentionBackendEnum.FLASH_ATTN
+                if fa4_available
+                else AttentionBackendEnum.TRITON_ATTN
+            )
+            logger.info(
+                "Unlimited-OCR: auto-selected attention backend=%s (fa4_available=%s).",
+                attn_config.backend.value,
+                fa4_available,
+            )
+
+        # ── step 2: configure the chosen backend ────────────────────────────
+        if attn_config.backend == AttentionBackendEnum.FLASH_ATTN:
+            if not fa4_available:
+                raise RuntimeError(
+                    "Unlimited-OCR: --attention-config backend=FLASH_ATTN "
+                    "requires FA4 (rswa_mask_mod), but FA4 is not available on "
+                    "this device/installation. Use backend=TRITON_ATTN or "
+                    "FLEX_ATTENTION, or upgrade vllm-flash-attn."
+                )
+            # On SM90 (H20), the default FA version is FA3 regardless of FA4
+            # availability (FA4 is only auto-upgraded when head_size > 256).
+            # The R-SWA mask_mod requires FA4, so force the version globally.
+            if attn_config.flash_attn_version is None:
+                attn_config.flash_attn_version = 4
+            elif attn_config.flash_attn_version < 4:
+                logger.warning(
+                    "Unlimited-OCR: flash_attn_version=%d cannot express the "
+                    "R-SWA mask_mod; upgrading to 4.",
+                    attn_config.flash_attn_version,
+                )
+                attn_config.flash_attn_version = 4
+            logger.info(
+                "Unlimited-OCR: FlashAttention FA%d + rswa_mask_mod — exact R-SWA.",
+                attn_config.flash_attn_version,
+            )
+
+        elif attn_config.backend == AttentionBackendEnum.TRITON_ATTN:
+            logger.info(
+                "Unlimited-OCR: TritonAttention — R-SWA via unified attention mask."
+            )
+
+        elif attn_config.backend == AttentionBackendEnum.FLEX_ATTENTION:
+            logger.info(
+                "Unlimited-OCR: FlexAttention — R-SWA via Triton block mask%s.",
+                ""
+                if not fa4_available
+                else (
+                    " (FA4 available but not used; pass backend=FLASH_ATTN to upgrade)"
+                ),
+            )
+
+        else:
+            raise ValueError(
+                f"Unlimited-OCR: unsupported attention backend "
+                f"{attn_config.backend!r} for R-SWA. "
+                "Use FLASH_ATTN (FA4), TRITON_ATTN or FLEX_ATTENTION."
+            )
+
+        # R-SWA windows the *generated* tokens, so a decode-token's KV is not a
+        # pure causal function of the prefix and cannot be safely reused across
+        # requests via prefix caching. Only the prompt/image prefix is cacheable,
+        # but OCR is single-turn with image-led prompts that rarely share a
+        # prefix, so prefix caching brings little benefit while complicating the
+        # KV cache manager. Disable it for this model.
+        cache_config = vllm_config.cache_config
+        if cache_config.enable_prefix_caching:
+            cache_config.enable_prefix_caching = False
+            logger.info(
+                "Unlimited-OCR: disabling prefix caching (R-SWA decode KV is not "
+                "cacheable, and single-turn image-led prompts rarely hit the "
+                "prefix cache)."
+            )
+
+        mm_config = getattr(vllm_config.model_config, "multimodal_config", None)
+        if mm_config is not None:
+            if mm_config.mm_encoder_attn_backend is None:
+                mm_config.mm_encoder_attn_backend = AttentionBackendEnum.FLASH_ATTN
+            elif mm_config.mm_encoder_attn_backend == AttentionBackendEnum.FLASHINFER:
+                logger.warning(
+                    "Unlimited-OCR: FlashInfer is not supported for the vision "
+                    "encoder (the CLIP stage runs full attention without "
+                    "cu_seqlens); falling back to FlashAttention."
+                )
+                mm_config.mm_encoder_attn_backend = AttentionBackendEnum.FLASH_ATTN
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        text_config = model_config.hf_config.text_config
+        text_config.architectures = ["DeepseekV2ForCausalLM"]
+        if getattr(model_config.hf_config, "rswa_window", None) is None:
+            model_config.hf_config.rswa_window = 128
+        # Propagate rswa_window to text_config so that DeepseekAttention (which
+        # receives text_config as its vllm_config.model_config.hf_config via
+        # init_vllm_registered_model) can read it and create RSWAAttention.
+        rswa_window = model_config.hf_config.rswa_window
+        text_config.rswa_window = rswa_window
+
+
 class Gemma4Config(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_config(vllm_config: "VllmConfig") -> None:
@@ -157,6 +298,20 @@ class DiffusionGemmaModelForBlockDiffusionConfig(VerifyAndUpdateConfig):
         sc = vllm_config.scheduler_config
         if sc is not None and sc.max_num_seqs >= SchedulerConfig.DEFAULT_MAX_NUM_SEQS:
             sc.max_num_seqs = 8
+
+        # Remove the model's generation_config.json cap on max_new_tokens
+        # (256) so DiffusionGemma behaves like every other model: no
+        # server-wide limit, each request controls its own output length
+        # via max_tokens.  Setting to None causes get_diff_sampling_param
+        # to skip this key entirely.
+        model_config = vllm_config.model_config
+        if "max_new_tokens" not in model_config.override_generation_config:
+            model_config.override_generation_config["max_new_tokens"] = None
+            logger.info(
+                "DiffusionGemma: removing server-wide max_new_tokens cap "
+                "from generation_config.json (use "
+                "--override-generation-config to set a custom limit).",
+            )
 
 
 class DeepseekV4ForCausalLMConfig(VerifyAndUpdateConfig):
@@ -613,6 +768,20 @@ class Qwen3_5ForConditionalGenerationConfig(VerifyAndUpdateConfig):
             )
 
 
+class ColQwen3_5Config(Qwen3_5ForConditionalGenerationConfig):
+    """ColQwen3.5 (late-interaction retrieval) inherits Qwen3.5's mamba cache
+    handling and additionally serves BIDIRECTIONAL attention: ColPali-style
+    document/query encoding attends over the whole sequence, not causally. Set
+    is_causal=False so Qwen3NextAttention builds its full_attention layers with
+    AttentionType.ENCODER_ONLY (the linear_attention GatedDeltaNet layers are
+    unaffected). Generation arches keep the parent (causal) and are untouched.
+    """
+
+    @staticmethod
+    def verify_and_update_model_config(model_config: "ModelConfig") -> None:
+        model_config.hf_config.is_causal = False
+
+
 class SnowflakeGteNewModelConfig(VerifyAndUpdateConfig):
     @staticmethod
     def verify_and_update_model_config(model_config: "ModelConfig") -> None:
@@ -642,7 +811,7 @@ class VoyageQwen3BidirectionalEmbedModelConfig(VerifyAndUpdateConfig):
 
 MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "ColBERTJinaRobertaModel": JinaRobertaModelConfig,
-    "ColQwen3_5": Qwen3_5ForConditionalGenerationConfig,
+    "ColQwen3_5": ColQwen3_5Config,
     "DeepseekV4ForCausalLM": DeepseekV4ForCausalLMConfig,
     "DeepseekV32ForCausalLM": DeepseekV32ForCausalLM,
     "DiffusionGemmaForBlockDiffusion": DiffusionGemmaModelForBlockDiffusionConfig,  # noqa: E501
@@ -675,6 +844,7 @@ MODELS_CONFIG_MAP: dict[str, type[VerifyAndUpdateConfig]] = {
     "Qwen3VLForSequenceClassification": Qwen3VLForSequenceClassificationConfig,
     "Qwen3_5ForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
     "Qwen3_5MoeForConditionalGeneration": Qwen3_5ForConditionalGenerationConfig,
+    "UnlimitedOCRForCausalLM": UnlimitedOCRForCausalLMConfig,
     "VoyageQwen3BidirectionalEmbedModel": VoyageQwen3BidirectionalEmbedModelConfig,
     "XLMRobertaModel": JinaRobertaModelConfig,
 }

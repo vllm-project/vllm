@@ -22,6 +22,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheSpec,
+    MambaSpec,
     SlidingWindowSpec,
 )
 from vllm.v1.request import Request
@@ -35,18 +36,18 @@ def _validate_prefix_cache_retention_interval(
     if retention_interval is None:
         return
 
-    # Retention only sparsifies sliding-window checkpoints for now; every other
-    # manager (full attention, Mamba, chunked-local) caches densely and
-    # ignores it to be conservative.
-    # TODO: Support Mamba/linear attention.
+    # Retention sparsifies sliding-window and Mamba (linear-attention)
+    # checkpoints; full-attention and chunked-local groups cache densely and
+    # ignore it (their hit granularity must stay fine).
     if not any(
-        isinstance(g.kv_cache_spec, SlidingWindowSpec)
+        isinstance(g.kv_cache_spec, (SlidingWindowSpec, MambaSpec))
         for g in kv_cache_config.kv_cache_groups
     ):
         raise ValueError(
             "VLLM_PREFIX_CACHE_RETENTION_INTERVAL is set but this model has "
-            "no sliding-window KV cache group, so retention has no effect. "
-            "Unset it (the feature only applies to sliding-window attention)."
+            "no sliding-window or Mamba KV cache group, so retention has no "
+            "effect. Unset it (it only applies to sliding-window and Mamba "
+            "attention)."
         )
 
     if retention_interval < 0 or retention_interval % scheduler_block_size != 0:
@@ -202,13 +203,33 @@ class KVCacheCoordinator(ABC):
             num_local_computed_tokens: The number of local computed tokens.
             num_external_computed_tokens: The number of external computed tokens.
         """
+        # A running request is already tracked in num_cached_block and won't
+        # have new prefix-cache hits, so this is a no-op for it.
+        if any(
+            request_id in manager.num_cached_block
+            for manager in self.single_type_managers
+        ):
+            assert all(len(blocks) == 0 for blocks in new_computed_blocks)
+            return
+
+        # Two-phase allocation (issue #33775): first touch every group's local
+        # cache-hit blocks, then allocate external blocks for every group. This
+        # ensures an earlier group's external `get_new_blocks` cannot evict a
+        # later group's not-yet-touched cache-hit blocks.
         for i, manager in enumerate(self.single_type_managers):
-            manager.allocate_new_computed_blocks(
+            manager.add_local_computed_blocks(
                 request_id,
                 new_computed_blocks[i],
                 num_local_computed_tokens,
                 num_external_computed_tokens,
             )
+        if num_external_computed_tokens > 0:
+            for manager in self.single_type_managers:
+                manager.allocate_external_computed_blocks(
+                    request_id,
+                    num_local_computed_tokens,
+                    num_external_computed_tokens,
+                )
 
     def allocate_new_blocks(
         self,
@@ -272,6 +293,25 @@ class KVCacheCoordinator(ABC):
         for manager in self.single_type_managers:
             manager.free(request_id)
 
+    def pop_blocks_for_free(self, request_id: str) -> list[KVCacheBlock]:
+        """
+        Pop the request's bookkeeping from all single-type managers and
+        return its blocks without returning them to the block pool. The
+        caller must eventually pass the returned blocks to
+        `block_pool.free_blocks`, freeing them in reverse order (so that
+        tail blocks are evicted first).
+
+        Args:
+            request_id: The request ID.
+
+        Returns:
+            The request's blocks in allocation order.
+        """
+        blocks: list[KVCacheBlock] = []
+        for manager in self.single_type_managers:
+            blocks.extend(manager.pop_blocks_for_free(request_id))
+        return blocks
+
     def get_num_common_prefix_blocks(self, running_request_id: str) -> list[int]:
         """
         Get the number of common prefix blocks for all requests with allocated
@@ -290,7 +330,10 @@ class KVCacheCoordinator(ABC):
         ]
 
     def remove_skipped_blocks(
-        self, request_id: str, total_computed_tokens: int
+        self,
+        request_id: str,
+        total_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
     ) -> None:
         """
         Remove the blocks that are no longer needed from `blocks` and replace
@@ -300,9 +343,14 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             total_computed_tokens: The total number of computed tokens, including
                 local computed tokens and external computed tokens.
+            num_prompt_tokens: Optional prompt length. R-SWA managers use this to
+                free gap blocks between the prefill tail and decode window; other
+                manager types ignore it.
         """
         for manager in self.single_type_managers:
-            manager.remove_skipped_blocks(request_id, total_computed_tokens)
+            manager.remove_skipped_blocks(
+                request_id, total_computed_tokens, num_prompt_tokens
+            )
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """

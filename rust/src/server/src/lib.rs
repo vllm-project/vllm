@@ -7,22 +7,36 @@ mod listener;
 mod lora;
 mod middleware;
 mod routes;
+mod runtime;
 mod server_info;
 mod state;
+mod tls;
+#[cfg(test)]
+mod tls_tests;
 mod utils;
 
+use std::future::Future;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use axum::Router;
-use axum::serve::ListenerExt as _;
-pub use config::{ApiServerOptions, Config, CoordinatorMode, HttpListenerMode};
+use axum::body::Body;
+use axum::http::Request;
+pub use config::{
+    ApiServerOptions, Config, CoordinatorMode, CorsConfig, DEFAULT_KEEP_ALIVE_TIMEOUT,
+    HttpListenerMode, TlsConfig,
+};
+use hyper::body::Incoming;
+use hyper::server::conn::http1;
+use hyper_util::rt::{TokioIo, TokioTimer};
+use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::service::TowerToHyperService;
 use tokio::net::TcpListener;
 use tokio::time::{Instant, sleep_until};
-use tokio_stream::wrappers::TcpListenerStream;
-use tokio_util::either::Either;
 use tokio_util::sync::CancellationToken;
 use tonic::transport::Server as TonicServer;
+use tower::ServiceExt as _;
 use tracing::{info, trace, warn};
 use vllm_chat::{ChatLlm, LoadModelBackendsOptions, load_model_backends};
 pub use vllm_chat::{ChatTemplateContentFormatOption, ParserSelection, RendererSelection};
@@ -30,14 +44,47 @@ use vllm_engine_core_client::{EngineCoreClient, EngineCoreClientConfig};
 use vllm_llm::Llm;
 use vllm_text::TextLlm;
 
-use crate::listener::Listener;
+use crate::listener::{Listener, MaybeTlsListener};
 use crate::routes::build_router;
 use crate::server_info::ServerInfoSnapshot;
 use crate::state::AppState;
 
+/// How often the server PINGs an idle gRPC connection to reap a dead peer;
+/// tonic enables no keepalive by default. 2h matches the gRPC-core default.
+const GRPC_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(7200);
+/// How long the server waits for a keepalive PING reply before dropping the gRPC
+/// connection. 20s matches the gRPC-core default.
+const GRPC_KEEPALIVE_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// Resolve the public model names accepted by the frontend.
+fn effective_served_model_names(model: &str, served_model_name: &[String]) -> Vec<String> {
+    if served_model_name.is_empty() {
+        vec![model.to_string()]
+    } else {
+        served_model_name.to_vec()
+    }
+}
+
+/// Choose the gRPC listener host. It follows the HTTP TCP host when there is
+/// one; otherwise (unix socket or inherited fd) it defaults to IPv4 loopback
+/// rather than all interfaces, so the side-car is never accidentally
+/// network-exposed.
+fn grpc_bind_host(listener_mode: &HttpListenerMode) -> &str {
+    match listener_mode {
+        HttpListenerMode::BindTcp { host, .. } => host.as_str(),
+        HttpListenerMode::BindUnix { .. } | HttpListenerMode::InheritedFd { .. } => "127.0.0.1",
+    }
+}
+
 /// Build the shared application state for one configured model and one engine
 /// client.
 async fn build_state(config: &Config) -> Result<Arc<AppState>> {
+    // If no served names are specified, fall back to the backend model path so
+    // that the API always has at least one valid model ID. Use the same primary
+    // public name for frontend-side metrics labels.
+    let served_model_names = effective_served_model_names(&config.model, &config.served_model_name);
+    let metrics_model_name = served_model_names[0].clone();
+
     // Load both backends from the same model metadata so they stay in sync.
     let loaded = load_model_backends(
         &config.model,
@@ -68,32 +115,27 @@ async fn build_state(config: &Config) -> Result<Arc<AppState>> {
     let client = EngineCoreClient::connect(EngineCoreClientConfig {
         transport_mode: config.transport_mode.clone(),
         coordinator_mode,
-        model_name: config.model.clone(),
+        model_name: metrics_model_name,
         client_index: 0,
     })
     .await
     .context("failed to connect to engine core")?;
 
     let llm = Llm::new(client).with_log_stats(!config.disable_log_stats);
-    let text = TextLlm::new(llm, text_backend);
+    let text = TextLlm::new(llm, text_backend).with_max_logprobs(config.max_logprobs);
 
     let chat = ChatLlm::new(text, chat_backend)
         .with_tool_call_parser(config.tool_call_parser.clone())
         .with_reasoning_parser(config.reasoning_parser.clone());
 
-    // If no served names are specified, fall back to the backend model path so
-    // that the API always has at least one valid model ID.
-    let served_model_names = if config.served_model_name.is_empty() {
-        vec![config.model.clone()]
-    } else {
-        config.served_model_name.clone()
-    };
-
     Ok(Arc::new(
         AppState::new(served_model_names, chat)
+            .with_model_path(config.model.clone())
             .with_api_server_options(config.api_server_options)
             .with_server_info(ServerInfoSnapshot::from_config(config))
-            .with_api_keys(config.api_keys.clone()),
+            .with_api_keys(config.api_keys.clone())
+            .with_cors(config.cors.clone())
+            .with_profiler(config.profiler.clone()),
     ))
 }
 
@@ -120,6 +162,15 @@ where
 {
     config.validate().context("invalid OpenAI frontend configuration")?;
 
+    // Build the TLS server config once, up front, so a bad cert/key fails fast
+    // before the (potentially long) engine handshake.
+    let tls_config = config
+        .tls
+        .as_ref()
+        .map(tls::build_server_config)
+        .transpose()
+        .context("invalid TLS configuration")?;
+
     // Also check shutdown during the (potentially long) startup handshake.
     let state = tokio::select! {
         result = build_state(&config) => result?,
@@ -128,43 +179,45 @@ where
     let listener = Listener::bind(&config.listener_mode)
         .await
         .context("failed to bind listener for OpenAI server")?;
-    let bind_address = listener.local_addr()?;
+    let bind_address = listener.local_addr_display()?;
     let model = state.primary_model_name().to_owned();
     let app = extend_router(build_router(state.clone()));
 
     // Optionally bind the gRPC Generate server on a separate port. Bind
     // synchronously here so bind errors (port in use, permission denied, ...)
-    // surface before we start serving, rather than being deferred until
-    // shutdown. The gRPC listener follows the same host as the HTTP listener so
-    // that enabling --grpc-port does not accidentally expose the service on all
-    // interfaces when HTTP is intentionally local-only.
+    // surface before serving rather than being deferred until shutdown.
     let grpc_setup = if let Some(grpc_port) = config.grpc_port {
-        let grpc_host = match &config.listener_mode {
-            HttpListenerMode::BindTcp { host, .. } => host.as_str(),
-            HttpListenerMode::BindUnix { .. } | HttpListenerMode::InheritedFd { .. } => "0.0.0.0",
-        };
+        let grpc_host = grpc_bind_host(&config.listener_mode);
         let grpc_listener = TcpListener::bind((grpc_host, grpc_port))
             .await
             .with_context(|| format!("failed to bind gRPC listener on {grpc_host}:{grpc_port}"))?;
         let addr = grpc_listener.local_addr()?;
+        let grpc_listener = Listener::Tcp(grpc_listener);
+        // gRPC reuses the HTTP TLS config (same SslContext) plus ALPN h2.
+        let grpc_tls = config
+            .tls
+            .as_ref()
+            .map(tls::build_grpc_server_config)
+            .transpose()
+            .context("invalid gRPC TLS configuration")?;
         let svc = grpc::GenerateServer::new(grpc::GenerateServiceImpl::new(state.clone()));
-        info!(%addr, "starting gRPC server");
-        Some((grpc_listener, svc))
+        let svc = TonicServer::builder()
+            .http2_keepalive_interval(Some(GRPC_KEEPALIVE_INTERVAL))
+            .http2_keepalive_timeout(Some(GRPC_KEEPALIVE_TIMEOUT))
+            .layer(middleware::request_runtime_layer(state.clone()))
+            .add_service(svc);
+        info!(%addr, tls = grpc_tls.is_some(), "starting gRPC server");
+        Some((grpc_listener, svc, grpc_tls))
     } else {
         None
     };
 
-    info!(%bind_address, %model, "starting OpenAI server");
-
-    // Set TCP_NODELAY on accepted connections to reduce latency.
-    // By `tap_io` we will do this on every accepted connection.
-    let listener = listener.tap_io(|io| {
-        if let Either::Left(tcp_stream) = io
-            && let Err(err) = tcp_stream.set_nodelay(true)
-        {
-            trace!(error = %err, "failed to enable TCP_NODELAY on accepted HTTP connection");
-        }
-    });
+    let scheme = if tls_config.is_some() {
+        "https"
+    } else {
+        "http"
+    };
+    info!(%bind_address, %scheme, %model, "starting OpenAI server");
 
     // Run HTTP and gRPC concurrently under a child token of the caller's shutdown
     // token. Caller cancellation propagates into both protocols; if either
@@ -195,13 +248,28 @@ where
         }
     });
 
+    // 0 disables keep-alive but still bounds the head read (default), so a
+    // silent client cannot hold the connection open.
+    let keep_alive_timeout = config.keep_alive_timeout;
+    let timeouts = ConnectionTimeouts {
+        header_read: if keep_alive_timeout.is_zero() {
+            DEFAULT_KEEP_ALIVE_TIMEOUT
+        } else {
+            keep_alive_timeout
+        },
+        keep_alive_enabled: !keep_alive_timeout.is_zero(),
+    };
+
     let http_fut = {
         let shutdown = server_shutdown.child_token();
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let server =
-                axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned());
+            let listener = match tls_config {
+                Some(context) => MaybeTlsListener::tls(listener, context),
+                None => MaybeTlsListener::plain(listener),
+            };
+            let server = serve_connections(listener, app, shutdown.cancelled_owned(), timeouts);
 
             let result = tokio::select! {
                 result = server => {
@@ -223,16 +291,17 @@ where
         let server_shutdown = server_shutdown.clone();
         let force_shutdown = force_shutdown.clone();
         async move {
-            let Some((grpc_listener, svc)) = grpc_setup else {
+            let Some((grpc_listener, svc, grpc_tls)) = grpc_setup else {
                 // No gRPC configured: just wait for shutdown so we do not race the
                 // join! by resolving early and tripping the cancellation token.
                 shutdown.cancelled().await;
                 return Ok(());
             };
-            let server = TonicServer::builder().add_service(svc).serve_with_incoming_shutdown(
-                TcpListenerStream::new(grpc_listener),
-                shutdown.cancelled_owned(),
-            );
+            let incoming = match grpc_tls {
+                Some(context) => MaybeTlsListener::tls(grpc_listener, context),
+                None => MaybeTlsListener::plain(grpc_listener),
+            };
+            let server = svc.serve_with_incoming_shutdown(incoming, shutdown.cancelled_owned());
 
             let result = tokio::select! {
                 result = server => {
@@ -257,4 +326,97 @@ where
         .copied()
         .unwrap_or_else(|| Instant::now() + config.shutdown_timeout);
     state.shutdown(shutdown_deadline).await
+}
+
+/// Per-connection timeouts applied while serving HTTP/HTTPS.
+#[derive(Clone, Copy)]
+pub(crate) struct ConnectionTimeouts {
+    /// HTTP/1 header-read timeout (bounds idle keep-alive and the head read).
+    pub(crate) header_read: Duration,
+    /// Whether HTTP/1 keep-alive is enabled; `false` closes after each response.
+    pub(crate) keep_alive_enabled: bool,
+}
+
+/// Serve `app` per connection (HTTP/1) with a keep-alive idle timeout and
+/// graceful drain. Hand-rolled on hyper because [`axum::serve()`] takes no config.
+async fn serve_connections<L>(
+    mut listener: L,
+    app: Router,
+    shutdown: impl Future<Output = ()> + Send,
+    timeouts: ConnectionTimeouts,
+) -> Result<()>
+where
+    L: axum::serve::Listener,
+{
+    let graceful = GracefulShutdown::new();
+    let mut shutdown = std::pin::pin!(shutdown);
+    loop {
+        let (io, _addr) = tokio::select! {
+            conn = listener.accept() => conn,
+            () = &mut shutdown => break,
+        };
+
+        let service = TowerToHyperService::new(
+            app.clone().map_request(|req: Request<Incoming>| req.map(Body::new)),
+        );
+        let mut builder = http1::Builder::new();
+        builder.timer(TokioTimer::new()).header_read_timeout(timeouts.header_read);
+        if !timeouts.keep_alive_enabled {
+            builder.keep_alive(false);
+        }
+        let connection = builder.serve_connection(TokioIo::new(io), service);
+        let connection = graceful.watch(connection);
+
+        tokio::spawn(async move {
+            if let Err(err) = connection.await {
+                trace!(error = %err, "failed to serve connection");
+            }
+        });
+    }
+
+    drop(listener);
+    graceful.shutdown().await;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn effective_served_model_names_falls_back_to_backend_model() {
+        assert_eq!(
+            effective_served_model_names("backend-model", &[]),
+            vec!["backend-model"]
+        );
+    }
+
+    #[test]
+    fn effective_served_model_names_preserves_public_names() {
+        let served_names = vec!["public-model".to_string(), "public-alias".to_string()];
+
+        assert_eq!(
+            effective_served_model_names("backend-model", &served_names),
+            served_names
+        );
+    }
+
+    #[test]
+    fn grpc_bind_host_follows_http_tcp_host() {
+        let mode = HttpListenerMode::BindTcp {
+            host: "0.0.0.0".to_string(),
+            port: 8000,
+        };
+        assert_eq!(grpc_bind_host(&mode), "0.0.0.0");
+    }
+
+    #[test]
+    fn grpc_bind_host_defaults_to_loopback_without_tcp_host() {
+        let unix = HttpListenerMode::BindUnix {
+            path: "/tmp/vllm.sock".to_string(),
+        };
+        let inherited = HttpListenerMode::InheritedFd { fd: 3 };
+        assert_eq!(grpc_bind_host(&unix), "127.0.0.1");
+        assert_eq!(grpc_bind_host(&inherited), "127.0.0.1");
+    }
 }

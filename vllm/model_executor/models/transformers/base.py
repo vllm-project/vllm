@@ -158,9 +158,6 @@ class Base(
                     "Transformers modeling backend does "
                     "not support MXFP4 quantization yet."
                 )
-            # Skip loading extra bias for GPTQ models.
-            if "gptq" in quant_method_name:
-                self.ignore_unexpected_suffixes.append(".bias")
 
         self._patch_config()
         from_config_kwargs = dict(
@@ -303,17 +300,13 @@ class Base(
         - Any quantization config specific mappings
         """
         self.hf_to_vllm_mapper = WeightsMapper()
+        orig_to_new_renamings = self.hf_to_vllm_mapper.orig_to_new_renamings
         orig_to_new_regex = self.hf_to_vllm_mapper.orig_to_new_regex
 
         for mapping in get_model_conversion_mapping(self.model):
             # Handle weights which have been renamed in Transformers
             if isinstance(mapping, WeightRenaming):
-                # Recompile using regex (Transformers used re)
-                compiled_sources = re.compile(
-                    mapping.compiled_sources.pattern, mapping.compiled_sources.flags
-                )
-                target_pattern = mapping.target_patterns[0]
-                orig_to_new_regex[compiled_sources] = target_pattern
+                orig_to_new_renamings.append(mapping)
             # TODO: Handle WeightConverter to enable layer merging
 
         # Handle unexpected weights which should be ignored
@@ -647,10 +640,7 @@ class Base(
             return hidden_states, aux_hidden_states
         return hidden_states
 
-    def load_weights(
-        self,
-        weights: Iterable[tuple[str, torch.Tensor]],
-    ) -> set[str]:
+    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=self.skip_prefixes,

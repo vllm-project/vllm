@@ -102,11 +102,7 @@ class PPTestSettings:
 
 TEXT_GENERATION_MODELS = {
     # [Decoder-only]
-    # Uses Llama
-    # "BAAI/AquilaChat-7B": PPTestSettings.fast(),
     "Snowflake/snowflake-arctic-instruct": PPTestSettings.fast(load_format="dummy"),
-    "baichuan-inc/Baichuan-7B": PPTestSettings.fast(),
-    "baichuan-inc/Baichuan2-13B-Chat": PPTestSettings.fast(),
     "bigscience/bloomz-1b1": PPTestSettings.fast(),
     "zai-org/chatglm3-6b": PPTestSettings.fast(),
     "CohereLabs/c4ai-command-r-v01": PPTestSettings.fast(load_format="dummy"),
@@ -118,8 +114,7 @@ TEXT_GENERATION_MODELS = {
     "tiiuae/falcon-7b": PPTestSettings.fast(),
     "google/gemma-1.1-2b-it": PPTestSettings.fast(),
     "google/gemma-2-9b": PPTestSettings.fast(),
-    "gpt2": PPTestSettings.fast(),
-    "bigcode/starcoder": PPTestSettings.fast(),
+    "openai-community/gpt2": PPTestSettings.fast(),
     "EleutherAI/gpt-j-6b": PPTestSettings.fast(),
     "EleutherAI/pythia-1.4b": PPTestSettings.fast(),
     "ibm/PowerLM-3b": PPTestSettings.fast(),
@@ -155,9 +150,6 @@ TEXT_GENERATION_MODELS = {
     "stabilityai/stablelm-3b-4e1t": PPTestSettings.fast(),
     "bigcode/starcoder2-3b": PPTestSettings.fast(),
     "upstage/solar-pro-preview-instruct": PPTestSettings.fast(load_format="dummy"),
-    # FIXME: Cannot load tokenizer in latest transformers version.
-    # Need to use tokenizer from `meta-llama/Llama-2-7b-chat-hf`
-    # "xverse/XVERSE-7B-Chat": PPTestSettings.fast(),
     # [Encoder-only]
     # TODO: Implement PP
     # "facebook/bart-base": PPTestSettings.fast(),
@@ -178,7 +170,7 @@ MULTIMODAL_MODELS = {
     "facebook/chameleon-7b": PPTestSettings.fast(),
     "adept/fuyu-8b": PPTestSettings.fast(),
     "zai-org/glm-4v-9b": PPTestSettings.fast(),
-    "OpenGVLab/InternVL2-1B": PPTestSettings.fast(),
+    "OpenGVLab/InternVL3-1B": PPTestSettings.fast(),
     "llava-hf/llava-1.5-7b-hf": PPTestSettings.fast(),
     "llava-hf/llava-v1.6-mistral-7b-hf": PPTestSettings.fast(),
     "llava-hf/LLaVA-NeXT-Video-7B-hf": PPTestSettings.fast(),
@@ -206,7 +198,7 @@ TEST_MODELS = [
     "intfloat/e5-mistral-7b-instruct",
     "BAAI/bge-multilingual-gemma2",
     # [MULTIMODAL GENERATION]
-    "OpenGVLab/InternVL2-1B",
+    "OpenGVLab/InternVL3-1B",
     "microsoft/Phi-3.5-vision-instruct",
     "fixie-ai/ultravox-v0_5-llama-3_2-1b",
     # [LANGUAGE GENERATION - HYBRID ARCH]

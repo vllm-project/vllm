@@ -812,17 +812,6 @@ class Llama4ForConditionalGeneration(
         )
         return self.language_model.get_eagle3_default_aux_hidden_state_layers()
 
-    def set_eplb_state(
-        self,
-        expert_load_view: torch.Tensor,
-        logical_to_physical_map: torch.Tensor,
-        logical_replica_count: torch.Tensor,
-    ):
-        self.language_model.set_eplb_state(
-            expert_load_view, logical_to_physical_map, logical_replica_count
-        )
-        self.expert_weights = self.language_model.expert_weights
-
     def update_physical_experts_metadata(
         self, num_physical_experts: int, num_local_physical_experts: int
     ):
@@ -926,6 +915,7 @@ class Llama4ForConditionalGeneration(
         max_frames_per_batch: int,
         device: torch.device,
         dtype: torch.dtype,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphCaptureInputs,
@@ -954,6 +944,7 @@ class Llama4ForConditionalGeneration(
         mm_kwargs: dict[str, Any],
         max_batch_size: int,
         max_frames_per_batch: int,
+        path: str = "default",
     ):
         from vllm.v1.worker.encoder_cudagraph_defs import (
             EncoderCudaGraphReplayBuffers,
@@ -966,6 +957,7 @@ class Llama4ForConditionalGeneration(
     def encoder_cudagraph_forward(
         self,
         inputs: dict[str, torch.Tensor],
+        path: str = "default",
     ) -> torch.Tensor:
         return self.encode_image_chunks(
             inputs["pixel_values"],
@@ -975,6 +967,7 @@ class Llama4ForConditionalGeneration(
     def encoder_eager_forward(
         self,
         mm_kwargs: dict[str, Any],
+        path: str = "default",
     ) -> torch.Tensor:
         return self.encode_image_chunks(
             mm_kwargs["pixel_values"],
@@ -1131,66 +1124,6 @@ class Llama4ForConditionalGeneration(
 
         return name
 
-    def _separate_and_rename_weights(
-        self, weights: Iterable[tuple[str, torch.Tensor]]
-    ) -> tuple[list[tuple[str, torch.Tensor]], list[tuple[str, torch.Tensor]]]:
-        """Rename weights and separate them into language_model and other
-        weights."""
-        language_model_weights = []
-        other_weights = []
-
-        for name, weight in weights:
-            renamed = self._rename_weight_for_modelopt_checkpoint(name)
-
-            attr = renamed.split(".", 1)[0]
-            if isinstance(getattr(self, attr), StageMissingLayer):
-                continue
-
-            if renamed.startswith("language_model."):
-                language_model_weights.append((renamed, weight))
-            else:
-                other_weights.append((renamed, weight))
-
-        return language_model_weights, other_weights
-
-    def _handle_expert_scale_broadcasting(
-        self, weights: list[tuple[str, torch.Tensor]], params_dict: dict
-    ) -> tuple[list[tuple[str, torch.Tensor]], set[str]]:
-        """Handle expert scale parameters that need broadcasting.
-
-        ModelOpt checkpoints use a single value tensor scalar for BMM style
-        experts, vLLM expects the scale to be broadcasted across all experts.
-        """
-        regular_weights = []
-        expert_scale_weights = []
-        updated_params = set()
-
-        for name, weight in weights:
-            # Check if this is an expert scale parameter that needs broadcasting
-            if (
-                "feed_forward.experts." in name
-                and "scale" in name
-                and ".shared_expert" not in name
-            ):
-                name = maybe_remap_moe_expert_param_name(name, params_dict)
-                if name in params_dict:
-                    param = params_dict[name]
-                    if (
-                        hasattr(param, "data")
-                        and param.data.numel() > 1
-                        and weight.numel() == 1
-                    ):
-                        # Broadcast single value to all experts
-                        param.data.fill_(weight.item())
-                        updated_params.add(name)
-                        continue
-
-                expert_scale_weights.append((name, weight))
-            else:
-                regular_weights.append((name, weight))
-
-        return regular_weights, expert_scale_weights, updated_params
-
     def _load_other_weights(
         self,
         other_weights: Iterable[tuple[str, torch.Tensor]],
@@ -1251,19 +1184,67 @@ class Llama4ForConditionalGeneration(
         params_dict = dict(self.named_parameters())
         updated_params: set[str] = set()
 
-        # Separate and rename weights
-        language_model_weights, other_weights = self._separate_and_rename_weights(
-            weights
-        )
+        # Stream thelanguage-model weights straight into
+        # AutoWeightsLoader so each tensor is loaded and released as we iterate,
+        # instead of materializing the whole checkpoint in host memory first.
+        # Only the small vision/projector and scalar expert-scale groups are
+        # buffered.
+        other_weights: list[tuple[str, torch.Tensor]] = []
+        expert_scale_weights: list[tuple[str, torch.Tensor]] = []
 
-        # Handle expert scale parameters
-        regular_weights, expert_scale_weights, updated_params_from_experts = (
-            self._handle_expert_scale_broadcasting(language_model_weights, params_dict)
-        )
-        updated_params.update(updated_params_from_experts)
+        def regular_language_model_weights() -> Iterable[tuple[str, torch.Tensor]]:
+            """Rename weights and separate them into language_model and other
+            weights.
+
+            Yields the (large) language_model weights for streaming; the small
+            groups (vision/projector and scalar expert scales) are buffered into
+            the lists above.
+            """
+            for name, weight in weights:
+                renamed = self._rename_weight_for_modelopt_checkpoint(name)
+
+                attr = renamed.split(".", 1)[0]
+                if isinstance(getattr(self, attr), StageMissingLayer):
+                    continue
+
+                if not renamed.startswith("language_model."):
+                    other_weights.append((renamed, weight))
+                    continue
+
+                # Handle expert scale parameters that need broadcasting.
+                # ModelOpt checkpoints use a single value tensor scalar for BMM
+                # style experts, vLLM expects the scale to be broadcasted across
+                # all experts.
+                if (
+                    "feed_forward.experts." in renamed
+                    and "scale" in renamed
+                    and ".shared_expert" not in renamed
+                ):
+                    renamed = maybe_remap_moe_expert_param_name(renamed, params_dict)
+                    if renamed in params_dict:
+                        param = params_dict[renamed]
+                        if (
+                            hasattr(param, "data")
+                            and param.data.numel() > 1
+                            and weight.numel() == 1
+                        ):
+                            # Broadcast single value to all experts
+                            param.data.fill_(weight.item())
+                            updated_params.add(renamed)
+                            continue
+
+                    expert_scale_weights.append((renamed, weight))
+                    continue
+
+                yield renamed, weight
 
         loader = AutoWeightsLoader(self)
-        loaded_language_model_params = loader.load_weights(regular_weights)
+        # AutoWeightsLoader consumes its input lazily and runs to exhaustion,
+        # so other_weights / expert_scale_weights are fully populated as a side
+        # effect by the time this returns.
+        loaded_language_model_params = loader.load_weights(
+            regular_language_model_weights()
+        )
         assert loaded_language_model_params is not None
         updated_params.update(loaded_language_model_params)
 

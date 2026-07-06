@@ -385,12 +385,31 @@ class SamplingParams(
         repetition_detection: RepetitionDetectionParams | None = None,
     ) -> "SamplingParams":
         if logit_bias is not None:
-            # Convert token_id to integer
-            # Clamp the bias between -100 and 100 per OpenAI API spec
-            logit_bias = {
-                int(token): min(100.0, max(-100.0, bias))
-                for token, bias in logit_bias.items()
-            }
+            # Fast path uses a dict comprehension; on failure we iterate once
+            # to identify the exact offending entry for the error message.
+            try:
+                logit_bias = {
+                    int(token): min(100.0, max(-100.0, bias))
+                    for token, bias in logit_bias.items()
+                }
+            except (ValueError, TypeError):
+                invalid_keys = []
+                converted_logit_bias = {}
+                for token, bias in logit_bias.items():
+                    try:
+                        token_id = int(token)
+                    except (ValueError, TypeError):
+                        invalid_keys.append(token)
+                        continue
+                    converted_logit_bias[token_id] = min(100.0, max(-100.0, bias))
+                if invalid_keys:
+                    raise VLLMValidationError(
+                        f"logit_bias contains key(s) that cannot be "
+                        f"converted to integer token IDs: {invalid_keys!r}",
+                        parameter="logit_bias",
+                        value=invalid_keys,
+                    ) from None
+                logit_bias = converted_logit_bias
 
         return SamplingParams(
             n=1 if n is None else n,
@@ -523,6 +542,12 @@ class SamplingParams(
         if self.temperature < 0.0:
             raise VLLMValidationError(
                 f"temperature must be non-negative, got {self.temperature}.",
+                parameter="temperature",
+                value=self.temperature,
+            )
+        if self.temperature > 2.0:
+            raise VLLMValidationError(
+                f"temperature must be in [0, 2], got {self.temperature}.",
                 parameter="temperature",
                 value=self.temperature,
             )
@@ -720,7 +745,9 @@ class SamplingParams(
         self._validate_logits_processors(model_config)
         self._validate_allowed_token_ids(tokenizer)
         self._validate_spec_decode(speculative_config)
-        self._validate_structured_outputs(structured_outputs_config, tokenizer)
+        self._validate_structured_outputs(
+            model_config, structured_outputs_config, tokenizer
+        )
 
     def _validate_logprobs(self, model_config: ModelConfig) -> None:
         max_logprobs = model_config.max_logprobs
@@ -853,11 +880,24 @@ class SamplingParams(
 
     def _validate_structured_outputs(
         self,
+        model_config: ModelConfig,
         structured_outputs_config: StructuredOutputsConfig | None,
         tokenizer: TokenizerLike | None,
     ) -> None:
         if structured_outputs_config is None or self.structured_outputs is None:
             return
+
+        if model_config.is_diffusion:
+            # Diffusion LLMs denoise a whole canvas of tokens in parallel
+            # rather than sampling left-to-right, which the grammar FSM
+            # requires. Without this check, requests fail mid-generation
+            # with an FSM rejection (HTTP 500). See issue #45436.
+            raise ValueError(
+                "Structured outputs are not yet supported for diffusion "
+                "language models. Remove the structured output constraint "
+                "(e.g. `response_format`, `structured_outputs`) from the "
+                "request."
+            )
 
         if tokenizer is None:
             raise ValueError(
@@ -898,6 +938,18 @@ class SamplingParams(
             and self.structured_outputs.grammar.strip() == ""
         ):
             raise ValueError("structured_outputs.grammar cannot be an empty string")
+        # Reject empty string json schema early to avoid engine-side crashes
+        if (
+            isinstance(self.structured_outputs.json, str)
+            and self.structured_outputs.json.strip() == ""
+        ):
+            raise ValueError("structured_outputs.json cannot be an empty string")
+        # Reject json_object=False early to avoid engine-side crashes
+        if self.structured_outputs.json_object is False:
+            raise ValueError(
+                "structured_outputs.json_object must be True if set; omit "
+                "structured_outputs to disable structured outputs"
+            )
 
         from vllm.v1.structured_output.backend_guidance import (
             has_guidance_unsupported_json_features,
