@@ -1,0 +1,15 @@
+model_name: "deepseek-ai/DeepSeek-V4-Flash-DSpark"
+accuracy_threshold: 0.95
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1200
+# Regression coverage for the fp8_ds_mla KV cache reshape path (#47648):
+# DSpark spec decode + fp8 KV exercises the DeepSeek-V4 sparse SWA MLA cache,
+# which must allocate the 584-byte-per-token layout instead of the semantic
+# 512 head size.
+server_args: >-
+  --enforce-eager
+  --max-model-len 4096
+  --tensor-parallel-size 8
+  --kv-cache-dtype fp8
+  --speculative-config '{"method":"dspark","num_speculative_tokens":7,"draft_sample_method":"probabilistic"}'
