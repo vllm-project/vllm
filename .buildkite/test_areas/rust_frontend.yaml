@@ -31,8 +31,9 @@ steps:
 
   # - pytest -v -s entrypoints/openai/completion/test_prompt_validation.py -k "not prompt_embeds"
   - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
-  # Cases with `return_token_ids` disabled expect explicit `null` fields, which Rust omits (`skip_serializing_none`).
-  - pytest -v -s "entrypoints/openai/test_return_token_ids.py::test_basic_completion_with_emoji[True]" entrypoints/openai/test_return_token_ids.py::test_chat_completion_with_emoji_and_token_ids
+  # test_comparison streams differently: Rust emits a separate first (prompt_token_ids) chunk and
+  # finish chunk without logprobs, while the test reads `logprobs.tokens` on every chunk.
+  - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
   - pytest -v -s entrypoints/openai/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
 
