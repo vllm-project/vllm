@@ -129,6 +129,7 @@ FROM fetch_vllm_${REMOTE_VLLM} AS fetch_vllm
 # don't need the rust toolchain or protoc.
 FROM fetch_vllm AS rust-build
 ARG COMMON_WORKDIR
+ARG USE_SCCACHE
 
 # protoc is used by tonic-build/prost-build.
 RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
@@ -144,6 +145,10 @@ ENV CARGO_BUILD_JOBS=4
 ENV CARGO_NET_RETRY=10
 ENV RUSTUP_MAX_RETRIES=10
 
+# BuildKit can run this stage in parallel with ROCm native builds. Keep Rust on
+# a separate local sccache daemon while sharing the same remote cache backend.
+ENV SCCACHE_SERVER_PORT=4227
+
 RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
     cd ${COMMON_WORKDIR}/vllm \
     && uv pip install --system -r requirements/build/rust.txt
@@ -155,8 +160,15 @@ RUN --mount=type=cache,id=vllm-rocm-uv,target=/root/.cache/uv \
 RUN --mount=type=cache,id=vllm-rocm-cargo-registry,target=/root/.cargo/registry,sharing=locked \
     --mount=type=cache,id=vllm-rocm-cargo-git,target=/root/.cargo/git,sharing=locked \
     cd ${COMMON_WORKDIR}/vllm \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+        export RUSTC_WRAPPER=sccache \
+        && sccache --show-stats; \
+    fi \
     && bash build_rust.sh \
-    && test -x vllm/vllm-rs
+    && test -x vllm/vllm-rs \
+    && if [ "$USE_SCCACHE" = "1" ]; then \
+        sccache --show-stats; \
+    fi
 
 # -----------------------
 # vLLM native build stages
@@ -231,7 +243,13 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/benchmarks /benchmarks
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm_base /docker/Dockerfile.rocm_base
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/ci-rocm.hcl /docker/ci-rocm.hcl
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/docker-bake.hcl /docker/docker-bake.hcl
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/docker-bake-rocm.hcl /docker/docker-bake-rocm.hcl
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/pyproject.toml /pyproject.toml
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
@@ -516,7 +534,13 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/benchmarks /benchmar
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tests /tests
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/examples /examples
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/tools/install_torchcodec_rocm.sh /tools/install_torchcodec_rocm.sh
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile /docker/Dockerfile
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.cpu /docker/Dockerfile.cpu
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm /docker/
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/Dockerfile.rocm_base /docker/Dockerfile.rocm_base
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/ci-rocm.hcl /docker/ci-rocm.hcl
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/docker-bake.hcl /docker/docker-bake.hcl
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/docker-bake-rocm.hcl /docker/docker-bake-rocm.hcl
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/pyproject.toml /pyproject.toml
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
@@ -574,6 +598,9 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # Enable fast and less brittle model downloads in tests.
 ENV HF_XET_HIGH_PERFORMANCE=1
 ENV HF_HUB_DOWNLOAD_TIMEOUT=60
+
+# Keep torch.cuda.is_available() fork-safe (see vllm/env_override.py).
+ENV PYTORCH_NVML_BASED_CUDA_CHECK=1
 
 # Pre-install vLLM test dependencies.
 COPY requirements/test/rocm.txt /tmp/rocm-test-reqs.txt
@@ -694,6 +721,9 @@ ENV SAFETENSORS_FAST_GPU=1
 
 # Performance environment variable.
 ENV HIP_FORCE_DEV_KERNARG=1
+
+# Keep torch.cuda.is_available() fork-safe (see vllm/env_override.py).
+ENV PYTORCH_NVML_BASED_CUDA_CHECK=1
 
 # Workaround for ROCm profiler limits
 RUN echo "ROCTRACER_MAX_EVENTS=10000000" > ${COMMON_WORKDIR}/libkineto.conf

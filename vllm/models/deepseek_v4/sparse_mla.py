@@ -13,6 +13,7 @@ from vllm.config.cache import CacheDType
 from vllm.platforms.interface import DeviceCapability
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+from vllm.utils.torch_utils import np_to_pinned_tensor
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionCGSupport,
@@ -46,7 +47,6 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
     supported_dtypes: ClassVar[list[torch.dtype]] = [torch.bfloat16]
     supported_kv_cache_dtypes: ClassVar[list[CacheDType]] = [
         "auto",
-        "bfloat16",
         "fp8_ds_mla",
         "fp8",  # alias for fp8_ds_mla
     ]
@@ -84,6 +84,10 @@ class DeepseekV4FlashMLABackend(AttentionBackend):
 
     @classmethod
     def is_sparse(cls) -> bool:
+        return True
+
+    @classmethod
+    def supports_sink(cls) -> bool:
         return True
 
     @classmethod
@@ -208,7 +212,7 @@ class DeepseekV4FlashMLAMetadataBuilder(
         # Zero-fill for cudagraphs
         self.req_id_per_token_buffer.fill_(0)
         self.req_id_per_token_buffer[: req_id_per_token.shape[0]].copy_(
-            torch.from_numpy(req_id_per_token), non_blocking=True
+            np_to_pinned_tensor(req_id_per_token), non_blocking=True
         )
         req_id_per_token = self.req_id_per_token_buffer[:num_tokens]
 

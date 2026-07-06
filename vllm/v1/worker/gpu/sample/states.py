@@ -56,6 +56,8 @@ class SamplingStates:
         num_logprobs = sampling_params.logprobs
         if num_logprobs is None:
             num_logprobs = NO_LOGPROBS
+        elif num_logprobs == -1:
+            num_logprobs = self.vocab_size
         self.num_logprobs[req_idx] = num_logprobs
 
     def apply_staged_writes(self) -> None:

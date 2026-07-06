@@ -45,7 +45,6 @@ def build_response_output_items(
     content: str | None,
     tool_calls: list[FunctionCall] | None,
     logprobs: list[Logprob] | None = None,
-    tool_call_id_type: str = "random",
 ) -> list[ResponseOutputItem]:
     outputs: list[ResponseOutputItem] = []
 
@@ -86,12 +85,7 @@ def build_response_output_items(
                 ResponseFunctionToolCall(
                     id=f"fc_{random_uuid()}",
                     call_id=tool_call.id
-                    if tool_call.id
-                    else make_tool_call_id(
-                        id_type=tool_call_id_type,
-                        func_name=tool_call.name,
-                        idx=idx,
-                    ),
+                    or make_tool_call_id(func_name=tool_call.name, idx=idx),
                     type="function_call",
                     status="completed",
                     name=tool_call.name,
@@ -306,6 +300,20 @@ def _construct_message_from_response_item(
             content=item.get("output"),
             tool_call_id=item.get("call_id"),
         )
+    elif isinstance(item, dict) and item.get("role") == "assistant":
+        content = item.get("content")
+        text: str | None = None
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list) and content:
+            text = content[0].get("text")
+        if text is not None:
+            if prev_assistant_msg:
+                previous_content = prev_assistant_msg.get("content")
+                if previous_content is None:
+                    prev_assistant_msg["content"] = text
+                    return None
+            return {"role": "assistant", "content": text}
     return item  # type: ignore[arg-type]
 
 

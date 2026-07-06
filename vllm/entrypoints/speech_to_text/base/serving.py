@@ -16,14 +16,15 @@ from transformers import PreTrainedTokenizerBase
 
 import vllm.envs as envs
 from vllm.engine.protocol import EngineClient
+from vllm.entrypoints.generate.base.serving import GenerateBaseServing
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import OpenAIServing, SpeechToTextRequest
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
+from vllm.entrypoints.serve.engine.typing import SpeechToTextRequest
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens
 from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
@@ -86,7 +87,7 @@ def asr_inter_chunk_separator(
     return "" if language and language.lower() in no_space_languages else " "
 
 
-class OpenAISpeechToText(OpenAIServing):
+class SpeechToTextBaseServing(GenerateBaseServing):
     """Base class for speech-to-text operations like transcription and
     translation."""
 
@@ -172,6 +173,8 @@ class OpenAISpeechToText(OpenAIServing):
                     sr=self.asr_config.sample_rate,
                     max_duration_s=self.max_audio_decode_duration_s,
                 )
+        except ValueError:
+            raise
         except Exception as exc:
             raise ValueError("Invalid or unsupported audio file.") from exc
 
@@ -472,7 +475,7 @@ class OpenAISpeechToText(OpenAIServing):
         list_result_generator: list[AsyncGenerator[RequestOutput, None]] | None = None
 
         input_len = (
-            OpenAISpeechToText._get_decoder_prompt_len(engine_inputs)
+            SpeechToTextBaseServing._get_decoder_prompt_len(engine_inputs)
             if request.use_beam_search
             else 0
         )

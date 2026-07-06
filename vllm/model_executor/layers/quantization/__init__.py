@@ -11,6 +11,7 @@ logger = init_logger(__name__)
 
 QuantizationMethods = Literal[
     "awq",
+    "auto_awq",
     "fp8",
     "fbgemm_fp8",
     "fp_quant",
@@ -18,7 +19,6 @@ QuantizationMethods = Literal[
     "modelopt_fp4",
     "modelopt_mxfp8",
     "modelopt_mixed",
-    "gguf",
     "auto_gptq",
     "gptq",
     "gptq_marlin",
@@ -114,9 +114,8 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from vllm.model_executor.layers.quantization.quark.quark import QuarkConfig
     from vllm.models.deepseek_v4 import DeepseekV4FP8Config
 
+    from .auto_awq import AutoAWQConfig
     from .auto_gptq import AutoGPTQConfig
-    from .awq import AWQConfig
-    from .awq_marlin import AWQMarlinConfig
     from .bitsandbytes import BitsAndBytesConfig
     from .compressed_tensors.compressed_tensors import (
         CompressedTensorsConfig,
@@ -125,7 +124,6 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .fbgemm_fp8 import FBGEMMFp8Config
     from .fp8 import Fp8Config
     from .fp_quant import FPQuantConfig
-    from .gguf import GGUFConfig
     from .humming import HummingConfig
     from .inc import INCConfig
     from .modelopt import (
@@ -140,7 +138,9 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
     from .torchao import TorchAOConfig
 
     method_to_config: dict[str, type[QuantizationConfig]] = {
-        "awq": AWQConfig,
+        "awq": AutoAWQConfig,
+        "awq_marlin": AutoAWQConfig,
+        "auto_awq": AutoAWQConfig,
         "fp8": Fp8Config,
         "fbgemm_fp8": FBGEMMFp8Config,
         "fp_quant": FPQuantConfig,
@@ -148,35 +148,33 @@ def get_quantization_config(quantization: str) -> type[QuantizationConfig]:
         "modelopt_fp4": ModelOptNvFp4Config,
         "modelopt_mxfp8": ModelOptMxFp8Config,
         "modelopt_mixed": ModelOptMixedPrecisionConfig,
-        "gguf": GGUFConfig,
         "auto_gptq": AutoGPTQConfig,
         "gptq": AutoGPTQConfig,
         "gptq_marlin": AutoGPTQConfig,
-        "awq_marlin": AWQMarlinConfig,
         "compressed-tensors": CompressedTensorsConfig,
         "bitsandbytes": BitsAndBytesConfig,
         "experts_int8": ExpertsInt8Config,
         "quark": QuarkConfig,
         "moe_wna16": MoeWNA16Config,
         "torchao": TorchAOConfig,
-        "auto-round": INCConfig,
         "inc": INCConfig,
         "mxfp4": Mxfp4Config,
         "gpt_oss_mxfp4": GptOssMxfp4Config,
         "deepseek_v4_fp8": DeepseekV4FP8Config,
         "humming": HummingConfig,
         "online": OnlineQuantizationConfig,
+        # MiniMax-style checkpoints tag `quant_method: "mxfp8"`; load with the
+        # ModelOpt MXFP8 config (same format). The "mxfp8" online shorthand
+        # below only applies to the `--quantization mxfp8` CLI path.
+        "mxfp8": ModelOptMxFp8Config,
     }
 
-    # Register online shorthands as quantization methods so the user can
-    # specify "LLM(..., quantization='fp8_per_tensor')" as shorthand for
-    # creating a more complicated online quant config object.
+    # Register online shorthands (e.g. "fp8_per_tensor") as quant methods.
+    # setdefault so a shorthand that is also a checkpoint method (e.g. "mxfp8")
+    # keeps its checkpoint config; the shorthand still works via the
+    # `--quantization` CLI path in `resolve_quantization_config`.
     for shorthand in _ONLINE_SHORTHANDS:
-        assert shorthand not in method_to_config, (
-            f"Online quant shorthand {shorthand!r} conflicts with an "
-            f"existing quantization method"
-        )
-        method_to_config[shorthand] = OnlineQuantizationConfig
+        method_to_config.setdefault(shorthand, OnlineQuantizationConfig)
 
     # Update the `method_to_config` with customized quantization methods.
     method_to_config.update(_CUSTOMIZED_METHOD_TO_QUANT_CONFIG)
