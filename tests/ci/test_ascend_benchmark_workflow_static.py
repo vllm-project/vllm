@@ -101,7 +101,10 @@ def test_benchmark_repo_default_ref_is_main():
 
     assert "feature/perfgate-two-stage" not in text
     assert (
-        "BENCHMARK_REPO_REF: ${{ vars.VLLM_HUST_BENCHMARK_REPO_REF || 'main' }}"
+        "BENCHMARK_REPO_REF: ${{ (github.event_name == 'pull_request' || "
+        "github.event_name == 'issue_comment' || github.event_name == "
+        "'workflow_dispatch') && (vars.VLLM_HUST_BENCHMARK_REPO_REF || "
+        "'main') || 'main' }}"
     ) in text
 
 
@@ -158,6 +161,17 @@ def test_benchmark_script_does_not_default_pr_hardware_to_b3():
 
     assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-}" in script
     assert "HARDWARE_CHIP_MODEL=${HARDWARE_CHIP_MODEL:-910B3}" not in script
+
+
+def test_perfgate_spec_resolver_uses_benchmark_registry():
+    script = (
+        Path(__file__).resolve().parents[2]
+        / ".github/workflows/scripts/resolve_perfgate_spec_file.py"
+    ).read_text(encoding="utf-8")
+
+    assert "vllm_hust_benchmark" in script
+    assert "perfgate_specs.resolve_perfgate_spec_file" in script
+    assert "perfgate-ascend-qwen25-3b-910b3.json" not in script
 
 
 def test_issue_comment_uses_ubuntu_gate_before_self_hosted_runner():
