@@ -14,12 +14,13 @@ from vllm.model_executor.layers.fused_moe.config import (
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
+    kInt4W4A8StaticChannelSym,
     kInt4W4A8StaticGroup32Sym,
     kInt4W4A8StaticGroup64Sym,
     kInt4W4A8StaticGroup128Sym,
     kInt4W4A8StaticGroupSym,
 )
-from vllm.platforms import current_platform
+from vllm.platforms import CpuArchEnum, current_platform
 
 
 class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
@@ -47,6 +48,48 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
+
+    @staticmethod
+    def is_supported_config(
+        cls: type[mk.FusedMoEExperts],
+        moe_config: FusedMoEConfig,
+        weight_key: QuantKey | None,
+        activation_key: QuantKey | None,
+        activation_format: mk.FusedMoEActivationFormat,
+    ) -> tuple[bool, str | None]:
+        if (
+            not current_platform.is_cpu()
+            or current_platform.get_cpu_architecture() != CpuArchEnum.ARM
+        ):
+            return False, "kernel only supports Arm CPU"
+
+        if moe_config.in_dtype not in (
+            torch.float32,
+            torch.bfloat16,
+            torch.float16,
+        ):
+            return (
+                False,
+                f"kernel does not support {moe_config.in_dtype} input/output dtype",
+            )
+
+        try:
+            _ = torch.ops.aten._dyn_quant_matmul_4bit
+            _ = torch.ops.aten._dyn_quant_pack_4bit_weight
+        except AttributeError:
+            return (
+                False,
+                f"PyTorch {torch.__version__} does not support "
+                "_dyn_quant_* 4bit ops. Install a newer version",
+            )
+
+        return mk.FusedMoEExperts.is_supported_config(
+            cls,
+            moe_config,
+            weight_key,
+            activation_key,
+            activation_format,
+        )
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -86,8 +129,9 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
           Can be channel-wise or group-wise quantization
         - Activations: dynamic per-token 8-bit integer quantization
         """
-        # group size must be multiple of 32
+        # channelwise or groupwise with group size being a multiple of 32
         SUPPORTED_W_A = [
+            (kInt4W4A8StaticChannelSym, None),
             (kInt4W4A8StaticGroup128Sym, None),
             (kInt4W4A8StaticGroup64Sym, None),
             (kInt4W4A8StaticGroup32Sym, None),
@@ -120,7 +164,8 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
         """Expert parallelism not yet supported."""
         return False
 
-    def _activation_kind(self, activation: MoEActivation) -> int:
+    @staticmethod
+    def _activation_kind(activation: MoEActivation) -> int:
         """Convert MoEActivation to kernel activation kind integer.
 
         Returns:
@@ -200,29 +245,22 @@ class CPUExpertsInt4(mk.FusedMoEExpertsMonolithic):
             e_score_correction_bias=e_score_correction_bias,
         )
 
-        # Extract dimensions from weight tensors
-        # w1 is w13_packed: [num_experts, packed_data...]
-        # w2 is w2_packed: [num_experts, packed_data...]
-        # These dimensions should be available from the layer
-        # For now, we'll extract from moe_config
-        K = self.moe_config.hidden_dim
-        N = self.moe_config.intermediate_size_per_partition
+        hidden_size = self.moe_config.hidden_dim
+        intermediate_size = self.moe_config.intermediate_size_per_partition
         assert self.quant_config.block_shape is not None
-        if self.quant_config.is_per_act_token:
+        # C++ kernel expects an int: -1 for channelwise, and group size for groupwise
+        if self.quant_config.block_shape == [-1, 1]:
             group_size = -1
         else:
             group_size = self.quant_config.block_shape[1]
-
-        # Call the dynamic 4-bit int MoE kernel
         return torch.ops._C.dynamic_4bit_int_moe(
             hidden_states,
             topk_ids.to(torch.long),
             topk_weights,
             w1,  # w13_weight_packed
             w2,  # w2_weight_packed
-            K,  # hidden_size (w2_out_features)
-            N,  # intermediate_size (w2_in_features)
-            N * 2,  # 2*intermediate_size (w13_out_features)
+            hidden_size,
+            intermediate_size,
             group_size,
             apply_router_weight_on_input,
             self._activation_kind(activation),
