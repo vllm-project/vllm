@@ -671,11 +671,17 @@ class ParallelConfig:
 
     @property
     def use_batched_dp_moe(self) -> bool:
+        # Batched-activation-format (BatchedExperts) backends: the whole per-rank
+        # batch lands in a padded [local_experts, max_tokens*world, hidden] buffer,
+        # so the scheduler budget must stay small (256) — otherwise every fill/
+        # activation/GEMM pads to the full budget (e.g. 8192*8 rows) and the EP
+        # transport sizes its slot buffers to match.
         return (
             self.all2all_backend
             in (
                 "deepep_low_latency",
                 "nixl_ep",
+                "flashinfer_ep_low_latency",
             )
             and self.enable_expert_parallel
             and self.data_parallel_size > 1
