@@ -25,7 +25,7 @@ pub struct ToolSchema {
 ///
 /// It can be either a raw text string, or a structured input with named child elements.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) enum ParamInput {
+pub(crate) enum ParamInput {
     Text(String),
     #[allow(dead_code)]
     Elements(Vec<ParamElement>),
@@ -39,7 +39,7 @@ impl From<String> for ParamInput {
 
 /// One named structured parameter child.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct ParamElement {
+pub(crate) struct ParamElement {
     pub name: String,
     pub value: ParamInput,
 }
@@ -93,13 +93,7 @@ impl ToolSchemas {
     where
         P: Into<ParamInput>,
     {
-        let tool_schema = self.resolve(function_name);
-        let mut converted = Map::with_capacity(params.len());
-        for (name, value) in params {
-            let value = tool_schema.convert(&name, value.into());
-            converted.insert(name, value);
-        }
-        converted
+        self.resolve(function_name).convert_params(params)
     }
 
     /// Convert one parameter value for one named tool.
@@ -117,6 +111,19 @@ impl ToolSchemas {
 }
 
 impl ToolSchema {
+    /// Convert a set of named parameter values with this schema.
+    pub(crate) fn convert_params<P>(&self, params: Vec<(String, P)>) -> Map<String, Value>
+    where
+        P: Into<ParamInput>,
+    {
+        let mut converted = Map::with_capacity(params.len());
+        for (name, value) in params {
+            let value = self.convert(&name, value.into());
+            converted.insert(name, value);
+        }
+        converted
+    }
+
     /// Return an empty schema with no parameter information, which causes all
     /// parameters to be treated as strings.
     const fn empty() -> &'static Self {
