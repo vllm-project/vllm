@@ -68,7 +68,7 @@ class XPUExperts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        if torch.ops._xpu_C.is_xe2_arch():
+        if torch.ops._xpu_C.is_xe2_arch() or torch.ops._xpu_C.is_xe3_arch():
             return True
         return False
 
