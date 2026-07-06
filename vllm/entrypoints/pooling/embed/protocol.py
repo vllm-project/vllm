@@ -207,6 +207,17 @@ class CohereEmbedContent(BaseModel):
     text: str | None = None
     image_url: dict[str, str] | None = None
 
+    @model_validator(mode="after")
+    def validate_content_payload(self):
+        if self.type == "text":
+            if self.text is None:
+                raise ValueError("CohereEmbedContent with type='text' requires text")
+        elif not self.image_url or not self.image_url.get("url"):
+            raise ValueError(
+                "CohereEmbedContent with type='image_url' requires image_url.url"
+            )
+        return self
+
 
 class CohereEmbedInput(BaseModel):
     content: list[CohereEmbedContent]

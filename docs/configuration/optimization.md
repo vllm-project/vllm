@@ -109,7 +109,7 @@ from vllm import LLM
 
 # Combine pipeline and tensor parallelism
 llm = LLM(
-    model="meta-llama/Llama-3.3-70B-Instruct,
+    model="meta-llama/Llama-3.3-70B-Instruct",
     tensor_parallel_size=4,
     pipeline_parallel_size=2,
 )
@@ -298,7 +298,7 @@ The `fastokens` Python package (>= 0.2.0) must be installed; if it isn't,
 vLLM raises a clear `ImportError` at tokenizer load. The override applies to
 any `--tokenizer-mode` that ends up loading an HF fast tokenizer (`hf`,
 `deepseek_v32`, `deepseek_v4`, …). Models that don't use the HF
-fast tokenizer (`mistral`, `grok2`, `kimi_audio`) ignore the flag.
+fast tokenizer (`mistral`, `kimi_audio`) ignore the flag.
 
 Tokenizer-bound workloads — long shared prefixes, bursty short prompts,
 batch detokenization — see the largest wins. If your bottleneck is GPU

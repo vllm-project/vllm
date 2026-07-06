@@ -66,6 +66,13 @@ class ChatMessage(OpenAIBaseModel):
     # vLLM-specific fields that are not in OpenAI spec
     reasoning: str | None = None
 
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler):
+        data = handler(self)
+        if len(data.get("tool_calls", [])) == 0:
+            data.pop("tool_calls", None)
+        return data
+
 
 class ChatCompletionLogProb(OpenAIBaseModel):
     token: str
@@ -375,6 +382,21 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "need to map generated text back to input tokens."
         ),
     )
+    return_token_offsets: bool | None = Field(
+        default=False,
+        description=(
+            "If true, return char-level (start, end) offsets for each "
+            "token relative to the tokenized source string in the "
+            "`token_offsets` field of the rendered response. Only "
+            "supported on the `/v1/completions/render` and "
+            "`/v1/chat/completions/render` endpoints; ignored on regular "
+            "generation endpoints. Honored only for Fast (Rust-backed) "
+            "tokenizers; otherwise `token_offsets` is null. For chat "
+            "requests, offsets are relative to the templated prompt "
+            "string (after applying the chat template). Multimodal "
+            "inputs and pre-tokenized inputs always yield null."
+        ),
+    )
     return_prompt_text: bool | None = Field(
         default=None,
         description=(
@@ -382,6 +404,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "prompt string produced by chat templating. In streaming mode it "
             "is sent only on the first chunk. This is useful for inspecting "
             "exactly what was fed into the model."
+        ),
+    )
+
+    return_assistant_tokens_mask: bool = Field(
+        default=False,
+        description=(
+            "If true, the /render response will include an "
+            "``assistant_tokens_mask`` field — a per-token list of 0/1 "
+            "values indicating which tokens were assistant-generated. "
+            "Requires the chat template to use ``{% generation %}`` "
+            "tags.  When the template does not support it, "
+            "``assistant_tokens_mask`` will be ``null``."
         ),
     )
 
@@ -498,6 +532,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
+            return_assistant_tokens_mask=bool(self.return_assistant_tokens_mask),
         )
 
     def build_tok_params(self, model_config: ModelConfig) -> TokenizeParams:
@@ -517,6 +552,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             needs_detokenization=bool(self.echo and not self.return_token_ids),
             max_total_tokens_param="max_model_len",
             max_output_tokens_param=max_output_tokens_param,
+            return_token_offsets=bool(self.return_token_offsets),
         )
 
     # Default sampling parameters for chat completion requests
@@ -574,6 +610,18 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 "min_p", self._DEFAULT_SAMPLING_PARAMS["min_p"]
             )
 
+        # Merge server-default stop_token_ids (e.g., model-specific tokens
+        # like </call> for gpt-oss) with any request-specified ones
+        stop_token_ids = self.stop_token_ids
+        default_stop_ids = default_sampling_params.get("stop_token_ids")
+        if default_stop_ids:
+            if not stop_token_ids:
+                stop_token_ids = list(default_stop_ids)
+            else:
+                stop_token_ids = list(
+                    dict.fromkeys([*stop_token_ids, *default_stop_ids])
+                )
+
         prompt_logprobs = self.prompt_logprobs
         if prompt_logprobs is None and self.echo:
             prompt_logprobs = self.top_logprobs
@@ -625,7 +673,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             min_p=min_p,
             seed=self.seed,
             stop=self.stop,
-            stop_token_ids=self.stop_token_ids,
+            stop_token_ids=stop_token_ids,
             logprobs=self.top_logprobs if self.logprobs else None,
             prompt_logprobs=prompt_logprobs,
             ignore_eos=self.ignore_eos,
@@ -952,8 +1000,8 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     response_format: Any | None = None
     seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = Field(default_factory=list)
-    temperature: float | None = 0.7
-    top_p: float | None = 1.0
+    temperature: float | None = None
+    top_p: float | None = None
     user: str | None = None
     tool_choice: Literal["none"] | None = "none"
     include_reasoning: bool = True
@@ -962,8 +1010,8 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     best_of: int | None = None
     use_beam_search: bool = False
     top_k: int | None = None
-    min_p: float | None = 0.0
-    repetition_penalty: float | None = 1.0
+    min_p: float | None = None
+    repetition_penalty: float | None = None
     length_penalty: float | None = 1.0
     early_stopping: bool = False
     structured_outputs: StructuredOutputsParams | None = None
@@ -972,9 +1020,16 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     continue_final_message: bool = False
     chat_template: str | None = None
     chat_template_kwargs: dict[str, Any] | None = None
+    media_io_kwargs: dict[str, dict[str, Any]] | None = None
+    mm_processor_kwargs: dict[str, Any] | None = None
+    priority: int = Field(default=0, ge=_INT64_MIN, le=_INT64_MAX)
+    cache_salt: str | None = None
     include_stop_str_in_output: bool = False
     guided_decoding_backend: str | None = None
     echo: bool = False
+    # None falls back to the server-level --return-tokens-as-token-ids default,
+    # matching ChatCompletionRequest.return_tokens_as_token_ids.
+    return_tokens_as_token_ids: bool | None = None
     return_token_ids: bool = False
 
     @model_validator(mode="before")

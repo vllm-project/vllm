@@ -128,11 +128,13 @@ class IncrementalLexer:
     def flush(self) -> list[LexToken]:
         tokens: list[LexToken] = []
         if self.buffer:
+            tokens.extend(self._drain(final=True))
+        if self.buffer:
             tokens.append(LexToken(self.content_terminal, self.buffer))
             self.buffer = ""
         return tokens
 
-    def _drain(self) -> list[LexToken]:
+    def _drain(self, *, final: bool = False) -> list[LexToken]:
         tokens: list[LexToken] = []
         first_chars = self._literal_first_chars
         content_terminal = self.content_terminal
@@ -161,11 +163,22 @@ class IncrementalLexer:
                 ):
                     best_match = (name, lit, len(lit))
 
-            if self.buffer in prefix_set:
+            # If the current buffer is both a complete literal and the prefix
+            # of a longer literal, wait for the next chunk. For example,
+            # "<invoke name=" should not be emitted before the next chunk
+            # proves whether this is the quoted form '<invoke name="'.
+            if self.buffer in prefix_set and not final:
                 if best_match is not None:
-                    tokens.append(LexToken(best_match[0], best_match[1]))
-                    self.buffer = self.buffer[best_match[2] :]
-                    continue
+                    longer_match = False
+                    for lit, _ in literals_by_first.get(first, ()):
+                        if len(lit) > best_match[2] and lit.startswith(self.buffer):
+                            longer_match = True
+                            break
+                    if not longer_match:
+                        tokens.append(LexToken(best_match[0], best_match[1]))
+                        self.buffer = self.buffer[best_match[2] :]
+                        continue
+                    break
                 else:
                     break
 

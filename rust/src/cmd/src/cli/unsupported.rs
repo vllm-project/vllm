@@ -526,39 +526,6 @@ pub struct ServerUnsupportedArgs {
     #[arg(long)]
     pub disable_access_log_for_endpoints: Option<Noop>,
 
-    /// Allow credentials.
-    #[arg(
-        long,
-        visible_alias = "no-allow-credentials",
-        default_missing_value = "true",
-        num_args = 0..=1
-    )]
-    pub allow_credentials: Option<Unsupported>,
-
-    /// Allowed origins.
-    #[arg(long)]
-    pub allowed_origins: Option<Unsupported>,
-
-    /// Allowed methods.
-    #[arg(long)]
-    pub allowed_methods: Option<Unsupported>,
-
-    /// Allowed headers.
-    #[arg(long)]
-    pub allowed_headers: Option<Unsupported>,
-
-    /// The file path to the SSL key file.
-    #[arg(long)]
-    pub ssl_keyfile: Option<Unsupported>,
-
-    /// The file path to the SSL cert file.
-    #[arg(long)]
-    pub ssl_certfile: Option<Unsupported>,
-
-    /// The CA certificates file.
-    #[arg(long)]
-    pub ssl_ca_certs: Option<Unsupported>,
-
     /// Refresh SSL Context when SSL certificate files change
     #[arg(
         long,
@@ -567,15 +534,6 @@ pub struct ServerUnsupportedArgs {
         num_args = 0..=1
     )]
     pub enable_ssl_refresh: Option<Unsupported>,
-
-    /// Whether client certificate is required (see stdlib ssl module's).
-    #[arg(long)]
-    pub ssl_cert_reqs: Option<Unsupported>,
-
-    /// SSL cipher suites for HTTPS (TLS 1.2 and below only).
-    /// Example: 'ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-CHACHA20-POLY1305'
-    #[arg(long)]
-    pub ssl_ciphers: Option<Unsupported>,
 
     /// FastAPI root_path when app is behind a path based routing proxy.
     #[arg(long)]

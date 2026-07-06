@@ -112,7 +112,7 @@ class _StatsKey:
 
     # Maps metric name -> _MetricType value
     TYPES = "types"
-    # Maps metric name -> observed value (number or list)
+    # Maps metric name -> {label values tuple -> observed value (number or list)}
     DATA = "data"
 
 
@@ -125,15 +125,17 @@ class OffloadingConnectorStats(KVConnectorStats):
 
         {
             _StatsKey.TYPES: {name: _MetricType.*, ...},
-            _StatsKey.DATA:  {name: value, ...},
+            _StatsKey.DATA:  {name: {labelvalues: value, ...}, ...},
         }
 
     This structure is self-describing: it survives IPC serialization
     without needing the full ``OffloadingMetricMetadata`` objects on the
     receiving side.
 
-    Counter values are aggregated by summing, gauge values use the latest
-    snapshot, and histogram values are lists of observed samples.
+    Counter values are aggregated by summing per-label-tuple, gauge values
+    use the latest snapshot per-label-tuple, and histogram values are lists of
+    observed samples per-label-tuple. Unlabeled metrics use ``()`` as their
+    labelvalues tuple.
     """
 
     def __post_init__(self):
@@ -160,26 +162,32 @@ class OffloadingConnectorStats(KVConnectorStats):
         assert isinstance(other, OffloadingConnectorStats)
         other_types = other._types
         other_values = other._values
-        for key, value in other_values.items():
+        for key, other_label_values in other_values.items():
             type_str = other_types.get(key)
             if type_str is None:
                 raise AssertionError(f"Unknown offloading stats key: {key}")
             self._types.setdefault(key, type_str)
-            if type_str == _MetricType.HISTOGRAM:
-                assert isinstance(value, list)
-                if key not in self._values:
-                    self._values[key] = value
+            current_label_values = self._values.setdefault(key, {})
+            for labelvalues, value in other_label_values.items():
+                if type_str == _MetricType.HISTOGRAM:
+                    assert isinstance(value, list)
+                    if labelvalues not in current_label_values:
+                        current_label_values[labelvalues] = list(value)
+                    else:
+                        assert isinstance(current_label_values[labelvalues], list)
+                        current_label_values[labelvalues].extend(value)
+                elif type_str == _MetricType.COUNTER:
+                    assert isinstance(value, int | float)
+                    current_label_values[labelvalues] = (
+                        current_label_values.get(labelvalues, 0) + value
+                    )
+                elif type_str == _MetricType.GAUGE:
+                    assert isinstance(value, int | float)
+                    current_label_values[labelvalues] = value
                 else:
-                    assert isinstance(self._values[key], list)
-                    self._values[key].extend(value)
-            elif type_str == _MetricType.COUNTER:
-                assert isinstance(value, int | float)
-                self._values[key] = self._values.get(key, 0) + value
-            elif type_str == _MetricType.GAUGE:
-                assert isinstance(value, int | float)
-                self._values[key] = value
-            else:
-                raise AssertionError(f"Unknown metric type '{type_str}' for key: {key}")
+                    raise AssertionError(
+                        f"Unknown metric type '{type_str}' for key: {key}"
+                    )
         return self
 
     def reduce(self) -> dict[str, int | float]:
@@ -190,44 +198,62 @@ class OffloadingConnectorStats(KVConnectorStats):
         stats for the last time interval.
         """
         return_dict: dict[str, int | float] = {}
-        for key, value in self._values.items():
+        for key, label_value_map in self._values.items():
             type_str = self._types.get(key)
             if type_str is None:
                 raise AssertionError(f"Unknown offloading stats key: {key}")
-            if type_str == _MetricType.HISTOGRAM:
-                assert isinstance(value, list)
-                return_dict[f"{key}_count"] = len(value)
-                return_dict[f"{key}_sum"] = sum(value)
-            elif type_str in (_MetricType.COUNTER, _MetricType.GAUGE):
-                assert isinstance(value, int | float)
-                return_dict[key] = value
-            else:
-                raise AssertionError(f"Unknown metric type '{type_str}' for key: {key}")
+            for labelvalues, value in label_value_map.items():
+                key_with_labels = f"{key}:{labelvalues}" if labelvalues else key
+                if type_str == _MetricType.HISTOGRAM:
+                    assert isinstance(value, list)
+                    return_dict[f"{key_with_labels}_count"] = len(value)
+                    return_dict[f"{key_with_labels}_sum"] = sum(value)
+                elif type_str in (_MetricType.COUNTER, _MetricType.GAUGE):
+                    assert isinstance(value, int | float)
+                    return_dict[key_with_labels] = value
+                else:
+                    raise AssertionError(
+                        f"Unknown metric type '{type_str}' for key: {key}"
+                    )
         return return_dict
 
     def is_empty(self) -> bool:
         return not self.data.get(_StatsKey.DATA)
 
     def increase_counter(
-        self, counter_name: str, counter_increase_value: int | float
+        self,
+        counter_name: str,
+        counter_increase_value: int | float,
+        labelvalues: tuple[str, ...] = (),
     ) -> None:
         """Increase a counter on the stats payload."""
         self._types.setdefault(counter_name, _MetricType.COUNTER)
-        self._values[counter_name] = (
-            self._values.get(counter_name, 0) + counter_increase_value
+        counter_values = self._values.setdefault(counter_name, {})
+        counter_values[labelvalues] = (
+            counter_values.get(labelvalues, 0) + counter_increase_value
         )
 
-    def set_gauge(self, gauge_name: str, gauge_value: int | float) -> None:
+    def set_gauge(
+        self,
+        gauge_name: str,
+        gauge_value: int | float,
+        labelvalues: tuple[str, ...] = (),
+    ) -> None:
         """Set a gauge snapshot on the stats payload."""
         self._types.setdefault(gauge_name, _MetricType.GAUGE)
-        self._values[gauge_name] = gauge_value
+        gauge_values = self._values.setdefault(gauge_name, {})
+        gauge_values[labelvalues] = gauge_value
 
     def observe_histogram(
-        self, histogram_name: str, histogram_value: int | float
+        self,
+        histogram_name: str,
+        histogram_value: int | float,
+        labelvalues: tuple[str, ...] = (),
     ) -> None:
         """Record a histogram observation on the stats payload."""
         self._types.setdefault(histogram_name, _MetricType.HISTOGRAM)
-        self._values.setdefault(histogram_name, []).append(histogram_value)
+        histogram_values = self._values.setdefault(histogram_name, {})
+        histogram_values.setdefault(labelvalues, []).append(histogram_value)
 
 
 class OffloadPromMetrics(KVConnectorPromMetrics):
@@ -255,7 +281,10 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
 
         self._observe_deprecated_metrics = issubclass(spec_cls, CPUOffloadingSpec)
         self._offloading_metric_defs: dict[str, PromMetricT] = {}
-        self.offloading_metrics: dict[tuple[int, str], PromMetricT] = {}
+        # (engine_idx, metric_name, labelvalues) -> metric with bound labels
+        self.offloading_metrics: dict[
+            tuple[int, str, tuple[str, ...]], PromMetricT
+        ] = {}
 
         self._counter_kv_bytes = self._counter_cls(
             name=_DEPRECATED_TOTAL_BYTES,
@@ -301,10 +330,6 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             self._offloading_metric_defs[metric_name] = self._create_metric(
                 metric_name, metadata
             )
-            for engine_idx, labelvalues in per_engine_labelvalues.items():
-                self.offloading_metrics[(engine_idx, metric_name)] = (
-                    self._offloading_metric_defs[metric_name].labels(*labelvalues)
-                )
 
     def _create_metric(
         self, metric_name: str, metadata: OffloadingMetricMetadata
@@ -312,7 +337,7 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         kwargs: dict[str, Any] = {
             "name": metric_name,
             "documentation": metadata.documentation,
-            "labelnames": self._labelnames,
+            "labelnames": self._labelnames + list(metadata.labelnames),
         }
         if isinstance(metadata, OffloadingCounterMetadata):
             metric_cls = self._counter_cls
@@ -326,11 +351,37 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
             raise AssertionError(f"Unknown offloading metric metadata: {metadata}")
         return metric_cls(**kwargs)
 
+    def _get_prometheus_metric(
+        self,
+        metric_name: str,
+        labelvalues: tuple[str, ...],
+        engine_idx: int,
+    ) -> PromMetric:
+        metadata = self._offloading_metric_metadata[metric_name]
+        if len(labelvalues) != len(metadata.labelnames):
+            raise AssertionError(
+                f"Metric {metric_name} expects {len(metadata.labelnames)} labels, "
+                f"got {len(labelvalues)}"
+            )
+        key = (engine_idx, metric_name, labelvalues)
+        prom_metric = self.offloading_metrics.get(key)
+        if prom_metric is None:
+            engine_labelvalues = self.per_engine_labelvalues[engine_idx]
+            prom_metric = self._offloading_metric_defs[metric_name].labels(
+                *(engine_labelvalues + list(labelvalues))
+            )
+            self.offloading_metrics[key] = prom_metric
+        return prom_metric
+
     def _increase_counter(
-        self, metric_name: str, value: int | float, engine_idx: int
+        self,
+        metric_name: str,
+        value: int | float,
+        labelvalues: tuple[str, ...],
+        engine_idx: int,
     ) -> None:
-        self.offloading_metrics[(engine_idx, metric_name)].inc(value)
-        if not self._observe_deprecated_metrics:
+        self._get_prometheus_metric(metric_name, labelvalues, engine_idx).inc(value)
+        if labelvalues or not self._observe_deprecated_metrics:
             return
         # Keep deprecated CPU offload transfer metrics updated during the
         # transition to flat metric names.
@@ -343,15 +394,26 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         elif metric_name == _TransferMetricName.STORE_TIME:
             self.counter_kv_transfer_time[(engine_idx, _TransferType.STORE)].inc(value)
 
-    def _set_gauge(self, metric_name: str, value: int | float, engine_idx: int) -> None:
-        self.offloading_metrics[(engine_idx, metric_name)].set(value)
+    def _set_gauge(
+        self,
+        metric_name: str,
+        value: int | float,
+        labelvalues: tuple[str, ...],
+        engine_idx: int,
+    ) -> None:
+        self._get_prometheus_metric(metric_name, labelvalues, engine_idx).set(value)
 
     def _observe_histogram(
-        self, metric_name: str, value: list[int | float], engine_idx: int
+        self,
+        metric_name: str,
+        value: list[int | float],
+        labelvalues: tuple[str, ...],
+        engine_idx: int,
     ) -> None:
+        prom_metric = self._get_prometheus_metric(metric_name, labelvalues, engine_idx)
         for observation in value:
-            self.offloading_metrics[(engine_idx, metric_name)].observe(observation)
-            if not self._observe_deprecated_metrics:
+            prom_metric.observe(observation)
+            if labelvalues or not self._observe_deprecated_metrics:
                 continue
             # Keep deprecated CPU offload transfer metrics updated during the
             # transition to flat metric names.
@@ -368,20 +430,23 @@ class OffloadPromMetrics(KVConnectorPromMetrics):
         """Observe transfer statistics."""
         metric_types = transfer_stats_data.get(_StatsKey.TYPES, {})
         metric_data = transfer_stats_data.get(_StatsKey.DATA, {})
-        for key, value in metric_data.items():
+        for key, label_value_map in metric_data.items():
             type_str = metric_types.get(key)
             if type_str is None:
                 raise AssertionError(f"Unknown offloading stats key: {key}")
             assert key in self._offloading_metric_defs
-            if type_str == _MetricType.COUNTER:
-                assert isinstance(value, int | float)
-                self._increase_counter(key, value, engine_idx)
-            elif type_str == _MetricType.GAUGE:
-                assert isinstance(value, int | float)
-                self._set_gauge(key, value, engine_idx)
-            elif type_str == _MetricType.HISTOGRAM:
-                assert isinstance(value, list)
-                assert all(isinstance(v, int | float) for v in value)
-                self._observe_histogram(key, value, engine_idx)
-            else:
-                raise AssertionError(f"Unknown metric type '{type_str}' for key: {key}")
+            for labelvalues, value in label_value_map.items():
+                if type_str == _MetricType.COUNTER:
+                    assert isinstance(value, int | float)
+                    self._increase_counter(key, value, labelvalues, engine_idx)
+                elif type_str == _MetricType.GAUGE:
+                    assert isinstance(value, int | float)
+                    self._set_gauge(key, value, labelvalues, engine_idx)
+                elif type_str == _MetricType.HISTOGRAM:
+                    assert isinstance(value, list)
+                    assert all(isinstance(v, int | float) for v in value)
+                    self._observe_histogram(key, value, labelvalues, engine_idx)
+                else:
+                    raise AssertionError(
+                        f"Unknown metric type '{type_str}' for key: {key}"
+                    )

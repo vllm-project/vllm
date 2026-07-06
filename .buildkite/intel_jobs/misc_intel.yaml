@@ -5,6 +5,10 @@ steps:
 - label: V1 Core + KV + Metrics
   timeout_in_minutes: 30
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -31,6 +35,10 @@ steps:
 - label: V1 Sample + Logits
   timeout_in_minutes: 30
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -57,17 +65,48 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      'pip install lm_eval[api]>=0.4.12 &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
       pytest -v -s v1/logits_processors --ignore=v1/logits_processors/test_custom_online.py --ignore=v1/logits_processors/test_custom_offline.py &&
       pytest -v -s v1/test_oracle.py &&
       pytest -v -s v1/test_request.py &&
       pytest -v -s v1/test_outputs.py &&
-      pytest -v -s v1/sample/test_topk_topp_sampler.py'
+      pytest -v -s v1/sample/test_topk_topp_sampler.py &&
+      pytest -v -s v1/sample/test_logprobs.py &&
+      pytest -v -s v1/sample/test_logprobs_e2e.py'
+
+- label: Basic Models Tests (Initialization)
+  timeout_in_minutes: 60
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/
+    - tests/models/test_initialization.py
+    - tests/models/registry.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'export VLLM_XPU_FUSED_MOE_USE_REF=1 &&
+      cd tests &&
+      pytest -v -s models/test_initialization.py::test_can_initialize_large_subset[Eagle3MiniMaxM2ForCausalLM]'
 
 - label: XPU CPU Offload
   timeout_in_minutes: 60
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -88,10 +127,39 @@ steps:
       pytest -v -s v1/kv_offload &&
       pytest -v -s v1/kv_connector/unit/test_offloading_connector.py'
 
+- label: NixlConnector PD accuracy (2 GPUs)
+  timeout_in_minutes: 60
+  num_devices: 2
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/v1/worker/kv_connector_model_runner_mixin.py
+    - tests/v1/kv_connector/nixl_integration/
+    - vllm/platforms/xpu.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh'
+
 - label: Regression
   key: regression
   timeout_in_minutes: 30
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -114,7 +182,7 @@ steps:
   commands:
   - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install modelscope &&
+      'pip install modelscope\<1.38 &&
       cd tests &&
       pytest -v -s test_regression.py'
 
@@ -123,6 +191,10 @@ steps:
   timeout_in_minutes: 30
   num_devices: 2
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -154,6 +226,10 @@ steps:
   key: async-engine-inputs-utils-worker
   timeout_in_minutes: 30
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:

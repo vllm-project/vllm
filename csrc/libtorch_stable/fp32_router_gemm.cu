@@ -100,7 +100,7 @@ __global__ __launch_bounds__(128, 1) void fp32_router_gemm_kernel(
   }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("griddepcontrol.wait;");
+  cudaGridDependencySynchronize();
 #endif
 
   for (int ki = 0; ki < k_iterations; ki++) {
@@ -146,7 +146,7 @@ __global__ __launch_bounds__(128, 1) void fp32_router_gemm_kernel(
   }
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
-  asm volatile("griddepcontrol.launch_dependents;");
+  cudaTriggerProgrammaticLaunchCompletion();
 #endif
 }
 
