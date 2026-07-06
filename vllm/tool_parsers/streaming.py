@@ -138,6 +138,7 @@ def extract_required_tool_call_streaming(
     function_name_returned: bool,
     tool_call_idx: int | None,
     tool_call_id_type: str,
+    tokenizer: "TokenizerLike",
 ) -> tuple[DeltaMessage | None, bool]:
     if current_text is None or current_text == "":
         # if the current text is empty, we cannot parse it
@@ -188,11 +189,19 @@ def extract_required_tool_call_streaming(
                     current_tool_call = obj[-2]
 
                 function_name_returned = True
-                tool_call_id = make_tool_call_id(
-                    id_type=tool_call_id_type,
-                    func_name=current_tool_call["name"],
-                    idx=tool_call_idx,
-                )
+
+                if is_mistral_tokenizer(tokenizer):
+                    # Import mistral_common only if we need it.
+                    from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
+
+                    tool_call_id = MistralToolCall.generate_random_id()
+                else:
+
+                    tool_call_id = make_tool_call_id(
+                        id_type=tool_call_id_type,
+                        func_name=current_tool_call["name"],
+                        idx=tool_call_idx,
+                    )
                 delta_message = DeltaMessage(
                     tool_calls=[
                         DeltaToolCall(
