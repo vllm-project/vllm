@@ -517,8 +517,16 @@ Here is a summary of a plugin file:
 ??? code
 
     ```python
-
-    # import the required packages
+    from collections.abc import Sequence
+    from vllm.entrypoints.openai.protocol import (
+        ChatCompletionRequest,
+        DeltaMessage,
+        ResponsesRequest,
+    )
+    from vllm.model_executor.models.interfaces import TokenizerLike
+    from vllm.tool_parsers.base import ToolParser
+    from vllm.tool_parsers.protocol import ExtractedToolCallInformation
+    from vllm.tool_parsers.tool_parser_manager import ToolParserManager
 
     # define a tool parser and register it to vllm
     # the name list in register_module can be used

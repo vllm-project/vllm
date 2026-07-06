@@ -27,6 +27,7 @@ You can pass a single image to the `'image'` field of the multi-modal dictionary
 ??? code
 
     ```python
+    from PIL import Image
     from vllm import LLM
 
     llm = LLM(model="llava-hf/llava-1.5-7b-hf")
@@ -35,7 +36,7 @@ You can pass a single image to the `'image'` field of the multi-modal dictionary
     prompt = "USER: <image>\nWhat is the content of this image?\nASSISTANT:"
 
     # Load the image using PIL.Image
-    image = PIL.Image.open(...)
+    image = Image.open(...)
 
     # Single prompt inference
     outputs = llm.generate({
@@ -48,8 +49,8 @@ You can pass a single image to the `'image'` field of the multi-modal dictionary
         print(generated_text)
 
     # Batch inference
-    image_1 = PIL.Image.open(...)
-    image_2 = PIL.Image.open(...)
+    image_1 = Image.open(...)
+    image_2 = Image.open(...)
     outputs = llm.generate(
         [
             {
@@ -75,6 +76,7 @@ To substitute multiple images inside the same text prompt, you can pass in a lis
 ??? code
 
     ```python
+    from PIL import Image
     from vllm import LLM
 
     llm = LLM(
@@ -88,8 +90,8 @@ To substitute multiple images inside the same text prompt, you can pass in a lis
     prompt = "<|user|>\n<|image_1|>\n<|image_2|>\nWhat is the content of each image?<|end|>\n<|assistant|>\n"
 
     # Load the images using PIL.Image
-    image1 = PIL.Image.open(...)
-    image2 = PIL.Image.open(...)
+    image1 = Image.open(...)
+    image2 = Image.open(...)
 
     outputs = llm.generate({
         "prompt": prompt,
@@ -108,6 +110,7 @@ If using the [LLM.chat](../models/generative_models.md#llmchat) method, you can 
 ??? code
 
     ```python
+    import torch
     from vllm import LLM
     from vllm.assets.image import ImageAsset
 
@@ -156,13 +159,29 @@ Multi-image input can be extended to perform video captioning. We show this with
 ??? code
 
     ```python
+    import base64
+    import io
+
+    from PIL import Image
     from vllm import LLM
+
+
+    def encode_image(image: Image.Image) -> str:
+        """Encode a PIL Image to base64 string."""
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG")
+        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
 
     # Specify the maximum number of frames per video to be 4. This can be changed.
     llm = LLM("Qwen/Qwen2-VL-2B-Instruct", limit_mm_per_prompt={"image": 4})
 
+    # Load your video and extract frames, making sure it only has
+    # the number of frames specified earlier.
+    # Example: use cv2 or decord to load and sample frames from a video file.
+    video_frames: list[Image.Image] = [...]  # list of PIL Image frames
+
     # Create the request payload.
-    video_frames = ... # load your video making sure it only has the number of frames specified earlier.
     message = {
         "role": "user",
         "content": [
@@ -173,7 +192,7 @@ Multi-image input can be extended to perform video captioning. We show this with
         ],
     }
     for i in range(len(video_frames)):
-        base64_image = encode_image(video_frames[i]) # base64 encoding.
+        base64_image = encode_image(video_frames[i])  # base64 encoding.
         new_image = {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"}}
         message["content"].append(new_image)
 
@@ -456,6 +475,8 @@ You must enable this feature via `enable_mm_embeds=True`.
 ??? code
 
     ```python
+    import torch
+    from PIL import Image
     from vllm import LLM
 
     # Inference with image embeddings as input
@@ -499,11 +520,12 @@ You must enable this feature via `enable_mm_embeds=True`.
         limit_mm_per_prompt={"image": 4},
         enable_mm_embeds=True,
     )
+    images: list[Image.Image] = [...]  # load your images
     mm_data = {
         "image": {
             # Shape: (num_images, num_slices, hidden_size)
             # num_slices can differ for each image
-            "image_embeds": [torch.load(...) for image in images],  
+            "image_embeds": [torch.load(...) for image in images],
             # Shape: (num_images, 2)
             # image_sizes is needed to calculate details of the sliced image.
             "image_sizes": [image.size for image in images],
@@ -772,6 +794,7 @@ Then, you can use the OpenAI client as follows:
 
     openai_api_key = "EMPTY"
     openai_api_base = "http://localhost:8000/v1"
+    model = "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
 
     client = OpenAI(
         api_key=openai_api_key,
@@ -858,11 +881,42 @@ When you extract video frames on the client side and send them as `video/jpeg` (
 ??? code
 
     ```python
+    import base64
+    import io
+    from pathlib import Path
+
+    import cv2
     from openai import OpenAI
+    from PIL import Image
+
+
+    def extract_frames(video_path: str, num_frames: int = 32) -> list[Image.Image]:
+        """Extract frames from a video file."""
+        cap = cv2.VideoCapture(video_path)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        indices = [int(i * total_frames / num_frames) for i in range(num_frames)]
+        frames = []
+        for idx in indices:
+            cap.set(cv2.CAP_PROP_POS_FRAMES, idx)
+            ret, frame = cap.read()
+            if ret:
+                frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                frames.append(Image.fromarray(frame_rgb))
+        cap.release()
+        return frames
+
+
+    def encode_image(image: Image.Image) -> str:
+        """Encode a PIL Image to base64 string."""
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG")
+        return base64.b64encode(buffer.getvalue()).decode("utf-8")
+
 
     client = OpenAI(base_url="http://localhost:8000/v1", api_key="EMPTY")
 
     # Client-side frame extraction
+    video_path = "path/to/video.mp4"
     frames = extract_frames(video_path, num_frames=32)
     frames_b64 = ",".join([encode_image(f) for f in frames])
     video_url = f"data:video/jpeg;base64,{frames_b64}"
@@ -951,6 +1005,7 @@ Then, you can use the OpenAI client as follows:
 
     openai_api_key = "EMPTY"
     openai_api_base = "http://localhost:8000/v1"
+    model = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
 
     client = OpenAI(
         api_key=openai_api_key,
@@ -994,6 +1049,19 @@ Alternatively, you can pass `audio_url`, which is the audio counterpart of `imag
 ??? code
 
     ```python
+    from openai import OpenAI
+
+    openai_api_key = "EMPTY"
+    openai_api_base = "http://localhost:8000/v1"
+    model = "fixie-ai/ultravox-v0_5-llama-3_2-1b"
+
+    client = OpenAI(
+        api_key=openai_api_key,
+        base_url=openai_api_base,
+    )
+
+    audio_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/winning_call.mp3"
+
     chat_completion_from_url = client.chat.completions.create(
         messages=[
             {
@@ -1052,7 +1120,12 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
 ??? code
 
     ```python
+    import torch
+    from openai import OpenAI
     from vllm.utils.serial_utils import tensor2base64
+
+    openai_api_key = "EMPTY"
+    openai_api_base = "http://localhost:8000/v1"
 
     client = OpenAI(
         # defaults to os.environ.get("OPENAI_API_KEY")
@@ -1062,6 +1135,7 @@ The following example demonstrates how to pass image embeddings to the OpenAI se
 
     # Basic usage - this is equivalent to the LLaVA example for offline inference
     model = "llava-hf/llava-1.5-7b-hf"
+    image_url = "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/2560px-Gfp-wisconsin-madison-the-nature-boardwalk.jpg"
     embeds = {
         "type": "image_embeds",
         "image_embeds": tensor2base64(torch.load(...)),  # Shape: (image_feature_size, hidden_size)

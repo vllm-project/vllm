@@ -180,7 +180,11 @@ Note that you can use reasoning with any provided structured outputs feature. Th
 ??? code
 
     ```python
+    from openai import OpenAI
     from pydantic import BaseModel
+
+    client = OpenAI(base_url="http://localhost:8000/v1", api_key="-")
+    model = client.models.list().data[0].id
 
 
     class People(BaseModel):

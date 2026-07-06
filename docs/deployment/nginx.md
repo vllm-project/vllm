@@ -96,7 +96,7 @@ Notes:
         -v $hf_cache_dir:/root/.cache/huggingface/ \
         -p 8081:8000 \
         --name vllm0 vllm \
-        --model meta-llama/Llama-2-7b-chat-hf
+        meta-llama/Llama-2-7b-chat-hf
     docker run \
         -itd \
         --ipc host \
@@ -106,7 +106,7 @@ Notes:
         -v $hf_cache_dir:/root/.cache/huggingface/ \
         -p 8082:8000 \
         --name vllm1 vllm \
-        --model meta-llama/Llama-2-7b-chat-hf
+        meta-llama/Llama-2-7b-chat-hf
     ```
 
 !!! note
