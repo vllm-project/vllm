@@ -19,25 +19,6 @@ from vllm.utils.math_utils import cdiv
 
 logger = init_logger(__name__)
 
-_AUTO_WARMUP_MAX_TOKENS = 16_384
-_DEFAULT_TOKEN_SIZE_CANDIDATES = (
-    1,
-    2,
-    4,
-    8,
-    16,
-    32,
-    64,
-    128,
-    256,
-    512,
-    1024,
-    2048,
-    4096,
-    8192,
-    16_384,
-)
-
 
 def _compute_mhc_pre_num_split(
     *,
@@ -72,11 +53,10 @@ def _select_mhc_warmup_token_sizes(
     if max_tokens <= 0:
         return []
 
-    max_auto_tokens = min(max_tokens, _AUTO_WARMUP_MAX_TOKENS)
-    candidates = list(_DEFAULT_TOKEN_SIZE_CANDIDATES)
+    # Warm up every size to avoid TileLang JIT during inference.
+    candidates = list(range(1, max_tokens + 1))
     candidates.extend(cudagraph_capture_sizes)
-    candidates.append(max_auto_tokens)
-    return _normalize_token_sizes(candidates, max_tokens=max_auto_tokens)
+    return _normalize_token_sizes(candidates, max_tokens=max_tokens)
 
 
 def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
@@ -128,30 +108,81 @@ def _warmup_layer_mhc(
         device=device,
     )
 
-    for size in token_sizes:
+    # Use real RMSNorm weights so norm-fused TileLang kernels are warmed up
+    # with the same tensors passed at runtime.
+    norm_configs = (
+        (
+            layer.hc_attn_fn,
+            layer.hc_attn_scale,
+            layer.hc_attn_base,
+            layer.attn_norm.weight.data,
+            float(layer.attn_norm.variance_epsilon),
+        ),
+        (
+            layer.hc_ffn_fn,
+            layer.hc_ffn_scale,
+            layer.hc_ffn_base,
+            layer.ffn_norm.weight.data,
+            float(layer.ffn_norm.variance_epsilon),
+        ),
+    )
+
+    for i, size in enumerate(token_sizes):
+        if i % 1000 == 0:
+            logger.info(
+                "mHC warmup progress: %d/%d (size=%d)",
+                i,
+                len(token_sizes),
+                size,
+            )
         residual_slice = residual[:size]
-        for fn, scale, base in (
-            (layer.hc_attn_fn, layer.hc_attn_scale, layer.hc_attn_base),
-            (layer.hc_ffn_fn, layer.hc_ffn_scale, layer.hc_ffn_base),
-        ):
+        # Dummy inputs for the fused post+pre variant.
+        x_dummy = torch.zeros(
+            size, hidden_size, dtype=torch.bfloat16, device=device
+        )
+        post_mix_dummy = torch.zeros(
+            size, hc_mult, 1, dtype=torch.float32, device=device
+        )
+        comb_mix_dummy = torch.zeros(
+            size, hc_mult, hc_mult, dtype=torch.float32, device=device
+        )
+        for fn, scale, base, norm_weight, norm_eps in norm_configs:
             layer_input, post_mix, comb_mix = layer.hc_pre(
                 residual_slice,
                 fn,
                 scale,
                 base,
+                norm_weight=norm_weight,
+                norm_eps=norm_eps,
             )
             layer.hc_post(layer_input, residual_slice, post_mix, comb_mix)
+
+            # Warm up the fused post+pre variant used after the first layer.
+            torch.ops.vllm.mhc_fused_post_pre_tilelang(
+                x_dummy,
+                residual_slice,
+                post_mix_dummy,
+                comb_mix_dummy,
+                fn,
+                scale,
+                base,
+                layer.rms_norm_eps,
+                layer.hc_eps,
+                layer.hc_eps,
+                layer.hc_post_alpha,
+                layer.hc_sinkhorn_iters,
+                n_splits=1,
+                tile_n=1,
+                norm_weight=norm_weight,
+                norm_eps=norm_eps,
+            )
 
 
 def _warmup_hc_head(
     model: torch.nn.Module,
     token_sizes: list[int],
 ) -> None:
-    # Upstream a8887c208 ("[DSV4] aiter mhc support (ROCm)") refactored
-    # ``hc_head`` from a free function into the ``HCHeadOp`` CustomOp
-    # instance attached to the model as ``hc_head_op``. We call through
-    # that instance so the warmup exercises the same dispatched
-    # implementation as the inference path.
+    # Exercise the same HCHeadOp instance used during inference.
     hc_head_op = getattr(model, "hc_head_op", None)
     if hc_head_op is None:
         return
@@ -186,9 +217,7 @@ def deepseek_v4_mhc_warmup(
     max_tokens: int,
     cudagraph_capture_sizes: list[int] | None = None,
 ) -> None:
-    # Cheap model-type gate before walking ``model.modules()``. The class
-    # walk below is O(num_layers) and shows up in startup time on very
-    # large checkpoints; bail out for any model that is not DeepSeek V4.
+    # Bail out early for non-DeepSeek-V4 models to avoid walking modules.
     config = getattr(model, "config", None)
     model_type = getattr(config, "model_type", None) if config is not None else None
     if model_type is not None and model_type != "deepseek_v4":
