@@ -65,12 +65,16 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         )
         self.gemm1_clamp_limit = quant_config.gemm1_clamp_limit
         self.fused_moe_impl: XpuFusedMoe | None = None
+        is_xe2_or_xe3 = torch.ops._xpu_C.is_xe2_arch() or torch.ops._xpu_C.is_xe3_arch()
+        if not is_xe2_or_xe3:
+            raise NotImplementedError(
+                "XPUExperts is only supported on Intel Xe2/Xe3 GPUs"
+            )
+        self._expects_unquantized_inputs = is_xe2_or_xe3
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        if torch.ops._xpu_C.is_xe2_arch() or torch.ops._xpu_C.is_xe3_arch():
-            return True
-        return False
+        return self._expects_unquantized_inputs
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
