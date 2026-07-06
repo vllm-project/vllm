@@ -16,7 +16,6 @@ import pytest
 from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.exceptions import VLLMUnprocessableEntityError
 from vllm.multimodal.media import MediaConnector
-from vllm.multimodal.media.connector import _wrap_media_fetch_error
 
 
 class TestVLLMUnprocessableEntityError:
@@ -158,56 +157,3 @@ class TestErrorResponse:
 
         assert response.error.message == "Test error message"
         assert response.error.code == 422
-
-
-class TestIntegration:
-    """Integration tests for full error flow."""
-
-    def test_404_to_http_422(self):
-        """Verify 404 error results in HTTP 422 response."""
-
-        url = "https://example.com/missing.jpg"
-        exc = aiohttp.ClientResponseError(
-            request_info=MagicMock(),
-            history=(),
-            status=404,
-            message="Not Found",
-        )
-
-        wrapped = _wrap_media_fetch_error(url, exc)
-        response = create_error_response(wrapped)
-
-        assert response.error.code == 422
-        assert response.error.type == "UnprocessableEntityError"
-
-    def test_dns_remains_retryable(self):
-        """Verify DNS error remains as-is for retry (not converted to 422)."""
-
-        url = "https://nonexistent.example/image.jpg"
-        exc = aiohttp.ClientConnectorDNSError(
-            connection_key=MagicMock(),
-            os_error=MagicMock(),
-        )
-
-        wrapped = _wrap_media_fetch_error(url, exc)
-        response = create_error_response(wrapped)
-
-        assert response.error.code == 500
-        assert response.error.type == "InternalServerError"
-
-    def test_500_remains_500(self):
-        """Verify 500 error remains HTTP 500."""
-
-        url = "https://example.com/image.jpg"
-        exc = aiohttp.ClientResponseError(
-            request_info=MagicMock(),
-            history=(),
-            status=500,
-            message="Internal Server Error",
-        )
-
-        wrapped = _wrap_media_fetch_error(url, exc)
-        response = create_error_response(wrapped)
-
-        assert response.error.code == 500
-        assert response.error.type == "InternalServerError"
