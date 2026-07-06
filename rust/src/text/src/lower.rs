@@ -162,6 +162,9 @@ pub fn lower_sampling_params(
         routed_experts_prompt_start,
         vllm_xargs,
         stream_interval,
+        use_beam_search: _,
+        n: _,
+        length_penalty: _,
     } = sampling_params;
 
     validate_logprobs(

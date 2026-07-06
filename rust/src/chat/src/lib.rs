@@ -495,6 +495,20 @@ impl ChatLlm {
         )
     }
 
+    /// Render, tokenize, and run beam search for one chat request.
+    ///
+    /// Reuses the same render → finalize → prompt extraction pipeline as
+    /// [`Self::chat`], but calls [`TextLlm::beam_search`] instead of
+    /// [`TextLlm::generate`].
+    pub async fn beam_search_chat(
+        &self,
+        request: ChatRequest,
+    ) -> Result<vllm_text::BeamSearchOutput> {
+        let text_request = self.processor.prepare_for_tokenization(request).await?;
+
+        self.text.beam_search(text_request).await.map_err(Error::from)
+    }
+
     /// Abort in-flight requests by their external (user-supplied) request ids.
     pub async fn abort(&self, external_ids: &[String]) -> Result<()> {
         self.text.abort(external_ids).await?;

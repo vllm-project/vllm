@@ -26,6 +26,8 @@ use vllm_chat::{
 };
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_llm::WeightVersionSpan;
+use vllm_text::BeamSearchOutput;
+use vllm_text::tokenizer::Tokenizer;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 pub(crate) use self::types::ChatCompletionRequest;
@@ -94,6 +96,33 @@ pub async fn chat_completions(
     // Like Python, report reasoning-token details only when a reasoning parser
     // is configured to count them.
     let count_reasoning_tokens = state.chat.reasoning_parser_name().is_some();
+
+    if prepared.chat_request.sampling_params.use_beam_search {
+        let beam_result = match state
+            .chat
+            .beam_search_chat(prepared.chat_request)
+            .instrument(request_span.clone())
+            .await
+        {
+            Ok(result) => result,
+            Err(error) => {
+                return chat_submit_error("failed to submit beam search chat request", error)
+                    .into_response();
+            }
+        };
+
+        let tokenizer = state.chat.text().tokenizer();
+        let response = collect_beam_search_chat_completion(
+            beam_result,
+            prepared.request_id,
+            prepared.response_model,
+            created,
+            api_server_options,
+            prepared.options,
+            tokenizer.as_ref(),
+        );
+        return Json(response).into_response();
+    }
 
     let mut chat_stream =
         match state.chat.chat(prepared.chat_request).instrument(request_span.clone()).await {
@@ -312,6 +341,100 @@ async fn collect_chat_completion(
         kv_transfer_params,
         ec_transfer_params,
     })
+}
+
+fn collect_beam_search_chat_completion(
+    beam_result: BeamSearchOutput,
+    request_id: String,
+    response_model: String,
+    created: u64,
+    ApiServerOptions {
+        enable_log_requests,
+        enable_prompt_tokens_details,
+        enable_per_request_metrics,
+        ..
+    }: ApiServerOptions,
+    ResponseOptions {
+        return_token_ids,
+        include_reasoning: _,
+        ..
+    }: ResponseOptions,
+    tokenizer: &dyn Tokenizer,
+) -> ChatCompletionResponse {
+    let usage = Usage::from_token_usage(beam_result.usage, enable_prompt_tokens_details, None);
+    let metrics = PerRequestMetrics::from_request(
+        enable_per_request_metrics,
+        vllm_llm::RequestTimestamps::default(),
+        usage.completion_tokens.unwrap_or(0),
+        None,
+    );
+
+    let choices: Vec<ChatCompletionChoice> = beam_result
+        .beams
+        .iter()
+        .enumerate()
+        .map(|(i, beam)| {
+            let generated_tokens =
+                beam.tokens[beam_result.prompt_token_ids.len()..].to_vec();
+            let openai_finish_reason = beam
+                .finish_reason
+                .as_ref()
+                .map(|fr| chat_finish_reason_to_openai(fr, false).unwrap_or("error"))
+                .unwrap_or("length");
+            let stop_reason = beam.stop_reason.map(|token_id| {
+                serde_json::Value::Number(serde_json::Number::from(token_id))
+            });
+            let decoded = tokenizer
+                .decode(&generated_tokens, false)
+                .unwrap_or_default();
+            ChatCompletionChoice {
+                index: i as u32,
+                message: ChatCompletionMessage {
+                    role: AssistantRole,
+                    content: Some(decoded).filter(|t| !t.is_empty()),
+                    refusal: None,
+                    annotations: None,
+                    audio: None,
+                    function_call: None,
+                    tool_calls: Vec::new(),
+                    reasoning: None,
+                },
+                logprobs: None,
+                finish_reason: Some(openai_finish_reason.to_string()),
+                stop_reason,
+                token_ids: return_token_ids.then_some(generated_tokens),
+                routed_experts: None,
+                weight_versions: None,
+            }
+        })
+        .collect();
+
+    if enable_log_requests {
+        info!(
+            model = %response_model,
+            prompt_tokens = usage.prompt_tokens,
+            output_tokens = usage.completion_tokens.unwrap_or(0),
+            num_beams = beam_result.beams.len(),
+            "beam search chat completion finished"
+        );
+    }
+
+    ChatCompletionResponse {
+        id: request_id,
+        object: "chat.completion".to_string(),
+        created,
+        model: response_model,
+        choices,
+        service_tier: None,
+        usage: Some(usage),
+        metrics,
+        system_fingerprint: None,
+        prompt_logprobs: None,
+        prompt_token_ids: return_token_ids.then_some(beam_result.prompt_token_ids),
+        prompt_text: None,
+        kv_transfer_params: None,
+        ec_transfer_params: None,
+    }
 }
 
 /// Convert one internal chat event stream into OpenAI chat-completion chunks.
