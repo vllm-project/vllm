@@ -216,6 +216,11 @@ class DSparkSpeculator(DFlashSpeculator):
         else:
             self.draft_token_capacity[:num_reqs].fill_(self.num_speculative_steps)
 
+    def compute_capacities(self, num_reqs: int) -> torch.Tensor | None:
+        if not self.use_draft_token_capacity:
+            return None
+        return self.draft_token_capacity[:num_reqs]
+
     def _generate_draft(
         self,
         num_reqs: int,

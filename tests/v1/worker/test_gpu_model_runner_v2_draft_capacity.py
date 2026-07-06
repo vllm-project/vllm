@@ -136,13 +136,16 @@ def test_capacity_based_verification_manager_updates_cpu_capacities():
     )
     draft_token_capacity = torch.tensor([1, 2], dtype=torch.int32, device=device)
 
-    handler.restore_batch(input_batch, draft_token_capacity)
+    handler.trim_batch(input_batch)
+    handler.update_capacities(draft_token_capacity)
     assert handler.copy_event_pending
 
     torch.accelerator.synchronize()
     handler.trim_batch(input_batch)
     assert handler.req_states.draft_token_capacity_np.tolist() == [2, 3, 1, 3]
 
+    handler.update_capacities(draft_token_capacity)
+    torch.accelerator.synchronize()
     handler.remove_request("req0")
     handler.req_states.draft_token_capacity_np.fill(3)
     handler.trim_batch(input_batch)

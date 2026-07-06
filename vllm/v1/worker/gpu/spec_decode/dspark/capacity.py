@@ -26,9 +26,6 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu.states import RequestState
 
 
-_DRAFT_TOKEN_CAPACITY_UNSET = object()
-
-
 @dataclass
 class _SamplerDecompactionState:
     num_scheduled_tokens_before_capacity: np.ndarray
@@ -63,18 +60,6 @@ class VerificationCapacityRequestStates:
         req_idx = self.req_id_to_index.pop(req_id, None)
         if req_idx is not None:
             self.draft_token_capacity_np[req_idx] = self.num_speculative_steps
-
-
-def get_draft_token_capacity(
-    speculator: object | None,
-    num_reqs: int,
-) -> torch.Tensor | None:
-    draft_token_capacity = getattr(speculator, "draft_token_capacity", None)
-    if draft_token_capacity is None:
-        return None
-    if not getattr(speculator, "use_draft_token_capacity", True):
-        return None
-    return draft_token_capacity[:num_reqs]
 
 
 def apply_draft_token_capacity(
@@ -181,12 +166,8 @@ class CapacityBasedVerificationManager:
 
     def _stage_draft_token_capacity_copy(
         self,
-        req_ids: list[str],
-        idx_mapping_np: np.ndarray,
         draft_token_capacity: torch.Tensor,
     ) -> None:
-        self.req_ids = list(req_ids)
-        self.idx_mapping_np = idx_mapping_np
         self.num_draft_tokens = self.req_states.num_speculative_steps
         self.copied_draft_token_capacity_np = None
         self.copy_event_pending = False
@@ -199,20 +180,13 @@ class CapacityBasedVerificationManager:
             self.copy_event.record()
             self.copy_event_pending = True
 
-    def _restore_draft_token_capacity(
-        self,
-        input_batch: "InputBatch",
-        draft_token_capacity: torch.Tensor | None,
-    ) -> None:
+    def update_capacities(self, draft_token_capacity: torch.Tensor | None) -> None:
         self._flush_draft_token_capacity_copy()
         if draft_token_capacity is None:
             self.clear()
             return
-        self._stage_draft_token_capacity_copy(
-            input_batch.req_ids,
-            input_batch.idx_mapping_np,
-            draft_token_capacity,
-        )
+        assert self.idx_mapping_np is not None
+        self._stage_draft_token_capacity_copy(draft_token_capacity)
 
     def _flush_draft_token_capacity_copy(self) -> bool:
         if self.copied_draft_token_capacity_np is None:
@@ -347,6 +321,8 @@ class CapacityBasedVerificationManager:
 
     def trim_batch(self, input_batch: "InputBatch") -> "InputBatch":
         self._flush_draft_token_capacity_copy()
+        self.req_ids = list(input_batch.req_ids)
+        self.idx_mapping_np = input_batch.idx_mapping_np
         if (
             input_batch.num_draft_tokens == 0
             or input_batch.num_draft_tokens_per_req is None
@@ -378,15 +354,7 @@ class CapacityBasedVerificationManager:
     def restore_batch(
         self,
         input_batch: "InputBatch",
-        draft_token_capacity: torch.Tensor | None | object = (
-            _DRAFT_TOKEN_CAPACITY_UNSET
-        ),
     ) -> "InputBatch":
-        if draft_token_capacity is not _DRAFT_TOKEN_CAPACITY_UNSET:
-            self._restore_draft_token_capacity(
-                input_batch,
-                draft_token_capacity,  # type: ignore[arg-type]
-            )
         if self.sampler_decompaction is None:
             return input_batch
         restored_batch = replace(

@@ -70,6 +70,10 @@ class BaseSpeculator(ABC):
     ) -> torch.Tensor:
         pass
 
+    def compute_capacities(self, num_reqs: int) -> torch.Tensor | None:
+        del num_reqs
+        return None
+
 
 class DraftModelSpeculator(BaseSpeculator):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):

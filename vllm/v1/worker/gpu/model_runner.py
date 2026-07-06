@@ -105,7 +105,6 @@ from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.capacity import (
     CapacityBasedVerificationManager,
-    get_draft_token_capacity,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -1528,20 +1527,14 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 mm_inputs=mm_inputs,
             )
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
-            draft_token_capacity = get_draft_token_capacity(
-                self.speculator, input_batch.num_reqs
-            )
-        else:
-            draft_token_capacity = None
+            if self.verification_capacity_manager is not None:
+                self.verification_capacity_manager.update_capacities(
+                    self.speculator.compute_capacities(input_batch.num_reqs)
+                )
 
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
-            if self.verification_capacity_manager is not None:
-                self.verification_capacity_manager.restore_batch(
-                    input_batch,
-                    draft_token_capacity,
-                )
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],
