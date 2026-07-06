@@ -13,6 +13,7 @@ if not torch.cuda.is_available():
     pytest.skip("CUDA required for draft capacity tests", allow_module_level=True)
 
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.cudagraph_utils import (
     BatchExecutionDescriptor,
     CudaGraphManager,
@@ -20,11 +21,9 @@ from vllm.v1.worker.gpu.cudagraph_utils import (
 from vllm.v1.worker.gpu.spec_decode.decompaction import (
     prepare_sampler_decompaction_metadata,
 )
-from vllm.v1.worker.gpu.spec_decode.dspark.speculator import (
+from vllm.v1.worker.gpu.spec_decode.dspark.capacity import (
+    DraftTokenCapacityHandler,
     compute_draft_token_capacity_from_confidence,
-)
-from vllm.v1.worker.gpu.spec_decode.utils import (
-    DraftTokensHandler,
     get_effective_scheduled_token_counts,
 )
 
@@ -113,22 +112,21 @@ def test_compute_draft_token_capacity_keeps_threshold_ties():
     assert draft_token_capacity.cpu().tolist() == [1, 1]
 
 
-def test_draft_tokens_handler_uses_capacity_placeholders():
+def test_draft_token_capacity_handler_updates_cpu_capacities():
     device = torch.device("cuda")
-    handler = DraftTokensHandler(device)
+    handler = DraftTokenCapacityHandler(device)
     input_batch: Any = SimpleNamespace(
         req_ids=["req0", "req1"],
         idx_mapping_np=np.array([2, 0], dtype=np.int32),
-        has_structured_output_reqs=False,
     )
-    draft_tokens = torch.zeros((2, 3), dtype=torch.int64, device=device)
     draft_token_capacity = torch.tensor([1, 2], dtype=torch.int32, device=device)
 
-    handler.set_draft_tokens(input_batch, draft_tokens, draft_token_capacity)
-
-    draft_token_ids = handler.get_draft_tokens()
-    assert draft_token_ids is not None
-    assert draft_token_ids.draft_token_ids == [[-1, -1, -1], [-1, -1, -1]]
+    handler.set_draft_token_capacities(
+        input_batch.req_ids,
+        input_batch.idx_mapping_np,
+        draft_token_capacity,
+        num_draft_tokens=3,
+    )
     assert handler.copy_event_pending
 
     draft_token_capacity_np = np.full(4, 3, dtype=np.int32)
@@ -145,6 +143,28 @@ def test_draft_tokens_handler_uses_capacity_placeholders():
         {"req1": 0},
     )
     assert draft_token_capacity_np.tolist() == [2, 3, 3, 3]
+
+
+def test_draft_token_capacity_handler_trims_structured_output_tokens():
+    device = torch.device("cuda")
+    handler = DraftTokenCapacityHandler(device)
+    draft_token_capacity = torch.tensor([1, 2], dtype=torch.int32, device=device)
+    handler.set_draft_token_capacities(
+        ["req0", "req1"],
+        np.array([0, 1], dtype=np.int32),
+        draft_token_capacity,
+        num_draft_tokens=3,
+    )
+
+    draft_token_ids = DraftTokenIds(
+        ["req0", "req1"],
+        [[11, 12, 13], [21, 22, 23]],
+    )
+
+    assert handler.trim_draft_token_ids(draft_token_ids).draft_token_ids == [
+        [11],
+        [21, 22],
+    ]
 
 
 def test_effective_scheduled_token_counts_apply_capacity_before_dispatch():

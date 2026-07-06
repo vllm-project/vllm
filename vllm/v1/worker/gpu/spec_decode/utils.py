@@ -3,83 +3,9 @@
 import numpy as np
 import torch
 
-from vllm.v1.core.sched.output import SchedulerOutput
 from vllm.v1.outputs import DraftTokenIds
 from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.input_batch import InputBatch
-
-
-def get_draft_token_capacity(
-    speculator: object | None,
-    num_reqs: int,
-) -> torch.Tensor | None:
-    draft_token_capacity = getattr(speculator, "draft_token_capacity", None)
-    if draft_token_capacity is None:
-        return None
-    if not getattr(speculator, "use_draft_token_capacity", True):
-        return None
-    return draft_token_capacity[:num_reqs]
-
-
-def get_scheduled_draft_token_counts(
-    req_ids: list[str] | tuple[str, ...],
-    draft_tokens: dict[str, list[int]],
-) -> np.ndarray:
-    return np.fromiter(
-        (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
-        dtype=np.int32,
-        count=len(req_ids),
-    )
-
-
-def apply_draft_token_capacity(
-    num_scheduled_tokens: np.ndarray,
-    scheduled_draft_tokens_per_req: np.ndarray,
-    idx_mapping_np: np.ndarray,
-    draft_token_capacity_np: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    num_draft_tokens_per_req = np.minimum(
-        scheduled_draft_tokens_per_req,
-        draft_token_capacity_np[idx_mapping_np],
-    )
-    pruned_draft_tokens_per_req = (
-        scheduled_draft_tokens_per_req - num_draft_tokens_per_req
-    )
-    return (
-        num_scheduled_tokens - pruned_draft_tokens_per_req,
-        num_draft_tokens_per_req,
-        pruned_draft_tokens_per_req,
-    )
-
-
-def get_effective_scheduled_token_counts(
-    scheduler_output: SchedulerOutput,
-    req_id_to_index: dict[str, int],
-    draft_token_capacity_np: np.ndarray,
-) -> tuple[int, int]:
-    num_tokens_per_req = scheduler_output.num_scheduled_tokens
-    req_ids = tuple(num_tokens_per_req)
-    num_reqs = len(req_ids)
-    num_scheduled_tokens = np.fromiter(
-        num_tokens_per_req.values(), dtype=np.int32, count=num_reqs
-    )
-    draft_tokens = scheduler_output.scheduled_spec_decode_tokens
-    if draft_tokens:
-        scheduled_draft_tokens_per_req = get_scheduled_draft_token_counts(
-            req_ids, draft_tokens
-        )
-        idx_mapping_np = np.fromiter(
-            map(req_id_to_index.get, req_ids),
-            dtype=np.int32,
-            count=num_reqs,
-        )
-        num_scheduled_tokens, _, _ = apply_draft_token_capacity(
-            num_scheduled_tokens,
-            scheduled_draft_tokens_per_req,
-            idx_mapping_np,
-            draft_token_capacity_np,
-        )
-    return int(num_scheduled_tokens.sum()), int(num_scheduled_tokens.max())
 
 
 class DraftTokensHandler:
@@ -89,98 +15,38 @@ class DraftTokensHandler:
         self.copy_event = torch.Event()
 
         self.req_ids: list[str] = []
-        self.idx_mapping_np: np.ndarray | None = None
         self.draft_tokens_np: np.ndarray | None = None
-        self.draft_token_capacity_np: np.ndarray | None = None
         self.num_draft_tokens: int = 0
-        self.copy_event_pending = False
-
-    def _sync_copy(self) -> None:
-        if self.copy_event_pending:
-            self.copy_event.synchronize()
-            self.copy_event_pending = False
-
-    def _copy_ready(self) -> bool:
-        if not self.copy_event_pending:
-            return True
-        if not self.copy_event.query():
-            return False
-        self.copy_event_pending = False
-        return True
-
-    def _get_draft_token_capacities(self) -> np.ndarray | None:
-        if self.draft_token_capacity_np is None:
-            return None
-        return np.clip(self.draft_token_capacity_np, 0, self.num_draft_tokens)
 
     def set_draft_tokens(
-        self,
-        input_batch: InputBatch,
-        draft_tokens: torch.Tensor,
-        draft_token_capacity: torch.Tensor | None = None,
+        self, input_batch: InputBatch, draft_tokens: torch.Tensor
     ) -> None:
         self.req_ids = input_batch.req_ids
-        self.idx_mapping_np = input_batch.idx_mapping_np
         self.num_draft_tokens = draft_tokens.shape[1]
-        self.draft_tokens_np = None
-        self.draft_token_capacity_np = None
-        self.copy_event_pending = False
-        if not input_batch.has_structured_output_reqs and draft_token_capacity is None:
+        if not input_batch.has_structured_output_reqs:
             # No draft token validation needs to be performed by
             # the scheduler for this batch.
+            self.draft_tokens_np = None
             return
 
-        # Transfer only the scheduler metadata needed by the current batch. Draft
-        # token ids are needed for structured output validation; DSpark capacity is
-        # a small per-request int vector used by the CPU scheduler on later steps.
+        # For spec decoding + structured outputs, we must transfer the
+        # draft tokens back to the scheduler for grammar validation.
         current_stream = torch.cuda.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
-            if input_batch.has_structured_output_reqs:
-                self.draft_tokens_np = async_copy_to_np(draft_tokens)
-                # draft_tokens is a temporary allocation on the main stream and read
-                # here on copy_stream; without record_stream, the caching allocator
-                # may reuse its memory before the async copy executes.
-                draft_tokens.record_stream(self.copy_stream)
-            if draft_token_capacity is not None:
-                self.draft_token_capacity_np = async_copy_to_np(draft_token_capacity)
-                draft_token_capacity.record_stream(self.copy_stream)
+            self.draft_tokens_np = async_copy_to_np(draft_tokens)
+            # draft_tokens is a temporary allocation on the main stream and read here on
+            # copy_stream; without record_stream, the caching allocator may reuse its
+            # memory before the async copy executes.
+            draft_tokens.record_stream(self.copy_stream)
             self.copy_event.record()
-            self.copy_event_pending = True
-
-    def try_update_draft_token_capacities(
-        self,
-        draft_token_capacity_np: np.ndarray,
-        req_id_to_index: dict[str, int],
-    ) -> bool:
-        if self.draft_token_capacity_np is None:
-            return False
-        if not self._copy_ready():
-            return False
-        draft_token_capacities = self._get_draft_token_capacities()
-        assert draft_token_capacities is not None
-        assert self.idx_mapping_np is not None
-        active = np.isin(self.req_ids, tuple(req_id_to_index))
-        draft_token_capacity_np[self.idx_mapping_np[active]] = draft_token_capacities[
-            active
-        ]
-        return True
 
     def get_draft_tokens(self) -> DraftTokenIds | None:
         if self.draft_tokens_np is not None:
-            self._sync_copy()
-            draft_token_capacities = self._get_draft_token_capacities()
+            self.copy_event.synchronize()
             draft_token_ids = self.draft_tokens_np.tolist()
-            if draft_token_capacities is not None:
-                draft_token_ids = [
-                    token_ids[:capacity]
-                    for token_ids, capacity in zip(
-                        draft_token_ids, draft_token_capacities
-                    )
-                ]
         else:
-            # No token-id copy was needed. Keep placeholder lengths unchanged so
-            # capacity-only batches do not block the scheduler on a D2H copy.
+            # This case only happens when async scheduling is disabled.
             draft_token_ids = [[-1] * self.num_draft_tokens for _ in self.req_ids]
         return DraftTokenIds(self.req_ids, draft_token_ids)
 

@@ -108,18 +108,19 @@ from vllm.v1.worker.gpu.spec_decode.decompaction import (
     SamplerDecompactionBuffers,
     prepare_sampler_decompaction_from_counts,
 )
-from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
-    set_eagle3_aux_hidden_state_layers,
-)
-from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
-from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
-from vllm.v1.worker.gpu.spec_decode.utils import (
-    DraftTokensHandler,
+from vllm.v1.worker.gpu.spec_decode.dspark.capacity import (
+    DraftTokenCapacityHandler,
     apply_draft_token_capacity,
     get_draft_token_capacity,
     get_effective_scheduled_token_counts,
     get_scheduled_draft_token_counts,
 )
+from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
+    set_eagle3_aux_hidden_state_layers,
+)
+from vllm.v1.worker.gpu.spec_decode.rejection_sampler import RejectionSampler
+from vllm.v1.worker.gpu.spec_decode.speculator import DraftModelSpeculator
+from vllm.v1.worker.gpu.spec_decode.utils import DraftTokensHandler
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.gpu.structured_outputs import StructuredOutputsWorker
 from vllm.v1.worker.lora_model_runner_mixin import LoRAModelRunnerMixin
@@ -215,6 +216,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
+        self.draft_token_capacity_handler = DraftTokenCapacityHandler(self.device)
 
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
@@ -1195,7 +1197,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         if not dummy_run:
-            self.draft_tokens_handler.try_update_draft_token_capacities(
+            self.draft_token_capacity_handler.try_update_draft_token_capacities(
                 self.req_states.draft_token_capacity_np,
                 self.req_states.req_id_to_index,
             )
@@ -1570,14 +1572,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
-            self.draft_tokens_handler.try_update_draft_token_capacities(
+            self.draft_token_capacity_handler.try_update_draft_token_capacities(
                 self.req_states.draft_token_capacity_np,
                 self.req_states.req_id_to_index,
             )
+            if draft_token_capacity is not None:
+                self.draft_token_capacity_handler.set_draft_token_capacities(
+                    input_batch.req_ids,
+                    input_batch.idx_mapping_np,
+                    draft_token_capacity,
+                    self.num_speculative_steps,
+                )
+            else:
+                self.draft_token_capacity_handler.clear()
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],
-                draft_token_capacity,
             )
 
         # Post-step KV connector related operations.
@@ -1587,7 +1597,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         return async_output
 
     def take_draft_token_ids(self) -> DraftTokenIds | None:
-        return self.draft_tokens_handler.get_draft_tokens()
+        draft_token_ids = self.draft_tokens_handler.get_draft_tokens()
+        if draft_token_ids is None:
+            return None
+        return self.draft_token_capacity_handler.trim_draft_token_ids(draft_token_ids)
 
     @torch.inference_mode()
     @step_eplb_after()
