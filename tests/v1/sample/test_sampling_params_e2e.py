@@ -4,6 +4,7 @@
 import pytest
 
 from vllm import LLM, SamplingParams
+from vllm.distributed import cleanup_dist_env_and_memory
 
 MODEL = "hmellor/tiny-random-LlamaForCausalLM"
 PROMPT = "Hello my name is Robert and I"
@@ -190,7 +191,14 @@ def test_prompt_logprobs_mode_respected():
     per_mode_value = {}
 
     for mode in ("raw_logits", "raw_logprobs"):
-        llm = LLM(MODEL, enforce_eager=True, logprobs_mode=mode)
+        # Low gpu_memory_utilization so these engines fit alongside the
+        # module-scoped llm fixture on small CI GPUs.
+        llm = LLM(
+            MODEL,
+            enforce_eager=True,
+            logprobs_mode=mode,
+            gpu_memory_utilization=0.05,
+        )
         output = llm.generate(
             prompt, SamplingParams(max_tokens=1, prompt_logprobs=0, temperature=0)
         )[0]
@@ -199,6 +207,7 @@ def test_prompt_logprobs_mode_respected():
         prompt_token_id = output.prompt_token_ids[1]
         per_mode_value[mode] = output.prompt_logprobs[1][prompt_token_id].logprob
         del llm
+        cleanup_dist_env_and_memory()
 
     assert per_mode_value["raw_logits"] != per_mode_value["raw_logprobs"], (
         "prompt_logprobs should reflect logprobs_mode (logits vs logprobs)."
