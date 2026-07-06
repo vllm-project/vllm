@@ -1,7 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from typing import cast
-
 import torch
 
 from vllm.config import SpeculativeConfig
@@ -17,7 +15,6 @@ from vllm.v1.worker.gpu.sample.logprob import compute_topk_logprobs
 from vllm.v1.worker.gpu.sample.output import SamplerOutput
 from vllm.v1.worker.gpu.sample.sampler import Sampler
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS
-from vllm.v1.worker.gpu.spec_decode.decompaction import SamplerDecompactionMetadata
 from vllm.v1.worker.gpu.spec_decode.rejection_sampler_utils import (
     rejection_sample,
 )
@@ -111,59 +108,34 @@ class RejectionSampler:
         # that num_nans is computed before applying penalties and temperature.
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
-        compact_input_batch = cast(
-            InputBatch,
-            getattr(input_batch, "_compact_input_batch", input_batch),
-        )
-        decompaction = cast(
-            SamplerDecompactionMetadata | None,
-            getattr(input_batch, "_sampler_decompaction", None),
-        )
-
-        draft_sampled = compact_input_batch.input_ids[
-            compact_input_batch.logits_indices
-        ]
-        pos = compact_input_batch.positions[compact_input_batch.logits_indices]
+        draft_sampled = input_batch.input_ids[input_batch.logits_indices]
+        pos = input_batch.positions[input_batch.logits_indices]
         processed_logits = self.sampler.apply_sampling_params(
             logits,
-            compact_input_batch.expanded_idx_mapping,
-            compact_input_batch.idx_mapping_np,
+            input_batch.expanded_idx_mapping,
+            input_batch.idx_mapping_np,
             pos,
             draft_sampled,
-            compact_input_batch.expanded_local_pos,
+            input_batch.expanded_local_pos,
         )
-        rejection_draft_sampled = draft_sampled
-        rejection_cu_num_logits = compact_input_batch.cu_num_logits
-        rejection_pos = pos
-        rejection_expanded_idx_mapping = compact_input_batch.expanded_idx_mapping
-        rejection_expanded_local_pos = compact_input_batch.expanded_local_pos
-        target_logit_idx_mapping = None
-        if decompaction is not None:
-            rejection_draft_sampled = decompaction.draft_sampled
-            rejection_cu_num_logits = decompaction.cu_num_logits
-            rejection_pos = decompaction.pos
-            rejection_expanded_idx_mapping = decompaction.expanded_idx_mapping
-            rejection_expanded_local_pos = decompaction.expanded_local_pos
-            target_logit_idx_mapping = decompaction.target_logit_idx_mapping
         sampled, num_sampled = rejection_sample(
             processed_logits,
             draft_logits,
-            rejection_draft_sampled,
-            rejection_cu_num_logits,
-            rejection_pos,
-            compact_input_batch.idx_mapping,
-            rejection_expanded_idx_mapping,
-            rejection_expanded_local_pos,
+            draft_sampled,
+            input_batch.cu_num_logits,
+            pos,
+            input_batch.idx_mapping,
+            input_batch.expanded_idx_mapping,
+            input_batch.expanded_local_pos,
             self.sampler.sampling_states.temperature.gpu,
             self.sampler.sampling_states.seeds.gpu,
             self.num_speculative_steps,
             self.synthetic_conditional_rates,
             use_fp64=self.sampler.use_fp64_gumbel,
             use_block_verification=self.use_block_verification,
-            target_logit_idx_mapping=target_logit_idx_mapping,
         )
         logprobs_tensors = self._get_logprobs_tensors(
-            compact_input_batch,
+            input_batch,
             sampled,
             num_sampled,
             processed_logits
@@ -173,20 +145,11 @@ class RejectionSampler:
 
         num_sampled, num_rejected = get_num_sampled_and_rejected(
             num_sampled,
-            compact_input_batch.seq_lens,
-            rejection_cu_num_logits,
-            compact_input_batch.idx_mapping,
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
             self.sampler.req_states.prefill_len.gpu,
         )
-        num_rejected_for_next_step = None
-        if decompaction is not None:
-            _, num_rejected_for_next_step = get_num_sampled_and_rejected(
-                num_sampled,
-                compact_input_batch.seq_lens,
-                compact_input_batch.cu_num_logits,
-                compact_input_batch.idx_mapping,
-                self.sampler.req_states.prefill_len.gpu,
-            )
 
         return SamplerOutput(
             sampled_token_ids=sampled,
@@ -194,5 +157,4 @@ class RejectionSampler:
             num_nans=num_nans,
             num_sampled=num_sampled,
             num_rejected=num_rejected,
-            num_rejected_for_next_step=num_rejected_for_next_step,
         )

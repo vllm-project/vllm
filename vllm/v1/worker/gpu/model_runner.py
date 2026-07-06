@@ -1098,6 +1098,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 sampler_input_batch = self.verification_capacity_manager.restore_batch(
                     input_batch
                 )
+                logits = self.verification_capacity_manager.restore_logits(logits)
             sampler_output = self.rejection_sampler(
                 logits,
                 sampler_input_batch,
@@ -1105,13 +1106,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.draft_logits,
             )
 
-        if sampler_output.num_rejected_for_next_step is not None:
-            return (
-                sampler_output,
+        num_rejected = sampler_output.num_rejected
+        if self.verification_capacity_manager is not None:
+            assert sampler_output.num_sampled is not None
+            assert num_rejected is not None
+            num_rejected = self.verification_capacity_manager.get_compact_num_rejected(
                 sampler_output.num_sampled,
-                sampler_output.num_rejected_for_next_step,
+                num_rejected,
+                input_batch,
             )
-        return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
+        return sampler_output, sampler_output.num_sampled, num_rejected
 
     def postprocess_sampled(
         self,

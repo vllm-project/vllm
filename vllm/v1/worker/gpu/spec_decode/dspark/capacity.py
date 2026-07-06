@@ -12,6 +12,7 @@ from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import (
     combine_sampled_and_draft_tokens,
     expand_idx_mapping,
+    get_num_sampled_and_rejected,
     prepare_pos_seq_lens,
     prepare_prefill_inputs,
 )
@@ -357,17 +358,39 @@ class CapacityBasedVerificationManager:
     ) -> "InputBatch":
         if self.sampler_decompaction is None:
             return input_batch
-        restored_batch = replace(
+        return replace(
             input_batch,
+            cu_num_logits=self.sampler_decompaction.cu_num_logits,
+            cu_num_logits_np=self.sampler_decompaction.cu_num_logits_np,
+            expanded_idx_mapping=self.sampler_decompaction.expanded_idx_mapping,
+            expanded_local_pos=self.sampler_decompaction.expanded_local_pos,
+            input_ids=self.sampler_decompaction.draft_sampled,
+            logits_indices=self.sampler_decompaction.logits_indices,
+            positions=self.sampler_decompaction.pos,
             query_start_loc=self.sampler_decompaction.query_start_loc,
         )
-        object.__setattr__(restored_batch, "_compact_input_batch", input_batch)
-        object.__setattr__(
-            restored_batch,
-            "_sampler_decompaction",
-            self.sampler_decompaction,
+
+    def restore_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        if self.sampler_decompaction is None:
+            return logits
+        return logits[self.sampler_decompaction.target_logit_idx_mapping]
+
+    def get_compact_num_rejected(
+        self,
+        num_sampled: torch.Tensor,
+        num_rejected: torch.Tensor,
+        input_batch: "InputBatch",
+    ) -> torch.Tensor:
+        if self.sampler_decompaction is None:
+            return num_rejected
+        _, num_rejected = get_num_sampled_and_rejected(
+            num_sampled,
+            input_batch.seq_lens,
+            input_batch.cu_num_logits,
+            input_batch.idx_mapping,
+            self.req_states.prefill_len,
         )
-        return restored_batch
+        return num_rejected
 
 
 @triton.jit

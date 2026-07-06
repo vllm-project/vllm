@@ -11,11 +11,13 @@ from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 
 @dataclass
 class SamplerDecompactionMetadata:
+    cu_num_logits_np: np.ndarray
     cu_num_logits: torch.Tensor
     expanded_idx_mapping: torch.Tensor
     expanded_local_pos: torch.Tensor
     draft_sampled: torch.Tensor
     pos: torch.Tensor
+    logits_indices: torch.Tensor
     target_logit_idx_mapping: torch.Tensor
     query_start_loc: torch.Tensor
 
@@ -25,6 +27,7 @@ class SamplerDecompactionBuffers:
     expanded_idx_mapping: torch.Tensor
     expanded_local_pos: torch.Tensor
     target_logit_idx_mapping: torch.Tensor
+    logits_indices: torch.Tensor
     draft_sampled: torch.Tensor
     pos: torch.Tensor
 
@@ -43,10 +46,12 @@ class SamplerDecompactionBuffers:
         target_logit_idx_mapping = torch.empty(
             max_num_tokens, dtype=torch.int64, device=device
         )
+        logits_indices = torch.empty_like(target_logit_idx_mapping)
         return cls(
             expanded_idx_mapping=expanded_idx_mapping,
             expanded_local_pos=expanded_local_pos,
             target_logit_idx_mapping=target_logit_idx_mapping,
+            logits_indices=logits_indices,
             draft_sampled=torch.empty_like(target_logit_idx_mapping),
             pos=torch.empty_like(target_logit_idx_mapping),
         )
@@ -59,6 +64,7 @@ def _prepare_sampler_decompaction_metadata_kernel(
     sampler_expanded_local_pos_ptr,
     sampler_draft_sampled_ptr,
     sampler_pos_ptr,
+    sampler_logits_indices_ptr,
     compact_cu_num_logits_ptr,
     full_cu_num_logits_ptr,
     compact_query_start_loc_ptr,
@@ -122,6 +128,7 @@ def _prepare_sampler_decompaction_metadata_kernel(
     token = tl.where(is_sampled_token, last_sampled, draft_token)
     draft_sampled = tl.where(is_draft_token & ~is_valid_draft, -1, token)
     tl.store(sampler_draft_sampled_ptr + full_logit_idx, draft_sampled, mask=mask)
+    tl.store(sampler_logits_indices_ptr + full_logit_idx, full_logit_idx, mask=mask)
 
 
 def _get_or_slice_buffer(
@@ -152,6 +159,7 @@ def prepare_sampler_decompaction_metadata(
     target_logit_idx_mapping: torch.Tensor | None = None,
     sampler_draft_sampled: torch.Tensor | None = None,
     sampler_pos: torch.Tensor | None = None,
+    sampler_logits_indices: torch.Tensor | None = None,
     buffers: SamplerDecompactionBuffers | None = None,
 ) -> SamplerDecompactionMetadata:
     assert num_new_sampled_tokens == 1, (
@@ -162,6 +170,7 @@ def prepare_sampler_decompaction_metadata(
         expanded_idx_mapping = buffers.expanded_idx_mapping
         expanded_local_pos = buffers.expanded_local_pos
         target_logit_idx_mapping = buffers.target_logit_idx_mapping
+        sampler_logits_indices = buffers.logits_indices
         sampler_draft_sampled = buffers.draft_sampled
         sampler_pos = buffers.pos
     expanded_idx_mapping = _get_or_slice_buffer(
@@ -179,12 +188,16 @@ def prepare_sampler_decompaction_metadata(
     sampler_pos = _get_or_slice_buffer(
         sampler_pos, total_num_logits, positions.dtype, device
     )
+    sampler_logits_indices = _get_or_slice_buffer(
+        sampler_logits_indices, total_num_logits, torch.int64, device
+    )
     _prepare_sampler_decompaction_metadata_kernel[(idx_mapping.shape[0],)](
         target_logit_idx_mapping,
         expanded_idx_mapping,
         expanded_local_pos,
         sampler_draft_sampled,
         sampler_pos,
+        sampler_logits_indices,
         compact_cu_num_logits,
         full_cu_num_logits,
         compact_query_start_loc,
@@ -197,11 +210,13 @@ def prepare_sampler_decompaction_metadata(
         NUM_NEW_SAMPLED_TOKENS=num_new_sampled_tokens,
     )
     return SamplerDecompactionMetadata(
+        cu_num_logits_np=np.empty(0, dtype=np.int32),
         cu_num_logits=full_cu_num_logits,
         expanded_idx_mapping=expanded_idx_mapping,
         expanded_local_pos=expanded_local_pos,
         draft_sampled=sampler_draft_sampled,
         pos=sampler_pos,
+        logits_indices=sampler_logits_indices,
         target_logit_idx_mapping=target_logit_idx_mapping,
         query_start_loc=full_query_start_loc,
     )
@@ -239,7 +254,7 @@ def prepare_sampler_decompaction_from_counts(
         : num_reqs_padded + 1
     ]
 
-    return prepare_sampler_decompaction_metadata(
+    metadata = prepare_sampler_decompaction_metadata(
         compact_cu_num_logits,
         full_cu_num_logits,
         full_query_start_loc,
@@ -253,3 +268,5 @@ def prepare_sampler_decompaction_from_counts(
         num_new_sampled_tokens,
         buffers=buffers,
     )
+    metadata.cu_num_logits_np = full_cu_num_logits_np
+    return metadata
