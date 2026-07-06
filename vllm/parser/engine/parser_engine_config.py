@@ -89,6 +89,15 @@ class ParserEngineConfig:
     # Drop content that is entirely whitespace when tool calls follow.
     drop_whitespace_only_content_before_tools: bool = True
 
+    # Also defer/drop whitespace-only content deltas that arrive *after* some
+    # non-whitespace content has already been streamed. Without this, trailing
+    # whitespace between a legitimate content chunk and a tool_call chunk (and
+    # leading whitespace after the tool_call closes) leaks as ``delta.content``
+    # in a chunk that a downstream router may reject once a tool_use block is
+    # active. Off by default; enable per-parser where the model reliably emits
+    # whitespace around its tool-call markers (currently DeepSeek V3.2/V4).
+    drop_whitespace_only_content_after_nonws: bool = False
+
     # .strip() content text when tool calls are present.
     strip_content_whitespace_with_tools: bool = True
 

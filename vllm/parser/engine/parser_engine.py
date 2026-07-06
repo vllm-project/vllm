@@ -131,6 +131,9 @@ class ParserEngine(Parser):
         self._drop_ws_only_content_before_tools = (
             parser_engine_config.drop_whitespace_only_content_before_tools
         )
+        self._drop_ws_only_content_after_nonws = (
+            parser_engine_config.drop_whitespace_only_content_after_nonws
+        )
         self._strip_content_ws_with_tools = (
             parser_engine_config.strip_content_whitespace_with_tools
         )
@@ -747,7 +750,17 @@ class ParserEngine(Parser):
         content_str = "".join(content_parts)
 
         if self._content_has_nonws:
-            pass
+            if (
+                self._drop_ws_only_content_after_nonws
+                and content_str
+                and not content_str.strip()
+            ):
+                if self._tool_slots:
+                    if self._drop_ws_only_content_before_tools:
+                        content_str = ""
+                elif not finished:
+                    self._deferred_content = content_str
+                    content_str = ""
         elif content_str:
             stripped = content_str.strip()
             if stripped:
