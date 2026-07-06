@@ -192,6 +192,12 @@ class MultiModalConfig:
     Value sits in range [0;1) and determines fraction of media tokens
     from each video to be pruned.
     """
+    video_retention_ratio: float | None = Field(default=None, gt=0.0, le=1.0)
+    """Sets retention ratio for video pruning via VidCom2 (Video Compression
+    Commander). Value sits in range (0;1] and determines the fraction of media
+    tokens from each video to be kept. Mutually exclusive with
+    `video_pruning_rate`.
+    """
     mm_tensor_ipc: MMTensorIPC = "direct_rpc"
     """IPC (inter-process communication) method for multimodal tensors.
     - "direct_rpc": Use msgspec serialization via RPC
@@ -292,6 +298,14 @@ class MultiModalConfig:
                 raise FileNotFoundError(
                     f"Parent directory for FP8 scale save path not found: {save_parent}"
                 )
+        if (
+            self.video_pruning_rate is not None
+            and self.video_retention_ratio is not None
+        ):
+            raise ValueError(
+                "'video_pruning_rate' (EVS) and 'video_retention_ratio' "
+                "(VidCom2) are mutually exclusive — set only one."
+            )
         return self
 
     def compute_hash(self) -> str:
@@ -345,4 +359,13 @@ class MultiModalConfig:
         return kwargs | dict(inference_kwargs)
 
     def is_multimodal_pruning_enabled(self):
-        return self.video_pruning_rate is not None and self.video_pruning_rate > 0
+        return self.get_video_pruning_spec() is not None
+
+    def get_video_pruning_spec(self) -> tuple[str, float] | None:
+        """Return `(method, q)` where `q` is always the pruning fraction:
+        `video_pruning_rate` for EVS, `1 - retention_ratio` for VidCom2."""
+        if self.video_pruning_rate is not None and self.video_pruning_rate > 0:
+            return ("evs", float(self.video_pruning_rate))
+        if self.video_retention_ratio is not None and self.video_retention_ratio < 1.0:
+            return ("vidcom2", float(1.0 - self.video_retention_ratio))
+        return None

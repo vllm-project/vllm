@@ -5292,6 +5292,19 @@ class GPUModelRunner(
             and mm_config is not None
             and mm_config.is_multimodal_pruning_enabled()
         )
+        if self.is_multimodal_pruning_enabled:
+            assert mm_config is not None
+            pruning_spec = mm_config.get_video_pruning_spec()
+            assert pruning_spec is not None
+            pruning_method = pruning_spec[0]
+            model = self.get_model()
+            supported_methods = model.supported_video_pruning_methods
+            if pruning_method not in supported_methods:
+                raise ValueError(
+                    f"Video pruning method '{pruning_method}' is not "
+                    f"supported by {type(model).__name__} (supported "
+                    f"methods: {supported_methods})."
+                )
         self.requires_sequential_video_encoding = hasattr(
             self.get_model(), "requires_sequential_video_encoding"
         )  # Temporary hack for dynamic res video w/o support for bs>1 yet

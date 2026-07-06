@@ -417,6 +417,11 @@ class SupportsMultiModalPruning(Protocol):
 
     supports_multimodal_pruning: ClassVar[Literal[True]] = True
 
+    supported_video_pruning_methods: ClassVar[tuple[str, ...]] = ("evs",)
+    """Video pruning methods (as reported by
+    `MultiModalConfig.get_video_pruning_spec`) implemented by this model.
+    Models supporting methods beyond EVS should override this."""
+
     def recompute_mrope_positions(
         self,
         input_ids: list[int] | torch.Tensor,

@@ -350,6 +350,31 @@ Instead of NumPy arrays, you can also pass `'torch.Tensor'` instances, as shown 
 
 Full example: [examples/generate/multimodal/vision_language_offline.py](../../examples/generate/multimodal/vision_language_offline.py)
 
+#### Video Token Pruning
+
+For supported models, vLLM can prune video tokens after the vision encoder to
+reduce prefill time and KV cache usage, at some cost in accuracy. Two
+training-free methods are available, selected by mutually exclusive flags:
+
+- **EVS** (Efficient Video Sampling): `--video-pruning-rate <q>` drops the
+  fraction `q` of video tokens with the lowest temporal dissimilarity to the
+  previous frame. The first frame is always fully retained.
+- **VidCom2** (Video Compression Commander):
+  `--video-retention-ratio <r>` keeps the fraction `r` of video tokens,
+  scoring them by similarity to video-level and frame-level feature centers
+  and giving distinctive frames a larger share of the budget. At least one
+  token per frame is retained.
+
+```bash
+vllm serve Qwen/Qwen3-VL-8B-Instruct --video-retention-ratio 0.25
+```
+
+!!! note
+    EVS is supported by all models implementing multimodal pruning; VidCom2 is
+    currently supported by Qwen3-VL only. Unsupported combinations are
+    rejected at startup. Enabling video pruning also disables encoder CUDA
+    graphs, since the retained token count becomes data-dependent.
+
 ### Audio Inputs
 
 You can pass a tuple `(array, sampling_rate)` to the `'audio'` field of the multi-modal dictionary.
