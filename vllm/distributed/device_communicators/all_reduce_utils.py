@@ -68,6 +68,11 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
         6: 32 * MiB,  # 32 MB
         8: 64 * MiB,  # 64 MB
     },
+    # Experimental probe for consumer Blackwell / sm120 TP3. Runtime support
+    # still depends on torch symmetric memory and topology capabilities.
+    "12.0": {
+        3: 4 * MiB,
+    },
 }
 
 # NCCL symmetric memory allreduce configuration based on H100 and GB200 benchmarks.
@@ -86,10 +91,11 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
 #
 # The config defines ranges where custom_AR is preferred (symm_mem disabled).
 NCCL_SYMM_MEM_ALL_REDUCE_CONFIG: dict[str, Any] = {
-    "min_world_size": 4,
+    "min_world_size": 3,
     # Ranges where custom_AR outperforms NCCL symm_mem: (lower_bound, upper_bound)
     # NCCL symm_mem will NOT be used for sizes in range: lower < size < upper
     "custom_ar_preferred_ranges": {
+        3: (16 * KiB, 512 * KiB),  # experimental PCIe TP3 probe
         4: (16 * KiB, 512 * KiB),  # custom_AR wins for 32K-256K
         8: (16 * KiB, 128 * KiB),  # custom_AR wins for 32K-64K
     },

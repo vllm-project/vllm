@@ -362,6 +362,9 @@ class Qwen3NextAttention(nn.Module):
             if self.dual_chunk_attention_config
             else {},
         )
+        self.attn.dcp_replicated_full_attention_heads = (
+            self.replicate_uneven_full_attention
+        )
 
         self.q_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)
         self.k_norm = Qwen3NextRMSNorm(self.head_dim, eps=config.rms_norm_eps)

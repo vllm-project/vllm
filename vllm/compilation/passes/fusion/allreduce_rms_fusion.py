@@ -106,6 +106,11 @@ FI_ALLREDUCE_FUSION_MAX_SIZE_MB: dict[int, dict[int, float]] = {
         8: 2,  # 2MB
         16: 64,  # 64MB (mnnvl multi-node)
     },
+    # Experimental: consumer Blackwell / sm120 with TP3 PCIe. This only
+    # enables workspace probing; FlashInfer may still reject the topology.
+    120: {
+        3: 4,  # conservative probe for PCIe TP3
+    },
 }
 
 # Max size of the input tensor per world size per device capability
@@ -126,6 +131,9 @@ _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB: dict[int, dict[int, float]] = {
         2: 32,  # 32MB
         4: 4,  # 4MB
         8: 2,  # 2MB
+    },
+    120: {
+        3: 4,  # conservative probe for PCIe TP3
     },
 }
 

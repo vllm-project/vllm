@@ -72,7 +72,7 @@ from vllm.v1.attention.backends.utils import (
     infer_global_hyperparameters,
     split_decodes_and_prefills,
 )
-from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
+from vllm.v1.attention.ops.common import cp_lse_ag_out_ar, cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
 from vllm.v1.kv_cache_interface import (
@@ -322,12 +322,15 @@ class BatchDCPPrefillWrapper:
         disable_split_kv: bool,
     ):
         """Plan the prefill operation with given parameters."""
+        replicated_full_heads = envs.VLLM_EXPERIMENTAL_DCP_REPLICATED_FULL_ATTENTION
         self._context.plan(
             qo_indptr=qo_indptr_cpu,
             paged_kv_indptr=paged_kv_indptr_cpu,
             paged_kv_indices=paged_kv_indices,
             paged_kv_last_page_len=paged_kv_last_page_len_cpu,
-            num_qo_heads=num_qo_heads * dcp_world_size,
+            num_qo_heads=(
+                num_qo_heads if replicated_full_heads else num_qo_heads * dcp_world_size
+            ),
             num_kv_heads=num_kv_heads,
             head_dim_qk=head_dim,
             page_size=page_size,
@@ -364,8 +367,14 @@ class BatchDCPPrefillWrapper:
         out: torch.Tensor,
     ):
         _dcp_debug_sync("prefill.start", prefill_query, key, value, out)
-        prefill_query_across_dcp = get_dcp_group().all_gather(
-            prefill_query.contiguous(), dim=1
+        replicated_full_heads = (
+            envs.VLLM_EXPERIMENTAL_DCP_REPLICATED_FULL_ATTENTION
+            and getattr(layer, "dcp_replicated_full_attention_heads", False)
+        )
+        prefill_query_across_dcp = (
+            prefill_query
+            if replicated_full_heads
+            else get_dcp_group().all_gather(prefill_query.contiguous(), dim=1)
         )
         _dcp_debug_sync("prefill.after_all_gather", prefill_query_across_dcp)
         output_context_tmp, lse_context_tmp = self._context.run(
@@ -378,12 +387,21 @@ class BatchDCPPrefillWrapper:
         _dcp_debug_sync(
             "prefill.after_context", output_context_tmp, lse_context_tmp
         )
-        output_context, lse_context = self._dcp_combine(
-            output_context_tmp,
-            lse_context_tmp,
-            get_dcp_group(),
-            return_lse=True,
-        )
+        if replicated_full_heads:
+            output_context, lse_context = cp_lse_ag_out_ar(
+                output_context_tmp,
+                lse_context_tmp,
+                get_dcp_group(),
+                return_lse=True,
+                is_lse_base_on_e=False,
+            )
+        else:
+            output_context, lse_context = self._dcp_combine(
+                output_context_tmp,
+                lse_context_tmp,
+                get_dcp_group(),
+                return_lse=True,
+            )
         _dcp_debug_sync("prefill.after_combine", output_context, lse_context)
         lse_context = lse_context.transpose(0, 1).contiguous()
 
@@ -2063,9 +2081,14 @@ class FlashInferImpl(AttentionImpl):
                     out_decode = output[:num_decode_tokens]
 
                 if use_dcp:
-                    decode_query = get_dcp_group().all_gather(
-                        decode_query.contiguous(), dim=-2
+                    replicated_full_heads = (
+                        envs.VLLM_EXPERIMENTAL_DCP_REPLICATED_FULL_ATTENTION
+                        and getattr(layer, "dcp_replicated_full_attention_heads", False)
                     )
+                    if not replicated_full_heads:
+                        decode_query = get_dcp_group().all_gather(
+                            decode_query.contiguous(), dim=-2
+                        )
                     output_tmp = torch.empty_like(decode_query)
                     lse = torch.empty(
                         (decode_query.size(0), decode_query.size(1)),
@@ -2083,11 +2106,19 @@ class FlashInferImpl(AttentionImpl):
                         return_lse=True,
                         kv_cache_sf=kv_cache_sf,
                     )
-                    output[:num_decode_tokens] = self.dcp_combine(
-                        output_tmp,
-                        lse,
-                        get_dcp_group(),
-                    )
+                    if replicated_full_heads:
+                        output[:num_decode_tokens] = cp_lse_ag_out_ar(
+                            output_tmp,
+                            lse,
+                            get_dcp_group(),
+                            is_lse_base_on_e=False,
+                        )
+                    else:
+                        output[:num_decode_tokens] = self.dcp_combine(
+                            output_tmp,
+                            lse,
+                            get_dcp_group(),
+                        )
                 else:
                     decode_wrapper.run(
                         decode_query,
