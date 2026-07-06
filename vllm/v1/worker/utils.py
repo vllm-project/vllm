@@ -130,15 +130,25 @@ class KVBlockZeroer:
         ``block_id * page_size_el`` lands at the correct offset.
 
         Only AttentionSpec layers are processed; Mamba layers are skipped.
+        Segments are grouped by page size so that mixed-page models
+        (e.g. MLA + Indexer with different page sizes) are handled.
         """
         self.device = device
-        self._meta: tuple[torch.Tensor, torch.Tensor, int, int, int] | None = None
+        self.pin_memory = pin_memory
+        # List of (seg_addrs, page_size_el, blk_size, n_segs), one per
+        # distinct page size so that mixed-page models (e.g. MLA + Indexer)
+        # are handled correctly.
+        self._meta_list: list[tuple[torch.Tensor, int, int, int]] = []
+        self._id_cap: int = 0
+        self._ids_pinned: list[torch.Tensor] = []
+        self._ids_gpu: list[torch.Tensor] = []
+        self._id_buffer_index = 0
 
         if runner_only_attn_layers is None:
             runner_only_attn_layers = set()
         seen_ptrs: set[int] = set()
-        seg_addrs: list[int] = []
-        seg_page_sizes: list[int] = []
+        # page_size_el -> (seg_addrs, kernel_block_el)
+        page_groups: dict[int, tuple[list[int], int]] = {}
 
         for group in attn_groups_iter:
             spec = group.kv_cache_spec
@@ -172,6 +182,10 @@ class KVBlockZeroer:
                 kernel_block_el = cur_bytes // 4
                 cur_page_el = kernel_block_el * ratio
 
+                if cur_page_el not in page_groups:
+                    page_groups[cur_page_el] = ([], kernel_block_el)
+
+                seg_list = page_groups[cur_page_el][0]
                 block_stride_bytes = cur_bytes
                 outer_dims = [
                     d
@@ -181,43 +195,63 @@ class KVBlockZeroer:
                 outer_strides = [kv.stride(d) * el for d in outer_dims]
                 for outer in iprod(*(range(kv.shape[d]) for d in outer_dims)):
                     off_bytes = sum(i * s for i, s in zip(outer, outer_strides))
-                    seg_addrs.append(dp + off_bytes)
-                    seg_page_sizes.append(cur_page_el)
+                    seg_list.append(dp + off_bytes)
 
-        if not seg_addrs:
-            self._meta = None
+        if not page_groups:
+            self._meta_list = []
             return
 
-        max_page_size_el = max(seg_page_sizes)
-        blk_size = min(
-            min(largest_power_of_2_divisor(ps) for ps in seg_page_sizes),
-            1024,
+        self._id_cap = 8192
+        self._ids_pinned = torch.empty(
+            self._id_cap,
+            dtype=torch.int64,
+            pin_memory=self.pin_memory,
         )
-        self._meta = (
-            torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
-            torch.tensor(seg_page_sizes, dtype=torch.int64, device=self.device),
-            max_page_size_el // blk_size,
-            blk_size,
-            len(seg_addrs),
-        )
+        self._ids_gpu = torch.empty(self._id_cap, dtype=torch.int64, device=self.device)
+        self._meta_list = []
+        for page_size_el, (seg_addrs, _) in page_groups.items():
+            blk_size = min(largest_power_of_2_divisor(page_size_el), 1024)
+            self._meta_list.append(
+                (
+                    torch.tensor(seg_addrs, dtype=torch.uint64, device=self.device),
+                    page_size_el,
+                    blk_size,
+                    len(seg_addrs),
+                )
+            )
 
     def zero_block_ids(self, block_ids: list[int]) -> None:
         """Zero the KV cache memory for the given block IDs."""
-        if not block_ids or self._meta is None:
+        if not block_ids or not self._meta_list:
             return
-        seg_addrs, seg_page_sizes, max_chunks, blk_size, n_segs = self._meta
         n_blocks = len(block_ids)
-        idx = async_tensor_h2d(block_ids, device=self.device, dtype=torch.int64)
-        grid = (n_blocks * n_segs * max_chunks,)
-        _zero_kv_blocks_kernel[grid](
-            seg_addrs,
-            seg_page_sizes,
-            idx,
-            n_blocks,
-            N_SEGS=n_segs,
-            MAX_CHUNKS=max_chunks,
-            BLOCK_SIZE=blk_size,
-        )
+        if n_blocks > self._id_cap:
+            # The old pinned buffers may still be the source of an in-flight
+            # nonblocking copy. Growing is rare, so we don't mind the sync overhead
+            torch.accelerator.synchronize()
+            self._id_cap = n_blocks * 2
+            self._ids_pinned = torch.empty(
+                self._id_cap,
+                dtype=torch.int64,
+                pin_memory=self.pin_memory,
+            )
+            self._ids_gpu = torch.empty(
+                self._id_cap, dtype=torch.int64, device=self.device
+            )
+        assert self._ids_pinned is not None and self._ids_gpu is not None
+        self._ids_pinned[:n_blocks].numpy()[:] = block_ids
+        idx = self._ids_gpu[:n_blocks]
+        idx.copy_(self._ids_pinned[:n_blocks], non_blocking=True)
+        for seg_addrs, page_size_el, blk_size, n_segs in self._meta_list:
+            grid = (n_blocks * n_segs * (page_size_el // blk_size),)
+            _zero_kv_blocks_kernel[grid](
+                seg_addrs,
+                idx,
+                n_blocks,
+                N_SEGS=n_segs,
+                PAGE_SIZE_EL=page_size_el,
+                BLOCK_SIZE=blk_size,
+            )
 
     def warmup(self, num_kv_blocks: int) -> None:
         """JIT-compile the zeroing kernel before the first real request."""
@@ -245,11 +279,23 @@ class AttentionGroup:
         kernel_block_size: int | None = None,
         num_metadata_builders: int = 1,
     ):
-        kv_cache_spec_builder = (
-            self.kv_cache_spec.copy_with_new_block_size(kernel_block_size)
-            if kernel_block_size is not None
-            else self.kv_cache_spec
+        # Compressed MLA (e.g. the kpool indexer) is addressed at
+        # ``storage_block_size`` granularity and is not virtually split into
+        # kernel blocks. Rescaling its ``block_size`` down to
+        # ``kernel_block_size`` would shrink ``storage_block_size``
+        # (= block_size // compress_ratio) and desync the metadata builder from
+        # the cache layout (e.g. kpool: 1024 -> 64 makes storage 64 -> 4). Skip
+        # the rescale for such specs.
+        is_compressed_mla = (
+            isinstance(self.kv_cache_spec, AttentionSpec)
+            and self.kv_cache_spec.storage_block_size != self.kv_cache_spec.block_size
         )
+        if kernel_block_size is not None and not is_compressed_mla:
+            kv_cache_spec_builder = self.kv_cache_spec.copy_with_new_block_size(
+                kernel_block_size
+            )
+        else:
+            kv_cache_spec_builder = self.kv_cache_spec
         builder_cls = self.backend.get_builder_cls()
         builder_kwargs = {}
         if builder_cls.requires_block_table_width:
@@ -269,6 +315,15 @@ class AttentionGroup:
             )
             for _ in range(num_metadata_builders)
         ]
+        # Expose the kernel block size to builders that need to translate the
+        # shared (kernel-granularity) block_table into their own addressing
+        # (e.g. the kpool indexer, which shares the MLA's 64-token table but is
+        # addressed at storage_block_size pool-page granularity).
+        if kernel_block_size is not None:
+            for _b in self.metadata_builders:
+                # Dynamic attribute: the kpool indexer builder reads it via
+                # getattr to translate the shared block_table.
+                _b.kernel_block_size = kernel_block_size  # type: ignore[attr-defined]
 
     def get_metadata_builder(self, ubatch_id: int = 0) -> AttentionMetadataBuilder:
         assert len(self.metadata_builders) > ubatch_id

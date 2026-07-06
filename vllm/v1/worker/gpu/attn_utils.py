@@ -215,6 +215,7 @@ def _reshape_attention_kv_cache(
     kv_cache_stride_order: tuple[int, ...],
     num_blocks: int,
     packing: tuple[int, int] | None,
+    storage_offset: int = 0,
 ) -> torch.Tensor:
     permuted_kv_cache_shape = tuple(kv_cache_shape[i] for i in kv_cache_stride_order)
     inv_order = [
@@ -256,10 +257,17 @@ def _reshape_attention_kv_cache(
             kv_raw_tensor.view(dtype),
             size=permuted_kv_cache_shape,
             stride=tuple(strides),
+            storage_offset=storage_offset,
         )
     else:
-        # No padding — safe to use a contiguous view.
-        kv_cache = kv_raw_tensor.view(dtype).view(permuted_kv_cache_shape)
+        # No padding — safe to use a contiguous view. For co-located (concat)
+        # groups, view only this layer's own region of the shared tensor via
+        # storage_offset.
+        base = kv_raw_tensor.view(dtype)
+        if storage_offset:
+            region_numel = prod(permuted_kv_cache_shape)
+            base = base[storage_offset : storage_offset + region_numel]
+        kv_cache = base.view(permuted_kv_cache_shape)
 
     return kv_cache.permute(*inv_order)
 

@@ -790,7 +790,29 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
         compressed_slot_mapping = slot_mapping
         compressed_seq_lens = seq_lens
+        # Default to the raw shared table; translated below when the indexer is
+        # co-located with a virtually-split MLA (compress_ratio > 1). This
+        # translated table is the ONE block_table the indexer must use for every
+        # cache access (write via slot_mapping AND the top-k reads), so that the
+        # pool keys written at indexer-page granularity are read back from the
+        # same physical pages.
+        indexer_block_table = block_table
         if self.compress_ratio > 1:
+            # The shared block_table is in kernel_block_size (token) units
+            # (e.g. 64) because the co-located MLA is virtually split. The
+            # indexer is NOT split and is addressed at storage_block_size
+            # pool-page granularity, so translate the table: every
+            # (block_size // kernel_block_size) columns is one indexer page,
+            # and each such entry is (page_phys * that factor), so dividing
+            # recovers the indexer physical page id in [0, num_blocks).
+            kbs = getattr(self, "kernel_block_size", None)
+            if (
+                kbs is not None
+                and self.kv_cache_spec.block_size != kbs
+                and self.kv_cache_spec.block_size % kbs == 0
+            ):
+                factor = self.kv_cache_spec.block_size // kbs
+                indexer_block_table = (block_table[:, ::factor] // factor).contiguous()
             padded_num_tokens = num_tokens
             if self.pcp_world_size > 1:
                 padded_num_tokens = slot_mapping.shape[0] // self.pcp_world_size
@@ -798,7 +820,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 num_tokens,
                 query_start_loc,
                 seq_lens,
-                block_table,
+                indexer_block_table,
                 self.kv_cache_spec.storage_block_size,
                 self.compress_ratio,
                 out=self.compressed_slot_mapping_buffer,
@@ -848,7 +870,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     seq_lens,
                     compressed_seq_lens,
                     compressed_seq_lens_cpu,
-                    common_attn_metadata.block_table_tensor,
+                    indexer_block_table,
                     self.compress_ratio,
                     query_slice=query_slice,
                     skip_kv_gather=query_slice.start > 0,
@@ -926,6 +948,20 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 seq_lens = self._dcp_localize_decode_seq_lens(
                     seq_lens, num_decodes, seq_lens_is_buffer_view
                 )
+
+            # Translate the decode block_table to indexer-page granularity,
+            # matching the prefill read and the write. Done AFTER
+            # _prepare_decode_tensors because it copies raw MLA-width rows
+            # (its expand kernel reads expanded_bt_stride columns per row).
+            if self.compress_ratio > 1:
+                _kbs = getattr(self, "kernel_block_size", None)
+                if (
+                    _kbs is not None
+                    and self.kv_cache_spec.block_size != _kbs
+                    and self.kv_cache_spec.block_size % _kbs == 0
+                ):
+                    _factor = self.kv_cache_spec.block_size // _kbs
+                    block_table = (block_table[:, ::_factor] // _factor).contiguous()
 
             # For DeepseekV4 (compress_ratio > 1), the indexer KV cache stores
             # compressed tokens. Convert uncompressed seq_lens to compressed.
