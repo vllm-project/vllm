@@ -1,0 +1,432 @@
+# Qwen3.6 TP3/DCP3 Research Notes
+
+This document records an experimental serving effort for Qwen3.6-class
+NVFP4 models on three independent PCIe Blackwell GPUs without NVLink. The
+goal is not only to fit a model, but to use all three GPUs productively for
+long-context agent workloads.
+
+## Goals
+
+- Serve dense Qwen3.6 27B NVFP4 on `TP=3` despite uneven GQA/KV geometry.
+- Preserve long context: target range is 128K-150K today, with 256K as the
+  stretch goal.
+- Keep `max_num_seqs=8` usable for agent workloads that mix one large context
+  with many small concurrent prompts.
+- Support vision and eventually speculative decoding without losing the
+  long-context memory budget.
+- Understand and reduce communication overhead on PCIe-only multi-GPU systems.
+- Identify where vLLM memory estimation and placement are too conservative or
+  too unaware of real transient workspace needs.
+
+The current test host has three 16 GiB GPUs. That makes the useful target a
+48 GiB aggregate-memory deployment, but without shared memory or NVLink. The
+correct strategy is therefore not to emulate a single large GPU blindly; it is
+to make the TP/DCP, KV-cache, draft-model, and communication layouts serve the
+topology.
+
+The high-level outcome is already positive: this setup makes dense 27B usable
+with 150K context and `2x+` long-context concurrency on a 48 GiB aggregate
+consumer/prosumer PCIe system. That is not comparable to a single 32 GiB RTX
+5090 memory budget: the single card can be faster, but it cannot provide the
+same long-context capacity. The current decode speed is roughly within a 2x
+factor of the single-card target while enabling workloads that did not fit
+there.
+
+## Current Working Results
+
+### Dense 27B, text only
+
+The dense 27B NVFP4 target (`mconcat/Qwopus3.6-27B-v2-NVFP4`) runs with:
+
+- `--tensor-parallel-size 3`
+- `--decode-context-parallel-size 3`
+- `--max-model-len 150K`
+- `--max-num-seqs 8`
+- `--max-num-batched-tokens 8192`
+- `--gpu-memory-utilization 0.85`
+- `--kv-cache-dtype fp8`
+- Model Runner V2
+- FlashInfer attention
+- PyNCCL all-reduce
+
+Observed:
+
+- model weights: about `7.98 GiB` per GPU;
+- GPU KV cache size: `386,477` logical tokens;
+- maximum concurrency for `153,600` tokens per request: `2.52x`;
+- a real `150K` prompt smoke returned successfully;
+- no replicated full-attention fallback is required for the dense 27B target.
+
+The important result is that TP3/DCP3 is viable for the dense 27B target even
+though the standard vLLM assumptions usually expect tensor-parallel-friendly
+head layouts. This is achieved by using sequence-dimension DCP for the KV
+budget instead of requiring a clean KV-head split.
+
+### Dense 27B with vision
+
+The same dense 27B profile also runs with vision enabled:
+
+- `--mm-encoder-tp-mode data`
+- no `--language-model-only`
+- same `TP=3`, `DCP=3`, `150K`, `max_num_seqs=8`, `gpu_memory_utilization=0.85`
+
+Observed:
+
+- model weights: about `8.84 GiB` per GPU;
+- vision tower cost: about `+0.86 GiB/GPU`;
+- available KV cache memory: `3.59 GiB`;
+- GPU KV cache size: `327,019` logical tokens;
+- maximum concurrency for `153,600` tokens per request: `2.13x`;
+- multimodal warmup completed and the server reached healthy state.
+
+This means vision is no longer a blocker for the 150K dense profile, but it
+does compete directly with speculative decoding and FlashInfer autotune
+headroom.
+
+### Agent-stable no-MTP profile
+
+For the agent-oriented profile, a tighter no-MTP configuration reached:
+
+- `--max-model-len 128K`
+- `--max-num-seqs 8`
+- `--gpu-memory-utilization 0.92`
+
+Observed:
+
+- KV cache size: `481,689` logical tokens;
+- maximum concurrency for `131,072` tokens per request: `3.67x`;
+- direct agent smoke across `qwen`, `codex`, `claude`, and `hermes` completed
+  with no CUDA OOM, HTTP 500, or EngineDeadError.
+
+Viewed physically, this is roughly in the "1.5M token-slot" class across three
+16 GiB GPUs, even though vLLM reports the logical request-level KV budget. This
+is the practical success: the three independent GPUs can be made to behave like
+a useful long-context serving pool for agent workloads.
+
+Rejected tighter profiles:
+
+- `0.94` and `0.93` no-MTP started and exposed more KV tokens, but failed under
+  agent prefill workspace pressure in GDN/FLA kernels.
+- `0.92` with some lower-thinking request defaults increased planned KV
+  reservation, but failed on the first agent request with a small CUDA
+  allocation OOM.
+
+The memory target cannot be chosen only from the final reserved KV blocks.
+Transient prefill workspaces need explicit headroom.
+
+### MTP status
+
+Built-in Qwen3.5/Qwen3.6 MTP runs on the dense 27B target with:
+
+- `{"method":"mtp","num_speculative_tokens":1}`
+- `TP=3`, `DCP=3`, `150K`
+
+Observed:
+
+- model weights increased from about `7.98 GiB/GPU` to about `9.12 GiB/GPU`;
+- MTP overhead: about `+1.14 GiB/GPU`;
+- GPU KV cache size dropped to `251,200` logical tokens;
+- maximum concurrency for `153,600` tokens per request dropped to `1.64x`;
+- experimental TP3 MTP decode reached the `~50 tok/s` class on dense 27B in
+  warmed testing;
+- spec decode metrics were healthy in a short run:
+  - mean acceptance length around `1.73`;
+  - draft acceptance rate around `72.8%`.
+
+The key warning is:
+
+```text
+Replicating Qwen3.5 MTP fc because hidden_size=5120 is not divisible by tensor_parallel_size=3.
+```
+
+MTP is therefore functional and already useful, but the current TP3
+implementation pays a replicated-memory cost. The next step is to turn the
+promising `~50 tok/s` class observation into a controlled benchmark: matched
+no-MTP vs MTP A/B over 10-20 warmed sequential requests at 256 and 512 generated
+tokens, then concurrency 4 and 8.
+
+## DFlash Findings
+
+DFlash is attractive because it drafts a whole token block in one pass instead
+of autoregressively drafting token by token. The public Qwen3.6 draft model is
+`z-lab/Qwen3.6-27B-DFlash`.
+
+The local draft config is:
+
+- `num_hidden_layers=5`
+- `hidden_size=5120`
+- `intermediate_size=17408`
+- `num_attention_heads=32`
+- `num_key_value_heads=8`
+- `sliding_window=2048`
+- `layer_types=[sliding_attention, sliding_attention, sliding_attention,
+  sliding_attention, full_attention]`
+- `dflash_config.target_layer_ids=[1,16,31,46,61]`
+
+The first compatibility blockers on `TP=3` are:
+
+- attention heads: `32 % 3 != 0`;
+- MLP intermediate size: `17408 % 3 != 0`;
+- mixed sliding/full attention support is still experimental for this model
+  family.
+
+The current experimental patches add two opt-in escape hatches:
+
+- allow mixed SWA/full DFlash attention for proof-of-concept runs;
+- allow replicated DFlash attention projections when head count is not divisible
+  by TP size.
+
+That got past the first attention assertion but immediately exposed the MLP
+assertion. This is expected: DFlash is not a small head-only module. A naive
+"replicate DFlash on all three target TP ranks" approach would replicate both
+attention and MLP state.
+
+Approximate BF16 DFlash memory:
+
+- attention per layer: about 52M parameters;
+- MLP per layer: about 267M parameters;
+- five draft layers plus FC/context projection: roughly 1.6B-2B parameters;
+- BF16 storage: roughly 3.5-4 GiB before runtime buffers.
+
+If DFlash is truly TP-sharded over three GPUs, that is roughly `1.2-1.4 GiB/GPU`.
+If the incompatible pieces are replicated on every GPU, it can become
+`3.5-4 GiB/GPU`, likely worse than built-in MTP on this memory budget.
+
+Conclusion: replicated DFlash is useful only as a diagnostic PoC. The production
+path should be either true uneven/padded sharding or isolated draft placement.
+
+## Alternatives to Built-in MTP
+
+### DFlash
+
+Pros:
+
+- block diffusion drafts multiple tokens in one pass;
+- vLLM has first-class `method="dflash"` plumbing;
+- can outperform autoregressive draft methods if acceptance remains high.
+
+Cons:
+
+- Qwen3.6 DFlash support is still moving due to causal/mixed SWA layers;
+- non-causal DFlash attention interacts poorly with DCP and KV-cache dtype
+  choices in some vLLM/FlashInfer versions;
+- the Qwen3.6 draft geometry is not TP3-friendly;
+- replicated fallback is too memory-expensive for `150K + vision`.
+
+### EAGLE/EAGLE3-style draft models
+
+Pros:
+
+- mature speculative-decoding path in vLLM;
+- can use hidden states rather than duplicating a full target-size model.
+
+Cons:
+
+- needs a compatible trained draft model for the exact target;
+- draft TP and placement still need attention on PCIe-only hosts;
+- acceptance depends strongly on workload and prompt style.
+
+### N-gram / prompt lookup / suffix decoding
+
+Pros:
+
+- very low memory overhead;
+- can help coding and agent workloads with repeated prefixes, boilerplate, and
+  tool-call patterns;
+- does not require a large draft model.
+
+Cons:
+
+- not a general decode accelerator;
+- gains depend on repetition and prompt structure;
+- cannot replace MTP/DFlash for arbitrary natural language.
+
+### External draft service
+
+Pros:
+
+- best fit for three independent GPUs if one GPU has available headroom;
+- avoids replicating draft weights on all target TP ranks;
+- can run a draft model with different precision, backend, or batch policy.
+
+Cons:
+
+- vLLM's current in-process speculative path assumes a tighter coupling between
+  target runner, draft model, hidden-state transfer, and verification;
+- requires new scheduling/IPC APIs or a custom proposer path;
+- hidden-state transfer latency must be measured carefully.
+
+### Custom-trained draft model
+
+Training a custom draft model is technically possible and could be attractive if
+off-the-shelf MTP/DFlash placement remains inefficient for TP3. A custom drafter
+could be shaped around this exact deployment:
+
+- TP3-friendly dimensions;
+- small enough to fit on one GPU or into planned residual memory;
+- trained on agent/coding/tool-call distributions rather than generic chat;
+- designed for `150K` target-context behavior and Qwen3.6 hidden states.
+
+This is a last-resort route, not the first optimization. It likely costs much
+more calendar time than fixing placement/sharding and benchmarking existing
+MTP/DFlash/EAGLE-style paths.
+
+## FlashInfer Research Direction
+
+FlashInfer is involved in several distinct paths:
+
+- attention backend for the target model;
+- FP4/NVFP4 GEMM kernels;
+- autotune cache generation/loading;
+- optional all-reduce backend;
+- DFlash non-causal draft attention path.
+
+Current local findings:
+
+- FlashInfer attention works for dense 27B TP3/DCP3.
+- TRTLLM FlashInfer path cannot return LSE for DCP, so vLLM falls back to
+  FlashInfer native attention.
+- Missing autotune cache falls back to default tactics; this is stable but can
+  leave performance on the table.
+- Running autotune at high `gpu_memory_utilization` can OOM even when runtime
+  serving would fit, because autotune temporarily allocates profiling workspaces.
+- For MoE/NVFP4 on SM120, native FlashInfer/CuTeDSL/CUTLASS paths are still
+  riskier than Marlin in this environment; Marlin is slower than the theoretical
+  native FP4 path, but currently more reliable.
+
+Research items:
+
+1. Build FlashInfer autotune cache at a lower utilization profile, then run
+   production with `VLLM_FLASHINFER_AUTOTUNE_MODE=load`.
+2. Verify which cache keys change across:
+   - MTP on/off;
+   - vision on/off;
+   - `max_num_batched_tokens`;
+   - FlashInfer backend variant;
+   - model architecture: dense 27B vs 35B-A3B MoE.
+3. Test target attention backends separately from MoE GEMM backends.
+4. Revisit native FP4 MoE only when SM120/SM12x correctness and performance
+   issues are resolved upstream.
+
+## Intercommunication Research Direction
+
+Current stable communication mode is PyNCCL:
+
+- `NCCL_P2P_DISABLE=1`
+- `--disable-custom-all-reduce`
+- FlashInfer all-reduce disabled
+- symmetric memory disabled
+
+This is conservative but stable on a PCIe-only, no-NVLink topology.
+
+Observed/known issues:
+
+- vLLM custom all-reduce can hang on Blackwell PCIe systems when topology
+  assumptions do not hold.
+- PyTorch `SymmMemCommunicator` did not support device capability `12.0` in this
+  stack.
+- vLLM's `NCCL_SYMM_MEM` path was originally gated for larger world sizes and is
+  not a free win for `world_size=3`.
+- Local experiments that enabled symmetric-memory paths did not improve short
+  decode and hit long-prefill instability.
+
+Next technical directions:
+
+1. Keep PyNCCL as the production baseline.
+2. Add reproducible microbenchmarks for TP3 all-reduce sizes that actually occur
+   in Qwen3.6 dense and MoE decode.
+3. Re-test P2P after BIOS/IOMMU/ACS changes, but do not assume it solves the
+   GPU2 bottleneck if the PCIe topology is inherently asymmetric.
+4. Prototype a custom IPC all-reduce only for the narrow tensor sizes where
+   PyNCCL is measurably dominant in latency.
+5. Track whether vLLM/FlashInfer symmetric-memory support catches up for
+   Blackwell consumer/prosumer SM120 systems.
+
+## Memory Placement and Estimation Debt
+
+vLLM's current memory planning is functional but not topology-aware enough for
+this target.
+
+Problems seen locally:
+
+- `gpu_memory_utilization` reserves KV blocks based on planned steady-state
+  memory, but GDN/FLA prefill kernels need transient workspace headroom.
+- FlashInfer autotune can OOM during profiling even when the final selected
+  runtime tactic would fit.
+- Vision, MTP, DFlash, and CUDA graph pools all compete for the same residual
+  memory, but the placement policy treats many of these costs as uniform across
+  ranks.
+- Replicated fallback for incompatible TP geometry can make a model "work" while
+  silently destroying the KV budget.
+
+Desired improvements:
+
+- expose planned vs measured memory buckets per rank:
+  weights, KV, CUDA graphs, compile cache, vision tower, draft model, transient
+  workspace estimate;
+- model transient workspace reserves explicitly instead of relying on coarse
+  utilization headroom;
+- allow asymmetric placement for draft modules and possibly vision encoders;
+- support uneven/padded sharding for small incompatible dimensions instead of
+  full replication;
+- make speculative draft placement independent enough that draft weights are not
+  replicated across all target TP ranks unless requested.
+
+## Dense 27B vs 35B-A3B
+
+Dense 27B:
+
+- easier TP3 target geometry in the current patches;
+- no replicated full-attention fallback in the dense target;
+- good long-context behavior with DCP3;
+- vision works at 150K/0.85.
+
+35B-A3B / Agents-A1 MoE:
+
+- MoE/EP makes full utilization attractive, but several dense/full-attention
+  fallback paths still appear because head counts are not cleanly divisible by
+  TP3;
+- Marlin is currently the reliable FP4/MoE backend on SM120, while native
+  FlashInfer/CuTeDSL paths need more validation;
+- agent stability was achieved at `128K`, `max_num_seqs=8`, `gpu_util=0.87` for
+  the MoE vision profile and `0.92` for the no-MTP text-oriented profile, but
+  higher utilization failed on transient workspaces.
+
+## Upstream Research References
+
+- vLLM Qwen3.6 27B recipe: https://recipes.vllm.ai/Qwen/Qwen3.6-27B
+- vLLM speculative config docs: https://docs.vllm.ai/en/stable/api/vllm/config/speculative/
+- vLLM engine args / gpu memory utilization docs: https://docs.vllm.ai/en/v0.20.1/configuration/engine_args/
+- DFlash model card: https://huggingface.co/z-lab/Qwen3.6-27B-DFlash
+- Qwen3.6 DFlash low-acceptance discussion: https://huggingface.co/z-lab/Qwen3.6-27B-DFlash/discussions/2
+- vLLM DFlash KV dtype issue: https://github.com/vllm-project/vllm/issues/41559
+- DFlash paper: https://arxiv.org/html/2602.06036v2
+- NVIDIA DFlash Blackwell blog: https://developer.nvidia.com/blog/boost-inference-performance-up-to-15x-on-nvidia-blackwell-using-dflash-speculative-decoding/
+- FlashInfer SM120 NVFP4 MoE issue: https://github.com/flashinfer-ai/flashinfer/issues/2723
+- FlashInfer FP4 GEMM performance issue: https://github.com/flashinfer-ai/flashinfer/issues/1732
+- FlashInfer SM12x vLLM CUTLASS backend issue: https://github.com/flashinfer-ai/flashinfer/issues/3013
+- vLLM Blackwell PCIe custom all-reduce discussion: https://discuss.vllm.ai/t/vllm-hangs-during-worker-initialization-on-blackwell-pcie-gpus-unless-disable-custom-all-reduce-is-used/2540
+- FlashInfer autotune OOM discussion: https://discuss.vllm.ai/t/getting-flashinfer-jit-autotuner-oom-detected/2565
+
+## Recommended Next Work
+
+1. Commit the current DFlash patch only as an experimental proof-of-concept
+   helper, not as the final production design.
+2. Add a DFlash MLP fallback only if the goal is to measure replicated-DFlash
+   memory cost; otherwise skip it and go directly to uneven/padded sharding.
+3. Design true TP3 uneven sharding for DFlash attention and MLP:
+   - attention heads split as `[11, 11, 10]` or padded to 33;
+   - MLP intermediate split as `[5803, 5803, 5802]` or padded to 17409;
+   - trim padded outputs before residual paths.
+4. Investigate external/isolated draft placement:
+   - target remains TP3/DCP3;
+   - draft model uses TP1 or its own placement;
+   - hidden-state transfer and verification latency are measured explicitly.
+5. Run matched MTP A/B benchmarks:
+   - no-MTP vs MTP `num_speculative_tokens=1,2,3`;
+   - 10-20 warmed sequential requests;
+   - 256 and 512 generated tokens;
+   - then concurrency 4 and 8.
+6. Build and pin FlashInfer autotune caches separately from production startup.
+7. Keep PyNCCL as the stable interconnect baseline until a measured custom path
+   beats it without long-context instability.
