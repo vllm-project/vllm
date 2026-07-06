@@ -133,7 +133,7 @@ class AsyncOperationManager:
         # CUDA streams for async operations
         self._save_stream = torch.cuda.Stream()
         self._load_stream = torch.cuda.Stream()
-        self._save_event = torch.Event()
+        self._save_event = torch.cuda.Event()
 
         # Buffer allocators for data copying
         self._save_buffer_allocator = CopyBufferAllocator(
@@ -171,7 +171,7 @@ class AsyncOperationManager:
     def submit_save_operation(self, request_id: str, block_ids, block_hashes) -> Future:
         """Submit a save operation for async execution."""
         future: Future[Any] = Future()
-        main_stream_event = torch.Event()
+        main_stream_event = torch.cuda.Event()
         main_stream_event.record()
         task = (request_id, block_ids, block_hashes, future, main_stream_event)
         self._save_queue.put(task)
@@ -304,7 +304,7 @@ class AsyncOperationManager:
                     block_ids, buffers, "gather"
                 )
 
-                save_stream_event = torch.Event()
+                save_stream_event = torch.cuda.Event()
                 save_stream_event.record(self._save_stream)  # Record gather completion
 
             # Step3: Write data in batches

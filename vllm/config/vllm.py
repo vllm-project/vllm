@@ -1850,8 +1850,13 @@ class VllmConfig:
             tp_size = self.parallel_config.tensor_parallel_size
             from vllm._aiter_ops import rocm_aiter_ops
 
-            if rocm_aiter_ops.is_enabled():
-                max_size = rocm_aiter_ops.get_aiter_allreduce_max_size()
+            max_size: int | None = None
+            if rocm_aiter_ops.is_custom_all_reduce_enabled():
+                from vllm.distributed.device_communicators.aiter_custom_all_reduce import (  # noqa: E501
+                    AiterCustomAllreduce,
+                )
+
+                max_size = AiterCustomAllreduce.effective_max_size()
             else:
                 max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
             if max_size is not None and self.model_config is not None:
