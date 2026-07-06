@@ -862,6 +862,28 @@ def test_sample_passes_reordered_draft_probs_to_rejection_sampler():
     assert torch.equal(passed_draft_probs, expected_draft_probs)
 
 
+def test_invalid_draft_suffixes_remain_rejected_in_metadata():
+    runner = object.__new__(GPUModelRunner)
+    runner.device = torch.device("cpu")
+    runner.arange_np = np.arange(64, dtype=np.int64)
+    runner._arange_scratch = np.empty(64, dtype=np.int64)
+    # Placeholder (-1) drafts are kept in input_ids (clamped to 0 only at the
+    # embedding boundary). For num_draft_tokens=[2, 1, 2] the draft positions
+    # are [1, 2, 4, 6, 7], so the gather carries the -1s straight into the
+    # rejection-sampling metadata.
+    runner.input_ids = SimpleNamespace(
+        gpu=torch.tensor([99, 10, -1, 99, 12, 99, 13, -1], dtype=torch.int32),
+    )
+
+    metadata = GPUModelRunner._calc_spec_decode_metadata(
+        runner,
+        np.array([2, 1, 2], dtype=np.int32),
+        np.array([3, 5, 8], dtype=np.int32),
+    )
+
+    assert metadata.draft_token_ids.tolist() == [10, -1, 12, 13, -1]
+
+
 def test_init_kv_cache_with_kv_sharing_invalid_target_layer_order(default_vllm_config):
     torch.set_default_dtype(torch.float16)
     layer_0 = "model.layers.0.self_attn.attn"

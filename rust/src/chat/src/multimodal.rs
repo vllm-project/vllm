@@ -16,13 +16,14 @@ use std::sync::{Arc, LazyLock};
 
 use itertools::izip;
 use llm_multimodal::{
-    AsyncMultiModalTracker, FieldLayout, ImagePreProcessor, ImageProcessorRegistry, MediaConnector,
-    MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelProcessorSpec,
-    ModelRegistry, PreProcessorConfig, PreprocessedImages, PromptReplacement, TokenResolver,
-    TrackedMedia,
+    AsyncMultiModalTracker, FieldLayout, MediaConnector, MediaConnectorConfig, MediaContentPart,
+    Modality, ModelMetadata, ModelProcessorSpec, ModelRegistry, PreProcessorConfig,
+    PreprocessedEncoderInputs as PreprocessedImages, PromptReplacement, Tokenizer as TokenResolver,
+    TrackedMedia, VisionPreProcessor as ImagePreProcessor,
+    VisionProcessorRegistry as ImageProcessorRegistry,
 };
 use tracing::warn;
-use vllm_engine_core_client::protocol::ModelDtype;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmFeatureSpec, MmFeatures, MmField, MmFieldElem, MmFlatField, MmKwargsItem,
     MmSharedField, MmSlice, PlaceholderRange, SliceSpec,
@@ -554,6 +555,10 @@ impl TokenResolver for TokenizerResolver {
 
     fn id_to_token(&self, id: u32) -> Option<String> {
         self.0.id_to_token(id)
+    }
+
+    fn encode_text(&self, text: &str) -> Option<Vec<u32>> {
+        self.0.encode(text, false).ok()
     }
 }
 
