@@ -44,6 +44,7 @@ __global__ void marlin_int4_fp8_preprocess_kernel_awq(
   // same row (stride 1) instead of striding across rows (stride size_n/8).
   int col = blockIdx.y * 32 + threadIdx.x;
   if (col >= size_n / 8) return;
+  (void)size_k;
 
   int32_t val = qweight[blockIdx.x * (size_n / 8) + col];
   int32_t zero = qzeros[blockIdx.x / group_size * (size_n / 8) + col];
