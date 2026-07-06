@@ -71,6 +71,7 @@ def test_detect_chip_model_from_npu_smi_text() -> None:
 
     assert resolver.detect_chip_model_from_text("Name: Ascend 910B2") == "910B2"
     assert resolver.detect_chip_model_from_text("chip model: 910B3") == "910B3"
+    assert resolver.detect_chip_model_from_text("chip model: 910B4") == "910B4"
 
 
 def test_resolve_spec_file_prefers_explicit_override() -> None:

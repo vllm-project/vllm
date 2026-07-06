@@ -5,20 +5,18 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
 
-SUPPORTED_CHIP_MODELS = ("910B2", "910B3")
+ASCEND_910B_CHIP_PATTERN = re.compile(r"910B\d+")
 
 
 def detect_chip_model_from_text(text: str) -> str:
     normalized = text.upper().replace(" ", "")
-    for chip_model in sorted(SUPPORTED_CHIP_MODELS, reverse=True):
-        if chip_model in normalized:
-            return chip_model
-
-    return ""
+    match = ASCEND_910B_CHIP_PATTERN.search(normalized)
+    return match.group(0) if match else ""
 
 
 def detect_chip_model_from_npu_smi(npu_smi_bin: str) -> str:
