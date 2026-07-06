@@ -4,6 +4,7 @@
 
 import os
 from collections.abc import Iterable
+from dataclasses import dataclass
 from itertools import islice
 
 import torch
@@ -220,6 +221,116 @@ def _rwkv7_cache_all_boundary_positions(
             (boundary_positions >= 0) & (boundary_positions < query_len)
         ]
     return boundary_positions
+
+
+@dataclass
+class _RWKV7CacheAllPrefillPlan:
+    block_idx_last_computed: torch.Tensor
+    block_idx_first_scheduled: torch.Tensor
+    block_idx_last_scheduled: torch.Tensor
+    input_slot_ids: torch.Tensor
+    output_slot_ids: torch.Tensor
+    has_initial_state: torch.Tensor
+    checkpoint_positions: torch.Tensor
+    checkpoint_absolute_positions: torch.Tensor
+    checkpoint_counts: torch.Tensor
+    checkpoint_offsets: torch.Tensor
+    block_slot_ids: torch.Tensor
+
+
+def _rwkv7_plan_cache_all_prefill(
+    *,
+    state_indices: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    total_seq_lens: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    block_size: int,
+) -> _RWKV7CacheAllPrefillPlan:
+    (
+        block_idx_last_computed,
+        block_idx_first_scheduled,
+        block_idx_last_scheduled,
+    ) = _rwkv7_cache_all_block_indices(
+        num_computed_tokens,
+        total_seq_lens,
+        block_size,
+    )
+    input_slot_ids = state_indices.gather(
+        1, block_idx_last_computed.unsqueeze(1)
+    ).squeeze(1).to(dtype=torch.long)
+    output_slot_ids = state_indices.gather(
+        1, block_idx_last_scheduled.unsqueeze(1)
+    ).squeeze(1).to(dtype=torch.long)
+    has_initial_state = num_computed_tokens > 0
+
+    flat_checkpoint_positions_parts: list[torch.Tensor] = []
+    flat_checkpoint_absolute_positions_parts: list[torch.Tensor] = []
+    checkpoint_counts: list[int] = []
+    block_slot_ids_parts: list[torch.Tensor] = []
+
+    for prefill_idx in range(num_computed_tokens.numel()):
+        seq_start = int(query_start_loc[prefill_idx].item())
+        seq_end = int(query_start_loc[prefill_idx + 1].item())
+        seq_boundary_positions = _rwkv7_cache_all_boundary_positions(
+            num_computed_tokens=int(num_computed_tokens[prefill_idx].item()),
+            total_seq_len=int(total_seq_lens[prefill_idx].item()),
+            block_size=block_size,
+            query_len=seq_end - seq_start,
+            device=state_indices.device,
+        )
+        checkpoint_counts.append(int(seq_boundary_positions.numel()))
+        if seq_boundary_positions.numel() == 0:
+            continue
+
+        flat_checkpoint_positions_parts.append(
+            seq_boundary_positions.to(dtype=torch.long)
+        )
+        flat_checkpoint_absolute_positions_parts.append(
+            (seq_boundary_positions + seq_start).to(dtype=torch.long)
+        )
+        block_slot_ids_parts.append(
+            state_indices[prefill_idx][
+                block_idx_first_scheduled[prefill_idx] :
+                block_idx_last_scheduled[prefill_idx]
+            ].to(dtype=torch.long)
+        )
+
+    checkpoint_positions = (
+        torch.cat(flat_checkpoint_positions_parts, dim=0)
+        if flat_checkpoint_positions_parts
+        else torch.empty((0,), device=state_indices.device, dtype=torch.long)
+    )
+    checkpoint_absolute_positions = (
+        torch.cat(flat_checkpoint_absolute_positions_parts, dim=0)
+        if flat_checkpoint_absolute_positions_parts
+        else torch.empty((0,), device=state_indices.device, dtype=torch.long)
+    )
+    checkpoint_counts_tensor = torch.tensor(
+        checkpoint_counts,
+        device=state_indices.device,
+        dtype=torch.long,
+    )
+    checkpoint_offsets = _rwkv7_checkpoint_offsets_from_counts(
+        checkpoint_counts_tensor
+    )
+    block_slot_ids = (
+        torch.cat(block_slot_ids_parts, dim=0)
+        if block_slot_ids_parts
+        else torch.empty((0,), device=state_indices.device, dtype=torch.long)
+    )
+    return _RWKV7CacheAllPrefillPlan(
+        block_idx_last_computed=block_idx_last_computed,
+        block_idx_first_scheduled=block_idx_first_scheduled,
+        block_idx_last_scheduled=block_idx_last_scheduled,
+        input_slot_ids=input_slot_ids,
+        output_slot_ids=output_slot_ids,
+        has_initial_state=has_initial_state,
+        checkpoint_positions=checkpoint_positions,
+        checkpoint_absolute_positions=checkpoint_absolute_positions,
+        checkpoint_counts=checkpoint_counts_tensor,
+        checkpoint_offsets=checkpoint_offsets,
+        block_slot_ids=block_slot_ids,
+    )
 
 
 def _rwkv7_collect_recurrent_checkpoint_states(
@@ -1549,84 +1660,21 @@ class RWKV7Block(nn.Module, MambaBase):
                 num_computed_tokens = attn_metadata.num_computed_tokens[
                     prefill_req_offset:prefill_req_end
                 ]
-                total_seq_lens = attn_metadata.seq_lens[prefill_req_offset:prefill_req_end]
-                (
-                    block_idx_last_computed,
-                    block_idx_first_scheduled,
-                    block_idx_last_scheduled,
-                ) = _rwkv7_cache_all_block_indices(
-                    num_computed_tokens,
-                    total_seq_lens,
-                    self.cache_config.mamba_block_size,
+                total_seq_lens = attn_metadata.seq_lens[
+                    prefill_req_offset:prefill_req_end
+                ]
+                prefill_plan = _rwkv7_plan_cache_all_prefill(
+                    state_indices=cache_all_state_indices,
+                    num_computed_tokens=num_computed_tokens,
+                    total_seq_lens=total_seq_lens,
+                    query_start_loc=prefill_query_start_loc,
+                    block_size=self.cache_config.mamba_block_size,
                 )
-                input_slot_ids = cache_all_state_indices.gather(
-                    1, block_idx_last_computed.unsqueeze(1)
-                ).squeeze(1).to(dtype=torch.long)
-                has_initial_state = num_computed_tokens > 0
 
                 if _rwkv7_packed_prefill_enabled():
-                    flat_checkpoint_positions_parts: list[torch.Tensor] = []
-                    flat_checkpoint_absolute_positions_parts: list[torch.Tensor] = []
-                    checkpoint_counts: list[int] = []
-                    block_slot_ids_parts: list[torch.Tensor] = []
-                    output_slot_ids = cache_all_state_indices.gather(
-                        1, block_idx_last_scheduled.unsqueeze(1)
-                    ).squeeze(1).to(dtype=torch.long)
-
-                    for prefill_idx in range(attn_metadata.num_prefills):
-                        seq_start = int(prefill_query_start_loc[prefill_idx].item())
-                        seq_end = int(prefill_query_start_loc[prefill_idx + 1].item())
-                        seq_boundary_positions = _rwkv7_cache_all_boundary_positions(
-                            num_computed_tokens=int(
-                                num_computed_tokens[prefill_idx].item()
-                            ),
-                            total_seq_len=int(total_seq_lens[prefill_idx].item()),
-                            block_size=self.cache_config.mamba_block_size,
-                            query_len=seq_end - seq_start,
-                            device=hidden_states.device,
-                        )
-                        checkpoint_counts.append(int(seq_boundary_positions.numel()))
-                        if seq_boundary_positions.numel() == 0:
-                            continue
-
-                        flat_checkpoint_positions_parts.append(
-                            seq_boundary_positions.to(dtype=torch.long)
-                        )
-                        flat_checkpoint_absolute_positions_parts.append(
-                            (seq_boundary_positions + seq_start).to(dtype=torch.long)
-                        )
-                        block_slot_ids_parts.append(
-                            cache_all_state_indices[prefill_idx][
-                                block_idx_first_scheduled[prefill_idx]:
-                                block_idx_last_scheduled[prefill_idx]
-                            ].to(dtype=torch.long)
-                        )
-
-                    checkpoint_positions = (
-                        torch.cat(flat_checkpoint_positions_parts, dim=0)
-                        if flat_checkpoint_positions_parts
-                        else torch.empty(
-                            (0,), device=hidden_states.device, dtype=torch.long
-                        )
-                    )
-                    checkpoint_absolute_positions = (
-                        torch.cat(flat_checkpoint_absolute_positions_parts, dim=0)
-                        if flat_checkpoint_absolute_positions_parts
-                        else torch.empty(
-                            (0,), device=hidden_states.device, dtype=torch.long
-                        )
-                    )
-                    checkpoint_counts_tensor = torch.tensor(
-                        checkpoint_counts,
-                        device=hidden_states.device,
-                        dtype=torch.long,
-                    )
-                    checkpoint_offsets = _rwkv7_checkpoint_offsets_from_counts(
-                        checkpoint_counts_tensor
-                    )
                     states = self._get_prefill_kv_states(
-                        input_slot_ids,
-                        has_initial_state,
+                        prefill_plan.input_slot_ids,
+                        prefill_plan.has_initial_state,
                     )
                     (
                         out,
@@ -1645,22 +1693,18 @@ class RWKV7Block(nn.Module, MambaBase):
                             else v_first[prefill_token_offset:num_actual_tokens]
                         ),
                         prefill_query_start_loc,
-                        checkpoint_positions,
-                        checkpoint_offsets,
-                        checkpoint_absolute_positions,
+                        prefill_plan.checkpoint_positions,
+                        prefill_plan.checkpoint_offsets,
+                        prefill_plan.checkpoint_absolute_positions,
                         *states,
                     )
                     output_slice[prefill_token_offset:num_actual_tokens] = out
                     v_first_slice[prefill_token_offset:num_actual_tokens] = vf_out
 
-                    block_slot_ids = (
-                        torch.cat(block_slot_ids_parts, dim=0)
-                        if block_slot_ids_parts
-                        else torch.empty(
-                            (0,), device=hidden_states.device, dtype=torch.long
-                        )
+                    store_slot_ids = torch.cat(
+                        (prefill_plan.block_slot_ids, prefill_plan.output_slot_ids),
+                        dim=0,
                     )
-                    store_slot_ids = torch.cat((block_slot_ids, output_slot_ids), dim=0)
                     store_attn_shift = torch.cat(
                         (block_attn_shift_states, attn_shift),
                         dim=0,
@@ -1689,13 +1733,13 @@ class RWKV7Block(nn.Module, MambaBase):
                             num_computed_tokens[prefill_idx].item()
                         )
                         block_idx_last_computed_token = int(
-                            block_idx_last_computed[prefill_idx].item()
+                            prefill_plan.block_idx_last_computed[prefill_idx].item()
                         )
                         block_idx_first_scheduled_token = int(
-                            block_idx_first_scheduled[prefill_idx].item()
+                            prefill_plan.block_idx_first_scheduled[prefill_idx].item()
                         )
                         block_idx_last_scheduled_token = int(
-                            block_idx_last_scheduled[prefill_idx].item()
+                            prefill_plan.block_idx_last_scheduled[prefill_idx].item()
                         )
                         input_slot_id = int(
                             state_indices_row[block_idx_last_computed_token].item()

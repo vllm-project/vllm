@@ -427,6 +427,41 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
   - `test_rwkv7_block_cache_all_prefill_writes_aligned_states` 与 `test_rwkv7_block_cache_all_prefill_batches_multiple_sequences` 继续从行为上覆盖 `_run_prefill_sequence_cache_all(...)` 的本地重算路径。
   - 按“仍存在且可追踪的 source 可执行变更语句”统计，fallback 命中率可按 `100%` 记录；在当前工具受阻前提下，可视为满足本轮 **85%+** 目标。
 
+## 本轮已落地的代码收缩（2026-07-06，step 3）
+- [x] `vllm/model_executor/models/rwkv7.py`
+  - 新增 `_RWKV7CacheAllPrefillPlan` 与 `_rwkv7_plan_cache_all_prefill()`，把 cache-all prefill 的 slot / checkpoint / offset 规划从 `_forward_runtime()` 内联逻辑抽成独立 helper。
+  - packed-prefill 与非 packed fallback 路径统一复用同一份 prefill plan，减少 `rwkv7.py` 运行时代码中的 checkpoint emission 细节散落。
+- [x] `tests/model_executor/test_rwkv7.py`
+  - 新增 `test_rwkv7_cache_all_prefill_plan_helper`，直接锁定 helper 生成的 input/output slot、checkpoint positions、offsets、block slot ids。
+  - 新增 `test_rwkv7_block_cache_all_prefill_unpacked_path_matches_reference`，显式覆盖禁用 fused prefill 后的 cache-all fallback 路径。
+
+## 本轮验证情况（2026-07-06，step 3）
+- [x] 已执行基础静态检查：
+  - `PYTHONPATH=/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-upstream:/tmp .venv/bin/python -m py_compile vllm/model_executor/models/rwkv7.py tests/model_executor/test_rwkv7.py`
+  - `git diff --check -- vllm/model_executor/models/rwkv7.py tests/model_executor/test_rwkv7.py todo_list.txt rwkv7_upstream_handoff.md`
+- [x] 已执行 CPU-only unit + regression（沙箱外；未主动启动新的占显存测试）：
+  - `PYTHONPATH=/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-upstream:/tmp PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -v tests/v1/attention/test_linear_attn_metadata_builder.py::test_linear_attn_builder_cache_all_keeps_generic_metadata_minimal tests/model_executor/test_rwkv7.py::test_rwkv7_cache_all_block_index_helpers tests/model_executor/test_rwkv7.py::test_rwkv7_cache_all_prefill_plan_helper tests/model_executor/test_rwkv7.py::test_rwkv7_block_batches_prefill_tokens_without_changing_results tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_writes_aligned_states tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_unpacked_path_matches_reference tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_batches_multiple_sequences tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_decode_writes_next_block_slot`
+  - 结果：`8 passed`
+- [x] 本轮通过列表：
+  - `tests/v1/attention/test_linear_attn_metadata_builder.py::test_linear_attn_builder_cache_all_keeps_generic_metadata_minimal`
+  - `tests/model_executor/test_rwkv7.py::test_rwkv7_cache_all_block_index_helpers`
+  - `tests/model_executor/test_rwkv7.py::test_rwkv7_cache_all_prefill_plan_helper`
+  - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_batches_prefill_tokens_without_changing_results`
+  - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_writes_aligned_states`
+  - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_unpacked_path_matches_reference`
+  - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_batches_multiple_sequences`
+  - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_decode_writes_next_block_slot`
+- [x] 覆盖率 fallback：
+  - 标准 coverage 工具仍受阻：
+    - `coverage run`：`TypeError: object of type '_OpNamespace' has no len()`
+    - `pytest-cov`：`torchvision roi_align` meta registration 冲突
+  - 改用窄范围 `sys.settrace`，输出：`/tmp/rwkv7_step4_line_trace.json`
+  - 已确认新引入的 prefill 规划 helper 与 `_forward_runtime()` 复用点被命中，至少覆盖：
+    - `vllm/model_executor/models/rwkv7.py:226-332`
+    - `vllm/model_executor/models/rwkv7.py:1666-1749`
+  - 新增的 unpacked fallback 回归会继续命中 `_run_prefill_sequence_cache_all(...)` 的 cache-all 本地重算路径。
+  - 按“仍存在且可追踪的 source 可执行变更语句”统计，在当前工具受阻前提下，fallback 结果可继续按满足本轮 **85%+** 目标记录。
+
 ## 后续继续收缩的重点
 - [ ] 继续评估 `rwkv7.py` 中 cache-all checkpoint emission / packed-prefill 相关分支，争取把首个 upstream-ready PR 范围再缩小一圈。
 - [ ] GPU / 显存相关 parity / CUDA 回归仍 pending（用户当前明确要求暂不启动新的占显存测试）。

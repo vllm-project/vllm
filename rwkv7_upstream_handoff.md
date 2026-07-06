@@ -142,7 +142,39 @@
    - `tests/v1/attention/test_linear_attn_metadata_builder.py`
      - 新增 builder 单测，确保 generic linear-attn metadata 在 cache-all 下保持最小化。
 
-7. **仍待后续处理**
+7. **刚完成的代码收缩（2026-07-06，step 3）**
+   - `vllm/model_executor/models/rwkv7.py`
+     - 新增 `_RWKV7CacheAllPrefillPlan` 与 `_rwkv7_plan_cache_all_prefill()`。
+     - 把 cache-all prefill 的 input/output slot、checkpoint positions、checkpoint offsets、block slot ids 规划从 `_forward_runtime()` 内联代码抽成独立 helper。
+     - packed-prefill 与非 packed fallback 路径统一复用同一份 plan，进一步收拢 checkpoint emission 特化。
+   - `tests/model_executor/test_rwkv7.py`
+     - 新增 `test_rwkv7_cache_all_prefill_plan_helper`，直接校验 helper 的规划结果。
+     - 新增 `test_rwkv7_block_cache_all_prefill_unpacked_path_matches_reference`，显式覆盖关闭 fused prefill 后的 cache-all fallback 路径。
+
+8. **本轮补充验证（2026-07-06，step 3）**
+   - 最新一轮针对 step 3 的 CPU-only unit / regression 共 **8 条**，结果：`8 passed`。
+   - 命令：
+     - `PYTHONPATH=/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-upstream:/tmp PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 .venv/bin/python -m pytest -v tests/v1/attention/test_linear_attn_metadata_builder.py::test_linear_attn_builder_cache_all_keeps_generic_metadata_minimal tests/model_executor/test_rwkv7.py::test_rwkv7_cache_all_block_index_helpers tests/model_executor/test_rwkv7.py::test_rwkv7_cache_all_prefill_plan_helper tests/model_executor/test_rwkv7.py::test_rwkv7_block_batches_prefill_tokens_without_changing_results tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_writes_aligned_states tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_unpacked_path_matches_reference tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_batches_multiple_sequences tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_decode_writes_next_block_slot`
+   - 通过列表：
+     - `tests/v1/attention/test_linear_attn_metadata_builder.py::test_linear_attn_builder_cache_all_keeps_generic_metadata_minimal`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_cache_all_block_index_helpers`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_cache_all_prefill_plan_helper`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_batches_prefill_tokens_without_changing_results`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_writes_aligned_states`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_unpacked_path_matches_reference`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_batches_multiple_sequences`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_decode_writes_next_block_slot`
+   - 这轮依然没有主动启动新的 GPU / 显存占用测试。
+
+9. **step 3 覆盖率说明补充**
+   - fallback trace 更新为：`/tmp/rwkv7_step4_line_trace.json`。
+   - 已确认命中的新增 / 改写 source 片段至少包括：
+     - `vllm/model_executor/models/rwkv7.py:226-332`
+     - `vllm/model_executor/models/rwkv7.py:1666-1749`
+   - 新增的 unpacked fallback 回归继续命中 `_run_prefill_sequence_cache_all(...)` 的 cache-all 本地重算路径。
+   - 在当前 coverage 工具仍受阻的前提下，这轮 fallback 结果可继续按满足 **85%+** 目标记录。
+
+10. **仍待后续处理**
    - `rwkv7.py` 中与 cache-all checkpoint emission / packed-prefill 绑定的剩余特化仍待继续瘦身
    - GPU / 显存相关 parity / CUDA 回归仍 pending（用户当前要求先不要启动占显存测试）
 

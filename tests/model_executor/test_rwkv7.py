@@ -39,6 +39,7 @@ from vllm.model_executor.models.rwkv7 import (
     _rwkv7_cache_all_block_index_bounds,
     _rwkv7_cache_all_block_indices,
     _rwkv7_cache_all_boundary_positions,
+    _rwkv7_plan_cache_all_prefill,
 )
 from vllm.transformers_utils.configs.rwkv7 import RWKV7Config
 from vllm.utils.network_utils import get_open_port
@@ -122,9 +123,18 @@ def test_rwkv7_cache_all_block_index_helpers():
             block_size,
         )
     )
-    torch.testing.assert_close(block_idx_last_computed, torch.tensor([0, 0, 1], dtype=torch.int32))
-    torch.testing.assert_close(block_idx_first_scheduled, torch.tensor([0, 1, 1], dtype=torch.int32))
-    torch.testing.assert_close(block_idx_last_scheduled, torch.tensor([2, 1, 2], dtype=torch.int32))
+    torch.testing.assert_close(
+        block_idx_last_computed,
+        torch.tensor([0, 0, 1], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        block_idx_first_scheduled,
+        torch.tensor([0, 1, 1], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        block_idx_last_scheduled,
+        torch.tensor([2, 1, 2], dtype=torch.int32),
+    )
 
     torch.testing.assert_close(
         _rwkv7_cache_all_boundary_positions(
@@ -155,6 +165,64 @@ def test_rwkv7_cache_all_block_index_helpers():
             device=torch.device("cpu"),
         ),
         torch.empty((0,), dtype=torch.long),
+    )
+
+
+def test_rwkv7_cache_all_prefill_plan_helper():
+    plan = _rwkv7_plan_cache_all_prefill(
+        state_indices=torch.tensor(
+            [[10, 11, 12], [20, 21, 22]],
+            dtype=torch.long,
+        ),
+        num_computed_tokens=torch.tensor([0, 9], dtype=torch.int32),
+        total_seq_lens=torch.tensor([17, 17], dtype=torch.int32),
+        query_start_loc=torch.tensor([0, 17, 25], dtype=torch.int32),
+        block_size=8,
+    )
+
+    torch.testing.assert_close(
+        plan.block_idx_last_computed,
+        torch.tensor([0, 1], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        plan.block_idx_first_scheduled,
+        torch.tensor([0, 1], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        plan.block_idx_last_scheduled,
+        torch.tensor([2, 2], dtype=torch.int32),
+    )
+    torch.testing.assert_close(
+        plan.input_slot_ids,
+        torch.tensor([10, 21], dtype=torch.long),
+    )
+    torch.testing.assert_close(
+        plan.output_slot_ids,
+        torch.tensor([12, 22], dtype=torch.long),
+    )
+    torch.testing.assert_close(
+        plan.has_initial_state,
+        torch.tensor([False, True]),
+    )
+    torch.testing.assert_close(
+        plan.checkpoint_positions,
+        torch.tensor([7, 15, 6], dtype=torch.long),
+    )
+    torch.testing.assert_close(
+        plan.checkpoint_absolute_positions,
+        torch.tensor([7, 15, 23], dtype=torch.long),
+    )
+    torch.testing.assert_close(
+        plan.checkpoint_counts,
+        torch.tensor([2, 1], dtype=torch.long),
+    )
+    torch.testing.assert_close(
+        plan.checkpoint_offsets,
+        torch.tensor([0, 2, 3], dtype=torch.long),
+    )
+    torch.testing.assert_close(
+        plan.block_slot_ids,
+        torch.tensor([10, 11, 21], dtype=torch.long),
     )
 
 
@@ -843,6 +911,93 @@ def test_rwkv7_block_uses_fp32_runtime_state_dtype():
 
 
 def test_rwkv7_block_cache_all_prefill_writes_aligned_states():
+    config = _make_config()
+    block_size = 8
+    cache_config = CacheConfig(
+        enable_prefix_caching=True,
+        mamba_cache_mode="all",
+        block_size=block_size,
+        mamba_block_size=block_size,
+    )
+    vllm_config = VllmConfig(
+        cache_config=cache_config,
+        device_config=DeviceConfig("cpu"),
+    )
+    with set_current_vllm_config(vllm_config):
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(1, 1, backend="gloo")
+        try:
+            block_all = RWKV7Block(
+                config=config,
+                layer_idx=0,
+                cache_config=cache_config,
+                prefix="model.layers.0",
+            )
+            _initialize_module_parameters(block_all)
+
+            block_ref = RWKV7Block(
+                config=config,
+                layer_idx=0,
+                cache_config=cache_config,
+                prefix="model.layers.1",
+            )
+            block_ref.load_state_dict(block_all.state_dict())
+
+            state_shapes = block_all.get_state_shape()
+            state_dtypes = block_all.get_state_dtype()
+            block_all.kv_cache = tuple(
+                torch.zeros((3, *shape), dtype=dtype)
+                for shape, dtype in zip(state_shapes, state_dtypes)
+            )
+            block_ref.kv_cache = tuple(cache.clone() for cache in block_all.kv_cache)
+
+            hidden_states = torch.randn(17, config.hidden_size, dtype=torch.float32)
+            metadata = _make_cache_all_prefill_metadata(
+                query_len=17,
+                total_seq_len=17,
+                block_table=[0, 1, 2],
+                num_computed_tokens=0,
+                device=torch.device("cpu"),
+            )
+
+            output_all, v_first_all = block_all(hidden_states, None, metadata)
+
+            output_ref = torch.empty_like(hidden_states)
+            v_first_ref = torch.empty_like(hidden_states)
+            state = (None, None, None)
+            boundaries = [(0, 8, 0), (8, 16, 1), (16, 17, 2)]
+            for start, end, slot_id in boundaries:
+                out, vf_out, attn_shift, recurrent, ffn_shift = block_ref._run_sequence(
+                    hidden_states[start:end],
+                    None,
+                    *state,
+                )
+                output_ref[start:end] = out
+                v_first_ref[start:end] = vf_out
+                block_ref._store_kv_state(slot_id, attn_shift, recurrent, ffn_shift)
+                state = (attn_shift, recurrent, ffn_shift)
+
+            torch.testing.assert_close(output_all, output_ref, rtol=2e-4, atol=1e-4)
+            torch.testing.assert_close(
+                v_first_all, v_first_ref, rtol=2e-4, atol=1e-4
+            )
+            for cached_all, cached_ref in zip(block_all.kv_cache, block_ref.kv_cache):
+                torch.testing.assert_close(
+                    cached_all, cached_ref, rtol=2e-4, atol=1e-4
+                )
+        finally:
+            cleanup_dist_env_and_memory()
+
+
+def test_rwkv7_block_cache_all_prefill_unpacked_path_matches_reference(monkeypatch):
+    monkeypatch.setenv("RWKV7_DISABLE_FUSED_PREFILL", "1")
+
     config = _make_config()
     block_size = 8
     cache_config = CacheConfig(
