@@ -1323,6 +1323,11 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
             )
 
     @property
+    def supports_eplb(self) -> bool:
+        # AITER shuffle keeps expert dim outermost, so EPLB row moves are layout-safe.
+        return True
+
+    @property
     def is_monolithic(self) -> bool:
         if self.moe_kernel is not None:
             return self.moe_kernel.is_monolithic
