@@ -10,7 +10,10 @@ from torch import nn
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig, get_current_vllm_config
-from vllm.distributed.parallel_state import get_pp_group
+from vllm.distributed.parallel_state import (
+    get_pp_group,
+    get_tensor_model_parallel_world_size,
+)
 from vllm.logger import init_logger
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
@@ -92,6 +95,21 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             if (quant_config and quant_config.get_name() == "modelopt_fp4")
             else quant_config
         )
+        # Qwen3.5 MTP projects [embedding, hidden] back to hidden_size and
+        # gathers the output for the following draft layer. Some checkpoints
+        # use hidden_size=5120, which is not divisible by tp=3. Replicating this
+        # small BF16 projection avoids a false TP divisibility failure while the
+        # heavier MTP decoder layer remains tensor-parallel.
+        fc_disable_tp = (
+            self.config.hidden_size % get_tensor_model_parallel_world_size() != 0
+        )
+        if fc_disable_tp:
+            logger.warning_once(
+                "Replicating Qwen3.5 MTP fc because hidden_size=%d is not "
+                "divisible by tensor_parallel_size=%d.",
+                self.config.hidden_size,
+                get_tensor_model_parallel_world_size(),
+            )
         self.fc = ColumnParallelLinear(
             self.config.hidden_size * 2,
             self.config.hidden_size,
@@ -100,6 +118,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             return_bias=False,
             quant_config=fc_quant,
             prefix=f"{prefix}.fc",
+            disable_tp=fc_disable_tp,
         )
 
         self.layers = torch.nn.ModuleList(
