@@ -338,14 +338,21 @@ class DeepseekV32Attention(MLAAttention):
         # bf16_skinny_gemm wins at M <= 2, dsv3_fused_a_gemm at 3 <= M <= 16,
         # cuBLAS above. Blackwell-only: the boundaries and the fused_a
         # tile_m=32 choice are tied to the 148/152-SM single-wave geometry.
+        # Quantized linear methods may not register .weight until
+        # process_weights_after_loading (e.g. compressed-tensors NVFP4
+        # registers weight_packed at init) — probe with getattr.
+        qkv_a_weight = getattr(self.fused_qkv_a_proj, "weight", None)
+        q_b_weight = getattr(self.q_b_proj, "weight", None)
         self._skinny_gemm_ok = (
             current_platform.is_device_capability_family(100)
             and hasattr(torch.ops._C, "bf16_skinny_gemm")
             and hasattr(torch.ops._C, "dsv3_fused_a_gemm")
-            and self.fused_qkv_a_proj.weight.dtype == torch.bfloat16
-            and tuple(self.fused_qkv_a_proj.weight.shape) == (2624, 6144)
-            and self.q_b_proj.weight.dtype == torch.bfloat16
-            and tuple(self.q_b_proj.weight.shape) == (2048, 2048)
+            and qkv_a_weight is not None
+            and qkv_a_weight.dtype == torch.bfloat16
+            and tuple(qkv_a_weight.shape) == (2624, 6144)
+            and q_b_weight is not None
+            and q_b_weight.dtype == torch.bfloat16
+            and tuple(q_b_weight.shape) == (2048, 2048)
         )
 
         # Lightning indexer uses its own RoPE; interleave maps to non-NeoX.

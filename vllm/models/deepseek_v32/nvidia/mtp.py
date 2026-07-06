@@ -54,9 +54,15 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         # bf16 skinny GEMM for the (6144, 12288) eh_proj: wins only at M <= 3
         # on B300 (23.3/26.1/27.4us vs cuBLAS ~27.6); cuBLAS splitK holds
         # from M=4 up (151MB weight streams at 5.6TB/s there).
-        self._eh_skinny_ok = current_platform.is_device_capability_family(
-            100
-        ) and hasattr(torch.ops._C, "bf16_skinny_gemm")
+        # Shape-gated: the kernel only instantiates the GLM-5.2 geometry;
+        # DeepSeek-V3-family (hidden 7168 -> weight (7168, 14336)) must stay
+        # on cuBLAS.
+        self._eh_skinny_ok = (
+            current_platform.is_device_capability_family(100)
+            and hasattr(torch.ops._C, "bf16_skinny_gemm")
+            and self.eh_proj.weight.dtype == torch.bfloat16
+            and tuple(self.eh_proj.weight.shape) == (6144, 12288)
+        )
 
         topk_indices_buffer = torch.empty(
             vllm_config.scheduler_config.max_num_batched_tokens,
@@ -95,7 +101,7 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         if (
             self._eh_skinny_ok
             and eh_input.shape[0] <= 3
-            and self.eh_proj.weight.dtype == torch.bfloat16
+            and eh_input.dtype == torch.bfloat16
         ):
             hidden_states = ops.bf16_skinny_gemm(eh_input, self.eh_proj.weight)
         else:
