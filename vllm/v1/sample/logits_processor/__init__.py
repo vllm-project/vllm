@@ -125,7 +125,13 @@ def _load_logitsprocs_by_fqcns(
             continue
 
         logger.debug("- Loading logits processor %s", logitproc)
-        module_path, qualname = logitproc.split(":")
+        parts = logitproc.split(":")
+        if len(parts) != 2:
+            raise ValueError(
+                f"Invalid logits processor FQCN: '{logitproc}'. "
+                "Expected format: <module>:<type>, e.g., 'mypackage.mymodule:MyLogitsProcessor'"
+            )
+        module_path, qualname = parts
 
         try:
             # Load module
