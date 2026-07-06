@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""End-to-end CPU FP8 MoE expert-parallel coverage."""
+"""CPU FP8 MoE expert-parallel integration coverage."""
 
 import math
 import os
@@ -189,6 +189,7 @@ def _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port):
         tensor_parallel_size=tp_size,
         data_parallel_size=dp_size,
         data_parallel_rank=dp_rank,
+        enable_expert_parallel=True,
         _data_parallel_master_port_list=[int(dp_port)],
     )
     with set_current_vllm_config(vllm_config):
@@ -203,7 +204,7 @@ def _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port):
 
 
 def _make_forward_context(dp_rank, dp_size, num_tokens_per_dp_rank):
-    """Forward context with DP metadata for AgRsAll2AllManager."""
+    """Forward context with DP metadata for EP group dispatch."""
     from vllm.config.parallel import ParallelConfig
     from vllm.config.vllm import VllmConfig
     from vllm.forward_context import set_forward_context
@@ -238,9 +239,8 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
         os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_moe_ep_{port}")
         _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
 
-        from vllm.distributed.device_communicators.all2all import AgRsAll2AllManager
         from vllm.distributed.parallel_state import (
-            get_dp_group,
+            get_ep_group,
             get_tp_group,
         )
         from vllm.forward_context import get_forward_context
@@ -292,16 +292,14 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
         w1_s_local = w1_s[local_experts].contiguous()
         w2_s_local = w2_s[local_experts].contiguous()
 
-        dp_cpu_group = get_dp_group().cpu_group
-
         with _make_forward_context(dp_rank, dp_size, M_per_dp):
-            manager = AgRsAll2AllManager(dp_cpu_group)
+            ep_group = get_ep_group()
             dp_metadata = get_forward_context().dp_metadata
             assert dp_metadata is not None
 
             with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
                 # Dispatch: all-gather over DP group → [total_M, K]
-                a_gathered, tw_gathered, tid_gathered = manager.dispatch(
+                a_gathered, tw_gathered, tid_gathered = ep_group.dispatch(
                     a_local.clone(),
                     topk_weight_local.clone(),
                     topk_ids_local_global.clone().long(),
@@ -331,7 +329,7 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
 
             with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
                 # Combine: reduce-scatter over DP group → [M_per_dp, K]
-                combined = manager.combine(expert_out)
+                combined = ep_group.combine(expert_out)
 
         # TP all-reduce: sum TP-partner contributions (mirrors moe_runner.py:451)
         dist.all_reduce(combined, group=get_tp_group().device_group)

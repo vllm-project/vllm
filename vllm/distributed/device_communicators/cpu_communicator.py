@@ -179,14 +179,6 @@ class CpuCommunicator(DeviceCommunicatorBase):
     def _sizes_are_uniform(sizes: list[int]) -> bool:
         return all(size == sizes[0] for size in sizes[1:])
 
-    def _get_ragged_pad_capacity(self, tensor: torch.Tensor) -> int:
-        buffer = self._ragged_pad_buffers.get(self._ragged_buffer_key(tensor))
-        return 0 if buffer is None else buffer.shape[0]
-
-    def _get_ragged_shm_gather_capacity(self, tensor: torch.Tensor) -> int:
-        buffer = self._ragged_shm_gather_buffers.get(self._ragged_buffer_key(tensor))
-        return 0 if buffer is None else buffer.shape[0] // self.world_size
-
     def _get_ragged_pad_buffer(
         self,
         tensor: torch.Tensor,

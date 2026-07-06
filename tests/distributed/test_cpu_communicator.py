@@ -479,6 +479,31 @@ def _get_dp_shm_communicator():
     return dp_group, communicator
 
 
+def _get_ragged_buffer_capacity(communicator, tensor, buffers, *, per_rank=False):
+    buffer = buffers.get(communicator._ragged_buffer_key(tensor))
+    if buffer is None:
+        return 0
+    if per_rank:
+        return buffer.shape[0] // communicator.world_size
+    return buffer.shape[0]
+
+
+def _get_ragged_capacities(communicator, tensor):
+    return (
+        _get_ragged_buffer_capacity(
+            communicator,
+            tensor,
+            communicator._ragged_pad_buffers,
+        ),
+        _get_ragged_buffer_capacity(
+            communicator,
+            tensor,
+            communicator._ragged_shm_gather_buffers,
+            per_rank=True,
+        ),
+    )
+
+
 def _ragged_shm_buffers_worker(
     rank,
     world_size,
@@ -502,10 +527,7 @@ def _ragged_shm_buffers_worker(
             small_result,
             _concat_rank_values(small_sizes, HIDDEN_SIZE, 1.0),
         )
-        small_caps = (
-            communicator._get_ragged_pad_capacity(small_hidden),
-            communicator._get_ragged_shm_gather_capacity(small_hidden),
-        )
+        small_caps = _get_ragged_capacities(communicator, small_hidden)
         small_result_repeat = dp_group.all_gatherv(
             small_hidden.clone(),
             sizes=small_sizes,
@@ -514,10 +536,7 @@ def _ragged_shm_buffers_worker(
             small_result_repeat,
             _concat_rank_values(small_sizes, HIDDEN_SIZE, 1.0),
         )
-        small_repeat_caps = (
-            communicator._get_ragged_pad_capacity(small_hidden),
-            communicator._get_ragged_shm_gather_capacity(small_hidden),
-        )
+        small_repeat_caps = _get_ragged_capacities(communicator, small_hidden)
 
         large_hidden = _filled(large_sizes[rank], HIDDEN_SIZE, float(rank + 1))
         large_result = dp_group.all_gatherv(large_hidden.clone(), sizes=large_sizes)
@@ -525,10 +544,7 @@ def _ragged_shm_buffers_worker(
             large_result,
             _concat_rank_values(large_sizes, HIDDEN_SIZE, 1.0),
         )
-        large_caps = (
-            communicator._get_ragged_pad_capacity(large_hidden),
-            communicator._get_ragged_shm_gather_capacity(large_hidden),
-        )
+        large_caps = _get_ragged_capacities(communicator, large_hidden)
 
         large_result_repeat = dp_group.all_gatherv(
             large_hidden.clone(),
@@ -538,10 +554,7 @@ def _ragged_shm_buffers_worker(
             large_result_repeat,
             _concat_rank_values(large_sizes, HIDDEN_SIZE, 1.0),
         )
-        repeat_caps = (
-            communicator._get_ragged_pad_capacity(large_hidden),
-            communicator._get_ragged_shm_gather_capacity(large_hidden),
-        )
+        repeat_caps = _get_ragged_capacities(communicator, large_hidden)
 
         assert small_caps == (max(small_sizes), max(small_sizes))
         assert small_repeat_caps == small_caps
@@ -579,8 +592,7 @@ def _uniform_sizes_shm_worker(
         torch.testing.assert_close(explicit_sizes, expected_hidden)
         torch.testing.assert_close(implicit_sizes, expected_hidden)
         torch.testing.assert_close(explicit_sizes, implicit_sizes)
-        assert communicator._get_ragged_pad_capacity(hidden) == 0
-        assert communicator._get_ragged_shm_gather_capacity(hidden) == 0
+        assert _get_ragged_capacities(communicator, hidden) == (0, 0)
 
         dist.barrier()
     except Exception as err:

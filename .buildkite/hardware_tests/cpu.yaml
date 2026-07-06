@@ -50,6 +50,7 @@ steps:
       OMP_NUM_THREADS=1 pytest -x -v -s \
         tests/v1/worker/test_cpu_worker.py \
         tests/distributed/test_cpu_communicator.py::test_cpu_ep_dispatch_combine_ragged \
+        tests/distributed/test_cpu_communicator.py::test_cpu_ep_dispatch_propagates_padding_mask \
         tests/distributed/test_cpu_communicator.py::test_cpu_ep_compile_ragged_fastpath \
         tests/distributed/test_cpu_communicator.py::test_cpu_dp_group_ranks_share_shm_group_name \
         tests/distributed/test_cpu_communicator.py::test_cpu_dp_shm_all_reduce_matches_gloo \
