@@ -65,9 +65,6 @@ class Sampler:
         self.logprob_token_ids_state.add_request(req_idx, sampling_params)
         self.thinking_budget_state.add_request(req_idx, sampling_params)
 
-    def remove_request(self, req_idx: int) -> None:
-        self.thinking_budget_state.remove_request(req_idx)
-
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
         self.penalties_state.apply_staged_writes()
@@ -82,6 +79,7 @@ class Sampler:
         input_batch: InputBatch,
     ) -> SamplerOutput:
         expanded_idx_mapping = input_batch.expanded_idx_mapping
+        idx_mapping = input_batch.idx_mapping
         idx_mapping_np = input_batch.idx_mapping_np
         cu_num_logits_np = input_batch.cu_num_logits_np
         expanded_local_pos = input_batch.expanded_local_pos
@@ -101,6 +99,7 @@ class Sampler:
         sampled, processed_logits = self.sample(
             logits,
             expanded_idx_mapping,
+            idx_mapping,
             idx_mapping_np,
             pos,
             input_ids,
@@ -155,6 +154,7 @@ class Sampler:
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
+        idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
         input_ids: torch.Tensor,
@@ -193,6 +193,7 @@ class Sampler:
         self.thinking_budget_state.apply(
             logits,
             expanded_idx_mapping,
+            idx_mapping,
             idx_mapping_np,
             input_ids,
             expanded_local_pos,
@@ -218,6 +219,7 @@ class Sampler:
         self,
         logits: torch.Tensor,
         expanded_idx_mapping: torch.Tensor,
+        idx_mapping: torch.Tensor,
         idx_mapping_np: np.ndarray,
         pos: torch.Tensor,
         input_ids: torch.Tensor,
@@ -227,6 +229,7 @@ class Sampler:
         processed_logits = self.apply_sampling_params(
             logits,
             expanded_idx_mapping,
+            idx_mapping,
             idx_mapping_np,
             pos,
             input_ids,

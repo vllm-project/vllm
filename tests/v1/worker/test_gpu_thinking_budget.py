@@ -59,13 +59,15 @@ def _apply(
     input_ids: list[int],
     local_pos: list[int],
 ) -> torch.Tensor:
+    idx_mapping = torch.tensor([3], dtype=torch.int32, device=DEVICE)
     expanded_idx_mapping = torch.tensor(
         [3] * len(input_ids), dtype=torch.int32, device=DEVICE
     )
-    idx_mapping_np = expanded_idx_mapping.cpu().numpy()
+    idx_mapping_np = idx_mapping.cpu().numpy()
     state.apply(
         logits,
         expanded_idx_mapping,
+        idx_mapping,
         idx_mapping_np,
         torch.tensor(input_ids, dtype=torch.int32, device=DEVICE),
         torch.tensor(local_pos, dtype=torch.int32, device=DEVICE),
