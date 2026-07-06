@@ -115,6 +115,8 @@ class OfflineInputsContext:
     pooling_params: PoolingParams | Sequence[PoolingParams]
     tokenization_kwargs: dict[str, Any] | None = None
     chat_template: str | None = None
+    seq_lora_requests: Sequence[LoRARequest | None] = None
+    priorities: Sequence[int] | None = None
 
     ## for bi-encoder & late-interaction
     n_queries: int | None = None

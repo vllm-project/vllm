@@ -103,11 +103,10 @@ class PoolingIOProcessor:
             isinstance(ctx.prompts, dict) and "data" in ctx.prompts
         )
 
-        prompts_seq = prompt_to_seq(ctx.prompts)
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
             **(ctx.tokenization_kwargs or {})
         )
-        return self._preprocess_cmpl_offline(prompts=prompts_seq, tok_params=tok_params)
+        return self._preprocess_cmpl_offline(prompts=ctx.prompts, tok_params=tok_params)
 
     def post_process_offline(
         self,

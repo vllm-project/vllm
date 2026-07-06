@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from tqdm.auto import tqdm
@@ -15,11 +15,14 @@ from vllm.outputs import (
     ClassificationRequestOutput,
     EmbeddingRequestOutput,
     PoolingRequestOutput,
+    RequestOutput,
     ScoringRequestOutput,
 )
 from vllm.pooling_params import PoolingParams
+from vllm.renderers.inputs.preprocess import prompt_to_seq
 from vllm.tasks import SCORE_TYPE_MAP, PoolingTask, SupportedTask
 
+from .base.io_processor import PoolingIOProcessor
 from .factories import init_pooling_io_processors
 from .scoring.io_processor import ScoringIOProcessor
 from .scoring.typing import ScoreInput
@@ -47,6 +50,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             renderer=self.renderer,
             chat_template_config=self.chat_template_config,
         )
+        self._executor = self.renderer._executor
 
     def encode(
         self,
@@ -88,7 +92,26 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
             raise ValueError(
                 "The 'data' field is only supported for the 'plugin' pooling task."
             )
+
         self._verify_pooling_task(pooling_task)
+
+        prompts_seq = prompt_to_seq(prompts)
+        num_requests = len(prompts_seq)
+
+        if isinstance(lora_request, Sequence):
+            if len(lora_request) != num_requests:
+                raise ValueError(
+                    f"The lengths of prompts ({num_requests}) "
+                    f"and lora_request ({len(lora_request)}) must be the same."
+                )
+
+        if isinstance(pooling_params, Sequence):
+            if len(pooling_params) != num_requests:
+                raise ValueError(
+                    f"The lengths of prompts ({num_requests}) "
+                    f"and params ({len(pooling_params)}) must be the same."
+                )
+
         assert pooling_task is not None and pooling_task in self.pooling_io_processors
 
         io_processor = self.pooling_io_processors[pooling_task]
@@ -96,40 +119,42 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         if pooling_params is None:
             pooling_params = PoolingParams()
 
-        ctx = OfflineInputsContext(
-            prompts=prompts,
-            pooling_params=pooling_params,
-            tokenization_kwargs=tokenization_kwargs,
+        def pre_process_iterator():
+            for i in range(num_requests):
+                if isinstance(pooling_params, Sequence):
+                    param = pooling_params[i]
+                else:
+                    param = pooling_params
+
+                if param.task is None:
+                    param.task = pooling_task
+                elif pooling_task == "plugin":
+                    # `plugin` task uses io_processor.parse_request to verify inputs.
+                    # We actually allow plugin to overwrite pooling_task.
+                    pass
+                elif param.task != pooling_task:
+                    msg = (
+                        f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
+                    )
+                    raise ValueError(msg)
+
+                if isinstance(lora_request, Sequence):
+                    lora_requests = [lora_request[i]]
+                else:
+                    lora_requests = [lora_request]
+
+                ctx = OfflineInputsContext(
+                    prompts=[prompts_seq[i]],
+                    pooling_params=[param],
+                    tokenization_kwargs=tokenization_kwargs,
+                    seq_lora_requests=lora_requests,
+                    priorities=None,
+                )
+                yield ctx
+
+        outputs = self._run_tiling_engine(
+            io_processor, pre_process_iterator(), num_requests, use_tqdm=use_tqdm
         )
-
-        engine_inputs = io_processor.pre_process_offline(ctx)
-        n_inputs = len(engine_inputs)
-        assert ctx.pooling_params is not None
-
-        params_seq = self._params_to_seq(ctx.pooling_params, n_inputs)
-
-        for param in params_seq:
-            if param.task is None:
-                param.task = pooling_task
-            elif pooling_task == "plugin":
-                # `plugin` task uses io_processor.parse_request to verify inputs.
-                # We actually allow plugin to overwrite pooling_task.
-                pass
-            elif param.task != pooling_task:
-                msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
-                raise ValueError(msg)
-
-        seq_lora_requests = self._lora_request_to_seq(lora_request, n_inputs)
-        seq_priority = self._priority_to_seq(None, n_inputs)
-
-        self._render_and_add_requests(
-            prompts=engine_inputs,
-            params=params_seq,
-            lora_requests=seq_lora_requests,
-            priorities=seq_priority,
-        )
-
-        outputs = self._run_engine(use_tqdm=use_tqdm, output_type=PoolingRequestOutput)
         outputs = io_processor.post_process_offline(
             ctx=OfflineOutputsContext(outputs=outputs)
         )
@@ -400,3 +425,105 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         )
 
         return [ScoringRequestOutput.from_base(item) for item in outputs]
+
+    def _run_tiling_engine(
+        self,
+        io_processor: PoolingIOProcessor,
+        iterator: Iterable[OfflineInputsContext],
+        num_requests: int,
+        use_tqdm: bool | Callable[..., tqdm] = True,
+    ):
+        # Keeping max_num_seqs * 2 requests in the core can already saturate the core.
+        # Therefore, keep most requests waiting outside the core.
+        max_requests_in_core = (
+            self.llm_engine.vllm_config.scheduler_config.max_num_seqs * 2
+        )
+        n_requests_in_core = 0
+        n_waited_requests = num_requests
+
+        if use_tqdm:
+            tqdm_func = use_tqdm if callable(use_tqdm) else tqdm
+            pbar = tqdm_func(
+                total=num_requests,
+                desc="Processed prompts",
+                dynamic_ncols=True,
+                postfix=(f"est. speed input: {0:.2f} toks/s, output: {0:.2f} toks/s"),
+            )
+
+        outputs: list[PoolingRequestOutput] = []
+        total_in_toks = 0
+        total_out_toks = 0
+        added_request_ids = set()
+
+        def pre_process(ctx):
+            engine_inputs = io_processor.pre_process_offline(ctx)
+
+            request_kwargs = {
+                "prompts": engine_inputs,
+                "params": ctx.pooling_params,
+                "lora_requests": ctx.seq_lora_requests,
+                "priorities": ctx.priorities,
+            }
+
+            return request_kwargs
+
+        it = self._executor.map(pre_process, iterator)
+
+        try:
+            while n_waited_requests or self.llm_engine.has_unfinished_requests():
+                for i in range(max_requests_in_core - n_requests_in_core):
+                    if n_waited_requests == 0:
+                        break
+
+                    requests = next(it)
+                    n_waited_requests -= 1
+                    n_requests_in_core += 1
+
+                    request_ids = self._render_and_add_requests(**requests)
+
+                    for request_id in request_ids:
+                        # undo assign_request_id
+                        request_id = request_id.split("-", 1)[0]
+                        added_request_ids.update(request_id)
+
+                step_outputs = self.llm_engine.step()
+
+                for output in step_outputs:
+                    assert isinstance(output, PoolingRequestOutput)
+                    assert output.finished
+                    outputs.append(output)
+                    added_request_ids.discard(output.request_id)
+                    n_requests_in_core -= 1
+
+                    if use_tqdm:
+                        if isinstance(output, RequestOutput):
+                            # Calculate tokens only for RequestOutput
+                            n = len(output.outputs)
+                            assert output.prompt_token_ids is not None
+                            total_in_toks += len(output.prompt_token_ids) * n
+                            in_spd = total_in_toks / pbar.format_dict["elapsed"]
+                            total_out_toks += sum(
+                                len(stp.token_ids) for stp in output.outputs
+                            )
+                            out_spd = total_out_toks / pbar.format_dict["elapsed"]
+                            pbar.postfix = (
+                                f"est. speed input: {in_spd:.2f} toks/s, "
+                                f"output: {out_spd:.2f} toks/s"
+                            )
+                            pbar.update(n)
+                        else:
+                            pbar.update(1)
+                        if pbar.n == num_requests:
+                            pbar.refresh()
+
+        except Exception as e:
+            if added_request_ids:
+                self.llm_engine.abort_request(list(added_request_ids), internal=True)
+            raise e
+
+        if use_tqdm:
+            pbar.close()
+        # Sort the outputs by request ID.
+        # This is necessary because some requests may be finished earlier than
+        # its previous requests.
+        return sorted(outputs, key=lambda x: int(x.request_id))
