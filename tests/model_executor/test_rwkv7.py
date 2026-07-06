@@ -33,7 +33,13 @@ from vllm.model_executor.layers.fla.ops import (
     rwkv7_recurrent_reference_with_checkpoints,
 )
 from vllm.model_executor.models.config import MambaModelConfig, MODELS_CONFIG_MAP
-from vllm.model_executor.models.rwkv7 import RWKV7Block, RWKV7ForCausalLM
+from vllm.model_executor.models.rwkv7 import (
+    RWKV7Block,
+    RWKV7ForCausalLM,
+    _rwkv7_cache_all_block_index_bounds,
+    _rwkv7_cache_all_block_indices,
+    _rwkv7_cache_all_boundary_positions,
+)
 from vllm.transformers_utils.configs.rwkv7 import RWKV7Config
 from vllm.utils.network_utils import get_open_port
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
@@ -102,6 +108,56 @@ def _make_decode_metadata(
     )
 
 
+def test_rwkv7_cache_all_block_index_helpers():
+    block_size = 8
+
+    assert _rwkv7_cache_all_block_index_bounds(0, 17, block_size) == (0, 0, 2)
+    assert _rwkv7_cache_all_block_index_bounds(8, 9, block_size) == (0, 1, 1)
+    assert _rwkv7_cache_all_block_index_bounds(9, 17, block_size) == (1, 1, 2)
+
+    block_idx_last_computed, block_idx_first_scheduled, block_idx_last_scheduled = (
+        _rwkv7_cache_all_block_indices(
+            torch.tensor([0, 8, 9], dtype=torch.int32),
+            torch.tensor([17, 9, 17], dtype=torch.int32),
+            block_size,
+        )
+    )
+    torch.testing.assert_close(block_idx_last_computed, torch.tensor([0, 0, 1], dtype=torch.int32))
+    torch.testing.assert_close(block_idx_first_scheduled, torch.tensor([0, 1, 1], dtype=torch.int32))
+    torch.testing.assert_close(block_idx_last_scheduled, torch.tensor([2, 1, 2], dtype=torch.int32))
+
+    torch.testing.assert_close(
+        _rwkv7_cache_all_boundary_positions(
+            num_computed_tokens=0,
+            total_seq_len=17,
+            block_size=block_size,
+            query_len=17,
+            device=torch.device("cpu"),
+        ),
+        torch.tensor([7, 15], dtype=torch.long),
+    )
+    torch.testing.assert_close(
+        _rwkv7_cache_all_boundary_positions(
+            num_computed_tokens=9,
+            total_seq_len=17,
+            block_size=block_size,
+            query_len=8,
+            device=torch.device("cpu"),
+        ),
+        torch.tensor([6], dtype=torch.long),
+    )
+    torch.testing.assert_close(
+        _rwkv7_cache_all_boundary_positions(
+            num_computed_tokens=8,
+            total_seq_len=9,
+            block_size=block_size,
+            query_len=1,
+            device=torch.device("cpu"),
+        ),
+        torch.empty((0,), dtype=torch.long),
+    )
+
+
 def _make_multi_decode_metadata(
     total_seq_lens: list[int], state_indices: list[int], *, device: torch.device
 ) -> LinearAttentionMetadata:
@@ -150,7 +206,6 @@ def _make_cache_all_prefill_metadata(
     total_seq_len: int,
     block_table: list[int],
     num_computed_tokens: int,
-    block_size: int,
     device: torch.device,
 ) -> LinearAttentionMetadata:
     return LinearAttentionMetadata(
@@ -164,21 +219,6 @@ def _make_cache_all_prefill_metadata(
         num_computed_tokens=torch.tensor(
             [num_computed_tokens], dtype=torch.int32, device=device
         ),
-        block_idx_last_computed_token=torch.tensor(
-            [max((num_computed_tokens + block_size - 1) // block_size - 1, 0)],
-            dtype=torch.int32,
-            device=device,
-        ),
-        block_idx_first_scheduled_token=torch.tensor(
-            [((num_computed_tokens + 1) + block_size - 1) // block_size - 1],
-            dtype=torch.int32,
-            device=device,
-        ),
-        block_idx_last_scheduled_token=torch.tensor(
-            [(total_seq_len + block_size - 1) // block_size - 1],
-            dtype=torch.int32,
-            device=device,
-        ),
     )
 
 
@@ -188,7 +228,6 @@ def _make_cache_all_multi_prefill_metadata(
     total_seq_lens: list[int],
     block_tables: list[list[int]],
     num_computed_tokens: list[int],
-    block_size: int,
     device: torch.device,
 ) -> LinearAttentionMetadata:
     query_start_loc = [0]
@@ -205,30 +244,6 @@ def _make_cache_all_multi_prefill_metadata(
         num_computed_tokens=torch.tensor(
             num_computed_tokens, dtype=torch.int32, device=device
         ),
-        block_idx_last_computed_token=torch.tensor(
-            [
-                max((tokens + block_size - 1) // block_size - 1, 0)
-                for tokens in num_computed_tokens
-            ],
-            dtype=torch.int32,
-            device=device,
-        ),
-        block_idx_first_scheduled_token=torch.tensor(
-            [
-                ((tokens + 1) + block_size - 1) // block_size - 1
-                for tokens in num_computed_tokens
-            ],
-            dtype=torch.int32,
-            device=device,
-        ),
-        block_idx_last_scheduled_token=torch.tensor(
-            [
-                (total_seq_len + block_size - 1) // block_size - 1
-                for total_seq_len in total_seq_lens
-            ],
-            dtype=torch.int32,
-            device=device,
-        ),
     )
 
 
@@ -237,7 +252,6 @@ def _make_cache_all_decode_metadata(
     total_seq_len: int,
     block_table: list[int],
     num_computed_tokens: int,
-    block_size: int,
     device: torch.device,
 ) -> LinearAttentionMetadata:
     return LinearAttentionMetadata(
@@ -250,21 +264,6 @@ def _make_cache_all_decode_metadata(
         state_indices_tensor=torch.tensor([block_table], dtype=torch.long, device=device),
         num_computed_tokens=torch.tensor(
             [num_computed_tokens], dtype=torch.int32, device=device
-        ),
-        block_idx_last_computed_token=torch.tensor(
-            [max((num_computed_tokens + block_size - 1) // block_size - 1, 0)],
-            dtype=torch.int32,
-            device=device,
-        ),
-        block_idx_first_scheduled_token=torch.tensor(
-            [((num_computed_tokens + 1) + block_size - 1) // block_size - 1],
-            dtype=torch.int32,
-            device=device,
-        ),
-        block_idx_last_scheduled_token=torch.tensor(
-            [(total_seq_len + block_size - 1) // block_size - 1],
-            dtype=torch.int32,
-            device=device,
         ),
     )
 
@@ -896,7 +895,6 @@ def test_rwkv7_block_cache_all_prefill_writes_aligned_states():
                 total_seq_len=17,
                 block_table=[0, 1, 2],
                 num_computed_tokens=0,
-                block_size=block_size,
                 device=torch.device("cpu"),
             )
 
@@ -987,7 +985,6 @@ def test_rwkv7_block_cache_all_prefill_batches_multiple_sequences():
                 total_seq_lens=total_seq_lens,
                 block_tables=block_tables,
                 num_computed_tokens=[0, 0],
-                block_size=block_size,
                 device=torch.device("cpu"),
             )
 
@@ -1080,7 +1077,6 @@ def test_rwkv7_block_cache_all_decode_writes_next_block_slot():
                 total_seq_len=9,
                 block_table=[0, 1],
                 num_computed_tokens=8,
-                block_size=block_size,
                 device=torch.device("cpu"),
             )
 

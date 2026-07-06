@@ -46,6 +46,7 @@ from vllm.model_executor.models.interfaces import (
     SupportsPP,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import cdiv
 from vllm.utils.torch_utils import direct_register_custom_op
 from vllm.v1.attention.backends.linear_attn import LinearAttentionMetadata
 
@@ -153,15 +154,57 @@ def _custom_op_tensor_or_none(tensor: torch.Tensor) -> torch.Tensor | None:
     return None if tensor.numel() == 0 else tensor
 
 
+def _rwkv7_cache_all_block_index_bounds(
+    num_computed_tokens: int,
+    total_seq_len: int,
+    block_size: int,
+) -> tuple[int, int, int]:
+    block_idx_last_computed_token = max(cdiv(num_computed_tokens, block_size) - 1, 0)
+    block_idx_first_scheduled_token = cdiv(num_computed_tokens + 1, block_size) - 1
+    block_idx_last_scheduled_token = max(cdiv(total_seq_len, block_size) - 1, 0)
+    return (
+        block_idx_last_computed_token,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
+    )
+
+
+def _rwkv7_cache_all_block_indices(
+    num_computed_tokens: torch.Tensor,
+    total_seq_lens: torch.Tensor,
+    block_size: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    block_idx_last_computed_token = torch.clamp(
+        cdiv(num_computed_tokens, block_size) - 1,
+        min=0,
+    )
+    block_idx_first_scheduled_token = cdiv(num_computed_tokens + 1, block_size) - 1
+    block_idx_last_scheduled_token = torch.clamp(
+        cdiv(total_seq_lens, block_size) - 1,
+        min=0,
+    )
+    return (
+        block_idx_last_computed_token,
+        block_idx_first_scheduled_token,
+        block_idx_last_scheduled_token,
+    )
+
+
 def _rwkv7_cache_all_boundary_positions(
     *,
     num_computed_tokens: int,
-    block_idx_first_scheduled_token: int,
-    block_idx_last_scheduled_token: int,
+    total_seq_len: int,
     block_size: int,
     query_len: int,
     device: torch.device,
 ) -> torch.Tensor:
+    _, block_idx_first_scheduled_token, block_idx_last_scheduled_token = (
+        _rwkv7_cache_all_block_index_bounds(
+            num_computed_tokens,
+            total_seq_len,
+            block_size,
+        )
+    )
     if block_idx_last_scheduled_token <= block_idx_first_scheduled_token:
         return torch.empty((0,), device=device, dtype=torch.long)
 
@@ -1264,8 +1307,7 @@ class RWKV7Block(nn.Module, MambaBase):
         hidden_states: torch.Tensor,
         v_first: torch.Tensor | None,
         num_computed_tokens: int,
-        block_idx_first_scheduled_token: int,
-        block_idx_last_scheduled_token: int,
+        total_seq_len: int,
         state_indices_row: torch.Tensor,
         attn_shift_state: torch.Tensor | None,
         recurrent_state: torch.Tensor | None,
@@ -1285,11 +1327,17 @@ class RWKV7Block(nn.Module, MambaBase):
         assert self.cache_config.mamba_block_size is not None
         block_boundary_positions = _rwkv7_cache_all_boundary_positions(
             num_computed_tokens=num_computed_tokens,
-            block_idx_first_scheduled_token=block_idx_first_scheduled_token,
-            block_idx_last_scheduled_token=block_idx_last_scheduled_token,
+            total_seq_len=total_seq_len,
             block_size=self.cache_config.mamba_block_size,
             query_len=hidden_states.shape[0],
             device=hidden_states.device,
+        )
+        _, block_idx_first_scheduled_token, block_idx_last_scheduled_token = (
+            _rwkv7_cache_all_block_index_bounds(
+                num_computed_tokens,
+                total_seq_len,
+                self.cache_config.mamba_block_size,
+            )
         )
 
         residual = hidden_states
@@ -1441,26 +1489,28 @@ class RWKV7Block(nn.Module, MambaBase):
             self.cache_config is not None
             and self.cache_config.mamba_cache_mode == "all"
             and attn_metadata.num_computed_tokens is not None
-            and attn_metadata.block_idx_last_computed_token is not None
-            and attn_metadata.block_idx_first_scheduled_token is not None
-            and attn_metadata.block_idx_last_scheduled_token is not None
         )
 
         if attn_metadata.num_decode_tokens > 0:
             if cache_all:
-                decode_input_slot_ids = state_indices[: attn_metadata.num_decodes].gather(
-                    1,
-                    attn_metadata.block_idx_last_computed_token[
-                        : attn_metadata.num_decodes
-                    ].unsqueeze(1),
-                ).squeeze(1).to(dtype=torch.long)
-                decode_output_slot_ids = state_indices[
+                assert self.cache_config is not None
+                decode_num_computed_tokens = attn_metadata.num_computed_tokens[
                     : attn_metadata.num_decodes
-                ].gather(
-                    1,
-                    attn_metadata.block_idx_last_scheduled_token[
-                        : attn_metadata.num_decodes
-                    ].unsqueeze(1),
+                ]
+                (
+                    decode_block_idx_last_computed,
+                    _,
+                    decode_block_idx_last_scheduled,
+                ) = _rwkv7_cache_all_block_indices(
+                    decode_num_computed_tokens,
+                    attn_metadata.seq_lens[: attn_metadata.num_decodes],
+                    self.cache_config.mamba_block_size,
+                )
+                decode_input_slot_ids = state_indices[: attn_metadata.num_decodes].gather(
+                    1, decode_block_idx_last_computed.unsqueeze(1)
+                ).squeeze(1).to(dtype=torch.long)
+                decode_output_slot_ids = state_indices[: attn_metadata.num_decodes].gather(
+                    1, decode_block_idx_last_scheduled.unsqueeze(1)
                 ).squeeze(1).to(dtype=torch.long)
             else:
                 decode_input_slot_ids = state_indices[: attn_metadata.num_decodes].to(
@@ -1496,22 +1546,19 @@ class RWKV7Block(nn.Module, MambaBase):
                 cache_all_state_indices = state_indices[
                     prefill_req_offset:prefill_req_end
                 ]
-                block_idx_last_computed = attn_metadata.block_idx_last_computed_token[
-                    prefill_req_offset:prefill_req_end
-                ]
-                block_idx_first_scheduled = (
-                    attn_metadata.block_idx_first_scheduled_token[
-                        prefill_req_offset:prefill_req_end
-                    ]
-                )
-                block_idx_last_scheduled = (
-                    attn_metadata.block_idx_last_scheduled_token[
-                        prefill_req_offset:prefill_req_end
-                    ]
-                )
                 num_computed_tokens = attn_metadata.num_computed_tokens[
                     prefill_req_offset:prefill_req_end
                 ]
+                total_seq_lens = attn_metadata.seq_lens[prefill_req_offset:prefill_req_end]
+                (
+                    block_idx_last_computed,
+                    block_idx_first_scheduled,
+                    block_idx_last_scheduled,
+                ) = _rwkv7_cache_all_block_indices(
+                    num_computed_tokens,
+                    total_seq_lens,
+                    self.cache_config.mamba_block_size,
+                )
                 input_slot_ids = cache_all_state_indices.gather(
                     1, block_idx_last_computed.unsqueeze(1)
                 ).squeeze(1).to(dtype=torch.long)
@@ -1533,12 +1580,7 @@ class RWKV7Block(nn.Module, MambaBase):
                             num_computed_tokens=int(
                                 num_computed_tokens[prefill_idx].item()
                             ),
-                            block_idx_first_scheduled_token=int(
-                                block_idx_first_scheduled[prefill_idx].item()
-                            ),
-                            block_idx_last_scheduled_token=int(
-                                block_idx_last_scheduled[prefill_idx].item()
-                            ),
+                            total_seq_len=int(total_seq_lens[prefill_idx].item()),
                             block_size=self.cache_config.mamba_block_size,
                             query_len=seq_end - seq_start,
                             device=hidden_states.device,
@@ -1676,8 +1718,7 @@ class RWKV7Block(nn.Module, MambaBase):
                             hidden_states[start:end],
                             None if v_first is None else v_first[start:end],
                             seq_num_computed_tokens,
-                            block_idx_first_scheduled_token,
-                            block_idx_last_scheduled_token,
+                            int(attn_metadata.seq_lens[batch_idx].item()),
                             state_indices_row,
                             *states,
                         )

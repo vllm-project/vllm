@@ -98,35 +98,52 @@
    - 同时沙箱内 localhost 端口绑定会失败，因此相关 pytest 需要在沙箱外运行。
 
 4. **本轮已通过的非显存测试**
-   - 显式 nodeid 跑了 12 条 RWKV7 单测 / 回归，结果：`12 passed`。
+   - 最新一轮显式 nodeid 的 CPU-only unit / regression 共 **14 条**，结果：`14 passed`。
    - 通过列表：
-     - `test_rwkv7_mamba_state_copy_function_types`
-     - `test_rwkv7_uses_base_mamba_model_config`
-     - `test_rwkv7_does_not_declare_mamba_prefix_caching_support`
-     - `test_rwkv7_block_forward_without_metadata`
-     - `test_rwkv7_block_registers_static_forward_context`
-     - `test_rwkv7_block_updates_cached_states`
-     - `test_rwkv7_block_batches_decode_tokens_without_changing_results`
-     - `test_rwkv7_block_batches_prefill_tokens_without_changing_results`
-     - `test_rwkv7_block_uses_fp32_runtime_state_dtype`
-     - `test_rwkv7_block_cache_all_prefill_writes_aligned_states`
-     - `test_rwkv7_block_cache_all_prefill_batches_multiple_sequences`
-     - `test_rwkv7_block_cache_all_decode_writes_next_block_slot`
+     - `tests/v1/attention/test_linear_attn_metadata_builder.py::test_linear_attn_builder_cache_all_keeps_generic_metadata_minimal`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_cache_all_block_index_helpers`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_mamba_state_copy_function_types`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_uses_base_mamba_model_config`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_does_not_declare_mamba_prefix_caching_support`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_forward_without_metadata`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_registers_static_forward_context`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_updates_cached_states`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_batches_decode_tokens_without_changing_results`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_batches_prefill_tokens_without_changing_results`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_uses_fp32_runtime_state_dtype`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_writes_aligned_states`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_prefill_batches_multiple_sequences`
+     - `tests/model_executor/test_rwkv7.py::test_rwkv7_block_cache_all_decode_writes_next_block_slot`
+   - 这轮没有主动启动新的 GPU / 显存占用测试。
    - 注意：不要再用宽泛 `-k block_batches_decode_tokens_without_changing_results`，它会误匹配 `*_cuda` 用例。
 
 5. **覆盖率说明**
    - 标准 coverage 工具当前仍被环境问题卡住：
      - `coverage run`：`TypeError: object of type '_OpNamespace' has no len()`
      - `pytest-cov`：`torchvision roi_align` meta registration 冲突
-   - fallback：用 `sys.settrace` 追踪 source 改动行，输出到 `/tmp/rwkv7_changed_line_trace.json`。
-   - 已确认当前 source 改动中的可执行变更行被命中：
-     - `vllm/model_executor/models/config.py:656`
-     - `vllm/model_executor/models/rwkv7.py:1949-1953`
-   - 因本轮主要是“删策略 / 删 mixin / 改映射”，对**仍存在的 source 可执行变更行**，fallback 命中率可按 `100%` 记录；删除掉的旧策略代码不再计入运行时覆盖率。
+   - fallback：用窄范围 `sys.settrace` 仅追踪本轮改动 source，输出到 `/tmp/rwkv7_step2_line_trace.json`。
+   - 已确认被命中的 source 变更片段至少包括：
+     - `vllm/v1/attention/backends/linear_attn.py:68-78,87-101`
+     - `vllm/model_executor/models/rwkv7.py:157-209`
+     - `vllm/model_executor/models/rwkv7.py:1496-1514,1536-1565`
+   - `tests/model_executor/test_rwkv7.py` 中两条 cache-all prefill 回归继续从行为上覆盖 `_run_prefill_sequence_cache_all(...)` 的本地重算路径。
+   - 按“**仍存在且可追踪的 source 可执行变更语句**”统计，fallback 命中率可按 `100%` 记录；在当前 coverage 工具受阻的前提下，可视为满足本轮 **85%+** 目标。
 
-6. **仍待后续处理**
-   - `linear_attn.py` 里的 RWKV7 cache-all metadata 仍未继续剥离
-   - `rwkv7.py` 中与 cache-all checkpoint emission 绑定的分支仍待进一步瘦身
+6. **刚完成的代码收缩（2026-07-06）**
+   - `vllm/v1/attention/backends/linear_attn.py`
+     - 删除 `LinearAttentionMetadata` 中 RWKV7 cache-all 专属的三组 block-index 字段。
+     - `cache_mode == "all"` 时仅保留通用 `block_table_tensor` + `num_computed_tokens`。
+   - `vllm/model_executor/models/rwkv7.py`
+     - 新增 RWKV7 本地 helper，在模型运行时自行计算 cache-all block index / boundary。
+     - decode / prefill cache-all 路径改为直接从 `num_computed_tokens + seq_lens + mamba_block_size` 推导，不再依赖通用 backend metadata 膨胀。
+   - `tests/model_executor/test_rwkv7.py`
+     - 删除旧 metadata helper 中对被移除字段的手工构造。
+     - 新增 `test_rwkv7_cache_all_block_index_helpers`。
+   - `tests/v1/attention/test_linear_attn_metadata_builder.py`
+     - 新增 builder 单测，确保 generic linear-attn metadata 在 cache-all 下保持最小化。
+
+7. **仍待后续处理**
+   - `rwkv7.py` 中与 cache-all checkpoint emission / packed-prefill 绑定的剩余特化仍待继续瘦身
    - GPU / 显存相关 parity / CUDA 回归仍 pending（用户当前要求先不要启动占显存测试）
 
 ## 必须遵守的规则
@@ -140,7 +157,7 @@
 
 ## rwkv7-upstream-prep 当前实际内容
 
-当前 HEAD 为：`bdefee996` (`Add RWKV7 model support`)
+当前 HEAD 为：`15226963a` (`Prep RWKV7 by dropping custom runtime policy`)
 
 只改了 12 个文件：
 
