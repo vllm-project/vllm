@@ -5,7 +5,7 @@
 import pickle
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import pybase64 as base64
 import ray
@@ -14,13 +14,15 @@ import torch
 from torch.multiprocessing.reductions import rebuild_cuda_tensor, reduce_tensor
 
 from vllm import envs
-from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     WeightTransferEngine,
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
 )
+
+if TYPE_CHECKING:
+    from vllm.config import VllmConfig
 from vllm.distributed.weight_transfer.packed_tensor import (
     DEFAULT_PACKED_BUFFER_SIZE_BYTES,
     packed_ipc_consumer,
@@ -87,10 +89,6 @@ class IPCWeightTransferUpdateInfo(WeightTransferUpdateInfo):
     """Whether this update uses packed tensor format."""
 
     def __post_init__(self):
-        super().__post_init__()
-        if self.update_kind != "dense":
-            raise NotImplementedError("IPC weight transfer only supports dense updates")
-
         if self.ipc_handles_pickled is not None:
             if self.ipc_handles is not None:
                 raise ValueError(
@@ -152,7 +150,8 @@ class IPCWeightTransferEngine(
     def __init__(
         self,
         config: WeightTransferConfig,
-        parallel_config: ParallelConfig,
+        vllm_config: "VllmConfig",
+        device: torch.device,
         model: torch.nn.Module,
     ) -> None:
         """
@@ -160,10 +159,11 @@ class IPCWeightTransferEngine(
 
         Args:
             config: The configuration for the weight transfer engine
-            parallel_config: The configuration for the parallel setup
+            vllm_config: The full vLLM config
+            device: The device this worker's model lives on
             model: The local model instance which will receive the weights
         """
-        super().__init__(config, parallel_config, model)
+        super().__init__(config, vllm_config, device, model)
 
     def parse_update_info(
         self, update_dict: dict[str, Any]
@@ -206,22 +206,37 @@ class IPCWeightTransferEngine(
         """
         pass
 
-    def receive_weights(
-        self,
-        update_info: IPCWeightTransferUpdateInfo,
-        load_weights: Callable[[list[tuple[str, torch.Tensor]]], None],
-    ) -> None:
+    def start_weight_update(self) -> None:
+        """Initialize layerwise reloading for the incoming checkpoint weights."""
+        from vllm.model_executor.model_loader.reload import (
+            initialize_layerwise_reload,
+        )
+
+        initialize_layerwise_reload(self.model)
+
+    def finish_weight_update(self) -> None:
+        """Finalize layerwise reloading after all weights have been received."""
+        from vllm.model_executor.model_loader.reload import (
+            finalize_layerwise_reload,
+        )
+
+        finalize_layerwise_reload(self.model, self.model_config)
+
+    def receive_weights(self, update_info: IPCWeightTransferUpdateInfo) -> None:
         """
-        Receive weights from the trainer via CUDA IPC handles.
+        Receive weights from the trainer via CUDA IPC handles and load them.
 
         Args:
             update_info: IPC update info containing parameter names, dtypes, shapes,
                         and IPC handles. Each IPC handle is a mapping between physical
                         GPU UUID and the rebuild_cuda_tensor args tuple.
-            load_weights: Callable that loads weights into the model. Called
-                         incrementally for each weight to avoid OOM.
         """
-        device_index = torch.accelerator.current_device_index()
+        # Use the worker's assigned device rather than the ambient current
+        # device: the receive path is no longer wrapped in
+        # `with torch.device(self.device)` by the caller, so the current device
+        # is not guaranteed to match self.device. The IPC tensors must be
+        # rebuilt on the device the model lives on.
+        device_index = self.device.index
 
         if update_info.packed:
             assert update_info.tensor_sizes is not None
@@ -234,7 +249,6 @@ class IPCWeightTransferEngine(
                 tensor_sizes=update_info.tensor_sizes,
                 device_index=device_index,
             )
-            load_weights(weights)
         else:
             assert isinstance(update_info.ipc_handles, list)
             weights = []
@@ -260,7 +274,7 @@ class IPCWeightTransferEngine(
                 weight = rebuild_cuda_tensor(*list_args)
                 weights.append((name, weight))
 
-            load_weights(weights)
+        self.model.load_weights(weights)
 
     def shutdown(self) -> None:
         pass

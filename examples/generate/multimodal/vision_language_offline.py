@@ -68,28 +68,6 @@ def run_aria(questions: list[str], modality: str) -> ModelRequestData:
     )
 
 
-# Aya Vision
-def run_aya_vision(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-    model_name = "CohereLabs/aya-vision-8b"
-
-    engine_args = EngineArgs(
-        model=model_name,
-        max_model_len=2048,
-        max_num_seqs=2,
-        mm_processor_kwargs={"crop_to_patches": True},
-        limit_mm_per_prompt={modality: 1},
-    )
-    prompts = [
-        f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|><image>{question}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>"
-        for question in questions
-    ]
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-    )
-
-
 # Bee-8B
 def run_bee(questions: list[str], modality: str) -> ModelRequestData:
     assert modality == "image"
@@ -1377,28 +1355,6 @@ def run_llava_onevision(questions: list[str], modality: str) -> ModelRequestData
     )
 
 
-# Mantis
-def run_mantis(questions: list[str], modality: str) -> ModelRequestData:
-    assert modality == "image"
-
-    llama3_template = "<|start_header_id|>user<|end_header_id|>\n\n{}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"  # noqa: E501
-    prompts = [llama3_template.format(f"{question}\n<image>") for question in questions]
-
-    engine_args = EngineArgs(
-        model="TIGER-Lab/Mantis-8B-siglip-llama3",
-        max_model_len=4096,
-        hf_overrides={"architectures": ["MantisForConditionalGeneration"]},
-        limit_mm_per_prompt={modality: 1},
-    )
-    stop_token_ids = [128009]
-
-    return ModelRequestData(
-        engine_args=engine_args,
-        prompts=prompts,
-        stop_token_ids=stop_token_ids,
-    )
-
-
 # MiniCPM-V
 def run_minicpmv_base(questions: list[str], modality: str, model_name):
     assert modality in ["image", "video", "image+video"]
@@ -2349,7 +2305,6 @@ def run_step_vl(questions: list[str], modality: str) -> ModelRequestData:
 
 model_example_map = {
     "aria": run_aria,
-    "aya_vision": run_aya_vision,
     "bagel": run_bagel,
     "cheers": run_cheers,
     "bee": run_bee,
@@ -2390,7 +2345,6 @@ model_example_map = {
     "llava-next": run_llava_next,
     "llava-next-video": run_llava_next_video,
     "llava-onevision": run_llava_onevision,
-    "mantis": run_mantis,
     "minicpmo": run_minicpmo,
     "minicpmv": run_minicpmv,
     "mistral3": run_mistral3,

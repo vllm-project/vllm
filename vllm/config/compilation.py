@@ -1355,6 +1355,7 @@ class CompilationConfig:
         min_cg_support: "AttentionCGSupport",
         min_cg_attn_backend: str | None,
         uniform_decode_query_len: int = 1,
+        use_v2_model_runner: bool = False,
         tensor_parallel_size: int = 1,
         kv_cache_config: "KVCacheConfig | None" = None,
         max_num_reqs: int | None = None,
@@ -1455,13 +1456,16 @@ class CompilationConfig:
                 "and make sure compilation mode is VLLM_COMPILE"
             )
 
-        # Adjust cudagraph sizes to be a multiple of uniform_decode_query_len
+        # MRV1 adjusts cudagraph sizes to be a multiple of uniform_decode_query_len
         # to avoid: https://github.com/vllm-project/vllm/issues/28207 and temp-fix:
         # https://github.com/vllm-project/vllm/issues/28207#issuecomment-3504004536
         # Will be removed in the near future when we have separate cudagraph capture
         # sizes for decode and mixed prefill-decode.
+        # MRV2 handles cudagraph capture sizing in cudagraph_utils.py
+        # and doesn't need below: https://github.com/vllm-project/vllm/pull/45953
         if (
-            cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
+            not use_v2_model_runner
+            and cudagraph_mode.decode_mode() == CUDAGraphMode.FULL
             and uniform_decode_query_len > 1
         ):
             self.adjust_cudagraph_sizes_for_spec_decode(
