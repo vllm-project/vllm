@@ -252,14 +252,8 @@ def _minimax_qk_norm_fusion(
             tp_world,
             eps,
         )
-    # ROCm fast path: AITER fused QK-norm + AllReduce (ROCm/aiter#3163).
-    # AITER's kernel requires q/k/v dims aligned to WARP_SIZE * PACK_SIZE;
-    # skip for incompatible shapes (e.g. TP=8 MiniMax-M2) and fall through.
-    if (
-        tp_world > 1
-        and num_tokens <= MINIMAX_QK_NORM_MAX_TOKEN_NUM
-        and rocm_aiter_ops.has_custom_fused_qknorm_ar()
-    ):
+    # ROCm AITER fused QK-norm + AllReduce; skips unaligned shapes.
+    if tp_world > 1 and num_tokens <= MINIMAX_QK_NORM_MAX_TOKEN_NUM:
         pack_size = 16 // qkv.element_size()
         warp_work_size = 32 * pack_size
         if q_size % warp_work_size == 0 and kv_size % warp_work_size == 0:
