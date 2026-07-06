@@ -175,6 +175,16 @@ if flashinfer_comm is not None:
         )
         curr_device = current_platform.get_device_capability()
         device_capability = curr_device.to_int() if curr_device is not None else None
+        # Get one shot input size limit for the current world size
+        # for the current device capability
+        max_one_shot_size = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB.get(
+            device_capability,  # type: ignore[arg-type, unused-ignore]
+            {},
+        ).get(world_size, None)
+        # Use one shot if no max size is specified
+        use_oneshot = (
+            max_one_shot_size is None or current_tensor_size <= max_one_shot_size * MiB
+        )
 
         # Select workspace based on pattern: quant patterns use the
         # trtllm quant workspace, non-quant patterns use the primary workspace.
@@ -197,18 +207,6 @@ if flashinfer_comm is not None:
             "Flashinfer allreduce workspace must be initialized when using flashinfer"
         )
         assert flashinfer_comm is not None
-        if workspace.backend == "mnnvl":
-            # Let mnnvl use its own heuristic for one-shot vs two-shot.
-            use_oneshot = None
-        if workspace.backend == "trtllm":
-            # Get one shot input size limit for the current world size
-            # for the current device capability
-            max_size = _FI_ALLREDUCE_ONE_SHOT_MAX_SIZES_MB.get(
-                device_capability,  # type: ignore[arg-type, unused-ignore]
-                {},
-            ).get(world_size, None)
-            # Use one shot if no max size is specified
-            use_oneshot = max_size is None or current_tensor_size <= max_size * MiB
         if norm_out is None:
             norm_out = allreduce_in
             residual_out = residual
