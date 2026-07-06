@@ -76,12 +76,6 @@ class DPMetadata:
     # NOTE: local_sizes should only be set by the chunked_sizes context manager
     local_sizes: list[int] | None = None
 
-    # Memoized result of _compute_sp_num_tokens, keyed by sequence_parallel_size.
-    # num_tokens_across_dp_cpu is fixed for the lifetime of this DPMetadata
-    # instance (one per forward pass, see DPMetadata.make), so the size vector
-    # for a given sequence_parallel_size never changes within a pass.
-    _sp_sizes_cache: dict[int, list[int]] = field(default_factory=dict)
-
     @staticmethod
     def make(
         parallel_config: ParallelConfig,
@@ -104,22 +98,15 @@ class DPMetadata:
         )
         return DPMetadata(num_tokens_across_dp_cpu)
 
-    def _get_or_compute_sp_sizes(self, sequence_parallel_size: int) -> list[int]:
-        sizes = self._sp_sizes_cache.get(sequence_parallel_size)
-        if sizes is None:
-            sizes = _compute_sp_num_tokens(
-                self.num_tokens_across_dp_cpu, sequence_parallel_size
-            )
-            self._sp_sizes_cache[sequence_parallel_size] = sizes
-        return sizes
-
     @contextmanager
     def sp_local_sizes(self, sequence_parallel_size: int):
         """
         Context manager for setting self.local_sizes. Same as self.chunked_sizes
         but without any chunking.
         """
-        self.local_sizes = self._get_or_compute_sp_sizes(sequence_parallel_size)
+        self.local_sizes = _compute_sp_num_tokens(
+            self.num_tokens_across_dp_cpu, sequence_parallel_size
+        )
         try:
             yield self.local_sizes
         finally:

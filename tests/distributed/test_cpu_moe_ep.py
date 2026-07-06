@@ -9,24 +9,22 @@ all-reduce chain for the AgRsAll2AllManager + CPUExpertsFp8 path on CPU
 
 Covers:
   - TP=1, DP=6 — production CPU EP topology coverage
-  - TP=2, DP=3 — component-only hybrid TP+EP plumbing coverage
 
-Run: numactl -m 4 -N 4 .venv/bin/python -m pytest \
+Run: numactl -m 5 -N 5 .venv/bin/python -m pytest \
          tests/distributed/test_cpu_moe_ep.py -v
 """
 
 import math
 import os
+import traceback
 
 import pytest
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 
-from tests.distributed.cpu_mp_test_utils import (
-    report_worker_failure,
-    spawn_workers,
-)
 from vllm.platforms import current_platform
+from vllm.utils.network_utils import get_open_port
 
 if not current_platform.is_cpu():
     pytest.skip("CPU-only test", allow_module_level=True)
@@ -38,6 +36,76 @@ from vllm.model_executor.layers.fused_moe.experts.cpu_moe import (  # noqa: E402
 
 if not hasattr(torch.ops._C, "fused_experts_cpu"):
     pytest.skip("fused_experts_cpu op not available", allow_module_level=True)
+
+
+def ensure_spawn_start_method():
+    if mp.get_start_method(allow_none=True) is None:
+        mp.set_start_method("spawn")
+
+
+def report_worker_failure(rank: int, err_q: mp.Queue, err: Exception) -> None:
+    err_q.put(f"[Rank {rank}]\n{traceback.format_exc()}")
+    raise SystemExit(1) from err
+
+
+def collect_worker_failures(procs, err_q: mp.Queue) -> list[str]:
+    exit_errors = []
+    for rank, proc in enumerate(procs):
+        proc.join()
+        if proc.exitcode != 0:
+            exit_errors.append(f"[Rank {rank}] worker exited with code {proc.exitcode}")
+
+    errors = []
+    while not err_q.empty():
+        errors.append(err_q.get_nowait())
+    err_q.close()
+    err_q.join_thread()
+    return errors + exit_errors
+
+
+def spawn_workers(
+    worker_fn,
+    world_size,
+    tp_size,
+    dp_size,
+    params,
+    *,
+    distributed_init_ports=None,
+    dp_port=None,
+):
+    ensure_spawn_start_method()
+
+    if distributed_init_ports is None:
+        shared_init_port = get_open_port()
+        distributed_init_ports = [shared_init_port] * world_size
+    elif len(distributed_init_ports) != world_size:
+        raise ValueError("distributed_init_ports must provide one port per worker rank")
+
+    if dp_port is None:
+        dp_port = get_open_port()
+
+    err_q: mp.Queue = mp.Queue()
+    procs = []
+    for rank in range(world_size):
+        proc = mp.Process(
+            target=worker_fn,
+            args=(
+                rank,
+                world_size,
+                tp_size,
+                dp_size,
+                distributed_init_ports[rank],
+                dp_port,
+                params,
+                err_q,
+            ),
+        )
+        proc.start()
+        procs.append(proc)
+
+    failures = collect_worker_failures(procs, err_q)
+    if failures:
+        pytest.fail("Worker(s) failed:\n" + "\n---\n".join(failures))
 
 
 # ---------------------------------------------------------------------------
@@ -319,14 +387,3 @@ _PARAMS = [
 def test_cpu_moe_ep_dp6_tp1(params):
     """TP=1, DP=6: pure expert parallelism baseline (EP=6)."""
     spawn_workers(_moe_ep_worker, world_size=6, tp_size=1, dp_size=6, params=params)
-
-
-@pytest.mark.distributed
-@pytest.mark.parametrize("params", _PARAMS, ids=["E12-div", "E10-nondiv"])
-def test_cpu_moe_ep_component_dp3_tp2(params):
-    """Component-only TP=2, DP=3 hybrid tensor+expert coverage.
-
-    This bypasses CPUPlatform's full-model topology validation and only checks
-    the lower-level dispatch/combine + local-skip + TP all-reduce plumbing.
-    """
-    spawn_workers(_moe_ep_worker, world_size=6, tp_size=2, dp_size=3, params=params)

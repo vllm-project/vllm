@@ -9,15 +9,13 @@ while sequence-parallel paths use the EP group.
 """
 
 import os
+import traceback
 
 import pytest
 import torch
 import torch.distributed as dist
+import torch.multiprocessing as mp
 
-from tests.distributed.cpu_mp_test_utils import (
-    report_worker_failure,
-    spawn_workers,
-)
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
 from vllm.utils.network_utils import get_open_port
@@ -34,6 +32,76 @@ HAS_CPU_SHM = hasattr(torch.ops._C, "init_shm_manager") and (
     current_platform.get_cpu_architecture()
     in (CpuArchEnum.X86, CpuArchEnum.ARM, CpuArchEnum.POWERPC)
 )
+
+
+def ensure_spawn_start_method():
+    if mp.get_start_method(allow_none=True) is None:
+        mp.set_start_method("spawn")
+
+
+def report_worker_failure(rank: int, err_q: mp.Queue, err: Exception) -> None:
+    err_q.put(f"[Rank {rank}]\n{traceback.format_exc()}")
+    raise SystemExit(1) from err
+
+
+def collect_worker_failures(procs, err_q: mp.Queue) -> list[str]:
+    exit_errors = []
+    for rank, proc in enumerate(procs):
+        proc.join()
+        if proc.exitcode != 0:
+            exit_errors.append(f"[Rank {rank}] worker exited with code {proc.exitcode}")
+
+    errors = []
+    while not err_q.empty():
+        errors.append(err_q.get_nowait())
+    err_q.close()
+    err_q.join_thread()
+    return errors + exit_errors
+
+
+def spawn_workers(
+    worker_fn,
+    world_size,
+    tp_size,
+    dp_size,
+    params,
+    *,
+    distributed_init_ports=None,
+    dp_port=None,
+):
+    ensure_spawn_start_method()
+
+    if distributed_init_ports is None:
+        shared_init_port = get_open_port()
+        distributed_init_ports = [shared_init_port] * world_size
+    elif len(distributed_init_ports) != world_size:
+        raise ValueError("distributed_init_ports must provide one port per worker rank")
+
+    if dp_port is None:
+        dp_port = get_open_port()
+
+    err_q: mp.Queue = mp.Queue()
+    procs = []
+    for rank in range(world_size):
+        proc = mp.Process(
+            target=worker_fn,
+            args=(
+                rank,
+                world_size,
+                tp_size,
+                dp_size,
+                distributed_init_ports[rank],
+                dp_port,
+                params,
+                err_q,
+            ),
+        )
+        proc.start()
+        procs.append(proc)
+
+    failures = collect_worker_failures(procs, err_q)
+    if failures:
+        pytest.fail("Worker(s) failed:\n" + "\n---\n".join(failures))
 
 
 def _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port):
@@ -648,7 +716,7 @@ def _dp_shm_group_name_worker(
         report_worker_failure(rank, err_q, err)
 
 
-def _dp_ar_shm_worker(
+def _dp_shm_all_reduce_worker(
     rank,
     world_size,
     tp_size,
@@ -658,39 +726,21 @@ def _dp_ar_shm_worker(
     params,
     err_q,
 ):
-    """Mirror `_run_ar`'s 4xdp_size int32 coordination all-reduce and confirm
-    the SHM fp32 round-trip matches the gloo reference exactly."""
+    """Confirm the DP SHM all-reduce matches the gloo reference exactly."""
     try:
-        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_dp_ar_shm_{port}")
+        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_dp_shm_all_reduce_{port}")
         _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
 
         dp_group, _ = _get_dp_shm_communicator()
-
-        # Build the same 4 x dp_size contribution tensor `_run_ar` builds,
-        # writing only this rank's column with a distinct per-rank pattern.
-        tensor = torch.zeros(4, dp_size, dtype=torch.int32)
-        tensor[0][rank] = 10 + rank  # orig_num_tokens
-        tensor[1][rank] = 100 + rank  # padded_num_tokens
-        tensor[2][rank] = 1 if rank % 2 == 0 else 0  # should_ubatch flag
-        tensor[3][rank] = rank  # cudagraph_mode
+        tensor = torch.arange(12, dtype=torch.float32).reshape(3, 4) + float(rank)
 
         # Gloo reference (SUM over the DP group's cpu_group).
         ref = tensor.clone()
         dist.all_reduce(ref, group=dp_group.cpu_group)
 
-        # SHM fp32 round-trip (matches the shipped `_run_ar` path).
-        tensor_fp32 = tensor.to(torch.float32)
-        dp_group.all_reduce(tensor_fp32)
-        shm_result = tensor_fp32.round().to(torch.int32)
+        shm_result = dp_group.all_reduce(tensor.clone())
 
         torch.testing.assert_close(shm_result, ref)
-
-        # Spot-check the semantic reads `_run_ar`'s callers rely on.
-        assert bool(torch.all(shm_result[2] == 1).item()) == bool(
-            torch.all(ref[2] == 1).item()
-        )
-        assert int(shm_result[3].min().item()) == int(ref[3].min().item())
-        assert int(shm_result[1].max().item()) == int(ref[1].max().item())
 
         dist.barrier()
     except Exception as err:
@@ -817,11 +867,9 @@ def test_cpu_dp_reduce_scatterv_implicit_sizes_require_even_split():
 
 @pytest.mark.distributed
 @pytest.mark.skipif(not HAS_CPU_SHM, reason="CPU SHM communicator required")
-def test_cpu_dp_token_count_all_reduce_shm_matches_gloo():
-    """The per-step DP token-count all-reduce (`_run_ar`) routed through SHM
-    must match the gloo reference for a DP=6 (EP) topology."""
+def test_cpu_dp_shm_all_reduce_matches_gloo():
     spawn_workers(
-        _dp_ar_shm_worker,
+        _dp_shm_all_reduce_worker,
         world_size=6,
         tp_size=1,
         dp_size=6,

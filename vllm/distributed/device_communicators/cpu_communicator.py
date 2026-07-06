@@ -425,16 +425,8 @@ class CpuCommunicator(DeviceCommunicatorBase):
             assert dp_metadata is not None
             if dp_metadata.local_sizes is not None:
                 return fn()
-            # Inline the sequence_parallel_size=1 case of sp_local_sizes: avoid
-            # the generator-contextmanager enter/exit machinery, which is paid
-            # on every dispatch/combine call (this branch always runs because
-            # the outer sp_local_sizes context in moe_runner.py is traced away
-            # by dynamo, so local_sizes is never seen set at runtime here).
-            dp_metadata.local_sizes = dp_metadata._get_or_compute_sp_sizes(1)
-            try:
+            with dp_metadata.sp_local_sizes(sequence_parallel_size=1):
                 return fn()
-            finally:
-                dp_metadata.local_sizes = None
 
         @torch.library.custom_op(
             f"vllm::cpu_ep_dispatch_rl_{safe_name}", mutates_args=()
@@ -443,11 +435,9 @@ class CpuCommunicator(DeviceCommunicatorBase):
             hidden_states: torch.Tensor,
             router_logits: torch.Tensor,
         ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-            # Piggyback the per-token padding mask (if produced for this
-            # step, see gpu_model_runner.py) on the same all-gather so
-            # skipping dummy/padding rows in the MoE kernel needs no extra
-            # collective. Kept as a pure op output (not a side effect) so it
-            # stays safe under the op's mutates_args=() purity contract.
+            # Piggyback any per-token padding mask already present in the
+            # forward context on the same all-gather so skipping padding rows
+            # in the MoE kernel needs no extra collective.
             is_padding = get_forward_context().is_padding
             extra_tensors = None
             if is_padding is not None:
