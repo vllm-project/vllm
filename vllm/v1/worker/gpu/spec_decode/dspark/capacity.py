@@ -1,5 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
 import numpy as np
 import torch
 
@@ -11,6 +14,20 @@ from vllm.v1.worker.gpu.spec_decode.decompaction import (
     SamplerDecompactionMetadata,
     prepare_sampler_decompaction_from_counts,
 )
+
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu.input_batch import InputBatch
+
+
+@dataclass
+class _SamplerDecompactionState:
+    num_scheduled_tokens_before_capacity: np.ndarray
+    scheduled_draft_tokens_per_req: np.ndarray
+    pruned_draft_tokens_per_req: np.ndarray
+    num_bonus_tokens: int
+    max_num_reqs: int
+    last_sampled_tokens: torch.Tensor
+    draft_tokens: torch.Tensor
 
 
 def get_draft_token_capacity(
@@ -101,6 +118,7 @@ class CapacityBasedVerificationManager:
         self.draft_token_capacity_np: np.ndarray | None = None
         self.num_draft_tokens: int = 0
         self.copy_event_pending = False
+        self._sampler_decompaction_state: _SamplerDecompactionState | None = None
 
     def clear(self) -> None:
         self.req_ids = []
@@ -108,6 +126,44 @@ class CapacityBasedVerificationManager:
         self.draft_token_capacity_np = None
         self.num_draft_tokens = 0
         self.copy_event_pending = False
+        self._sampler_decompaction_state = None
+
+    def apply_draft_token_capacity(
+        self,
+        req_ids: list[str],
+        draft_tokens: dict[str, list[int]],
+        num_scheduled_tokens: np.ndarray,
+        idx_mapping_np: np.ndarray,
+        draft_token_capacity_np: np.ndarray,
+        num_bonus_tokens: int,
+        max_num_reqs: int,
+        last_sampled_tokens: torch.Tensor,
+        req_state_draft_tokens: torch.Tensor,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        num_scheduled_tokens_before_capacity = num_scheduled_tokens.copy()
+        scheduled_draft_tokens_per_req = get_scheduled_draft_token_counts(
+            req_ids, draft_tokens
+        )
+        (
+            num_scheduled_tokens,
+            num_draft_tokens_per_req,
+            pruned_draft_tokens_per_req,
+        ) = apply_draft_token_capacity(
+            num_scheduled_tokens,
+            scheduled_draft_tokens_per_req,
+            idx_mapping_np,
+            draft_token_capacity_np,
+        )
+        self._sampler_decompaction_state = _SamplerDecompactionState(
+            num_scheduled_tokens_before_capacity=num_scheduled_tokens_before_capacity,
+            scheduled_draft_tokens_per_req=scheduled_draft_tokens_per_req,
+            pruned_draft_tokens_per_req=pruned_draft_tokens_per_req,
+            num_bonus_tokens=num_bonus_tokens,
+            max_num_reqs=max_num_reqs,
+            last_sampled_tokens=last_sampled_tokens,
+            draft_tokens=req_state_draft_tokens,
+        )
+        return num_scheduled_tokens, num_draft_tokens_per_req
 
     def _sync_copy(self) -> None:
         if self.copy_event_pending:
@@ -166,42 +222,42 @@ class CapacityBasedVerificationManager:
         ]
         return True
 
-    def prepare_sampler_decompaction(
+    def _prepare_sampler_decompaction(
         self,
-        compact_cu_num_logits: torch.Tensor,
-        compact_query_start_loc: torch.Tensor,
-        idx_mapping: torch.Tensor,
-        positions: torch.Tensor,
-        last_sampled_tokens: torch.Tensor,
-        draft_tokens: torch.Tensor,
-        num_scheduled_tokens_before_capacity: np.ndarray,
-        scheduled_draft_tokens_per_req: np.ndarray,
-        pruned_draft_tokens_per_req: np.ndarray,
-        num_bonus_tokens: int,
-        num_reqs: int,
-        num_reqs_padded: int,
-        max_num_reqs: int,
-        num_new_sampled_tokens: int = 1,
+        input_batch: "InputBatch",
     ) -> SamplerDecompactionMetadata | None:
-        if not np.any(pruned_draft_tokens_per_req > 0):
+        state = self._sampler_decompaction_state
+        if state is None:
+            return None
+        if not np.any(state.pruned_draft_tokens_per_req > 0):
             return None
         return prepare_sampler_decompaction_from_counts(
-            compact_cu_num_logits,
-            compact_query_start_loc,
-            idx_mapping,
-            positions,
-            last_sampled_tokens,
-            draft_tokens,
-            num_scheduled_tokens_before_capacity,
-            scheduled_draft_tokens_per_req,
-            num_bonus_tokens,
-            num_reqs,
-            num_reqs_padded,
-            max_num_reqs,
+            input_batch.cu_num_logits,
+            input_batch.query_start_loc,
+            input_batch.idx_mapping,
+            input_batch.positions,
+            state.last_sampled_tokens,
+            state.draft_tokens,
+            state.num_scheduled_tokens_before_capacity,
+            state.scheduled_draft_tokens_per_req,
+            state.num_bonus_tokens,
+            input_batch.num_reqs,
+            input_batch.num_reqs_after_padding,
+            state.max_num_reqs,
             self.device,
             self.sampler_decompaction_buffers,
-            num_new_sampled_tokens,
+            state.num_bonus_tokens,
         )
+
+    def trim_batch(self, input_batch: "InputBatch") -> "InputBatch":
+        if input_batch.num_draft_tokens == 0:
+            self._sampler_decompaction_state = None
+            input_batch.sampler_decompaction = None
+            return input_batch
+        input_batch.sampler_decompaction = self._prepare_sampler_decompaction(
+            input_batch
+        )
+        return input_batch
 
 
 @triton.jit

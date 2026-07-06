@@ -106,10 +106,8 @@ from vllm.v1.worker.gpu.shutdown import free_before_shutdown
 from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.capacity import (
     CapacityBasedVerificationManager,
-    apply_draft_token_capacity,
     get_draft_token_capacity,
     get_effective_scheduled_token_counts,
-    get_scheduled_draft_token_counts,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -872,7 +870,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get the number of draft tokens for each request.
         draft_tokens = scheduler_output.scheduled_spec_decode_tokens
         num_draft_tokens_per_req = None
-        sampler_decompaction = None
         if not draft_tokens:
             # No draft token scheduled (common case).
             total_num_draft_tokens = 0
@@ -886,21 +883,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 num_reqs, dtype=torch.int32, device=self.device
             )
         else:
-            num_scheduled_tokens_before_capacity = num_scheduled_tokens.copy()
-            scheduled_draft_tokens_per_req = get_scheduled_draft_token_counts(
-                req_ids, draft_tokens
-            )
-            (
-                num_scheduled_tokens,
-                num_draft_tokens_per_req,
-                pruned_draft_tokens_per_req,
-            ) = apply_draft_token_capacity(
-                num_scheduled_tokens,
-                scheduled_draft_tokens_per_req,
-                idx_mapping_np,
-                self.req_states.draft_token_capacity_np,
-            )
             num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
+            num_scheduled_tokens, num_draft_tokens_per_req = (
+                self.capacity_verification_manager.apply_draft_token_capacity(
+                    req_ids,
+                    draft_tokens,
+                    num_scheduled_tokens,
+                    idx_mapping_np,
+                    self.req_states.draft_token_capacity_np,
+                    num_bonus_tokens,
+                    self.max_num_reqs,
+                    self.req_states.last_sampled_tokens,
+                    self.req_states.draft_tokens,
+                )
+            )
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
             num_logits = num_draft_tokens_per_req + num_bonus_tokens
@@ -991,26 +987,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.model_state.num_new_sampled_tokens_per_step,
         )
 
-        if draft_tokens:
-            sampler_decompaction = (
-                self.capacity_verification_manager.prepare_sampler_decompaction(
-                    cu_num_logits,
-                    query_start_loc,
-                    idx_mapping,
-                    self.input_buffers.positions,
-                    self.req_states.last_sampled_tokens,
-                    self.req_states.draft_tokens,
-                    num_scheduled_tokens_before_capacity,
-                    scheduled_draft_tokens_per_req,
-                    pruned_draft_tokens_per_req,
-                    num_bonus_tokens,
-                    num_reqs,
-                    num_reqs_padded,
-                    self.max_num_reqs,
-                    self.model_state.num_new_sampled_tokens_per_step,
-                )
-            )
-
         # CPU upper bound on seq_lens; padded entries left at zero.
         num_computed_tokens_np = self.req_states.num_computed_tokens_np[idx_mapping_np]
         seq_lens_cpu_upper_bound_np = np.zeros(num_reqs_padded, dtype=np.int32)
@@ -1031,7 +1007,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # prompt_lens is only used in R-SWA case.
             prompt_lens = self.req_states.prompt_len.gpu[idx_mapping]
 
-        return InputBatch(
+        input_batch = InputBatch(
             req_ids=req_ids,
             num_reqs=num_reqs,
             num_reqs_after_padding=num_reqs_padded,
@@ -1062,8 +1038,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             prompt_lens=prompt_lens,
-            sampler_decompaction=sampler_decompaction,
         )
+        return self.capacity_verification_manager.trim_batch(input_batch)
 
     def prepare_attn(
         self, input_batch: InputBatch
