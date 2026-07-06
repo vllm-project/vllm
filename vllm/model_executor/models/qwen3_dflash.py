@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
+import os
 from collections.abc import Iterable
 
 import torch
@@ -52,6 +53,20 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _allow_mixed_swa_full_dflash() -> bool:
+    return os.environ.get("VLLM_EXPERIMENTAL_DFLASH_MIXED_SWA_FULL", "0").lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _allow_replicated_uneven_dflash_attention() -> bool:
+    return os.environ.get(
+        "VLLM_EXPERIMENTAL_DFLASH_REPLICATE_UNEVEN_ATTENTION", "0"
+    ).lower() in ("1", "true", "yes")
+
+
 def _resolve_layer_attention(
     config: Qwen3Config, layer_idx: int
 ) -> tuple[int | None, bool]:
@@ -87,13 +102,19 @@ def _resolve_layer_attention(
         num_sliding = sum(lt == SLIDING_ATTENTION for lt in layer_types)
         any_sliding = num_sliding > 0
         all_sliding = num_sliding == len(layer_types)
-        if any_sliding and not all_sliding:
+        if any_sliding and not all_sliding and not _allow_mixed_swa_full_dflash():
             # Mixed sliding/full attention needs per-layer causal metadata and
             # multiple KV-cache groups, which DFlash does not yet support.
             raise NotImplementedError(
                 "DFlash does not yet support mixed sliding/full attention via "
                 "layer_types; see "
                 "https://github.com/vllm-project/vllm/issues/40898."
+            )
+        if any_sliding and not all_sliding:
+            logger.warning_once(
+                "Allowing experimental DFlash mixed sliding/full attention. "
+                "This is intended for Qwen3.6 DFlash POC only; validate "
+                "acceptance rate and long-context correctness before production."
             )
 
     default_causal = False
@@ -152,7 +173,18 @@ class DFlashQwen3Attention(nn.Module):
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
-        assert self.total_num_heads % tp_size == 0
+        disable_attn_tp = False
+        if self.total_num_heads % tp_size != 0:
+            if not _allow_replicated_uneven_dflash_attention():
+                assert self.total_num_heads % tp_size == 0
+            disable_attn_tp = True
+            logger.warning_once(
+                "Replicating DFlash attention projections because "
+                "num_attention_heads=%d is not divisible by tensor_parallel_size=%d.",
+                self.total_num_heads,
+                tp_size,
+            )
+            tp_size = 1
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
         if self.total_num_kv_heads >= tp_size:
@@ -173,6 +205,7 @@ class DFlashQwen3Attention(nn.Module):
             bias=attention_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            disable_tp=disable_attn_tp,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -180,6 +213,7 @@ class DFlashQwen3Attention(nn.Module):
             bias=attention_bias,  # DFlash has o_proj bias when using attention bias
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            disable_tp=disable_attn_tp,
         )
 
         self.rotary_emb = get_rope(
