@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicU64;
 
 use prometheus_client::encoding::text::encode;
 use prometheus_client::metrics::counter::Counter;
-use prometheus_client::metrics::family::Family;
+pub use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::gauge::Gauge;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
@@ -23,6 +23,8 @@ pub use scheduler::*;
 pub type U64Counter = Counter<u64, AtomicU64>;
 pub type U64Gauge = Gauge<u64, AtomicU64>;
 pub type F64Gauge = Gauge<f64, AtomicU64>;
+/// Histogram metric handle cloned out of a Prometheus family.
+pub type HistogramMetric = Histogram;
 pub(crate) type HistogramFamily = Family<EngineLabels, Histogram, fn() -> Histogram>;
 
 /// Shared Prometheus registry for frontend metrics.
