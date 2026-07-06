@@ -176,3 +176,28 @@ def test_cpu_fused_moe(
         torch.testing.assert_close(output, ref_output, atol=atol, rtol=rtol),
         f"{torch.max(torch.abs(output - ref_output))}",
     )
+
+
+def test_act_fn_table_needs_no_config_context(monkeypatch):
+    """Every _CPU_MOE_ACT_FN entry must be callable with NO vLLM config set.
+
+    The table is consulted at model *forward* time (engine warmup /
+    profile_run), outside any set_current_vllm_config() context. An entry
+    that lazily instantiates a CustomOp calls get_current_vllm_config() in
+    CustomOp.__init__ and crashes CPU MoE serving with "Current vLLM config
+    is not set". This class of bug regressed twice (#32368, fixed by #32777;
+    #45447, fixed by #45961) because the main test above runs under the
+    default_vllm_config fixture, which masks it. This test pins the whole
+    table: entries must be static methods or standalone functions.
+    """
+    import vllm.config.vllm as vllm_config_vllm
+
+    # Reproduce the failing condition exactly: no current config at call
+    # time (also shields against config-context leakage from other tests).
+    monkeypatch.setattr(vllm_config_vllm, "_current_vllm_config", None)
+
+    x = torch.randn(8, 32, dtype=torch.float32)
+    for act, fn in _CPU_MOE_ACT_FN.items():
+        out = fn(x)
+        # All entries are gated activations: last dim halves.
+        assert out.shape == (8, 16), act
