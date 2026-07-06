@@ -718,7 +718,7 @@ class Indexer(nn.Module):
         self.is_inplace_rope = is_inplace_rope
         self.n_head_scale = self.n_head**-0.5
         self.use_fused_indexer_q = (
-            current_platform.is_cuda_alike() 
+            current_platform.is_cuda_alike()
             and self.quant_block_size == self.head_dim
             and self.head_dim == 128
             and self.rope_dim == 64
