@@ -20,6 +20,8 @@ from torch.distributed.distributed_c10d import is_nccl_available
 from typing_extensions import ParamSpec
 
 # import custom ops, trigger op registration
+with contextlib.suppress(ImportError):
+    import vllm._C  # noqa
 import vllm._C_stable_libtorch  # noqa
 
 with contextlib.suppress(ImportError):

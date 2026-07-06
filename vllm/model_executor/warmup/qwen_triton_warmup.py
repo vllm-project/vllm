@@ -123,8 +123,12 @@ def _qwen_gdn_warmup_config(
             conv_cache if is_conv_state_dim_first() else conv_cache.transpose(-1, -2)
         )
         tp_size = int(layer.tp_size)
-        h = int(layer.num_k_heads) // tp_size
-        hv = int(layer.num_v_heads) // tp_size
+        h = int(
+            getattr(layer, "padded_local_num_k_heads", layer.num_k_heads // tp_size)
+        )
+        hv = int(
+            getattr(layer, "padded_local_num_v_heads", layer.num_v_heads // tp_size)
+        )
 
         return _QwenGDNWarmupConfig(
             h=h,

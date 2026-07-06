@@ -27,6 +27,7 @@
 
 from collections.abc import Iterable
 from itertools import islice
+import math
 from typing import Any
 
 import torch
@@ -46,6 +47,8 @@ from vllm.model_executor.layers.fused_moe import (
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     MergedColumnParallelLinear,
+    PaddedMergedColumnParallelLinear,
+    PaddedRowParallelLinear,
     QKVParallelLinear,
     ReplicatedLinear,
     RowParallelLinear,
@@ -72,6 +75,10 @@ from .utils import (
 logger = init_logger(__name__)
 
 
+def _ceil_to_multiple(value: int, multiple: int) -> int:
+    return ((value + multiple - 1) // multiple) * multiple
+
+
 class Qwen2MoeMLP(nn.Module):
     def __init__(
         self,
@@ -85,23 +92,47 @@ class Qwen2MoeMLP(nn.Module):
         prefix: str = "",
     ) -> None:
         super().__init__()
-        self.gate_up_proj = MergedColumnParallelLinear(
-            hidden_size,
-            [intermediate_size] * 2,
-            bias=False,
-            quant_config=quant_config,
-            disable_tp=is_sequence_parallel,
-            prefix=f"{prefix}.gate_up_proj",
-        )
-        self.down_proj = RowParallelLinear(
-            intermediate_size,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            reduce_results=reduce_results,
-            disable_tp=is_sequence_parallel,
-            prefix=f"{prefix}.down_proj",
-        )
+        tp_size = get_tensor_model_parallel_world_size()
+        needs_padding = not is_sequence_parallel and intermediate_size % tp_size != 0
+        if needs_padding:
+            pad_multiple = math.lcm(tp_size, 16)
+            padded_intermediate_size = _ceil_to_multiple(intermediate_size,
+                                                         pad_multiple)
+            self.gate_up_proj = PaddedMergedColumnParallelLinear(
+                hidden_size,
+                [intermediate_size] * 2,
+                [padded_intermediate_size] * 2,
+                bias=False,
+                quant_config=quant_config,
+                prefix=f"{prefix}.gate_up_proj",
+            )
+            self.down_proj = PaddedRowParallelLinear(
+                intermediate_size,
+                padded_intermediate_size,
+                hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                reduce_results=reduce_results,
+                prefix=f"{prefix}.down_proj",
+            )
+        else:
+            self.gate_up_proj = MergedColumnParallelLinear(
+                hidden_size,
+                [intermediate_size] * 2,
+                bias=False,
+                quant_config=quant_config,
+                disable_tp=is_sequence_parallel,
+                prefix=f"{prefix}.gate_up_proj",
+            )
+            self.down_proj = RowParallelLinear(
+                intermediate_size,
+                hidden_size,
+                bias=False,
+                quant_config=quant_config,
+                reduce_results=reduce_results,
+                disable_tp=is_sequence_parallel,
+                prefix=f"{prefix}.down_proj",
+            )
         if hidden_act != "silu":
             raise ValueError(
                 f"Unsupported activation: {hidden_act}. Only silu is supported for now."
