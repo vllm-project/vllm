@@ -21,12 +21,13 @@ use serde_json::Value;
 use thiserror_ext::AsReport as _;
 use tracing::{debug, error, info, trace};
 use tracing_futures::Instrument as _;
+use vllm_engine_core_client::protocol::logprobs::TokenLogprob;
 use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_text::tokenizer::Tokenizer;
 use vllm_text::{
     BeamSearchOutput, DecodedPromptLogprobs, DecodedTextEvent, FinishReason, TextOutputStream,
     TextOutputStreamExt as _,
 };
-use vllm_text::tokenizer::Tokenizer;
 
 use self::convert::{ResponseOptions, prepare_completion_request};
 use super::utils::logprobs::{
@@ -249,6 +250,55 @@ async fn collect_completion(
     })
 }
 
+fn build_beam_logprobs(
+    beam_logprobs: &[Vec<TokenLogprob>],
+    generated_tokens: &[u32],
+    tokenizer: &dyn Tokenizer,
+) -> Option<LogProbs> {
+    if generated_tokens.is_empty() || beam_logprobs.len() < generated_tokens.len() {
+        return None;
+    }
+    let n = generated_tokens.len();
+    let mut tokens = Vec::with_capacity(n);
+    let mut token_logprobs = Vec::with_capacity(n);
+    let mut top_logprobs = Vec::with_capacity(n);
+    let mut text_offset = Vec::with_capacity(n);
+    let mut offset = 0u32;
+
+    for pos in 0..n {
+        let entries = &beam_logprobs[pos];
+        let Some(first) = entries.first() else {
+            continue;
+        };
+        let token_id = generated_tokens[pos];
+        let token = tokenizer.decode(&[token_id], false).unwrap_or_default();
+        offset += text_len(&token);
+        tokens.push(token);
+        token_logprobs.push(Some(first.logprob));
+        text_offset.push(offset);
+        let mut top: HashMap<String, f32> = HashMap::with_capacity(entries.len());
+        for entry in entries {
+            let decoded = tokenizer.decode(&[entry.token_id], false).unwrap_or_default();
+            top.insert(
+                if decoded.is_empty() {
+                    format!("token_id:{}", entry.token_id)
+                } else {
+                    decoded
+                },
+                entry.logprob,
+            );
+        }
+        top_logprobs.push(Some(top));
+    }
+
+    Some(LogProbs {
+        tokens,
+        token_logprobs,
+        top_logprobs,
+        text_offset,
+    })
+}
+
 async fn collect_beam_search_completion(
     beam_result: BeamSearchOutput,
     request_id: String,
@@ -261,6 +311,7 @@ async fn collect_beam_search_completion(
     }: ApiServerOptions,
     ResponseOptions {
         echo,
+        requested_logprobs,
         return_token_ids,
         ..
     }: ResponseOptions,
@@ -284,9 +335,7 @@ async fn collect_beam_search_completion(
         .enumerate()
         .map(|(i, beam)| {
             let generated_tokens = beam.tokens[beam_result.prompt_token_ids.len()..].to_vec();
-            let decoded = tokenizer
-                .decode(&generated_tokens, false)
-                .unwrap_or_default();
+            let decoded = tokenizer.decode(&generated_tokens, false).unwrap_or_default();
             let text = match &echo {
                 Some(prompt) => format!("{prompt}{}", decoded),
                 None => decoded,
@@ -296,14 +345,16 @@ async fn collect_beam_search_completion(
                 .as_ref()
                 .map(|fr| completion_finish_reason_to_openai(fr).unwrap_or("error"))
                 .unwrap_or("length");
-            let stop_reason = beam.stop_reason.map(|token_id| {
-                serde_json::Value::Number(serde_json::Number::from(token_id))
-            });
+            let stop_reason = beam
+                .stop_reason
+                .map(|token_id| serde_json::Value::Number(serde_json::Number::from(token_id)));
+            let logprobs = requested_logprobs
+                .and_then(|_| build_beam_logprobs(&beam.logprobs, &generated_tokens, tokenizer));
 
             CompletionChoice {
                 index: i as u32,
                 text,
-                logprobs: None,
+                logprobs,
                 finish_reason: Some(openai_finish_reason.to_string()),
                 stop_reason,
                 prompt_logprobs: None,

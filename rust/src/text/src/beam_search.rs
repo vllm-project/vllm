@@ -22,6 +22,10 @@ pub struct BeamSearchBeam {
     pub stop_reason: Option<u32>,
     /// LoRA request for this beam.
     pub lora_request: Option<LoraRequest>,
+    // TODO: store the original multimodal features (MmFeatures) so that
+    // per-step GenerateRequests can pass them to the engine, matching
+    // Python's BeamSearchSequence.get_prompt() which rebuilds mm_input()
+    // with mm_kwargs / mm_hashes / mm_placeholders preserved.
 }
 
 /// Collected result of one beam search invocation.
@@ -128,6 +132,8 @@ pub(crate) async fn run_beam_search(
                 request_id: format!("beam-{i}-step-{step}"),
                 prompt_token_ids: beam.tokens.clone(),
                 sampling_params,
+                // TODO: pass through beam.mm_features once BeamSearchBeam
+                // stores them (see TODO on BeamSearchBeam struct).
                 mm_features: None,
                 arrival_time: None,
                 cache_salt: config.cache_salt.clone(),
@@ -234,9 +240,7 @@ pub(crate) async fn run_beam_search(
             score_b.total_cmp(&score_a)
         });
     } else {
-        completed.sort_by(|a, b| {
-            b.cum_logprob.total_cmp(&a.cum_logprob)
-        });
+        completed.sort_by(|a, b| b.cum_logprob.total_cmp(&a.cum_logprob));
     }
 
     let best_beams: Vec<BeamSearchBeam> = completed.into_iter().take(beam_width).collect();

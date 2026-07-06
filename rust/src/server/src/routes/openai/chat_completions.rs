@@ -24,6 +24,7 @@ use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
     CollectedAssistantMessage, FinishReason,
 };
+use vllm_engine_core_client::protocol::logprobs::TokenLogprob;
 use vllm_engine_core_client::protocol::output::StopReason;
 use vllm_text::BeamSearchOutput;
 use vllm_text::tokenizer::Tokenizer;
@@ -40,7 +41,8 @@ use crate::routes::openai::utils::logprobs::{
     decoded_logprobs_to_openai_chat, decoded_prompt_logprobs_to_maps,
 };
 use crate::routes::openai::utils::types::{
-    ChatLogProbs, FunctionCallDelta, FunctionCallResponse, ToolCall, ToolCallDelta, Usage,
+    ChatLogProbs, ChatLogProbsContent, FunctionCallDelta, FunctionCallResponse, ToolCall,
+    ToolCallDelta, TopLogProb, Usage,
 };
 use crate::routes::openai::utils::usage::ContinuousUsage;
 use crate::routes::openai::utils::validated_json::ValidatedJson;
@@ -261,6 +263,54 @@ async fn collect_chat_completion(
     })
 }
 
+fn build_beam_chat_logprobs(
+    beam_logprobs: &[Vec<TokenLogprob>],
+    generated_tokens: &[u32],
+    tokenizer: &dyn Tokenizer,
+) -> Option<ChatLogProbs> {
+    if generated_tokens.is_empty() || beam_logprobs.len() < generated_tokens.len() {
+        return None;
+    }
+    let n = generated_tokens.len();
+    let mut content = Vec::with_capacity(n);
+    for pos in 0..n {
+        let entries = &beam_logprobs[pos];
+        let Some(first) = entries.first() else {
+            continue;
+        };
+        let token = tokenizer.decode(&[generated_tokens[pos]], false).unwrap_or_default();
+        let token_bytes = token.as_bytes().to_vec();
+        let top_logprobs: Vec<TopLogProb> = entries
+            .iter()
+            .map(|e| {
+                let decoded = tokenizer.decode(&[e.token_id], false).unwrap_or_default();
+                TopLogProb {
+                    token: if decoded.is_empty() {
+                        format!("token_id:{}", e.token_id)
+                    } else {
+                        decoded.clone()
+                    },
+                    logprob: e.logprob,
+                    bytes: Some(decoded.as_bytes().to_vec()),
+                }
+            })
+            .collect();
+        content.push(ChatLogProbsContent {
+            token: if token.is_empty() {
+                format!("token_id:{}", generated_tokens[pos])
+            } else {
+                token
+            },
+            logprob: first.logprob,
+            bytes: Some(token_bytes),
+            top_logprobs,
+        });
+    }
+    Some(ChatLogProbs {
+        content: Some(content),
+    })
+}
+
 fn collect_beam_search_chat_completion(
     beam_result: BeamSearchOutput,
     request_id: String,
@@ -272,6 +322,7 @@ fn collect_beam_search_chat_completion(
         ..
     }: ApiServerOptions,
     ResponseOptions {
+        requested_logprobs,
         return_token_ids,
         include_reasoning: _,
         ..
@@ -295,19 +346,19 @@ fn collect_beam_search_chat_completion(
         .iter()
         .enumerate()
         .map(|(i, beam)| {
-            let generated_tokens =
-                beam.tokens[beam_result.prompt_token_ids.len()..].to_vec();
+            let generated_tokens = beam.tokens[beam_result.prompt_token_ids.len()..].to_vec();
             let openai_finish_reason = beam
                 .finish_reason
                 .as_ref()
                 .map(|fr| chat_finish_reason_to_openai(fr, false).unwrap_or("error"))
                 .unwrap_or("length");
-            let stop_reason = beam.stop_reason.map(|token_id| {
-                serde_json::Value::Number(serde_json::Number::from(token_id))
-            });
-            let decoded = tokenizer
-                .decode(&generated_tokens, false)
-                .unwrap_or_default();
+            let stop_reason = beam
+                .stop_reason
+                .map(|token_id| serde_json::Value::Number(serde_json::Number::from(token_id)));
+            let decoded = tokenizer.decode(&generated_tokens, false).unwrap_or_default();
+            let logprobs = requested_logprobs
+                .then(|| build_beam_chat_logprobs(&beam.logprobs, &generated_tokens, tokenizer))
+                .flatten();
             ChatCompletionChoice {
                 index: i as u32,
                 message: ChatCompletionMessage {
@@ -316,7 +367,7 @@ fn collect_beam_search_chat_completion(
                     tool_calls: None,
                     reasoning: None,
                 },
-                logprobs: None,
+                logprobs,
                 finish_reason: Some(openai_finish_reason.to_string()),
                 stop_reason,
                 token_ids: return_token_ids.then_some(generated_tokens),
