@@ -30,14 +30,6 @@ from vllm.model_executor.layers.quantization.base_config import (
     QuantizationConfig,
     QuantizeMethodBase,
 )
-from vllm.model_executor.layers.quantization.utils.humming_utils import (
-    convert_to_humming_moe_kernel_format,
-    get_humming_moe_quant_config,
-    input_schema_to_quant_key,
-    make_humming_moe_kernel,
-    select_humming_moe_experts,
-    weight_schema_to_quant_key,
-)
 from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.parameter import (
     BasevLLMParameter,
@@ -114,7 +106,7 @@ def prepare_param(tensor, name, extra_attrs):
     return param
 
 
-def prepare_moe_param(tensor: torch.Tensor, name: str, extra_attrs: dict[str, Any]):
+def prepare_moe_param(tensor, name, extra_attrs):
     param = torch.nn.Parameter(tensor, requires_grad=False)
     if "scale_type" in extra_attrs:
         extra_attrs["quant_method"] = extra_attrs["scale_type"]
@@ -613,26 +605,11 @@ class HummingMoEMethod(FusedMoEMethodBase):
     ) -> None:
         super().__init__(moe)
         self.quant_config = quant_config
+        self.moe = moe
         self.weight_schema = quant_config.weight_schema
         self.input_schema = quant_config.input_schema
         self.force_weight_schema = quant_config.force_weight_schema
         self.force_input_schema = quant_config.force_input_schema
-
-        # Derive QuantKeys from humming schemas.
-        # Prefer force schemas (the final format after requant) over base.
-        weight_key = weight_schema_to_quant_key(
-            self.force_weight_schema or self.weight_schema
-        )
-        activation_key = input_schema_to_quant_key(
-            self.force_input_schema or self.input_schema
-        )
-
-        # Select Humming MoE experts
-        self.experts_cls = select_humming_moe_experts(
-            config=self.moe,
-            weight_key=weight_key,
-            activation_key=activation_key,
-        )
 
     def prepare_weight_loader(self, layer, weight_loader):
         def new_weight_loader(
@@ -670,7 +647,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
                     sublayer_name = "w2" if shard_id == "w2" else "w13"
 
                     param = getattr(layer, sublayer_name + "_" + key)
-                    part_success = param.weight_loader(
+                    part_subccess = param.weight_loader(
                         param=param,
                         loaded_weight=tensor.cpu(),
                         weight_name=shard_id + "_" + key,
@@ -678,7 +655,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
                         expert_id=expert_id,
                         return_success=return_success,
                     )
-                    success = success and part_success
+                    success = success and part_subccess
 
                 return success if return_success else None
 
@@ -700,7 +677,7 @@ class HummingMoEMethod(FusedMoEMethodBase):
 
     def create_weights(
         self,
-        layer: RoutedExperts,
+        layer: torch.nn.Module,
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -757,34 +734,159 @@ class HummingMoEMethod(FusedMoEMethodBase):
         locks = torch.zeros(1024, dtype=torch.int32)
         layer.register_buffer("locks", locks)
 
-    def get_fused_moe_quant_config(self, layer: RoutedExperts) -> FusedMoEQuantConfig:
+    def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+        from vllm.model_executor.layers.quantization.utils.humming_utils import (
+            get_humming_moe_quant_config,
+        )
+
         return get_humming_moe_quant_config(layer)
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         if getattr(self, "processed", False):
             return
         self.processed = True
+        layer.weight_schemas = {}
+        layer.input_schemas = {}
+        for sublayer_name, configs in layer.sublayer_configs.items():
+            input_schema = self.input_schema
+            weight_schema = self.weight_schema
+            # convert from checkpoint format to humming format
+            if not isinstance(weight_schema, _hm.HummingWeightSchema):
+                tensors: dict[str, torch.Tensor] = dict(
+                    (key.removeprefix(sublayer_name + "_"), value)
+                    for key, value in layer.state_dict().items()
+                    if key.startswith(sublayer_name + "_")
+                )
 
-        # Convert weights to Humming kernel format
-        convert_to_humming_moe_kernel_format(
-            layer=layer,
-            sublayer_configs=layer.sublayer_configs,
-            weight_schema=self.weight_schema,
-            input_schema=self.input_schema,
-            force_weight_schema=self.force_weight_schema,
+                shape_k_stacks = [configs["shape_k"]]
+                shape_n_stacks = [configs["shape_n"]]
+                if sublayer_name == "w13":
+                    shape_n_stacks = [configs["shape_n"] // 2] * 2
+
+                weight_schema, tensors = weight_schema.convert_humming(
+                    tensors=tensors,
+                    shape_n_stacks=shape_n_stacks,
+                    shape_k_stacks=shape_k_stacks,
+                    param_dtype=layer.param_dtype,
+                    num_experts=layer.num_experts,
+                )
+
+                input_schema, _ = input_schema.convert_humming(
+                    tensors=tensors,
+                    shape_n_stacks=shape_n_stacks,
+                    shape_k_stacks=shape_k_stacks,
+                    param_dtype=layer.param_dtype,
+                    num_experts=layer.num_experts,
+                )
+
+                for name, _ in list(layer.named_parameters()):
+                    if not name.startswith(sublayer_name + "_"):
+                        continue
+                    delattr(layer, name)
+
+                for name, tensor in tensors.items():
+                    name = f"{sublayer_name}_{name}"
+                    param = torch.nn.Parameter(tensor, requires_grad=False)
+                    setattr(layer, name, param)
+
+            layer.weight_schemas[sublayer_name] = weight_schema
+            layer.input_schemas[sublayer_name] = input_schema
+
+            # force requant (origin quant setting -> fp16/bf16 -> new_quant setting)
+            assert isinstance(weight_schema, _hm.HummingWeightSchema)
+            force_requant = self.force_weight_schema is not None
+            if force_requant and weight_schema != self.force_weight_schema:
+                tensors = dict(
+                    (key.removeprefix(sublayer_name + "_"), value)
+                    for key, value in layer.state_dict().items()
+                    if key.startswith(sublayer_name + "_")
+                )
+
+                tensors = weight_schema.requant_tensors(
+                    tensors=tensors,
+                    target_weight_schema=self.force_weight_schema,
+                    param_dtype=layer.param_dtype,
+                )
+
+                weight_schema = self.force_weight_schema
+
+                for name, _ in list(layer.named_parameters()):
+                    if not name.startswith(sublayer_name + "_"):
+                        continue
+                    if name == sublayer_name + "_bias":
+                        continue
+                    delattr(layer, name)
+
+                for name, tensor in tensors.items():
+                    name = f"{sublayer_name}_{name}"
+                    param = torch.nn.Parameter(tensor, requires_grad=False)
+                    setattr(layer, name, param)
+
+                del tensors
+
+            # prepare layer config from humming kernel
+            _hm.HummingMethod.prepare_layer_meta(
+                layer=layer,
+                shape_n=configs["shape_n"],
+                shape_k=configs["shape_k"],
+                pad_n_to_multiple=256,
+                pad_k_to_multiple=128,
+                input_schema=input_schema,
+                weight_schema=weight_schema,
+                has_bias=self.moe.has_bias,
+                num_experts=layer.num_experts,
+                torch_dtype=layer.param_dtype,
+                sublayer_name=sublayer_name,
+            )
+
+            # preprocess weight for inference
+            _hm.HummingMethod.transform_humming_layer(
+                layer, sublayer_name=sublayer_name
+            )
+
+        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+            get_humming_moe_gemm_type,
         )
 
-        # Build the MoE kernel
-        self.moe_quant_config = self.get_fused_moe_quant_config(layer)
+        # use moe modular
+        experts: HummingIndexedExperts | HummingGroupedExperts
+        layer._ensure_moe_quant_config_init()
         assert self.moe_quant_config is not None
-        assert self.experts_cls is not None
-        self.moe_kernel = make_humming_moe_kernel(
-            self.moe_quant_config,
-            self.moe,
-            self.experts_cls,
-            layer=layer,
-            routing_tables=layer._expert_routing_tables(),
+        if get_humming_moe_gemm_type() == "indexed":
+            experts = HummingIndexedExperts(layer, self.moe, self.moe_quant_config)
+        else:
+            experts = HummingGroupedExperts(layer, self.moe, self.moe_quant_config)
+        self.experts = experts
+
+    def select_gemm_impl(
+        self,
+        prepare_finalize,
+        layer: torch.nn.Module,
+    ):
+        from vllm.model_executor.layers.fused_moe import modular_kernel as mk
+        from vllm.model_executor.layers.fused_moe.experts.fused_humming_moe import (
+            BatchedHummingGroupedExperts,
+            HummingGroupedExperts,
+            HummingIndexedExperts,
+            get_humming_moe_gemm_type,
         )
+
+        activation_format = prepare_finalize.activation_format
+        assert self.moe_quant_config is not None
+        if activation_format == mk.FusedMoEActivationFormat.BatchedExperts:
+            return BatchedHummingGroupedExperts(
+                layer=layer,
+                moe_config=self.moe,
+                quant_config=self.moe_quant_config,
+                max_num_tokens=prepare_finalize.max_num_tokens_per_rank(),
+                num_dispatchers=prepare_finalize.num_dispatchers(),
+            )
+        elif get_humming_moe_gemm_type() == "indexed":
+            return HummingIndexedExperts(layer, self.moe, self.moe_quant_config)
+        else:
+            return HummingGroupedExperts(layer, self.moe, self.moe_quant_config)
 
     def apply(
         self,
@@ -794,36 +896,22 @@ class HummingMoEMethod(FusedMoEMethodBase):
         topk_ids: torch.Tensor,
         shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
-    ) -> torch.Tensor:
-        """
-        Apply Humming-quantized MoE computation using the standard kernel flow.
-
-        This method uses FusedMoEKernel.apply() which orchestrates:
-        1. Preparation (quantization if needed - skipped for Humming via
-           expects_unquantized_inputs=True to prevent double quantization)
-        2. Expert computation (via experts.apply())
-        3. Finalization (weight application & reduction - no-op for Humming
-           since it's already done internally)
-
-        Humming handles all quantization, weight application, and reduction
-        internally in the experts.apply() method via HummingMethod calls.
-
-        Note: Although w1/w2 weights are passed to the kernel for interface
-        consistency, Humming's experts.apply() reads weights directly from
-        the layer object via HummingMethod.forward_layer() and ignores the
-        w1/w2 parameters.
-        """
-        assert self.moe_kernel is not None
-        return self.moe_kernel.apply(
-            hidden_states=x,
-            w1=layer.w13_weight,
-            w2=layer.w2_weight,
-            topk_ids=topk_ids,
-            topk_weights=topk_weights,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        workspace1, workspace2, output = self.experts.make_workspaces(
+            M=topk_ids.size(0),
+            topk=topk_ids.size(1),
             activation=layer.activation,
-            global_num_experts=layer.global_num_experts,
-            expert_map=layer.expert_map,
-            apply_router_weight_on_input=False,
-            shared_experts=shared_experts,
-            shared_experts_input=shared_experts_input,
         )
+
+        assert workspace1.data_ptr() == output.data_ptr()
+
+        self.experts.main_apply(
+            hidden_states=x,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            workspace1=workspace1,
+            workspace2=workspace2,
+            expert_tokens_meta=None,
+        )
+
+        return output
