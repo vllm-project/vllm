@@ -732,6 +732,15 @@ class Scheduler(SchedulerInterface):
                             "num_uncached_common_prefix_tokens",
                             0,
                         )
+                        # Pin the detected shared-prefix junction so its Mamba
+                        # state survives sparse prefix-cache retention.
+                        request.shared_prefix_boundary = (
+                            num_new_local_computed_tokens
+                            + num_uncached_common_prefix_tokens
+                            if num_uncached_common_prefix_tokens
+                            >= self.cache_config.block_size
+                            else 0
+                        )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:

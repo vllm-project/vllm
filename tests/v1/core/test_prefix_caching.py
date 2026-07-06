@@ -3943,3 +3943,143 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
     assert retained(64) == {3, 7, 11, 14, 15}
     # interval 0 -> only the latest replay boundary (block 14).
     assert retained(0) == {14}
+
+
+def test_mamba_reachable_block_mask_pins_shared_prefix():
+    """A Marconi-detected shared prefix (``shared_prefix_boundary``) lands before
+    ``num_prompt`` so the replay-boundary rule alone would drop it. The mask must
+    pin the single state block ending on that boundary so sparse retention does
+    not defeat cross-request shared-prefix reuse."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    block_size = 16
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=(1, 1),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+    def retained(retention_interval, shared_prefix_boundary, end_block=16):
+        m = MambaManager.reachable_block_mask(
+            start_block=0,
+            end_block=end_block,
+            alignment_tokens=block_size,
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=retention_interval,
+            num_prompt_tokens=256,
+            shared_prefix_boundary=shared_prefix_boundary,
+        )
+        return None if m is None else {i for i, v in enumerate(m) if v}
+
+    # interval 0 keeps only replay boundary 14; the shared prefix at token 96
+    # (state block 96//16 - 1 = 5) is now pinned too.
+    assert retained(0, 96) == {5, 14}
+    # A non-aligned boundary floors to the enclosing aligned boundary.
+    assert retained(0, 100) == {5, 14}
+    # Coexists with segment tails (interval 64 -> {3,7,11,15} + replay 14).
+    assert retained(64, 96) == {3, 5, 7, 11, 14, 15}
+    # Dense default ignores the hint (nothing to sparsify).
+    assert retained(None, 96) is None
+    # Out-of-range boundary is a no-op (only replay 14 remains).
+    assert retained(0, 16 * block_size * 2) == {14}
+    # No boundary given -> unchanged replay-only behavior.
+    assert retained(0, 0) == {14}
+    assert retained(0, None) == {14}
+
+
+def test_mamba_shared_prefix_survives_zero_retention(monkeypatch):
+    """Manager-level check of the full wiring: a pinned shared-prefix boundary
+    (``Request.shared_prefix_boundary``, set by the scheduler on Marconi-style
+    detection) keeps its Mamba state block cached under
+    ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0``, which otherwise retains only the
+    end-of-prompt replay boundary. Without this, a shared prefix (junction
+    before ``num_prompt``) would be recomputed by every sharing request."""
+    monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", "0")
+    block_size = 16
+
+    # 16-block (256-token) prompt; replay boundary is block 240 // 16 - 1 = 14.
+    token_ids = [i for i in range(16) for _ in range(block_size)]
+
+    def cached_mamba_blocks(shared_prefix_boundary):
+        # Fresh manager per scenario so cached blocks don't leak between runs.
+        manager = make_kv_cache_manager(
+            _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba"]),
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=block_size,
+        )
+        req = make_request("r", token_ids, block_size, sha256)
+        req.shared_prefix_boundary = shared_prefix_boundary
+        computed_blocks, num_computed = manager.get_computed_blocks(req)
+        blocks = manager.allocate_slots(
+            req, len(token_ids), num_computed, computed_blocks
+        )
+        assert blocks is not None
+        pool = manager.block_pool
+        return {
+            i
+            for i in range(16)
+            if pool.get_cached_block(req.block_hashes[i], kv_cache_group_ids=[1])
+            is not None
+        }
+
+    # Without a pinned boundary, retention=0 keeps only the replay boundary (14).
+    assert cached_mamba_blocks(0) == {14}
+    # Pinning the shared prefix at token 96 (state block 5) retains it too, so a
+    # later request sharing that prefix can hit the Mamba state.
+    assert cached_mamba_blocks(96) == {5, 14}
+
+
+def test_mamba_shared_prefix_reuse_under_zero_retention(monkeypatch):
+    """Full cross-request Marconi flow: a partial shared prefix cached by the
+    detecting request must stay reusable by a later request under
+    ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0``. Without the pin the junction is
+    masked out and the later request misses; with it (and under dense) the reuse
+    is preserved."""
+    block_size = 16
+
+    def last_req_hit(retention, pin):
+        if retention is None:
+            monkeypatch.delenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", raising=False)
+        else:
+            monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", str(retention))
+        manager = make_kv_cache_manager(
+            _make_hybrid_kv_cache_config(block_size, 200, ["full", "mamba_align"]),
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=block_size,
+        )
+        shared = [7 for _ in range(2 * block_size)]  # 2-block shared prefix
+
+        def distinct(v):
+            return [v for _ in range(2 * block_size)]
+
+        # req0 primes the shared prefix's (dense) attention cache; align-mode
+        # Mamba keeps only its own tail, not the shared-prefix junction.
+        req0 = make_request("0", shared + distinct(50), block_size, sha256)
+        cb, nc = manager.get_computed_blocks(req0)
+        manager.allocate_slots(req0, len(req0.all_token_ids), nc, cb)
+
+        # req1 detects the shared prefix (attn hit, Mamba lag) and, via the
+        # Marconi chunk, caches the junction's Mamba state.
+        req1 = make_request("1", shared + distinct(60), block_size, sha256)
+        cb, nc = manager.get_computed_blocks(req1)
+        ucc = manager.coordinator.num_uncached_common_prefix_tokens
+        assert ucc == 2 * block_size  # shared prefix detected
+        if pin:
+            req1.shared_prefix_boundary = nc + ucc
+        manager.allocate_slots(req1, ucc, nc, cb)  # chunk stops at the junction
+
+        # req2 shares the same prefix: does it reuse the cached junction?
+        req2 = make_request("2", shared + distinct(70), block_size, sha256)
+        _, nc2 = manager.get_computed_blocks(req2)
+        return nc2
+
+    # Dense retains the junction -> reuse works (baseline ceiling).
+    assert last_req_hit(retention=None, pin=False) == 2 * block_size
+    # retention=0 without the pin masks the junction out -> reuse lost (the bug).
+    assert last_req_hit(retention=0, pin=False) == 0
+    # retention=0 with the pin keeps the junction -> reuse restored.
+    assert last_req_hit(retention=0, pin=True) == 2 * block_size

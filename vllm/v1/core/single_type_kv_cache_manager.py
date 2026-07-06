@@ -348,6 +348,7 @@ class SingleTypeKVCacheManager(ABC):
             use_eagle=self.use_eagle,
             retention_interval=retention_interval,
             num_prompt_tokens=request.num_prompt_tokens,
+            shared_prefix_boundary=request.shared_prefix_boundary or None,
         )
         self.block_pool.cache_full_blocks(
             request=request,
@@ -371,13 +372,15 @@ class SingleTypeKVCacheManager(ABC):
         use_eagle: bool,
         retention_interval: int | None = None,
         num_prompt_tokens: int | None = None,
+        shared_prefix_boundary: int | None = None,
     ) -> list[bool] | None:
         """Per-block mask for ``cache_full_blocks``. ``None`` means cache
         every (non-null) block — the default for full attention.
 
         Subclasses with sparse hit semantics (SWA) override this to skip
         blocks that can never serve a hit at any alignment-aligned prefix
-        length.
+        length. ``shared_prefix_boundary`` is an optional proven reuse point
+        that such subclasses may pin; the base (dense) policy ignores it.
         """
         return None
 
@@ -781,6 +784,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         use_eagle: bool,
         retention_interval: int | None = None,
         num_prompt_tokens: int | None = None,
+        shared_prefix_boundary: int | None = None,
     ) -> list[bool] | None:
         assert isinstance(kv_cache_spec, SlidingWindowSpec)
         if alignment_tokens is None:
@@ -1096,6 +1100,7 @@ class MambaManager(SingleTypeKVCacheManager):
         use_eagle: bool,
         retention_interval: int | None = None,
         num_prompt_tokens: int | None = None,
+        shared_prefix_boundary: int | None = None,
     ) -> list[bool] | None:
         """Sparse Mamba state-snapshot retention.
 
@@ -1104,6 +1109,10 @@ class MambaManager(SingleTypeKVCacheManager):
           ``None`` -> dense (cache every block; default, unchanged behavior)
           ``0``    -> keep only the latest replay boundary
           ``> 0``  -> keep one state per ``retention_interval``-sized segment
+
+        ``shared_prefix_boundary`` (if set) is a proven cross-request shared
+        prefix (Marconi-style APC); its boundary state is always kept so sparse
+        retention does not defeat shared-prefix reuse.
         """
         if retention_interval is None or alignment_tokens is None:
             # Dense caching (default) or no alignment constraint imposed.
@@ -1137,6 +1146,15 @@ class MambaManager(SingleTypeKVCacheManager):
             boundary_block = latest // block_size - 1
             if start_block <= boundary_block < end_block:
                 mask[boundary_block - start_block] = True
+
+        # (3) Shared-prefix junction. A cross-request shared prefix detected via
+        # Marconi-style APC lands before ``num_prompt``, so (2) would drop it.
+        # Keep the single state block ending on that boundary explicitly.
+        if shared_prefix_boundary:
+            aligned = shared_prefix_boundary // alignment_tokens * alignment_tokens
+            junction_block = aligned // block_size - 1
+            if start_block <= junction_block < end_block:
+                mask[junction_block - start_block] = True
 
         return mask
 
