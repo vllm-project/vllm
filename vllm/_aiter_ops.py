@@ -1229,17 +1229,21 @@ def _rocm_aiter_fused_rms_gated_fp8_group_quant_fake(
 def _rocm_aiter_group_fp8_quant_impl(
     x: torch.Tensor,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.shape[-1] % group_size == 0, "Input shape must be divisible by group size"
     from aiter import QuantType, get_hip_quant
 
     aiter_per1x128_quant = get_hip_quant(QuantType.per_1x128)
-    return aiter_per1x128_quant(x.contiguous(), quant_dtype=FP8_DTYPE)
+    return aiter_per1x128_quant(
+        x.contiguous(), quant_dtype=FP8_DTYPE, transpose_scale=transpose_scale
+    )
 
 
 def _rocm_aiter_group_fp8_quant_fake(
     x: torch.Tensor,
     group_size: int,
+    transpose_scale: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     M, N = x.shape
     x_fp8 = torch.empty((M, N), dtype=FP8_DTYPE, device=x.device)
@@ -1248,36 +1252,6 @@ def _rocm_aiter_group_fp8_quant_fake(
             M,
             (N + group_size - 1) // group_size,
         ),
-        dtype=torch.float32,
-        device=x.device,
-    )
-    return x_fp8, out_bs
-
-
-def _rocm_aiter_group_fp8_quant_transpose_scale_impl(
-    x: torch.Tensor,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    assert x.shape[-1] % group_size == 0, "Input shape must be divisible by group size"
-    from aiter.ops.quant import per_group_quant_hip
-
-    # Column-major group scale, the layout the B-preshuffle GEMM expects.
-    return per_group_quant_hip(
-        x.contiguous(),
-        quant_dtype=FP8_DTYPE,
-        group_size=group_size,
-        transpose_scale=True,
-    )
-
-
-def _rocm_aiter_group_fp8_quant_transpose_scale_fake(
-    x: torch.Tensor,
-    group_size: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    M, N = x.shape
-    x_fp8 = torch.empty((M, N), dtype=FP8_DTYPE, device=x.device)
-    out_bs = torch.empty(
-        (M, (N + group_size - 1) // group_size),
         dtype=torch.float32,
         device=x.device,
     )
@@ -2102,12 +2076,6 @@ class rocm_aiter_ops:
             )
 
             direct_register_custom_op(
-                op_name="rocm_aiter_group_fp8_quant_transpose_scale",
-                op_func=_rocm_aiter_group_fp8_quant_transpose_scale_impl,
-                fake_impl=_rocm_aiter_group_fp8_quant_transpose_scale_fake,
-            )
-
-            direct_register_custom_op(
                 op_name="rocm_aiter_per_tensor_quant",
                 op_func=_rocm_aiter_per_tensor_quant_impl,
                 mutates_args=["out", "scale"],
@@ -2696,18 +2664,11 @@ class rocm_aiter_ops:
     def group_fp8_quant(
         input_2d: torch.Tensor,
         group_size: int = 128,
+        transpose_scale: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert group_size == 128, "Group size must be 128"
-        return torch.ops.vllm.rocm_aiter_group_fp8_quant(input_2d, group_size)
-
-    @staticmethod
-    def group_fp8_quant_transpose_scale(
-        input_2d: torch.Tensor,
-        group_size: int = 128,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        assert group_size == 128, "Group size must be 128"
-        return torch.ops.vllm.rocm_aiter_group_fp8_quant_transpose_scale(
-            input_2d, group_size
+        return torch.ops.vllm.rocm_aiter_group_fp8_quant(
+            input_2d, group_size, transpose_scale
         )
 
     @staticmethod

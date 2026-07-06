@@ -134,7 +134,7 @@ class DeepseekV4MLP(nn.Module):
     def forward(self, x):
         if self._gateup_scale is not None and x.dim() == 2:
             # gate_up via fp8 group-quant (col-major) + B-preshuffle GEMM.
-            x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant_transpose_scale(x)
+            x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
             gate_up = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
                 x_fp8,
                 self.gate_up_proj.weight,

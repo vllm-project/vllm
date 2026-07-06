@@ -639,7 +639,7 @@ class DeepseekV4ROCMAiterMLAAttention(DeepseekV4Attention):
     ) -> torch.Tensor:
         from vllm._aiter_ops import rocm_aiter_ops
 
-        x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant_transpose_scale(x)
+        x_fp8, x_scale = rocm_aiter_ops.group_fp8_quant(x, transpose_scale=True)
         out = rocm_aiter_ops.gemm_a8w8_blockscale_bpreshuffle(
             x_fp8, weight, x_scale, scale, output_dtype=x.dtype
         )
