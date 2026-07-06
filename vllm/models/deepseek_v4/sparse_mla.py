@@ -147,6 +147,8 @@ class DeepseekV4FlashMLAMetadataBuilder(
     ) -> None:
         super().__init__(kv_cache_spec, layer_names, vllm_config, device)
         self.model_config = vllm_config.model_config
+        # Classify single-token queries (plus num_speculative_tokens via
+        # supports_spec_as_decode=True) as decodes; longer queries go to prefill.
         self._init_reorder_batch_threshold(1, supports_spec_as_decode=True)
         self.topk_tokens = self.model_config.hf_config.index_topk
 
