@@ -22,18 +22,22 @@ from vllm.model_executor.layers.fused_moe.routed_experts_capture.common import (
     require_full_attn_group_id,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capture.manager import (
+    FullAttnBlockMap,
     RoutedExpertsManager,
+    compute_full_attn_block_map,
 )
 from vllm.model_executor.layers.fused_moe.routed_experts_capture.shared_region import (
     RoutedExpertsWorkerWriter,
 )
 
 __all__ = [
+    "FullAttnBlockMap",
     "RoutedExpertsCapturer",
     "RoutedExpertsManager",
     "RoutedExpertsTensors",
     "RoutedExpertsWorkerWriter",
     "RoutedExpertsWriteTask",
+    "compute_full_attn_block_map",
     "get_num_experts",
     "get_num_experts_per_token",
     "get_routed_experts_output_rank",
