@@ -90,6 +90,7 @@ Observed:
 - model weights: about `7.98 GiB` per GPU;
 - GPU KV cache size: `386,477` logical tokens;
 - maximum concurrency for `153,600` tokens per request: `2.52x`;
+- warmed no-MTP sequential decode tests reached the `52-54 tok/s` class;
 - a real `150K` prompt smoke returned successfully;
 - no replicated full-attention fallback is required for the dense 27B target.
 
@@ -181,8 +182,8 @@ choice here; Marlin is.
 
 DFlash on MoE is still worth keeping in scope. Experimental runs showed
 approximately the `100 tok/s` class, which is materially higher than the dense
-27B TP3 MTP path. This needs a proper controlled benchmark because the first
-results mix several moving parts:
+27B no-MTP `52-54 tok/s` baseline. This needs a proper controlled benchmark
+because the first results mix several moving parts:
 
 - MoE backend choice: Marlin vs FlashInfer/CuTeDSL;
 - speculative method: built-in MTP vs DFlash/external drafter;
@@ -209,8 +210,6 @@ Observed:
 - MTP overhead: about `+1.14 GiB/GPU`;
 - GPU KV cache size dropped to `251,200` logical tokens;
 - maximum concurrency for `153,600` tokens per request dropped to `1.64x`;
-- experimental TP3 MTP decode reached the `~50 tok/s` class on dense 27B in
-  warmed testing;
 - spec decode metrics were healthy in a short run:
   - mean acceptance length around `1.73`;
   - draft acceptance rate around `72.8%`.
@@ -221,11 +220,11 @@ The key warning is:
 Replicating Qwen3.5 MTP fc because hidden_size=5120 is not divisible by tensor_parallel_size=3.
 ```
 
-MTP is therefore functional and already useful, but the current TP3
-implementation pays a replicated-memory cost. The next step is to turn the
-promising `~50 tok/s` class observation into a controlled benchmark: matched
-no-MTP vs MTP A/B over 10-20 warmed sequential requests at 256 and 512 generated
-tokens, then concurrency 4 and 8.
+MTP is therefore functional, but the current TP3 implementation pays a
+replicated-memory cost and its performance benefit is not yet proven. The
+clean no-MTP baseline is the `52-54 tok/s` warmed sequential result. The next
+step is a controlled MTP A/B: matched no-MTP vs MTP runs over 10-20 warmed
+sequential requests at 256 and 512 generated tokens, then concurrency 4 and 8.
 
 ## DFlash Findings
 
