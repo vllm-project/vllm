@@ -51,6 +51,19 @@ from vllm.distributed.utils import is_weak_contiguous  # noqa: E402
 class CustomAllreduce:
     _SUPPORTED_WORLD_SIZES = [2, 4, 6, 8]
 
+    @staticmethod
+    def _is_unsupported_arch() -> bool:
+        # The custom all-reduce kernels are only built and tuned for sm_90 and
+        # sm_100 (see CUSTOM_ALL_REDUCE_MAX_SIZES). On consumer Blackwell
+        # (sm_12x, e.g. RTX PRO 6000 / RTX 50-series) the kernel's IPC /
+        # peer-mapping path aborts with `custom_all_reduce.cuh 'invalid
+        # argument'` during cudagraph capture, so the entire 12.x family is
+        # unsupported and callers must fall back to NCCL all-reduce.
+        return (
+            current_platform.is_cuda()
+            and current_platform.is_device_capability_family(120)
+        )
+
     # max_size: max supported allreduce size
     def __init__(
         self,
@@ -120,6 +133,14 @@ class CustomAllreduce:
         assert isinstance(device, torch.device)
         self.device = device
         device_capability = current_platform.get_device_capability()
+        if self._is_unsupported_arch():
+            logger.warning(
+                "Custom allreduce is disabled because it is not supported on "
+                "consumer Blackwell (sm_12x, e.g. RTX PRO 6000 / RTX 50-series);"
+                " falling back to NCCL all-reduce. To silence this warning, "
+                "specify disable_custom_all_reduce=True explicitly."
+            )
+            return
         if (
             current_platform.is_cuda()
             and symm_mem_enabled
