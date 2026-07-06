@@ -10,7 +10,7 @@
 use std::mem::take;
 
 pub use backend::{DynTextBackend, SamplingHints, SamplingLimits, TextBackend};
-pub use error::{Error, LogprobsError, Result, TokenIdsError};
+pub use error::{Error, LogprobsError, Result, SamplingParamsError, TokenIdsError};
 use futures::Stream;
 pub use lower::{
     PreparedTextRequest, lower_sampling_params, lower_text_request, resolve_max_tokens,
@@ -31,6 +31,7 @@ mod error;
 mod lower;
 pub mod output;
 mod request;
+mod sampling;
 pub use vllm_tokenizer as tokenizer;
 
 trait_set! {

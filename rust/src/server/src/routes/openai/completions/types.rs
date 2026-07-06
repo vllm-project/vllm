@@ -10,8 +10,7 @@ use vllm_engine_core_client::protocol::sampling::RepetitionDetectionParams;
 use vllm_text::Prompt;
 
 use crate::routes::openai::utils::types::{
-    LogProbs, Normalizable, StreamOptions, StringOrArray, Usage, default_true,
-    validate_repetition_penalty_value, validate_stop, validate_top_p_value,
+    LogProbs, Normalizable, StreamOptions, StringOrArray, Usage, default_true, validate_stop,
 };
 
 /// Serde default for `CompletionRequest::max_tokens`, matching the Python vLLM
@@ -44,7 +43,6 @@ pub struct CompletionRequest {
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
     /// on their existing frequency in the text so far
-    #[validate(range(min = -2.0, max = 2.0))]
     pub frequency_penalty: Option<f32>,
 
     /// Modify the likelihood of specified tokens appearing in the completion
@@ -63,7 +61,6 @@ pub struct CompletionRequest {
 
     /// Number between -2.0 and 2.0. Positive values penalize new tokens based
     /// on whether they appear in the text so far
-    #[validate(range(min = -2.0, max = 2.0))]
     pub presence_penalty: Option<f32>,
 
     /// If specified, our system will make a best effort to sample
@@ -82,11 +79,9 @@ pub struct CompletionRequest {
     pub suffix: Option<String>,
 
     /// What sampling temperature to use, between 0 and 2
-    #[validate(range(min = 0.0, max = 2.0))]
     pub temperature: Option<f32>,
 
     /// An alternative to sampling with temperature (nucleus sampling)
-    #[validate(custom(function = "validate_top_p_value"))]
     pub top_p: Option<f32>,
 
     /// A unique identifier representing your end-user
@@ -104,11 +99,9 @@ pub struct CompletionRequest {
     pub top_k: Option<u32>,
 
     /// Min-p nucleus sampling parameter
-    #[validate(range(min = 0.0, max = 1.0))]
     pub min_p: Option<f32>,
 
     /// Repetition penalty for reducing repetitive text
-    #[validate(custom(function = "validate_repetition_penalty_value"))]
     pub repetition_penalty: Option<f32>,
 
     /// Parameters for detecting repetitive N-gram patterns in output tokens
@@ -284,47 +277,4 @@ pub(super) enum CompletionSseChunk {
     Chunk(CompletionStreamResponse),
     /// Final usage chunk emitted before `[DONE]` when `include_usage=true`.
     Usage(CompletionStreamResponse),
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::{Value, json};
-    use validator::Validate;
-
-    use super::CompletionRequest;
-
-    fn completion_request_with(field: &str, value: Value) -> CompletionRequest {
-        let mut request = json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "prompt": "hello",
-        });
-        request
-            .as_object_mut()
-            .expect("request is an object")
-            .insert(field.to_string(), value);
-        serde_json::from_value(request).expect("parse completion request")
-    }
-
-    #[test]
-    fn completion_request_rejects_invalid_sampling_ranges() {
-        for (field, value) in [
-            ("temperature", json!(5.0)),
-            ("top_p", json!(0.0)),
-            ("min_p", json!(2.0)),
-            ("repetition_penalty", json!(0.0)),
-            ("frequency_penalty", json!(100.0)),
-            ("presence_penalty", json!(100.0)),
-        ] {
-            let request = completion_request_with(field, value);
-            assert!(request.validate().is_err(), "{field} should be rejected");
-        }
-    }
-
-    #[test]
-    fn completion_request_accepts_python_compatible_repetition_penalty() {
-        let request = completion_request_with("repetition_penalty", json!(2.5));
-        request
-            .validate()
-            .expect("positive finite repetition_penalty should be accepted");
-    }
 }

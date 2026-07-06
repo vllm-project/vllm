@@ -17,6 +17,7 @@ use vllm_tokenizer::Tokenizer;
 use crate::backend::{SamplingHints, SamplingLimits};
 use crate::error::{Error, Result};
 use crate::request::{SamplingParams, TextRequest};
+use crate::sampling::validate_resolved_sampling_params;
 
 /// One text request after it has been lowered into the raw generate boundary.
 #[derive(Debug)]
@@ -147,6 +148,14 @@ pub fn lower_sampling_params(
     let thinking_token_budget = normalize_thinking_token_budget(thinking_token_budget)?;
     let frequency_penalty = frequency_penalty.unwrap_or(0.0);
     let presence_penalty = presence_penalty.unwrap_or(0.0);
+    validate_resolved_sampling_params(
+        temperature,
+        top_p,
+        min_p,
+        frequency_penalty,
+        presence_penalty,
+        repetition_penalty,
+    )?;
 
     let mut stop_token_ids = stop_token_ids.unwrap_or_default();
     let mut all_stop_token_ids = BTreeSet::from_iter(stop_token_ids.iter().copied());
@@ -319,7 +328,7 @@ mod tests {
     use super::*;
     use crate::backend::hf::HfTextBackend;
     use crate::backend::{SamplingHints, TextBackend as _};
-    use crate::error::{LogprobsError, TokenIdsError};
+    use crate::error::{LogprobsError, SamplingParamsError, TokenIdsError};
     use crate::request::{Prompt, TextRequest};
 
     fn stub_tokenizer() -> TestTokenizer {
@@ -480,6 +489,120 @@ mod tests {
             panic!("expected repetition_detection validation error");
         };
         assert!(message.contains("min_count=1"));
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_invalid_sampling_ranges() {
+        let cases = [
+            (
+                "temperature",
+                SamplingParams {
+                    temperature: Some(5.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "top_p",
+                SamplingParams {
+                    top_p: Some(0.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "min_p",
+                SamplingParams {
+                    min_p: Some(2.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "repetition_penalty",
+                SamplingParams {
+                    repetition_penalty: Some(0.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "frequency_penalty",
+                SamplingParams {
+                    frequency_penalty: Some(100.0),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "presence_penalty",
+                SamplingParams {
+                    presence_penalty: Some(100.0),
+                    ..SamplingParams::default()
+                },
+            ),
+        ];
+
+        for (expected_parameter, sampling_params) in cases {
+            let error =
+                lower_sampling_params_with_limits(sampling_params, sample_sampling_limits())
+                    .unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    Error::SamplingParams(SamplingParamsError::OutOfRange {
+                        parameter,
+                        ..
+                    }) if parameter == expected_parameter
+                ),
+                "{expected_parameter} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_sampling_params_rejects_non_finite_sampling_values() {
+        for (expected_parameter, sampling_params) in [
+            (
+                "temperature",
+                SamplingParams {
+                    temperature: Some(f32::INFINITY),
+                    ..SamplingParams::default()
+                },
+            ),
+            (
+                "repetition_penalty",
+                SamplingParams {
+                    repetition_penalty: Some(f32::NAN),
+                    ..SamplingParams::default()
+                },
+            ),
+        ] {
+            let error =
+                lower_sampling_params_with_limits(sampling_params, sample_sampling_limits())
+                    .unwrap_err();
+
+            assert!(
+                matches!(
+                    error,
+                    Error::SamplingParams(SamplingParamsError::NotFinite {
+                        parameter,
+                        ..
+                    }) if parameter == expected_parameter
+                ),
+                "{expected_parameter} should reject non-finite values"
+            );
+        }
+    }
+
+    #[test]
+    fn lower_sampling_params_accepts_python_compatible_repetition_penalty_above_two() {
+        let params = lower_sampling_params_with_limits(
+            SamplingParams {
+                repetition_penalty: Some(2.5),
+                ..SamplingParams::default()
+            },
+            sample_sampling_limits(),
+        )
+        .unwrap();
+
+        assert_eq!(params.repetition_penalty, 2.5);
     }
 
     #[test]
