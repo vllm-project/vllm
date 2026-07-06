@@ -3,9 +3,13 @@
 """Tests for fp32_router_gemm kernel: activation×weight→fp32.
 
 Supported (hidden_size, num_experts) pairs:
-  (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
+  (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3,
+  (6144, 256) -> GLM-5.2
 
-Correctness baseline: torch.matmul in float64.
+Correctness baseline: F.linear in float32. Every M in [1, 32] is covered so
+all tuned geometries (wide-block, experts-per-block, token-group; boundaries
+at M=4/5, odd/even, M=15/16) are exercised on Blackwell, and the legacy
+128/1 geometry everywhere else.
 """
 
 import pytest
@@ -14,7 +18,8 @@ import torch
 from vllm._custom_ops import fp32_router_gemm
 
 # (hidden_size, num_experts)
-SHAPES = [(3072, 256), (6144, 128)]
+SHAPES = [(3072, 256), (6144, 128), (6144, 256)]
+ALL_M = list(range(1, 33))
 # Absolute tolerance for fp32 kernel vs float64 reference
 ATOL_FP32 = 2e-4
 ATOL_BF16 = 2e-2  # bf16 activation has lower precision
@@ -34,7 +39,7 @@ def _ref(mat_a: torch.Tensor, mat_b: torch.Tensor) -> torch.Tensor:
 
 
 @pytest.mark.parametrize("hidden_dim,num_experts", SHAPES)
-@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16, 32])
+@pytest.mark.parametrize("num_tokens", ALL_M)
 def test_fp32_activation(num_tokens: int, hidden_dim: int, num_experts: int):
     """fp32 activation → fp32 output should match reference closely."""
     _requires_sm90()
@@ -52,7 +57,7 @@ def test_fp32_activation(num_tokens: int, hidden_dim: int, num_experts: int):
 
 
 @pytest.mark.parametrize("hidden_dim,num_experts", SHAPES)
-@pytest.mark.parametrize("num_tokens", [1, 2, 4, 8, 16, 32])
+@pytest.mark.parametrize("num_tokens", ALL_M)
 def test_bf16_activation(num_tokens: int, hidden_dim: int, num_experts: int):
     """bf16 activation → fp32 output should match reference within bf16 error."""
     _requires_sm90()
