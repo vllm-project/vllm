@@ -7528,14 +7528,17 @@ class GPUModelRunner(
                 self._wa_free.append(s)
         for ri in range(num_reqs):  # allocate a slot for new requests
             rid = req_ids[ri]
-            if rid not in slot_of:
+            if rid not in slot_of and self._wa_free:
                 # FIFO (pop front) so a just-freed slot isn't reused immediately,
                 # giving the async readout time to read it before reallocation.
-                slot_of[rid] = (
-                    self._wa_free.pop(0) if self._wa_free else self._wa_scratch
-                )
+                # On overflow (no free slot) the request is left untracked, so
+                # compute_word_align skips it (slot is None) instead of reading a
+                # scratch buffer shared by other overflow requests.
+                slot_of[rid] = self._wa_free.pop(0)
+        # Untracked overflow requests route their capture rows to the scratch
+        # slot (padding only); they are absent from slot_of, so no timestamps.
         slot_per_ri = np.fromiter(
-            (slot_of[req_ids[ri]] for ri in range(num_reqs)),
+            (slot_of.get(req_ids[ri], self._wa_scratch) for ri in range(num_reqs)),
             dtype=np.int64,
             count=num_reqs,
         )
