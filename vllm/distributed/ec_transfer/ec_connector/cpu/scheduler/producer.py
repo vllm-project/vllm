@@ -12,10 +12,12 @@ from math import ceil
 from typing import TYPE_CHECKING
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import ECRegionContext
+from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
+    AllocationError,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.common import (
     evict_and_alloc,
 )
-from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import AllocationError
 from vllm.logger import init_logger
 
 if TYPE_CHECKING:
@@ -58,7 +60,9 @@ class ECCPUProducer:
             pos = feature.mm_position
             if pos.offset + pos.length <= num_computed_tokens:
                 continue
-            mm_hash = feature.mm_hash or feature.identifier
+            # Key on identifier — the encoder-output cache key vLLM uses
+            # everywhere (has_cache_item, GPU encoder_cache, worker save/load).
+            mm_hash = feature.identifier
             if mm_hash in self._pending_new_encodings:
                 continue
             with self._lock:
@@ -84,7 +88,7 @@ class ECCPUProducer:
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         feature = request.mm_features[index]
-        mm_hash = feature.mm_hash or feature.identifier
+        mm_hash = feature.identifier
         if mm_hash in self._pending_new_encodings:
             return
         with self._lock:

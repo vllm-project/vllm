@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
-from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
+from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
 

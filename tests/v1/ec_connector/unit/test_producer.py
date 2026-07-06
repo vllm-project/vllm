@@ -6,11 +6,11 @@ import uuid
 import torch
 
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import ECRegionContext
+from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
+    ECSharedRegion,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler.producer import (
     ECCPUProducer,
-)
-from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
-    ECSharedRegion,
 )
 
 _N = 8

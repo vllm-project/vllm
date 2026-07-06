@@ -35,10 +35,10 @@ from vllm.distributed.ec_transfer.ec_connector.cpu.common import (
     ECCPUConnectorMetadata,
     ECRegionContext,
 )
-from vllm.distributed.ec_transfer.ec_connector.cpu.worker import ECCPUWorker
-from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
+from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     ECSharedRegion,
 )
+from vllm.distributed.ec_transfer.ec_connector.cpu.worker import ECCPUWorker
 
 # ── shape constants ──────────────────────────────────────────────────────────
 

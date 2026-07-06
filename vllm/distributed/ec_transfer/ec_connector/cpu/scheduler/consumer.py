@@ -46,7 +46,9 @@ class ECCPUConsumer:
 
     def update_state_after_alloc(self, request: "Request", index: int) -> None:
         feature = request.mm_features[index]
-        mm_hash = feature.mm_hash or feature.identifier
+        # Key on identifier — the encoder-output cache key vLLM uses
+        # everywhere (has_cache_item, GPU encoder_cache, worker save/load).
+        mm_hash = feature.identifier
         with self._lock:
             if mm_hash in self._local_encodings:
                 if mm_hash not in self._pending_reload:

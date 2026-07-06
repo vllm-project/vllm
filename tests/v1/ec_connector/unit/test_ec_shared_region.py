@@ -10,7 +10,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 import torch
 
-from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import (
+from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
     AllocationError,
     ECSharedRegion,
     _wait_for_file_size,

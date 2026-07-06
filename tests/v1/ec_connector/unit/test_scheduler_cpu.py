@@ -6,8 +6,10 @@ import torch
 
 import vllm.distributed.ec_transfer.ec_connector.cpu.scheduler as sched_mod
 from vllm.distributed.ec_transfer.ec_connector.cpu.common import ECRegionContext
+from vllm.distributed.ec_transfer.ec_connector.cpu.ec_shared_region import (
+    ECSharedRegion,
+)
 from vllm.distributed.ec_transfer.ec_connector.cpu.scheduler import ECCPUScheduler
-from vllm.distributed.ec_transfer.ec_connector.ec_shared_region import ECSharedRegion
 
 _N = 16
 _BS = 64
@@ -20,9 +22,9 @@ class _Pos:
 
 
 class _Feature:
-    def __init__(self, mm_hash, length=1):
+    def __init__(self, mm_hash, length=1, identifier=None):
         self.mm_hash = mm_hash
-        self.identifier = mm_hash
+        self.identifier = identifier if identifier is not None else mm_hash
         self.mm_position = _Pos(0, length)
 
 
@@ -100,4 +102,73 @@ def test_has_cache_item_false_when_not_consumer(monkeypatch):
 
     s = ECCPUScheduler(_Cfg())
     assert s.has_cache_item("anything") is False
+    s.shutdown()
+
+
+def test_connector_keys_on_identifier_not_mm_hash(monkeypatch):
+    """The connector must key the encoder cache on feature.identifier (what
+    has_cache_item is called with), NOT feature.mm_hash. They differ under LoRA.
+    """
+    s = _make_scheduler(monkeypatch)
+    # identifier = encoder-output key (what the scheduler passes to
+    # has_cache_item); mm_hash = processor key (differs under
+    # enable_tower_connector_lora).
+    req = _Request([_Feature("PROC_KEY", length=1, identifier="ENC_KEY")])
+    s.update_state_after_alloc(req, 0)
+    meta = s.build_connector_meta(scheduler_output=None)
+    assert "ENC_KEY" in meta.saves  # saved under the identifier
+    assert "PROC_KEY" not in meta.saves
+    # matches scheduler's has_cache_item(identifier)
+    assert s.has_cache_item("ENC_KEY") is True
+    assert s.has_cache_item("PROC_KEY") is False
+    s.shutdown()
+
+
+def test_cpu_region_fifo_eviction(monkeypatch):
+    # Region holds exactly 2 one-block encodings.
+    region = ECSharedRegion(
+        instance_id=str(uuid.uuid4()), num_blocks=2, block_size_bytes=_BS
+    )
+    ctx = ECRegionContext(
+        region=region,
+        dtype=torch.float16,
+        hidden_dim=32,
+        element_size=2,
+        block_size_bytes=_BS,
+        num_blocks=2,
+    )
+    monkeypatch.setattr(sched_mod, "setup_ec_region", lambda cfg: ctx)
+
+    class _EC:
+        is_ec_producer = True
+        is_ec_consumer = True
+
+    class _Cfg:
+        ec_transfer_config = _EC()
+
+    s = ECCPUScheduler(_Cfg())
+
+    for h in ("A", "B", "C"):  # 3 into a 2-slot region
+        s.update_state_after_alloc(_Request([_Feature(h, length=1)]), 0)
+        s.build_connector_meta(scheduler_output=None)
+    # A (oldest) evicted to make room for C; B and C remain.
+    assert s.has_cache_item("A") is False
+    assert s.has_cache_item("B") is True
+    assert s.has_cache_item("C") is True
+    s.shutdown()
+
+
+def test_multiple_mm_items_per_request(monkeypatch):
+    s = _make_scheduler(monkeypatch)
+    req = _Request([_Feature("h1", length=1), _Feature("h2", length=1)])
+    s.update_state_after_alloc(req, 0)
+    s.update_state_after_alloc(req, 1)
+    meta = s.build_connector_meta(scheduler_output=None)
+    assert set(meta.saves) == {"h1", "h2"}
+    assert s.has_cache_item("h1") and s.has_cache_item("h2")
+    # Reuse both on the next step.
+    s.update_state_after_alloc(req, 0)
+    s.update_state_after_alloc(req, 1)
+    meta2 = s.build_connector_meta(scheduler_output=None)
+    assert set(meta2.loads) == {"h1", "h2"}
     s.shutdown()
