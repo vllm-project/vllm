@@ -7,6 +7,7 @@ use vllm_llm::Error as LlmError;
 
 pub use crate::lower::logprobs::LogprobsError;
 pub use crate::lower::token_ids::TokenIdsError;
+pub use crate::sampling::SamplingParamsError;
 
 #[derive(Debug, Error)]
 pub enum Error {
@@ -23,6 +24,8 @@ pub enum Error {
     Logprobs(#[from] LogprobsError),
     #[error(transparent)]
     TokenIds(#[from] TokenIdsError),
+    #[error(transparent)]
+    SamplingParams(#[from] SamplingParamsError),
     #[error(
         "`min_tokens` must be less than or equal to `max_tokens`, \
          got min_tokens={min_tokens}, max_tokens={max_tokens}"
@@ -50,6 +53,7 @@ impl Error {
             | Self::EmptyPromptTokenIds { .. }
             | Self::Logprobs(_)
             | Self::TokenIds(_)
+            | Self::SamplingParams(_)
             | Self::MinTokensExceedsMaxTokens { .. }
             | Self::InvalidThinkingTokenBudget
             | Self::InvalidRepetitionDetection { .. }

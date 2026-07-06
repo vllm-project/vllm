@@ -15,8 +15,7 @@ use crate::routes::openai::utils::structured_outputs::ResponseFormat;
 use crate::routes::openai::utils::types::{
     ChatLogProbs, ChatMessage, Normalizable, StreamOptions, StringOrArray, Tool, ToolCall,
     ToolCallDelta, ToolChoice, ToolChoiceValue, ToolReference, UNKNOWN_MODEL_ID, Usage,
-    default_true, validate_messages, validate_repetition_penalty_value, validate_stop,
-    validate_top_p_value,
+    default_true, validate_messages, validate_stop, validate_top_p_value,
 };
 
 /// vLLM-compatible request type for the Chat Completions API.
@@ -128,7 +127,7 @@ pub struct ChatCompletionRequest {
     pub min_p: Option<f32>,
 
     /// Repetition penalty for reducing repetitive text
-    #[validate(custom(function = "validate_repetition_penalty_value"))]
+    #[validate(range(min = 0.0, max = 2.0))]
     pub repetition_penalty: Option<f32>,
 
     /// Length penalty for beam search
@@ -584,43 +583,4 @@ fn validate_chat_cross_parameters(
     }
 
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::{Value, json};
-    use validator::Validate;
-
-    use super::ChatCompletionRequest;
-
-    fn chat_request_with(field: &str, value: Value) -> ChatCompletionRequest {
-        let mut request = json!({
-            "model": "Qwen/Qwen1.5-0.5B-Chat",
-            "messages": [
-                {
-                    "role": "user",
-                    "content": "hello"
-                }
-            ],
-        });
-        request
-            .as_object_mut()
-            .expect("request is an object")
-            .insert(field.to_string(), value);
-        serde_json::from_value(request).expect("parse chat completion request")
-    }
-
-    #[test]
-    fn chat_request_rejects_zero_repetition_penalty() {
-        let request = chat_request_with("repetition_penalty", json!(0.0));
-        assert!(request.validate().is_err());
-    }
-
-    #[test]
-    fn chat_request_accepts_python_compatible_repetition_penalty_above_two() {
-        let request = chat_request_with("repetition_penalty", json!(2.5));
-        request
-            .validate()
-            .expect("positive finite repetition_penalty should be accepted");
-    }
 }
