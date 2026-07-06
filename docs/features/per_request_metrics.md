@@ -93,10 +93,10 @@ request.
 
     In streaming responses, metrics are attached to the final usage chunk (the
     chunk sent after all content chunks). That chunk is only emitted when usage
-    reporting is enabled, so a streaming client must set **both**
-    `include_metrics: true` **and** `stream_options.include_usage: true` to
-    receive metrics. Setting only `include_metrics` on a stream yields no
-    metrics.
+    reporting is enabled with `stream_options.include_usage: true` or forced
+    server-side with `--enable-force-include-usage`. Without forced usage, a
+    streaming client must set **both** `include_metrics: true` **and**
+    `stream_options.include_usage: true` to receive metrics.
 
     ```python
     from openai import OpenAI

@@ -24,7 +24,10 @@ from vllm.v1.metrics.stats import RequestStateStats
 MODEL_NAME = "test-model"
 
 
-def _build_serving_chat(enable_per_request_metrics: bool) -> OpenAIServingChat:
+def _build_serving_chat(
+    enable_per_request_metrics: bool,
+    enable_force_include_usage: bool = False,
+) -> OpenAIServingChat:
     """Create a minimally-initialized serving instance for the metrics path."""
     serving = OpenAIServingChat.__new__(OpenAIServingChat)
     serving.response_role = "assistant"
@@ -34,7 +37,7 @@ def _build_serving_chat(enable_per_request_metrics: bool) -> OpenAIServingChat:
     serving.enable_prompt_tokens_details = False
     serving.enable_log_outputs = False
     serving.enable_log_deltas = False
-    serving.enable_force_include_usage = False
+    serving.enable_force_include_usage = enable_force_include_usage
     serving.request_logger = None
     serving.system_fingerprint = None
     serving.enable_per_request_metrics = enable_per_request_metrics
@@ -110,14 +113,16 @@ def _make_request(include_metrics: bool, n: int = 1) -> ChatCompletionRequest:
 
 
 def _make_stream_request(
-    include_metrics: bool, include_usage: bool, n: int = 1
+    include_metrics: bool, include_usage: bool | None, n: int = 1
 ) -> ChatCompletionRequest:
     return ChatCompletionRequest(
         model=MODEL_NAME,
         messages=[{"role": "user", "content": "Test prompt"}],
         max_tokens=10,
         stream=True,
-        stream_options={"include_usage": include_usage},
+        stream_options=(
+            {"include_usage": include_usage} if include_usage is not None else None
+        ),
         include_metrics=include_metrics,
         n=n,
     )
@@ -277,7 +282,7 @@ async def test_metrics_enabled_no_request_output_metrics():
 
 # ---------------------------------------------------------------------------
 # Streaming chat: metrics ride on the final usage chunk, which only exists when
-# include_usage is set. So include_metrics alone is not enough in streaming.
+# usage reporting is enabled. So include_metrics alone is not enough in streaming.
 # ---------------------------------------------------------------------------
 
 
@@ -292,6 +297,24 @@ async def test_streaming_metrics_present_with_include_usage():
     # The final usage chunk is the one carrying ``usage``; metrics attach there.
     usage_chunks = [c for c in chunks if c.get("usage")]
     assert usage_chunks, "expected a final usage chunk when include_usage=True"
+    metrics = usage_chunks[-1].get("metrics")
+    assert metrics is not None
+    assert metrics["time_to_first_token_ms"] == pytest.approx(500.0)
+
+
+@pytest.mark.asyncio
+async def test_streaming_metrics_present_with_force_include_usage():
+    serving = _build_serving_chat(
+        enable_per_request_metrics=True,
+        enable_force_include_usage=True,
+    )
+    chunks = await _collect_stream_chunks(
+        serving,
+        _make_stream_request(include_metrics=True, include_usage=None),
+        _make_request_output(metrics=_STATS),
+    )
+    usage_chunks = [c for c in chunks if c.get("usage")]
+    assert usage_chunks, "expected a final usage chunk when forced server-side"
     metrics = usage_chunks[-1].get("metrics")
     assert metrics is not None
     assert metrics["time_to_first_token_ms"] == pytest.approx(500.0)

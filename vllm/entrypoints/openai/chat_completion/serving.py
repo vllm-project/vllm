@@ -759,11 +759,11 @@ class OpenAIServingChat(GenerateBaseServing):
                 )
 
                 # In streaming, metrics ride on this final usage chunk, which is
-                # only emitted when ``include_usage`` is set (i.e.
+                # only emitted when usage reporting is enabled (i.e.
                 # ``stream_options.include_usage=true`` or
-                # ``--enable-force-include-usage``). So a streaming client must set
-                # both ``include_metrics`` and ``stream_options.include_usage`` to
-                # receive metrics; setting only ``include_metrics`` yields nothing.
+                # ``--enable-force-include-usage``). Without forced usage, a client
+                # must set both ``include_metrics`` and
+                # ``stream_options.include_usage`` to receive metrics.
                 stream_per_request_metrics: PerRequestTimingMetrics | None = None
                 if (
                     self.enable_per_request_metrics
