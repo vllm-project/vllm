@@ -222,6 +222,19 @@ if flashinfer_comm is not None:
             # in vllm we only support swizzled layout
             layout_code = flashinfer_comm.QuantizationSFLayout.SWIZZLED_128x4
 
+        # vllm's one-shot size table is tuned for the trtllm backend. For
+        # mnnvl, flashinfer caps the workspace's one-shot region at its own
+        # MNNVL_ONE_SHOT_THRESHOLD (~4MB, e.g. 44 tokens at hidden 6144 bf16
+        # TP8); forcing use_oneshot=True past that raises ValueError instead
+        # of using two-shot, so every decode capture between the one-shot cap
+        # and the fusion threshold silently lost fusion. Let flashinfer's
+        # AUTO heuristic pick the strategy (it matches its own workspace
+        # sizing), and keep trigger_completion_at_end=True since AUTO may
+        # select one-shot (see the Lamport NaN note below).
+        mnnvl_auto = workspace.backend == "mnnvl"
+        if mnnvl_auto:
+            use_oneshot = None
+
         flashinfer_comm.allreduce_fusion(
             input=allreduce_in,
             workspace=workspace,
@@ -249,8 +262,9 @@ if flashinfer_comm is not None:
             # the end for the one-shot path; the two-shot path is synchronized
             # and keeps the early completion. Related one-shot instability in
             # the same kernel: flashinfer-ai/flashinfer#1223.
-            trigger_completion_at_end=use_oneshot
-            or num_tokens > PDL_ADVANCE_LAUNCH_TOKENS,
+            trigger_completion_at_end=True
+            if mnnvl_auto
+            else (use_oneshot or num_tokens > PDL_ADVANCE_LAUNCH_TOKENS),
         )
 
     def call_trtllm_fused_allreduce_norm_fake(
