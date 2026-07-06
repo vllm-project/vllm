@@ -1404,12 +1404,15 @@ def test_get_max_concurrency_for_kv_cache_config():
         enable_chunked_prefill=True,
         max_model_len=model_config.max_model_len,
         is_encoder_decoder=model_config.is_encoder_decoder,
+        # Pin to sync: SWA per-request bounds grow with overlapping batches.
+        async_scheduling=False,
     )
 
     vllm_config = VllmConfig(
         model_config=model_config,
         scheduler_config=scheduler_config,
     )
+    assert vllm_config.max_concurrent_batches == 1
 
     full_attention_spec = FullAttentionSpec(
         block_size=16,

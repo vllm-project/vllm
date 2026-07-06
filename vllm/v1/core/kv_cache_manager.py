@@ -123,6 +123,7 @@ class KVCacheManager:
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
+        max_concurrent_batches: int = 1,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
@@ -152,6 +153,7 @@ class KVCacheManager:
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
+            max_concurrent_batches=max_concurrent_batches,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
@@ -397,9 +399,12 @@ class KVCacheManager:
         # insufficient free blocks.
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
+        # Free on the processed-token basis: in-flight steps' attention windows
+        # still read blocks below the optimistic boundary, and rejected spec
+        # tokens can roll it back.
         self.coordinator.remove_skipped_blocks(
             request.request_id,
-            total_computed_tokens,
+            max(0, total_computed_tokens - request.num_in_flight_tokens),
             num_prompt_tokens=request.num_prompt_tokens,
         )
 

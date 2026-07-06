@@ -482,7 +482,10 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
     attention_chunk_size: int
 
     def max_admission_blocks_per_request(
-        self, max_num_batched_tokens: int, max_model_len: int
+        self,
+        max_num_batched_tokens: int,
+        max_model_len: int,
+        max_concurrent_batches: int = 1,
     ) -> int:
         """Per-request admission cap, in blocks.
 
@@ -490,9 +493,13 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
         (`max_memory_usage_bytes`) and the runtime admission gate, so requests
         admitted by startup can also be admitted at runtime.
         """
-        # During chunked prefill, we hold KV for at most one chunk window.
+        # During chunked prefill, we hold KV for at most one chunk window, the
+        # newly scheduled tokens, and — since frees happen on the
+        # processed-token basis — up to `max_concurrent_batches - 1` in-flight
+        # chunks.
         num_tokens = min(
-            self.attention_chunk_size + max_num_batched_tokens, max_model_len
+            self.attention_chunk_size + max_concurrent_batches * max_num_batched_tokens,
+            max_model_len,
         )
         return cdiv(num_tokens, self.block_size)
 
@@ -500,7 +507,9 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
         max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         max_blocks = self.max_admission_blocks_per_request(
-            max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_model_len=max_model_len,
+            max_concurrent_batches=vllm_config.max_concurrent_batches,
         )
         return max_blocks * self.page_size_bytes
 
@@ -544,7 +553,10 @@ class SlidingWindowSpec(AttentionSpec):
         )
 
     def max_admission_blocks_per_request(
-        self, max_num_batched_tokens: int, max_model_len: int
+        self,
+        max_num_batched_tokens: int,
+        max_model_len: int,
+        max_concurrent_batches: int = 1,
     ) -> int:
         """Per-request admission cap, in blocks.
 
@@ -555,10 +567,12 @@ class SlidingWindowSpec(AttentionSpec):
         before each chunk's `get_num_blocks_to_allocate`.
         """
         # During chunked prefill, we hold KV for the last `sliding_window-1`
-        # computed tokens plus the newly scheduled tokens, and never more
-        # than `max_model_len`.
+        # computed tokens, the newly scheduled tokens, and — since frees happen
+        # on the processed-token basis — up to `max_concurrent_batches - 1`
+        # in-flight chunks; never more than `max_model_len`.
         num_tokens = min(
-            self.sliding_window - 1 + max_num_batched_tokens, max_model_len
+            self.sliding_window - 1 + max_concurrent_batches * max_num_batched_tokens,
+            max_model_len,
         )
         # +1 because the sliding window may not start from the beginning of
         # the block. E.g. block size 4 and num_token 4 needs two blocks
@@ -572,7 +586,9 @@ class SlidingWindowSpec(AttentionSpec):
         max_model_len = vllm_config.model_config.max_model_len
         max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
         max_blocks = self.max_admission_blocks_per_request(
-            max_num_batched_tokens=max_num_batched_tokens, max_model_len=max_model_len
+            max_num_batched_tokens=max_num_batched_tokens,
+            max_model_len=max_model_len,
+            max_concurrent_batches=vllm_config.max_concurrent_batches,
         )
         return max_blocks * self.page_size_bytes
 
