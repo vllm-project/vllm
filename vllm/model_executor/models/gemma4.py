@@ -1323,8 +1323,10 @@ class Gemma4Model(nn.Module, EagleModelMixin):
             # Extract the per-layer embedding for this specific layer
             if per_layer_inputs is not None:
                 actual_layer_idx = self.start_layer + layer_idx
+                # Index the layer axis positionally from the end: runners
+                # may pass flattened [T, L, D] or batched [B, S, L, D].
                 layer_per_input = per_layer_inputs[
-                    :, actual_layer_idx, :
+                    ..., actual_layer_idx, :
                 ]  # (num_tokens, per_layer_dim)
             else:
                 layer_per_input = None

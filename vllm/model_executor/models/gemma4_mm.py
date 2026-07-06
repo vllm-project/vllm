@@ -1579,11 +1579,22 @@ class Gemma4ForConditionalGeneration(
 
         # Select the pre-cached PLEs for this batch (None when PLE
         # is disabled for variants without PLE).
-        per_layer_inputs = (
-            self.per_layer_embeddings[: inputs_embeds.shape[0]]
-            if self.per_layer_embeddings is not None and inputs_embeds is not None
-            else None
-        )
+        if self.per_layer_embeddings is not None and inputs_embeds is not None:
+            # The PLE cache is token-major [T, L, D]; inputs_embeds may be
+            # flattened [T, H] or batched [B, S, H] depending on the runner.
+            # Slice by the flattened token count and restore the batch shape
+            # so [..., layer_idx, :] indexing works for any input layout.
+            batch_shape = inputs_embeds.shape[:-1]
+            n_tok = 1
+            for _size in batch_shape:
+                n_tok *= _size
+            per_layer_inputs = self.per_layer_embeddings[:n_tok].reshape(
+                *batch_shape,
+                self.config.text_config.num_hidden_layers,
+                self.config.text_config.hidden_size_per_layer_input,
+            )
+        else:
+            per_layer_inputs = None
 
         # Gemma4 bidi: clear mm_prefix_range for full_attention layers.
         # Must run here (outside @support_torch_compile boundary) because
