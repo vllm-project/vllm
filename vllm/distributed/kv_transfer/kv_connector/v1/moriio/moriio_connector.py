@@ -1322,6 +1322,9 @@ class MoRIIOConnectorWorker:
         return {remote_agent_name}
 
     def _remote_tp_rank(self, remote_tp_size: int) -> int:
+        # 0/unknown remote TP == homogeneous (avoids collapsing all ranks to 0).
+        if remote_tp_size <= 0:
+            remote_tp_size = self.world_size
         return get_moriio_remote_tp_rank(self.tp_rank, self.world_size, remote_tp_size)
 
     def _background_moriio_handshake(
@@ -1910,7 +1913,8 @@ class MoRIIOConnectorWorker:
         validate_moriio_heterogeneous_tp_kv_heads(
             local_tp_size=self.world_size,
             remote_tp_size=(
-                remote_tp_size if remote_tp_size is not None else self.world_size
+                remote_tp_size if remote_tp_size and remote_tp_size > 0
+                else self.world_size
             ),
             total_num_kv_heads=self.model_config.get_total_num_kv_heads(),
             is_mla=self._is_mla_cache_layer(layer_name),
