@@ -6,13 +6,13 @@ import queue
 from pathlib import Path
 from typing import TypeAlias, TypeVar
 
-from transformers import AutoTokenizer, PreTrainedTokenizer, PreTrainedTokenizerFast
+from transformers import AutoTokenizer, PythonBackend, TokenizersBackend
 
 from vllm.transformers_utils.config import get_sentence_transformer_tokenizer_config
 
 from .protocol import TokenizerLike
 
-HfTokenizer: TypeAlias = PreTrainedTokenizer | PreTrainedTokenizerFast
+HfTokenizer: TypeAlias = PythonBackend | TokenizersBackend
 _T = TypeVar("_T", bound=TokenizerLike)
 
 
@@ -24,7 +24,7 @@ class ThreadSafeHFTokenizerMixin:
 
 def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
     """
-    If `tokenizer` is a `PreTrainedTokenizerFast`, modify the tokenizer
+    If `tokenizer` is a `TokenizersBackend`, modify the tokenizer
     in-place to make the public interface thread-safe by routing calls
     through a deep-copied tokenizer pool.
 
@@ -34,14 +34,14 @@ def maybe_make_thread_pool(tokenizer: _T, copies: int = 1):
       methods like ``add_special_tokens`` or ``add_tokens``.
     - Adjacent method calls could happen on different deep copies.
     """
-    if not isinstance(tokenizer, PreTrainedTokenizerFast) or isinstance(
+    if not isinstance(tokenizer, TokenizersBackend) or isinstance(
         tokenizer, ThreadSafeHFTokenizerMixin
     ):
         return tokenizer
 
     og_tokenizer = copy.copy(tokenizer)
 
-    tokenizer_pool: queue.Queue[PreTrainedTokenizerFast] = queue.Queue()
+    tokenizer_pool: queue.Queue[TokenizersBackend] = queue.Queue()
     for _ in range(copies):
         tokenizer_pool.put(copy.deepcopy(og_tokenizer))
 
