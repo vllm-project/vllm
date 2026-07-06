@@ -120,6 +120,13 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
     # which does not implement is_fast in Transformers
     tokenizer_is_fast = getattr(tokenizer, "is_fast", True)
 
+    # MistralCommonBackend is tekken-backed and needs byte-fallback-aware tokenization.
+    mistral_tekkenizer = None
+    if getattr(getattr(tokenizer, "tokenizer", None), "instruct_tokenizer", None):
+        from vllm.tokenizers.mistral import mistral_common_tekkenizer
+
+        mistral_tekkenizer = mistral_common_tekkenizer(tokenizer)
+
     max_token_id = max(tokenizer_vocab.values())
     max_chars_per_token = max(len(tok) for tok in tokenizer_vocab)
 
@@ -152,7 +159,20 @@ def get_cached_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
         def is_fast(self) -> bool:
             return tokenizer_is_fast
 
+        def convert_ids_to_tokens(self, ids, skip_special_tokens: bool = False):
+            if mistral_tekkenizer is not None:
+                from vllm.tokenizers.mistral import tekken_convert_ids_to_tokens
+
+                return tekken_convert_ids_to_tokens(mistral_tekkenizer, ids)
+            return super().convert_ids_to_tokens(
+                ids, skip_special_tokens=skip_special_tokens
+            )
+
         def convert_tokens_to_string(self, tokens: list[str]) -> str:
+            if mistral_tekkenizer is not None:
+                from vllm.tokenizers.mistral import tekken_convert_tokens_to_string
+
+                return tekken_convert_tokens_to_string(mistral_tekkenizer, tokens)
             try:
                 return super().convert_tokens_to_string(tokens)
             except NotImplementedError:
