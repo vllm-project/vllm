@@ -493,6 +493,15 @@ void concat_and_cache_mla_rope_fused(
     const std::string& kv_cache_dtype,
     torch::stable::Tensor& kv_cache_quant_scale);
 
+// Rotate Q and K, then write rotated K and V to the flash KV cache (NHD).
+void fused_rope_and_reshape_cache_flash(
+    torch::stable::Tensor& query, torch::stable::Tensor& key,
+    torch::stable::Tensor& value, torch::stable::Tensor& positions,
+    torch::stable::Tensor& cos_sin_cache, bool is_neox,
+    torch::stable::Tensor& key_cache, torch::stable::Tensor& value_cache,
+    torch::stable::Tensor& slot_mapping, torch::stable::Tensor& k_scale,
+    torch::stable::Tensor& v_scale, const std::string& kv_cache_dtype);
+
 // Just for unittest
 void convert_fp8(torch::stable::Tensor& dst_cache,
                  torch::stable::Tensor& src_cache, const double scale,

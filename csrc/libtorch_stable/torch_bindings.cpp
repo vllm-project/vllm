@@ -809,6 +809,22 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_cache_ops, ops) {
       "                     str kv_cache_dtype,"
       "                     Tensor kv_cache_scale) -> ()");
 
+  // Rotate Q and K, then write rotated K and V to the flash KV cache.
+  ops.def(
+      "fused_rope_and_reshape_cache_flash("
+      "                     Tensor! query,"
+      "                     Tensor! key,"
+      "                     Tensor value,"
+      "                     Tensor positions,"
+      "                     Tensor cos_sin_cache,"
+      "                     bool is_neox,"
+      "                     Tensor! key_cache,"
+      "                     Tensor! value_cache,"
+      "                     Tensor slot_mapping,"
+      "                     Tensor k_scale,"
+      "                     Tensor v_scale,"
+      "                     str kv_cache_dtype) -> ()");
+
   // Convert the key and value cache to fp8 data type.
   ops.def(
       "convert_fp8(Tensor! dst_cache, Tensor src_cache, float scale, "
@@ -895,6 +911,8 @@ STABLE_TORCH_LIBRARY_IMPL(_C_cache_ops, CUDA, ops) {
   ops.impl("concat_and_cache_mla", TORCH_BOX(&concat_and_cache_mla));
   ops.impl("concat_and_cache_mla_rope_fused",
            TORCH_BOX(&concat_and_cache_mla_rope_fused));
+  ops.impl("fused_rope_and_reshape_cache_flash",
+           TORCH_BOX(&fused_rope_and_reshape_cache_flash));
   ops.impl("convert_fp8", TORCH_BOX(&convert_fp8));
   ops.impl("gather_and_maybe_dequant_cache",
            TORCH_BOX(&gather_and_maybe_dequant_cache));

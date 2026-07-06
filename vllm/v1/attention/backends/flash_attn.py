@@ -18,6 +18,7 @@ from vllm.utils.torch_utils import (
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImpl,
+    AttentionLayer,
     AttentionType,
     MultipleOf,
 )
@@ -27,7 +28,10 @@ from vllm.v1.attention.backends.fa_utils import (
     is_fa_version_supported,
     is_flash_attn_varlen_func_available,
 )
-from vllm.v1.attention.backends.utils import get_dcp_local_seq_lens
+from vllm.v1.attention.backends.utils import (
+    get_dcp_local_seq_lens,
+    get_kv_cache_layout,
+)
 from vllm.v1.attention.ops.common import cp_lse_ag_out_rs
 from vllm.v1.attention.ops.dcp_alltoall import dcp_a2a_lse_reduce
 from vllm.v1.attention.ops.merge_attn_states import merge_attn_states
@@ -55,9 +59,6 @@ from vllm.v1.attention.backend import (
     AttentionCGSupport,
     AttentionMetadataBuilder,
     CommonAttentionMetadata,
-)
-from vllm.v1.attention.backends.utils import (
-    get_kv_cache_layout,
 )
 from vllm.v1.kv_cache_interface import AttentionSpec
 
@@ -1039,6 +1040,49 @@ class FlashAttentionImpl(AttentionImpl):
             self.kv_cache_dtype,
             layer._k_scale,
             layer._v_scale,
+        )
+
+    def fused_rope_kvcache_supported(self) -> bool:
+        # NVFP4 KV cache (SM100+) uses a different write path; the fused kernel
+        # in this PR covers auto / fp8_e4m3 / fp8_e5m2 only. The kernel also
+        # assumes the flash NHD cache layout (host-side TORCH_CHECK calls would
+        # hard-fail on HND); fall back to the unfused path under HND.
+        return self.kv_cache_dtype != "nvfp4" and get_kv_cache_layout() == "NHD"
+
+    def do_rope_and_kv_cache_update(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        positions: torch.Tensor,
+        cos_sin_cache: torch.Tensor,
+        is_neox: bool,
+        kv_cache: torch.Tensor,
+        layer_slot_mapping: torch.Tensor,
+    ) -> None:
+        # Layout per get_kv_cache_shape (num_blocks-first after #42095): the
+        # leading-2 dim is at index 1, so unbind(1) gives
+        # [num_blocks, block_size, num_kv_heads, head_size] per element.
+        key_cache, value_cache = kv_cache.unbind(1)
+        key_cache = canonicalize_singleton_dim_strides(key_cache)
+        value_cache = canonicalize_singleton_dim_strides(value_cache)
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
+        torch.ops._C_cache_ops.fused_rope_and_reshape_cache_flash(
+            query,
+            key,
+            value,
+            positions,
+            cos_sin_cache,
+            is_neox,
+            key_cache,
+            value_cache,
+            layer_slot_mapping,
+            layer._k_scale,
+            layer._v_scale,
+            self.kv_cache_dtype,
         )
 
     def _forward_with_dcp(
