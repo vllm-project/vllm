@@ -25,10 +25,14 @@ pub enum Error {
     ValueDecode(#[from] rmpv::decode::Error),
     #[error("messagepack ext value decode failed: {message}")]
     ExtValueDecode { message: String },
+    #[error("invalid structured outputs params: {message}")]
+    InvalidStructuredOutputsParams { message: String },
     #[error("io error")]
     Io(#[from] std::io::Error),
     #[error("transport error")]
     Transport(#[from] zeromq::ZmqError),
+    #[error("ZMQ runtime task failed")]
+    ZmqRuntimeTask(#[from] tokio::task::JoinError),
     #[error("engine core reported fatal failure")]
     EngineCoreDead,
     #[error("startup handshake timed out while waiting for {stage} after {timeout:?}")]
@@ -83,6 +87,8 @@ pub enum Error {
     },
     #[error("utility call `{method}` closed unexpectedly (call_id={call_id})")]
     UtilityCallClosed { method: String, call_id: u64 },
+    #[error("utility call `{method}` returned inconsistent results across engines: {values}")]
+    InconsistentUtilityResults { method: String, values: String },
 
     /// A special variant to allow cloning the same error.
     #[error(transparent)]

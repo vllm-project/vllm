@@ -3,7 +3,8 @@
 
 use tonic::Status;
 use uuid::Uuid;
-use vllm_engine_core_client::protocol::{StopReason, StructuredOutputsParams};
+use vllm_engine_core_client::protocol::output::StopReason;
+use vllm_engine_core_client::protocol::structured_outputs::StructuredOutputsParams;
 use vllm_text::{
     DecodedLogprobs, DecodedPromptLogprobs, FinishReason, Finished, Prompt, SamplingParams,
     TextDecodeOptions, TextRequest,
@@ -91,6 +92,8 @@ pub fn to_text_request(
         cache_salt: kv.map(|k| &k.cache_salt).filter(|s| !s.is_empty()).cloned(),
         add_special_tokens: true,
         data_parallel_rank: None,
+        reasoning_parser_kwargs: None,
+        lora_request: None,
     })
 }
 
@@ -228,32 +231,18 @@ fn convert_structured_output(
         StructuredOutput::Json(schema) => {
             let json: serde_json::Value = serde_json::from_str(schema)
                 .map_err(|e| Status::invalid_argument(format!("invalid json schema: {e}")))?;
-            StructuredOutputsParams {
-                json: Some(json),
-                ..Default::default()
-            }
+            StructuredOutputsParams::json(json)
         }
-        StructuredOutput::Regex(regex) => StructuredOutputsParams {
-            regex: Some(regex.clone()),
-            ..Default::default()
-        },
-        StructuredOutput::Choice(choices) => StructuredOutputsParams {
-            choice: Some(choices.choices.clone()),
-            ..Default::default()
-        },
-        StructuredOutput::Grammar(grammar) => StructuredOutputsParams {
-            grammar: Some(grammar.clone()),
-            ..Default::default()
-        },
-        StructuredOutput::JsonObject(true) => StructuredOutputsParams {
-            json_object: Some(true),
-            ..Default::default()
-        },
+        StructuredOutput::Regex(regex) => StructuredOutputsParams::regex(regex.clone()),
+        StructuredOutput::Choice(choices) => {
+            StructuredOutputsParams::choice(choices.choices.clone())
+        }
+        StructuredOutput::Grammar(grammar) => StructuredOutputsParams::grammar(grammar.clone()),
+        StructuredOutput::JsonObject(true) => StructuredOutputsParams::json_object(),
         StructuredOutput::JsonObject(false) => return Ok(None),
-        StructuredOutput::StructuralTag(tag) => StructuredOutputsParams {
-            structural_tag: Some(tag.clone()),
-            ..Default::default()
-        },
+        StructuredOutput::StructuralTag(tag) => {
+            StructuredOutputsParams::structural_tag(tag.clone())
+        }
     };
     Ok(Some(params))
 }
@@ -343,13 +332,13 @@ fn to_finish_info(finished: &Finished, token_ids: &[u32]) -> pb::FinishInfo {
             (PbFinishReason::Stop as i32, sr)
         }
         FinishReason::Length => (PbFinishReason::Length as i32, None),
-        FinishReason::Abort | FinishReason::Error | FinishReason::Repetition => {
+        FinishReason::Abort | FinishReason::Error | FinishReason::Repetition(_) => {
             (PbFinishReason::Aborted as i32, None)
         }
     };
 
     pb::FinishInfo {
-        num_output_tokens: finished.output_token_count as u32,
+        num_output_tokens: finished.usage.output_token_count as u32,
         finish_reason,
         stop_reason,
         kv_transfer_params: finished.kv_transfer_params.as_ref().and_then(json_to_proto_struct),
@@ -500,7 +489,7 @@ impl ResponseOpts {
 
 #[cfg(test)]
 mod tests {
-    use vllm_engine_core_client::protocol::StopReason;
+    use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{FinishReason, Finished, Prompt};
 
     use super::pb::finish_info::{FinishReason as PbFinishReason, StopReason as PbStopReason};
@@ -589,8 +578,11 @@ mod tests {
 
     fn finished(reason: FinishReason) -> Finished {
         Finished {
-            prompt_token_count: 0,
-            output_token_count: 0,
+            usage: vllm_llm::TokenUsage {
+                prompt_token_count: 0,
+                output_token_count: 0,
+                cached_token_count: 0,
+            },
             finish_reason: reason,
             kv_transfer_params: None,
         }

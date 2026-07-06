@@ -131,13 +131,13 @@ async fn main() -> Result<()> {
                 ChatEvent::LogprobsDelta { .. } => {}
                 ChatEvent::Done {
                     message,
-                    output_token_count,
+                    usage,
                     finish_reason: reason,
                     ..
                 } => {
                     final_reasoning = message.reasoning().unwrap_or_default();
                     final_text = message.text();
-                    final_output_token_count = output_token_count;
+                    final_output_token_count = usage.output_token_count;
                     finish_reason = Some(reason);
                     break;
                 }

@@ -822,23 +822,35 @@ def _rms_norm_kernel(
         tl.store(output_row_start_ptr + col_idx, output, mask=mask)
 
 
-def rms_norm(
-    input: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6
-) -> torch.Tensor:
+def rms_norm_batch_invariant(
+    input: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float = 1e-6,
+    residual: torch.Tensor | None = None,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
     Compute RMS normalization using Triton kernel.
 
-    RMS Norm normalizes the input by the root mean square and scales by weight:
-    output = input / sqrt(mean(input^2) + eps) * weight
 
     Args:
         input: Input tensor of shape (..., hidden_size)
         weight: Weight tensor of shape (hidden_size,)
         eps: Small constant for numerical stability
+        residual: Optional residual tensor fused into the normalization path
 
     Returns:
-        Tensor with RMS normalization applied along the last dimension
+        RMS normalized tensor, or ``(output, residual_out)`` when ``residual``
+        is provided
     """
+    if residual is not None:
+        assert input.shape == residual.shape, (
+            f"Input shape {input.shape} must match residual shape {residual.shape}"
+        )
+        import vllm._custom_ops as ops
+
+        ops.fused_add_rms_norm(input, residual, weight, eps)
+        return input, residual
+
     assert weight.dim() == 1, "Weight must be 1-dimensional"
     assert input.shape[-1] == weight.shape[0], (
         f"Input last dimension ({input.shape[-1]}) must match "
@@ -867,26 +879,6 @@ def rms_norm(
         BLOCK_SIZE=BLOCK_SIZE,
     )
     return output.reshape(original_shape)
-
-
-def rms_norm_batch_invariant(
-    input: torch.Tensor, weight: torch.Tensor, eps: float = 1e-6
-) -> torch.Tensor:
-    """
-    Batch-invariant wrapper for RMS normalization.
-
-    This function provides a deterministic, batch-invariant implementation
-    of RMS normalization for use with the batch_invariant mode.
-
-    Args:
-        input: Input tensor of shape (..., hidden_size)
-        weight: Weight tensor of shape (hidden_size,)
-        eps: Small constant for numerical stability
-
-    Returns:
-        RMS normalized tensor
-    """
-    return rms_norm(input, weight, eps=eps)
 
 
 def linear_batch_invariant(input, weight, bias=None):

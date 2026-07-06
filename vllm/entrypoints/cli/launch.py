@@ -18,7 +18,7 @@ from vllm.entrypoints.openai.cli_args import (
     make_arg_parser,
     validate_parsed_serve_args,
 )
-from vllm.entrypoints.utils import VLLM_SUBCMD_PARSER_EPILOG
+from vllm.entrypoints.serve.utils.api_utils import VLLM_SUBCMD_PARSER_EPILOG
 from vllm.logger import init_logger
 from vllm.utils.argparse_utils import FlexibleArgumentParser
 
@@ -120,7 +120,7 @@ async def run_launch_fastapi(args: argparse.Namespace) -> None:
     signal.signal(signal.SIGTERM, _interrupt_init)
 
     # 1. Socket binding
-    listen_address, sock = setup_server(args)
+    listen_address, sock = setup_server(args, reuse_port=False)
 
     # 2. Build and serve the API server
     engine_args = AsyncEngineArgs.from_cli_args(args)

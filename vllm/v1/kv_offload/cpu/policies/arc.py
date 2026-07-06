@@ -3,6 +3,8 @@
 from collections import OrderedDict
 from collections.abc import Iterable
 
+from typing_extensions import override
+
 from vllm.v1.kv_offload.base import OffloadKey
 from vllm.v1.kv_offload.cpu.policies.base import BlockStatus, CachePolicy
 
@@ -54,18 +56,22 @@ class ARCCachePolicy(CachePolicy):
         self.b1: OrderedDict[OffloadKey, None] = OrderedDict()
         self.b2: OrderedDict[OffloadKey, None] = OrderedDict()
 
+    @override
     def get(self, key: OffloadKey) -> BlockStatus | None:
         return self.t1.get(key) or self.t2.get(key)
 
+    @override
     def insert(self, key: OffloadKey, block: BlockStatus) -> None:
         self.t1[key] = block
         self.b1.pop(key, None)
         self.b2.pop(key, None)
 
+    @override
     def remove(self, key: OffloadKey) -> None:
         if self.t1.pop(key, None) is None:
             self.t2.pop(key, None)
 
+    @override
     def touch(self, keys: Iterable[OffloadKey]) -> None:
         for key in reversed(list(keys)):
             if key in self.t1:
@@ -94,6 +100,7 @@ class ARCCachePolicy(CachePolicy):
                 # move to MRU position (end) to keep it fresh in the ghost list
                 self.b2.move_to_end(key)
 
+    @override
     def clear(self) -> None:
         self.t1.clear()
         self.t2.clear()
@@ -101,6 +108,7 @@ class ARCCachePolicy(CachePolicy):
         self.b2.clear()
         self.target_t1_size = 0.0
 
+    @override
     def evict(
         self, n: int, protected: set[OffloadKey]
     ) -> list[tuple[OffloadKey, BlockStatus]] | None:

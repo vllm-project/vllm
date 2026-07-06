@@ -4,6 +4,7 @@ use std::slice;
 use llm_multimodal::ImageDetail;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use vllm_llm::TokenUsage;
 
 // ============================================================================
 // Constants
@@ -313,29 +314,82 @@ pub enum MessageContent {
 #[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub struct Usage {
-    pub prompt_tokens: u32,
-    pub total_tokens: u32,
-    pub completion_tokens: Option<u32>,
+    pub prompt_tokens: usize,
+    pub total_tokens: usize,
+    pub completion_tokens: Option<usize>,
     pub prompt_tokens_details: Option<PromptTokenUsageInfo>,
 }
 
 impl Usage {
-    /// Create a Usage from prompt and completion token counts.
-    pub fn from_counts(prompt_tokens: u32, completion_tokens: u32) -> Self {
+    /// Create a Usage with prompt-token cache details.
+    pub fn from_counts(
+        prompt_tokens: usize,
+        completion_tokens: usize,
+        cached_tokens: Option<usize>,
+    ) -> Self {
         Self {
             prompt_tokens,
             total_tokens: prompt_tokens + completion_tokens,
             completion_tokens: Some(completion_tokens),
-            prompt_tokens_details: None,
+            prompt_tokens_details: cached_tokens
+                .filter(|&c| c > 0)
+                .map(|c| PromptTokenUsageInfo { cached_tokens: c }),
         }
+    }
+
+    pub fn from_token_usage(usage: TokenUsage, enable_prompt_tokens_details: bool) -> Self {
+        Self::from_counts(
+            usage.prompt_token_count,
+            usage.output_token_count,
+            enable_prompt_tokens_details.then_some(usage.cached_token_count),
+        )
     }
 }
 
 /// Mirrors the Python vLLM `PromptTokenUsageInfo` class.
-#[serde_with::skip_serializing_none]
 #[derive(Debug, Clone, Serialize)]
 pub struct PromptTokenUsageInfo {
-    pub cached_tokens: Option<u32>,
+    pub cached_tokens: usize,
+}
+
+#[cfg(test)]
+mod usage_tests {
+    use vllm_llm::TokenUsage;
+
+    use super::Usage;
+
+    #[test]
+    fn token_usage_hides_prompt_token_details_by_default() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 5,
+                output_token_count: 2,
+                cached_token_count: 3,
+            },
+            false,
+        );
+
+        assert_eq!(usage.prompt_tokens, 5);
+        assert_eq!(usage.completion_tokens, Some(2));
+        assert!(usage.prompt_tokens_details.is_none());
+    }
+
+    #[test]
+    fn token_usage_includes_prompt_token_details_when_enabled() {
+        let usage = Usage::from_token_usage(
+            TokenUsage {
+                prompt_token_count: 5,
+                output_token_count: 2,
+                cached_token_count: 3,
+            },
+            true,
+        );
+
+        assert_eq!(
+            usage.prompt_tokens_details.as_ref().map(|details| details.cached_tokens),
+            Some(3)
+        );
+    }
 }
 
 /// OpenAI completions-style logprobs.
@@ -403,6 +457,12 @@ pub struct ModelObject {
     pub object: String,
     pub created: i64,
     pub owned_by: String,
+    /// Backend model path (base cards) or adapter path (LoRA cards).
+    pub root: Option<String>,
+    /// Base model a LoRA adapter derives from; `null` for base models.
+    pub parent: Option<String>,
+    /// Maximum context length; `null` for LoRA adapter cards.
+    pub max_model_len: Option<u32>,
 }
 
 /// Response body for `GET /v1/models`.
@@ -410,6 +470,41 @@ pub struct ModelObject {
 pub struct ListModelsResponse {
     pub object: String,
     pub data: Vec<ModelObject>,
+}
+
+// ============================================================================
+// Shared validation helpers
+// ============================================================================
+
+/// Validates a messages array is non-empty and has valid user-message content.
+///
+/// Used by both `POST /v1/chat/completions` and `POST /tokenize` (chat form)
+/// so validation behaviour stays in lockstep.
+pub(crate) fn validate_messages(
+    messages: &[ChatMessage],
+) -> Result<(), validator::ValidationError> {
+    if messages.is_empty() {
+        return Err(validator::ValidationError::new("messages cannot be empty"));
+    }
+
+    for msg in messages {
+        if let ChatMessage::User { content, .. } = msg {
+            match content {
+                MessageContent::Text(text) if text.is_empty() => {
+                    return Err(validator::ValidationError::new(
+                        "message content cannot be empty",
+                    ));
+                }
+                MessageContent::Parts(parts) if parts.is_empty() => {
+                    return Err(validator::ValidationError::new(
+                        "message content parts cannot be empty",
+                    ));
+                }
+                _ => {}
+            }
+        }
+    }
+    Ok(())
 }
 
 // ============================================================================

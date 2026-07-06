@@ -6,7 +6,8 @@ from typing import TYPE_CHECKING, Any
 
 import torch
 
-from vllm.utils.torch_utils import async_tensor_h2d
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.sample.logits_processor.interface import (
     BatchUpdate,
     MoveDirectionality,
@@ -21,12 +22,11 @@ def maybe_create_thinking_budget_state_holder(
     max_num_seqs: int,
     num_spec_tokens: int,
     device: torch.device,
-    is_pin_memory: bool,
 ) -> "ThinkingBudgetStateHolder | None":
     if reasoning_config is None:
         return None
     return ThinkingBudgetStateHolder(
-        reasoning_config, max_num_seqs, num_spec_tokens, device, is_pin_memory
+        reasoning_config, max_num_seqs, num_spec_tokens, device, PIN_MEMORY
     )
 
 
@@ -173,6 +173,19 @@ class ThinkingBudgetStateHolder:
                 return i
         return -1
 
+    @staticmethod
+    def _find_last_sequence_index_from(
+        target_list: list[int], token_ids: list[int], search_start: int
+    ) -> int:
+        """Last occurrence of ``token_ids`` at or after ``search_start``."""
+        if not token_ids:
+            return -1
+        lo = max(0, search_start)
+        for i in range(len(target_list) - len(token_ids), lo - 1, -1):
+            if target_list[i : i + len(token_ids)] == token_ids:
+                return i
+        return -1
+
     def _init_state_entry(
         self, prompt_tok_ids: list[int] | None, thinking_token_budget: int
     ) -> dict[str, Any]:
@@ -226,9 +239,12 @@ class ThinkingBudgetStateHolder:
             "force_index": [],
             "start_thinking": start_thinking,
             "end_thinking": -1,
+            "start_search_pos": 0,
+            "end_search_pos": 0,
             "in_spec_mode": False,
             "bonus_token_forced": False,
             "continue_thinking": continue_thinking,
+            "scan_offset": 0,
         }
 
     def _update_think_state(self, state: dict[str, Any]) -> None:
@@ -240,16 +256,41 @@ class ThinkingBudgetStateHolder:
             state["force_index"] = []
             return
 
+        output_tok_ids = state.get("output_tok_ids", [])
         if state["start_thinking"] == -1:
-            start_thinking = self._find_last_sequence_index(
-                state.get("output_tok_ids", []), self.think_start_token_ids
+            seq_len = len(self.think_start_token_ids)
+            scan_offset = state.get("scan_offset", 0)
+            start_thinking = self._find_last_sequence_index_from(
+                output_tok_ids,
+                self.think_start_token_ids,
+                max(scan_offset, state["start_search_pos"] - (seq_len - 1)),
             )
+            if start_thinking >= 0 and scan_offset > 0:
+                # Re-entry after a forced end: budget was already exhausted
+                # in a prior block, so immediately force-close this one.
+                # scan_offset > 0 is only set after forced-end completion
+                # (never after natural end), so this won't block legitimate
+                # re-entries where budget remains.
+                state["start_thinking"] = start_thinking
+                state["in_think"] = False
+                state["in_end"] = True
+                state["end_count"] = 0
+                state["force_index"] = [0]
+                return
             state["start_thinking"] = start_thinking
+            if start_thinking == -1:
+                state["start_search_pos"] = len(output_tok_ids)
         if state["end_thinking"] == -1:
-            end_thinking = self._find_last_sequence_index(
-                state.get("output_tok_ids", []), self.think_end_token_ids
+            seq_len = len(self.think_end_token_ids)
+            scan_offset = state.get("scan_offset", 0)
+            end_thinking = self._find_last_sequence_index_from(
+                output_tok_ids,
+                self.think_end_token_ids,
+                max(scan_offset, state["end_search_pos"] - (seq_len - 1)),
             )
             state["end_thinking"] = end_thinking
+            if end_thinking == -1:
+                state["end_search_pos"] = len(output_tok_ids)
 
         if state["start_thinking"] == -1:
             return
@@ -433,6 +474,11 @@ class ThinkingBudgetStateHolder:
                         "in_end": False,
                         "end_count": 0,
                         "check_count_down": state["thinking_token_budget"],
+                        "start_thinking": -1,
+                        "end_thinking": -1,
+                        "think_count": 0,
+                        "continue_thinking": False,
+                        "scan_offset": len(state.get("output_tok_ids", [])),
                     }
                 )
 
@@ -511,14 +557,31 @@ class ThinkingBudgetStateHolder:
 
         if active_indices_cpu:
             device = logits.device
-            active_indices = async_tensor_h2d(
-                active_indices_cpu, dtype=torch.long, device=device
-            )
-            force_tokens = async_tensor_h2d(
-                force_tokens_cpu, dtype=torch.long, device=device
-            )
-            # Avoid CPU->GPU sync.
-            fill = logits.new_full((len(active_indices_cpu),), 1e9)
-            logits.index_put_((active_indices, force_tokens), fill)
+            if current_platform.is_rocm() and logits.is_contiguous():
+                # Flattened index_fill avoids ROCm faults seen with 2-D
+                # advanced-indexing writes on the thinking-budget path.
+                vocab_size = logits.shape[1]
+                flat_indices_cpu = [
+                    row * vocab_size + token
+                    for row, token in zip(active_indices_cpu, force_tokens_cpu)
+                ]
+                flat_indices = async_tensor_h2d(
+                    flat_indices_cpu, dtype=torch.long, device=device
+                )
+                logits.view(-1).index_fill_(0, flat_indices, 1e9)
+            elif current_platform.is_rocm():
+                fill = logits.new_tensor(1e9)
+                for row, token in zip(active_indices_cpu, force_tokens_cpu):
+                    logits[row, token] = fill
+            else:
+                active_indices = async_tensor_h2d(
+                    active_indices_cpu, dtype=torch.long, device=device
+                )
+                force_tokens = async_tensor_h2d(
+                    force_tokens_cpu, dtype=torch.long, device=device
+                )
+                # Avoid CPU->GPU sync.
+                fill = logits.new_full((len(active_indices_cpu),), 1e9)
+                logits.index_put_((active_indices, force_tokens), fill)
 
         return logits
