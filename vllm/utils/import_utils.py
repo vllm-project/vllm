@@ -7,12 +7,10 @@ Contains helpers related to importing modules.
 This is similar in concept to the `importlib` module.
 """
 
-import contextlib
 import importlib.metadata
 import importlib.util
 import os
 import sys
-from collections.abc import Iterator
 from functools import cache
 from types import ModuleType
 from typing import Any

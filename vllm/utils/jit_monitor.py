@@ -20,12 +20,11 @@ Currently monitors:
   (via ``knobs.runtime.jit_post_compile_hook``)
 """
 
+import contextlib
 import functools
 import os
-from collections.abc import Mapping, Iterator
+from collections.abc import Iterator, Mapping
 from typing import Literal
-
-import contextlib
 
 from vllm.logger import init_logger
 from vllm.triton_utils.importing import HAS_TRITON
