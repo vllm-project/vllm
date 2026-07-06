@@ -15,7 +15,6 @@ from vllm.outputs import (
     ClassificationRequestOutput,
     EmbeddingRequestOutput,
     PoolingRequestOutput,
-    RequestOutput,
     ScoringRequestOutput,
 )
 from vllm.pooling_params import PoolingParams
@@ -172,7 +171,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         lora_request: list[LoRARequest] | LoRARequest | None = None,
         tokenization_kwargs: dict[str, Any] | None = None,
     ):
-
         io_processor = self.pooling_io_processors["plugin"]
 
         if pooling_params is None:
