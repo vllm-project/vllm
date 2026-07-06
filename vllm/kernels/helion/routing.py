@@ -27,6 +27,7 @@ import torch
 _ROUTABLE_EAGER_OPS = frozenset(
     {
         "per_token_group_fp8_quant",
+        "dynamic_per_token_scaled_fp8_quant",
     }
 )
 _helion_ready: dict[str, bool] = {}
