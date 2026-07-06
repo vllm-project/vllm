@@ -227,15 +227,14 @@ class SpeculativeConfig:
     synthetic_acceptance_rates. Only valid when rejection_sample_method is 'synthetic'.
     Mutually exclusive with synthetic_acceptance_rates."""
 
-    dspark_confidence_threshold: float | None = None
-    """Minimum DSpark cumulative prefix-survival probability for keeping a draft
-    token active when no DSpark SPS profile is provided. Set to None to disable
-    DSpark confidence-based capacity."""
+    dspark_confidence_threshold: float = 0.0
+    """Minimum DSpark cumulative prefix-survival probability for keeping a
+    per-request draft prefix. Set to 0.0 to use budget-based global top-k
+    allocation."""
 
-    dspark_sps_profile: list[float] | None = None
-    """Optional DSpark target-engine step throughput profile indexed by verifier
-    batch size B. If provided, DSpark chooses per-request draft prefix lengths
-    by maximizing expected accepted tokens times this profiled SPS(B)."""
+    dspark_budget_frac: float = 1.0
+    """Fraction of the full per-request draft-token budget available to the
+    DSpark global prefix allocator."""
 
     @staticmethod
     def _acceptance_length_to_rates(length: float, n: int) -> list[float]:
@@ -1118,18 +1117,15 @@ class SpeculativeConfig:
                 "are only valid with rejection_sample_method='synthetic'."
             )
 
-        if self.dspark_confidence_threshold is not None and not (
-            0.0 < self.dspark_confidence_threshold < 1.0
-        ):
+        if not 0.0 <= self.dspark_confidence_threshold <= 1.0:
             raise ValueError(
-                "dspark_confidence_threshold must be in (0, 1) or None, got "
+                "dspark_confidence_threshold must be in [0, 1], got "
                 f"{self.dspark_confidence_threshold}."
             )
-        if self.dspark_sps_profile is not None:
-            if not self.dspark_sps_profile:
-                raise ValueError("dspark_sps_profile must not be empty.")
-            if any(value <= 0.0 for value in self.dspark_sps_profile):
-                raise ValueError("dspark_sps_profile values must be positive.")
+        if not 0.0 < self.dspark_budget_frac <= 1.0:
+            raise ValueError(
+                f"dspark_budget_frac must be in (0, 1], got {self.dspark_budget_frac}."
+            )
 
         if self.draft_model_config:
             self.draft_model_config.verify_with_parallel_config(

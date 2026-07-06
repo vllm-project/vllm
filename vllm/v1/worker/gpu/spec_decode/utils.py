@@ -9,6 +9,49 @@ from vllm.v1.worker.gpu.async_utils import async_copy_to_np
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
 
+def get_draft_token_capacity(
+    speculator: object | None,
+    num_reqs: int,
+) -> torch.Tensor | None:
+    draft_token_capacity = getattr(speculator, "draft_token_capacity", None)
+    if draft_token_capacity is None:
+        return None
+    if not getattr(speculator, "use_draft_token_capacity", True):
+        return None
+    return draft_token_capacity[:num_reqs]
+
+
+def get_scheduled_draft_token_counts(
+    req_ids: list[str] | tuple[str, ...],
+    draft_tokens: dict[str, list[int]],
+) -> np.ndarray:
+    return np.fromiter(
+        (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
+        dtype=np.int32,
+        count=len(req_ids),
+    )
+
+
+def apply_draft_token_capacity(
+    num_scheduled_tokens: np.ndarray,
+    scheduled_draft_tokens_per_req: np.ndarray,
+    idx_mapping_np: np.ndarray,
+    draft_token_capacity_np: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    num_draft_tokens_per_req = np.minimum(
+        scheduled_draft_tokens_per_req,
+        draft_token_capacity_np[idx_mapping_np],
+    )
+    pruned_draft_tokens_per_req = (
+        scheduled_draft_tokens_per_req - num_draft_tokens_per_req
+    )
+    return (
+        num_scheduled_tokens - pruned_draft_tokens_per_req,
+        num_draft_tokens_per_req,
+        pruned_draft_tokens_per_req,
+    )
+
+
 def get_effective_scheduled_token_counts(
     scheduler_output: SchedulerOutput,
     req_id_to_index: dict[str, int],
@@ -22,19 +65,19 @@ def get_effective_scheduled_token_counts(
     )
     draft_tokens = scheduler_output.scheduled_spec_decode_tokens
     if draft_tokens:
-        scheduled_draft_tokens_per_req = np.fromiter(
-            (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
-            dtype=np.int32,
-            count=num_reqs,
+        scheduled_draft_tokens_per_req = get_scheduled_draft_token_counts(
+            req_ids, draft_tokens
         )
         idx_mapping_np = np.fromiter(
             map(req_id_to_index.get, req_ids),
             dtype=np.int32,
             count=num_reqs,
         )
-        num_scheduled_tokens -= scheduled_draft_tokens_per_req - np.minimum(
+        num_scheduled_tokens, _, _ = apply_draft_token_capacity(
+            num_scheduled_tokens,
             scheduled_draft_tokens_per_req,
-            draft_token_capacity_np[idx_mapping_np],
+            idx_mapping_np,
+            draft_token_capacity_np,
         )
     return int(num_scheduled_tokens.sum()), int(num_scheduled_tokens.max())
 

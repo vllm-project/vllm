@@ -1553,12 +1553,18 @@ def test_dspark_capacity_config_validation():
         method="ngram",
         num_speculative_tokens=1,
         dspark_confidence_threshold=0.25,
-        dspark_sps_profile=[1.0, 0.75],
+        dspark_budget_frac=0.5,
     )
     assert speculative_config.dspark_confidence_threshold == 0.25
-    assert speculative_config.dspark_sps_profile == [1.0, 0.75]
+    assert speculative_config.dspark_budget_frac == 0.5
+    assert (
+        SpeculativeConfig(
+            method="ngram", num_speculative_tokens=1
+        ).dspark_confidence_threshold
+        == 0.0
+    )
 
-    for threshold in (0.0, 1.0, -0.1, 1.1):
+    for threshold in (-0.1, 1.1):
         with pytest.raises(ValueError, match="dspark_confidence_threshold"):
             SpeculativeConfig(
                 method="ngram",
@@ -1566,12 +1572,12 @@ def test_dspark_capacity_config_validation():
                 dspark_confidence_threshold=threshold,
             )
 
-    for profile in ([], [1.0, 0.0], [1.0, -0.1]):
-        with pytest.raises(ValueError, match="dspark_sps_profile"):
+    for budget_frac in (0.0, -0.1, 1.1):
+        with pytest.raises(ValueError, match="dspark_budget_frac"):
             SpeculativeConfig(
                 method="ngram",
                 num_speculative_tokens=1,
-                dspark_sps_profile=profile,
+                dspark_budget_frac=budget_frac,
             )
 
 

@@ -629,6 +629,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 common_attn_metadata,
                 decode_threshold=self.reorder_batch_threshold,
                 require_uniform=not (self.use_flattening or self.use_varlen),
+                treat_short_extends_as_decodes=not self.use_varlen,
             )
         )
 
@@ -727,9 +728,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             max_decode_len = int(decode_lens_cpu.max().item())
             next_n = 1 + self.num_speculative_tokens
+            has_prefill_decodes = False
+            if common_attn_metadata.is_prefilling is not None:
+                has_prefill_decodes = bool(
+                    common_attn_metadata.is_prefilling[:num_decodes].any().item()
+                )
+            use_varlen = (
+                self.use_varlen and max_decode_len > 1 and not has_prefill_decodes
+            )
             use_native = (
-                not (self.use_flattening or self.use_varlen)
-                and max_decode_len <= next_n
+                not (self.use_flattening or use_varlen) and max_decode_len <= next_n
             )
 
             global_seq_lens_for_decode = self._prepare_global_decode_seq_lens(
@@ -745,7 +753,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             # Build the varlen per-row request ids from the original per-request
             # decode_lens, before _prepare_decode_tensors overwrites the buffer.
             decode_indices = None
-            if self.use_varlen:
+            if use_varlen:
                 decode_indices = self._build_varlen_decode_indices(
                     decode_lens=decode_lens,
                     decode_lens_cpu=decode_lens_cpu,

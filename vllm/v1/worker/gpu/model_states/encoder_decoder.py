@@ -124,12 +124,17 @@ class EncoderDecoderModelState(ModelState):
         )
 
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
-        max_query_len = input_batch.num_scheduled_tokens.max().item()
+        max_query_len = input_batch.max_query_len
         seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
         if for_capture:
             max_seq_len = self.max_model_len
         else:
             max_seq_len = int(seq_lens_cpu_upper_bound[:num_reqs].max().item())
+        is_prefilling = torch.from_numpy(input_batch.is_prefilling_np)
+        if num_reqs != input_batch.num_reqs:
+            padded_is_prefilling = torch.zeros(num_reqs, dtype=torch.bool)
+            padded_is_prefilling[: input_batch.num_reqs] = is_prefilling
+            is_prefilling = padded_is_prefilling
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -147,6 +152,7 @@ class EncoderDecoderModelState(ModelState):
             model_specific_attn_metadata=enc_dec_attn_metadata,
             for_cudagraph_capture=for_capture,
             rswa_prefix_lens=input_batch.prompt_lens,
+            is_prefilling=is_prefilling,
         )
         return attn_metadata
 

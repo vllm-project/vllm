@@ -534,6 +534,7 @@ def sparse_attn_indexer(
         batch_size = padded_q_quant_decode_tokens.shape[0]
         next_n = padded_q_quant_decode_tokens.shape[1]
         num_padded_tokens = batch_size * next_n
+        paged_weights = weights[:num_padded_tokens]
         seq_lens = decode_metadata.seq_lens[:batch_size]
         # seq_lens is always 2D: (B, next_n) for native spec decode, (B, 1)
         # otherwise. deep_gemm fp8_fp4_paged_mqa_logits requires 2D context_lens;
@@ -552,7 +553,7 @@ def sparse_attn_indexer(
             logits = torch.ops.vllm.xpu_fp8_paged_mqa_logits(
                 padded_q_quant_cast,
                 kv_cache,
-                weights[:num_padded_tokens],
+                paged_weights,
                 seq_lens_xpu,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,
@@ -562,7 +563,7 @@ def sparse_attn_indexer(
             logits = fp8_fp4_paged_mqa_logits(
                 (padded_q_quant_cast, padded_q_scale),
                 kv_cache,
-                weights[:num_padded_tokens],
+                paged_weights,
                 seq_lens,
                 decode_metadata.block_table,
                 decode_metadata.schedule_metadata,

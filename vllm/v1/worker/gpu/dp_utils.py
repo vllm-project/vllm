@@ -19,6 +19,7 @@ def sync_cudagraph_and_dp_padding(
     num_tokens: int,
     num_reqs: int,
     uniform_token_count: int | None,
+    max_req_tokens: int | None,
     dp_size: int,
     dp_rank: int,
     num_active_loras: int = 0,
@@ -30,15 +31,17 @@ def sync_cudagraph_and_dp_padding(
     """
     assert dp_size > 1, "DP size must be greater than 1"
     group = get_dp_group().cpu_group
-    tensor = torch.zeros(3, dp_size, dtype=torch.int32, device="cpu")
+    tensor = torch.zeros(4, dp_size, dtype=torch.int32, device="cpu")
     tensor[0][dp_rank] = num_tokens
     tensor[1][dp_rank] = desired_batch_desc.cg_mode.value
     tensor[2][dp_rank] = uniform_token_count or 0  # (0 means None)
+    tensor[3][dp_rank] = max_req_tokens or 0  # (0 means None)
     dist.all_reduce(tensor, group=group)
 
     num_tokens_across_dp = tensor[0]
     cg_mode_across_dp = tensor[1]
     uniform_token_counts_across_dp = tensor[2]
+    max_req_tokens_across_dp = tensor[3]
 
     if torch.all(num_tokens_across_dp == 0).item():
         synced_desc = BatchExecutionDescriptor(
@@ -68,6 +71,9 @@ def sync_cudagraph_and_dp_padding(
         uniform_token_counts_across_dp == synced_uniform_token_count
     ):
         synced_uniform_token_count = None
+    synced_max_req_tokens: int | None = int(max_req_tokens_across_dp.max())
+    if synced_max_req_tokens == 0:
+        synced_max_req_tokens = None
 
     # Dispatch for the final synced values, use num_reqs instead of synced_num_reqs
     # so we don't perform request padding for PIECEWISE graphs.
@@ -77,6 +83,7 @@ def sync_cudagraph_and_dp_padding(
         synced_num_tokens,
         synced_uniform_token_count,
         num_active_loras=num_active_loras,
+        max_req_tokens=synced_max_req_tokens,
     )
 
     # Update num_tokens_across_dp to reflect padded size.
@@ -90,6 +97,7 @@ def dispatch_cg_and_sync_dp(
     num_reqs: int,
     num_tokens: int,
     uniform_token_count: int | None,
+    max_req_tokens: int | None,
     dp_size: int,
     dp_rank: int,
     need_eager: bool = False,
@@ -100,6 +108,7 @@ def dispatch_cg_and_sync_dp(
             cg_mode=CUDAGraphMode.NONE,
             num_tokens=num_tokens,
             num_reqs=num_reqs,
+            max_req_tokens=max_req_tokens,
             num_active_loras=num_active_loras,
         )
     else:
@@ -112,6 +121,7 @@ def dispatch_cg_and_sync_dp(
             num_tokens,
             uniform_token_count,
             num_active_loras=num_active_loras,
+            max_req_tokens=max_req_tokens,
         )
 
     if dp_size == 1:
@@ -123,6 +133,7 @@ def dispatch_cg_and_sync_dp(
         num_tokens,
         num_reqs,
         uniform_token_count,
+        max_req_tokens,
         dp_size,
         dp_rank,
         num_active_loras=num_active_loras,

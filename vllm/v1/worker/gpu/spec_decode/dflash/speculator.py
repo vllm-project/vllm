@@ -374,6 +374,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs,
             num_query_tokens,
             uniform_token_count=self.num_query_per_req,
+            max_req_tokens=None,
             dp_size=self.dp_size,
             dp_rank=self.dp_rank,
             need_eager=is_profile,

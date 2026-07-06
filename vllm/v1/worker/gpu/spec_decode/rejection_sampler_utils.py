@@ -56,6 +56,11 @@ def _target_logit_idx(
 
 
 @triton.jit
+def _safe_draft_token(draft_token):
+    return draft_token >= 0, tl.maximum(0, draft_token)
+
+
+@triton.jit
 def _compute_global_residual_mass(
     local_residual_mass_ptr,
     local_residual_mass_stride,
@@ -74,6 +79,10 @@ def _compute_global_residual_mass(
     HAS_DRAFT_LOGITS: tl.constexpr,
     HAS_TARGET_LOGIT_IDX_MAPPING: tl.constexpr,
 ):
+    draft_token = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
+    if draft_token < 0:
+        return prefix_joint_ratio
+
     if HAS_DRAFT_LOGITS:
         blocks = tl.arange(0, PADDED_VOCAB_NUM_BLOCKS)
         mask = blocks < vocab_num_blocks
@@ -87,9 +96,6 @@ def _compute_global_residual_mass(
         # One-hot draft. M_s is a point mass at this draft token
         # so the residual mass reduces to the closed form:
         #   p * (1 - M_b(draft_token)).
-        draft_token = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
-        if draft_token < 0:
-            return prefix_joint_ratio
         target_lse = _compute_global_logsumexp(
             target_local_max_ptr,
             target_local_max_stride,
@@ -373,8 +379,7 @@ def _compute_cumulative_log_p_kernel(
     for step in range(num_draft_tokens):
         logit_idx = start_idx + step
         draft_token = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
-        is_valid_draft = draft_token >= 0
-        draft_token = tl.maximum(0, draft_token)
+        is_valid_draft, draft_token = _safe_draft_token(draft_token)
         target_logprob, draft_logprob, _, _ = _compute_global_logprobs_and_logsumexp(
             draft_token,
             True,  # mask
@@ -400,11 +405,8 @@ def _compute_cumulative_log_p_kernel(
             HAS_DRAFT_LOGITS,
             HAS_TARGET_LOGIT_IDX_MAPPING,
         )
-        log_p = tl.where(
-            is_valid_draft,
-            tl.minimum(log_p + (target_logprob - draft_logprob), 0.0),
-            float("-inf"),
-        )
+        log_p = tl.minimum(log_p + (target_logprob - draft_logprob), 0.0)
+        log_p = tl.where(is_valid_draft, log_p, float("-inf"))
         tl.store(cumulative_log_p_ptr + logit_idx, log_p)
 
 
@@ -579,45 +581,40 @@ def _rejection_kernel(
     for i in range(num_draft_tokens):
         logit_idx = start_idx + i
         draft_sampled = tl.load(draft_sampled_ptr + logit_idx + 1).to(tl.int64)
-        is_valid_draft = draft_sampled >= 0
+        is_valid_draft, draft_sampled = _safe_draft_token(draft_sampled)
         pos = tl.load(pos_ptr + logit_idx)
         u = tl_rand32(seed, pos, includes_zero=False)
         if USE_BLOCK_VERIFICATION and not is_greedy:
             # Block verification (Sun et al., 2024): https://arxiv.org/abs/2403.10444
-            if is_valid_draft:
-                prefix_joint_ratio = tl.exp(
-                    tl.load(cumulative_log_p_ptr + logit_idx).to(tl.float32)
-                )
-                if i < num_draft_tokens - 1:
-                    residual_mass = _compute_global_residual_mass(
-                        local_residual_mass_ptr,
-                        local_residual_mass_stride,
-                        prefix_joint_ratio,
-                        target_logits_ptr,
-                        target_logits_stride,
-                        target_local_max_ptr,
-                        target_local_max_stride,
-                        target_local_sumexp_ptr,
-                        target_local_sumexp_stride,
-                        draft_sampled_ptr,
-                        target_logit_idx_mapping_ptr,
-                        logit_idx + 1,
-                        vocab_num_blocks,
-                        PADDED_VOCAB_NUM_BLOCKS,
-                        HAS_DRAFT_LOGITS,
-                        HAS_TARGET_LOGIT_IDX_MAPPING,
-                    )
-                    denom = residual_mass + 1.0 - prefix_joint_ratio
-                    h = tl.where(denom > 0.0, residual_mass / denom, 1.0)
-                else:
-                    h = prefix_joint_ratio
-            else:
-                h = 0.0
-            accepted_length = tl.where(u <= h, i + 1, accepted_length)
-            tl.store(
-                sampled_ptr + req_idx * sampled_stride + i,
-                tl.maximum(0, draft_sampled),
+            prefix_joint_ratio = tl.exp(
+                tl.load(cumulative_log_p_ptr + logit_idx).to(tl.float32)
             )
+            if i < num_draft_tokens - 1:
+                residual_mass = _compute_global_residual_mass(
+                    local_residual_mass_ptr,
+                    local_residual_mass_stride,
+                    prefix_joint_ratio,
+                    target_logits_ptr,
+                    target_logits_stride,
+                    target_local_max_ptr,
+                    target_local_max_stride,
+                    target_local_sumexp_ptr,
+                    target_local_sumexp_stride,
+                    draft_sampled_ptr,
+                    target_logit_idx_mapping_ptr,
+                    logit_idx + 1,
+                    vocab_num_blocks,
+                    PADDED_VOCAB_NUM_BLOCKS,
+                    HAS_DRAFT_LOGITS,
+                    HAS_TARGET_LOGIT_IDX_MAPPING,
+                )
+                denom = residual_mass + 1.0 - prefix_joint_ratio
+                h = tl.where(denom > 0.0, residual_mass / denom, 1.0)
+            else:
+                h = prefix_joint_ratio
+            h = tl.where(is_valid_draft, h, 0.0)
+            accepted_length = tl.where(u <= h, i + 1, accepted_length)
+            tl.store(sampled_ptr + req_idx * sampled_stride + i, draft_sampled)
         elif accepted:
             if is_greedy:
                 # Greedy sampling. Accept IFF draft matches target argmax.
@@ -635,9 +632,9 @@ def _rejection_kernel(
                 if SYNTHETIC_MODE:
                     rate = tl.load(synthetic_conditional_rates_ptr + i)
                     # -1 is used for padded draft token ids that should be rejected.
-                    accepted &= (u < rate) & (draft_sampled >= 0)
+                    accepted &= (u < rate) & is_valid_draft
                 else:
-                    accepted &= target_argmax == draft_sampled
+                    accepted &= (target_argmax == draft_sampled) & is_valid_draft
                 tl.store(
                     sampled_ptr + req_idx * sampled_stride + i,
                     draft_sampled if accepted else target_argmax,
@@ -645,8 +642,6 @@ def _rejection_kernel(
             else:
                 # Speculative decoding (Leviathan et al., 2023): https://arxiv.org/abs/2211.17192
                 # -1 is used for padded draft token ids that should be rejected.
-                # Avoid possible OOB ptr access.
-                draft_sampled = tl.maximum(0, draft_sampled)
                 target_logprob, draft_logprob, target_lse, draft_lse = (
                     _compute_global_logprobs_and_logsumexp(
                         draft_sampled,

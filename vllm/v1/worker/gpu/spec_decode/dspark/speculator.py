@@ -29,125 +29,12 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
-from vllm.triton_utils import tl, triton
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
+from vllm.v1.worker.gpu.spec_decode.dspark.capacity import (
+    compute_draft_token_capacity_from_confidence,
+)
 from vllm.v1.worker.gpu.spec_decode.dspark.utils import load_dspark_model
-
-
-@triton.jit
-def _compute_prefix_survival_probabilities_kernel(
-    confidence_logits_ptr,
-    survival_probs_ptr,
-    NUM_SPECULATIVE_STEPS: tl.constexpr,
-):
-    req_idx = tl.program_id(0)
-    survival_prob = tl.full((), 1.0, tl.float32)
-    for step in tl.static_range(0, NUM_SPECULATIVE_STEPS):
-        confidence_logit = tl.load(
-            confidence_logits_ptr + req_idx * NUM_SPECULATIVE_STEPS + step
-        ).to(tl.float32)
-        confidence_prob = 1.0 / (1.0 + tl.exp(-confidence_logit))
-        survival_prob *= confidence_prob
-        tl.store(
-            survival_probs_ptr + req_idx * NUM_SPECULATIVE_STEPS + step,
-            survival_prob,
-        )
-
-
-@triton.jit
-def _allocate_draft_token_capacity_kernel(
-    survival_probs_ptr,
-    capacity_ptr,
-    sps_profile_ptr,
-    num_reqs,
-    min_survival_probability,
-    REQ_BLOCK: tl.constexpr,
-    NUM_SPECULATIVE_STEPS: tl.constexpr,
-    MAX_ADMISSIONS: tl.constexpr,
-    HAS_SPS_PROFILE: tl.constexpr,
-    SPS_PROFILE_LEN: tl.constexpr,
-):
-    offsets = tl.arange(0, REQ_BLOCK)
-    active = offsets < num_reqs
-    lengths = tl.full((REQ_BLOCK,), 0, tl.int32)
-    best_lengths = tl.full((REQ_BLOCK,), 0, tl.int32)
-
-    batch_size = tl.full((), num_reqs, tl.int32)
-    expected_tokens = batch_size.to(tl.float32)
-    if HAS_SPS_PROFILE:
-        profile_idx = tl.minimum(batch_size, SPS_PROFILE_LEN - 1)
-        sps = tl.load(sps_profile_ptr + profile_idx).to(tl.float32)
-    else:
-        sps = 1.0
-    best_throughput = expected_tokens * sps
-
-    for _ in tl.range(0, MAX_ADMISSIONS):
-        has_next = active & (lengths < NUM_SPECULATIVE_STEPS)
-        next_scores = tl.load(
-            survival_probs_ptr + offsets * NUM_SPECULATIVE_STEPS + lengths,
-            mask=has_next,
-            other=-1.0,
-        )
-        next_scores = tl.where(
-            next_scores >= min_survival_probability,
-            next_scores,
-            -1.0,
-        )
-        best_score, best_idx = tl.max(next_scores, axis=0, return_indices=True)
-        admit = best_score >= 0.0
-        is_best_req = offsets == best_idx
-        lengths += tl.where(admit & is_best_req, 1, 0)
-
-        batch_size += tl.where(admit, 1, 0)
-        expected_tokens += tl.where(admit, best_score, 0.0)
-        if HAS_SPS_PROFILE:
-            profile_idx = tl.minimum(batch_size, SPS_PROFILE_LEN - 1)
-            sps = tl.load(sps_profile_ptr + profile_idx).to(tl.float32)
-        else:
-            sps = 1.0
-        throughput = expected_tokens * sps
-        better = admit & (throughput > best_throughput)
-        best_throughput = tl.where(better, throughput, best_throughput)
-        best_lengths = tl.where(better, lengths, best_lengths)
-
-    tl.store(capacity_ptr + offsets, best_lengths, mask=active)
-
-
-def compute_draft_token_capacity_from_confidence(
-    confidence_logits: torch.Tensor,
-    draft_token_capacity: torch.Tensor,
-    min_survival_probability: float,
-    num_reqs: int,
-    num_speculative_steps: int,
-    survival_probs: torch.Tensor | None = None,
-    sps_profile: torch.Tensor | None = None,
-) -> None:
-    if num_reqs == 0 or num_speculative_steps == 0:
-        return
-    if survival_probs is None:
-        survival_probs = torch.empty_like(confidence_logits)
-    _compute_prefix_survival_probabilities_kernel[(num_reqs,)](
-        confidence_logits,
-        survival_probs,
-        NUM_SPECULATIVE_STEPS=num_speculative_steps,
-    )
-    req_block = triton.next_power_of_2(max(num_reqs, 1))
-    has_sps_profile = sps_profile is not None and sps_profile.numel() > 0
-    if sps_profile is None:
-        sps_profile = survival_probs
-    _allocate_draft_token_capacity_kernel[(1,)](
-        survival_probs,
-        draft_token_capacity,
-        sps_profile,
-        num_reqs,
-        min_survival_probability,
-        REQ_BLOCK=req_block,
-        NUM_SPECULATIVE_STEPS=num_speculative_steps,
-        MAX_ADMISSIONS=num_reqs * num_speculative_steps,
-        HAS_SPS_PROFILE=has_sps_profile,
-        SPS_PROFILE_LEN=sps_profile.numel(),
-    )
 
 
 class DSparkSpeculator(DFlashSpeculator):
@@ -206,21 +93,12 @@ class DSparkSpeculator(DFlashSpeculator):
             device=device,
         )
         self.min_survival_probability = getattr(
-            self.speculative_config, "dspark_confidence_threshold", None
+            self.speculative_config, "dspark_confidence_threshold", 0.0
         )
-        sps_profile = getattr(self.speculative_config, "dspark_sps_profile", None)
-        self.sps_profile = (
-            None
-            if sps_profile is None
-            else torch.tensor(sps_profile, dtype=torch.float32, device=device)
-        )
+        self.capacity_budget_frac = self.speculative_config.dspark_budget_frac
         self.use_draft_token_capacity = (
-            self.min_survival_probability is not None or self.sps_profile is not None
+            self.min_survival_probability > 0.0 or self.capacity_budget_frac < 1.0
         )
-        if self.use_draft_token_capacity:
-            self.extra_uniform_decode_lens = list(
-                range(1, self.num_speculative_steps + 1)
-            )
 
     def load_draft_model(
         self,
@@ -228,11 +106,20 @@ class DSparkSpeculator(DFlashSpeculator):
         target_attn_layer_names: set[str],
     ) -> torch.nn.Module:
         model = load_dspark_model(target_model, self.vllm_config)
+        if (
+            self.use_draft_token_capacity
+            and getattr(model, "compute_confidence", None) is None
+        ):
+            raise ValueError(
+                "DSpark draft-token capacity requires a draft model with a "
+                f"confidence head; {type(model).__name__} does not implement "
+                "compute_confidence."
+            )
         # Reduced draft vocab: probabilistic rejection sampling indexes draft
         # logits by target id, so precompute the draft->target column map and a
         # scratch buffer to scatter logits into target vocab before sampling.
-        if self.draft_logits is not None and model.draft_id_to_target_id is not None:
-            d2t = model.draft_id_to_target_id
+        d2t = getattr(model, "draft_id_to_target_id", None)
+        if self.draft_logits is not None and d2t is not None:
             self._d2t_scatter_index = (
                 torch.arange(d2t.shape[0], device=d2t.device) + d2t
             )
@@ -269,9 +156,7 @@ class DSparkSpeculator(DFlashSpeculator):
         sample_pos = self.sample_pos[:num_sample].view(num_reqs, n_spec)
         confidence_logits = self.draft_token_confidence_logits[:num_reqs]
         min_survival_probability = self.min_survival_probability
-        use_confidence_capacity = (
-            min_survival_probability is not None or self.sps_profile is not None
-        )
+        use_confidence_capacity = self.use_draft_token_capacity
 
         # Anchor (bonus) token per request = the input id at query offset 0,
         # read via the precomputed persistent index (fixed buffer for capture).
@@ -319,19 +204,14 @@ class DSparkSpeculator(DFlashSpeculator):
             prev = draft_sampled_i
 
         if use_confidence_capacity and not is_profile:
-            allocator_min_survival_probability = (
-                0.0
-                if self.sps_profile is not None or min_survival_probability is None
-                else min_survival_probability
-            )
             compute_draft_token_capacity_from_confidence(
                 self.draft_token_confidence_logits,
                 self.draft_token_capacity,
-                allocator_min_survival_probability,
+                min_survival_probability,
                 num_reqs,
                 self.num_speculative_steps,
                 self.draft_token_survival_probs,
-                self.sps_profile,
+                self.capacity_budget_frac,
             )
         else:
             self.draft_token_capacity[:num_reqs].fill_(self.num_speculative_steps)

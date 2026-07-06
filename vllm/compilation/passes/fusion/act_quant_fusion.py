@@ -8,7 +8,6 @@ import torch
 from torch._higher_order_ops.auto_functionalize import auto_functionalized
 from torch._ops import OpOverload
 
-import vllm._C  # noqa: F401
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
