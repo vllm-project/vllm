@@ -49,6 +49,7 @@ code is identical across transports.
 from vllm.config import IPCWeightTransferConfig
 from vllm.distributed.weight_transfer import (
     HTTPVLLMWeightSyncClient,
+    ModuleSource,
     RayVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
 )
@@ -62,9 +63,9 @@ client = HTTPVLLMWeightSyncClient("http://localhost:8000")
 engine = WeightTransferTrainerFactory.trainer_init(
     backend="ipc",
     config=IPCWeightTransferConfig(packed=False),
-    init_info=IPCTrainerInitInfo(),
+    init_info=IPCTrainerInitInfo(rank=0),  # single-GPU trainer = sender
     client=client,
-    weight_iterator=model.named_parameters,
+    source=ModuleSource(model),
 )
 
 # Drives start_weight_update / update_weights / finish_weight_update.
@@ -84,10 +85,11 @@ no import or subclassing required.
 
 ### Multi-rank (FSDP) trainers
 
-Only rank 0 holds the engine and drives the inference side. All ranks must still participate
-in the IPC handle all-gather, so non-rank-0 ranks call
-`IPCTrainerWeightTransferEngine.participate(weight_iterator, config)` concurrently with rank
-0's `send_weights()`. See the FSDP example below.
+Every rank builds the engine via `trainer_init` and calls `send_weights()` concurrently. All
+ranks join the IPC handle all-gather (and any FSDP `full_tensor()` gather); only rank 0 (the
+sender) ships the merged handles and drives the inference side — non-sender ranks guard those
+steps on `is_sender` internally. Pass each rank's index via the init info
+(`IPCTrainerInitInfo(rank=...)`). See the FSDP example below.
 
 ## Examples
 

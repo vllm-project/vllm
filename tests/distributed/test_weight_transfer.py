@@ -1054,7 +1054,7 @@ def inference_receive_ipc_tensor(
 
     import torch
 
-    _set_ray_assigned_device()
+    device = _set_ray_assigned_device()
 
     from vllm.config.parallel import ParallelConfig
     from vllm.config.weight_transfer import IPCWeightTransferConfig
@@ -1083,7 +1083,7 @@ def inference_receive_ipc_tensor(
     vllm_config.model_config = MagicMock()
 
     recorder = Recorder()
-    engine = IPCWeightTransferEngine(config, vllm_config, "cuda", recorder)
+    engine = IPCWeightTransferEngine(config, vllm_config, device, recorder)
     # Transport-only test: bypass the set_current_vllm_config context that
     # receive_weights enters, since vllm_config here is a mock.
     import vllm.config as _vllm_config_mod

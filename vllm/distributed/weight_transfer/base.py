@@ -113,19 +113,18 @@ class TrainerInitInfo(WeightTransferInitInfo):
 
     `rank` is this trainer process's rank, provided **explicitly** by the
     caller — the engine does not read it from a global process group, which is
-    ambiguous once several groups (FSDP / TP / PP / EP) exist. The sender is the
-    rank where `rank == sender_rank`; only it opens the endpoint and drives the
-    inference-side RPCs, while every rank still runs the trainer-side
-    collectives. Backend subclasses add their own (positional) fields; `rank` /
-    `sender_rank` are keyword-only so that ordering never conflicts.
+    ambiguous once several groups (FSDP / TP / PP / EP) exist. Rank 0 is always
+    the sender: only it opens the endpoint and drives the inference-side RPCs,
+    while every rank still runs the trainer-side collectives. Backend subclasses
+    add their own (positional) fields; `rank` is keyword-only so that ordering
+    never conflicts.
     """
 
     rank: int = field(kw_only=True)
-    sender_rank: int = field(default=0, kw_only=True)
 
     @property
     def is_sender(self) -> bool:
-        return self.rank == self.sender_rank
+        return self.rank == 0
 
 
 @dataclass
@@ -340,8 +339,8 @@ class TrainerWeightTransferEngine(ABC, Generic[TConfig, TInitInfo]):
     then replayed each round by the no-argument `send_weights()`.
 
     Multi-rank trainers: `trainer_init` and `send_weights` are
-    called on *every* trainer rank. Rank is resolved once, at `trainer_init`,
-    into `is_sender` (default: rank 0). Non-sender ranks still run every
+    called on *every* trainer rank. Rank 0 is the sender, resolved once at
+    `trainer_init` into `is_sender`. Non-sender ranks still run every
     collective (iterating the source, metadata export, IPC handle all-gather) so
     the group stays aligned, but each engine explicitly guards the control-plane
     RPCs and the transmit on `self.is_sender`, so only the sender touches the

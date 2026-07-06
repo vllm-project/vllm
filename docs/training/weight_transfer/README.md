@@ -76,6 +76,7 @@ the protocol is structural).
 ```python
 from vllm.config import NCCLWeightTransferConfig
 from vllm.distributed.weight_transfer import (
+    ModuleSource,
     RayVLLMWeightSyncClient,        # or HTTPVLLMWeightSyncClient(base_url)
     WeightTransferTrainerFactory,
 )
@@ -87,9 +88,11 @@ from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
 engine = WeightTransferTrainerFactory.trainer_init(
     backend="nccl",
     config=NCCLWeightTransferConfig(packed=True),
-    init_info=NCCLTrainerInitInfo(master_address=addr, master_port=port, world_size=ws),
+    init_info=NCCLTrainerInitInfo(
+        master_address=addr, master_port=port, world_size=ws, rank=0
+    ),
     client=RayVLLMWeightSyncClient(llm_handle),
-    weight_iterator=model.named_parameters,  # a factory: returns a fresh iterator
+    source=ModuleSource(model),  # re-iterable (name, tensor) source
 )
 
 # 2. Push weights. One call drives start_weight_update / update_weights /

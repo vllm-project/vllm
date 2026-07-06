@@ -43,8 +43,8 @@ class NCCLTrainerInitInfo(TrainerInitInfo):
     """Trainer-side initialization info for NCCL weight transfer backends.
 
     The sender opens its endpoint as NCCL rank 0, so it needs no `rank_offset`.
-    `world_size` is the full trainer+worker NCCL group size. `rank` /
-    `sender_rank` (from `TrainerInitInfo`) pick which trainer process sends.
+    `world_size` is the full trainer+worker NCCL group size. `rank` (from
+    `TrainerInitInfo`) identifies this trainer process; rank 0 is the sender.
     """
 
     master_address: str

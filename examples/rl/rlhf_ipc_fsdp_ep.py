@@ -14,9 +14,10 @@ Layout (4 GPUs, TP=1, DP=4, EP):
   * A ``DataParallelInferenceEngine`` actor spawns all 4 LLM actors,
     waits for initialization, and orchestrates generation / weight-sync.
 
-The rank-0 FSDP worker holds an ``IPCTrainerWeightTransferEngine`` with a
-``RayVLLMWeightSyncClient`` over the DP LLM actors; non-rank-0 ranks join the
-IPC handle all-gather via ``IPCTrainerWeightTransferEngine.participate``.
+Every FSDP rank builds an ``IPCTrainerWeightTransferEngine`` (via ``trainer_init``)
+and calls ``send_weights()``; all ranks join the IPC handle all-gather, and only
+rank 0 (the sender) ships the merged handles and drives the DP LLM actors through
+its ``RayVLLMWeightSyncClient``.
 
 This example was run on 4xH100.
 """

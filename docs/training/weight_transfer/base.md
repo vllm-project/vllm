@@ -40,14 +40,17 @@ parameter-free `send_weights()`. It talks to the inference side through a
 
 | Method | Description |
 | ------ | ----------- |
-| `trainer_init(config, init_info, *, client, weight_iterator=None)` | Classmethod factory: rendezvous with the inference side (driving `client.init_weight_transfer_engine`) and return a ready instance |
-| `send_weights(weight_iterator=None)` | Push weights and drive `start_weight_update` / `update_weights` / `finish_weight_update` via the client |
+| `trainer_init(config, init_info, *, client, source)` | Classmethod factory: rendezvous with the inference side (driving `client.init_weight_transfer_engine`) and return a ready instance |
+| `send_weights()` | Push weights and drive `start_weight_update` / `update_weights` / `finish_weight_update` via the client |
 | `shutdown()` | Tear down communicators / process groups (default no-op) |
 
-`weight_iterator` is a **factory** (`Callable[[], Iterator[tuple[str, Tensor]]]`),
-not a bare iterator, because `model.named_parameters()` is single-use and each
-send round must re-iterate. `materialize_full_tensor(tensor)` (in `base.py`) is
-the shared helper that gathers FSDP shards (`full_tensor()`) at send time.
+`source` is a **`WeightSource`**: a re-iterable stream of `(name, tensor)` pairs
+plus a `metadata()` channel. It is re-iterable (not a bare iterator) because
+`model.named_parameters()` is single-use and each send round must re-iterate. The
+built-in `ModuleSource(module)` covers the common case — iterating it materializes
+each parameter (gathering FSDP `DTensor` shards via `full_tensor()`), while
+`metadata()` reads the global shape/dtype without gathering. `materialize_full_tensor`
+(in `base.py`) is the shared gather helper it uses.
 
 ### VLLMWeightSyncClient (control plane)
 
@@ -170,11 +173,11 @@ The trainer side is a separate `TrainerWeightTransferEngine`, registered with
 `WeightTransferTrainerFactory`:
 
 ```python
-from typing import Self
+from typing_extensions import Self
 from vllm.distributed.weight_transfer.base import (
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
-    WeightIterator,
+    WeightSource,
 )
 
 class MyTrainerEngine(TrainerWeightTransferEngine[MyConfig, MyTrainerInitInfo]):
@@ -182,19 +185,23 @@ class MyTrainerEngine(TrainerWeightTransferEngine[MyConfig, MyTrainerInitInfo]):
     config_cls = MyConfig
 
     @classmethod
-    def trainer_init(cls, config, init_info, *, client, weight_iterator=None) -> Self:
-        engine = cls(config, client=client, weight_iterator=weight_iterator)
-        # Build the worker-side init info and hand it to the inference side; open
-        # the trainer endpoint (concurrently if the backend rendezvous blocks).
-        client.init_weight_transfer_engine(worker_init_info_dict)
+    def trainer_init(cls, config, init_info, *, client, source) -> Self:
+        engine = cls(
+            config, client=client, source=source, is_sender=init_info.is_sender
+        )
+        # Only rank 0 (the sender) drives the inference side. Build the
+        # worker-side init info and hand it over; open the trainer endpoint
+        # (concurrently if the backend rendezvous blocks).
+        if engine.is_sender:
+            client.init_weight_transfer_engine(worker_init_info_dict)
         return engine
 
-    def send_weights(self, weight_iterator: WeightIterator | None = None) -> None:
-        factory = self._resolve_iterator(weight_iterator)
-        update_info = build_update_info(factory())  # per-round metadata
-        self.client.start_weight_update()
-        self.client.update_weights(update_info)      # + data-plane transfer
-        self.client.finish_weight_update()
+    def send_weights(self) -> None:
+        update_info = build_update_info(self.source.metadata())  # per-round metadata
+        if self.is_sender:
+            self.client.start_weight_update()
+            self.client.update_weights(update_info)  # + data-plane transfer
+            self.client.finish_weight_update()
 ```
 
 ### 3. Register with the Factory

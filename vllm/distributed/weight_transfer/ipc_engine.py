@@ -41,8 +41,8 @@ class IPCWeightTransferInitInfo(WeightTransferInitInfo):
 @dataclass
 class IPCTrainerInitInfo(TrainerInitInfo):
     """Trainer-side init info for IPC weight transfer. No rendezvous needed;
-    `rank` / `sender_rank` (from `TrainerInitInfo`) pick which trainer ships the
-    merged IPC handles. All ranks still join the handle all-gather."""
+    `rank` (from `TrainerInitInfo`) identifies this trainer process — rank 0
+    ships the merged IPC handles. All ranks still join the handle all-gather."""
 
 
 @dataclass
@@ -134,36 +134,6 @@ class IPCWeightTransferEngine(
         model: torch.nn.Module,
     ) -> None:
         super().__init__(config, vllm_config, device, model)
-
-    def parse_update_info(
-        self, update_dict: dict[str, Any]
-    ) -> IPCWeightTransferUpdateInfo:
-        """Parse update dict, deserializing pickled IPC handles if present.
-
-        HTTP transport sends IPC handles as a base64-encoded pickle under the
-        key ``ipc_handles_pickled``. This method deserializes them back into
-        ``ipc_handles`` before constructing the typed dataclass, keeping
-        serialization concerns out of the dataclass itself.
-
-        Requires ``VLLM_ALLOW_INSECURE_SERIALIZATION=1`` because the
-        payload is deserialized via ``pickle.loads``.
-        """
-        pickled = update_dict.pop("ipc_handles_pickled", None)
-        if pickled is not None:
-            if update_dict.get("ipc_handles") is not None:
-                raise ValueError(
-                    "Cannot specify both `ipc_handles` and `ipc_handles_pickled`"
-                )
-
-            if not envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
-                raise ValueError(
-                    "Refusing to deserialize `ipc_handles_pickled` without "
-                    "VLLM_ALLOW_INSECURE_SERIALIZATION=1"
-                )
-
-            update_dict["ipc_handles"] = pickle.loads(base64.b64decode(pickled))
-
-        return super().parse_update_info(update_dict)
 
     def init_transfer_engine(self, init_info: IPCWeightTransferInitInfo) -> None:
         """
