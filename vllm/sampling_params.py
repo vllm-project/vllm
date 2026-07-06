@@ -614,9 +614,9 @@ class SamplingParams(
                 "Set detokenize=True to use stop."
             )
         assert isinstance(self.bad_words, list)
-        if any(not bad_word for bad_word in self.bad_words):
+        if any(not bad_word.strip() for bad_word in self.bad_words):
             raise ValueError(
-                f"bad_words cannot contain an empty string. "
+                f"bad_words cannot contain an empty or whitespace-only string. "
                 f"Got bad_words={self.bad_words}"
             )
 
