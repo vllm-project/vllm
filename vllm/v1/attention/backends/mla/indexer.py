@@ -728,14 +728,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             max_decode_len = int(decode_lens_cpu.max().item())
             next_n = 1 + self.num_speculative_tokens
-            has_prefill_decodes = False
-            if common_attn_metadata.is_prefilling is not None:
-                has_prefill_decodes = bool(
-                    common_attn_metadata.is_prefilling[:num_decodes].any().item()
-                )
-            use_varlen = (
-                self.use_varlen and max_decode_len > 1 and not has_prefill_decodes
-            )
+            use_varlen = self.use_varlen and max_decode_len > 1
             use_native = (
                 not (self.use_flattening or use_varlen) and max_decode_len <= next_n
             )
