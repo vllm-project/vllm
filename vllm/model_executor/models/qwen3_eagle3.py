@@ -13,6 +13,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import QKVParallelLinear, ReplicatedLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
+from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -39,16 +40,10 @@ class Qwen3Eagle3DecoderLayer(Qwen3DecoderLayer):
         config: Qwen3Config | None = None,
         layer_idx: int = 0,
     ) -> None:
-        config = config or vllm_config.model_config.hf_config
-        cache_config = vllm_config.cache_config
-        quant_config = get_draft_quant_config(vllm_config)
+        super().__init__(vllm_config, prefix=prefix)
 
-        super().__init__(
-            config=config,
-            cache_config=cache_config,
-            quant_config=quant_config,
-            prefix=prefix,
-        )
+        config = config or vllm_config.model_config.hf_config
+        quant_config = self.get_quant_config(vllm_config)
 
         # First layer uses 2*hidden_size (embeds + hidden_states concatenated)
         # Subsequent layers use hidden_size (only hidden_states, no embeds)
@@ -75,6 +70,10 @@ class Qwen3Eagle3DecoderLayer(Qwen3DecoderLayer):
             self._residual_norm = self._norm_before_residual
         else:
             self._residual_norm = self._norm_after_residual
+
+    def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
+        """Use drafter's quantization config instead of verifier's."""
+        return get_draft_quant_config(vllm_config)
 
     def _norm_before_residual(
         self, hidden_states: torch.Tensor

@@ -59,6 +59,7 @@ from vllm.model_executor.layers.attention.mm_encoder_attention import (
     MMEncoderAttention,
 )
 from vllm.model_executor.layers.conv import Conv3dLayer
+from vllm.model_executor.layers.fusion.residual_stream import Scatter, finalize_norm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
     RowParallelLinear,
@@ -1601,7 +1602,16 @@ class Qwen3LLMModel(Qwen3Model):
             return IntermediateTensors(
                 {"hidden_states": hidden_states, "residual": residual}
             )
-        hidden_states, _ = self.norm(hidden_states, residual)
+        # Qwen3DecoderLayer defers its reduce (output PARTIAL), so the final norm
+        # must absorb the owed all-reduce -- route through finalize_norm rather
+        # than a bare self.norm (which would skip the AR and miscompute at TP>1).
+        last_layer = self.layers[self.end_layer - 1]
+        hidden_states = finalize_norm(
+            self.norm,
+            hidden_states,
+            residual,
+            incoming=getattr(last_layer, "output_scatter", Scatter.FULL),
+        )
 
         if len(aux_hidden_states) > 0:
             return hidden_states, aux_hidden_states

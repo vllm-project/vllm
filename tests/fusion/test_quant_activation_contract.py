@@ -1,6 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Contract tests for the QuantizedActivation linear-kernel integration."""
+"""Contract tests for the ``QuantizedActivation`` manual-fusion integration.
+
+Pure-Python introspection over the linear-kernel registry -- no model load, no
+device -- pinning which backends consume a pre-quantized activation and how the
+bridge / consumer enforce the key. Tracks the AR+RMS+Quant bullet under
+https://github.com/vllm-project/vllm/issues/43224.
+"""
+
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -30,6 +38,15 @@ from vllm.model_executor.kernels.linear.scaled_mm.ScaledMMLinearKernel import (
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
 )
+from vllm.model_executor.layers.fusion.ar_rms_quant import (
+    _FUSED_AR_RMS_QUANT_IMPLS,
+    _FUSED_RMS_QUANT_IMPLS,
+    _flashinfer_ar_rms_fp8,
+    _flashinfer_ar_rms_nvfp4,
+    _rms_norm_fp8_static,
+    _to_fp8_qa,
+    _to_nvfp4_qa,
+)
 from vllm.model_executor.layers.fusion.quant_activation import (
     QuantizedActivation,
     as_quantized_activation,
@@ -41,7 +58,8 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 
-# The only backends that consume a pre-quantized activation.
+# The only backends that consume a pre-quantized activation. Anything else must
+# quantize its own input, so the bridge must not mark its layer.
 SUPPORTING = {
     CutlassFP8ScaledMMLinearKernel,
     FlashInferFP8ScaledMMLinearKernel,
@@ -64,8 +82,8 @@ def _all_kernel_classes() -> list[type]:
 
 
 def _probe(cls: type):
-    """A bare kernel instance with a plausible config, so input_quant_key()
-    can be queried without the hardware-gated constructor."""
+    """A bare kernel instance with a plausible config, so ``input_quant_key()``
+    can be queried without the hardware-gated ``__init__``."""
     obj = cls.__new__(cls)  # type: ignore[call-overload]
     if issubclass(cls, NvFp4LinearKernel):
         obj.config = NvFp4LinearLayerConfig()
@@ -113,6 +131,27 @@ def test_bridge_marks_supporting_and_skips_others():
     layer = torch.nn.Module()
     expose_input_quant_key(layer, unsupported)
     assert not hasattr(layer, "input_quant_key")
+
+
+def test_fp8_producer_stamps_registered_key():
+    qa = _to_fp8_qa(
+        torch.zeros(2, 4, dtype=current_platform.fp8_dtype()),
+        torch.zeros(2, 4),
+        SimpleNamespace(input_scale=torch.tensor(1.0)),
+    )
+    assert qa.quant_key == kFp8StaticTensorSym
+    assert _FUSED_RMS_QUANT_IMPLS[kFp8StaticTensorSym] is _rms_norm_fp8_static
+    assert _FUSED_AR_RMS_QUANT_IMPLS[kFp8StaticTensorSym] is _flashinfer_ar_rms_fp8
+
+
+def test_nvfp4_producer_stamps_registered_key():
+    qa = _to_nvfp4_qa(
+        torch.zeros(2, 2, dtype=torch.uint8),  # 2 fp4 packed per byte
+        torch.zeros(2, 4, dtype=torch.uint8),  # viewed as float8_e4m3fn
+        torch.zeros(2, 4),
+    )
+    assert qa.quant_key == kNvfp4Dynamic
+    assert _FUSED_AR_RMS_QUANT_IMPLS[kNvfp4Dynamic] is _flashinfer_ar_rms_nvfp4
 
 
 def test_as_quantized_activation_validates_key():

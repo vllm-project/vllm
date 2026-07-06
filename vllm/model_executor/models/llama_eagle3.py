@@ -40,7 +40,8 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         config: LlamaConfig | None = None,
         layer_idx: int = 0,
     ) -> None:
-        super().__init__(vllm_config, prefix=prefix, config=config)
+        # Eagle3 has its own unfused decoder forward (linears reduce themselves).
+        super().__init__(vllm_config, prefix=prefix, config=config, reduce_results=True)
 
         config = config or vllm_config.model_config.hf_config
         quant_config = self.get_quant_config(vllm_config)

@@ -1624,9 +1624,12 @@ class RowParallelLinear(LinearBase):
             ),
         )
         if not reduce_results and (bias and not skip_bias_add):
-            raise ValueError(
-                "When not reduce the results, adding bias to the "
-                "results can lead to incorrect results"
+            logger.warning_once(
+                "%s: bias is added only on rank 0 with reduce_results=False, so "
+                "it is correct only if a summing all-reduce follows downstream "
+                "(e.g. a fused all-reduce + RMSNorm). It will be wrong if the "
+                "partial output is consumed directly or under reduce-scatter/SP.",
+                prefix,
             )
 
         if bias:

@@ -35,13 +35,18 @@ class LlamaDecoderLayer(LlamaDecoderLayer):
         prefix: str = "",
         config: LlamaConfig | None = None,
     ) -> None:
-        super().__init__(vllm_config, prefix=prefix, config=config)
+        # Eagle's model forward consumes a reduced final hidden state, so the
+        # linears reduce themselves (the communicator tolerates the Identity
+        # layer-0 norm and reads it live).
+        super().__init__(vllm_config, prefix=prefix, config=config, reduce_results=True)
 
         # Skip the input_layernorm
         # https://github.com/SafeAILab/EAGLE/blob/35c78f6cdc19a73e05cf5c330b4c358dad970c6a/eagle/model/cnets.py#L427
         if disable_input_layernorm:
             del self.input_layernorm
             self.input_layernorm = nn.Identity()
+            # Rebuild so the stream captures the Identity norm
+            self.residual_stream = self._build_residual_stream(vllm_config)
 
     def get_quant_config(self, vllm_config: VllmConfig) -> QuantizationConfig | None:
         """Use drafter's quantization config instead of verifier's."""
