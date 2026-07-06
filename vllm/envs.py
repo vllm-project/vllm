@@ -263,6 +263,7 @@ if TYPE_CHECKING:
     VLLM_MULTI_STREAM_GEMM_TOKEN_THRESHOLD: int = 1024
     VLLM_COMPILE_CACHE_SAVE_FORMAT: Literal["binary", "unpacked"] = "binary"
     VLLM_USE_V2_MODEL_RUNNER: bool | None = None
+    VLLM_EXPERIMENTAL_REPLICATE_UNEVEN_FULL_ATTENTION: bool = False
     VLLM_LOG_MODEL_INSPECTION: bool = False
     VLLM_DEBUG_MFU_METRICS: bool = False
     VLLM_WEIGHT_OFFLOADING_DISABLE_PIN_MEMORY: bool = False
@@ -1723,6 +1724,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use FlashInfer allreduce
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "0"))
+    ),
+    "VLLM_EXPERIMENTAL_REPLICATE_UNEVEN_FULL_ATTENTION": lambda: bool(
+        int(os.getenv("VLLM_EXPERIMENTAL_REPLICATE_UNEVEN_FULL_ATTENTION", "0"))
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(

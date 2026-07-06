@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3Next model."""
 
+import os
 from collections.abc import Iterable
 from itertools import islice
 
@@ -79,6 +80,12 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
+
+
+def _experimental_replicate_uneven_full_attention() -> bool:
+    return os.environ.get(
+        "VLLM_EXPERIMENTAL_REPLICATE_UNEVEN_FULL_ATTENTION", ""
+    ).lower() in ("1", "true", "yes", "on")
 
 KVCache = tuple[torch.Tensor, torch.Tensor]
 
@@ -242,11 +249,28 @@ class Qwen3NextAttention(nn.Module):
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
         self.total_num_heads = config.num_attention_heads
-        assert self.total_num_heads % tp_size == 0
-        self.num_heads = self.total_num_heads // tp_size
+        self.replicate_uneven_full_attention = (
+            self.total_num_heads % tp_size != 0
+            and _experimental_replicate_uneven_full_attention()
+        )
+        if self.replicate_uneven_full_attention:
+            logger.warning(
+                "Replicating Qwen3Next full-attention layer %s on every TP rank "
+                "because num_attention_heads=%d is not divisible by "
+                "tensor_parallel_size=%d.",
+                prefix,
+                self.total_num_heads,
+                tp_size,
+            )
+            self.num_heads = self.total_num_heads
+        else:
+            assert self.total_num_heads % tp_size == 0
+            self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = config.num_key_value_heads
         self.attn_head_partition = None
         use_overlapping_gqa = (
+            not self.replicate_uneven_full_attention
+            and
             self.total_num_kv_heads % tp_size != 0
             and tp_size % self.total_num_kv_heads != 0
         )
@@ -258,6 +282,8 @@ class Qwen3NextAttention(nn.Module):
                 tp_rank=tp_rank,
             )
             self.num_kv_heads = self.attn_head_partition.num_kv_heads
+        elif self.replicate_uneven_full_attention:
+            self.num_kv_heads = self.total_num_kv_heads
         elif self.total_num_kv_heads >= tp_size:
             # Number of KV heads is greater than TP size, so we partition
             # the KV heads across multiple tensor parallel GPUs.
@@ -291,6 +317,7 @@ class Qwen3NextAttention(nn.Module):
             bias=getattr(config, "qkv_bias", False),
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
+            disable_tp=self.replicate_uneven_full_attention,
             **qkv_kwargs,
         )
 
@@ -300,6 +327,7 @@ class Qwen3NextAttention(nn.Module):
             bias=False,
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
+            disable_tp=self.replicate_uneven_full_attention,
         )
 
         self.rotary_emb = get_rope(

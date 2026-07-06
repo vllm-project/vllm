@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 import warnings
 from collections.abc import Callable
 from dataclasses import InitVar, field
@@ -73,6 +74,12 @@ else:
     LogitsProcessor = Any
 
 logger = init_logger(__name__)
+
+
+def _experimental_replicate_uneven_full_attention() -> bool:
+    return os.environ.get(
+        "VLLM_EXPERIMENTAL_REPLICATE_UNEVEN_FULL_ATTENTION", ""
+    ).lower() in ("1", "true", "yes", "on")
 
 RunnerOption = Literal["auto", RunnerType]
 ConvertType = Literal["none", "embed", "classify"]
@@ -1170,11 +1177,22 @@ class ModelConfig:
         total_num_attention_heads = self.model_arch_config.total_num_attention_heads
         tensor_parallel_size = parallel_config.tensor_parallel_size
         if total_num_attention_heads % tensor_parallel_size != 0:
-            raise ValueError(
-                f"Total number of attention heads ({total_num_attention_heads})"
-                " must be divisible by tensor parallel size "
-                f"({tensor_parallel_size})."
-            )
+            if _experimental_replicate_uneven_full_attention():
+                logger.warning(
+                    "Allowing tensor_parallel_size=%s with non-divisible "
+                    "attention heads=%s because "
+                    "VLLM_EXPERIMENTAL_REPLICATE_UNEVEN_FULL_ATTENTION is set. "
+                    "Full-attention layers must replicate their QKV/O projections "
+                    "on each TP rank.",
+                    tensor_parallel_size,
+                    total_num_attention_heads,
+                )
+            else:
+                raise ValueError(
+                    f"Total number of attention heads ({total_num_attention_heads})"
+                    " must be divisible by tensor parallel size "
+                    f"({tensor_parallel_size})."
+                )
 
         if parallel_config.enable_expert_parallel:
             self._verify_with_expert_parallelism()
@@ -1270,6 +1288,13 @@ class ModelConfig:
             return 1
 
         total_num_kv_heads = self.get_total_num_kv_heads()
+        if (
+            _experimental_replicate_uneven_full_attention()
+            and self.model_arch_config.total_num_attention_heads
+            % parallel_config.tensor_parallel_size
+            != 0
+        ):
+            return total_num_kv_heads
         # If tensor parallelism is used, we divide the number of KV heads by
         # the tensor parallel size. We will replicate the KV heads in the
         # case where the number of KV heads is smaller than the tensor
@@ -1292,6 +1317,11 @@ class ModelConfig:
 
     def get_num_attention_heads(self, parallel_config: ParallelConfig) -> int:
         num_heads = self.model_arch_config.total_num_attention_heads
+        if (
+            _experimental_replicate_uneven_full_attention()
+            and num_heads % parallel_config.tensor_parallel_size != 0
+        ):
+            return num_heads
         return num_heads // parallel_config.tensor_parallel_size
 
     def get_num_experts(self) -> int:

@@ -657,13 +657,16 @@ class Qwen3_5MoeForConditionalGeneration(
         # Qwen3.5 does not support multimodal pruning (EVS).
         self.is_multimodal_pruning_enabled = False
 
-        with self._mark_tower_model(vllm_config, {"image", "video"}):
-            self.visual = Qwen3_VisionTransformer(
-                config.vision_config,
-                norm_eps=getattr(config, "rms_norm_eps", 1e-6),
-                quant_config=quant_config,
-                prefix=maybe_prefix(prefix, "visual"),
-            )
+        if multimodal_config.language_model_only:
+            self.visual = None
+        else:
+            with self._mark_tower_model(vllm_config, {"image", "video"}):
+                self.visual = Qwen3_VisionTransformer(
+                    config.vision_config,
+                    norm_eps=getattr(config, "rms_norm_eps", 1e-6),
+                    quant_config=quant_config,
+                    prefix=maybe_prefix(prefix, "visual"),
+                )
 
         with self._mark_language_model(vllm_config):
             self.language_model = Qwen3_5MoeForCausalLM(
