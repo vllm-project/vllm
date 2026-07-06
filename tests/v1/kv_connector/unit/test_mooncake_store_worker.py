@@ -1097,7 +1097,7 @@ def test_requester_worker_init_prefers_local_hostname_override(
             },
         ),
     )
-    worker.MooncakeStoreWorker(_make_vllm_config(), _make_kv_cache_config())
+    worker.MooncakeStoreWorker(_make_vllm_config(rank=1), _make_kv_cache_config())
 
     assert store.setup.call_args.args[0] == "worker-a:50053"
 
@@ -1898,6 +1898,7 @@ def test_config_defaults_to_embedded():
     assert cfg.global_segment_size == worker.DEFAULT_GLOBAL_SEGMENT_SIZE
     assert cfg.local_buffer_size == worker.DEFAULT_LOCAL_BUFFER_SIZE
     assert cfg.enable_offload is False
+    assert cfg.tenant_id == worker.DEFAULT_TENANT_ID
 
 
 def test_config_pr40900_unchanged(tmp_path):
@@ -1919,6 +1920,51 @@ def test_config_pr40900_unchanged(tmp_path):
     assert cfg.global_segment_size == 4 * 1024**3
     assert cfg.local_buffer_size == 4 * 1024**3
     assert cfg.enable_offload is False
+    assert cfg.tenant_id == worker.DEFAULT_TENANT_ID
+
+
+def test_config_from_file_normalizes_tenant_id(tmp_path):
+    config_path = _write_mooncake_config(
+        tmp_path,
+        {
+            "metadata_server": "http://metadata/endpoint",
+            "master_server_address": "10.0.0.7:50051",
+            "tenant_id": "  tenant-a  ",
+        },
+    )
+
+    cfg = worker.MooncakeStoreConfig.from_file(config_path)
+
+    assert cfg.tenant_id == "tenant-a"
+
+
+def test_config_from_file_normalizes_empty_tenant_id_to_default(tmp_path):
+    config_path = _write_mooncake_config(
+        tmp_path,
+        {
+            "metadata_server": "http://metadata/endpoint",
+            "master_server_address": "10.0.0.7:50051",
+            "tenant_id": "   ",
+        },
+    )
+
+    cfg = worker.MooncakeStoreConfig.from_file(config_path)
+
+    assert cfg.tenant_id == worker.DEFAULT_TENANT_ID
+
+
+def test_config_from_file_rejects_non_string_tenant_id(tmp_path):
+    config_path = _write_mooncake_config(
+        tmp_path,
+        {
+            "metadata_server": "http://metadata/endpoint",
+            "master_server_address": "10.0.0.7:50051",
+            "tenant_id": False,
+        },
+    )
+
+    with pytest.raises(TypeError, match="tenant_id must be a string or null"):
+        worker.MooncakeStoreConfig.from_file(config_path)
 
 
 def test_config_embedded_rejects_zero_segment():
@@ -2002,6 +2048,7 @@ def test_topology_standalone_store_with_disk_offload(tmp_path, monkeypatch):
         "mlx5_0",
         "10.0.0.7:50051",
     )
+    assert store.setup.call_args.kwargs == {}
     # ReplicateConfig is built and carries the preferred_segment.
     assert isinstance(w.store_replicate_config, fake_replicate_config_cls)
     assert w.store_replicate_config.preferred_segment == "10.0.0.7:50053"
@@ -2045,6 +2092,7 @@ def test_topology_embedded_cpu_only(tmp_path, monkeypatch):
         "mlx5_0",
         "10.0.0.7:50051",
     )
+    assert store.setup.call_args.kwargs == {}
     # No preferred_segment — ReplicateConfig is default-constructed (so the
     # preferred_segment field keeps its default value).
     assert w.preferred_segment is None
@@ -2052,6 +2100,57 @@ def test_topology_embedded_cpu_only(tmp_path, monkeypatch):
     assert w.store_replicate_config.preferred_segment == ""
     # No disk budget — enable_offload was absent (defaults to False).
     assert w.disk_offload_buffer_budget_bytes is None
+
+
+def test_topology_forwards_non_default_tenant_id(tmp_path, monkeypatch):
+    store = MagicMock()
+    store.setup.return_value = 0
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "global_segment_size": "4GB",
+                "local_buffer_size": "4GB",
+                "protocol": "rdma",
+                "device_name": "mlx5_0",
+                "master_server_address": "10.0.0.7:50051",
+                "tenant_id": "  tenant-a  ",
+            },
+        ),
+    )
+
+    worker.MooncakeStoreWorker(_make_vllm_config(rank=1), _make_kv_cache_config())
+
+    assert store.setup.call_args.kwargs == {"tenant_id": "tenant-a"}
+
+
+def test_non_default_tenant_requires_new_mooncake(tmp_path, monkeypatch):
+    store = MagicMock()
+    store.setup.side_effect = TypeError("tenant_id is an invalid keyword argument")
+    _install_fake_mooncake(monkeypatch, store)
+    _patch_worker_runtime(monkeypatch)
+    monkeypatch.setenv(
+        "MOONCAKE_CONFIG_PATH",
+        _write_mooncake_config(
+            tmp_path,
+            {
+                "metadata_server": "http://metadata/endpoint",
+                "global_segment_size": "4GB",
+                "local_buffer_size": "4GB",
+                "protocol": "rdma",
+                "device_name": "mlx5_0",
+                "master_server_address": "10.0.0.7:50051",
+                "tenant_id": "tenant-a",
+            },
+        ),
+    )
+
+    with pytest.raises(RuntimeError, match="tenant_id"):
+        worker.MooncakeStoreWorker(_make_vllm_config(rank=1), _make_kv_cache_config())
 
 
 # ---------------------------------------------------------------------------
