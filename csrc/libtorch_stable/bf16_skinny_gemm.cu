@@ -85,9 +85,6 @@ __global__ __launch_bounds__(kBlockSize, 1) void bf16_skinny_gemm_kernel(
 
 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
   cudaGridDependencySynchronize();
-  // Trigger right after our own wait (see fp32_router_gemm.cu): gridsync-ing
-  // consumers are unaffected; independent consumers may overlap our body.
-  cudaTriggerProgrammaticLaunchCompletion();
 #endif
 
 #pragma unroll
@@ -150,6 +147,15 @@ __global__ __launch_bounds__(kBlockSize, 1) void bf16_skinny_gemm_kernel(
     for (int w = 0; w < kNumWarps; w++) final_sum += sm_reduction[m][n][w];
     out[(size_t)m * out_stride + n_base + n] = __float2bfloat16(final_sum);
   }
+
+  // Trigger only after our stores: every current consumer (norm_rope, the
+  // MTP block) is a plain launch, so an early trigger buys nothing here,
+  // and a late one keeps a future PDL consumer that forgets its
+  // cudaGridDependencySynchronize from racing our output. Matches
+  // fp32_router_gemm.cu.
+#if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+  cudaTriggerProgrammaticLaunchCompletion();
+#endif
 }
 
 }  // namespace skinny
