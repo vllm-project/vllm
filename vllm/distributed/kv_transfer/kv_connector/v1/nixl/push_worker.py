@@ -714,10 +714,14 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
             # Not tracked as a P-side send/process for this notif.
             if req_id not in self._reqs_to_send and req_id not in self._reqs_to_process:
                 if (meta := self._recving_metadata.get(req_id)) is not None:
-                    # D-side: P signalled push completion. Each of the
-                    # producer's pp_size stages sends one notif; wait for all.
+                    # Consumer waits for one notif per producer rank writing
+                    # here: pp_size stages * producers-per-consumer (>1 when
+                    # producer TP > consumer TP; tp_size is the producer TP).
+                    producers_per_consumer = max(1, int(tp_size) // self.world_size)
+                    expected_notifs = meta.pp_size * producers_per_consumer
                     self.consumer_notification_counts_by_req[req_id] += 1
-                    if self.consumer_notification_counts_by_req[req_id] < meta.pp_size:
+                    notifs = self.consumer_notification_counts_by_req[req_id]
+                    if notifs < expected_notifs:
                         continue
                     del self.consumer_notification_counts_by_req[req_id]
                     # P drove the transfer (we own no NIXL handle), so
