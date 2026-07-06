@@ -196,9 +196,6 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
         kv_cache_dtype_str = getattr(vllm_config.cache_config, "cache_dtype", "auto")
         if kv_cache_dtype_str in ("fp8", "fp8_e4m3", "fp8_e5m2"):
             kv_cache_dtype_str = "fp8"
-            # When KV is FP8, Q is also quantized to FP8 before the MLA decode kernel.
-            # Metadata tiles differ between FP8 and BF16, so q_dtype must reflect the
-            # actual kernel input dtype.
             q_dtype = dtypes.fp8
         else:
             kv_cache_dtype_str = "bf16"
