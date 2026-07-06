@@ -1023,7 +1023,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             prompt_lens=prompt_lens,
         )
         if self.verification_capacity_manager is not None:
-            input_batch = self.verification_capacity_manager.trim_batch(input_batch)
+            input_batch = self.verification_capacity_manager.prepare_batch(input_batch)
         if self.use_dcp:
             # Prepare dcp local seq_lens.
             prepare_dcp_local_seq_lens(
