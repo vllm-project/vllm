@@ -70,6 +70,36 @@ class MockLogprobsTokenizer:
         return "".join(self.decoded_tokens[token_id] for token_id in ids)
 
 
+class MockSentencePieceBackend:
+    def __init__(self, raw_tokens: dict[int, str]):
+        self.raw_tokens = raw_tokens
+
+    def id_to_piece(self, token_id: int) -> str:
+        return self.raw_tokens[token_id]
+
+
+class MockSentencePieceLogprobsTokenizer(MockLogprobsTokenizer):
+    is_spm = True
+
+    def __init__(
+        self,
+        raw_tokens: dict[int, str],
+        decoded_tokens: dict[int, str],
+        sentencepiece_pieces: dict[int, str],
+    ):
+        super().__init__(raw_tokens, decoded_tokens)
+        self.tokenizer = MockSentencePieceBackend(sentencepiece_pieces)
+        self.convert_ids_to_tokens_call_count = 0
+
+    def convert_ids_to_tokens(
+        self,
+        ids: list[int],
+        skip_special_tokens: bool = False,
+    ) -> list[str]:
+        self.convert_ids_to_tokens_call_count += 1
+        return super().convert_ids_to_tokens(ids, skip_special_tokens)
+
+
 def _make_top_logprobs(
     tokenizer: MockLogprobsTokenizer,
     token_ids: list[int],
@@ -291,6 +321,17 @@ def test_convert_ids_list_to_tokens_preserves_sentencepiece_boundaries():
     assert len(top_logprobs) == 4
 
 
+def test_convert_ids_list_to_tokens_prefers_sentencepiece_backend_pieces():
+    tokenizer = MockSentencePieceLogprobsTokenizer(
+        raw_tokens={0: "true", 1: "true"},
+        decoded_tokens={0: "true", 1: "true"},
+        sentencepiece_pieces={0: "▁true", 1: "true"},
+    )
+
+    assert convert_ids_list_to_tokens(tokenizer, [0, 1]) == [" true", "true"]
+    assert tokenizer.convert_ids_to_tokens_call_count == 0
+
+
 def test_convert_ids_list_to_tokens_preserves_readable_space_tokens():
     byte_level_tokenizer = MockLogprobsTokenizer(
         raw_tokens={0: "Ġword", 1: "word", 2: "Ġ", 3: "Ċ"},
@@ -343,12 +384,8 @@ def test_convert_ids_list_to_tokens_keeps_logprobs_count_and_values_stable():
     token_ids = list(range(10))
     logprobs = [-0.1 * (idx + 1) for idx in range(10)]
 
-    top4 = _make_top_logprobs(
-        tokenizer, token_ids, logprobs, requested_logprobs=4
-    )
-    top10 = _make_top_logprobs(
-        tokenizer, token_ids, logprobs, requested_logprobs=10
-    )
+    top4 = _make_top_logprobs(tokenizer, token_ids, logprobs, requested_logprobs=4)
+    top10 = _make_top_logprobs(tokenizer, token_ids, logprobs, requested_logprobs=10)
 
     assert len(top4) == 4
     assert len(top10) == 10
