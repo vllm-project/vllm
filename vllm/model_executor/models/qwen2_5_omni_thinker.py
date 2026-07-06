@@ -121,42 +121,44 @@ def check_interleaved_audio_video(
     num_audio: int,
 ) -> bool:
     """
-    Check if video and audio positions are interleaved in the multimodal region.
+    Check if video and audio positions are interleaved in any per-video span.
 
-    Returns True only for the use_audio_in_video=True case, where video and
-    audio tokens alternate within a single contiguous region with no gaps.
-
-    A simple range-overlap check produces false positives when multiple
-    non-interleaved requests are batched together: audio tokens from request N
-    fall between video tokens from request N and request N+1, making the
-    global ranges overlap even though each individual request is non-interleaved.
-
-    To distinguish true interleaving from this batching artefact we require
-    that every position in the combined [first_VA, last_VA] range is occupied
-    by either a video or an audio token (no text/image gaps).
+    For use_audio_in_video=True, each video placeholder is expanded into one
+    local span containing only video/audio pad tokens, bounded by non-pad
+    tokens such as audio_start/audio_end. Check each contiguous V/A span
+    independently instead of requiring all V/A tokens in the whole sequence to
+    form one global dense range; otherwise multi-video requests can be
+    misclassified as non-interleaved because of the boundary tokens between
+    videos.
     """
     if num_video == 0 or num_audio == 0:
         return False
 
-    video_pos = is_video.nonzero(as_tuple=True)[0]
-    audio_pos = is_audio.nonzero(as_tuple=True)[0]
-
-    # Quick range-overlap pre-check (necessary but not sufficient).
-    if not (
-        video_pos[0].item() < audio_pos[-1].item()
-        and audio_pos[0].item() < video_pos[-1].item()
-    ):
+    va_pos = (is_video | is_audio).nonzero(as_tuple=True)[0]
+    if len(va_pos) == 0:
         return False
 
-    # Density check: for true use_audio_in_video interleaving every position
-    # in the combined span is a video or audio token.  Batched non-interleaved
-    # requests have text/image tokens between the per-request V and A blocks.
-    # combined_start/end encompass all V/A tokens, so num_video + num_audio
-    # equals the number of V/A tokens in range; compare directly to span size.
-    combined_start = min(video_pos[0].item(), audio_pos[0].item())
-    combined_end = max(video_pos[-1].item(), audio_pos[-1].item())
-    total_in_range = combined_end - combined_start + 1
-    return (num_video + num_audio) == total_in_range
+    span_start = 0
+    for span_end in range(1, len(va_pos) + 1):
+        is_last = span_end == len(va_pos)
+        if not is_last and va_pos[span_end].item() == va_pos[span_end - 1].item() + 1:
+            continue
+
+        span = va_pos[span_start:span_end]
+        span_is_video = is_video[span]
+        span_is_audio = is_audio[span]
+        if span_is_video.any() and span_is_audio.any():
+            video_offsets = span_is_video.nonzero(as_tuple=True)[0]
+            audio_offsets = span_is_audio.nonzero(as_tuple=True)[0]
+            if (
+                video_offsets[0].item() < audio_offsets[-1].item()
+                and audio_offsets[0].item() < video_offsets[-1].item()
+            ):
+                return True
+
+        span_start = span_end
+
+    return False
 
 
 def merge_interleaved_embeddings(
