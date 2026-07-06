@@ -291,13 +291,12 @@ def test_prefill(hash_fn):
     # All blocks should be available.
     assert free_block_queue.num_free_blocks == 10
     # The order should be
+    # [partial without hashes from req1 and req0 (5, 4) - prepended for immediate reuse]
     # [unallocated (6, 7, 8, 9, 10)]
-    # [unique_req0 (4)]
-    # [unique_req1 (5)]
     # [common (3, 2, 1)]
     assert [
         b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ] == [6, 7, 8, 9, 10, 4, 5, 3, 2, 1]
+    ] == [5, 4, 6, 7, 8, 9, 10, 3, 2, 1]
 
     # Cache hit in the common prefix when the original block is already free.
     # Incomplete 1 block (6 tokens)
@@ -311,7 +310,7 @@ def test_prefill(hash_fn):
     blocks = manager.allocate_slots(
         req2, num_new_tokens, len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
-    assert blocks is not None and blocks.get_block_ids() == ([6],)
+    assert blocks is not None and blocks.get_block_ids() == ([5],)  # reuse partial [5]
 
     # Although we only have 6 free blocks, we have 8 blocks in
     # the free block queue due to lazy removal.
@@ -331,7 +330,7 @@ def test_prefill(hash_fn):
     )
     # This block ID order also checks the eviction order.
     assert blocks is not None and blocks.get_block_ids() == (
-        [7, 8, 9, 10, 4, 5, 6, 3, 2, 1],
+        [5, 4, 6, 7, 8, 9, 10, 3, 2, 1],
     )
 
     assert free_block_queue.num_free_blocks == 0
@@ -1216,13 +1215,12 @@ def test_prefill_plp():
     # All blocks should be available.
     assert manager.block_pool.free_block_queue.num_free_blocks == 10
     # The order should be
+    # [partial without hashes from req1 and req0 (5, 4) - prepended for immediate reuse]
     # [unallocated (6, 7, 8, 9, 10)]
-    # [unique_req0 (4)]
-    # [unique_req1 (5)]
     # [common (3, 2, 1)]
     assert [
         b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ] == [6, 7, 8, 9, 10, 4, 5, 3, 2, 1]
+    ] == [5, 4, 6, 7, 8, 9, 10, 3, 2, 1]
 
     # Request #2 is a prompt-logprobs request:
     # NO cache hit in the common prefix; duplicates request #0 cached blocks
@@ -1351,11 +1349,15 @@ def test_evict():
     assert manager.block_pool.free_block_queue.num_free_blocks == 1
 
     manager.free(req0)
+    # partial blocks (without hash) at head, other at tail (LRU policy):
+    assert [
+        b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
+    ] == [6, 10, 5, 4, 3, 2, 1]
     manager.free(req1)
     assert manager.block_pool.free_block_queue.num_free_blocks == 10
     assert [
         b.block_id for b in manager.block_pool.free_block_queue.get_all_free_blocks()
-    ] == [10, 6, 5, 4, 3, 2, 1, 9, 8, 7]
+    ] == [6, 10, 5, 4, 3, 2, 1, 9, 8, 7]
 
     # Touch the first 2 blocks.
     req2 = make_request("2", list(range(2 * 16 + 3)), block_size, sha256)
@@ -1365,7 +1367,7 @@ def test_evict():
     blocks = manager.allocate_slots(
         req2, 3, len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
-    assert blocks is not None and blocks.get_block_ids() == ([10],)
+    assert blocks is not None and blocks.get_block_ids() == ([6],)
     assert manager.block_pool.free_block_queue.num_free_blocks == 7
 
 
@@ -2001,7 +2003,7 @@ def test_maybe_evict_cached_block():
     assert len(pool.blocks) == len(block_hashes)
     # Manually add all blocks to cached_blocks
     for block, block_hash in zip(pool.blocks, block_hashes):
-        block.block_hash = block_hash
+        block.set_block_hash(block_hash)
         pool.cached_block_hash_to_block.insert(block_hash, block)
 
     block0, block1, block2, block3 = pool.blocks
@@ -3903,3 +3905,41 @@ def test_pure_swa_retention_dense_default_caches_all(monkeypatch):
         is not None
     }
     assert cached == set(range(16))
+
+
+def test_mamba_reachable_block_mask_sparsifies_retention():
+    """Mamba state-snapshot retention: with VLLM_PREFIX_CACHE_RETENTION_INTERVAL
+    the manager keeps one cached state per interval-sized segment (plus the
+    latest replay boundary) instead of a snapshot per block, which is what
+    lets a small attention block_size avoid Mamba dominating the KV pool."""
+    from vllm.v1.core.single_type_kv_cache_manager import MambaManager
+
+    block_size = 16
+    spec = MambaSpec(
+        block_size=block_size,
+        shapes=(1, 1),
+        dtypes=(torch.float32,),
+        mamba_cache_mode="align",
+    )
+
+    def retained(retention_interval, num_prompt_tokens=256, end_block=16):
+        m = MambaManager.reachable_block_mask(
+            start_block=0,
+            end_block=end_block,
+            alignment_tokens=block_size,
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=retention_interval,
+            num_prompt_tokens=num_prompt_tokens,
+        )
+        return None if m is None else {i for i, v in enumerate(m) if v}
+
+    # Dense default (None) -> no mask, every block cached (unchanged behavior).
+    assert retained(None) is None
+    # interval == block_size -> every block is a boundary -> stays dense.
+    assert retained(block_size) is None
+    # interval 64 = 4 blocks: segment tails at i%4==3 -> {3,7,11,15}; latest
+    # replay boundary 240//16 - 1 = 14. Sparse subset of the 16 blocks.
+    assert retained(64) == {3, 7, 11, 14, 15}
+    # interval 0 -> only the latest replay boundary (block 14).
+    assert retained(0) == {14}

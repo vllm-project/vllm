@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
@@ -15,17 +16,18 @@ use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
 use crate::metrics::{LoraInfoExporter, record_scheduler_stats};
+use crate::protocol::encode_msgpack;
+use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
+use crate::protocol::request::EngineCoreRequestType;
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
-use crate::protocol::{
-    ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequestType,
-    encode_msgpack,
-};
 use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
 
 pub(crate) struct ClientInner {
     input_send: RouterSendHalf,
+    /// The runtime handle used for sending messages to the engine.
+    handle: Handle,
     model_name: String,
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
@@ -37,11 +39,13 @@ impl ClientInner {
     /// handshake completes.
     pub fn new(
         input_send: RouterSendHalf,
+        handle: Handle,
         model_name: String,
         engines: &[ConnectedEngine],
     ) -> Self {
         Self {
             input_send,
+            handle,
             model_name,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
             utility_reg: Mutex::new(UtilityRegistry::default()),
@@ -213,9 +217,19 @@ impl ClientInner {
         // frames instead of always producing a single msgpack frame.
         let payload = encode_msgpack(payload)?;
         let mut input_send = self.input_send.clone();
-        transport::send_message(&mut input_send, engine_id, request_type.to_frame(), payload)
-            .await?;
-        Ok(())
+        let engine_id = engine_id.clone();
+
+        self.handle
+            .spawn(async move {
+                transport::send_message(
+                    &mut input_send,
+                    &engine_id,
+                    request_type.to_frame(),
+                    payload,
+                )
+                .await
+            })
+            .await?
     }
 
     /// Handle an abort request by sending the abort message to the engine.
@@ -337,8 +351,8 @@ pub(crate) async fn run_output_dispatcher_loop(
                 )),
             }?;
 
-            match outputs.classify() {
-                ClassifiedEngineCoreOutputs::RequestBatch(batch) => {
+            match outputs {
+                EngineCoreOutputs::RequestBatch(batch) => {
                     let senders = inner.take_senders_for_outputs(&batch.outputs);
                     for (output, sender) in batch.outputs.into_iter().zip(senders) {
                         let request_id = output.request_id.clone();
@@ -389,7 +403,7 @@ pub(crate) async fn run_output_dispatcher_loop(
                     let (running, waiting) = inner.lora_adapter_states();
                     lora_info.update(&METRICS.scheduler, running, waiting);
                 }
-                ClassifiedEngineCoreOutputs::Utility(utility) => {
+                EngineCoreOutputs::Utility(utility) => {
                     let call_id = utility.output.call_id;
                     if inner.resolve_utility_output(utility.output) {
                         trace!(
@@ -405,8 +419,7 @@ pub(crate) async fn run_output_dispatcher_loop(
                         );
                     }
                 }
-                other @ (ClassifiedEngineCoreOutputs::DpControl { .. }
-                | ClassifiedEngineCoreOutputs::Other(_)) => {
+                other => {
                     Err::<(), _>(unexpected_dispatcher_output!(
                         "received unexpected output on main dispatcher path: {other:?}"
                     ))?;
@@ -434,6 +447,7 @@ mod tests {
         let (send, _) = socket.split();
         ClientInner::new(
             send,
+            Handle::current(),
             "test-model".to_string(),
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),

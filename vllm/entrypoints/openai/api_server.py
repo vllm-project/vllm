@@ -32,9 +32,8 @@ from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
-from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
-from vllm.entrypoints.serve.tokenize.serving import OpenAIServingTokenization
+from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
     cli_env_setup,
     log_non_default_args,
@@ -55,6 +54,8 @@ from vllm.entrypoints.serve.utils.server_utils import (
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
+from vllm.renderers.online_derenderer import OnlineDerenderer
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.tasks import POOLING_TASKS, SupportedTask
 from vllm.tool_parsers import ToolParserManager
 from vllm.tracing import instrument
@@ -206,12 +207,6 @@ def build_app(
 
         register_generate_api_routers(app)
 
-        from vllm.entrypoints.serve.disagg.api_router import (
-            attach_router as attach_disagg_router,
-        )
-
-        attach_disagg_router(app)
-
         from vllm.entrypoints.serve.elastic_ep.api_router import (
             attach_router as elastic_ep_attach_router,
         )
@@ -219,11 +214,9 @@ def build_app(
         elastic_ep_attach_router(app)
 
     if "generate" in supported_tasks or "render" in supported_tasks:
-        from vllm.entrypoints.serve.render.api_router import (
-            attach_router as attach_render_router,
-        )
+        from vllm.entrypoints.scale_out.factories import register_scale_out_api_routers
 
-        attach_render_router(app)
+        register_scale_out_api_routers(app, supported_tasks)
 
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import (
@@ -360,10 +353,9 @@ async def init_app_state(
     )
     await state.openai_serving_models.init_static_loras()
 
-    state.openai_serving_render = OpenAIServingRender(
+    state.online_renderer = OnlineRenderer(
         model_config=engine_client.model_config,
         renderer=engine_client.renderer,
-        model_registry=state.openai_serving_models.registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -376,10 +368,24 @@ async def init_app_state(
         log_error_stack=args.log_error_stack,
     )
 
-    state.openai_serving_tokenization = OpenAIServingTokenization(
-        engine_client,
+    state.online_derenderer = OnlineDerenderer(
+        model_config=engine_client.model_config,
+        renderer=engine_client.renderer,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        log_error_stack=args.log_error_stack,
+    )
+
+    state.serving_tokenization = ServingTokenization(
         state.openai_serving_models,
-        state.openai_serving_render,
+        state.online_renderer,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -393,6 +399,10 @@ async def init_app_state(
         await init_generate_state(
             engine_client, state, args, request_logger, supported_tasks
         )
+
+        from vllm.entrypoints.scale_out.factories import init_scale_out_state
+
+        init_scale_out_state(state, args, engine_client, request_logger)
 
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import init_speech_to_text_state
@@ -424,8 +434,8 @@ async def init_render_app_state(
     """
     from vllm.entrypoints.chat_utils import load_chat_template
     from vllm.entrypoints.openai.models.serving import OpenAIModelRegistry
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
     from vllm.renderers import renderer_from_config
+    from vllm.renderers.online_renderer import OnlineRenderer
 
     served_model_names = args.served_model_name or [args.model]
     model_registry = OpenAIModelRegistry(
@@ -444,10 +454,9 @@ async def init_render_app_state(
     renderer = renderer_from_config(vllm_config)
     resolved_chat_template = load_chat_template(args.chat_template)
 
-    state.openai_serving_render = OpenAIServingRender(
+    state.online_renderer = OnlineRenderer(
         model_config=vllm_config.model_config,
         renderer=renderer,
-        model_registry=model_registry,
         request_logger=request_logger,
         chat_template=resolved_chat_template,
         chat_template_content_format=args.chat_template_content_format,
@@ -455,15 +464,40 @@ async def init_render_app_state(
         enable_auto_tools=args.enable_auto_tool_choice,
         exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
         tool_parser=args.tool_call_parser,
-        reasoning_parser=args.structured_outputs_config.reasoning_parser,
+        reasoning_parser=args.reasoning_parser,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        log_error_stack=args.log_error_stack,
+    )
+
+    state.online_derenderer = OnlineDerenderer(
+        model_config=vllm_config.model_config,
+        renderer=renderer,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        trust_request_chat_template=args.trust_request_chat_template,
+        enable_auto_tools=args.enable_auto_tool_choice,
+        exclude_tools_when_tool_choice_none=args.exclude_tools_when_tool_choice_none,
+        tool_parser=args.tool_call_parser,
+        reasoning_parser=args.reasoning_parser,
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         log_error_stack=args.log_error_stack,
     )
 
     state.openai_serving_models = model_registry
+    state.serving_tokenization = ServingTokenization(
+        model_registry,
+        state.online_renderer,
+        request_logger=request_logger,
+        chat_template=resolved_chat_template,
+        chat_template_content_format=args.chat_template_content_format,
+        default_chat_template_kwargs=args.default_chat_template_kwargs,
+        trust_request_chat_template=args.trust_request_chat_template,
+    )
 
-    # Expose tokenization via the render handler (no engine required).
-    state.openai_serving_tokenization = state.openai_serving_render
+    from vllm.entrypoints.scale_out.factories import init_render_state
+
+    init_render_state(state, request_logger)
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
@@ -474,14 +508,19 @@ async def init_render_app_state(
     state.server_load_metrics = 0
 
 
-def create_server_socket(addr: tuple[str, int]) -> socket.socket:
+def create_server_socket(
+    addr: tuple[str, int],
+    *,
+    reuse_port: bool,
+) -> socket.socket:
     family = socket.AF_INET
     if is_valid_ipv6_address(addr[0]):
         family = socket.AF_INET6
 
     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    if reuse_port:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.bind(addr)
 
     return sock
@@ -512,7 +551,7 @@ def validate_api_server_args(args):
 
 
 @instrument(span_name="API server setup")
-def setup_server(args):
+def setup_server(args, *, reuse_port: bool):
     """Validate API server args and create the server socket."""
 
     log_version_and_model(logger, VLLM_VERSION, args.model)
@@ -533,7 +572,7 @@ def setup_server(args):
         sock = create_server_unix_socket(args.uds)
     else:
         sock_addr = (args.host or "", args.port)
-        sock = create_server_socket(sock_addr)
+        sock = create_server_socket(sock_addr, reuse_port=reuse_port)
 
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
@@ -654,7 +693,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     signal.signal(signal.SIGTERM, _interrupt_init)
 
-    listen_address, sock = setup_server(args)
+    listen_address, sock = setup_server(args, reuse_port=False)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
 

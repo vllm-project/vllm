@@ -522,17 +522,17 @@ class FakeNixlConnectorWorker(NixlConnectorWorker):
         assert expected_engine_id == self.REMOTE_ENGINE_ID
 
         # Adjust remote block length metadata to satisfy heterogeneous TP
-        # invariants enforced during handshake validation.
+        # invariants enforced during handshake validation.  Use per-rank
+        # head ratio (not tp_ratio) to account for GQA replication capping.
         remote_block_lens = list(self.block_len_per_layer)
         tp_ratio = self.transfer_topo.tp_ratio(remote_tp_size)
-        if remote_tp_size > self.world_size:
-            # P TP > D TP case, block_len of remote is smaller
+        total_kv = self.transfer_topo.total_num_kv_heads
+        local_heads = self.transfer_topo.local_physical_heads
+        remote_heads = max(1, total_kv // remote_tp_size)
+        if remote_tp_size != self.world_size:
             remote_block_lens = [
-                block_len // (-tp_ratio) for block_len in remote_block_lens
-            ]
-        elif remote_tp_size < self.world_size:
-            remote_block_lens = [
-                block_len * tp_ratio for block_len in remote_block_lens
+                block_len * remote_heads // local_heads
+                for block_len in remote_block_lens
             ]
 
         # When remote tp_size > local tp_size, handshake with multiple
@@ -1148,6 +1148,123 @@ class TestNixlHandshake:
             )
             with pytest.raises(AssertionError):
                 worker2.add_remote_agent(bad_meta, remote_tp_size=1)
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_handshake_validates_gqa_replicated_block_len(
+        self, default_vllm_config, dist_init
+    ):
+        """Regression test for #45330.
+
+        When tp_size > total_num_kv_heads, GQA replication caps per-rank
+        KV heads at 1, so block_len stops scaling with 1/tp.  With 8 KV
+        heads and D_TP=16 pulling from P_TP=8, both sides hold one head
+        per rank and report the *same* block_len; the old validation
+        expected local_block_len * tp_ratio and rejected the valid
+        handshake.
+        """
+        vllm_config = create_vllm_config()
+
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.get_tensor_model_parallel_world_size",  # noqa: E501
+            return_value=16,
+        ):
+            connector = NixlConnector(
+                vllm_config,
+                KVConnectorRole.WORKER,
+                make_kv_cache_config(block_size=16),
+            )
+            connector.connector_worker = FakeNixlConnectorWorker(
+                vllm_config, connector.engine_id, hand_shake_latency=0
+            )
+            worker = connector.connector_worker
+
+            worker.transfer_topo.total_num_kv_heads = 8
+            worker.transfer_topo.local_physical_heads = 1
+            worker.kv_cache_layout = "HND"
+
+            worker.slot_size_per_layer = [4096]
+            worker.block_len_per_layer = [4096 * worker.block_size]
+            worker.num_blocks = 1
+            worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+
+            # Remote P with TP=8 also has 1 head/rank -> identical
+            # block_len despite tp_ratio == 2.
+            meta = NixlAgentMetadata(
+                engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+                kv_caches_base_addr=[0],
+                device_id=0,
+                num_blocks=1,
+                block_lens=list(worker.block_len_per_layer),
+                kv_cache_layout="HND",
+                block_size=worker.block_size,
+                ssm_sizes=(0, 0),
+                attn_backend_name=worker.backend_name,
+                physical_blocks_per_logical_kv_block=1,
+            )
+
+            # Must validate cleanly (used to raise AssertionError).
+            worker.add_remote_agent(meta, remote_tp_size=8)
+
+    @patch(
+        "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.NixlWrapper",
+        FakeNixlWrapper,
+    )
+    def test_handshake_rejects_wrong_block_len_without_gqa_replication(
+        self, default_vllm_config, dist_init
+    ):
+        """Ensure the head-ratio validation still rejects genuinely wrong
+        block_lens when GQA replication is NOT in effect (32 KV heads,
+        D_TP=4, P_TP=2: head_ratio=4, both sides have >1 head/rank).
+        """
+        vllm_config = create_vllm_config()
+
+        with patch(
+            "vllm.distributed.kv_transfer.kv_connector.v1.nixl.base_worker.get_tensor_model_parallel_world_size",  # noqa: E501
+            return_value=4,
+        ):
+            connector = NixlConnector(
+                vllm_config,
+                KVConnectorRole.WORKER,
+                make_kv_cache_config(block_size=16),
+            )
+            connector.connector_worker = FakeNixlConnectorWorker(
+                vllm_config, connector.engine_id, hand_shake_latency=0
+            )
+            worker = connector.connector_worker
+
+            worker.transfer_topo.total_num_kv_heads = 32
+            worker.transfer_topo.local_physical_heads = 8  # 32 // 4
+            worker.kv_cache_layout = "HND"
+
+            slot_size = 4096
+            worker.slot_size_per_layer = [slot_size]
+            worker.block_len_per_layer = [slot_size * worker.block_size]
+            worker.num_blocks = 1
+            worker.dst_num_blocks[worker.engine_id] = worker.num_blocks
+
+            # Remote P_TP=2 has 16 heads/rank -> head_ratio = 16/8 = 2.
+            # Correct remote block_len = local * 2.  Send local * 1
+            # (wrong) to verify rejection.
+            bad_meta = NixlAgentMetadata(
+                engine_id=FakeNixlConnectorWorker.REMOTE_ENGINE_ID,
+                agent_metadata=FakeNixlWrapper.AGENT_METADATA,
+                kv_caches_base_addr=[0],
+                device_id=0,
+                num_blocks=1,
+                block_lens=list(worker.block_len_per_layer),
+                kv_cache_layout="HND",
+                block_size=worker.block_size,
+                ssm_sizes=(0, 0),
+                attn_backend_name=worker.backend_name,
+                physical_blocks_per_logical_kv_block=1,
+            )
+
+            with pytest.raises(AssertionError):
+                worker.add_remote_agent(bad_meta, remote_tp_size=2)
 
 
 # NOTE: resource cleanup in mp backend is a bit finicky, so the order in which

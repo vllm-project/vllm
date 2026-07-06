@@ -326,7 +326,7 @@ class NixlBaseConnectorScheduler:
                     (identity, b"", encoded_data[(target_pp_rank, target_tp_rank)])
                 )
 
-    def _mamba_prefill_token_count(self, num_prompt_tokens: int) -> int:
+    def _get_remote_prefill_token_count(self, num_prompt_tokens: int) -> int:
         """D-side only. Returns N-1 for Mamba models since the decoder
         always recomputes the last token and must start from h(N-1)."""
         if self._has_mamba and num_prompt_tokens > 1:

@@ -13,6 +13,20 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  mirror:
+    amd:
+      device: mi300_4
+      timeout_in_minutes: 110
+      depends_on:
+        - image-build-amd
+      source_file_dependencies:
+        - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+        - tests/v1/kv_connector/nixl_integration/
+        - vllm/platforms/rocm.py
+      commands:
+        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+        - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+
 - label: Distributed FlashInfer NixlConnector PD accuracy (4 GPUs)
   key: distributed-flashinfer-nixlconnector-pd-accuracy-4-gpus
   timeout_in_minutes: 30
@@ -49,6 +63,19 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - DP_EP=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  mirror:
+    amd:
+      device: mi300_4
+      timeout_in_minutes: 50
+      depends_on:
+        - image-build-amd
+      source_file_dependencies:
+        - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+        - tests/v1/kv_connector/nixl_integration/
+        - vllm/platforms/rocm.py
+      commands:
+        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+        - DP_EP=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: CrossLayer KV layout Distributed NixlConnector PD accuracy tests (4 GPUs)
   key: crosslayer-kv-layout-distributed-nixlconnector-pd-accuracy-tests-4-gpus
@@ -61,6 +88,19 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - CROSS_LAYERS_BLOCKS=True bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  mirror:
+    amd:
+      device: mi300_4
+      timeout_in_minutes: 110
+      depends_on:
+        - image-build-amd
+      source_file_dependencies:
+        - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+        - tests/v1/kv_connector/nixl_integration/
+        - vllm/platforms/rocm.py
+      commands:
+        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+        - CROSS_LAYERS_BLOCKS=True ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: Hybrid SSM NixlConnector PD accuracy tests (4 GPUs)
   key: hybrid-ssm-nixlconnector-pd-accuracy-tests-4-gpus
@@ -73,6 +113,19 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - HYBRID_SSM=1 bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
+  mirror:
+    amd:
+      device: mi300_4
+      timeout_in_minutes: 60
+      depends_on:
+        - image-build-amd
+      source_file_dependencies:
+        - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+        - tests/v1/kv_connector/nixl_integration/
+        - vllm/platforms/rocm.py
+      commands:
+        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+        - HYBRID_SSM=1 ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_accuracy_test.sh
 
 - label: Hybrid SSM NixlConnector PD prefix cache test (2 GPUs)
   key: hybrid-ssm-nixlconnector-pd-prefix-cache-2-gpus
@@ -116,6 +169,20 @@ steps:
   commands:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
+  mirror:
+    amd:
+      device: mi300_2
+      timeout_in_minutes: 60
+      depends_on:
+        - image-build-amd
+      source_file_dependencies:
+        - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+        - vllm/v1/worker/kv_connector_model_runner_mixin.py
+        - tests/v1/kv_connector/nixl_integration/
+        - vllm/platforms/rocm.py
+      commands:
+        - uv pip install --system -r /vllm-workspace/requirements/kv_connectors_rocm.txt
+        - ATTENTION_BACKEND=TRITON_ATTN bash v1/kv_connector/nixl_integration/config_sweep_spec_decode_test.sh
 
 - label: MultiConnector (Nixl+Offloading) PD edge cases (2 GPUs)
   key: multiconnector-nixl-offloading-pd-edge-cases-2-gpus
