@@ -1,3 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
 import weakref
 from unittest import mock
 
@@ -44,7 +47,7 @@ def test_tiling_engine_many_requests(llm):
     This verifies that _run_tiling_engine correctly chunks requests,
     processes all of them, and returns outputs in the correct order.
     """
-    num_prompts = 4
+    num_prompts = 10
     prompts = [f"Prompt {i}" for i in range(num_prompts)]
     outputs = llm.encode(prompts, pooling_task="embed")
     assert len(outputs) == num_prompts
