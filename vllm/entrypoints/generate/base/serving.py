@@ -53,7 +53,7 @@ class ServeContext(Generic[RequestT]):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
 
-class OpenAIServing(BaseServing, BeamSearchOnlineMixin):
+class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
     request_id_prefix: ClassVar[str] = """
     A short string prepended to every request’s ID.
     """

@@ -117,100 +117,6 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "scaled_fp4_quant"):
 
 
 # page attention ops
-def paged_attention_v1(
-    out: torch.Tensor,
-    query: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    num_kv_heads: int,
-    scale: float,
-    block_tables: torch.Tensor,
-    seq_lens: torch.Tensor,
-    block_size: int,
-    max_seq_len: int,
-    alibi_slopes: torch.Tensor | None,
-    kv_cache_dtype: str,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
-    tp_rank: int = 0,
-    blocksparse_local_blocks: int = 0,
-    blocksparse_vert_stride: int = 0,
-    blocksparse_block_size: int = 64,
-    blocksparse_head_sliding_step: int = 0,
-) -> None:
-    torch.ops._C.paged_attention_v1(
-        out,
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        scale,
-        block_tables,
-        seq_lens,
-        block_size,
-        max_seq_len,
-        alibi_slopes,
-        kv_cache_dtype,
-        k_scale,
-        v_scale,
-        tp_rank,
-        blocksparse_local_blocks,
-        blocksparse_vert_stride,
-        blocksparse_block_size,
-        blocksparse_head_sliding_step,
-    )
-
-
-def paged_attention_v2(
-    out: torch.Tensor,
-    exp_sum: torch.Tensor,
-    max_logits: torch.Tensor,
-    tmp_out: torch.Tensor,
-    query: torch.Tensor,
-    key_cache: torch.Tensor,
-    value_cache: torch.Tensor,
-    num_kv_heads: int,
-    scale: float,
-    block_tables: torch.Tensor,
-    seq_lens: torch.Tensor,
-    block_size: int,
-    max_seq_len: int,
-    alibi_slopes: torch.Tensor | None,
-    kv_cache_dtype: str,
-    k_scale: torch.Tensor,
-    v_scale: torch.Tensor,
-    tp_rank: int = 0,
-    blocksparse_local_blocks: int = 0,
-    blocksparse_vert_stride: int = 0,
-    blocksparse_block_size: int = 64,
-    blocksparse_head_sliding_step: int = 0,
-) -> None:
-    torch.ops._C.paged_attention_v2(
-        out,
-        exp_sum,
-        max_logits,
-        tmp_out,
-        query,
-        key_cache,
-        value_cache,
-        num_kv_heads,
-        scale,
-        block_tables,
-        seq_lens,
-        block_size,
-        max_seq_len,
-        alibi_slopes,
-        kv_cache_dtype,
-        k_scale,
-        v_scale,
-        tp_rank,
-        blocksparse_local_blocks,
-        blocksparse_vert_stride,
-        blocksparse_block_size,
-        blocksparse_head_sliding_step,
-    )
-
-
 def paged_attention_rocm(
     out: torch.Tensor,
     exp_sum: torch.Tensor,
@@ -3085,6 +2991,24 @@ if hasattr(torch.ops._C, "fused_experts_cpu"):
         is_vnni: bool,
     ) -> torch.Tensor:
         return torch.empty_like(hidden_states)
+
+
+if hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
+
+    @register_fake("_C::dynamic_4bit_int_moe")
+    def dynamic_4bit_int_moe_fake(
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        w13_packed: torch.Tensor,
+        w2_packed: torch.Tensor,
+        hidden_size: int,
+        intermediate_size: int,
+        group_size: int,
+        apply_router_weight_on_input: bool,
+        activation_kind: int,
+    ) -> torch.Tensor:
+        return x.new_empty((x.size(0), hidden_size))
 
 
 def fused_experts_cpu(
