@@ -410,18 +410,11 @@ class DFlashQwen3Model(nn.Module):
             embeds = torch.where(is_mask, self.mask_embedding.to(embeds.dtype), embeds)
         return embeds
 
-    def _build_fused_kv_buffers(self) -> None:
-        """Build fused weight buffers for precompute_and_store_context_kv.
-
-        Must be called after weights are loaded. Stacks the KV-projection
-        weights, K-norm weights, and RoPE parameters from every attention
-        layer so that precompute_and_store_context_kv can run one fused
-        GEMM for all layers at once. Also aliases the weight of the hidden_norm.
-        """
-        layers_attn = [layer.self_attn for layer in self.layers]
-        attn0 = layers_attn[0]
-        has_bias = attn0.qkv_proj.bias is not None
-
+    def _build_context_kv_buffers(
+        self,
+        layers_attn: list[nn.Module],
+        has_bias: bool,
+    ) -> None:
         self._hidden_norm_weight = self.hidden_norm.weight.data
 
         # KV projection weights: [num_layers * 2 * kv_size, hidden_size]
@@ -438,6 +431,20 @@ class DFlashQwen3Model(nn.Module):
         self._k_norm_weights = torch.stack(
             [a.k_norm.weight.data for a in layers_attn], dim=0
         ).contiguous()
+
+    def _build_fused_kv_buffers(self) -> None:
+        """Build fused weight buffers for precompute_and_store_context_kv.
+
+        Must be called after weights are loaded. Stacks the KV-projection
+        weights, K-norm weights, and RoPE parameters from every attention
+        layer so that precompute_and_store_context_kv can run one fused
+        GEMM for all layers at once. Also aliases the weight of the hidden_norm.
+        """
+        layers_attn = [layer.self_attn for layer in self.layers]
+        attn0 = layers_attn[0]
+        has_bias = attn0.qkv_proj.bias is not None
+
+        self._build_context_kv_buffers(layers_attn, has_bias)
 
         # RoPE parameters
         self._rope_head_size = attn0.rotary_emb.head_size
@@ -467,6 +474,49 @@ class DFlashQwen3Model(nn.Module):
 
         # References to inner Attention layers for direct cache writes
         self._attn_layers = [layer.self_attn.attn for layer in self.layers]
+
+    def _project_context_kv(
+        self,
+        context_states: torch.Tensor,
+        num_ctx: int,
+        num_layers: int,
+        num_kv_heads: int,
+        head_dim: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        # --- Fused KV projection (one GEMM for all layers) ---
+        normed_context_states = torch.empty_like(context_states)
+        ops.rms_norm(
+            normed_context_states,
+            context_states,
+            self._hidden_norm_weight,
+            self._rms_norm_eps,
+        )
+        all_kv_flat = F.linear(
+            normed_context_states, self._fused_kv_weight, self._fused_kv_bias
+        )
+        # Single contiguous copy that separates K/V and transposes to
+        # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
+        # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
+        all_kv = (
+            all_kv_flat.view(num_ctx, num_layers, 2, num_kv_heads, head_dim)
+            .permute(2, 1, 0, 3, 4)
+            .contiguous()
+        )
+        all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
+        all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
+        return all_k, all_v
+
+    def _normalize_context_k(self, all_k: torch.Tensor) -> torch.Tensor:
+        # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
+        # The weight is selected per layer by the outermost (layer) index.
+        all_k_normed = torch.empty_like(all_k)
+        ops.rms_norm(
+            all_k_normed,
+            all_k,
+            self._k_norm_weights,
+            self._rms_norm_eps,
+        )
+        return all_k_normed
 
     def precompute_and_store_context_kv(
         self,
@@ -499,35 +549,8 @@ class DFlashQwen3Model(nn.Module):
         hd = self._head_dim
         nkv = self._num_kv_heads
 
-        # --- Fused KV projection (one GEMM for all layers) ---
-        normed_context_states = torch.empty_like(context_states)
-        ops.rms_norm(
-            normed_context_states,
-            context_states,
-            self._hidden_norm_weight,
-            self._rms_norm_eps,
-        )
-        all_kv_flat = F.linear(
-            normed_context_states, self._fused_kv_weight, self._fused_kv_bias
-        )
-        # Single contiguous copy that separates K/V and transposes to
-        # layer-major layout.  Result: [2, L, num_ctx, nkv, hd] contiguous.
-        # Indexing dim-0 gives contiguous [L, num_ctx, nkv, hd] for K and V.
-        all_kv = (
-            all_kv_flat.view(num_ctx, L, 2, nkv, hd).permute(2, 1, 0, 3, 4).contiguous()
-        )
-        all_k = all_kv[0]  # [L, num_ctx, nkv, hd], contiguous
-        all_v = all_kv[1]  # [L, num_ctx, nkv, hd], contiguous
-
-        # --- Grouped RMSNorm K across all layers ([L, num_ctx, nkv, hd]) ---
-        # The weight is selected per layer by the outermost (layer) index.
-        all_k_normed = torch.empty_like(all_k)
-        ops.rms_norm(
-            all_k_normed,
-            all_k,
-            self._k_norm_weights,
-            self._rms_norm_eps,
-        )
+        all_k, all_v = self._project_context_kv(context_states, num_ctx, L, nkv, hd)
+        all_k_normed = self._normalize_context_k(all_k)
 
         # --- Fused RoPE across all layers ---
         # View as [L * num_ctx, kv] so RoPE sees one big batch (no copy).
