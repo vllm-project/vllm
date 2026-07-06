@@ -14,8 +14,9 @@ from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
 from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
 from vllm.v1.attention.selector import _cached_get_attn_backend, get_attn_backend
 
+pytestmark = pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only test")
 
-@pytest.mark.skipif(not current_platform.is_rocm(), reason="ROCm only test")
+
 def test_rocm_backends_do_not_support_mm_prefix():
     """Regression test: ROCm backends must not claim mm_prefix support.
 
@@ -25,12 +26,12 @@ def test_rocm_backends_do_not_support_mm_prefix():
     incorrect results. Remove this test only if support is properly added.
     """
     assert not RocmAttentionBackend.supports_mm_prefix(), (
-        "RocmAttentionBackend must not support mm_prefix — "
-        "defer to Triton unified attention instead"
+        "RocmAttentionBackend does not support mm_prefix — "
+        "defer to Triton unified attention instead for now"
     )
     assert not RocmAiterUnifiedAttentionBackend.supports_mm_prefix(), (
-        "RocmAiterUnifiedAttentionBackend must not support mm_prefix — "
-        "defer to Triton unified attention instead"
+        "RocmAiterUnifiedAttentionBackend does not support mm_prefix — "
+        "defer to Triton unified attention instead for now"
     )
 
 
