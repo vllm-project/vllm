@@ -230,6 +230,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.max_num_tokens,
                 self.max_num_reqs,
                 self.req_states.draft_token_capacity_np,
+                self.req_states.num_computed_tokens.gpu,
+                self.req_states.prefill_len.gpu,
+                self.req_states.next_prefill_tokens,
+                self.req_states.all_token_ids.gpu,
                 self.req_states.last_sampled_tokens,
                 self.req_states.draft_tokens,
                 self.device,
@@ -892,22 +896,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         else:
             num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
-            verification_capacity_manager = self.verification_capacity_manager
-            if verification_capacity_manager is not None:
-                trim_result = verification_capacity_manager.apply_draft_token_capacity(
-                    req_ids,
-                    draft_tokens,
-                    num_scheduled_tokens,
-                    idx_mapping_np,
-                    num_bonus_tokens,
-                )
-                num_scheduled_tokens = trim_result.num_scheduled_tokens
-                num_draft_tokens_per_req = trim_result.num_draft_tokens_per_req
-            else:
-                num_draft_tokens_per_req = get_scheduled_draft_token_counts(
-                    req_ids,
-                    draft_tokens,
-                )
+            num_draft_tokens_per_req = get_scheduled_draft_token_counts(
+                req_ids,
+                draft_tokens,
+            )
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
             num_logits = num_draft_tokens_per_req + num_bonus_tokens
@@ -923,13 +915,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         num_tokens = int(num_scheduled_tokens.sum())
         assert 0 < num_tokens <= num_tokens_after_padding
-        if envs.VLLM_MOE_SKIP_PADDING:
-            # Mark trailing cudagraph-padding rows so kernels can skip work for
-            # them when supported.
-            self.input_buffers.is_padding[:num_tokens].fill_(False)
-            self.input_buffers.is_padding[num_tokens:num_tokens_after_padding].fill_(
-                True
-            )
 
         # Get query_start_loc.
         # num_reqs_padded is None for PIECEWISE graphs (no request padding needed)
@@ -969,19 +954,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.input_buffers.seq_lens,
         )
         seq_lens = self.input_buffers.seq_lens[:num_reqs_padded]
-
-        dcp_local_seq_lens = None
-        if self.use_dcp:
-            # Prepare dcp local seq_lens.
-            prepare_dcp_local_seq_lens(
-                self.input_buffers.dcp_local_seq_lens,
-                self.input_buffers.seq_lens,
-                num_reqs,
-                self.dcp_size,
-                self.dcp_rank,
-                self.cp_interleave,
-            )
-            dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[:num_reqs_padded]
 
         # Some input token ids are directly read from the last sampled tokens
         # and draft tokens. Also, get the logits indices to sample tokens from.
@@ -1035,7 +1007,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             query_start_loc_np=query_start_loc_np,
             seq_lens=seq_lens,
             seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
-            dcp_local_seq_lens=dcp_local_seq_lens,
+            dcp_local_seq_lens=None,
             num_computed_tokens_np=num_computed_tokens_np,
             prefill_len_np=prefill_len_np,
             num_computed_prefill_tokens_np=num_computed_prefill_tokens_np,
@@ -1052,6 +1024,26 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
         if self.verification_capacity_manager is not None:
             input_batch = self.verification_capacity_manager.trim_batch(input_batch)
+        if self.use_dcp:
+            # Prepare dcp local seq_lens.
+            prepare_dcp_local_seq_lens(
+                self.input_buffers.dcp_local_seq_lens,
+                self.input_buffers.seq_lens,
+                num_reqs,
+                self.dcp_size,
+                self.dcp_rank,
+                self.cp_interleave,
+            )
+            input_batch.dcp_local_seq_lens = self.input_buffers.dcp_local_seq_lens[
+                :num_reqs_padded
+            ]
+        if envs.VLLM_MOE_SKIP_PADDING:
+            # Mark trailing cudagraph-padding rows so kernels can skip work for
+            # them when supported.
+            self.input_buffers.is_padding[: input_batch.num_tokens].fill_(False)
+            self.input_buffers.is_padding[
+                input_batch.num_tokens : num_tokens_after_padding
+            ].fill_(True)
         return input_batch
 
     def prepare_attn(
