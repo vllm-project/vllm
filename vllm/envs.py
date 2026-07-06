@@ -280,7 +280,6 @@ if TYPE_CHECKING:
     VLLM_NIXL_EP_MAX_NUM_RANKS: int = 32
     VLLM_XPU_ENABLE_XPU_GRAPH: bool = False
     VLLM_XPU_USE_SAMPLER_KERNEL: bool = True
-    VLLM_XPU_MOE_ACT_QUANT_IN_PREPARE: bool = False
     VLLM_LORA_ENABLE_DUAL_STREAM: bool = False
     VLLM_GPU_NIC_PCIE_MAPPING: str = ""
     VLLM_NIC_SELECTION_VARS: str = ""
@@ -1937,12 +1936,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # whether use xpu specific sample kernel
     "VLLM_XPU_USE_SAMPLER_KERNEL": lambda: bool(
         int(os.getenv("VLLM_XPU_USE_SAMPLER_KERNEL", "1"))
-    ),
-    # When set, the MoE prepare/finalize step quantizes activations on XPU
-    # before handing them to the XpuFusedMoe kernel (route A). When unset
-    # (default), XpuFusedMoe quantizes activations internally.
-    "VLLM_XPU_MOE_ACT_QUANT_IN_PREPARE": lambda: bool(
-        int(os.getenv("VLLM_XPU_MOE_ACT_QUANT_IN_PREPARE", "0"))
     ),
     # Enable simple KV offload.
     "VLLM_USE_SIMPLE_KV_OFFLOAD": lambda: bool(

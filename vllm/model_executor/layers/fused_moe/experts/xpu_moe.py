@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import torch
 
-import vllm.envs as envs
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
 from vllm.model_executor.layers.fused_moe.config import (
@@ -69,7 +68,9 @@ class XPUExperts(mk.FusedMoEExpertsModular):
 
     @property
     def expects_unquantized_inputs(self) -> bool:
-        return not envs.VLLM_XPU_MOE_ACT_QUANT_IN_PREPARE
+        if torch.ops._xpu_C.is_xe2_arch():
+            return True
+        return False
 
     @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
