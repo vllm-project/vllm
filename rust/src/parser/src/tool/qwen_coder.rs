@@ -16,6 +16,28 @@ const FUNCTION_END: &str = "</function>";
 const PARAMETER_START: &str = "<parameter=";
 const PARAMETER_END: &str = "</parameter>";
 
+/// Model-specific configuration for the shared Qwen Coder grammar.
+///
+/// Only the tool-call wrapper tokens vary across models that reuse this
+/// grammar; the inner `<function=...>` / `<parameter=...>` tags are always
+/// byte-identical. Seed-OSS, for example, wraps the same body in
+/// `<seed:tool_call>` / `</seed:tool_call>`.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct QwenCoderConfig {
+    /// Human-readable parser name used in error messages.
+    pub(crate) parser_name: &'static str,
+    /// Marker that opens a tool-call block.
+    pub(crate) tool_call_start: &'static str,
+    /// Marker that closes a tool-call block.
+    pub(crate) tool_call_end: &'static str,
+}
+
+const QWEN_CODER_CONFIG: QwenCoderConfig = QwenCoderConfig {
+    parser_name: "Qwen Coder",
+    tool_call_start: TOOL_CALL_START,
+    tool_call_end: TOOL_CALL_END,
+};
+
 type QwenCoderInput<'i> = Partial<&'i str>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -57,16 +79,24 @@ pub struct Qwen3CoderToolParser {
     mode: QwenCoderMode,
     emitted_tool_count: usize,
     tool_parameters: ToolSchemas,
+    config: QwenCoderConfig,
 }
 
 impl Qwen3CoderToolParser {
     /// Create a Qwen Coder tool parser.
     fn new(tools: &[Tool]) -> Self {
+        Self::with_config(tools, QWEN_CODER_CONFIG)
+    }
+
+    /// Create a parser for a model that reuses the Qwen Coder grammar with a
+    /// different tool-call wrapper (e.g. Seed-OSS).
+    pub(crate) fn with_config(tools: &[Tool], config: QwenCoderConfig) -> Self {
         Self {
             buffer: String::new(),
             mode: QwenCoderMode::Text,
             emitted_tool_count: 0,
             tool_parameters: ToolSchemas::from_tools(tools),
+            config,
         }
     }
 
@@ -119,9 +149,10 @@ impl ToolParser for Qwen3CoderToolParser {
 
     fn parse_into(&mut self, chunk: &str, output: &mut ToolParserOutput) -> Result<()> {
         self.buffer.push_str(chunk);
+        let config = self.config;
 
         while let Some((event, consumed_len)) = parse_buffered_event(&self.buffer, |input| {
-            parse_next_qwen_coder_event(input, &mut self.mode)
+            parse_next_qwen_coder_event(input, &mut self.mode, config)
         })? {
             self.apply_event(event, output)?;
             self.buffer.drain(..consumed_len);
@@ -134,9 +165,12 @@ impl ToolParser for Qwen3CoderToolParser {
         let mut output = ToolParserOutput::default();
         if !self.buffer.is_empty() {
             if matches!(self.mode, QwenCoderMode::ToolCall { .. })
-                || self.buffer.starts_with(TOOL_CALL_START)
+                || self.buffer.starts_with(self.config.tool_call_start)
             {
-                return Err(parsing_failed!("incomplete Qwen Coder tool call"));
+                return Err(parsing_failed!(
+                    "incomplete {} tool call",
+                    self.config.parser_name
+                ));
             }
             output.push_text(&self.buffer);
         }
@@ -153,37 +187,54 @@ impl ToolParser for Qwen3CoderToolParser {
 fn parse_next_qwen_coder_event(
     input: &mut QwenCoderInput<'_>,
     mode: &mut QwenCoderMode,
+    config: QwenCoderConfig,
 ) -> ModalResult<QwenCoderEvent> {
     match mode {
-        QwenCoderMode::Text => parse_text_event(input),
-        QwenCoderMode::ToolCall { end_marker_scan } => tool_call_event(input, end_marker_scan),
+        QwenCoderMode::Text => parse_text_event(input, config),
+        QwenCoderMode::ToolCall { end_marker_scan } => {
+            tool_call_event(input, end_marker_scan, config.tool_call_end)
+        }
     }
 }
 
 /// Parse a text-mode Qwen Coder event.
-fn parse_text_event(input: &mut QwenCoderInput<'_>) -> ModalResult<QwenCoderEvent> {
-    alt((tool_call_start_event, safe_text_event)).parse_next(input)
+fn parse_text_event(
+    input: &mut QwenCoderInput<'_>,
+    config: QwenCoderConfig,
+) -> ModalResult<QwenCoderEvent> {
+    alt((
+        |input: &mut QwenCoderInput<'_>| tool_call_start_event(input, config.tool_call_start),
+        |input: &mut QwenCoderInput<'_>| safe_text_event(input, config.tool_call_start),
+    ))
+    .parse_next(input)
 }
 
 /// Parse a Qwen Coder tool-call start marker.
-fn tool_call_start_event(input: &mut QwenCoderInput<'_>) -> ModalResult<QwenCoderEvent> {
-    literal(TOOL_CALL_START).value(QwenCoderEvent::ToolCallStart).parse_next(input)
+fn tool_call_start_event(
+    input: &mut QwenCoderInput<'_>,
+    tool_call_start: &'static str,
+) -> ModalResult<QwenCoderEvent> {
+    literal(tool_call_start).value(QwenCoderEvent::ToolCallStart).parse_next(input)
 }
 
 /// Parse a safe text run before the next Qwen Coder marker.
-fn safe_text_event(input: &mut QwenCoderInput<'_>) -> ModalResult<QwenCoderEvent> {
-    safe_text_len(input, TOOL_CALL_START).map(|len| QwenCoderEvent::Text { len })
+fn safe_text_event(
+    input: &mut QwenCoderInput<'_>,
+    tool_call_start: &'static str,
+) -> ModalResult<QwenCoderEvent> {
+    safe_text_len(input, tool_call_start).map(|len| QwenCoderEvent::Text { len })
 }
 
 /// Parse a complete Qwen Coder tool call.
 fn tool_call_event(
     input: &mut QwenCoderInput<'_>,
     end_marker_scan: &mut MarkerScanState,
+    tool_call_end: &'static str,
 ) -> ModalResult<QwenCoderEvent> {
     let (body,) = seq!(
         _: ws0,
-        take_until_marker(TOOL_CALL_END, end_marker_scan),
-        _: literal(TOOL_CALL_END),
+        take_until_marker(tool_call_end, end_marker_scan),
+        _: literal(tool_call_end),
     )
     .parse_next(input)?;
 

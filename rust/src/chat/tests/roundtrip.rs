@@ -236,7 +236,7 @@ roundtrip_tests! {
     minimax_m25 => [reasoning_and_content, tool_call_mix],
     deepseek_v4 => [reasoning_and_content, tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
-    seed_oss => [reasoning_and_content],
+    seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
     gemma4 => [tool_call_mix], // Gemma4 strips reasoning in history if there's no tool call
     kimi_k25 => [tool_call_mix], // Kimi K2.5 strips reasoning in history
