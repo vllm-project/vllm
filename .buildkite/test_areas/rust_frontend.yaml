@@ -15,24 +15,25 @@ steps:
   - tests/utils.py
   - tests/benchmarks/test_serve_cli.py
   - tests/entrypoints/openai/chat_completion/test_chat_completion.py
-  # - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
+  - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
 
   # - tests/entrypoints/openai/completion/test_prompt_validation.py
   - tests/entrypoints/openai/completion/test_shutdown.py
-  # - tests/entrypoints/openai/test_return_token_ids.py
-  # - tests/entrypoints/openai/test_uds.py
+  - tests/entrypoints/openai/test_return_token_ids.py
+  - tests/entrypoints/openai/test_uds.py
   - tests/v1/sample/test_logprobs_e2e.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure and not (test_bench_serve and not test_bench_serve_chat)"
+  - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure"
   - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex"
-  # - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not invalid"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
 
   # - pytest -v -s entrypoints/openai/completion/test_prompt_validation.py -k "not prompt_embeds"
   - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
-  # - pytest -v -s entrypoints/openai/test_return_token_ids.py
-  # - pytest -v -s entrypoints/openai/test_uds.py
+  # Cases with `return_token_ids` disabled expect explicit `null` fields, which Rust omits (`skip_serializing_none`).
+  - pytest -v -s "entrypoints/openai/test_return_token_ids.py::test_basic_completion_with_emoji[True]" entrypoints/openai/test_return_token_ids.py::test_chat_completion_with_emoji_and_token_ids
+  - pytest -v -s entrypoints/openai/test_uds.py
   - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
 
 - label: Rust Frontend Serve/Admin Coverage
@@ -45,19 +46,24 @@ steps:
   - vllm/entrypoints/serve/
   - vllm/v1/engine/
   - tests/utils.py
-  # - tests/entrypoints/serve/dev/rpc/test_collective_rpc.py
+  - tests/entrypoints/serve/dev/rpc/test_collective_rpc.py
   - tests/entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
   - tests/entrypoints/serve/instrumentator/test_basic.py
   - tests/entrypoints/serve/instrumentator/test_metrics.py
   # - tests/entrypoints/serve/dev/test_sleep.py
+  - tests/entrypoints/serve/tokenize/test_tokenization.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  # - pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
-  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not show_version and not server_load"
-  - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not stream and not lora and not test_generate_logprobs and not stop_string_workflow"
+  - pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
+  # server_load can be flaky under the Rust frontend; keep it excluded for now.
+  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not server_load"
+  # test_generate_logprobs expects Python-style top_logprobs truncation (dedup sampled + cap at max(k, 1)).
+  - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not lora and not test_generate_logprobs and not stop_string_workflow"
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
   # - pytest -v -s entrypoints/serve/dev/test_sleep.py
+  # /tokenizer_info is not implemented in the Rust frontend (the CLI flag is accepted as a no-op).
+  - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
 
 - label: Rust Frontend Core Correctness
   timeout_in_minutes: 30
@@ -85,7 +91,7 @@ steps:
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
+  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2
 
 - label: Rust Frontend Distributed
   timeout_in_minutes: 30
