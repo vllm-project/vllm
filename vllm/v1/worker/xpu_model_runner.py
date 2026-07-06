@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from contextlib import contextmanager
+from functools import partial
 
 import torch
 
@@ -40,16 +41,16 @@ class XPUModelRunnerV2(GPUModelRunnerV2):
 
 @contextmanager
 def _torch_cuda_wrapper():
-    # replace cuda APIs with xpu APIs, this should work by default
+    # Replace cuda APIs with xpu APIs. Each callable gets its own functools.partial
+    # so it is not the same object as torch.xpu.* (Torch Dynamo _get_handlers()
+    # asserts on duplicate registration when cuda aliases xpu directly).
     torch.cuda.Stream = torch.xpu.Stream
-    torch.cuda.default_stream = torch.xpu.current_stream
-    torch.cuda.current_stream = torch.xpu.current_stream
-    torch.cuda.stream = torch.xpu.stream
-    torch.cuda.mem_get_info = torch.xpu.mem_get_info
-    torch.cuda.Event = torch.Event
-    torch.cuda.set_stream = torch.xpu.set_stream
+    torch.cuda.default_stream = partial(torch.xpu.current_stream)
+    torch.cuda.current_stream = partial(torch.xpu.current_stream)
+    torch.cuda.stream = partial(torch.xpu.stream)
+    torch.cuda.set_stream = partial(torch.xpu.set_stream)
     if supports_xpu_graph():
-        torch.cuda.graph = torch.xpu.graph
+        torch.cuda.graph = partial(torch.xpu.graph)
         torch.cuda.CUDAGraph = torch.xpu.XPUGraph
-        torch.cuda.graph_pool_handle = torch.xpu.graph_pool_handle
+        torch.cuda.graph_pool_handle = partial(torch.xpu.graph_pool_handle)
     yield
