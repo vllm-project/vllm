@@ -26,9 +26,12 @@ class _SamplerDecompactionState:
     scheduled_draft_tokens_per_req: np.ndarray
     pruned_draft_tokens_per_req: np.ndarray
     num_bonus_tokens: int
-    max_num_reqs: int
-    last_sampled_tokens: torch.Tensor
-    draft_tokens: torch.Tensor
+
+
+@dataclass
+class CapacityTrimResult:
+    num_scheduled_tokens: np.ndarray
+    num_draft_tokens_per_req: np.ndarray
 
 
 def get_draft_token_capacity(
@@ -105,8 +108,20 @@ def get_effective_scheduled_token_counts(
 
 
 class CapacityBasedVerificationManager:
-    def __init__(self, max_num_tokens: int, device: torch.device):
+    def __init__(
+        self,
+        max_num_tokens: int,
+        max_num_reqs: int,
+        draft_token_capacity_np: np.ndarray,
+        last_sampled_tokens: torch.Tensor,
+        draft_tokens: torch.Tensor,
+        device: torch.device,
+    ):
         self.device = device
+        self.max_num_reqs = max_num_reqs
+        self.draft_token_capacity_np = draft_token_capacity_np
+        self.last_sampled_tokens = last_sampled_tokens
+        self.draft_tokens = draft_tokens
         self.copy_stream = torch.cuda.Stream(device)
         self.copy_event = torch.Event()
         self.sampler_decompaction_buffers = SamplerDecompactionBuffers.make(
@@ -116,7 +131,7 @@ class CapacityBasedVerificationManager:
 
         self.req_ids: list[str] = []
         self.idx_mapping_np: np.ndarray | None = None
-        self.draft_token_capacity_np: np.ndarray | None = None
+        self.copied_draft_token_capacity_np: np.ndarray | None = None
         self.num_draft_tokens: int = 0
         self.copy_event_pending = False
         self._sampler_decompaction_state: _SamplerDecompactionState | None = None
@@ -125,7 +140,7 @@ class CapacityBasedVerificationManager:
     def clear(self) -> None:
         self.req_ids = []
         self.idx_mapping_np = None
-        self.draft_token_capacity_np = None
+        self.copied_draft_token_capacity_np = None
         self.num_draft_tokens = 0
         self.copy_event_pending = False
         self._sampler_decompaction_state = None
@@ -137,12 +152,8 @@ class CapacityBasedVerificationManager:
         draft_tokens: dict[str, list[int]],
         num_scheduled_tokens: np.ndarray,
         idx_mapping_np: np.ndarray,
-        draft_token_capacity_np: np.ndarray,
         num_bonus_tokens: int,
-        max_num_reqs: int,
-        last_sampled_tokens: torch.Tensor,
-        req_state_draft_tokens: torch.Tensor,
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> CapacityTrimResult:
         num_scheduled_tokens_before_capacity = num_scheduled_tokens.copy()
         scheduled_draft_tokens_per_req = get_scheduled_draft_token_counts(
             req_ids, draft_tokens
@@ -155,18 +166,18 @@ class CapacityBasedVerificationManager:
             num_scheduled_tokens,
             scheduled_draft_tokens_per_req,
             idx_mapping_np,
-            draft_token_capacity_np,
+            self.draft_token_capacity_np,
         )
         self._sampler_decompaction_state = _SamplerDecompactionState(
             num_scheduled_tokens_before_capacity=num_scheduled_tokens_before_capacity,
             scheduled_draft_tokens_per_req=scheduled_draft_tokens_per_req,
             pruned_draft_tokens_per_req=pruned_draft_tokens_per_req,
             num_bonus_tokens=num_bonus_tokens,
-            max_num_reqs=max_num_reqs,
-            last_sampled_tokens=last_sampled_tokens,
-            draft_tokens=req_state_draft_tokens,
         )
-        return num_scheduled_tokens, num_draft_tokens_per_req
+        return CapacityTrimResult(
+            num_scheduled_tokens=num_scheduled_tokens,
+            num_draft_tokens_per_req=num_draft_tokens_per_req,
+        )
 
     def _sync_copy(self) -> None:
         if self.copy_event_pending:
@@ -182,9 +193,9 @@ class CapacityBasedVerificationManager:
         return True
 
     def _get_draft_token_capacities(self) -> np.ndarray | None:
-        if self.draft_token_capacity_np is None:
+        if self.copied_draft_token_capacity_np is None:
             return None
-        return np.clip(self.draft_token_capacity_np, 0, self.num_draft_tokens)
+        return np.clip(self.copied_draft_token_capacity_np, 0, self.num_draft_tokens)
 
     def set_draft_token_capacities(
         self,
@@ -196,23 +207,22 @@ class CapacityBasedVerificationManager:
         self.req_ids = list(req_ids)
         self.idx_mapping_np = idx_mapping_np
         self.num_draft_tokens = num_draft_tokens
-        self.draft_token_capacity_np = None
+        self.copied_draft_token_capacity_np = None
         self.copy_event_pending = False
 
         current_stream = torch.cuda.current_stream(self.device)
         self.copy_stream.wait_stream(current_stream)
         with torch.cuda.stream(self.copy_stream):
-            self.draft_token_capacity_np = async_copy_to_np(draft_token_capacity)
+            self.copied_draft_token_capacity_np = async_copy_to_np(draft_token_capacity)
             draft_token_capacity.record_stream(self.copy_stream)
             self.copy_event.record()
             self.copy_event_pending = True
 
     def try_update_draft_token_capacities(
         self,
-        draft_token_capacity_np: np.ndarray,
         req_id_to_index: dict[str, int],
     ) -> bool:
-        if self.draft_token_capacity_np is None:
+        if self.copied_draft_token_capacity_np is None:
             return False
         if not self._copy_ready():
             return False
@@ -220,9 +230,9 @@ class CapacityBasedVerificationManager:
         assert draft_token_capacities is not None
         assert self.idx_mapping_np is not None
         active = np.isin(self.req_ids, tuple(req_id_to_index))
-        draft_token_capacity_np[self.idx_mapping_np[active]] = draft_token_capacities[
-            active
-        ]
+        self.draft_token_capacity_np[self.idx_mapping_np[active]] = (
+            draft_token_capacities[active]
+        )
         return True
 
     def _prepare_sampler_decompaction(
@@ -239,14 +249,14 @@ class CapacityBasedVerificationManager:
             input_batch.query_start_loc,
             input_batch.idx_mapping,
             input_batch.positions,
-            state.last_sampled_tokens,
-            state.draft_tokens,
+            self.last_sampled_tokens,
+            self.draft_tokens,
             state.num_scheduled_tokens_before_capacity,
             state.scheduled_draft_tokens_per_req,
             state.num_bonus_tokens,
             input_batch.num_reqs,
             input_batch.num_reqs_after_padding,
-            state.max_num_reqs,
+            self.max_num_reqs,
             self.device,
             self.sampler_decompaction_buffers,
             state.num_bonus_tokens,

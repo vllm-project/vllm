@@ -107,6 +107,7 @@ from vllm.v1.worker.gpu.spec_decode.dspark.capacity import (
     CapacityBasedVerificationManager,
     get_draft_token_capacity,
     get_effective_scheduled_token_counts,
+    get_scheduled_draft_token_counts,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -209,10 +210,6 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Draft tokens propagation - for spec-dec + struct outputs.
         self.draft_tokens_handler = DraftTokensHandler(self.device)
-        self.capacity_verification_manager = CapacityBasedVerificationManager(
-            self.max_num_tokens,
-            self.device,
-        )
 
         # Pooling models.
         self.is_pooling_model = self.model_config.runner_type == "pooling"
@@ -227,6 +224,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             vocab_size=self.vocab_size,
             device=self.device,
         )
+        self.verification_capacity_manager: CapacityBasedVerificationManager | None
+        if getattr(self.speculator, "use_draft_token_capacity", False):
+            self.verification_capacity_manager = CapacityBasedVerificationManager(
+                self.max_num_tokens,
+                self.max_num_reqs,
+                self.req_states.draft_token_capacity_np,
+                self.req_states.last_sampled_tokens,
+                self.req_states.draft_tokens,
+                self.device,
+            )
+        else:
+            self.verification_capacity_manager = None
         self.input_buffers = InputBuffers(
             max_num_reqs=self.max_num_reqs,
             max_num_tokens=self.max_num_tokens,
@@ -883,19 +892,22 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         else:
             num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
-            num_scheduled_tokens, num_draft_tokens_per_req = (
-                self.capacity_verification_manager.apply_draft_token_capacity(
+            verification_capacity_manager = self.verification_capacity_manager
+            if verification_capacity_manager is not None:
+                trim_result = verification_capacity_manager.apply_draft_token_capacity(
                     req_ids,
                     draft_tokens,
                     num_scheduled_tokens,
                     idx_mapping_np,
-                    self.req_states.draft_token_capacity_np,
                     num_bonus_tokens,
-                    self.max_num_reqs,
-                    self.req_states.last_sampled_tokens,
-                    self.req_states.draft_tokens,
                 )
-            )
+                num_scheduled_tokens = trim_result.num_scheduled_tokens
+                num_draft_tokens_per_req = trim_result.num_draft_tokens_per_req
+            else:
+                num_draft_tokens_per_req = get_scheduled_draft_token_counts(
+                    req_ids,
+                    draft_tokens,
+                )
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
             num_logits = num_draft_tokens_per_req + num_bonus_tokens
@@ -1038,7 +1050,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             has_structured_output_reqs=scheduler_output.has_structured_output_requests,
             prompt_lens=prompt_lens,
         )
-        return self.capacity_verification_manager.trim_batch(input_batch)
+        if self.verification_capacity_manager is not None:
+            input_batch = self.verification_capacity_manager.trim_batch(input_batch)
+        return input_batch
 
     def prepare_attn(
         self, input_batch: InputBatch
@@ -1092,24 +1106,33 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
             assert self.speculator is not None
+            verification_capacity_manager = self.verification_capacity_manager
+            decompaction = (
+                verification_capacity_manager.sampler_decompaction
+                if verification_capacity_manager is not None
+                else None
+            )
             sampler_output = self.rejection_sampler(
                 logits,
                 input_batch,
                 # Draft logits are needed for probabilistic rejection sampling.
                 self.speculator.draft_logits,
-                self.capacity_verification_manager.sampler_decompaction,
+                decompaction,
             )
 
         assert sampler_output.num_sampled is not None
         assert sampler_output.num_rejected is not None
-        num_rejected_for_next_step = (
-            self.capacity_verification_manager.get_num_rejected_for_next_step(
-                sampler_output.num_sampled,
-                sampler_output.num_rejected,
-                input_batch,
-                self.req_states.prefill_len.gpu,
+        num_rejected_for_next_step = sampler_output.num_rejected
+        verification_capacity_manager = self.verification_capacity_manager
+        if verification_capacity_manager is not None:
+            num_rejected_for_next_step = (
+                verification_capacity_manager.get_num_rejected_for_next_step(
+                    sampler_output.num_sampled,
+                    sampler_output.num_rejected,
+                    input_batch,
+                    self.req_states.prefill_len.gpu,
+                )
             )
-        )
 
         return sampler_output, sampler_output.num_sampled, num_rejected_for_next_step
 
@@ -1168,9 +1191,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
 
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
-        if not dummy_run:
-            self.capacity_verification_manager.try_update_draft_token_capacities(
-                self.req_states.draft_token_capacity_np,
+        verification_capacity_manager = self.verification_capacity_manager
+        if not dummy_run and verification_capacity_manager is not None:
+            verification_capacity_manager.try_update_draft_token_capacities(
                 self.req_states.req_id_to_index,
             )
             num_toks, max_query_len = get_effective_scheduled_token_counts(
@@ -1186,7 +1209,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if (
             not dummy_run
             and scheduler_output.scheduled_spec_decode_tokens
-            and getattr(self.speculator, "use_draft_token_capacity", False)
+            and verification_capacity_manager is not None
         ):
             uniform_tok_count = None
             if not scheduler_output.scheduled_new_reqs:
@@ -1502,14 +1525,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # ensuring that `copy_event` is recorded before calling postprocess.
         # This sequencing may slightly reduce latency as async D2H copy does not
         # need to wait for the postprocess to finish.
+        verification_capacity_manager = self.verification_capacity_manager
+        query_start_loc = (
+            verification_capacity_manager.get_postprocess_query_start_loc(input_batch)
+            if verification_capacity_manager is not None
+            else input_batch.query_start_loc
+        )
         self.postprocess_sampled(
             input_batch.idx_mapping,
             sampler_output.sampled_token_ids,
             num_sampled,
             num_rejected_for_postprocess,
-            self.capacity_verification_manager.get_postprocess_query_start_loc(
-                input_batch
-            ),
+            query_start_loc,
         )
 
         if self.speculator is not None:
@@ -1546,19 +1573,20 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if self.num_speculative_steps > 0:
             # Spec-decode and diffusion LLMs both use draft tokens but the latter does
             # not have a speculator (i.e. self.speculator is None)
-            self.capacity_verification_manager.try_update_draft_token_capacities(
-                self.req_states.draft_token_capacity_np,
-                self.req_states.req_id_to_index,
-            )
-            if draft_token_capacity is not None:
-                self.capacity_verification_manager.set_draft_token_capacities(
-                    input_batch.req_ids,
-                    input_batch.idx_mapping_np,
-                    draft_token_capacity,
-                    self.num_speculative_steps,
+            verification_capacity_manager = self.verification_capacity_manager
+            if verification_capacity_manager is not None:
+                verification_capacity_manager.try_update_draft_token_capacities(
+                    self.req_states.req_id_to_index,
                 )
-            else:
-                self.capacity_verification_manager.clear()
+                if draft_token_capacity is not None:
+                    verification_capacity_manager.set_draft_token_capacities(
+                        input_batch.req_ids,
+                        input_batch.idx_mapping_np,
+                        draft_token_capacity,
+                        self.num_speculative_steps,
+                    )
+                else:
+                    verification_capacity_manager.clear()
             self.draft_tokens_handler.set_draft_tokens(
                 input_batch,
                 self.req_states.draft_tokens[input_batch.idx_mapping],

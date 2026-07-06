@@ -113,7 +113,15 @@ def test_compute_draft_token_capacity_keeps_threshold_ties():
 
 def test_capacity_based_verification_manager_updates_cpu_capacities():
     device = torch.device("cuda")
-    handler = CapacityBasedVerificationManager(max_num_tokens=16, device=device)
+    draft_token_capacity_np = np.full(4, 3, dtype=np.int32)
+    handler = CapacityBasedVerificationManager(
+        max_num_tokens=16,
+        max_num_reqs=4,
+        draft_token_capacity_np=draft_token_capacity_np,
+        last_sampled_tokens=torch.zeros((4, 1), dtype=torch.int64, device=device),
+        draft_tokens=torch.zeros((4, 3), dtype=torch.int64, device=device),
+        device=device,
+    )
     input_batch: Any = SimpleNamespace(
         req_ids=["req0", "req1"],
         idx_mapping_np=np.array([2, 0], dtype=np.int32),
@@ -128,17 +136,14 @@ def test_capacity_based_verification_manager_updates_cpu_capacities():
     )
     assert handler.copy_event_pending
 
-    draft_token_capacity_np = np.full(4, 3, dtype=np.int32)
     torch.accelerator.synchronize()
     assert handler.try_update_draft_token_capacities(
-        draft_token_capacity_np,
         {"req0": 2, "req1": 0},
     )
     assert draft_token_capacity_np.tolist() == [2, 3, 1, 3]
 
     draft_token_capacity_np.fill(3)
     assert handler.try_update_draft_token_capacities(
-        draft_token_capacity_np,
         {"req1": 0},
     )
     assert draft_token_capacity_np.tolist() == [2, 3, 3, 3]
