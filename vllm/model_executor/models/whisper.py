@@ -1025,6 +1025,7 @@ class WhisperForConditionalGeneration(
         sampled_token_ids: list[list[int]],
         req_slots: dict[str, int],
         req_npos: dict[str, int],
+        live_slots: dict[str, int] | None = None,
     ) -> dict[str, list[float]] | None:
         """DTW-align each request that finishes this step; return per-token times.
 
@@ -1034,6 +1035,12 @@ class WhisperForConditionalGeneration(
         # Phase 1 (GPU, this thread): recompute + standardize each finishing
         # request's weights and pull them to the host.
         jobs: list[tuple[str, np.ndarray]] = []
+        # Async-readout race guard: this can run after the step, by which point a
+        # finished request's slot may have been freed and reassigned. Slots that a
+        # live request now owns have had their capture buffer overwritten, so a
+        # finished request pointing at such a slot is skipped below (no timestamps)
+        # rather than reading another request's cross-attention data.
+        used = set(live_slots.values()) if live_slots is not None else None
         for i, req_id in enumerate(req_ids):
             toks = sampled_token_ids[i] if i < len(sampled_token_ids) else None
             if not toks or toks[-1] != self._word_align_eos:
@@ -1042,6 +1049,8 @@ class WhisperForConditionalGeneration(
             n = req_npos.get(req_id, 0)
             if slot is None or n <= 0:
                 continue
+            if used is not None and live_slots.get(req_id) != slot and slot in used:
+                continue  # slot reused by another live request → stale, skip
             # crop the DTW to this request's real audio length (not the 30s pad)
             nframes = int(_WORD_ALIGN_NFRAMES[slot])
             jobs.append(

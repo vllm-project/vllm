@@ -7565,7 +7565,13 @@ class GPUModelRunner(
         finishing request against the slot it actually used this step."""
         slots = dict(self._wa_slot_of)
         npos = dict(self._wa_npos)
-        return lambda rids, toks: self.model.compute_word_align(rids, toks, slots, npos)
+        # Pass the live slot map (not a copy): read at readout time, it reveals
+        # whether a finished request's slot was already reassigned, so the readout
+        # can skip a reused slot instead of reading another request's buffer.
+        live = self._wa_slot_of
+        return lambda rids, toks: self.model.compute_word_align(
+            rids, toks, slots, npos, live_slots=live
+        )
 
     def init_routed_experts_capturer(self):
         logger.info(
