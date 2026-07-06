@@ -55,7 +55,8 @@ class WorkerSentinel:
         if self.dp_size > 1:
             old_cpu_group = get_dp_group().cpu_group
             stateless_destroy_torch_distributed_process_group(old_cpu_group)
-            port = params["new_stateless_dp_group_port"]
+            world_size = self.worker.parallel_config.world_size
+            port = params["new_stateless_dp_group_ports"][self.worker.rank % world_size]
             get_dp_group().cpu_group = stateless_init_torch_distributed_process_group(
                 self.data_parallel_master_ip,
                 port,
