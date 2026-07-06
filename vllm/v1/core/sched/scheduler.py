@@ -25,7 +25,7 @@ from vllm.distributed.kv_transfer.kv_connector.v1 import (
 from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
 from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe.routed_experts_capturer import (
+from vllm.model_executor.layers.fused_moe.routed_experts_capture import (
     RoutedExpertsManager,
 )
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
@@ -328,19 +328,20 @@ class Scheduler(SchedulerInterface):
         )
 
         if self.enable_return_routed_experts:
+            # Under DCP/PCP, physical slots are interleaved across ranks. A
+            # rank-local buffer therefore needs global token addressing.
             assert self.dcp_world_size == 1 and self.pcp_world_size == 1, (
-                "enable_return_routed_experts does not support context parallelism "
-                "(dcp_world_size > 1 or pcp_world_size > 1)"
+                "enable_return_routed_experts does not support context "
+                "parallelism (dcp_world_size > 1 or pcp_world_size > 1)"
             )
 
-            self.routed_experts_mgr = RoutedExpertsManager(
+            self.routed_experts_manager = RoutedExpertsManager(
                 vllm_config=vllm_config,
                 kv_cache_config=kv_cache_config,
             )
-            # Block-ID snapshot taken at schedule time (before forward),
-            # so update_from_output can read slot data even if a later
-            # schedule() frees the blocks (async scheduling race).
-            self._re_block_ids: dict[str, list[int]] = {}
+            # Snapshot block IDs before forward because async scheduling may
+            # release or reassign them before model output is processed.
+            self._routed_experts_block_ids: dict[str, list[int]] = {}
 
         self._pause_state: PauseState = PauseState.UNPAUSED
 
@@ -1265,11 +1266,13 @@ class Scheduler(SchedulerInterface):
         # scheduling may call _update_after_schedule again before the
         # prior update_from_output runs).
         if self.enable_return_routed_experts:
-            gid = self.routed_experts_mgr.attn_gid
-            self._re_block_ids.update(
+            full_attn_group_id = self.routed_experts_manager.full_attn_group_id
+            self._routed_experts_block_ids.update(
                 {
-                    rid: self.kv_cache_manager.get_blocks(rid).get_block_ids()[gid]
-                    for rid in num_scheduled_tokens
+                    request_id: self.kv_cache_manager.get_blocks(
+                        request_id
+                    ).get_block_ids()[full_attn_group_id]
+                    for request_id in num_scheduled_tokens
                 }
             )
 
@@ -1619,26 +1622,19 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens,
             )
 
-        # Persist per-step routed experts into the scheduler-side slot
-        # buffer (CPU->CPU fancy-index assign; ~few MB per step).
-        # MUST precede the per-request routing reads below: stopped
-        # requests may terminate on tokens generated in this very step,
-        # whose routing was just D2H'd into model_runner_output.
-        routing_data = None
+        # The worker stores routing in shared memory and returns per-step slot
+        # indices. Keeping slots in ModelRunnerOutput prevents a later async
+        # schedule from overwriting request-keyed metadata. Slots follow
+        # model_runner_output.req_ids order, and lock-free access relies on
+        # EngineCore processing step outputs in FIFO order.
+        routing_slots = None
         routing_offsets: dict[str, int] = {}
-        if model_runner_output.routed_experts is not None:
-            re = model_runner_output.routed_experts
-            self.routed_experts_mgr.store_batch(re.routing_data, re.slot_mapping)
-            routing_data = re.routing_data.astype(
-                self.routed_experts_mgr.routed_experts_by_slot.dtype,
-                copy=False,
-            )
-            # Build offset map using model runner's request order
-            # (input_batch ordering), NOT scheduler dict order.
+        if model_runner_output.routed_experts_slots is not None:
+            routing_slots = model_runner_output.routed_experts_slots
             offset = 0
-            for rid in model_runner_output.req_ids:
-                routing_offsets[rid] = offset
-                offset += num_scheduled_tokens[rid]
+            for request_id in model_runner_output.req_ids:
+                routing_offsets[request_id] = offset
+                offset += num_scheduled_tokens[request_id]
 
         # NOTE(woosuk): As len(num_scheduled_tokens) can be up to 1K or more,
         # the below loop can be a performance bottleneck. We should do our best
@@ -1754,16 +1750,16 @@ class Scheduler(SchedulerInterface):
             routed_experts = None
             if (
                 self.enable_return_routed_experts
-                and routing_data is not None
+                and routing_slots is not None
                 and new_token_ids
             ):
-                req_offset = routing_offsets[req_id]
-                end = req_offset + num_tokens_scheduled
-                block_ids = self._re_block_ids.pop(req_id, [])
+                request_offset = routing_offsets[req_id]
+                request_end = request_offset + num_tokens_scheduled
                 if num_output_tokens_before == 0:
-                    # Prefill completed: read full prompt routing from
-                    # slot buffer using the block-ID snapshot taken at
-                    # schedule time (immune to async preemption).
+                    # Prefill done: read full prompt routing via the block-ID
+                    # snapshot from schedule time (a sequence-prefix, so it
+                    # survives async preemption / later schedules).
+                    block_ids = self._routed_experts_block_ids.get(req_id, [])
                     if (
                         request.sampling_params is not None
                         and request.sampling_params.routed_experts_prompt_start
@@ -1772,24 +1768,37 @@ class Scheduler(SchedulerInterface):
                         prompt_start = (
                             request.sampling_params.routed_experts_prompt_start
                         )
-                        assert prompt_start < request.num_prompt_tokens
+                        if prompt_start >= request.num_prompt_tokens:
+                            raise ValueError(
+                                "routed_experts_prompt_start "
+                                f"({prompt_start}) must be < num_prompt_tokens "
+                                f"({request.num_prompt_tokens})"
+                            )
                     else:
                         prompt_start = 0
-                    routed_experts = self.routed_experts_mgr.get(
+                    routed_experts = self.routed_experts_manager.get(
                         block_ids,
-                        request.num_prompt_tokens,
+                        token_end=request.num_prompt_tokens,
                         token_start=prompt_start,
                     )
                 else:
+                    num_new_tokens = len(new_token_ids)
                     if scheduled_spec_token_ids:
-                        # Spec decode: accepted tokens at the START of
-                        # the scheduled range, rejected at the end.
-                        routed_experts = routing_data[
-                            req_offset : req_offset + len(new_token_ids)
+                        # Spec decode accepts a prefix of the scheduled token
+                        # sequence, so its routing slots start at the request
+                        # offset.
+                        selected_slots = routing_slots[
+                            request_offset : request_offset + num_new_tokens
                         ]
                     else:
-                        # Normal decode / re-prefill: token(s) at the END.
-                        routed_experts = routing_data[end - len(new_token_ids) : end]
+                        # Normal decode samples from the final scheduled token
+                        # positions, so its routing slots end at request_end.
+                        selected_slots = routing_slots[
+                            request_end - num_new_tokens : request_end
+                        ]
+                    routed_experts = self.routed_experts_manager.get_by_slots(
+                        selected_slots
+                    )
 
             should_emit_output = bool(
                 new_token_ids or pooler_output is not None or stopped
@@ -2201,6 +2210,8 @@ class Scheduler(SchedulerInterface):
         assert request.is_finished()
 
         self._inflight_prefills.discard(request)
+        if self.enable_return_routed_experts:
+            self._routed_experts_block_ids.pop(request.request_id, None)
         connector_delay_free_blocks, kv_xfer_params = self._connector_finished(request)
 
         # EC Connector: mirror the KV hook. The contract requires firing
@@ -2460,6 +2471,9 @@ class Scheduler(SchedulerInterface):
 
         if self.ec_connector is not None:
             self.ec_connector.shutdown()
+
+        if getattr(self, "routed_experts_manager", None) is not None:
+            self.routed_experts_manager.shutdown()
 
         logger.debug_once("[shutdown] Scheduler: complete")
 
