@@ -494,7 +494,7 @@ async def download_bytes_from_url(
             url = url_spec.url
 
         async with (
-            aiohttp.ClientSession() as session,
+            aiohttp.ClientSession(trust_env=True) as session,
             session.get(
                 url,
                 allow_redirects=envs.VLLM_MEDIA_URL_ALLOW_REDIRECTS,
