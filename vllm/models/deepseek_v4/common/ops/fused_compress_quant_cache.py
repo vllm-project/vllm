@@ -51,12 +51,30 @@ def compress_norm_rope_store_triton(
     quant_block: int,
     token_stride: int,
     scale_dim: int,
+    ape: torch.Tensor | None = None,
+    use_bf16_state_cache: bool = False,
 ) -> None:
     """Shared triton launcher for the fused compress+norm+RoPE+insert path.
 
     Picks one of the three kernels in this module based on ``head_dim`` and
     ``use_fp4_cache``. Identical launch signature for all three.
+
+    Args:
+        ape: APE tensor [compress_ratio, coff*head_dim]. Required when
+            use_bf16_state_cache=True.
+        use_bf16_state_cache: If True, add APE inside the compress kernel
+            instead of reading fused score+ape.
     """
+    if use_bf16_state_cache:
+        # Triton has no in-kernel APE path; the bf16 state cache is served by
+        # the fused HIP compressor on gfx950.
+        raise NotImplementedError(
+            "use_bf16_state_cache=True is not implemented for Triton kernels. "
+            "Use the fused HIP compressor on gfx950: "
+            "VLLM_ROCM_DSV4_HIP_COMPRESSOR=1 for CSA/HCA, or include "
+            "indexer explicitly for HIP indexer."
+        )
+
     if head_dim == 512:
         kernel = _fused_kv_compress_norm_rope_insert_sparse_attn
         num_warps = 4

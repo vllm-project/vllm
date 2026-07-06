@@ -119,6 +119,7 @@ if TYPE_CHECKING:
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_DSV4_HIP_COMPRESSOR: str = "False"
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
@@ -1145,6 +1146,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+    ),
+    # DeepSeek-V4 fused HIP compressor modes (experimental ROCm gfx950 path).
+    # false/0 disables; true/1 enables csa+hca; list values may include indexer.
+    "VLLM_ROCM_DSV4_HIP_COMPRESSOR": lambda: os.getenv(
+        "VLLM_ROCM_DSV4_HIP_COMPRESSOR", "False"
     ),
     # Whether to use aiter paged attention.
     # By default is disabled.
