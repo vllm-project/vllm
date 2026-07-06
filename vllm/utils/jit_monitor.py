@@ -21,10 +21,11 @@ Currently monitors:
 - TileLang ``@tilelang.jit`` first-time compilations
 """
 
+import contextlib
 import functools
 import importlib
 import os
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from contextlib import suppress
 from typing import Any, Literal, cast
 
@@ -144,20 +145,86 @@ def _safe_repr(value: object, *, max_len: int = 120) -> str:
     return text
 
 
-def _log_triton_jit_compile(fn_name: str, kwargs) -> None:
+def _get_compile_info(kwargs: Mapping[str, object]) -> dict:
     compile_info = kwargs.get("compile")
-    if not isinstance(compile_info, dict):
-        compile_info = {}
-    key = compile_info.get("key") or kwargs.get("key")
-    detail = f"key={key}" if _verbose and key is not None else None
-    event = (
-        "autotune/warmup candidate JIT compilation"
-        if kwargs.get("warmup")
-        else "kernel JIT compilation"
+    if isinstance(compile_info, dict):
+        return compile_info
+    return {}
+
+
+def _constant_name(fn: object, path: object) -> str:
+    jit_function = getattr(fn, "jit_function", None)
+    params = getattr(jit_function, "params", ())
+    if isinstance(path, tuple) and path and isinstance(path[0], int):
+        idx = path[0]
+        if idx < len(params):
+            param_name = getattr(params[idx], "name", None)
+            if param_name is not None:
+                if len(path) == 1:
+                    return param_name
+                suffix = "".join(f"[{part!r}]" for part in path[1:])
+                return f"{param_name}{suffix}"
+    return str(path)
+
+
+def _format_constants(fn: object, compile_info: Mapping[str, object]) -> str:
+    constants = compile_info.get("constants")
+    if not isinstance(constants, Mapping) or not constants:
+        return "{}"
+
+    items = sorted(
+        (
+            (_constant_name(fn, path), _safe_repr(value))
+            for path, value in constants.items()
+        ),
+        key=lambda item: item[0],
     )
+    return "{" + ", ".join(f"{name}={value}" for name, value in items) + "}"
+
+
+def _format_signature(compile_info: Mapping[str, object]) -> str:
+    signature = compile_info.get("signature")
+    if not isinstance(signature, Mapping) or not signature:
+        return "{}"
+    items = sorted((str(k), _safe_repr(v)) for k, v in signature.items())
+    return "{" + ", ".join(f"{name}={value}" for name, value in items) + "}"
+
+
+def _format_extra_compile_info(compile_info: Mapping[str, object]) -> str:
+    skip_keys = frozenset(
+        {
+            "constants",
+            "signature",
+            "key",
+            "fn",
+            "name",
+        }
+    )
+    items = [
+        f"{name}={_safe_repr(value)}"
+        for name, value in sorted(compile_info.items())
+        if name not in skip_keys
+    ]
+    return "{" + ", ".join(items) + "}"
+
+
+def _format_verbose_triton_compile_details(kwargs: Mapping[str, object]) -> str:
+    compile_info = _get_compile_info(kwargs)
+    fn = kwargs.get("fn")
+    key = compile_info.get("key") or kwargs.get("key")
+    return (
+        f"constexprs={_format_constants(fn, compile_info)}; "
+        f"signature={_format_signature(compile_info)}; "
+        f"extra_compile_info={_format_extra_compile_info(compile_info)}; "
+        f"key={_safe_repr(key)}"
+    )
+
+
+def _log_triton_jit_compile(fn_name: str, kwargs) -> None:
+    detail = _format_verbose_triton_compile_details(kwargs) if _verbose else None
     _handle_jit_event(
         backend="Triton",
-        event=event,
+        event="kernel JIT compilation",
         fn_name=fn_name,
         detail=detail,
     )
@@ -432,3 +499,32 @@ def _setup_tilelang_jit_hook() -> None:
         jit_impl_cls.__call__ = _call_with_monitor
 
     _tilelang_hook_installed = True
+
+
+@contextlib.contextmanager
+def numba_workqueue_threading_layer() -> Iterator[None]:
+    """Force numba's fork-safe `workqueue` threading layer for this block.
+
+    GNU OpenMP (numba's default `omp` threading layer) aborts the process
+    if a forked child re-enters an OpenMP-active runtime. vLLM forks the
+    EngineCore subprocess from a process that may already have launched
+    numba's parallel accelerator, so the first call to any
+    `@njit(parallel=True)` function must happen under `workqueue` instead.
+    The threading layer choice is sticky for the life of the process once
+    launched, so restoring the config on exit does not undo the effect.
+    """
+    import numba
+
+    key = "NUMBA_THREADING_LAYER"
+    previous_env = os.environ.get(key)
+    previous_config = numba.config.THREADING_LAYER
+    os.environ[key] = "workqueue"
+    numba.config.THREADING_LAYER = "workqueue"
+    try:
+        yield
+    finally:
+        if previous_env is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous_env
+        numba.config.THREADING_LAYER = previous_config
