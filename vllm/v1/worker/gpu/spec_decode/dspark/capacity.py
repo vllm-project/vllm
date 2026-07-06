@@ -358,7 +358,7 @@ class CapacityBasedVerificationManager:
             seq_lens_cpu_upper_bound_np
         )
 
-    def prepare_batch(self, input_batch: "InputBatch") -> "InputBatch":
+    def trim_batch(self, input_batch: "InputBatch") -> "InputBatch":
         if (
             input_batch.num_draft_tokens == 0
             or input_batch.num_draft_tokens_per_req is None
