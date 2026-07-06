@@ -76,6 +76,30 @@ steps:
       pytest -v -s v1/sample/test_logprobs.py &&
       pytest -v -s v1/sample/test_logprobs_e2e.py'
 
+- label: Basic Models Tests (Initialization)
+  timeout_in_minutes: 60
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/
+    - tests/models/test_initialization.py
+    - tests/models/registry.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'export VLLM_XPU_FUSED_MOE_USE_REF=1 &&
+      cd tests &&
+      pytest -v -s models/test_initialization.py::test_can_initialize_large_subset[Eagle3MiniMaxM2ForCausalLM]'
+
 - label: XPU CPU Offload
   timeout_in_minutes: 60
   device: intel_gpu
