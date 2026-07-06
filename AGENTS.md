@@ -83,6 +83,36 @@ uv pip install -r requirements/test/cuda.txt
 .venv/bin/python -m pytest tests/path/to/test_file.py -v
 ```
 
+### Adding tests
+
+Before writing a test, search the area you changed for an existing file and
+harness to extend. Prefer adding cases to an existing test module and reusing
+`conftest.py` fixtures, parametrization, and helpers in `tests/` over creating
+a new file or bespoke setup. Add a new test file only when no nearby suite covers
+the behavior.
+
+Write tests that protect **observable behavior and regression-prone paths**, not
+trivial wiring or implementation details that refactors should be free to
+change. A passing test is not meaningful by itself — coverage of code that cannot
+break (simple getters, one-line passthroughs) adds CI cost without signal.
+
+Principles borrowed from large open-source projects:
+
+- **Linux kernel** ([testing overview](https://docs.kernel.org/dev-tools/testing-overview.html)):
+  match test scope to the code — behavior and whole features through their
+  public interface; isolated units only when a regression test needs direct
+  access. Fix a bug, then add a test so it stays fixed.
+- **Kubernetes** ([writing good e2e tests](https://github.com/kubernetes/community/blob/main/contributors/devel/sig-testing/writing-good-e2e-tests.md)):
+  reuse shared framework utilities and constants; extend them when something is
+  generally useful. Follow stable nearby tests. Flaky tests are worse than no
+  tests — make failures actionable.
+- **PyTorch** ([test infrastructure](https://pytorch.org/blog/understanding-pytorchs-test-infrastructure/)):
+  parameterize over existing fixtures instead of copy-pasting cases. Test through
+  public APIs; keep tests atomic with no order or global-state dependencies.
+
+For model-specific requirements, see
+[`docs/contributing/model/tests.md`](docs/contributing/model/tests.md).
+
 ### Running linters
 
 > Requires [Environment setup](#environment-setup).
