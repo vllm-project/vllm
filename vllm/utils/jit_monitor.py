@@ -22,8 +22,10 @@ Currently monitors:
 
 import functools
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Iterator
 from typing import Literal
+
+import contextlib
 
 from vllm.logger import init_logger
 from vllm.triton_utils.importing import HAS_TRITON
@@ -287,3 +289,32 @@ def _setup_cutedsl_jit_hook() -> None:
 
     cute.compile = _compile_with_monitor
     _cutedsl_hook_installed = True
+
+
+@contextlib.contextmanager
+def numba_workqueue_threading_layer() -> Iterator[None]:
+    """Force numba's fork-safe `workqueue` threading layer for this block.
+
+    GNU OpenMP (numba's default `omp` threading layer) aborts the process
+    if a forked child re-enters an OpenMP-active runtime. vLLM forks the
+    EngineCore subprocess from a process that may already have launched
+    numba's parallel accelerator, so the first call to any
+    `@njit(parallel=True)` function must happen under `workqueue` instead.
+    The threading layer choice is sticky for the life of the process once
+    launched, so restoring the config on exit does not undo the effect.
+    """
+    import numba
+
+    key = "NUMBA_THREADING_LAYER"
+    previous_env = os.environ.get(key)
+    previous_config = numba.config.THREADING_LAYER
+    os.environ[key] = "workqueue"
+    numba.config.THREADING_LAYER = "workqueue"
+    try:
+        yield
+    finally:
+        if previous_env is None:
+            os.environ.pop(key, None)
+        else:
+            os.environ[key] = previous_env
+        numba.config.THREADING_LAYER = previous_config

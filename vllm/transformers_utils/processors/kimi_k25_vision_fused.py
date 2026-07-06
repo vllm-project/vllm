@@ -15,6 +15,7 @@ from transformers.image_processing_utils import BaseImageProcessor, BatchFeature
 from transformers.utils import TensorType
 
 from vllm.utils.import_utils import is_numba_available
+from vllm.utils.jit_monitor import numba_workqueue_threading_layer
 
 if is_numba_available():
     from numba import njit, prange
@@ -299,26 +300,27 @@ class KimiK25FusedVisionProcessor(BaseImageProcessor):
             (total_patches, 3, patch_size, patch_size), dtype=np.float32
         )
         out_offset = 0
-        for (
-            frames,
-            new_height,
-            new_width,
-            padded_height,
-            padded_width,
-            num_patches,
-        ) in prepared:
-            _write_fused_patches(
+        with numba_workqueue_threading_layer():
+            for (
                 frames,
-                pixel_values_np,
-                out_offset,
                 new_height,
                 new_width,
                 padded_height,
                 padded_width,
-                patch_size,
-                self.normalize_lut,
-            )
-            out_offset += num_patches
+                num_patches,
+            ) in prepared:
+                _write_fused_patches(
+                    frames,
+                    pixel_values_np,
+                    out_offset,
+                    new_height,
+                    new_width,
+                    padded_height,
+                    padded_width,
+                    patch_size,
+                    self.normalize_lut,
+                )
+                out_offset += num_patches
 
         data = {
             "pixel_values": torch.from_numpy(pixel_values_np),
