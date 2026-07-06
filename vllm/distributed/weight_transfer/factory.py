@@ -19,7 +19,7 @@ if TYPE_CHECKING:
     from vllm.config.weight_transfer import WeightTransferConfig
     from vllm.distributed.weight_transfer.base import (
         VLLMWeightSyncClient,
-        WeightIterator,
+        WeightSource,
         WeightTransferInitInfo,
     )
 
@@ -169,16 +169,19 @@ class WeightTransferTrainerFactory:
         init_info: "WeightTransferInitInfo",
         *,
         client: "VLLMWeightSyncClient",
-        weight_iterator: "WeightIterator | None" = None,
+        source: "WeightSource",
     ) -> TrainerWeightTransferEngine:
         """Build and rendezvous a ready-to-send trainer engine.
+
+        Called on every trainer rank (multi-rank trainers construct on all
+        ranks; the sender is resolved inside the engine's ``trainer_init``).
 
         Args:
             backend: Backend name (must be registered).
             config: Backend-specific weight transfer config.
             init_info: Backend-specific trainer init info.
             client: Inference-side control-plane client.
-            weight_iterator: Default (name, tensor) iterator factory.
+            source: `WeightSource` of `(name, tensor)` pairs to send each round.
 
         Raises:
             ValueError: If the backend is not registered.
@@ -200,7 +203,7 @@ class WeightTransferTrainerFactory:
             config=config,
             init_info=init_info,
             client=client,
-            weight_iterator=weight_iterator,
+            source=source,
         )
 
 

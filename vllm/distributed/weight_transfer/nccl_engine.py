@@ -17,10 +17,9 @@ from vllm.config.weight_transfer import NCCLWeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
-    WeightIterator,
+    WeightSource,
     WeightTransferEngine,
     WeightTransferUpdateInfo,
-    materialize_full_tensor,
 )
 from vllm.distributed.weight_transfer.nccl_common import (
     NCCLTrainerInitInfo,
@@ -187,12 +186,15 @@ class NCCLWeightTransferEngine(
 class NCCLTrainerWeightTransferEngine(
     TrainerWeightTransferEngine[NCCLWeightTransferConfig, NCCLTrainerInitInfo]
 ):
-    """Trainer-side (rank 0) NCCL weight transfer engine.
+    """Trainer-side NCCL weight transfer engine.
 
-    Holds the trainer's NCCL communicator and drives the full update round
-    trip: it runs the inference-side `update_weights` concurrently with the
-    trainer-side broadcast (both rendezvous inside the same NCCL calls), then
-    finishes the update.
+    On the sender (rank 0) holds the NCCL communicator and drives the full
+    update round trip: it runs the inference-side `update_weights` concurrently
+    with the trainer-side broadcast (both rendezvous inside the same NCCL
+    calls), then finishes the update. Non-sender trainer ranks hold no
+    communicator; they only iterate the source to stay in the trainer-side
+    collective (e.g. FSDP `full_tensor()`) and skip the client RPCs and the
+    broadcast (all guarded on `is_sender`).
     """
 
     init_info_cls = NCCLTrainerInitInfo
@@ -203,9 +205,10 @@ class NCCLTrainerWeightTransferEngine(
         config: NCCLWeightTransferConfig,
         *,
         client: VLLMWeightSyncClient,
-        weight_iterator: WeightIterator | None = None,
+        source: WeightSource,
+        is_sender: bool = True,
     ) -> None:
-        super().__init__(config, client=client, weight_iterator=weight_iterator)
+        super().__init__(config, client=client, source=source, is_sender=is_sender)
         self.model_update_group: PyNcclCommunicator | None = None
 
     @classmethod
@@ -215,11 +218,17 @@ class NCCLTrainerWeightTransferEngine(
         init_info: NCCLTrainerInitInfo,
         *,
         client: VLLMWeightSyncClient,
-        weight_iterator: WeightIterator | None = None,
+        source: WeightSource,
     ) -> Self:
-        engine = cls(config, client=client, weight_iterator=weight_iterator)
+        is_sender = init_info.is_sender
+        engine = cls(config, client=client, source=source, is_sender=is_sender)
+        if not is_sender:
+            # Non-sender trainer ranks aren't part of the transfer NCCL group and
+            # don't drive the inference side; they only participate in the
+            # trainer-side gather during send_weights.
+            return engine
 
-        # Workers sit at rank_offset 1, after the single trainer rank 0.
+        # Workers sit at rank_offset 1, after the single trainer sender rank 0.
         worker_init_info = NCCLWeightTransferInitInfo(
             master_address=init_info.master_address,
             master_port=init_info.master_port,
@@ -232,32 +241,29 @@ class NCCLTrainerWeightTransferEngine(
         # open the trainer endpoint (rank 0); both sides must rendezvous together.
         with ThreadPoolExecutor(max_workers=1) as exe:
             future = exe.submit(
-                client.init_weight_transfer_engine, asdict(worker_init_info)
+                engine.client.init_weight_transfer_engine, asdict(worker_init_info)
             )
             engine.model_update_group = trainer_init(init_info)
             future.result()  # surface any inference-side init error
 
         return engine
 
-    def send_weights(self, weight_iterator: WeightIterator | None = None) -> None:
-        if self.model_update_group is None:
-            raise RuntimeError("trainer_init() must be called before send_weights().")
+    def send_weights(self) -> None:
+        source = self.source
 
-        factory = self._resolve_iterator(weight_iterator)
+        # Metadata is declared without gathering. For Megatron it is itself a
+        # collective, so every rank runs it; only the sender ships it.
+        meta = source.metadata()
 
-        # Pass 1: metadata only. Reading .shape / .dtype returns the *global*
-        # values even for a sharded FSDP DTensor and does NOT trigger an
-        # all-gather, so the (potentially expensive) gather happens once, in the
-        # broadcast pass below.
-        names: list[str] = []
-        dtype_names: list[str] = []
-        shapes: list[list[int]] = []
-        for name, tensor in factory():
-            names.append(name)
-            dtype_names.append(str(tensor.dtype).split(".")[-1])
-            shapes.append(list(tensor.shape))
+        if not self.is_sender:
+            # Non-sender ranks only join the trainer-side gather collective.
+            self._broadcast(source)
+            return
+
         update_info = NCCLWeightTransferUpdateInfo(
-            names=names, dtype_names=dtype_names, shapes=shapes
+            names=[m.name for m in meta],
+            dtype_names=[str(m.dtype).split(".")[-1] for m in meta],
+            shapes=[list(m.shape) for m in meta],
         )
 
         self.client.start_weight_update()
@@ -270,34 +276,36 @@ class NCCLTrainerWeightTransferEngine(
             # hanging in broadcast waiting for a peer that will never arrive.
             if future.done():
                 future.result()
-            self._broadcast(factory())
+            self._broadcast(source)
             future.result()  # surface inference-side errors
         self.client.finish_weight_update()
 
-    def _broadcast(self, iterator) -> None:
-        """Broadcast (name, tensor) pairs from rank 0, packed or one-by-one."""
-        assert self.model_update_group is not None, (
-            "trainer_init() must be called before _broadcast()."
-        )
-
-        def post_iter_func(item):
-            return materialize_full_tensor(item[1])
-
+    def _broadcast(self, source: WeightSource) -> None:
+        """Iterate the source (materializing each tensor — a collective on all
+        ranks) and, on the sender, broadcast from rank 0, packed or one-by-one.
+        Non-sender ranks only replay the iteration to stay in the collective."""
         if self.config.packed:
-            packed_nccl_broadcast_producer(
-                iterator=iterator,
-                group=self.model_update_group,
-                src=0,
-                post_iter_func=post_iter_func,
-                buffer_size_bytes=self.config.packed_buffer_size_bytes,
-                num_buffers=self.config.packed_num_buffers,
-            )
+            if self.is_sender:
+                assert self.model_update_group is not None, (
+                    "trainer_init() must be called before _broadcast()."
+                )
+                packed_nccl_broadcast_producer(
+                    iterator=iter(source),
+                    group=self.model_update_group,
+                    src=0,
+                    post_iter_func=lambda item: item[1],
+                    buffer_size_bytes=self.config.packed_buffer_size_bytes,
+                    num_buffers=self.config.packed_num_buffers,
+                )
+            else:
+                for _ in source:
+                    pass
         else:
             stream = torch.cuda.current_stream()
-            for item in iterator:
-                self.model_update_group.broadcast(
-                    post_iter_func(item), src=0, stream=stream
-                )
+            for _name, tensor in source:
+                if self.is_sender:
+                    assert self.model_update_group is not None
+                    self.model_update_group.broadcast(tensor, src=0, stream=stream)
 
     def shutdown(self) -> None:
         self.model_update_group = None

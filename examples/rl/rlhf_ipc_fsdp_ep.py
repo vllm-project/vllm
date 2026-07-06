@@ -31,20 +31,17 @@ import torch.distributed as dist
 from huggingface_hub import snapshot_download
 from ray.util.placement_group import placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
-from torch.distributed._tensor import DTensor
 from torch.distributed.fsdp import fully_shard
 from transformers import AutoModelForCausalLM
 
 from vllm import LLM, SamplingParams
 from vllm.config import IPCWeightTransferConfig
 from vllm.distributed.weight_transfer import (
+    ModuleSource,
     RayVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
 )
-from vllm.distributed.weight_transfer.ipc_engine import (
-    IPCTrainerInitInfo,
-    IPCTrainerWeightTransferEngine,
-)
+from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
 from vllm.utils.network_utils import get_ip, get_open_port
 
 # Packed IPC transfer with a 1 GB buffer (matches the per-chunk buffer size).
@@ -133,85 +130,76 @@ class FSDPTrainWorker:
     def get_weight_metadata(self):
         return self.weight_names, self.weight_dtype_names, self.weight_shapes
 
-    def _full_param_iter(self):
-        """Factory yielding (name, full_tensor) pairs, un-fusing MoE experts.
-
-        HF's Qwen3MoeExperts (and other recent HF MoE impls) packs all experts
-        into two fused 3-D tensors per layer:
-          experts.gate_up_proj  shape (E, 2*I, H)
-          experts.down_proj     shape (E, H, I)
-        vLLM's Qwen3MoE load_weights still expects the older per-expert HF
-        layout (experts.<i>.gate_proj.weight, experts.<i>.up_proj.weight,
-        experts.<i>.down_proj.weight), so we un-fuse on the fly. Split order
-        matches HF's forward:
-          gate, up = linear(x, gate_up_proj[i]).chunk(2, dim=-1)
-        → rows [:I] of gate_up_proj[i] are gate, rows [I:] are up.
-        """
-        params = self.model.state_dict()
-        for name in list(params.keys()):
-            param = params.pop(name)
-            if isinstance(param, DTensor):
-                tensor = param.full_tensor().detach().contiguous()
-            else:
-                tensor = param.detach().contiguous()
-            del param
-
-            if name.endswith(".experts.gate_up_proj") and tensor.dim() == 3:
-                prefix = name[: -len(".gate_up_proj")]
-                num_experts, two_inter, _ = tensor.shape
-                inter = two_inter // 2
-                for i in range(num_experts):
-                    expert = tensor[i]
-                    yield (
-                        f"{prefix}.{i}.gate_proj.weight",
-                        expert[:inter].contiguous(),
-                    )
-                    yield (
-                        f"{prefix}.{i}.up_proj.weight",
-                        expert[inter:].contiguous(),
-                    )
-                del tensor
-            elif name.endswith(".experts.down_proj") and tensor.dim() == 3:
-                prefix = name[: -len(".down_proj")]
-                num_experts = tensor.shape[0]
-                for i in range(num_experts):
-                    yield (
-                        f"{prefix}.{i}.down_proj.weight",
-                        tensor[i].contiguous(),
-                    )
-                del tensor
-            else:
-                yield name, tensor
+    # Trainer-side MoE expert un-fusing is no longer needed: vLLM's Qwen3MoE
+    # load_weights now accepts the fused HF layout (experts.gate_up_proj /
+    # experts.down_proj) directly — see the ".experts.gate_up_proj must be
+    # handled by MoERunner.load_weights" note in
+    # vllm/model_executor/models/qwen3_moe.py — so `ModuleSource(self.model)`
+    # (plain named_parameters, DTensors gathered by TensorParam.full_tensor())
+    # suffices. Re-add `from torch.distributed._tensor import DTensor` if you
+    # restore this. Kept commented for reference:
+    #
+    # def _full_param_iter(self):
+    #     """Factory yielding (name, full_tensor) pairs, un-fusing MoE experts.
+    #
+    #     HF's Qwen3MoeExperts packs all experts into two fused 3-D tensors per
+    #     layer: experts.gate_up_proj (E, 2*I, H) and experts.down_proj (E, H, I).
+    #     Older vLLM expected the per-expert HF layout, so we un-fused on the fly.
+    #     Split order matches HF's forward: rows [:I] of gate_up_proj[i] are gate,
+    #     rows [I:] are up.
+    #     """
+    #     params = self.model.state_dict()
+    #     for name in list(params.keys()):
+    #         param = params.pop(name)
+    #         if isinstance(param, DTensor):
+    #             tensor = param.full_tensor().detach().contiguous()
+    #         else:
+    #             tensor = param.detach().contiguous()
+    #         del param
+    #
+    #         if name.endswith(".experts.gate_up_proj") and tensor.dim() == 3:
+    #             prefix = name[: -len(".gate_up_proj")]
+    #             num_experts, two_inter, _ = tensor.shape
+    #             inter = two_inter // 2
+    #             for i in range(num_experts):
+    #                 e = tensor[i]
+    #                 yield f"{prefix}.{i}.gate_proj.weight", e[:inter].contiguous()
+    #                 yield f"{prefix}.{i}.up_proj.weight", e[inter:].contiguous()
+    #             del tensor
+    #         elif name.endswith(".experts.down_proj") and tensor.dim() == 3:
+    #             prefix = name[: -len(".down_proj")]
+    #             num_experts = tensor.shape[0]
+    #             for i in range(num_experts):
+    #                 yield f"{prefix}.{i}.down_proj.weight", tensor[i].contiguous()
+    #             del tensor
+    #         else:
+    #             yield name, tensor
 
     def setup_engine(self, llm_handles):
-        """Build the trainer IPC engine on rank 0 (drives the inference side).
+        """Build the trainer IPC engine on every FSDP rank.
 
-        Also performs the (no-op) IPC init handshake against all DP LLM actors
-        via the Ray client.
+        Called on all ranks: rank 0 becomes the sender (drives the inference
+        side and performs the no-op IPC init handshake against all DP LLM
+        actors); the other ranks hold a null-client engine and only join the
+        IPC handle all-gather during send_weights.
         """
-        assert self.rank == 0
         self.engine = WeightTransferTrainerFactory.trainer_init(
             backend="ipc",
             config=WEIGHT_TRANSFER_CONFIG,
-            init_info=IPCTrainerInitInfo(),
+            init_info=IPCTrainerInitInfo(rank=self.rank),  # FSDP rank; sender is 0
             client=RayVLLMWeightSyncClient(llm_handles),
-            weight_iterator=self._full_param_iter,
+            source=ModuleSource(self.model),
         )
 
     def gather_and_broadcast_weights_ipc(self):
         """All-gather full params across FSDP ranks; rank 0 sends to vLLM.
 
-        Every rank participates in the IPC handle all-gather (so this must be
-        called on all ranks concurrently). Rank 0 additionally drives
-        start/update/finish on the inference side via its engine; non-rank-0
-        ranks only join the all-gather via `participate()`.
+        Called on all ranks concurrently. `send_weights` gathers each param and
+        contributes to the IPC handle all-gather on every rank; only rank 0 (the
+        sender) drives start/update/finish on the inference side (the other
+        ranks' client RPCs no-op).
         """
-        if self.rank == 0:
-            self.engine.send_weights()
-        else:
-            IPCTrainerWeightTransferEngine.participate(
-                self._full_param_iter, WEIGHT_TRANSFER_CONFIG
-            )
+        self.engine.send_weights()
 
 
 @ray.remote(num_cpus=1)
@@ -378,8 +366,8 @@ def main():
     # --- Weight transfer ---
     # The rank-0 FSDP worker owns the trainer engine and drives the inference
     # side (init/start/update/finish) for all DP actors via the Ray client.
-    print("[transfer] Initializing IPC weight transfer...")
-    ray.get(fsdp_workers[0].setup_engine.remote(llm_actors))
+    print("[transfer] Initializing IPC weight transfer (all FSDP ranks)...")
+    ray.get([w.setup_engine.remote(llm_actors) for w in fsdp_workers])
 
     # Two-phase sleep/wake pattern:
     # 1. sleep(level=1) — offload weights to CPU, discard KV cache

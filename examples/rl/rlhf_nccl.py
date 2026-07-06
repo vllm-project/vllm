@@ -37,6 +37,7 @@ from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.config import NCCLWeightTransferConfig
 from vllm.distributed.weight_transfer import (
+    ModuleSource,
     RayVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
 )
@@ -99,9 +100,10 @@ class TrainModel:
                 master_address=self.master_address,
                 master_port=self.port,
                 world_size=world_size,
+                rank=0,  # single-GPU trainer is the sole (sender) rank
             ),
             client=RayVLLMWeightSyncClient(llm_handle),
-            weight_iterator=self.model.named_parameters,  # bound method = factory
+            source=ModuleSource(self.model),
         )
 
     def broadcast_weights(self):

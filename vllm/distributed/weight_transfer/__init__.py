@@ -6,8 +6,11 @@ to inference workers.
 """
 
 from vllm.distributed.weight_transfer.base import (
+    ModuleSource,
+    ParamMeta,
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
+    WeightSource,
     WeightTransferEngine,
 )
 from vllm.distributed.weight_transfer.clients import (
@@ -27,4 +30,7 @@ __all__ = [
     "VLLMWeightSyncClient",
     "HTTPVLLMWeightSyncClient",
     "RayVLLMWeightSyncClient",
+    "ParamMeta",
+    "WeightSource",
+    "ModuleSource",
 ]

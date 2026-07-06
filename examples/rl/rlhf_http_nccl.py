@@ -41,6 +41,7 @@ from transformers import AutoModelForCausalLM
 from vllm.config import NCCLWeightTransferConfig
 from vllm.distributed.weight_transfer import (
     HTTPVLLMWeightSyncClient,
+    ModuleSource,
     WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.nccl_common import NCCLTrainerInitInfo
@@ -140,9 +141,10 @@ def main():
             master_address=master_address,
             master_port=master_port,
             world_size=world_size,
+            rank=0,  # single-GPU trainer is the sole (sender) rank
         ),
         client=HTTPVLLMWeightSyncClient(BASE_URL),
-        weight_iterator=train_model.named_parameters,
+        source=ModuleSource(train_model),
     )
 
     # Pause generation before weight sync

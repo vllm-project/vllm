@@ -49,6 +49,7 @@ from transformers import AutoModelForCausalLM
 from vllm.config import IPCWeightTransferConfig
 from vllm.distributed.weight_transfer import (
     HTTPVLLMWeightSyncClient,
+    ModuleSource,
     WeightTransferTrainerFactory,
 )
 from vllm.distributed.weight_transfer.ipc_engine import IPCTrainerInitInfo
@@ -144,9 +145,9 @@ def main():
     engine = WeightTransferTrainerFactory.trainer_init(
         backend="ipc",
         config=IPCWeightTransferConfig(packed=False),
-        init_info=IPCTrainerInitInfo(),
+        init_info=IPCTrainerInitInfo(rank=0),  # single-GPU trainer = sender
         client=HTTPVLLMWeightSyncClient(BASE_URL),
-        weight_iterator=train_model.named_parameters,
+        source=ModuleSource(train_model),
     )
 
     # Pause generation before weight sync

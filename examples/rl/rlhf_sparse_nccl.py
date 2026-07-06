@@ -119,6 +119,7 @@ class TrainModel:
                 master_address=self.master_address,
                 master_port=self.port,
                 world_size=world_size,
+                rank=0,  # single-GPU trainer is the sole (sender) rank
             )
         )
 

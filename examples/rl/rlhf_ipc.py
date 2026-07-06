@@ -30,6 +30,7 @@ from transformers import AutoModelForCausalLM
 from vllm import LLM, SamplingParams
 from vllm.config import IPCWeightTransferConfig
 from vllm.distributed.weight_transfer import (
+    ModuleSource,
     RayVLLMWeightSyncClient,
     WeightTransferTrainerFactory,
 )
@@ -70,9 +71,9 @@ class TrainModel:
         self.engine = WeightTransferTrainerFactory.trainer_init(
             backend="ipc",
             config=IPCWeightTransferConfig(packed=False),
-            init_info=IPCTrainerInitInfo(),
+            init_info=IPCTrainerInitInfo(rank=0),  # single-GPU trainer = sender
             client=RayVLLMWeightSyncClient(self.llm_handle),
-            weight_iterator=self.train_model.named_parameters,
+            source=ModuleSource(self.train_model),
         )
 
     def broadcast_weights(self):

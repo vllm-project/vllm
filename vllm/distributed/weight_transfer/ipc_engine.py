@@ -3,7 +3,6 @@
 """IPC-based weight transfer engine using CUDA IPC for communication."""
 
 import pickle
-from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -15,13 +14,13 @@ from typing_extensions import Self
 from vllm import envs
 from vllm.config.weight_transfer import IPCWeightTransferConfig
 from vllm.distributed.weight_transfer.base import (
+    TrainerInitInfo,
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
-    WeightIterator,
+    WeightSource,
     WeightTransferEngine,
     WeightTransferInitInfo,
     WeightTransferUpdateInfo,
-    materialize_full_tensor,
 )
 
 if TYPE_CHECKING:
@@ -30,12 +29,6 @@ from vllm.distributed.weight_transfer.packed_tensor import (
     packed_ipc_consumer,
     packed_ipc_producer,
 )
-
-# A callback that ships one update payload (an update_info dict) to the
-# inference side. The trainer engine passes `client.update_weights`; non-rank-0
-# trainer ranks pass `None` (they participate in the IPC handle all-gather but
-# never send).
-SendFn = Callable[[dict[str, Any]], None]
 
 
 @dataclass
@@ -46,10 +39,10 @@ class IPCWeightTransferInitInfo(WeightTransferInitInfo):
 
 
 @dataclass
-class IPCTrainerInitInfo(WeightTransferInitInfo):
-    """Trainer-side init info for IPC weight transfer. No rendezvous needed."""
-
-    pass
+class IPCTrainerInitInfo(TrainerInitInfo):
+    """Trainer-side init info for IPC weight transfer. No rendezvous needed;
+    `rank` / `sender_rank` (from `TrainerInitInfo`) pick which trainer ships the
+    merged IPC handles. All ranks still join the handle all-gather."""
 
 
 @dataclass
@@ -266,12 +259,12 @@ class IPCTrainerWeightTransferEngine(
 ):
     """Trainer-side CUDA IPC weight transfer engine.
 
-    For multi-rank (e.g. FSDP) trainers, *all* ranks must participate in the
-    IPC handle all-gather, but only rank 0 holds the engine and drives the
-    inference-side RPCs. Non-rank-0 ranks call the static `participate()`
-    helper to join the all-gather without sending anything. IPC transfer is
-    straight-line (no concurrent broadcast like NCCL): `update_weights` *is*
-    the transfer.
+    Called on every trainer rank. For multi-rank (e.g. FSDP) trainers all ranks
+    iterate the source (materializing each tensor) and contribute to the
+    IPC-handle all-gather; only the sender (rank 0) ships the merged handles to
+    the inference side. IPC transfer
+    is straight-line (no concurrent broadcast like NCCL): `update_weights` *is*
+    the transfer, and it rides the client, so it no-ops on non-senders.
     """
 
     init_info_cls = IPCTrainerInitInfo
@@ -282,9 +275,10 @@ class IPCTrainerWeightTransferEngine(
         config: IPCWeightTransferConfig,
         *,
         client: VLLMWeightSyncClient,
-        weight_iterator: WeightIterator | None = None,
+        source: WeightSource,
+        is_sender: bool = True,
     ) -> None:
-        super().__init__(config, client=client, weight_iterator=weight_iterator)
+        super().__init__(config, client=client, source=source, is_sender=is_sender)
         self.device_index = torch.accelerator.current_device_index()
         self.gpu_uuid = str(torch.cuda.get_device_properties(self.device_index).uuid)
 
@@ -295,57 +289,33 @@ class IPCTrainerWeightTransferEngine(
         init_info: IPCTrainerInitInfo,
         *,
         client: VLLMWeightSyncClient,
-        weight_iterator: WeightIterator | None = None,
+        source: WeightSource,
     ) -> Self:
-        engine = cls(config, client=client, weight_iterator=weight_iterator)
-        # IPC needs no data-plane rendezvous; this just lets the worker
-        # construct its (empty) init info.
-        client.init_weight_transfer_engine({})
+        engine = cls(
+            config, client=client, source=source, is_sender=init_info.is_sender
+        )
+        # IPC needs no data-plane rendezvous; this just lets the worker construct
+        # its (empty) init info. Only the sender drives the inference side.
+        if engine.is_sender:
+            engine.client.init_weight_transfer_engine({})
         return engine
 
-    def send_weights(self, weight_iterator: WeightIterator | None = None) -> None:
-        iterator = self._resolve_iterator(weight_iterator)()
-        self.client.start_weight_update()
-        self._send(iterator, self.config, self.gpu_uuid, self.client.update_weights)
-        self.client.finish_weight_update()
+    def send_weights(self) -> None:
+        source = self.source
+        if self.is_sender:
+            self.client.start_weight_update()
+        self._send(source)
+        if self.is_sender:
+            self.client.finish_weight_update()
         self._post_send_sync()
 
-    @classmethod
-    def participate(
-        cls, weight_iterator: WeightIterator, config: IPCWeightTransferConfig
-    ) -> None:
-        """Join the IPC handle all-gather from a non-rank-0 trainer rank.
+    # ---- data plane (runs on all ranks; only the sender ships) ----
 
-        Runs the same data-plane gather as `send_weights` (so the collective
-        all-gather lines up across ranks) but sends nothing and drives no
-        client RPCs.
-        """
-        device_index = torch.accelerator.current_device_index()
-        gpu_uuid = str(torch.cuda.get_device_properties(device_index).uuid)
-        cls._send(weight_iterator(), config, gpu_uuid, send_fn=None)
-        cls._post_send_sync()
-
-    # ---- data plane (shared by rank 0 send_weights + non-rank-0 participate) ----
-
-    @classmethod
-    def _send(
-        cls,
-        iterator: Iterator[tuple[str, torch.Tensor]],
-        config: IPCWeightTransferConfig,
-        gpu_uuid: str,
-        send_fn: SendFn | None,
-    ) -> None:
-        if config.packed:
-            cls._send_packed(iterator, config, gpu_uuid, send_fn)
+    def _send(self, source: WeightSource) -> None:
+        if self.config.packed:
+            self._send_packed(source)
         else:
-            cls._send_unpacked(iterator, gpu_uuid, send_fn)
-
-    @staticmethod
-    def _is_rank_zero() -> bool:
-        """Return True if this is rank 0 or no distributed group exists."""
-        if not torch.distributed.is_initialized():
-            return True
-        return torch.distributed.get_rank() == 0
+            self._send_unpacked(source)
 
     @staticmethod
     def _all_gather_and_merge_handles(
@@ -394,14 +364,9 @@ class IPCTrainerWeightTransferEngine(
             torch.distributed.barrier()
         torch.cuda.ipc_collect()
 
-    @classmethod
-    def _send_unpacked(
-        cls,
-        iterator: Iterator[tuple[str, torch.Tensor]],
-        gpu_uuid: str,
-        send_fn: SendFn | None,
-    ) -> None:
-        """Send all weights in a single API call (non-packed mode)."""
+    def _send_unpacked(self, source: WeightSource) -> None:
+        """Iterate the source, build one IPC handle per param, all-gather the
+        handles across ranks, and (sender) ship them in one update call."""
         names: list[str] = []
         dtype_names: list[str] = []
         shapes: list[list[int]] = []
@@ -413,75 +378,64 @@ class IPCTrainerWeightTransferEngine(
         # the IPC handle.
         weight_refs: list[torch.Tensor] = []
 
-        for name, tensor in iterator:
-            # FSDP shards are gathered here (once); regular tensors pass through.
-            full = materialize_full_tensor(tensor)
+        for name, tensor in source:
+            # FSDP shards were gathered by the source; ensure contiguity here.
             names.append(name)
-            dtype_names.append(str(full.dtype).split(".")[-1])
-            shapes.append(list(full.shape))
+            dtype_names.append(str(tensor.dtype).split(".")[-1])
+            shapes.append(list(tensor.shape))
 
-            weight = full.detach().contiguous()
+            weight = tensor.detach().contiguous()
             weight_refs.append(weight)
             _, ipc_args = reduce_tensor(weight)
-            ipc_handles.append({gpu_uuid: ipc_args})
+            ipc_handles.append({self.gpu_uuid: ipc_args})
 
-        ipc_handles = cls._all_gather_and_merge_handles(ipc_handles)
+        ipc_handles = self._all_gather_and_merge_handles(ipc_handles)
+        self._do_send(
+            names=names,
+            dtype_names=dtype_names,
+            shapes=shapes,
+            ipc_handles=ipc_handles,
+        )
 
-        if cls._is_rank_zero() and send_fn is not None:
-            cls._do_send(
-                send_fn=send_fn,
-                names=names,
-                dtype_names=dtype_names,
-                shapes=shapes,
-                ipc_handles=ipc_handles,
-            )
-
-    @classmethod
-    def _send_packed(
-        cls,
-        iterator: Iterator[tuple[str, torch.Tensor]],
-        config: IPCWeightTransferConfig,
-        gpu_uuid: str,
-        send_fn: SendFn | None,
-    ) -> None:
+    def _send_packed(self, source: WeightSource) -> None:
         """Send weights in bounded-memory chunks (packed mode)."""
-
-        def post_iter_func(item):
-            return materialize_full_tensor(item[1])
-
         for chunk in packed_ipc_producer(
-            iterator=iterator,
-            gpu_uuid=gpu_uuid,
-            post_iter_func=post_iter_func,
-            buffer_size_bytes=config.packed_buffer_size_bytes,
+            iterator=iter(source),
+            gpu_uuid=self.gpu_uuid,
+            post_iter_func=lambda item: item[1],
+            buffer_size_bytes=self.config.packed_buffer_size_bytes,
         ):
-            ipc_handle = cls._all_gather_and_merge_handles([chunk.ipc_handle])[0]
+            ipc_handle = self._all_gather_and_merge_handles([chunk.ipc_handle])[0]
+            self._do_send(
+                names=chunk.names,
+                dtype_names=chunk.dtype_names,
+                shapes=chunk.shapes,
+                ipc_handles=ipc_handle,
+                tensor_sizes=chunk.tensor_sizes,
+            )
+            # Per-chunk barrier: the producer reuses a single IPC buffer across
+            # chunks, but only the sender waits for the consumers (via _do_send).
+            # Without syncing every rank here, non-sender ranks race ahead and
+            # overwrite their buffer while their colocated worker is still
+            # reading the current chunk, silently corrupting the transfer.
+            self._post_send_sync()
 
-            if cls._is_rank_zero() and send_fn is not None:
-                cls._do_send(
-                    send_fn=send_fn,
-                    names=chunk.names,
-                    dtype_names=chunk.dtype_names,
-                    shapes=chunk.shapes,
-                    ipc_handles=ipc_handle,
-                    tensor_sizes=chunk.tensor_sizes,
-                )
-
-    @staticmethod
     def _do_send(
-        send_fn: SendFn,
+        self,
         names: list[str],
         dtype_names: list[str],
         shapes: list[list[int]],
         ipc_handles: list[dict[str, tuple]] | dict[str, tuple],
         tensor_sizes: list[int] | None = None,
     ) -> None:
-        """Build a single update payload and ship it via `send_fn`.
+        """Build one update payload and ship it via the client. Only the sender
+        ships (non-sender ranks already contributed to the handle all-gather).
 
         Emits raw `ipc_handles`; transports that cannot carry them natively
-        (HTTP/JSON) pickle them in their client (see
-        `HTTPVLLMWeightSyncClient`).
+        (HTTP/JSON) pickle them in their client (see `HTTPVLLMWeightSyncClient`).
         """
+        if not self.is_sender:
+            return
         update_fields: dict[str, Any] = {
             "names": names,
             "dtype_names": dtype_names,
@@ -492,4 +446,4 @@ class IPCTrainerWeightTransferEngine(
             update_fields["tensor_sizes"] = tensor_sizes
 
         update_info = IPCWeightTransferUpdateInfo(**update_fields)
-        send_fn(asdict(update_info))
+        self.client.update_weights(asdict(update_info))

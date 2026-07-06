@@ -23,6 +23,7 @@ from vllm.config.weight_transfer import (
 )
 from vllm.distributed.weight_transfer import (
     HTTPVLLMWeightSyncClient,
+    ModuleSource,
     RayVLLMWeightSyncClient,
     TrainerWeightTransferEngine,
     VLLMWeightSyncClient,
@@ -1294,48 +1295,41 @@ class TestTrainerFactory:
                     master_address="x", master_port=1, rank_offset=1, world_size=2
                 ),
                 client=RecordingClient(),
+                source=ModuleSource(torch.nn.Module()),
             )
 
 
+def _module_with(*pairs):
+    """A tiny nn.Module exposing the given (name, tensor) pairs as parameters,
+    so trainer tests can build a ModuleSource without a real model."""
+    module = torch.nn.Module()
+    for name, tensor in pairs:
+        module.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))
+    return module
+
+
 class _DummyTrainerEngine(TrainerWeightTransferEngine):
-    """Minimal concrete trainer engine to exercise base-class helpers."""
+    """Minimal concrete trainer engine to exercise base-class construction."""
 
     @classmethod
-    def trainer_init(cls, config, init_info, *, client, weight_iterator=None):
-        return cls(config, client=client, weight_iterator=weight_iterator)
+    def trainer_init(cls, config, init_info, *, client, source):
+        return cls(config, client=client, source=source)
 
-    def send_weights(self, weight_iterator=None):
+    def send_weights(self):
         pass
 
 
 class TestTrainerEngineBase:
-    """Base-class iterator resolution (no GPU)."""
+    """Base-class construction (no GPU)."""
 
-    def test_resolve_iterator_raises_when_unset(self):
-        engine = _DummyTrainerEngine(
-            WeightTransferConfig(backend="nccl"), client=RecordingClient()
-        )
-        with pytest.raises(ValueError, match="No weight_iterator"):
-            engine._resolve_iterator(None)
-
-    def test_resolve_iterator_uses_default(self):
-        sentinel = [("w", torch.zeros(2))]
+    def test_source_is_stored_and_iterable(self):
         engine = _DummyTrainerEngine(
             WeightTransferConfig(backend="nccl"),
             client=RecordingClient(),
-            weight_iterator=lambda: iter(sentinel),
+            source=ModuleSource(_module_with(("w", torch.zeros(2)))),
         )
-        factory = engine._resolve_iterator(None)
-        assert list(factory()) == sentinel
-
-    def test_resolve_iterator_override_wins(self):
-        engine = _DummyTrainerEngine(
-            WeightTransferConfig(backend="nccl"),
-            client=RecordingClient(),
-            weight_iterator=lambda: iter([("default", torch.zeros(1))]),
-        )
-        factory = engine._resolve_iterator(lambda: iter([("override", torch.zeros(1))]))
-        assert [n for n, _ in factory()] == ["override"]
+        assert engine.is_sender is True
+        assert [name for name, _ in engine.source] == ["w"]
 
 
 @pytest.mark.skipif(
@@ -1348,7 +1342,7 @@ def test_nccl_trainer_send_weights_drives_client_in_order():
     engine = NCCLTrainerWeightTransferEngine(
         NCCLWeightTransferConfig(packed=False),
         client=client,
-        weight_iterator=lambda: iter([("w", torch.zeros(4, device="cuda"))]),
+        source=ModuleSource(_module_with(("w", torch.zeros(4, device="cuda")))),
     )
     # Bypass the real NCCL rendezvous; broadcast is a no-op.
     engine.model_update_group = MagicMock()
@@ -1372,7 +1366,7 @@ def test_ipc_trainer_send_weights_drives_client_in_order():
     engine = IPCTrainerWeightTransferEngine(
         IPCWeightTransferConfig(packed=False),
         client=client,
-        weight_iterator=lambda: iter([("w", torch.ones(4, device="cuda"))]),
+        source=ModuleSource(_module_with(("w", torch.ones(4, device="cuda")))),
     )
 
     engine.send_weights()

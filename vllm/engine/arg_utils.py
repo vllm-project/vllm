@@ -757,6 +757,15 @@ class EngineArgs:
             backend = self.weight_transfer_config.get("backend", "nccl")
             cls = _WEIGHT_TRANSFER_CONFIG_CLASSES.get(backend, WeightTransferConfig)
             self.weight_transfer_config = cls(**self.weight_transfer_config)
+        elif type(self.weight_transfer_config) is WeightTransferConfig:
+            # The `vllm serve` CLI deserializes `--weight-transfer-config` JSON
+            # straight into the base class, bypassing the dict dispatch above, so
+            # backend wire params (packed, buffer sizes) would be missing. Upgrade
+            # to the backend subclass, preserving any base fields provided.
+            wtc = self.weight_transfer_config
+            cls = _WEIGHT_TRANSFER_CONFIG_CLASSES.get(wtc.backend)
+            if cls is not None:
+                self.weight_transfer_config = cls(**vars(wtc))
         if isinstance(self.ir_op_priority, dict):
             self.ir_op_priority = IrOpPriorityConfig(**self.ir_op_priority)
 

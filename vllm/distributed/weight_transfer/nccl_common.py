@@ -17,7 +17,10 @@ if TYPE_CHECKING:
     from vllm.config.parallel import ParallelConfig
     from vllm.distributed.device_communicators.pynccl import PyNcclCommunicator
 
-from vllm.distributed.weight_transfer.base import WeightTransferInitInfo
+from vllm.distributed.weight_transfer.base import (
+    TrainerInitInfo,
+    WeightTransferInitInfo,
+)
 
 
 @dataclass
@@ -36,11 +39,12 @@ class NCCLWeightTransferInitInfo(WeightTransferInitInfo):
 
 
 @dataclass
-class NCCLTrainerInitInfo(WeightTransferInitInfo):
+class NCCLTrainerInitInfo(TrainerInitInfo):
     """Trainer-side initialization info for NCCL weight transfer backends.
 
-    The trainer opens its endpoint as rank 0, so it needs no `rank_offset`.
-    `world_size` is the full trainer+worker process-group size.
+    The sender opens its endpoint as NCCL rank 0, so it needs no `rank_offset`.
+    `world_size` is the full trainer+worker NCCL group size. `rank` /
+    `sender_rank` (from `TrainerInitInfo`) pick which trainer process sends.
     """
 
     master_address: str

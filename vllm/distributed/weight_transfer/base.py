@@ -3,7 +3,7 @@
 """Base class for weight transfer engines."""
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Generic, Protocol, TypeVar, runtime_checkable
 
@@ -20,10 +20,9 @@ TInitInfo = TypeVar("TInitInfo", bound="WeightTransferInitInfo")
 TUpdateInfo = TypeVar("TUpdateInfo", bound="WeightTransferUpdateInfo")
 TConfig = TypeVar("TConfig", bound="WeightTransferConfig")
 
-# A trainer supplies its parameters as a *factory* returning a fresh iterator of
-# (name, tensor) pairs. A factory (not a bare iterator) is required because
-# `model.named_parameters()` is single-use; each send round must re-iterate.
-WeightIterator = Callable[[], Iterator[tuple[str, torch.Tensor]]]
+# A trainer supplies its parameters as a `WeightSource` (defined below): a
+# re-iterable stream of materialized `(name, tensor)` pairs plus a `metadata()`
+# channel. The built-in `ModuleSource` uses `materialize_full_tensor`.
 
 
 def materialize_full_tensor(tensor: torch.Tensor) -> torch.Tensor:
@@ -38,12 +37,95 @@ def materialize_full_tensor(tensor: torch.Tensor) -> torch.Tensor:
     return full_tensor() if callable(full_tensor) else tensor
 
 
+@dataclass(frozen=True)
+class ParamMeta:
+    """Name / wire dtype / full (HF) shape for one output parameter."""
+
+    name: str
+    dtype: torch.dtype
+    shape: tuple[int, ...]
+
+
+class WeightSource(ABC):
+    """A re-iterable source of the trainer's weights, handed to a trainer engine.
+
+    Two channels:
+
+    * `metadata()` — `(name, wire dtype, full shape)` for every parameter,
+      *without* transferring. Cheap when shapes are known locally (FSDP
+      `DTensor` global shape); may be expensive on first call for backends that
+      must materialize to learn shapes (e.g. a Megatron-Bridge export), in which
+      case it should cache.
+    * iteration — yields fully-materialized `(name, tensor)` pairs, one at a
+      time. Materializing is typically a collective (FSDP `full_tensor()`, a
+      Megatron export), so every trainer rank must iterate the same source in the
+      same order in lockstep, or ranks deadlock. Under pipeline parallelism a
+      rank may not own a parameter at all — iterating still drives the collective
+      and the yielded tensor is only meaningful on the sender.
+
+    `iter(source)` must yield a *fresh* pass each round. Backends with custom
+    producer logic (Megatron export, RDT plans, MoE re-fusing) subclass this.
+    """
+
+    @abstractmethod
+    def metadata(self) -> list[ParamMeta]:
+        raise NotImplementedError
+
+    @abstractmethod
+    def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
+        raise NotImplementedError
+
+
+class ModuleSource(WeightSource):
+    """`WeightSource` over `module.named_parameters()` — the common case.
+
+    Handles both plain dense modules and FSDP-sharded ones with no special
+    casing: iteration all-gathers each `DTensor` via `full_tensor()` (a
+    collective) and passes regular tensors through. `metadata()` reads the
+    *global* `.shape` / `.dtype`, so it never triggers a gather.
+    """
+
+    def __init__(self, module: torch.nn.Module) -> None:
+        self._module = module
+
+    def metadata(self) -> list[ParamMeta]:
+        return [
+            ParamMeta(name, p.dtype, tuple(p.shape))
+            for name, p in self._module.named_parameters()
+        ]
+
+    def __iter__(self) -> Iterator[tuple[str, torch.Tensor]]:
+        for name, param in self._module.named_parameters():
+            yield name, materialize_full_tensor(param)
+
+
 # Base protocols for backend-specific dataclasses
 @dataclass
 class WeightTransferInitInfo(ABC):  # noqa: B024
     """Base class for backend-specific initialization info."""
 
     pass
+
+
+@dataclass
+class TrainerInitInfo(WeightTransferInitInfo):
+    """Base trainer-side init info: which trainer rank drives the transfer.
+
+    `rank` is this trainer process's rank, provided **explicitly** by the
+    caller — the engine does not read it from a global process group, which is
+    ambiguous once several groups (FSDP / TP / PP / EP) exist. The sender is the
+    rank where `rank == sender_rank`; only it opens the endpoint and drives the
+    inference-side RPCs, while every rank still runs the trainer-side
+    collectives. Backend subclasses add their own (positional) fields; `rank` /
+    `sender_rank` are keyword-only so that ordering never conflicts.
+    """
+
+    rank: int = field(kw_only=True)
+    sender_rank: int = field(default=0, kw_only=True)
+
+    @property
+    def is_sender(self) -> bool:
+        return self.rank == self.sender_rank
 
 
 @dataclass
@@ -254,8 +336,16 @@ class TrainerWeightTransferEngine(ABC, Generic[TConfig, TInitInfo]):
     Symmetric to `WeightTransferEngine` but lives in the training process.
     Constructed via the `trainer_init` factory classmethod; carries any
     backend-specific state (NCCL communicators, IPC device info, transfer
-    plans) on `self`. Driven by `send_weights()` with no per-round args once
-    the weight iterator is set.
+    plans) on `self`. The `WeightSource` is required at `trainer_init`,
+    then replayed each round by the no-argument `send_weights()`.
+
+    Multi-rank trainers: `trainer_init` and `send_weights` are
+    called on *every* trainer rank. Rank is resolved once, at `trainer_init`,
+    into `is_sender` (default: rank 0). Non-sender ranks still run every
+    collective (iterating the source, metadata export, IPC handle all-gather) so
+    the group stays aligned, but each engine explicitly guards the control-plane
+    RPCs and the transmit on `self.is_sender`, so only the sender touches the
+    client.
 
     Subclasses should define:
         init_info_cls: Type of backend-specific trainer init info
@@ -271,11 +361,15 @@ class TrainerWeightTransferEngine(ABC, Generic[TConfig, TInitInfo]):
         config: TConfig,
         *,
         client: "VLLMWeightSyncClient",
-        weight_iterator: WeightIterator | None = None,
+        source: "WeightSource",
+        is_sender: bool = True,
     ) -> None:
         self.config = config
+        self.is_sender = is_sender
+        # The real client is held on every rank; each engine only *calls* it when
+        # `is_sender`, so non-sender ranks never touch the wire.
         self.client = client
-        self.weight_iterator = weight_iterator
+        self.source = source
 
     @classmethod
     @abstractmethod
@@ -285,48 +379,25 @@ class TrainerWeightTransferEngine(ABC, Generic[TConfig, TInitInfo]):
         init_info: TInitInfo,
         *,
         client: "VLLMWeightSyncClient",
-        weight_iterator: WeightIterator | None = None,
+        source: "WeightSource",
     ) -> Self:
         """Rendezvous with the inference side and return a ready instance.
 
-        Drives the full handshake via `client`: builds the worker-side init
-        info, calls `client.init_weight_transfer_engine`, then opens the
-        trainer-side endpoint. After return, `send_weights()` is callable.
-
-        `weight_iterator` is the default source of (name, tensor) pairs.
-        Optional here if you would rather pass it per-call to `send_weights`,
-        but one or the other must be set before sending.
+        Called on every trainer rank. The sender drives the full handshake via
+        `client` (build the worker-side init info, call
+        `client.init_weight_transfer_engine`, open the trainer-side endpoint);
+        non-sender ranks skip the rendezvous and the RPC. `source` is stored on
+        `self.source`; after return, `send_weights()` is callable.
         """
         raise NotImplementedError
 
     @abstractmethod
-    def send_weights(self, weight_iterator: WeightIterator | None = None) -> None:
-        """Push weights to inference workers and drive the full update round
-        trip: `start_weight_update`, `update_weights` (run concurrently with
-        the trainer-side broadcast when the backend requires it), then
-        `finish_weight_update`.
-
-        If `weight_iterator` is given it overrides the init-time default for
-        this call only; the init-time iterator stays the default for
-        subsequent calls. If neither is set, raises.
-        """
+    def send_weights(self) -> None:
+        """Push `self.source`'s weights to inference workers and drive the full
+        update round trip: `start_weight_update`, `update_weights` (run
+        concurrently with the trainer-side broadcast when the backend requires
+        it), then `finish_weight_update`. Called on every trainer rank."""
         raise NotImplementedError
 
     def shutdown(self) -> None:
         """Tear down communicators / process groups. Default no-op."""
-
-    def _resolve_iterator(
-        self, weight_iterator: WeightIterator | None
-    ) -> WeightIterator:
-        """Return the (name, tensor) iterator *factory* from the per-call
-        override or the init-time default. Raises if neither was set.
-
-        Callers invoke the returned factory to get a fresh iterator; some
-        backends (e.g. NCCL) iterate more than once per send round."""
-        factory = weight_iterator or self.weight_iterator
-        if factory is None:
-            raise ValueError(
-                "No weight_iterator available: pass one to send_weights() or "
-                "set it at trainer_init()."
-            )
-        return factory
