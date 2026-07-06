@@ -89,6 +89,7 @@ steps:
     - tests/v1/simple_kv_offload
     - tests/v1/worker
     - tests/v1/kv_connector/unit
+    - tests/v1/ec_connector/unit
     - tests/v1/metrics
     - tests/entrypoints/openai/correctness/test_lmeval.py
   commands:
@@ -101,6 +102,7 @@ steps:
     - pytest -v -s v1/simple_kv_offload
     - pytest -v -s v1/worker
     - pytest -v -s -m 'not cpu_test' v1/kv_connector/unit
+    - pytest -v -s -m 'not cpu_test' v1/ec_connector/unit
     - pytest -v -s -m 'not cpu_test' v1/metrics
     # Integration test for streaming correctness (requires special branch).
     - pip install -U git+https://github.com/robertgshaw2-redhat/lm-evaluation-harness.git@streaming-api

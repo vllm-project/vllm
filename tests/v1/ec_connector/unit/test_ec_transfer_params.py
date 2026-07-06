@@ -7,12 +7,12 @@ No running engine required.
 
 from unittest.mock import MagicMock
 
+from tests.v1.core.utils import create_scheduler
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.outputs import CompletionOutput, RequestOutput
 from vllm.sampling_params import SamplingParams
-from vllm.v1.core.sched.scheduler import Scheduler
 from vllm.v1.request import Request, RequestStatus
 
 EC_PARAMS: dict = {"mm_hash_abc": {"peer_host": "10.0.0.1", "peer_port": 5501}}
@@ -83,16 +83,7 @@ def test_free_request_calls_ec_connector_and_surfaces_params():
     )
     request.status = RequestStatus.FINISHED_STOPPED
 
-    # Build a minimal scheduler (bypassing __init__).
-    # connector=None lets the real _connector_finished run (it short-circuits
-    # to (False, None) when no KV connector is configured), so we only mock
-    # the EC connector whose output we're actually testing.
-    scheduler = object.__new__(Scheduler)
-    scheduler.connector = None
-    scheduler.finished_req_ids = set()
-    scheduler.finished_req_ids_dict = None
-    scheduler.encoder_cache_manager = MagicMock()
-    scheduler._free_blocks = MagicMock()
+    scheduler = create_scheduler(use_ec_connector=True)
 
     mock_ec = MagicMock()
     mock_ec.request_finished.return_value = (False, EC_PARAMS)
@@ -117,13 +108,7 @@ def test_free_request_without_ec_connector_returns_none():
     )
     request.status = RequestStatus.FINISHED_STOPPED
 
-    scheduler = object.__new__(Scheduler)
-    scheduler.connector = None
-    scheduler.ec_connector = None
-    scheduler.finished_req_ids = set()
-    scheduler.finished_req_ids_dict = None
-    scheduler.encoder_cache_manager = MagicMock()
-    scheduler._free_blocks = MagicMock()
+    scheduler = create_scheduler(use_ec_connector=True)
 
     kv_params, ec_params = scheduler._free_request(request)
 
