@@ -14,8 +14,9 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     DeltaToolCall,
 )
+from vllm.tool_parsers.abstract_tool_parser import ToolParser
 from vllm.tool_parsers.utils import partial_json_loads
-from vllm.utils.mistral import is_mistral_tokenizer
+from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 
 if TYPE_CHECKING:
     from vllm.tokenizers import TokenizerLike
@@ -85,7 +86,6 @@ def filter_delta_text(
                 break
     return updated_delta, passed_zero
 
-
 def extract_named_tool_call_streaming(
     *,
     delta_text: str,
@@ -95,6 +95,7 @@ def extract_named_tool_call_streaming(
     tool_call_id_type: str,
     tokenizer: "TokenizerLike",
     tool_call_array_index: int = 0,
+    tool_parser_cls: type[ToolParser] | None = None
 ) -> tuple[DeltaMessage | None, bool]:
     """Build a streaming tool-call delta for forced named tool choice."""
     if function_name_returned:
@@ -103,7 +104,7 @@ def extract_named_tool_call_streaming(
             index=tool_call_array_index,
         )
     else:
-        if is_mistral_tokenizer(tokenizer):
+        if is_mistral_tokenizer(tokenizer) or is_mistral_tool_parser(tool_parser_cls):
             # Import mistral_common only if we need it.
             from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 
@@ -139,6 +140,7 @@ def extract_required_tool_call_streaming(
     tool_call_idx: int | None,
     tool_call_id_type: str,
     tokenizer: "TokenizerLike",
+    tool_parser_cls: type[ToolParser] | None = None
 ) -> tuple[DeltaMessage | None, bool]:
     if current_text is None or current_text == "":
         # if the current text is empty, we cannot parse it
@@ -190,7 +192,7 @@ def extract_required_tool_call_streaming(
 
                 function_name_returned = True
 
-                if is_mistral_tokenizer(tokenizer):
+                if is_mistral_tokenizer(tokenizer) or is_mistral_tool_parser(tool_parser_cls):
                     # Import mistral_common only if we need it.
                     from vllm.tool_parsers.mistral_tool_parser import MistralToolCall
 
