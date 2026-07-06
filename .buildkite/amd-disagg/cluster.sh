@@ -74,7 +74,8 @@ export PROXY_SCRIPT="${PROXY_SCRIPT:-${_CLUSTER_SH_DIR}/moriio_toy_proxy_server.
 #   0 -> omit read_mode     (default; MoRIIO write mode: prefill pushes to decode)
 #   1 -> "read_mode": true  (decode pulls KV from prefill; matches upstream disagg)
 export MORIIO_READ_MODE="${MORIIO_READ_MODE:-0}"
-export MORI_GPU_ARCHS="${MORI_GPU_ARCHS:-gfx950}"
+# MORI_GPU_ARCHS is hard-set in the MoRI section below (must override the image's
+# multi-arch "gfx942;gfx950" default -- see the comment there).
 
 # ----------------------------------------------------------------- router / gateway
 # Selection for client (bench/accuracy) traffic:
@@ -154,13 +155,16 @@ export MORI_IB_GID_INDEX="${MORI_IB_GID_INDEX:-${_IB_GID_INDEX}}"
 # all2all ("Out of static heap memory! Requested: ~1.75GB"); 16G matches the VMM
 # default and leaves headroom for EP16. Accepts suffixes (e.g. 16G, 512M).
 export MORI_SHMEM_HEAP_SIZE="${MORI_SHMEM_HEAP_SIZE:-16G}"
-# Pin the JIT target arch. mori auto-detects the GPU arch for its shmem/all2all
-# kernels and on MI350X/MI355X (CDNA4 = gfx950) mis-selects gfx942 (MI300X); the
-# resulting shmem_kernels.hsaco then fails to load with "device kernel image is
-# invalid" and every EP worker dies at ep-group init (wide-EP only; TP is
-# unaffected). Forcing gfx950 makes mori JIT for the real ISA.
-# Ref: ROCm vLLM-MoRI docs (MORI_GPU_ARCHS=gfx950 for MI355X).
-export MORI_GPU_ARCHS="${MORI_GPU_ARCHS:-gfx950}"
+# Pin mori's JIT target arch for its shmem/all2all kernels. MUST be a hard set
+# (not ${..:-gfx950}): the v0.23.0 image already exports MORI_GPU_ARCHS="gfx942;
+# gfx950", so a :- default is a no-op and the multi-arch value survives. mori's
+# detect_gpu_arch() then returns the FIRST _SUPPORTED_ARCHS=["gfx942","gfx950"]
+# entry that is a substring of it -> always "gfx942" -> builds a gfx942
+# shmem_kernels.hsaco that fails to load on MI350X/MI355X (CDNA4 = gfx950) with
+# "device kernel image is invalid", killing every EP worker at init (wide-EP
+# only; TP is unaffected). Hard-setting a single arch makes the match resolve to
+# gfx950. Override inline (MORI_GPU_ARCHS=gfx942 ...) only on a real gfx942 box.
+export MORI_GPU_ARCHS="gfx950"
 
 # ----------------------------------------------------------------- benchmark
 # Space-separated ISL/OSL pairs and concurrency levels for the bench sweep.

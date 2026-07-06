@@ -586,6 +586,23 @@ run_node() {
         touch "${FLYDSL_RUNTIME_CACHE_DIR}/.seeded" 2>/dev/null || true
     fi
 
+    # mori JIT-compiles its shmem/all2all kernels to ~/.mori/jit/<arch>_<nic>/ on
+    # first EP use. HOME here is /workspace, bind-mounted to persistent+shared NFS
+    # (/data/$USER), so a wrong-arch cache from an earlier run/build survives and
+    # gets reloaded even after MORI_GPU_ARCHS changes -- an existing cache dir
+    # wins over the arch setting. Reloading a gfx942 shmem_kernels.hsaco on gfx950
+    # hardware fails with "device kernel image is invalid" and every EP worker
+    # dies at init (surfacing async as a torch.tensor HIP error). Guard: on EP
+    # runs, if the cache has no build for our target arch, purge it so mori
+    # recompiles for MORI_GPU_ARCHS. A matching arch dir is kept (fast reload).
+    if [[ "${WIDE_EP_MODE}" == "1" && -n "${MORI_GPU_ARCHS:-}" ]]; then
+        local _mori_jit="${HOME:-/workspace}/.mori/jit"
+        if [[ -d "${_mori_jit}" ]] && ! compgen -G "${_mori_jit}/${MORI_GPU_ARCHS}_*" >/dev/null 2>&1; then
+            log "purging stale mori jit cache ${_mori_jit} (no ${MORI_GPU_ARCHS}_* build present; forcing recompile for ${MORI_GPU_ARCHS})"
+            rm -rf "${_mori_jit}" 2>/dev/null || true
+        fi
+    fi
+
     # Start this node's server in the background (full server log -> LOGF; this
     # shell's stdout stays free for orchestration logs the srun/CI captures).
     build_server_cmd

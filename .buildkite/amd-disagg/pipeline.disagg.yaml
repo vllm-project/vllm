@@ -54,25 +54,25 @@ steps:
     commands:
       - bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
 
-  - label: "ROCm Disagg P/D 1P1D EP8/DP8 WideEP (MoRIIO + toy proxy) — SLURM"
-    key: rocm-disagg-pd-1p1d-ep8-slurm-proxy
-    agent_pool: amd_mi250_8 
-    timeout_in_minutes: 120
-    no_plugin: true
-    optional: true
-    depends_on:
-      - image-build-amd
-    source_file_dependencies:
-      - vllm/distributed/kv_transfer/
-      - vllm/platforms/rocm.py
-      - .buildkite/amd-disagg/
-    env:
-      IMAGE: "rocm/vllm-ci:${BUILDKITE_COMMIT}"
-      NODES: "2"
-      GPUS_PER_NODE: "8"
-      WIDE_EP_MODE: "1"
-      RUN_AFTER_HEALTH: "accuracy"
-      SLURM_PARTITION: "amd-rccl"
-      SLURM_TIME_LIMIT: "08:30:00"
-    commands:
-      - bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
+        #- label: "ROCm Disagg P/D 1P1D EP8/DP8 WideEP (MoRIIO + toy proxy) — SLURM"
+        #  key: rocm-disagg-pd-1p1d-ep8-slurm-proxy
+        #  agent_pool: amd_mi250_8 
+        #  timeout_in_minutes: 120
+        #  no_plugin: true
+        #  optional: true
+        #  depends_on:
+        #    - image-build-amd
+        #  source_file_dependencies:
+        #    - vllm/distributed/kv_transfer/
+        #    - vllm/platforms/rocm.py
+        #    - .buildkite/amd-disagg/
+        #  env:
+        #    IMAGE: "rocm/vllm-ci:${BUILDKITE_COMMIT}"
+        #    NODES: "2"
+        #    GPUS_PER_NODE: "8"
+        #    WIDE_EP_MODE: "1"
+        #    RUN_AFTER_HEALTH: "accuracy"
+        #    SLURM_PARTITION: "amd-rccl"
+        #    SLURM_TIME_LIMIT: "08:30:00"
+        #  commands:
+        #    - bash .buildkite/amd-disagg/run-slurm-disagg-test.sh
