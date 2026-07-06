@@ -29,6 +29,7 @@ def _triton_mrope_forward(
     mrope_section_h: tl.constexpr,
     mrope_section_w: tl.constexpr,
     is_interleaved: tl.constexpr,
+    is_neox: tl.constexpr,
 ):
     # Adapted from
     # https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/qwen2vl_mrope.py
@@ -82,13 +83,21 @@ def _triton_mrope_forward(
     # Load the left and right half of q and k for the current
     # program instance (i.e. for the current token) separately
     # ####################################################################
-    # left half of the head
-    first_half_q_offsets = (
-        tl.arange(0, pad_n_qh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
-    )
-    first_half_k_offsets = (
-        tl.arange(0, pad_n_kh)[:, None] * hd + tl.arange(0, pad_hd // 2)[None, :]
-    )
+    col = tl.arange(0, pad_hd // 2)
+    if is_neox:
+        first_cols = col  # 0, 1, 2, ...          (first half)
+        second_cols = col + (rd // 2)  # rd/2, rd/2+1, ...      (second half)
+    else:
+        first_cols = col * 2  # 0, 2, 4, ...           (even)
+        second_cols = col * 2 + 1  # 1, 3, 5, ...           (odd)
+
+    # left/Even half of the head
+    first_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + first_cols[None, :]
+    first_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + first_cols[None, :]
+    # Right/Odd half of the head
+    second_half_q_offsets = tl.arange(0, pad_n_qh)[:, None] * hd + second_cols[None, :]
+    second_half_k_offsets = tl.arange(0, pad_n_kh)[:, None] * hd + second_cols[None, :]
+
     first_q_mask = (tl.arange(0, pad_n_qh)[:, None] < n_qh) & (
         tl.arange(0, pad_hd // 2)[None, :] < rd // 2
     )
@@ -103,9 +112,6 @@ def _triton_mrope_forward(
         sin_row.dtype
     )
 
-    # right half of the head
-    second_half_q_offsets = first_half_q_offsets + (rd // 2)
-    second_half_k_offsets = first_half_k_offsets + (rd // 2)
     second_q_mask = first_q_mask
     second_k_mask = first_k_mask
 
@@ -139,6 +145,7 @@ def triton_mrope(
     head_size: int,
     rotary_dim: int,
     mrope_interleaved: bool,
+    is_neox: bool,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Qwen2VL mrope kernel.
 
@@ -183,6 +190,7 @@ def triton_mrope(
         mrope_section[1],
         mrope_section[2],
         mrope_interleaved,
+        is_neox,
     )
     return q, k
 
@@ -349,6 +357,7 @@ class MRotaryEmbedding(RotaryEmbeddingBase):
                 self.head_size,
                 self.rotary_dim,
                 self.mrope_interleaved,
+                self.is_neox_style,
             )
 
             return q.reshape(query_shape), k.reshape(key_shape)
