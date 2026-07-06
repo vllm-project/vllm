@@ -1511,17 +1511,17 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # This sequencing may slightly reduce latency as async D2H copy does not
         # need to wait for the postprocess to finish.
         verification_capacity_manager = self.verification_capacity_manager
-        query_start_loc = (
-            verification_capacity_manager.get_postprocess_query_start_loc(input_batch)
-            if verification_capacity_manager is not None
-            else input_batch.query_start_loc
-        )
+        postprocess_input_batch = input_batch
+        if verification_capacity_manager is not None:
+            postprocess_input_batch = verification_capacity_manager.restore_batch(
+                input_batch
+            )
         self.postprocess_sampled(
-            input_batch.idx_mapping,
+            postprocess_input_batch.idx_mapping,
             sampler_output.sampled_token_ids,
             num_sampled,
             num_rejected_for_postprocess,
-            query_start_loc,
+            postprocess_input_batch.query_start_loc,
         )
 
         if self.speculator is not None:

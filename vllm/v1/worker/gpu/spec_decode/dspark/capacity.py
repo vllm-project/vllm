@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -446,13 +446,16 @@ class CapacityBasedVerificationManager:
         )
         return num_rejected
 
-    def get_postprocess_query_start_loc(
+    def restore_batch(
         self,
         input_batch: "InputBatch",
-    ) -> torch.Tensor:
+    ) -> "InputBatch":
         if self.sampler_decompaction is None:
-            return input_batch.query_start_loc
-        return self.sampler_decompaction.query_start_loc
+            return input_batch
+        return replace(
+            input_batch,
+            query_start_loc=self.sampler_decompaction.query_start_loc,
+        )
 
 
 @triton.jit
