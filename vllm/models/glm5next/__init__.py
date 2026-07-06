@@ -8,11 +8,10 @@ if current_platform.is_rocm() or current_platform.is_xpu():
         "glm 5 next currently supports NVIDIA SM90 and above only."
     )
 
-from .nvidia.model import Glm5NextForCausalLM, Glm5NextForConditionalGeneration
+from .nvidia.model import Glm5NextForCausalLM
 from .nvidia.mtp import Glm5NextMTP
 
 __all__ = [
     "Glm5NextForCausalLM",
-    "Glm5NextForConditionalGeneration",
     "Glm5NextMTP",
 ]

@@ -1258,7 +1258,7 @@ void gather_and_maybe_dequant_cache(
     DISPATCH_BY_KV_CACHE_DTYPE(dst.scalar_type(), kv_cache_dtype,
                                CALL_GATHER_CACHE_576);
   } else if (head_dim == 512) {
-    DISPATCH_BY_KV_CACHE_DTYPE(dst.scalar_type(), kv_cache_dtype,
+    DISPATCH_BY_KV_CACHE_DTYPE(dst.dtype(), kv_cache_dtype,
                                CALL_GATHER_CACHE_512);
   } else {
     DISPATCH_BY_KV_CACHE_DTYPE(dst.scalar_type(), kv_cache_dtype,

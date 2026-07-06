@@ -8,14 +8,13 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 
-class Glm5NextTextConfig(PretrainedConfig):
-    model_type = "glm5_next_text"
-    base_config_key = "text_config"
+class Glm5NextConfig(PretrainedConfig):
+    model_type = "glm5_next"
     keys_to_ignore_at_inference = ["past_key_values"]
 
     def __init__(
         self,
-        model_type="glm5_next_text",
+        model_type="glm5_next",
         vocab_size: int = 154880,
         hidden_size: int = 4096,
         head_dim: int | None = None,
@@ -188,135 +187,3 @@ class Glm5NextTextConfig(PretrainedConfig):
             "linear_attention" if self.is_kda_layer(i) else "attention"
             for i in range(self.num_hidden_layers)
         ]
-
-
-class Glm5NextVisionConfig(PretrainedConfig):
-    model_type = "glm5_next_vision"
-    base_config_key = "vision_config"
-
-    def __init__(
-        self,
-        depth: int = 24,
-        hidden_size: int = 1024,
-        hidden_act: str = "silu",
-        image_size: int = 448,
-        intermediate_size: int = 4096,
-        num_heads: int = 16,
-        out_hidden_size: int = 4096,
-        projection_intermediate_size: int = 10240,
-        in_channels: int = 3,
-        initializer_range: float = 0.02,
-        patch_size: int = 14,
-        rms_norm_eps: float = 1e-5,
-        spatial_merge_size: int = 2,
-        temporal_patch_size: int = 2,
-        attention_dropout: float = 0.0,
-        attention_bias: bool = True,
-        **kwargs,
-    ):
-        super().__init__(**kwargs)
-
-        self.depth = depth
-        self.hidden_size = hidden_size
-        self.hidden_act = hidden_act
-        self.image_size = image_size
-        self.intermediate_size = intermediate_size
-        self.num_heads = num_heads
-        self.out_hidden_size = out_hidden_size
-        # GLM5-Next-specific merger bottleneck width (absent from the generic
-        # GLM-OCR vision config); the tower uses it as the PatchMerger
-        # context_dim instead of text_config.intermediate_size.
-        self.projection_intermediate_size = projection_intermediate_size
-        self.in_channels = in_channels
-        self.initializer_range = initializer_range
-        self.patch_size = patch_size
-        self.rms_norm_eps = rms_norm_eps
-        self.spatial_merge_size = spatial_merge_size
-        self.temporal_patch_size = temporal_patch_size
-        self.attention_dropout = attention_dropout
-        self.attention_bias = attention_bias
-
-
-class Glm5NextConfig(PretrainedConfig):
-    model_type = "glm5_next"
-    sub_configs = {
-        "vision_config": Glm5NextVisionConfig,
-        "text_config": Glm5NextTextConfig,
-    }
-    keys_to_ignore_at_inference = ["past_key_values"]
-
-    def __init__(
-        self,
-        text_config=None,
-        vision_config=None,
-        image_token_id: int = 154854,
-        video_token_id: int = 154855,
-        image_start_token_id: int = 154830,
-        image_end_token_id: int = 154831,
-        video_start_token_id: int = 154832,
-        video_end_token_id: int = 154833,
-        **kwargs,
-    ):
-        # Init super() first so base-class defaults don't clobber text-config
-        # values set below (PretrainedConfig has many text-related defaults
-        # that differ from Glm5NextTextConfig).
-        super().__init__(**kwargs)
-
-        if isinstance(vision_config, dict):
-            self.vision_config = self.sub_configs["vision_config"](**vision_config)
-        elif vision_config is None:
-            self.vision_config = self.sub_configs["vision_config"]()
-
-        if isinstance(text_config, dict):
-            self.text_config = self.sub_configs["text_config"](**text_config)
-        elif text_config is None:
-            # Backward compatibility: a flat top-level checkpoint (no nested
-            # text_config) folds its text fields into Glm5NextTextConfig.
-            self.text_config = self.sub_configs["text_config"](**kwargs)
-
-        self.image_token_id = image_token_id
-        self.video_token_id = video_token_id
-        self.image_start_token_id = image_start_token_id
-        self.image_end_token_id = image_end_token_id
-        self.video_start_token_id = video_start_token_id
-        self.video_end_token_id = video_end_token_id
-
-        # Mirror attention implementation recursively onto sub-configs.
-        self._attn_implementation = kwargs.pop("attn_implementation", None)
-
-    # Config-metadata fields that belong to the top-level (multimodal) config
-    # and must NOT be mirrored onto text_config: ``architectures`` /
-    # ``torch_dtype`` differ between the top-level config and the text
-    # sub-config, and mirroring them makes the top-level ``architectures``
-    # silently read back as None (PretrainedConfig initializes both to None),
-    # which then fails model-class resolution ("No model architectures are
-    # specified").
-    _UNMIRRORED_KEYS = [
-        "_name_or_path",
-        "model_type",
-        "dtype",
-        "torch_dtype",
-        "architectures",
-        "_attn_implementation_internal",
-    ]
-
-    def __setattr__(self, key, value):
-        unmirrored = type(self)._UNMIRRORED_KEYS
-        if (
-            (text_config := super().__getattribute__("__dict__").get("text_config"))
-            is not None
-            and key not in unmirrored
-            and key in text_config.__dict__
-        ):
-            setattr(text_config, key, value)
-        else:
-            super().__setattr__(key, value)
-
-    def __getattribute__(self, key):
-        unmirrored = type(self)._UNMIRRORED_KEYS
-        if "text_config" in super().__getattribute__("__dict__") and key not in unmirrored:
-            text_config = super().__getattribute__("text_config")
-            if key in text_config.__dict__:
-                return getattr(text_config, key)
-
-        return super().__getattribute__(key)

@@ -279,7 +279,6 @@ class ModelArchConfigConvertorBase:
             "deepseek_mtp",
             "k3_dspark",
             "glm5_next",
-            "glm5_next_text",
             "glm_moe_dsa",
             "glm4_moe_lite",
             "glm4_moe_lite_mtp",

@@ -937,18 +937,6 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 )
             )
 
-            seq_lens_is_buffer_view = (use_native and next_n > 1) or (
-                not use_native and max_decode_len > 1
-            )
-
-            # DCP: localize the now-expanded per-token global bounds to this
-            # rank's owned KV. Done here (after expansion) so each token's global
-            # causal length is localized individually; see the comment above.
-            if dcp_local_seq_lens is not None:
-                seq_lens = self._dcp_localize_decode_seq_lens(
-                    seq_lens, num_decodes, seq_lens_is_buffer_view
-                )
-
             # Translate the decode block_table to indexer-page granularity,
             # matching the prefill read and the write. Done AFTER
             # _prepare_decode_tensors because it copies raw MLA-width rows
