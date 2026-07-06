@@ -63,7 +63,7 @@ vllm serve --help=max
     Decimal suffixes (`k`, `m`, `g`, `t`) also accept floating point: `25.6k` = 25,600.
     Binary suffixes (`K`, `M`, `G`, `T`) require integers: `32K` = 32,768.
     
-    Supported arguments include: `--max-model-len`, `--max-num-batched-tokens`, `--max-num-scheduled-tokens`, `--kv-cache-memory-bytes`, `--kv-cache-size-tokens`, `--safetensors-prefetch-block-size`, `--window-size`.
+    Supported arguments include: `--max-model-len`, `--max-num-batched-tokens`, `--max-num-scheduled-tokens`, `--kv-cache-memory-bytes`, `--safetensors-prefetch-block-size`.
 
 See [vllm serve](./serve.md) for the full reference of all available arguments.
 

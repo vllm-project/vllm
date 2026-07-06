@@ -580,23 +580,23 @@ def test_human_readable_other_args():
     args = parser.parse_args(["--max-num-scheduled-tokens", "10.5k"])
     assert args.max_num_scheduled_tokens == 10500
 
-    # Test kv_cache_size_tokens
-    args = parser.parse_args(["--kv-cache-size-tokens", "100000"])
-    assert args.kv_cache_size_tokens == 100000
-    args = parser.parse_args(["--kv-cache-size-tokens", "100k"])
-    assert args.kv_cache_size_tokens == 100_000
-    args = parser.parse_args(["--kv-cache-size-tokens", "1M"])
-    assert args.kv_cache_size_tokens == 2**20
-    args = parser.parse_args(["--kv-cache-size-tokens", "1m"])
-    assert args.kv_cache_size_tokens == 1_000_000
+    # Test kv_cache_memory_bytes (existing human-readable arg)
+    args = parser.parse_args(["--kv-cache-memory-bytes", "100000"])
+    assert args.kv_cache_memory_bytes == 100000
+    args = parser.parse_args(["--kv-cache-memory-bytes", "100k"])
+    assert args.kv_cache_memory_bytes == 100_000
+    args = parser.parse_args(["--kv-cache-memory-bytes", "1M"])
+    assert args.kv_cache_memory_bytes == 2**20
+    args = parser.parse_args(["--kv-cache-memory-bytes", "1m"])
+    assert args.kv_cache_memory_bytes == 1_000_000
 
-    # Test window_size
-    args = parser.parse_args(["--window-size", "1000"])
-    assert args.window_size == 1000
-    args = parser.parse_args(["--window-size", "1k"])
-    assert args.window_size == 1_000
-    args = parser.parse_args(["--window-size", "2K"])
-    assert args.window_size == 2**10 * 2
+    # Test max_num_batched_tokens (existing human-readable arg)
+    args = parser.parse_args(["--max-num-batched-tokens", "1024"])
+    assert args.max_num_batched_tokens == 1024
+    args = parser.parse_args(["--max-num-batched-tokens", "2k"])
+    assert args.max_num_batched_tokens == 2_000
+    args = parser.parse_args(["--max-num-batched-tokens", "4K"])
+    assert args.max_num_batched_tokens == 2**10 * 4
 
 
 def test_numa_bind_args():
