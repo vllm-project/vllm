@@ -460,9 +460,11 @@ checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
 if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
   checkout="."
 fi
-if git -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# Pass safe.directory per-command (-c) because buildkite runs will always fail
+# the next check on git 2.35.2+ due to mixed uses of root and buildkite-agent/uids.
+if git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   vllm_standalone_merge_base="$(
-    git -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
+    git -c "safe.directory=${checkout}" -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
   )"
 fi
 if [[ -z "${vllm_standalone_merge_base}" ]]; then
@@ -545,12 +547,12 @@ if is_multi_node "$commands"; then
 else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
-  docker_tty_args=()
+  docker_run_terminal_args=(-i)
   if [[ "${ROCM_DOCKER_TTY}" == "1" ]]; then
-    docker_tty_args=(-t)
-    echo "Docker TTY allocation: enabled"
+    docker_run_terminal_args+=(-t)
+    echo "Docker interactive stdin: enabled; TTY allocation: enabled"
   else
-    echo "Docker TTY allocation: disabled"
+    echo "Docker interactive stdin: enabled; TTY allocation: disabled"
   fi
 
   ulimit_core_hard=$(ulimit -H -c)
@@ -568,7 +570,7 @@ else
   fi
 
   docker run \
-    "${docker_tty_args[@]}" \
+    "${docker_run_terminal_args[@]}" \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
     --network=host \
