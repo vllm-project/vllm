@@ -67,12 +67,9 @@ logger = init_logger(__name__)
 
 DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES = frozenset(
     {
-        "Qwen3ForCausalLM",
         "DeepseekV2ForCausalLM",
         "Qwen2MoeForCausalLM",
         "GraniteMoeForCausalLM",
-        "LlamaForCausalLM",
-        "MistralForCausalLM",
     }
 )
 
@@ -565,9 +562,15 @@ class VllmConfig:
         if model_config.runner_type != "generate":
             return False
 
+        if getattr(model_config, "is_hybrid", False):
+            return False
+
+        if getattr(model_config, "is_attention_free", False):
+            return False
         architectures = getattr(model_config, "architectures", [])
-        return any(
-            arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures
+        return (
+            any(arch in DEFAULT_V2_MODEL_RUNNER_ARCHITECTURES for arch in architectures)
+            or not model_config.is_moe
         )
 
     @property
@@ -771,13 +774,15 @@ class VllmConfig:
             speculative_config is None
             or not speculative_config.uses_dynamic_speculative_decoding()
             or not self.compilation_config.cudagraph_mode.has_full_cudagraphs()
+            or self.use_v2_model_runner
         ):
             return
 
         logger.warning_once(
             "Dynamic speculative decoding changes the target verification "
             "length at runtime. Overriding cudagraph_mode from %s to "
-            "PIECEWISE for reliability.",
+            "PIECEWISE for reliability. Use VLLM_USE_V2_MODEL_RUNNER=1 "
+            "if you want to use full CUDA graphs.",
             self.compilation_config.cudagraph_mode.name,
         )
         self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
@@ -1865,8 +1870,13 @@ class VllmConfig:
             tp_size = self.parallel_config.tensor_parallel_size
             from vllm._aiter_ops import rocm_aiter_ops
 
-            if rocm_aiter_ops.is_enabled():
-                max_size = rocm_aiter_ops.get_aiter_allreduce_max_size()
+            max_size: int | None = None
+            if rocm_aiter_ops.is_custom_all_reduce_enabled():
+                from vllm.distributed.device_communicators.aiter_custom_all_reduce import (  # noqa: E501
+                    AiterCustomAllreduce,
+                )
+
+                max_size = AiterCustomAllreduce.effective_max_size()
             else:
                 max_size = compilation_config.pass_config.flashinfer_max_size(tp_size)
             if max_size is not None and self.model_config is not None:
@@ -1951,12 +1961,21 @@ class VllmConfig:
         if architecture is None:
             return
 
+        from vllm.model_executor.models import ModelRegistry
         from vllm.model_executor.models.config import (
             MODELS_CONFIG_MAP,
             HybridAttentionMambaModelConfig,
         )
 
         cls = MODELS_CONFIG_MAP.get(architecture, None)
+        if cls is None:
+            # `architecture` may be an HF base-model name (e.g. "Mamba2Model"
+            # when `architectures` is omitted); normalize to the resolved arch
+            # so per-arch config hooks are not skipped.
+            architecture = ModelRegistry._normalize_arch(
+                architecture, self.model_config
+            )
+            cls = MODELS_CONFIG_MAP.get(architecture, None)
         if cls is not None:
             cls.verify_and_update_config(self)
 
@@ -2078,9 +2097,6 @@ class VllmConfig:
                 "dspark",
             ):
                 unsupported.append(f"speculative method '{speculative_config.method}'")
-
-            if speculative_config.uses_dynamic_speculative_decoding():
-                unsupported.append("dynamic speculative decoding")
 
             # V2 EagleSpeculator does not support parallel_drafting (for P-Eagle).
             # DFlash and DSpark use parallel drafting natively in V2 via their
