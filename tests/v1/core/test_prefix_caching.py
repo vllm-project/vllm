@@ -4083,3 +4083,99 @@ def test_mamba_shared_prefix_reuse_under_zero_retention(monkeypatch):
     assert last_req_hit(retention=0, pin=False) == 0
     # retention=0 with the pin keeps the junction -> reuse restored.
     assert last_req_hit(retention=0, pin=True) == 2 * block_size
+
+
+def test_swa_reachable_block_mask_pins_shared_prefix():
+    """SWA analog of the Mamba pin: the shared-prefix junction must keep the
+    ``need``-block sliding-window tail ending on that boundary (not a single
+    block), so a windowed hit can land there under sparse retention."""
+    from vllm.v1.core.single_type_kv_cache_manager import SlidingWindowManager
+
+    block_size = 16
+
+    def retained(retention, boundary, window, end_block=16):
+        spec = SlidingWindowSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+            sliding_window=window,
+        )
+        m = SlidingWindowManager.reachable_block_mask(
+            start_block=0,
+            end_block=end_block,
+            alignment_tokens=block_size,
+            kv_cache_spec=spec,
+            use_eagle=False,
+            retention_interval=retention,
+            num_prompt_tokens=256,
+            shared_prefix_boundary=boundary,
+        )
+        return None if m is None else {i for i, v in enumerate(m) if v}
+
+    # window == block_size -> need = cdiv(15, 16) = 1: single-block tail (like
+    # Mamba). Junction at token 96 -> block 5; replay boundary -> block 14.
+    assert retained(0, 96, block_size) == {5, 14}
+    # window == 3 * block_size -> need = cdiv(47, 16) = 3: the junction keeps a
+    # 3-block WINDOW {3,4,5} (the SWA distinction), plus replay window {12,13,14}.
+    assert retained(0, 96, 3 * block_size) == {3, 4, 5, 12, 13, 14}
+    # Coexists with segment tails (interval 64, need=1): {3,7,11,15} + replay 14
+    # + junction 5.
+    assert retained(64, 96, block_size) == {3, 5, 7, 11, 14, 15}
+    # Dense (all blocks reachable) ignores the hint.
+    assert retained(None, 96, block_size) is None
+    # No boundary -> unchanged replay-only behavior.
+    assert retained(0, 0, block_size) == {14}
+
+
+def test_swa_shared_prefix_reuse_under_zero_retention(monkeypatch):
+    """SWA cross-request analog: a partial shared prefix's sliding-window tail
+    must stay reusable under ``VLLM_PREFIX_CACHE_RETENTION_INTERVAL=0``. Without
+    the pin the junction window is masked out and a later request misses; with
+    it (and under dense) reuse is preserved."""
+    block_size = 16
+
+    def last_req_hit(retention, pin):
+        if retention is None:
+            monkeypatch.delenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", raising=False)
+        else:
+            monkeypatch.setenv("VLLM_PREFIX_CACHE_RETENTION_INTERVAL", str(retention))
+        manager = make_kv_cache_manager(
+            _make_hybrid_kv_cache_config(block_size, 200, ["full", "sliding_window"]),
+            max_model_len=8192,
+            enable_caching=True,
+            hash_block_size=block_size,
+        )
+        shared = [7 for _ in range(4 * block_size)]  # 4-block shared prefix
+
+        def distinct(v):
+            return [v for _ in range(2 * block_size)]
+
+        # req0 primes the (dense) full-attention cache; SWA under RET=0 keeps
+        # only its own replay window, not the shared-prefix boundary.
+        req0 = make_request("0", shared + distinct(50), block_size, sha256)
+        cb, nc = manager.get_computed_blocks(req0)
+        manager.allocate_slots(req0, len(req0.all_token_ids), nc, cb)
+
+        # req1 detects the shared prefix (full-attn hit, SWA lag). No chunk for
+        # SWA -- the pin fires during normal prefill.
+        req1 = make_request("1", shared + distinct(60), block_size, sha256)
+        cb, nc = manager.get_computed_blocks(req1)
+        ucc = manager.coordinator.num_uncached_common_prefix_tokens
+        if retention == 0:
+            assert ucc == 4 * block_size  # detection fires when SWA lags
+        if pin and ucc >= block_size:
+            req1.shared_prefix_boundary = nc + ucc
+        manager.allocate_slots(req1, len(req1.all_token_ids), nc, cb)
+
+        # req2 shares the same prefix: does its SWA window reuse the junction?
+        req2 = make_request("2", shared + distinct(70), block_size, sha256)
+        _, nc2 = manager.get_computed_blocks(req2)
+        return nc2
+
+    # Dense keeps every SWA tail -> reuse works (ceiling).
+    assert last_req_hit(retention=None, pin=False) == 4 * block_size
+    # retention=0 without the pin drops the junction window -> reuse lost (bug).
+    assert last_req_hit(retention=0, pin=False) == 0
+    # retention=0 with the pin keeps the junction window -> reuse restored.
+    assert last_req_hit(retention=0, pin=True) == 4 * block_size

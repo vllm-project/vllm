@@ -940,5 +940,11 @@ class KVCacheConfig:
         return any(isinstance(g.kv_cache_spec, MambaSpec) for g in self.kv_cache_groups)
 
     @property
+    def has_sliding_window(self) -> bool:
+        return any(
+            isinstance(g.kv_cache_spec, SlidingWindowSpec) for g in self.kv_cache_groups
+        )
+
+    @property
     def needs_kv_cache_zeroing(self) -> bool:
         return self.has_mamba_layers

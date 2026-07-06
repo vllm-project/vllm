@@ -837,6 +837,19 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
             ):
                 mask[i - start_block] = True
 
+        # (3) Shared-prefix junction tail. A cross-request shared prefix
+        # (Marconi-style detection) ends before ``num_prompt``, so (2) would skip
+        # its window. Keep the ``need``-block tail ending on that boundary so the
+        # junction can serve a hit under sparse retention.
+        if retention_interval is not None and shared_prefix_boundary:
+            aligned = shared_prefix_boundary // alignment_tokens * alignment_tokens
+            junction_end_block = aligned // block_size + shift
+            for i in range(
+                max(start_block, junction_end_block - need),
+                min(end_block, junction_end_block),
+            ):
+                mask[i - start_block] = True
+
         return mask
 
     def get_num_skipped_tokens(self, num_computed_tokens: int) -> int:

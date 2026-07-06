@@ -294,6 +294,13 @@ class Scheduler(SchedulerInterface):
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
+        # Groups whose prefix cache is sparsified under
+        # VLLM_PREFIX_CACHE_RETENTION_INTERVAL (Mamba / sliding window).
+        # For these, a detected shared prefix must be pinned so retention doesn't
+        # drop the junction and defeat cross-request reuse.
+        self.has_retention_maskable_groups = (
+            kv_cache_config.has_mamba_layers or kv_cache_config.has_sliding_window
+        )
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
@@ -725,15 +732,15 @@ class Scheduler(SchedulerInterface):
                             self.kv_cache_manager.get_computed_blocks(request)
                         )
 
-                    # In case of hybrid models, obtain hint for Marconi-style APC logic
-                    if self.has_mamba_layers:
+                    # Hybrid models: obtain the shared-prefix hint (Marconi-style
+                    # APC) and pin the detected junction so its sparse-retention
+                    # state (Mamba block / sliding-window tail) survives.
+                    if self.has_retention_maskable_groups:
                         num_uncached_common_prefix_tokens = getattr(
                             self.kv_cache_manager.coordinator,
                             "num_uncached_common_prefix_tokens",
                             0,
                         )
-                        # Pin the detected shared-prefix junction so its Mamba
-                        # state survives sparse prefix-cache retention.
                         request.shared_prefix_boundary = (
                             num_new_local_computed_tokens
                             + num_uncached_common_prefix_tokens
