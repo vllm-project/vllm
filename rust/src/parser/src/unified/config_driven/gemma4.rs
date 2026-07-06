@@ -18,6 +18,7 @@ use winnow::stream::Stream;
 use winnow::token::{literal, take_till, take_until};
 
 use super::{ArgsEndScan, ConfigDrivenParser, Input, ParserFormat};
+use crate::tool::ToolSchema;
 use crate::utils::{incomplete, partial_prefix_len};
 
 const CHANNEL_START: &str = "<|channel>";
@@ -52,7 +53,7 @@ impl ParserFormat for Gemma4Format {
         Ok(name)
     }
 
-    fn tool_args(body: &str) -> ModalResult<Map<String, Value>> {
+    fn tool_args(_schema: &ToolSchema, body: &str) -> ModalResult<Map<String, Value>> {
         let Some(args_input) = body.strip_suffix('}') else {
             return Err(ErrMode::Cut(ContextError::new()));
         };

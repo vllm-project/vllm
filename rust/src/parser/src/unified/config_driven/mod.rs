@@ -42,7 +42,7 @@ use winnow::token::{literal, rest};
 
 use super::{Result, UnifiedParser, UnifiedParserError, UnifiedParserOutput};
 use crate::reasoning::last_reasoning_boundary;
-use crate::tool::{Tool, ToolCallDelta};
+use crate::tool::{Tool, ToolCallDelta, ToolSchema, ToolSchemas};
 use crate::unified::parsing_failed;
 use crate::utils::{MarkerScanState, parse_buffered_event, safe_text_len_mul, take_until_marker};
 
@@ -87,6 +87,12 @@ pub trait ParserFormat: 'static {
     /// Whether decoded output must keep tokenizer special tokens.
     const PRESERVE_SPECIAL_TOKENS: bool = true;
 
+    /// Whether to normalize the request tools' parameter JSON schemas at
+    /// creation for schema-aware argument conversion. When `false`, the
+    /// engine skips schema construction and `tool_args` resolves to the
+    /// empty schema (all raw values keep their string-level interpretation).
+    const USES_TOOL_SCHEMAS: bool = false;
+
     /// Resumable scanner locating `CALL_END` for the raw argument body.
     type ArgsScan: ArgsEndScan;
 
@@ -96,7 +102,10 @@ pub trait ParserFormat: 'static {
 
     /// Parse one complete raw argument body (end marker already stripped)
     /// into a JSON object.
-    fn tool_args(body: &str) -> ModalResult<Map<String, Value>>;
+    ///
+    /// `schema` is the parameter schema resolved for this call's tool name —
+    /// the empty schema unless `USES_TOOL_SCHEMAS` is enabled.
+    fn tool_args(schema: &ToolSchema, body: &str) -> ModalResult<Map<String, Value>>;
 }
 
 /// Resumable scanner that locates a tool-call end marker in buffered input.
@@ -229,6 +238,7 @@ pub struct ConfigDrivenParser<F: ParserFormat> {
     buffer: String,
     mode: Mode<F>,
     markers: ModeMarkerSet,
+    tool_schemas: ToolSchemas,
     emitted_tool_count: usize,
     tokenizer: DynTokenizer,
     /// Resolved reasoning boundary token IDs for prompt-state derivation.
@@ -238,7 +248,13 @@ pub struct ConfigDrivenParser<F: ParserFormat> {
 
 impl<F: ParserFormat> ConfigDrivenParser<F> {
     /// Create a parser for one request stream.
-    pub fn new(_tools: &[Tool], tokenizer: DynTokenizer) -> Result<Self> {
+    pub fn new(tools: &[Tool], tokenizer: DynTokenizer) -> Result<Self> {
+        let tool_schemas = if F::USES_TOOL_SCHEMAS {
+            ToolSchemas::from_tools(tools)
+        } else {
+            ToolSchemas::default()
+        };
+
         let boundary_ids = match F::REASONING_BOUNDARY_TOKENS {
             Some((start, end)) => {
                 let start_id = tokenizer.token_to_id(start).ok_or_else(|| {
@@ -259,6 +275,7 @@ impl<F: ParserFormat> ConfigDrivenParser<F> {
             buffer: String::new(),
             mode: Mode::Text,
             markers: ModeMarkerSet::of::<F>(),
+            tool_schemas,
             emitted_tool_count: 0,
             tokenizer,
             boundary_ids,
@@ -389,7 +406,7 @@ impl<F: ParserFormat> UnifiedParser for ConfigDrivenParser<F> {
 
         while let Some((event, consumed_len)) = {
             parse_buffered_event(&self.buffer, |input| {
-                parse_next_event::<F>(input, &mut self.mode, &self.markers)
+                parse_next_event::<F>(input, &mut self.mode, &self.markers, &self.tool_schemas)
             })?
         } {
             self.apply_event(event, consumed_len, output)?;
@@ -430,13 +447,14 @@ fn parse_next_event<F: ParserFormat>(
     input: &mut Input<'_>,
     mode: &mut Mode<F>,
     markers: &ModeMarkerSet,
+    schemas: &ToolSchemas,
 ) -> ModalResult<Event> {
     match mode {
         Mode::Text => boundary_or_content(input, &markers.text, Event::Text),
         Mode::Reasoning => boundary_or_content(input, &markers.reasoning, Event::Reasoning),
         Mode::ToolBetween => boundary_or_content(input, &markers.between, Event::Ignored),
         Mode::ToolHeader => F::tool_header(input).map(|name| Event::CallHeader { name }),
-        Mode::ToolArgs { scan, .. } => args_event::<F>(input, scan),
+        Mode::ToolArgs { name, scan, .. } => args_event::<F>(input, scan, schemas.resolve(name)),
         Mode::Done => rest.value(Event::Ignored).parse_next(input),
     }
 }
@@ -445,9 +463,10 @@ fn parse_next_event<F: ParserFormat>(
 fn args_event<F: ParserFormat>(
     input: &mut Input<'_>,
     scan: &mut F::ArgsScan,
+    schema: &ToolSchema,
 ) -> ModalResult<Event> {
     let body = scan.scan(input, F::CALL_END)?;
-    let args = F::tool_args(body)?;
+    let args = F::tool_args(schema, body)?;
     Ok(Event::CallComplete { args })
 }
 

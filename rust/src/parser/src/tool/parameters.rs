@@ -6,7 +6,7 @@ use crate::tool::Tool;
 
 /// Normalized parameter schemas for all tools in one request.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct ToolSchemas {
+pub struct ToolSchemas {
     tools: BTreeMap<String, ToolSchema>,
 }
 
@@ -17,7 +17,7 @@ pub(super) struct ToolSchemas {
 /// coercing raw string parameter values into more specific JSON types for
 /// downstream tool call execution.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub(super) struct ToolSchema {
+pub struct ToolSchema {
     params: BTreeMap<String, JsonParamType>,
 }
 
@@ -64,13 +64,21 @@ pub(super) enum JsonParamType {
 
 impl ToolSchemas {
     /// Normalize OpenAI-style tool parameter JSON schemas for one request.
-    pub(super) fn from_tools(tools: &[Tool]) -> Self {
+    pub(crate) fn from_tools(tools: &[Tool]) -> Self {
         let tools = tools
             .iter()
             .map(|tool| (tool.name.clone(), ToolSchema::from_schema(&tool.parameters)))
             .collect();
 
         Self { tools }
+    }
+
+    /// Resolve the parameter schema for one named tool.
+    ///
+    /// Unknown tool names resolve to the empty schema, so all parameters fall
+    /// back to strings or object-like JSON for structured inputs.
+    pub(crate) fn resolve(&self, function_name: &str) -> &ToolSchema {
+        self.tools.get(function_name).unwrap_or(ToolSchema::empty())
     }
 
     /// Convert parameter values for one named tool.
@@ -85,7 +93,7 @@ impl ToolSchemas {
     where
         P: Into<ParamInput>,
     {
-        let tool_schema = self.tools.get(function_name).unwrap_or(ToolSchema::empty());
+        let tool_schema = self.resolve(function_name);
         let mut converted = Map::with_capacity(params.len());
         for (name, value) in params {
             let value = tool_schema.convert(&name, value.into());
@@ -104,8 +112,7 @@ impl ToolSchemas {
     where
         P: Into<ParamInput>,
     {
-        let tool_schema = self.tools.get(function_name).unwrap_or(ToolSchema::empty());
-        tool_schema.convert(name, value.into())
+        self.resolve(function_name).convert(name, value.into())
     }
 }
 

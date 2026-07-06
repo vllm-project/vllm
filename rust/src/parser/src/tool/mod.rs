@@ -28,6 +28,7 @@ pub use json::{
 pub use kimi_k2::KimiK2ToolParser;
 pub use minimax_m2::MinimaxM2ToolParser;
 pub use minimax_m3::MinimaxM3ToolParser;
+pub use parameters::{ToolSchema, ToolSchemas};
 pub use qwen_coder::Qwen3CoderToolParser;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
