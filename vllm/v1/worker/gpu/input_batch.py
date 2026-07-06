@@ -101,10 +101,6 @@ class InputBatch:
 
     max_req_tokens: int | None = None
 
-    @property
-    def max_query_len(self) -> int:
-        return self.max_req_tokens or self.num_scheduled_tokens.max().item()
-
     @classmethod
     def make_dummy(
         cls,
@@ -349,7 +345,7 @@ def _combine_sampled_and_draft_tokens_kernel(
     if NUM_NEW_SAMPLED_TOKENS > 0:
         # Write the last sampled token ID to input_ids.
         last_token_id = tl.load(last_sampled_tokens_ptr + req_state_idx)
-        tl.store(input_ids_ptr + logits_start, last_token_id)
+        tl.store(input_ids_ptr + query_end - num_logits, last_token_id)
 
     # Write the draft tokens (if any) to input_ids.
     if num_draft_tokens > 0:
@@ -359,7 +355,7 @@ def _combine_sampled_and_draft_tokens_kernel(
             mask=mask,
         )
         tl.store(
-            input_ids_ptr + logits_start + NUM_NEW_SAMPLED_TOKENS + block,
+            input_ids_ptr + query_end - num_draft_tokens + block,
             draft_tokens,
             mask=mask,
         )

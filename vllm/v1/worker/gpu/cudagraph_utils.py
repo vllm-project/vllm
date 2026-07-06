@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections import defaultdict
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from itertools import product
 from typing import Any, NamedTuple, Protocol
@@ -235,7 +235,7 @@ class CudaGraphManager:
         def decode_descs(
             num_tokens: int,
             num_active_loras: int,
-        ) -> Iterator[BatchExecutionDescriptor]:
+        ):
             for decode_query_len in decode_query_lens:
                 rounded_num_tokens = round_up(num_tokens, decode_query_len)
                 rounded_num_reqs = rounded_num_tokens // decode_query_len
