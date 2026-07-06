@@ -384,8 +384,8 @@ class AnthropicServingMessages(OpenAIServingChat):
             "id": block.id or f"call_{int(time.time())}",
             "type": "function",
             "function": {
-                "name": block.name or "",
-                "arguments": json.dumps(block.input or {}),
+                "name": block.name,
+                "arguments": json.dumps(block.input),
             },
         }
         tool_calls.append(tool_call)
