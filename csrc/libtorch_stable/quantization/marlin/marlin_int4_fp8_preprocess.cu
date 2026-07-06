@@ -104,7 +104,6 @@ torch::stable::Tensor marlin_int4_fp8_preprocess(
     STD_TORCH_CHECK(qweight.size(0) % qzeros.size(0) == 0,
                     "qweight.size(0) % qzeros.size(0) != 0");
     STD_TORCH_CHECK(group_size % 8 == 0, "group_size % 8 != 0");
-    STD_TORCH_CHECK(size_n % 8 == 0, "size_n % 8 != 0");
 
     dim3 blocks(size_k, (size_n / 8 + 31) / 32);
     marlin_int4_fp8_preprocess_kernel_awq<<<blocks, 32, 0, stream>>>(
