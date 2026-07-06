@@ -15,8 +15,8 @@ class GateLinear(ReplicatedLinear):
     """MoE gate linear layer with multi-tier GEMM dispatch:
 
     1. DSV3 specialized kernel (SM90+, M<=16, H=7168 E=256/384, H=6144 E=256)
-    2. fp32 specialized kernel  (SM90+, bf16/fp32 in, fp32 out,
-       M<=32, H=3072, E=256)
+    2. fp32 specialized kernel  (SM90+, bf16/fp32 in, fp32 out, M<=32,
+       (H, E) in {(3072, 256), (6144, 128), (6144, 256)})
     3. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
     4. F.linear via ReplicatedLinear (ultimate fallback)
 
@@ -36,7 +36,7 @@ class GateLinear(ReplicatedLinear):
 
     # (hidden_size, num_experts) pairs with an instantiated fp32 kernel:
     #   (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
-    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128)}
+    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128), (6144, 256)}
     FP32_MAX_TOKENS = 32
 
     def __init__(
