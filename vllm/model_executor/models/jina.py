@@ -25,7 +25,7 @@ from ..layers.pooler.tokwise import (
 from .interfaces import SupportsLateInteraction
 from .interfaces_base import VllmModelForPooling
 from .qwen3 import Qwen3ForCausalLM, Qwen3Model
-from .utils import AutoWeightsLoader, maybe_prefix
+from .utils import AutoWeightsLoader, WeightsMapper, maybe_prefix
 
 logger = logging.getLogger(__name__)
 
@@ -193,6 +193,9 @@ class JinaEmbeddingsV5Model(Qwen3ForCausalLM, VllmModelForPooling):
     """
 
     is_pooling_model = True
+    hf_to_vllm_mapper = Qwen3ForCausalLM.hf_to_vllm_mapper | WeightsMapper(
+        orig_to_new_prefix={"": "model."}
+    )
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__(vllm_config=vllm_config, prefix=prefix)
@@ -254,5 +257,6 @@ class JinaEmbeddingsV5Model(Qwen3ForCausalLM, VllmModelForPooling):
                         tensor = tensor + (lora_B @ lora_A) * scaling
                 yield name, tensor
 
-        loaded = self.model.load_weights(_merge_weights(weights))
-        return {f"model.{name}" for name in loaded}
+        loader = AutoWeightsLoader(self, ignore_unexpected_prefixes=["lm_head."])
+        weights = _merge_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

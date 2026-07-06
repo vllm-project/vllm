@@ -193,26 +193,16 @@ FROM base AS vllm-test-deps
 
 WORKDIR /vllm-workspace
 
-# Copy test requirements
-COPY requirements/test/cuda.in requirements/test/cpu.in
+# Test requirements are compiled from requirements/test/cuda.in into
+# requirements/test/cpu.txt by the pip-compile-cpu pre-commit hook, which
+# resolves CPU wheels via uv's --torch-backend cpu.
+COPY requirements/test/cpu.txt requirements/test/cpu.txt
 
-RUN \
-    sed -i '/mamba_ssm/d' requirements/test/cpu.in && \
-    remove_packages_not_supported_on_aarch64() { \
-    case "$(uname -m)" in \
-    aarch64|arm64) \
-    sed -i '/decord/d' requirements/test/cpu.in; \
-    sed -i '/terratorch/d' requirements/test/cpu.in; \
-    ;; \
-    esac; \
-    }; \
-    remove_packages_not_supported_on_aarch64 && \
-    sed -i 's/^torch==.*/torch==2.11.0/g' requirements/test/cpu.in && \
-    sed -i 's/torchaudio.*/torchaudio/g' requirements/test/cpu.in && \
-    sed -i 's/torchvision.*/torchvision/g' requirements/test/cpu.in && \
-    # Related issue: https://github.com/vllm-project/vllm/pull/38800#issuecomment-4228314305
-    sed -i 's/^sentence-transformers.*/sentence-transformers==5.3.0/g' requirements/test/cpu.in && \
-    uv pip compile requirements/test/cpu.in -o requirements/test/cpu.txt --index-strategy unsafe-best-match --torch-backend cpu
+# cpu.txt is compiled for x86_64, so platform markers are resolved away. Drop
+# packages unavailable on aarch64 (decord, terratorch) for arm builds.
+RUN case "$(uname -m)" in \
+    aarch64|arm64) sed -i '/^decord==/d; /^terratorch==/d' requirements/test/cpu.txt ;; \
+    esac
 
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv pip install -r requirements/test/cpu.txt
@@ -310,6 +300,12 @@ LABEL ai.vllm.build.target-arch="${TARGETARCH}"
 LABEL ai.vllm.build.cpu-x86="${VLLM_CPU_X86:-false}"
 LABEL ai.vllm.build.cpu-arm-bf16="${VLLM_CPU_ARM_BF16:-false}"
 LABEL ai.vllm.build.python-version="${PYTHON_VERSION:-3.12}"
+
+# Copy the examples directory (including the chat/tool templates) so it is
+# present in the released image, as the CUDA image ships it too. The vllm-test
+# stage above adds examples/ for testing only, so without this the published
+# vllm-openai-cpu image would not ship examples/*.jinja.
+COPY examples examples
 
 ENTRYPOINT ["vllm", "serve"]
 

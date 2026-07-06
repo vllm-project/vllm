@@ -32,7 +32,6 @@ from vllm.entrypoints.openai.engine.protocol import GenerationError
 from vllm.entrypoints.openai.models.protocol import BaseModelPath
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.elastic_ep.middleware import ScalingMiddleware
-from vllm.entrypoints.serve.render.serving import ServingRender
 from vllm.entrypoints.serve.sagemaker.api_router import sagemaker_standards_bootstrap
 from vllm.entrypoints.serve.tokenize.serving import ServingTokenization
 from vllm.entrypoints.serve.utils.api_utils import (
@@ -208,12 +207,6 @@ def build_app(
 
         register_generate_api_routers(app)
 
-        from vllm.entrypoints.serve.disagg.api_router import (
-            attach_router as attach_disagg_router,
-        )
-
-        attach_disagg_router(app)
-
         from vllm.entrypoints.serve.elastic_ep.api_router import (
             attach_router as elastic_ep_attach_router,
         )
@@ -221,11 +214,9 @@ def build_app(
         elastic_ep_attach_router(app)
 
     if "generate" in supported_tasks or "render" in supported_tasks:
-        from vllm.entrypoints.serve.render.api_router import (
-            attach_router as attach_render_router,
-        )
+        from vllm.entrypoints.scale_out.factories import register_scale_out_api_routers
 
-        attach_render_router(app)
+        register_scale_out_api_routers(app, supported_tasks)
 
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import (
@@ -401,12 +392,6 @@ async def init_app_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
-    state.serving_render = ServingRender(
-        state.openai_serving_models,
-        state.online_renderer,
-        state.online_derenderer,
-        request_logger=request_logger,
-    )
 
     if "generate" in supported_tasks:
         from vllm.entrypoints.generate.api_router import init_generate_state
@@ -414,6 +399,10 @@ async def init_app_state(
         await init_generate_state(
             engine_client, state, args, request_logger, supported_tasks
         )
+
+        from vllm.entrypoints.scale_out.factories import init_scale_out_state
+
+        init_scale_out_state(state, args, engine_client, request_logger)
 
     if "transcription" in supported_tasks or "realtime" in supported_tasks:
         from vllm.entrypoints.speech_to_text.factories import init_speech_to_text_state
@@ -505,12 +494,10 @@ async def init_render_app_state(
         default_chat_template_kwargs=args.default_chat_template_kwargs,
         trust_request_chat_template=args.trust_request_chat_template,
     )
-    state.serving_render = ServingRender(
-        model_registry,
-        state.online_renderer,
-        state.online_derenderer,
-        request_logger=request_logger,
-    )
+
+    from vllm.entrypoints.scale_out.factories import init_render_state
+
+    init_render_state(state, request_logger)
 
     state.vllm_config = vllm_config
     # Disable stats logging — there is no engine to poll.
@@ -521,14 +508,19 @@ async def init_render_app_state(
     state.server_load_metrics = 0
 
 
-def create_server_socket(addr: tuple[str, int]) -> socket.socket:
+def create_server_socket(
+    addr: tuple[str, int],
+    *,
+    reuse_port: bool,
+) -> socket.socket:
     family = socket.AF_INET
     if is_valid_ipv6_address(addr[0]):
         family = socket.AF_INET6
 
     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    if reuse_port:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.bind(addr)
 
     return sock
@@ -559,7 +551,7 @@ def validate_api_server_args(args):
 
 
 @instrument(span_name="API server setup")
-def setup_server(args):
+def setup_server(args, *, reuse_port: bool):
     """Validate API server args and create the server socket."""
 
     log_version_and_model(logger, VLLM_VERSION, args.model)
@@ -580,7 +572,7 @@ def setup_server(args):
         sock = create_server_unix_socket(args.uds)
     else:
         sock_addr = (args.host or "", args.port)
-        sock = create_server_socket(sock_addr)
+        sock = create_server_socket(sock_addr, reuse_port=reuse_port)
 
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
@@ -701,7 +693,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     signal.signal(signal.SIGTERM, _interrupt_init)
 
-    listen_address, sock = setup_server(args)
+    listen_address, sock = setup_server(args, reuse_port=False)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
 

@@ -28,14 +28,13 @@ SOFT_CAPS = [None, 30.0]
 SLIDING_WINDOWS = [None, 64]
 
 
-@pytest.mark.parametrize("kv_cache_dtype", ["auto", "nvfp4"])
-def test_flashinfer_backend_accepts_mm_prefix(kv_cache_dtype: str) -> None:
+def test_flashinfer_backend_accepts_mm_prefix() -> None:
     from vllm.v1.attention.backends.flashinfer import FlashInferBackend
 
     invalid_reasons = FlashInferBackend.validate_configuration(
         head_size=128,
         dtype=torch.bfloat16,
-        kv_cache_dtype=kv_cache_dtype,
+        kv_cache_dtype="auto",
         block_size=16,
         use_mla=False,
         has_sink=False,
@@ -77,6 +76,25 @@ def test_flashinfer_backend_rejects_unsupported_mm_prefix_combinations(
     )
 
     assert any(expected_reason in reason for reason in invalid_reasons)
+
+
+def test_flashinfer_backend_rejects_nvfp4_mm_prefix_combination() -> None:
+    from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+    reason = FlashInferBackend.supports_combination(
+        head_size=128,
+        dtype=torch.bfloat16,
+        kv_cache_dtype="nvfp4",
+        block_size=16,
+        use_mla=False,
+        has_sink=False,
+        use_sparse=False,
+        use_mm_prefix=True,
+        device_capability=DeviceCapability(10, 0),
+    )
+
+    assert reason is not None
+    assert "nvfp4" in reason
 
 
 def test_flashinfer_mm_prefix_custom_mask_matches_triton_semantics() -> None:
