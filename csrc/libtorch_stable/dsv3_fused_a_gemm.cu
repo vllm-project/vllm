@@ -728,6 +728,18 @@ template void invokeFusedAGemm<__nv_bfloat16, 6144, 2624, 16, 32>(
     __nv_bfloat16*, __nv_bfloat16 const*, __nv_bfloat16 const*, int num_tokens,
     cudaStream_t);
 
+// GLM-5.2 q_b_proj TP8 (K=2048 -> N=2048). tile_m=16 keeps 128 CTAs (already
+// a single wave) and measures ahead of tile_m=32 here. Beats cuBLAS
+// 1.79-1.87x at M=3..8 (tile_n=8) and 1.19-1.30x at M=9..16 (tile_n=16);
+// M<=2 belongs to bf16_skinny_gemm, M>=20 to cuBLAS.
+template void invokeFusedAGemm<__nv_bfloat16, 2048, 2048, 8>(
+    __nv_bfloat16*, __nv_bfloat16 const*, __nv_bfloat16 const*, int num_tokens,
+    cudaStream_t);
+
+template void invokeFusedAGemm<__nv_bfloat16, 2048, 2048, 16>(
+    __nv_bfloat16*, __nv_bfloat16 const*, __nv_bfloat16 const*, int num_tokens,
+    cudaStream_t);
+
 void dsv3_fused_a_gemm(torch::stable::Tensor& output,
                        torch::stable::Tensor const& mat_a,
                        torch::stable::Tensor const& mat_b) {
@@ -738,10 +750,12 @@ void dsv3_fused_a_gemm(torch::stable::Tensor& output,
 
   bool const is_dsv3 = hd_in == 7168 && hd_out == 2112;
   bool const is_glm = hd_in == 6144 && hd_out == 2624;
+  bool const is_glm_qb = hd_in == 2048 && hd_out == 2048;
   STD_TORCH_CHECK(num_tokens >= 1 && num_tokens <= 16,
                   "required 1 <= mat_a.shape[0] <= 16");
-  STD_TORCH_CHECK(is_dsv3 || is_glm,
-                  "supported (hd_in, hd_out): (7168, 2112), (6144, 2624)");
+  STD_TORCH_CHECK(
+      is_dsv3 || is_glm || is_glm_qb,
+      "supported (hd_in, hd_out): (7168, 2112), (6144, 2624), (2048, 2048)");
   STD_TORCH_CHECK(output.size(0) == num_tokens,
                   "required output.shape[0] == mat_a.shape[0]");
   STD_TORCH_CHECK(output.size(1) == hd_out,
@@ -775,13 +789,21 @@ void dsv3_fused_a_gemm(torch::stable::Tensor& output,
       invokeFusedAGemm<__nv_bfloat16, 7168, 2112, 16>(out, a, b, num_tokens,
                                                       stream);
     }
-  } else {
+  } else if (is_glm) {
     if (num_tokens <= 8) {
       invokeFusedAGemm<__nv_bfloat16, 6144, 2624, 8, 32>(out, a, b, num_tokens,
                                                          stream);
     } else {
       invokeFusedAGemm<__nv_bfloat16, 6144, 2624, 16, 32>(out, a, b,
                                                           num_tokens, stream);
+    }
+  } else {
+    if (num_tokens <= 8) {
+      invokeFusedAGemm<__nv_bfloat16, 2048, 2048, 8>(out, a, b, num_tokens,
+                                                     stream);
+    } else {
+      invokeFusedAGemm<__nv_bfloat16, 2048, 2048, 16>(out, a, b, num_tokens,
+                                                      stream);
     }
   }
 }
