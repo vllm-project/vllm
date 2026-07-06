@@ -77,10 +77,14 @@ mkdir -p "${LOG_ROOT}"
 #     --export flag), and
 #   * submit the job script bare, parsing the id from "Submitted batch job N".
 #
-# DISAGG_SCRIPTS_DIR is CRITICAL: it's the host scripts dir bind-mounted into the
-# container (launcher, cluster.sh, models.yaml, proxy). Default to this script's
-# own dir so the wrapper is self-contained regardless of the caller's CWD.
-export DISAGG_SCRIPTS_DIR="${DISAGG_SCRIPTS_DIR:-${SCRIPT_DIR}}"
+# DISAGG_SCRIPTS_DIR is bind-mounted on compute nodes. The Buildkite checkout
+# lives on the login node only — stage scripts onto shared NFS before sbatch.
+DISAGG_SCRIPTS_STAGE="${DISAGG_SCRIPTS_STAGE:-/data/scratch/buildkite-agent}"
+STAGED_DIR="${DISAGG_SCRIPTS_STAGE}/${BUILDKITE_COMMIT:-local}"
+mkdir -p "${STAGED_DIR}"
+cp -a "${SCRIPT_DIR}/." "${STAGED_DIR}/"
+export DISAGG_SCRIPTS_DIR="${STAGED_DIR}"
+echo "[slurm-submit] staged scripts for compute nodes: ${DISAGG_SCRIPTS_DIR}" >&2
 export IMAGE WIDE_EP_MODE xP yD GPUS_PER_NODE RUN_AFTER_HEALTH HEALTH_TIMEOUT_S
 export SHARED_MOUNT LOG_ROOT DRY_RUN MORIIO_READ_MODE
 export ROUTER_TYPE ROUTER_PORT VLLM_ROUTER_IMAGE
