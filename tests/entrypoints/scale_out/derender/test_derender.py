@@ -531,7 +531,7 @@ async def test_derender_chat_oversized_token_ids_rejected(client):
         },
     )
     assert response.status_code == 400
-    assert "max_model_len" in response.json()["message"]
+    assert "max_model_len" in response.json()["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -552,7 +552,7 @@ async def test_derender_chat_too_many_choices_rejected(client):
         },
     )
     assert response.status_code == 400
-    assert "choices count" in response.json()["message"]
+    assert "choices count" in response.json()["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -573,7 +573,7 @@ async def test_derender_completion_too_many_generate_responses_rejected(client):
         },
     )
     assert response.status_code == 400
-    assert "generate_responses count" in response.json()["message"]
+    assert "generate_responses count" in response.json()["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -586,8 +586,8 @@ async def test_derender_chat_negative_token_ids_rejected(client):
             "generate_response": _make_generate_response([-1, 42, 100]),
         },
     )
-    # Pydantic validation error returns 422
-    assert response.status_code == 422
+    # vLLM's validation_exception_handler converts Pydantic errors to 400
+    assert response.status_code == 400
 
 
 @pytest.mark.asyncio
@@ -617,7 +617,7 @@ async def test_derender_chat_oversized_logprobs_rejected(client):
         },
     )
     assert response.status_code == 400
-    assert "logprobs.content length" in response.json()["message"]
+    assert "logprobs.content length" in response.json()["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -654,7 +654,7 @@ async def test_derender_chat_oversized_top_logprobs_rejected(client):
         },
     )
     assert response.status_code == 400
-    assert "top_logprobs count" in response.json()["message"]
+    assert "top_logprobs count" in response.json()["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -680,7 +680,7 @@ async def test_derender_completion_oversized_token_ids_rejected(client):
         },
     )
     assert response.status_code == 400
-    assert "max_model_len" in response.json()["message"]
+    assert "max_model_len" in response.json()["error"]["message"]
 
 
 # ---------------------------------------------------------------------------
