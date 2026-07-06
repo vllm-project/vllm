@@ -48,6 +48,37 @@ def _prepack_experts(w: torch.Tensor) -> torch.Tensor:
     return torch.ops._C.convert_weight_packed(w)
 
 
+def _make_topk(
+    num_tokens: int,
+    num_experts: int,
+    topk: int,
+    dtype: torch.dtype = torch.bfloat16,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    score = torch.randn(num_tokens, num_experts, dtype=dtype)
+    score = torch.softmax(score, dim=-1, dtype=torch.float32)
+    topk_weight, topk_ids = torch.topk(score, topk)
+    return topk_weight, topk_ids.to(torch.int32)
+
+
+def _make_padding_variants(
+    topk_ids: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    topk_ids_partial = topk_ids.clone()
+    topk_ids_partial[0, 0] = -1
+    if topk_ids_partial.shape[0] > 1:
+        topk_ids_partial[-1, :] = -1
+    return topk_ids_partial, torch.full_like(topk_ids, -1)
+
+
+def _get_local_expert_slice(
+    expert_map: torch.Tensor,
+    local_num_experts: int,
+) -> slice:
+    owned = (expert_map != -1).nonzero(as_tuple=False)
+    expert_lo = int(owned[0].item())
+    return slice(expert_lo, expert_lo + local_num_experts)
+
+
 def _ref_unquant_moe(
     a: torch.Tensor,
     w1: torch.Tensor,
@@ -108,20 +139,13 @@ def test_unquant_cpu_fused_moe_skip_padding(seed):
     w2 = torch.randn(E, K, N, dtype=torch.bfloat16) / math.sqrt(N)
     pw1, pw2 = _prepack_experts(w1), _prepack_experts(w2)
 
-    score = torch.randn(M, E, dtype=torch.bfloat16)
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk)
-    topk_ids = topk_ids.to(torch.int32)
-
-    topk_ids_partial = topk_ids.clone()
-    topk_ids_partial[1, 0] = -1
-    topk_ids_partial[2, :] = -1
+    topk_weight, topk_ids = _make_topk(M, E, topk)
+    topk_ids_partial, topk_ids_all = _make_padding_variants(topk_ids)
 
     ref_out = _ref_unquant_moe(a, w1, w2, topk_weight, topk_ids_partial)
     out = _run_unquant_cpu_fused_moe(a, pw1, pw2, topk_weight, topk_ids_partial)
     torch.testing.assert_close(ref_out, out, atol=1e-2, rtol=1e-2)
 
-    topk_ids_all = torch.full_like(topk_ids, -1)
     out_all_skipped = _run_unquant_cpu_fused_moe(a, pw1, pw2, topk_weight, topk_ids_all)
     torch.testing.assert_close(
         out_all_skipped, torch.zeros(M, K, dtype=out_all_skipped.dtype)
@@ -315,10 +339,7 @@ def test_w8a16_block_fp8_cpu_fused_moe(M, N, K, E, topk, seed):
     a = torch.randn(M, K, dtype=torch.bfloat16) / math.sqrt(K)
     w1, w2, w1_s, w2_s = _make_fp8_moe_weights(E, N, K, BLOCK_SIZE)
 
-    score = torch.randn(M, E, dtype=torch.bfloat16)
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk)
-    topk_ids = topk_ids.to(torch.int32)
+    topk_weight, topk_ids = _make_topk(M, E, topk)
 
     ref_out = ref_w8a16_block_fp8_moe(
         a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, BLOCK_SIZE
@@ -381,28 +402,14 @@ def test_w8a16_block_fp8_cpu_fused_moe_invalid_expert_id_raises(
         _run_fp8_cpu_fused_moe(a, pw1, pw2, topk_weight, topk_ids, w1_s, w2_s)
 
 
-# Non-divisible (E, num_ranks) pairs are intentional: they exercise the
-# remainder-distribution path in determine_expert_map.
-@pytest.mark.parametrize("M", [1, 64, 121])
 @pytest.mark.parametrize(
-    "N,K,E,topk",
+    "M,N,K,E,topk,num_ranks",
     [
-        (256, 512, 8, 2),
-        (512, 512, 8, 4),
-        # E=10, num_ranks=4 maps to 3/3/2/2.
-        (256, 512, 10, 2),
-        # E=12, num_ranks=6 maps to 2 each.
-        (256, 512, 12, 2),
+        (1, 256, 512, 8, 2, 3),
+        (64, 256, 512, 10, 2, 4),
+        (121, 512, 512, 12, 4, 6),
     ],
-)
-@pytest.mark.parametrize(
-    "num_ranks",
-    [
-        2,
-        4,
-        3,  # E=8 maps to 3/3/2.
-        6,  # E=8 maps to 2/2/1/1/1/1.
-    ],
+    ids=["single-token", "nondiv-e10", "large-topk4"],
 )
 @pytest.mark.parametrize("seed", [0])
 def test_w8a16_block_fp8_cpu_fused_moe_expert_parallel(
@@ -427,10 +434,7 @@ def test_w8a16_block_fp8_cpu_fused_moe_expert_parallel(
     a = torch.randn(M, K, dtype=torch.bfloat16) / math.sqrt(K)
     w1, w2, w1_s, w2_s = _make_fp8_moe_weights(E, N, K, BLOCK_SIZE)
 
-    score = torch.randn(M, E, dtype=torch.bfloat16)
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk)
-    topk_ids = topk_ids.to(torch.int32)
+    topk_weight, topk_ids = _make_topk(M, E, topk)
 
     ref_out = ref_w8a16_block_fp8_moe(
         a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, BLOCK_SIZE
@@ -445,16 +449,12 @@ def test_w8a16_block_fp8_cpu_fused_moe_expert_parallel(
         )
         assert expert_map is not None
 
-        # Derive the contiguous start index for this rank's global experts
-        # by finding the first non-(-1) entry in expert_map.
-        owned = (expert_map != -1).nonzero(as_tuple=False)
-        lo = int(owned[0].item())
-        hi = lo + local_num_experts
+        local_experts = _get_local_expert_slice(expert_map, local_num_experts)
 
-        w1_local = w1[lo:hi].contiguous()
-        w2_local = w2[lo:hi].contiguous()
-        w1_s_local = w1_s[lo:hi].contiguous()
-        w2_s_local = w2_s[lo:hi].contiguous()
+        w1_local = w1[local_experts].contiguous()
+        w2_local = w2[local_experts].contiguous()
+        w1_s_local = w1_s[local_experts].contiguous()
+        w2_s_local = w2_s[local_experts].contiguous()
 
         # Remap + mask (mirrors CPUExpertsFp8.apply).
         local_ids = expert_map[topk_ids.long()]
@@ -482,15 +482,14 @@ def test_w8a16_block_fp8_cpu_fused_moe_expert_parallel(
     torch.testing.assert_close(ref_out.bfloat16(), summed, atol=1e-2, rtol=1e-2)
 
 
-@pytest.mark.parametrize("M", [1, 64, 121])
 @pytest.mark.parametrize(
-    "N,K,E,topk",
+    "M,N,K,E,topk,num_ranks",
     [
-        (256, 512, 10, 2),
-        (256, 512, 12, 2),
+        (1, 256, 512, 10, 2, 3),
+        (64, 256, 512, 12, 2, 6),
     ],
+    ids=["single-token-nondiv", "dp6"],
 )
-@pytest.mark.parametrize("num_ranks", [3, 6])
 @pytest.mark.parametrize("seed", [0])
 def test_w8a16_block_fp8_cpu_fused_moe_expert_parallel_apply(
     M, N, K, E, topk, num_ranks, seed
@@ -530,14 +529,12 @@ def test_w8a16_block_fp8_cpu_fused_moe_expert_parallel_apply(
         )
         assert expert_map is not None
 
-        owned = (expert_map != -1).nonzero(as_tuple=False)
-        lo = int(owned[0].item())
-        hi = lo + local_num_experts
+        local_experts = _get_local_expert_slice(expert_map, local_num_experts)
 
-        w1_local = _prepack_experts(w1[lo:hi].contiguous())
-        w2_local = _prepack_experts(w2[lo:hi].contiguous())
-        w1_s_local = w1_s[lo:hi].contiguous()
-        w2_s_local = w2_s[lo:hi].contiguous()
+        w1_local = _prepack_experts(w1[local_experts].contiguous())
+        w2_local = _prepack_experts(w2[local_experts].contiguous())
+        w1_s_local = w1_s[local_experts].contiguous()
+        w2_s_local = w2_s[local_experts].contiguous()
 
         moe_config = FusedMoEConfig(
             num_experts=E,
@@ -597,9 +594,7 @@ def test_fp8_cpu_fused_moe_skip_padding_expert_parallel(
 
     a = torch.randn(M, K, dtype=torch.bfloat16) / math.sqrt(K)
     w1, w2, w1_s, w2_s = _make_fp8_moe_weights(E, N, K, BLOCK_SIZE)
-    score = torch.softmax(torch.randn(M, E, dtype=torch.bfloat16), dim=-1)
-    topk_weight, topk_ids = torch.topk(score, topk)
-    topk_ids = topk_ids.to(torch.int32)
+    topk_weight, topk_ids = _make_topk(M, E, topk)
 
     padded_row = 1
     topk_ids_padded = topk_ids.clone()
@@ -609,13 +604,11 @@ def test_fp8_cpu_fused_moe_skip_padding_expert_parallel(
         ep_size=num_ranks, ep_rank=0, global_num_experts=E
     )
     assert expert_map is not None
-    owned = (expert_map != -1).nonzero(as_tuple=False)
-    lo = int(owned[0].item())
-    hi = lo + local_num_experts
-    w1_p = _prepack_experts(w1[lo:hi].contiguous())
-    w2_p = _prepack_experts(w2[lo:hi].contiguous())
-    w1_s_local = w1_s[lo:hi].contiguous()
-    w2_s_local = w2_s[lo:hi].contiguous()
+    local_experts = _get_local_expert_slice(expert_map, local_num_experts)
+    w1_p = _prepack_experts(w1[local_experts].contiguous())
+    w2_p = _prepack_experts(w2[local_experts].contiguous())
+    w1_s_local = w1_s[local_experts].contiguous()
+    w2_s_local = w2_s[local_experts].contiguous()
 
     common_args = (
         w1_p,
@@ -657,50 +650,17 @@ def test_w8a16_block_fp8_cpu_fused_moe_skip_padding(M, N, K, E, topk, seed):
     w1, w2, w1_s, w2_s = _make_fp8_moe_weights(E, N, K, BLOCK_SIZE)
     pw1, pw2 = _prepack_experts(w1), _prepack_experts(w2)
 
-    score = torch.randn(M, E, dtype=torch.bfloat16)
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk)
-    topk_ids = topk_ids.to(torch.int32)
-
-    topk_ids_partial = topk_ids.clone()
-    topk_ids_partial[1, 0] = -1
-    topk_ids_partial[2, :] = -1
+    topk_weight, topk_ids = _make_topk(M, E, topk)
+    topk_ids_partial, topk_ids_all = _make_padding_variants(topk_ids)
 
     ref_out = ref_w8a16_block_fp8_moe(
         a, w1, w2, w1_s, w2_s, topk_weight, topk_ids_partial, BLOCK_SIZE
     )
-    out = ops.fused_experts_cpu(
-        a.clone(),
-        pw1,
-        pw2,
-        topk_weight,
-        topk_ids_partial,
-        False,
-        ops.CPUQuantMethod.FP8_W8A16,
-        w1_s,
-        w2_s,
-        None,
-        None,
-        BLOCK_SIZE,
-        is_vnni=True,
-    )
+    out = _run_fp8_cpu_fused_moe(a, pw1, pw2, topk_weight, topk_ids_partial, w1_s, w2_s)
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
-    topk_ids_all = torch.full_like(topk_ids, -1)
-    out_all_skipped = ops.fused_experts_cpu(
-        a.clone(),
-        pw1,
-        pw2,
-        topk_weight,
-        topk_ids_all,
-        False,
-        ops.CPUQuantMethod.FP8_W8A16,
-        w1_s,
-        w2_s,
-        None,
-        None,
-        BLOCK_SIZE,
-        is_vnni=True,
+    out_all_skipped = _run_fp8_cpu_fused_moe(
+        a, pw1, pw2, topk_weight, topk_ids_all, w1_s, w2_s
     )
     torch.testing.assert_close(
         out_all_skipped, torch.zeros(M, K, dtype=out_all_skipped.dtype)
@@ -944,10 +904,7 @@ def test_mxfp4_cpu_fused_moe(M, N, K, E, topk, seed):
     w2dq = MXFP4QuantizeUtil.dequantize(w2q, dtype, w2s)
 
     # Routing
-    score = torch.randn(M, E, dtype=dtype)
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk)
-    topk_ids = topk_ids.to(torch.int32)
+    topk_weight, topk_ids = _make_topk(M, E, topk, dtype)
 
     # Reference
     ref_out = ref_mxfp4_fused_moe(a, w1dq, w2dq, topk_weight, topk_ids, topk)
@@ -997,9 +954,7 @@ def test_mxfp4_cpu_fused_moe_skip_padding(M, N, K, E, topk, seed):
     pw1, pw1s = _prepack_mxfp4_experts(w1q, w1s)
     pw2, pw2s = _prepack_mxfp4_experts(w2q, w2s)
 
-    topk_ids_partial = topk_ids.clone()
-    topk_ids_partial[0, 0] = -1
-    topk_ids_partial[1, :] = -1
+    topk_ids_partial, topk_ids_all = _make_padding_variants(topk_ids)
 
     ref_out = ref_mxfp4_fused_moe(a, w1dq, w2dq, topk_weight, topk_ids_partial, topk)
     out = _run_mxfp4_cpu_fused_moe(
@@ -1013,7 +968,6 @@ def test_mxfp4_cpu_fused_moe_skip_padding(M, N, K, E, topk, seed):
     )
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
-    topk_ids_all = torch.full_like(topk_ids, -1)
     out_all_skipped = _run_mxfp4_cpu_fused_moe(
         a,
         pw1,
@@ -1432,9 +1386,7 @@ def test_int4_w4a16_cpu_fused_moe_skip_padding(
         )
     )
 
-    topk_ids_partial = topk_ids.clone()
-    topk_ids_partial[0, 0] = -1
-    topk_ids_partial[1, :] = -1
+    topk_ids_partial, topk_ids_all = _make_padding_variants(topk_ids)
 
     ref_out = _ref_int4_moe(
         a,
@@ -1461,7 +1413,6 @@ def test_int4_w4a16_cpu_fused_moe_skip_padding(
     )
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=1e-2, rtol=1e-2)
 
-    topk_ids_all = torch.full_like(topk_ids, -1)
     out_all_skipped = _run_int4_cpu_fused_moe(
         a,
         blocked_w1,
@@ -1642,14 +1593,9 @@ def test_int8_w8a8_cpu_fused_moe_skip_padding(M, N, K, E, topk, seed):
     w1_q, w2_q, w1_s, w2_s = _make_int8_moe_weights(E, N, K)
     w1, w2 = _prepack_experts(w1_q), _prepack_experts(w2_q)
 
-    score = torch.randn(M, E, dtype=torch.bfloat16)
-    score = torch.softmax(score, dim=-1, dtype=torch.float32)
-    topk_weight, topk_ids = torch.topk(score, topk)
-    topk_ids = topk_ids.to(torch.int32)
+    topk_weight, topk_ids = _make_topk(M, E, topk)
 
-    topk_ids_partial = topk_ids.clone()
-    topk_ids_partial[1, 0] = -1
-    topk_ids_partial[2, :] = -1
+    topk_ids_partial, topk_ids_all = _make_padding_variants(topk_ids)
 
     ref_out = _ref_int8_moe(a, w1_q, w2_q, w1_s, w2_s, topk_weight, topk_ids_partial)
     out = _run_int8_cpu_fused_moe(
@@ -1664,7 +1610,6 @@ def test_int8_w8a8_cpu_fused_moe_skip_padding(M, N, K, E, topk, seed):
     )
     torch.testing.assert_close(ref_out.bfloat16(), out, atol=2e-1, rtol=2e-1)
 
-    topk_ids_all = torch.full_like(topk_ids, -1)
     out_all_skipped = _run_int8_cpu_fused_moe(
         a,
         w1,

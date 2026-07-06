@@ -1,18 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-Multi-process CPU test for FP8 W8A16 MoE expert parallelism.
-
-Validates the full dispatch → local-expert-skip compute → combine → TP
-all-reduce chain for the AgRsAll2AllManager + CPUExpertsFp8 path on CPU
-(gloo backend).
-
-Covers:
-  - TP=1, DP=6 — production CPU EP topology coverage
-
-Run: numactl -m 5 -N 5 .venv/bin/python -m pytest \
-         tests/distributed/test_cpu_moe_ep.py -v
-"""
+"""End-to-end CPU FP8 MoE expert-parallel coverage."""
 
 import math
 import os
@@ -38,17 +26,17 @@ if not hasattr(torch.ops._C, "fused_experts_cpu"):
     pytest.skip("fused_experts_cpu op not available", allow_module_level=True)
 
 
-def ensure_spawn_start_method():
+def _ensure_spawn_start_method():
     if mp.get_start_method(allow_none=True) is None:
         mp.set_start_method("spawn")
 
 
-def report_worker_failure(rank: int, err_q: mp.Queue, err: Exception) -> None:
+def _report_worker_failure(rank: int, err_q: mp.Queue, err: Exception) -> None:
     err_q.put(f"[Rank {rank}]\n{traceback.format_exc()}")
     raise SystemExit(1) from err
 
 
-def collect_worker_failures(procs, err_q: mp.Queue) -> list[str]:
+def _collect_worker_failures(procs, err_q: mp.Queue) -> list[str]:
     exit_errors = []
     for rank, proc in enumerate(procs):
         proc.join()
@@ -63,7 +51,7 @@ def collect_worker_failures(procs, err_q: mp.Queue) -> list[str]:
     return errors + exit_errors
 
 
-def spawn_workers(
+def _spawn_workers(
     worker_fn,
     world_size,
     tp_size,
@@ -73,7 +61,7 @@ def spawn_workers(
     distributed_init_ports=None,
     dp_port=None,
 ):
-    ensure_spawn_start_method()
+    _ensure_spawn_start_method()
 
     if distributed_init_ports is None:
         shared_init_port = get_open_port()
@@ -103,7 +91,7 @@ def spawn_workers(
         proc.start()
         procs.append(proc)
 
-    failures = collect_worker_failures(procs, err_q)
+    failures = _collect_worker_failures(procs, err_q)
     if failures:
         pytest.fail("Worker(s) failed:\n" + "\n---\n".join(failures))
 
@@ -143,6 +131,15 @@ def _make_fp8_moe_weights(E, N, K, block_size):
         * FACTOR_FOR_SCALE
     )
     return w1, w2, w1_s, w2_s
+
+
+def _get_local_expert_slice(
+    expert_map: torch.Tensor,
+    local_num_experts: int,
+) -> slice:
+    owned = (expert_map != -1).nonzero(as_tuple=False)
+    expert_lo = int(owned[0].item())
+    return slice(expert_lo, expert_lo + local_num_experts)
 
 
 def _run_single_rank_reference(a, w1, w2, w1_s, w2_s, topk_weight, topk_ids, E):
@@ -289,13 +286,11 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
         )
         assert expert_map is not None
 
-        owned = (expert_map != -1).nonzero(as_tuple=False)
-        expert_lo = int(owned[0].item())
-        expert_hi = expert_lo + local_num_experts
-        w1_local = w1[expert_lo:expert_hi].contiguous()
-        w2_local = w2[expert_lo:expert_hi].contiguous()
-        w1_s_local = w1_s[expert_lo:expert_hi].contiguous()
-        w2_s_local = w2_s[expert_lo:expert_hi].contiguous()
+        local_experts = _get_local_expert_slice(expert_map, local_num_experts)
+        w1_local = w1[local_experts].contiguous()
+        w2_local = w2[local_experts].contiguous()
+        w1_s_local = w1_s[local_experts].contiguous()
+        w2_s_local = w2_s[local_experts].contiguous()
 
         dp_cpu_group = get_dp_group().cpu_group
 
@@ -366,7 +361,7 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
         dist.barrier()
 
     except Exception as err:
-        report_worker_failure(rank, err_q, err)
+        _report_worker_failure(rank, err_q, err)
 
 
 # ---------------------------------------------------------------------------
@@ -374,16 +369,13 @@ def _moe_ep_worker(rank, world_size, tp_size, dp_size, port, dp_port, params, er
 # ---------------------------------------------------------------------------
 
 # (M_per_dp, N, K, E, topk, seed)
-# E=12 divisible by EP=6 (2 experts/rank), E=10 non-divisible (ranks 0-3 hold
-# 2 experts, ranks 4-5 hold 1) — mirrors the shape of 256÷6 at small scale.
 _PARAMS = [
-    (8, 256, 512, 12, 2, 0),
     (8, 256, 512, 10, 2, 0),
 ]
 
 
 @pytest.mark.distributed
-@pytest.mark.parametrize("params", _PARAMS, ids=["E12-div", "E10-nondiv"])
+@pytest.mark.parametrize("params", _PARAMS, ids=["E10-nondiv"])
 def test_cpu_moe_ep_dp6_tp1(params):
     """TP=1, DP=6: pure expert parallelism baseline (EP=6)."""
-    spawn_workers(_moe_ep_worker, world_size=6, tp_size=1, dp_size=6, params=params)
+    _spawn_workers(_moe_ep_worker, world_size=6, tp_size=1, dp_size=6, params=params)

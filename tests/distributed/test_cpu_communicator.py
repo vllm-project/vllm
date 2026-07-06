@@ -1,12 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""
-CPU EP communicator tests.
-
-CPU AgRs dispatch/combine follows the runtime group selection: non-sequence-
-parallel paths use the DP group, which may take the single-node SHM fastpath,
-while sequence-parallel paths use the EP group.
-"""
+"""CPU communicator tests for DP SHM and EP dispatch paths."""
 
 import os
 import traceback
@@ -34,17 +28,17 @@ HAS_CPU_SHM = hasattr(torch.ops._C, "init_shm_manager") and (
 )
 
 
-def ensure_spawn_start_method():
+def _ensure_spawn_start_method():
     if mp.get_start_method(allow_none=True) is None:
         mp.set_start_method("spawn")
 
 
-def report_worker_failure(rank: int, err_q: mp.Queue, err: Exception) -> None:
+def _report_worker_failure(rank: int, err_q: mp.Queue, err: Exception) -> None:
     err_q.put(f"[Rank {rank}]\n{traceback.format_exc()}")
     raise SystemExit(1) from err
 
 
-def collect_worker_failures(procs, err_q: mp.Queue) -> list[str]:
+def _collect_worker_failures(procs, err_q: mp.Queue) -> list[str]:
     exit_errors = []
     for rank, proc in enumerate(procs):
         proc.join()
@@ -59,7 +53,25 @@ def collect_worker_failures(procs, err_q: mp.Queue) -> list[str]:
     return errors + exit_errors
 
 
-def spawn_workers(
+def _run_worker(
+    rank,
+    world_size,
+    tp_size,
+    dp_size,
+    port,
+    dp_port,
+    worker_fn,
+    params,
+    err_q,
+):
+    try:
+        worker_fn(rank, world_size, tp_size, dp_size, port, dp_port, params, err_q)
+    except Exception as err:
+        err_q.put(f"[Rank {rank}]\n{traceback.format_exc()}")
+        raise SystemExit(1) from err
+
+
+def _spawn_workers(
     worker_fn,
     world_size,
     tp_size,
@@ -69,7 +81,7 @@ def spawn_workers(
     distributed_init_ports=None,
     dp_port=None,
 ):
-    ensure_spawn_start_method()
+    _ensure_spawn_start_method()
 
     if distributed_init_ports is None:
         shared_init_port = get_open_port()
@@ -84,7 +96,7 @@ def spawn_workers(
     procs = []
     for rank in range(world_size):
         proc = mp.Process(
-            target=worker_fn,
+            target=_run_worker,
             args=(
                 rank,
                 world_size,
@@ -92,6 +104,7 @@ def spawn_workers(
                 dp_size,
                 distributed_init_ports[rank],
                 dp_port,
+                worker_fn,
                 params,
                 err_q,
             ),
@@ -99,7 +112,7 @@ def spawn_workers(
         proc.start()
         procs.append(proc)
 
-    failures = collect_worker_failures(procs, err_q)
+    failures = _collect_worker_failures(procs, err_q)
     if failures:
         pytest.fail("Worker(s) failed:\n" + "\n---\n".join(failures))
 
@@ -268,7 +281,7 @@ def _ragged_dispatch_worker(
 
         dist.barrier()
     except Exception as err:
-        report_worker_failure(rank, err_q, err)
+        _report_worker_failure(rank, err_q, err)
 
 
 def _ragged_dispatch_padding_worker(
@@ -321,7 +334,7 @@ def _ragged_dispatch_padding_worker(
 
         dist.barrier()
     except Exception as err:
-        report_worker_failure(rank, err_q, err)
+        _report_worker_failure(rank, err_q, err)
 
 
 def _sequence_parallel_worker(
@@ -404,7 +417,7 @@ def _sequence_parallel_worker(
 
         dist.barrier()
     except Exception as err:
-        report_worker_failure(rank, err_q, err)
+        _report_worker_failure(rank, err_q, err)
 
 
 @torch._dynamo.config.patch(capture_dynamic_output_shape_ops=True)
@@ -449,7 +462,7 @@ def _compile_fastpath_worker(
 
         dist.barrier()
     except Exception as err:
-        report_worker_failure(rank, err_q, err)
+        _report_worker_failure(rank, err_q, err)
 
 
 def _get_dp_shm_communicator():
@@ -466,47 +479,7 @@ def _get_dp_shm_communicator():
     return dp_group, communicator
 
 
-def _ragged_shm_reuse_worker(
-    rank,
-    world_size,
-    tp_size,
-    dp_size,
-    port,
-    dp_port,
-    sizes,
-    err_q,
-):
-    try:
-        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_dp_ragged_reuse_{port}")
-        _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
-
-        dp_group, communicator = _get_dp_shm_communicator()
-        hidden = _filled(sizes[rank], HIDDEN_SIZE, float(rank + 1))
-        expected_hidden = _concat_rank_values(sizes, HIDDEN_SIZE, 1.0)
-
-        first = dp_group.all_gatherv(hidden.clone(), sizes=sizes)
-        torch.testing.assert_close(first, expected_hidden)
-        first_caps = (
-            communicator._get_ragged_pad_capacity(hidden),
-            communicator._get_ragged_shm_gather_capacity(hidden),
-        )
-
-        second = dp_group.all_gatherv(hidden.clone(), sizes=sizes)
-        torch.testing.assert_close(second, expected_hidden)
-        second_caps = (
-            communicator._get_ragged_pad_capacity(hidden),
-            communicator._get_ragged_shm_gather_capacity(hidden),
-        )
-
-        assert first_caps == (max(sizes), max(sizes))
-        assert second_caps == first_caps
-
-        dist.barrier()
-    except Exception as err:
-        report_worker_failure(rank, err_q, err)
-
-
-def _ragged_shm_grow_worker(
+def _ragged_shm_buffers_worker(
     rank,
     world_size,
     tp_size,
@@ -517,7 +490,7 @@ def _ragged_shm_grow_worker(
     err_q,
 ):
     try:
-        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_dp_ragged_grow_{port}")
+        os.environ.setdefault("VLLM_DIST_IDENT", f"test_cpu_dp_ragged_buffers_{port}")
         _init_tp_dp_environment(rank, tp_size, dp_size, port, dp_port)
 
         small_sizes, large_sizes = size_patterns
@@ -530,6 +503,18 @@ def _ragged_shm_grow_worker(
             _concat_rank_values(small_sizes, HIDDEN_SIZE, 1.0),
         )
         small_caps = (
+            communicator._get_ragged_pad_capacity(small_hidden),
+            communicator._get_ragged_shm_gather_capacity(small_hidden),
+        )
+        small_result_repeat = dp_group.all_gatherv(
+            small_hidden.clone(),
+            sizes=small_sizes,
+        )
+        torch.testing.assert_close(
+            small_result_repeat,
+            _concat_rank_values(small_sizes, HIDDEN_SIZE, 1.0),
+        )
+        small_repeat_caps = (
             communicator._get_ragged_pad_capacity(small_hidden),
             communicator._get_ragged_shm_gather_capacity(small_hidden),
         )
@@ -559,6 +544,7 @@ def _ragged_shm_grow_worker(
         )
 
         assert small_caps == (max(small_sizes), max(small_sizes))
+        assert small_repeat_caps == small_caps
         assert large_caps == (max(large_sizes), max(large_sizes))
         assert large_caps[0] > small_caps[0]
         assert large_caps[1] > small_caps[1]
@@ -566,7 +552,7 @@ def _ragged_shm_grow_worker(
 
         dist.barrier()
     except Exception as err:
-        report_worker_failure(rank, err_q, err)
+        _report_worker_failure(rank, err_q, err)
 
 
 def _uniform_sizes_shm_worker(
@@ -598,7 +584,7 @@ def _uniform_sizes_shm_worker(
 
         dist.barrier()
     except Exception as err:
-        report_worker_failure(rank, err_q, err)
+        _report_worker_failure(rank, err_q, err)
 
 
 def _all_zero_gatherv_worker(
@@ -626,7 +612,7 @@ def _all_zero_gatherv_worker(
 
         dist.barrier()
     except Exception as err:
-        report_worker_failure(rank, err_q, err)
+        _report_worker_failure(rank, err_q, err)
 
 
 def _implicit_uneven_reduce_scatterv_worker(
@@ -656,7 +642,7 @@ def _implicit_uneven_reduce_scatterv_worker(
 
         dist.barrier()
     except Exception as err:
-        report_worker_failure(rank, err_q, err)
+        _report_worker_failure(rank, err_q, err)
 
 
 def _dp_shm_group_name_worker(
@@ -713,7 +699,7 @@ def _dp_shm_group_name_worker(
 
             dist.barrier()
     except Exception as err:
-        report_worker_failure(rank, err_q, err)
+        _report_worker_failure(rank, err_q, err)
 
 
 def _dp_shm_all_reduce_worker(
@@ -744,13 +730,13 @@ def _dp_shm_all_reduce_worker(
 
         dist.barrier()
     except Exception as err:
-        report_worker_failure(rank, err_q, err)
+        _report_worker_failure(rank, err_q, err)
 
 
 @pytest.mark.distributed
 @pytest.mark.parametrize("sizes", [[2, 1], [0, 3]], ids=["ragged", "zero-rank"])
 def test_cpu_ep_dispatch_combine_ragged(sizes):
-    spawn_workers(
+    _spawn_workers(
         _ragged_dispatch_worker,
         world_size=2,
         tp_size=1,
@@ -762,7 +748,7 @@ def test_cpu_ep_dispatch_combine_ragged(sizes):
 @pytest.mark.distributed
 @pytest.mark.parametrize("sizes", [[1, 2], [1, 0, 3]], ids=["dp2", "dp3-zero-rank"])
 def test_cpu_ep_dispatch_propagates_padding_mask(sizes):
-    spawn_workers(
+    _spawn_workers(
         _ragged_dispatch_padding_worker,
         world_size=len(sizes),
         tp_size=1,
@@ -773,7 +759,7 @@ def test_cpu_ep_dispatch_propagates_padding_mask(sizes):
 
 @pytest.mark.distributed
 def test_cpu_ep_sequence_parallel_uses_ep_group():
-    spawn_workers(
+    _spawn_workers(
         _sequence_parallel_worker,
         world_size=4,
         tp_size=2,
@@ -785,7 +771,7 @@ def test_cpu_ep_sequence_parallel_uses_ep_group():
 @pytest.mark.distributed
 @pytest.mark.skipif(not hasattr(torch, "compile"), reason="torch.compile required")
 def test_cpu_ep_compile_ragged_fastpath():
-    spawn_workers(
+    _spawn_workers(
         _compile_fastpath_worker,
         world_size=2,
         tp_size=1,
@@ -796,7 +782,7 @@ def test_cpu_ep_compile_ragged_fastpath():
 
 @pytest.mark.distributed
 def test_cpu_dp_group_ranks_share_shm_group_name():
-    spawn_workers(
+    _spawn_workers(
         _dp_shm_group_name_worker,
         world_size=2,
         tp_size=1,
@@ -809,21 +795,9 @@ def test_cpu_dp_group_ranks_share_shm_group_name():
 
 @pytest.mark.distributed
 @pytest.mark.skipif(not HAS_CPU_SHM, reason="CPU SHM communicator required")
-def test_cpu_dp_all_gatherv_ragged_reuses_shm_buffers():
-    spawn_workers(
-        _ragged_shm_reuse_worker,
-        world_size=2,
-        tp_size=1,
-        dp_size=2,
-        params=[2, 1],
-    )
-
-
-@pytest.mark.distributed
-@pytest.mark.skipif(not HAS_CPU_SHM, reason="CPU SHM communicator required")
-def test_cpu_dp_all_gatherv_ragged_shm_buffers_grow_on_demand():
-    spawn_workers(
-        _ragged_shm_grow_worker,
+def test_cpu_dp_all_gatherv_ragged_shm_buffers_reuse_and_grow():
+    _spawn_workers(
+        _ragged_shm_buffers_worker,
         world_size=2,
         tp_size=1,
         dp_size=2,
@@ -834,7 +808,7 @@ def test_cpu_dp_all_gatherv_ragged_shm_buffers_grow_on_demand():
 @pytest.mark.distributed
 @pytest.mark.skipif(not HAS_CPU_SHM, reason="CPU SHM communicator required")
 def test_cpu_dp_all_gatherv_uniform_sizes_matches_direct_shm_gather():
-    spawn_workers(
+    _spawn_workers(
         _uniform_sizes_shm_worker,
         world_size=2,
         tp_size=1,
@@ -845,7 +819,7 @@ def test_cpu_dp_all_gatherv_uniform_sizes_matches_direct_shm_gather():
 
 @pytest.mark.distributed
 def test_cpu_dp_all_gatherv_all_zero_rows():
-    spawn_workers(
+    _spawn_workers(
         _all_zero_gatherv_worker,
         world_size=2,
         tp_size=1,
@@ -856,7 +830,7 @@ def test_cpu_dp_all_gatherv_all_zero_rows():
 
 @pytest.mark.distributed
 def test_cpu_dp_reduce_scatterv_implicit_sizes_require_even_split():
-    spawn_workers(
+    _spawn_workers(
         _implicit_uneven_reduce_scatterv_worker,
         world_size=2,
         tp_size=1,
@@ -868,7 +842,7 @@ def test_cpu_dp_reduce_scatterv_implicit_sizes_require_even_split():
 @pytest.mark.distributed
 @pytest.mark.skipif(not HAS_CPU_SHM, reason="CPU SHM communicator required")
 def test_cpu_dp_shm_all_reduce_matches_gloo():
-    spawn_workers(
+    _spawn_workers(
         _dp_shm_all_reduce_worker,
         world_size=6,
         tp_size=1,

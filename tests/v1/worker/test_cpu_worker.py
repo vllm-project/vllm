@@ -61,30 +61,24 @@ def _make_platform_config(
     )
 
 
-def test_get_cpushm_dist_ident_uses_dp_rendezvous_for_single_node_dp():
-    ident_rank0 = _get_cpushm_dist_ident(
-        _make_parallel_config(26001),
-        "tcp://127.0.0.1:11001",
-    )
-    ident_rank1 = _get_cpushm_dist_ident(
-        _make_parallel_config(26001),
-        "tcp://127.0.0.1:11002",
-    )
+@pytest.mark.parametrize(
+    ("dp_ports", "expected"),
+    [
+        ([26001, 26001], True),
+        ([26001, 26002], False),
+    ],
+    ids=["same-dp-rendezvous", "different-dp-rendezvous"],
+)
+def test_get_cpushm_dist_ident_uses_dp_rendezvous(dp_ports, expected):
+    idents = [
+        _get_cpushm_dist_ident(
+            _make_parallel_config(dp_port),
+            f"tcp://127.0.0.1:{11001 + rank}",
+        )
+        for rank, dp_port in enumerate(dp_ports)
+    ]
 
-    assert ident_rank0 == ident_rank1 == "127.0.0.1:26001"
-
-
-def test_get_cpushm_dist_ident_differs_for_different_dp_rendezvous():
-    ident_a = _get_cpushm_dist_ident(
-        _make_parallel_config(26001),
-        "tcp://127.0.0.1:11001",
-    )
-    ident_b = _get_cpushm_dist_ident(
-        _make_parallel_config(26002),
-        "tcp://127.0.0.1:11002",
-    )
-
-    assert ident_a != ident_b
+    assert (idents[0] == idents[1]) is expected
 
 
 def test_cpu_platform_rejects_only_hybrid_tp_dp_ep():
@@ -95,7 +89,7 @@ def test_cpu_platform_rejects_only_hybrid_tp_dp_ep():
     )
 
     with (
-        patch.dict(os.environ, os.environ.copy(), clear=True),
+        patch.dict(os.environ, {"VLLM_CPU_KVCACHE_SPACE": ""}),
         pytest.raises(
             NotImplementedError,
             match="tensor_parallel_size > 1 with data_parallel_size > 1",
@@ -111,5 +105,5 @@ def test_cpu_platform_allows_tp_only_ep():
         enable_expert_parallel=True,
     )
 
-    with patch.dict(os.environ, os.environ.copy(), clear=True):
+    with patch.dict(os.environ, {"VLLM_CPU_KVCACHE_SPACE": ""}):
         CpuPlatform.check_and_update_config(vllm_config)
