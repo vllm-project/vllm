@@ -99,9 +99,12 @@ class ShortConv(MambaBase, CustomOp):
         )
 
         forward_context = get_forward_context()
-        attn_metadata: AttentionMetadata = forward_context.attn_metadata
-        if attn_metadata is not None:
-            attn_metadata = attn_metadata[self.prefix]
+        attn_metadata_raw = forward_context.attn_metadata
+        attn_metadata: AttentionMetadata | None = None
+        if attn_metadata_raw is not None:
+            assert isinstance(attn_metadata_raw, dict)
+            attn_metadata = attn_metadata_raw[self.prefix]
+            assert isinstance(attn_metadata, ShortConvAttentionMetadata)
 
         BCx, _ = self.in_proj(hidden_states)
         B, C, x = BCx.chunk(3, dim=-1)
@@ -144,6 +147,7 @@ class ShortConv(MambaBase, CustomOp):
         conv_output_list = []
 
         if has_prefill:
+            assert attn_metadata.state_indices_tensor_p is not None
             Bx_p = (B_p * x_p).transpose(0, 1)  # (dim, num_prefill_tokens)
             out_p = causal_conv1d_torch(
                 Bx_p,
@@ -158,6 +162,7 @@ class ShortConv(MambaBase, CustomOp):
             conv_output_list.append(C_p * out_p)
 
         if has_decode:
+            assert attn_metadata.state_indices_tensor_d is not None
             state_indices_d = attn_metadata.state_indices_tensor_d.flatten()
             Bx_d = (B_d * x_d).unsqueeze(-1)  # (num_decodes, dim, 1)
             # Advanced indexing returns a copy; update in-place then scatter back
