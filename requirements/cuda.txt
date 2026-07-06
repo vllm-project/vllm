@@ -28,4 +28,4 @@ quack-kernels>=0.3.3
 tokenspeed-mla==0.1.2; platform_system == "Linux"
 
 # Humming kernels for quantization gemm
-humming-kernels[cu13]==0.1.6
+humming-kernels[cu13]==0.1.10
