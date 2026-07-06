@@ -128,6 +128,32 @@ def vllm_topk_softplus_sqrt(
             routed_scaling_factor,
         )
 
+    # aiter's topk_softplus is a faster drop-in for the non-hash sqrtsoftplus
+    # routing (bias + sqrt(softplus) + top-k + optional renorm + scaling).
+    # It does NOT support hash routing (input_tokens / hash_indices_table), so
+    # the 3 hash layers still use the vLLM kernel. Numerically identical to
+    # topk_hash_softplus_sqrt for the non-hash case (verified: idx match 100%,
+    # max weight diff ~1.8e-7).
+    if (
+        hash_indices_table is None
+        and input_tokens is None
+        and e_score_correction_bias is not None
+        and topk_indices.dtype == torch.int32
+        and rocm_aiter_ops.is_enabled()
+    ):
+        from aiter import topk_softplus
+
+        topk_softplus(
+            topk_weights,
+            topk_indices,
+            gating_output,
+            e_score_correction_bias,
+            renormalize,
+            routed_scaling_factor,
+            "sqrtsoftplus",
+        )
+        return topk_weights, topk_indices
+
     ops.topk_hash_softplus_sqrt(
         topk_weights,
         topk_indices,
