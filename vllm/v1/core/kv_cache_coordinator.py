@@ -553,7 +553,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             g.kv_cache_spec.block_size % hash_block_size == 0
             for g in kv_cache_config.kv_cache_groups
         ), "block_size must be divisible by hash_block_size"
-        assert dcp_world_size == 1, "DCP not support hybrid attn now."
+        if dcp_world_size != 1:
+            group_block_sizes = [
+                g.kv_cache_spec.block_size for g in kv_cache_config.kv_cache_groups
+            ]
+            assert len(set(group_block_sizes)) == 1, (
+                "DCP only supports hybrid attention when all KV cache groups "
+                f"share the same block size, got {group_block_sizes}."
+            )
         assert pcp_world_size == 1, "PCP not support hybrid attn now."
         self.verify_and_split_kv_cache_groups()
 

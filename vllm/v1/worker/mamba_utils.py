@@ -8,6 +8,7 @@ from typing import Any
 import torch
 
 from vllm.config import CacheConfig
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     get_conv_copy_spec,
@@ -289,9 +290,15 @@ def preprocess_mamba_align_fused_kernel(
     req_indices = tl.load(idx_mapping_ptr + offsets, mask=mask, other=0)
 
     state_idx = tl.load(state_idx_ptr + req_indices, mask=mask, other=-1)
-    num_accepted = tl.load(num_accepted_tokens_ptr + req_indices, mask=mask, other=1)
-
-    src_off = tl.maximum(num_accepted - 1, 0)
+    # This experimental DCP+align path is exercised without speculative
+    # decoding. The pre-copy is only a block-boundary migration, so the source
+    # state is always copied from the start of the previous running block.
+    #
+    # Leaving num_accepted-derived offsets here is unsafe with DCP-effective
+    # block columns: a stale/non-neutral accepted count can become a large
+    # token_bias, and temporal state copy would index block_table[src_col +
+    # token_bias] far beyond the align-state columns.
+    src_off = tl.zeros([BLOCK_SIZE], dtype=tl.int32)
     tl.store(src_col_ptr + req_indices, state_idx, mask=mask)
     tl.store(src_off_ptr + req_indices, src_off, mask=mask)
 
@@ -521,6 +528,11 @@ class MambaSpecDecodeGPUContext:
     ) -> "MambaSpecDecodeGPUContext":
         """Create context with allocated buffers (metadata populated later)."""
         mamba_group_ids, mamba_spec = get_mamba_groups(kv_cache_config)
+        block_size = mamba_spec.block_size
+        try:
+            block_size *= get_dcp_group().world_size
+        except AssertionError:
+            pass
 
         # Count total layers across all mamba groups
         num_layers = sum(
@@ -554,7 +566,7 @@ class MambaSpecDecodeGPUContext:
             state_dim_row_stride=torch.zeros(
                 total_states, dtype=torch.int64, device=device
             ),
-            block_size=mamba_spec.block_size,
+            block_size=block_size,
             num_layers=num_layers,
             num_state_types=num_state_types,
             mamba_group_ids=mamba_group_ids,
@@ -972,6 +984,10 @@ def preprocess_mamba(
     # TODO(Chen): we need to optimize this function a lot
     assert cache_config.enable_prefix_caching
     block_size = mamba_spec.block_size
+    try:
+        block_size *= get_dcp_group().world_size
+    except AssertionError:
+        pass
     cleanup_mamba_state_idx(scheduler_output, mamba_state_idx)
 
     copy_bufs.offset = 0

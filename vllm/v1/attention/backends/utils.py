@@ -28,6 +28,7 @@ import vllm.envs as envs
 from vllm.distributed.kv_transfer.kv_connector.utils import (
     get_kv_connector_cache_layout,
 )
+from vllm.distributed.parallel_state import get_dcp_group, get_pcp_group
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.v1.attention.backend import (
@@ -948,10 +949,20 @@ def mamba_get_block_table_tensor(
         return block_table
     else:
         assert isinstance(kv_cache_spec, MambaSpec)
+        total_cp_world_size = 1
+        try:
+            total_cp_world_size *= get_dcp_group().world_size
+        except AssertionError:
+            pass
+        try:
+            total_cp_world_size *= get_pcp_group().world_size
+        except AssertionError:
+            pass
+        effective_block_size = kv_cache_spec.block_size * total_cp_world_size
         # NOTE: For 0-length requests in CUDA graph, use a start_index of 0
         # to handle the invalid block table.
         start_indices = torch.clamp(
-            (seq_lens - 1) // kv_cache_spec.block_size,
+            (seq_lens - 1) // effective_block_size,
             min=0,
         )
         # Use int32 for arithmetic to avoid dtype promotion overhead,

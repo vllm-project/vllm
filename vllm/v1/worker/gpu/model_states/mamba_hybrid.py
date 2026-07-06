@@ -9,6 +9,7 @@ import torch.nn as nn
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.distributed.parallel_state import get_dcp_group
 from vllm.model_executor.layers.mamba.mamba_utils import (
     get_conv_copy_spec,
     is_conv_state_dim_first,
@@ -183,6 +184,11 @@ class MambaHybridModelState(DefaultModelState):
             return
         mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
         ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
+        mamba_block_size = mamba_spec.block_size
+        try:
+            mamba_block_size *= get_dcp_group().world_size
+        except AssertionError:
+            pass
 
         # The state-advance + pre-copy kernels run every step; they fast-exit per
         # request when src_col < 0 or src_col == dst_col, so no copy happens on
@@ -202,7 +208,7 @@ class MambaHybridModelState(DefaultModelState):
             self._mamba_src_off_gpu,
             num_reqs,
             BLOCK_SIZE=block,
-            MAMBA_BLOCK_SIZE=mamba_spec.block_size,
+            MAMBA_BLOCK_SIZE=mamba_block_size,
         )
         ctx.run_fused_precopy(
             num_reqs,

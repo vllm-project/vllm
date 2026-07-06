@@ -631,13 +631,13 @@ def resolve_kv_cache_block_sizes(
         bs = cache_config.block_size * dcp * pcp
         return bs, bs
 
-    if dcp != 1 or pcp != 1:
-        raise ValueError(
-            "Hybrid KV cache groups with multiple block sizes do not "
-            "support context parallelism (dcp_world_size/pcp_world_size > 1)."
-        )
-
     group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
+    if (dcp != 1 or pcp != 1) and len(set(group_block_sizes)) != 1:
+        raise ValueError(
+            "Hybrid KV cache groups with different block sizes do not "
+            "support context parallelism (dcp_world_size/pcp_world_size > 1). "
+            f"Got group block sizes={group_block_sizes}."
+        )
     scheduler_block_size = math.lcm(*group_block_sizes)
 
     # Block hashes are only consumed by prefix caching and KV connectors
