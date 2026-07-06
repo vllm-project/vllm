@@ -2208,6 +2208,20 @@ def fp32_router_gemm(
     return output
 
 
+def bf16_skinny_gemm(
+    x: torch.Tensor,
+    weight: torch.Tensor,
+) -> torch.Tensor:
+    """Skinny bf16 GEMM (M<=32): x [M, K] @ weight [N, K]^T -> [M, N].
+
+    Single block-per-column kernel with fp32 accumulation; replaces cuBLAS
+    splitK for weight-bandwidth-bound decode shapes (e.g. MTP eh_proj).
+    """
+    output = torch.empty((x.shape[0], weight.shape[0]), dtype=x.dtype, device=x.device)
+    torch.ops._C.bf16_skinny_gemm(output, x, weight)
+    return output
+
+
 if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "fp32_router_gemm"):
 
     @register_fake("_C::fp32_router_gemm")
