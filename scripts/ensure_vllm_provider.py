@@ -87,12 +87,12 @@ def resolve_expected_distribution(
     providers: list[str],
 ) -> str:
     repo_distribution = pyproject_distribution_name()
-    if repo_distribution and repo_distribution in providers:
+    if repo_distribution:
         if requested_distribution and requested_distribution != repo_distribution:
             print(
                 f"Expected distribution {requested_distribution!r} was requested, "
                 f"but current checkout builds {repo_distribution!r}; using "
-                f"{repo_distribution!r}.",
+                f"{repo_distribution!r}. Providers: {providers}",
                 file=sys.stderr,
             )
         return repo_distribution

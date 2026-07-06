@@ -32,3 +32,9 @@ def test_current_pyproject_name_overrides_stale_requested_distribution():
         helper.resolve_expected_distribution("vllm-hust", ["vllm", "vllm-hust"])
         == "vllm"
     )
+
+
+def test_current_pyproject_name_is_required_even_when_missing_from_providers():
+    helper = load_provider_helper()
+
+    assert helper.resolve_expected_distribution("vllm-hust", ["vllm-hust"]) == "vllm"

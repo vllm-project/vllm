@@ -813,7 +813,7 @@ ensure_runner_npu_ready() {
   fi
   if printf '%s\n' "$preflight_output" | grep -Eq '"provider_check_ok": false|Conflicting distributions still provide top-level'; then
     echo "vLLM provider validation failed before benchmark startup." >&2
-    echo "Remove conflicting distributions so only vllm-hust provides top-level 'vllm'." >&2
+    echo "Remove conflicting distributions so only the checked-out package provides top-level 'vllm'." >&2
     return 1
   fi
 
