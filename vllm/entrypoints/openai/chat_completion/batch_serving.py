@@ -283,7 +283,7 @@ class OpenAIServingChatBatch(OpenAIServingChat):
                         top_logprobs=output.logprobs,
                         num_output_top_logprobs=request.top_logprobs,
                         tokenizer=tokenizer,
-                        return_as_token_id=request.return_token_ids,
+                        return_as_token_id=request.return_tokens_as_token_ids,
                     )
                 else:
                     logprobs = None

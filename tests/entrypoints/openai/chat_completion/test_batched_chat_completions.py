@@ -172,3 +172,79 @@ async def test_batched_chat_completions_with_json_schema(
         parsed = json.loads(choice["message"]["content"])
         assert "answer" in parsed
         assert parsed["answer"] in ("yes", "no")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_batched_chat_completions_logprobs_not_token_id_placeholders(
+    server: RemoteOpenAIServer, model_name: str
+) -> None:
+    # Regression test: requesting `return_token_ids` alongside logprobs must not
+    # corrupt the logprob `token` fields into "token_id:{id}" placeholders. That
+    # placeholder rendering is controlled by `return_tokens_as_token_ids`, which
+    # this request leaves unset.
+    conversations = [
+        [{"role": "user", "content": "Reply with exactly the word: alpha"}],
+    ]
+
+    async with httpx.AsyncClient() as http_client:
+        response = await http_client.post(
+            f"{server.url_for('v1/chat/completions/batch')}",
+            json={
+                "model": model_name,
+                "messages": conversations,
+                "logprobs": True,
+                "top_logprobs": 1,
+                "return_token_ids": True,
+            },
+            timeout=60,
+        )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+
+    content = data["choices"][0]["logprobs"]["content"]
+    assert content
+    for entry in content:
+        assert not entry["token"].startswith("token_id:")
+        for top in entry["top_logprobs"]:
+            assert not top["token"].startswith("token_id:")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_name",
+    [MODEL_NAME],
+)
+async def test_batched_chat_completions_return_tokens_as_token_ids(
+    server: RemoteOpenAIServer, model_name: str
+) -> None:
+    # Complementary check: when `return_tokens_as_token_ids` is explicitly set,
+    # the logprob tokens *should* be rendered as "token_id:{id}" placeholders,
+    # proving the new field is actually wired through.
+    conversations = [
+        [{"role": "user", "content": "Reply with exactly the word: alpha"}],
+    ]
+
+    async with httpx.AsyncClient() as http_client:
+        response = await http_client.post(
+            f"{server.url_for('v1/chat/completions/batch')}",
+            json={
+                "model": model_name,
+                "messages": conversations,
+                "logprobs": True,
+                "top_logprobs": 1,
+                "return_tokens_as_token_ids": True,
+            },
+            timeout=60,
+        )
+
+    assert response.status_code == 200, response.text
+    data = response.json()
+
+    content = data["choices"][0]["logprobs"]["content"]
+    assert content
+    assert all(entry["token"].startswith("token_id:") for entry in content)

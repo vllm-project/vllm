@@ -776,33 +776,7 @@ class DiffusionGemmaModelState(ModelState):
         encoder_cache: Any,
         device: torch.device,
     ) -> None:
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.model = model
-        self.device = device
-
-        self.supports_mm_inputs = encoder_cache is not None
-        self.max_num_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.max_model_len = self.model_config.max_model_len
-        self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
-        self.dtype = self.model_config.dtype
-
-        if self.supports_mm_inputs:
-            from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-            from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
-
-            assert isinstance(encoder_cache, EncoderCache)
-            self.encoder_cache = encoder_cache
-            self.encoder_runner = EncoderRunner(
-                model=self.model,
-                max_num_tokens=self.max_num_tokens,
-                hidden_size=self.inputs_embeds_size,
-                encoder_cache=encoder_cache,
-                dtype=self.dtype,
-                device=self.device,
-            )
+        super().__init__(vllm_config, model, encoder_cache, device)
 
         # Per-step MM data produced by get_mm_embeddings and consumed by
         # prepare_inputs.  Stored as raw (mm_embeds, is_mm_embed) so that
@@ -904,7 +878,7 @@ class DiffusionGemmaModelState(ModelState):
         scheduled_encoder_inputs: dict[str, list[int]],
         input_batch: InputBatch,
         req_states: RequestState,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | None:
         if not self.supports_mm_inputs:
             return None
 
@@ -999,7 +973,9 @@ class DiffusionGemmaModelState(ModelState):
         # so the captured graph and runtime point to identical addresses.
         return {"inputs_embeds": self._inputs_embeds_buf[:num_tokens]}
 
-    def postprocess_state(self, idx_mapping, num_sampled) -> None:
+    def postprocess_state(
+        self, idx_mapping, num_sampled, num_computed_tokens=None
+    ) -> None:
         return None
 
     def prepare_attn(
