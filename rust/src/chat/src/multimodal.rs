@@ -16,13 +16,14 @@ use std::sync::{Arc, LazyLock};
 
 use itertools::izip;
 use llm_multimodal::{
-    AsyncMultiModalTracker, FieldLayout, ImagePreProcessor, ImageProcessorRegistry, MediaConnector,
-    MediaConnectorConfig, MediaContentPart, Modality, ModelMetadata, ModelProcessorSpec,
-    ModelRegistry, PreProcessorConfig, PreprocessedImages, PromptReplacement, TokenResolver,
-    TrackedMedia,
+    AsyncMultiModalTracker, FieldLayout, MediaConnector, MediaConnectorConfig, MediaContentPart,
+    Modality, ModelMetadata, ModelProcessorSpec, ModelRegistry, PreProcessorConfig,
+    PreprocessedEncoderInputs as PreprocessedImages, PromptReplacement, Tokenizer as TokenResolver,
+    TrackedMedia, VisionPreProcessor as ImagePreProcessor,
+    VisionProcessorRegistry as ImageProcessorRegistry,
 };
 use tracing::warn;
-use vllm_engine_core_client::protocol::ModelDtype;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::{
     MmBatchedField, MmFeatureSpec, MmFeatures, MmField, MmFieldElem, MmFlatField, MmKwargsItem,
     MmSharedField, MmSlice, PlaceholderRange, SliceSpec,
@@ -555,6 +556,10 @@ impl TokenResolver for TokenizerResolver {
     fn id_to_token(&self, id: u32) -> Option<String> {
         self.0.id_to_token(id)
     }
+
+    fn encode_text(&self, text: &str) -> Option<Vec<u32>> {
+        self.0.encode(text, false).ok()
+    }
 }
 
 #[cfg(test)]
@@ -563,7 +568,7 @@ mod tests {
 
     use llm_multimodal::TokenId;
     use vllm_engine_core_client::protocol::tensor::WireArrayData;
-    use vllm_text::tokenizer::{IncrementalDecoder, Tokenizer, TokenizerError};
+    use vllm_tokenizer::test_utils::TestTokenizer;
 
     use super::*;
 
@@ -574,60 +579,14 @@ mod tests {
     const LLAMA4_TILE_X_SEPARATOR_ID: u32 = 200093;
     const LLAMA4_TILE_Y_SEPARATOR_ID: u32 = 200094;
 
-    struct TestTokenizer;
-
-    impl Tokenizer for TestTokenizer {
-        fn encode(
-            &self,
-            text: &str,
-            _add_special_tokens: bool,
-        ) -> std::result::Result<Vec<u32>, TokenizerError> {
-            Ok(match text {
-                "<|image|>" => vec![LLAMA4_IMAGE_ID],
-                text => text.bytes().map(u32::from).collect(),
-            })
-        }
-
-        fn decode(
-            &self,
-            _token_ids: &[u32],
-            _skip_special_tokens: bool,
-        ) -> std::result::Result<String, TokenizerError> {
-            Ok(String::new())
-        }
-
-        fn token_to_id(&self, token: &str) -> Option<u32> {
-            match token {
-                "<|image_start|>" => Some(LLAMA4_IMAGE_START_ID),
-                "<|image_end|>" => Some(LLAMA4_IMAGE_END_ID),
-                "<|image|>" => Some(LLAMA4_IMAGE_ID),
-                "<|patch|>" => Some(LLAMA4_PATCH_ID),
-                "<|tile_x_separator|>" => Some(LLAMA4_TILE_X_SEPARATOR_ID),
-                "<|tile_y_separator|>" => Some(LLAMA4_TILE_Y_SEPARATOR_ID),
-                _ => None,
-            }
-        }
-
-        fn id_to_token(&self, id: u32) -> Option<String> {
-            match id {
-                LLAMA4_IMAGE_START_ID => Some("<|image_start|>".to_string()),
-                LLAMA4_IMAGE_END_ID => Some("<|image_end|>".to_string()),
-                LLAMA4_IMAGE_ID => Some("<|image|>".to_string()),
-                LLAMA4_PATCH_ID => Some("<|patch|>".to_string()),
-                LLAMA4_TILE_X_SEPARATOR_ID => Some("<|tile_x_separator|>".to_string()),
-                LLAMA4_TILE_Y_SEPARATOR_ID => Some("<|tile_y_separator|>".to_string()),
-                _ => None,
-            }
-        }
-
-        fn create_decode_stream(
-            &self,
-            _prompt_token_ids: &[u32],
-            _skip_special_tokens: bool,
-            _min_bytes_to_buffer: usize,
-        ) -> Box<dyn IncrementalDecoder + '_> {
-            unreachable!("not used")
-        }
+    fn llama4_tokenizer() -> TestTokenizer {
+        TestTokenizer::new()
+            .with_regular_token("<|image_start|>", LLAMA4_IMAGE_START_ID)
+            .with_regular_token("<|image_end|>", LLAMA4_IMAGE_END_ID)
+            .with_regular_token("<|image|>", LLAMA4_IMAGE_ID)
+            .with_regular_token("<|patch|>", LLAMA4_PATCH_ID)
+            .with_regular_token("<|tile_x_separator|>", LLAMA4_TILE_X_SEPARATOR_ID)
+            .with_regular_token("<|tile_y_separator|>", LLAMA4_TILE_Y_SEPARATOR_ID)
     }
 
     fn test_info(model_type: &str, config: serde_json::Value) -> MultimodalModelInfo {
@@ -635,7 +594,7 @@ mod tests {
             model_id: format!("{model_type}-test"),
             model_type: Some(model_type.to_string()),
             config,
-            tokenizer: TokenizerResolver(Arc::new(TestTokenizer)),
+            tokenizer: TokenizerResolver(Arc::new(llama4_tokenizer())),
         };
         let spec = context
             .resolve_model_spec()

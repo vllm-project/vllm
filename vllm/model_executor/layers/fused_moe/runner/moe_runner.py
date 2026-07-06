@@ -292,6 +292,11 @@ class MoERunner(MoERunnerInterface):
         # For smuggling this layer into the fused moe custom op
         register_layer_for_moe_forward_op(get_current_vllm_config(), self)
 
+    def load_weights(
+        self, weights: Iterable[tuple[str, torch.Tensor]]
+    ) -> Iterable[str]:
+        return self.routed_experts.load_weights(weights)
+
     def _select_forward(self) -> Callable:
         if current_platform.is_tpu() or current_platform.is_cpu():
             # TODO: Once the OOM issue for the TPU backend is resolved, we
@@ -720,8 +725,8 @@ class MoERunner(MoERunnerInterface):
     @property
     def do_naive_dispatch_combine(self) -> bool:
         return (
-            self.moe_config.dp_size > 1 and not self._quant_method.supports_internal_mk
-        )
+            self.moe_config.dp_size > 1 or self.moe_config.is_sequence_parallel
+        ) and not self._quant_method.supports_internal_mk
 
     def _maybe_dispatch(
         self,
