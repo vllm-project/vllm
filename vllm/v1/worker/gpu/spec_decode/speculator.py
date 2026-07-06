@@ -70,8 +70,8 @@ class BaseSpeculator(ABC):
     ) -> torch.Tensor:
         pass
 
-    def compute_capacities(self, num_reqs: int) -> torch.Tensor | None:
-        del num_reqs
+    def compute_capacities(self, input_batch: InputBatch) -> torch.Tensor | None:
+        del input_batch
         return None
 
 

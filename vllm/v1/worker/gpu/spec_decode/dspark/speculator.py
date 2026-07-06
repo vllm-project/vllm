@@ -29,6 +29,7 @@ import torch
 
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
+from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.sample.gumbel import gumbel_sample
 from vllm.v1.worker.gpu.spec_decode.dflash.speculator import DFlashSpeculator
 from vllm.v1.worker.gpu.spec_decode.dspark.capacity import (
@@ -216,10 +217,10 @@ class DSparkSpeculator(DFlashSpeculator):
         else:
             self.draft_token_capacity[:num_reqs].fill_(self.num_speculative_steps)
 
-    def compute_capacities(self, num_reqs: int) -> torch.Tensor | None:
+    def compute_capacities(self, input_batch: InputBatch) -> torch.Tensor | None:
         if not self.use_draft_token_capacity:
             return None
-        return self.draft_token_capacity[:num_reqs]
+        return self.draft_token_capacity[: input_batch.num_reqs]
 
     def _generate_draft(
         self,

@@ -1529,7 +1529,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.req_states.draft_tokens[input_batch.idx_mapping] = draft_tokens
             if self.verification_capacity_manager is not None:
                 self.verification_capacity_manager.update_capacities(
-                    self.speculator.compute_capacities(input_batch.num_reqs)
+                    self.speculator.compute_capacities(input_batch)
                 )
 
         if self.num_speculative_steps > 0:
