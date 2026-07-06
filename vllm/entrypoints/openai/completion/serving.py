@@ -392,7 +392,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     else:
                         logprobs = None
 
-                    previous_text_lens[i] += len(output.text)
+                    previous_text_lens[i] += len(delta_text)
                     previous_num_tokens[i] += len(output.token_ids)
                     finish_reason = output.finish_reason
                     stop_reason = output.stop_reason
