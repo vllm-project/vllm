@@ -465,8 +465,15 @@ class Attention(nn.Module, AttentionLayerBase):
 
         # for attn backends supporting query quantization
         self.query_quant = None
+        # ATOM keeps the query in bf16 (fp8 KV cache, q_descale=None). Skip the
+        # per-layer fp8 query quant (the aiter static scaled_quant kernel) when
+        # VLLM_DISABLE_QUERY_QUANT=1 to match ATOM and drop ~2.3us/marker.
+        import os as _os
+
+        _disable_qq = _os.environ.get("VLLM_DISABLE_QUERY_QUANT", "0") == "1"
         if (
-            self.impl.supports_quant_query_input
+            not _disable_qq
+            and self.impl.supports_quant_query_input
             and (
                 self.kv_cache_dtype.startswith("fp8") or self.kv_cache_dtype == "nvfp4"
             )

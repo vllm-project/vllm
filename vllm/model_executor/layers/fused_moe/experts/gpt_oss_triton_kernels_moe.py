@@ -6,7 +6,6 @@ from dataclasses import replace
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
-from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.activation import MoEActivation
@@ -57,7 +56,7 @@ def _triton_kernel_moe_supports_current_device() -> bool:
         # on_gfx9() already excludes gfx906/gfx908.
         # gfx1x family: gfx11xx (RDNA3/3.5) and gfx12xx (RDNA4);
         # on_gfx1x() excludes gfx10xx (RDNA1/RDNA2).
-        return on_gfx9() or on_gfx1x() or on_gfx1250() 
+        return on_gfx9() or on_gfx1x() or on_gfx1250()
     return False
 
 
@@ -1132,16 +1131,12 @@ def _aiter_moe_two_gemm(
     arch = get_arch()
     quant_dtype = torch.float8_e4m3fnuz if arch == "gfx942" else torch.float8_e4m3fn
 
-    # gfx1250's in-kernel gather miscomputes (validated on the FFM sim), so gather
-    # rows into expert-sorted order in torch and pass gather_indx=None instead. Per
-    # aiter's moe_gemm_torch, sorted row i reads source token gather_idx[i] // topk.
-    if arch == "gfx1250":
-        gather_src = gather_idx.to(torch.long) // topk
-        gemm1_input = hidden_states[gather_src]
-        gemm1_gather_indx = None
-    else:
-        gemm1_input = hidden_states
-        gemm1_gather_indx = gather_idx
+    # PATCH_GATHER: in-kernel gather on gfx1250 (ATOM behavior). ATOM (same aiter
+    # commit) passes gather_indx straight to moe_gemm_a8w4 on gfx1250; do the same
+    # to drop the eager vectorized_gather + floordiv. (If this miscomputes, the
+    # gfx1250 in-kernel gather needs GFX1250_SCALE-swizzled scales -> add swizzle.)
+    gemm1_input = hidden_states
+    gemm1_gather_indx = gather_idx
 
     gammas = routing_data.gate_scal if routing_data else None
     g1_gammas = gammas if apply_router_weight_on_input else None
@@ -1563,7 +1558,7 @@ class OAITritonExperts(BaseOAITritonExperts):
             self.quant_config: FusedMoEQuantConfig = FUSED_MOE_UNQUANTIZED_CONFIG
 
         if expert_map is not None:
-                topk_ids = expert_map[topk_ids]
+            topk_ids = expert_map[topk_ids]
 
         # ROCm aiter-native MXFP4 fast path (bypasses the gfx1250-incompatible
         # matmul_ogs unswizzle). Returns None -> fall through to matmul_ogs.

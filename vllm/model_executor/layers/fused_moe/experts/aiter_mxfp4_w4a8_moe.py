@@ -63,16 +63,10 @@ def aiter_triton_kernel_w4a8_moe_forward(
         gating_output, topk, sm_first=not renormalize
     )
 
-    # gfx1250: aiter's in-kernel gather is numerically broken (validated on the
-    # FFM sim: do_gather=True -> maxrel ~2.4), so gather rows into expert-sorted
-    # order in torch and pass gather_indx=None. Per aiter's moe_gemm_torch,
-    # sorted row i reads source token gather_idx[i] // n_expts_act, so this
-    # reproduces the in-kernel gather exactly (manual gather -> maxrel ~5e-3).
-    # gfx950 keeps the (working) in-kernel gather.
-    if on_gfx1250():
-        gather_src = gather_idx.to(torch.long) // topk
-        hidden_states = hidden_states[gather_src]
-        gather_idx = None
+    # PATCH_GFX1250_INKERNEL_GATHER: ATOM passes gather_idx in-kernel on gfx1250
+    # with GFX1250_SCALE-swizzled weight scales (see patch_swizzle.py). The old
+    # "in-kernel gather broken" was with UNSWIZZLED scales; with the correct
+    # GFX1250_SCALE swizzle the in-kernel gather is correct, so keep gather_idx.
 
     return triton_kernel_fused_mxfp4_w4a8_experts(
         None,
@@ -141,10 +135,9 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     )
     from vllm.platforms.rocm import on_gfx1250
 
-    from vllm.platforms.rocm import on_gfx1250
     _swizzle_mx_scale = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
     # TODO (JPVILLAM): merge conflict resolve later if _swizzle_mx_scale is enough
-    mx_scale_swizzle = None if on_gfx1250() else "CDNA4_SCALE"
+    mx_scale_swizzle = "GFX1250_SCALE" if on_gfx1250() else "CDNA4_SCALE"
 
     assert quant_config.w1_precision is not None, (
         "w1_precision in quant config can't be None"
