@@ -428,7 +428,10 @@ def rms_norm_dynamic_per_token_quant(
         (input.numel() // input.shape[-1], 1), device=input.device, dtype=torch.float32
     )
 
-    torch.ops._C.rms_norm_dynamic_per_token_quant(
+    from vllm.kernels.helion.routing import route_quant
+
+    route_quant(
+        "rms_norm_dynamic_per_token_quant",
         output, input, weight, scales, epsilon, scale_ub, residual
     )
     return output, scales
