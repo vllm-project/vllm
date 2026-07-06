@@ -1994,7 +1994,7 @@ class EngineArgs:
         elif self.data_parallel_size_local is not None:
             data_parallel_size_local = self.data_parallel_size_local
 
-            if self.data_parallel_start_rank and not headless:
+            if self.data_parallel_start_rank is not None and not headless:
                 # Infer hybrid LB mode.
                 self.data_parallel_hybrid_lb = True
 
@@ -2013,7 +2013,9 @@ class EngineArgs:
                 self.data_parallel_hybrid_lb = False
 
             self.data_parallel_rank = (
-                self.data_parallel_start_rank or inferred_data_parallel_rank
+                self.data_parallel_start_rank
+                if self.data_parallel_start_rank is not None
+                else inferred_data_parallel_rank
             )
             if self.nnodes > 1:
                 logger.info(
