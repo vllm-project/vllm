@@ -226,6 +226,20 @@ clean no-MTP baseline is the `52-54 tok/s` warmed sequential result. The next
 step is a controlled MTP A/B: matched no-MTP vs MTP runs over 10-20 warmed
 sequential requests at 256 and 512 generated tokens, then concurrency 4 and 8.
 
+If the first controlled MTP result is slower than no-MTP, that should be treated
+as optimization debt rather than a reason to drop MTP. The draft path still
+represents one of the main remaining acceleration levers. Work items include:
+
+- measure acceptance by prompt class and generated-token length;
+- sweep `num_speculative_tokens` instead of assuming `1` is best;
+- reduce or shard the replicated MTP `fc` memory cost for TP3;
+- check whether MTP improves aggregate throughput at concurrency even when a
+  single request is slower;
+- tune CUDA graph and FlashInfer warmup coverage for MTP shapes.
+
+The target is to turn MTP from "works on TP3" into an additional speedup layer
+on top of the already-working TP3/DCP3 long-context baseline.
+
 ## DFlash Findings
 
 DFlash is attractive because it drafts a whole token block in one pass instead
