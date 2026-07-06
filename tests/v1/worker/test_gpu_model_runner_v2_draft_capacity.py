@@ -23,7 +23,6 @@ from vllm.v1.worker.gpu.spec_decode.decompaction import (
 from vllm.v1.worker.gpu.spec_decode.dspark.capacity import (
     CapacityBasedVerificationManager,
     compute_draft_token_capacity_from_confidence,
-    get_effective_scheduled_token_counts,
 )
 from vllm.v1.worker.gpu.states import RequestState
 
@@ -132,42 +131,22 @@ def test_capacity_based_verification_manager_updates_cpu_capacities():
     input_batch: Any = SimpleNamespace(
         req_ids=["req0", "req1"],
         idx_mapping_np=np.array([2, 0], dtype=np.int32),
+        num_draft_tokens=0,
+        num_draft_tokens_per_req=None,
     )
     draft_token_capacity = torch.tensor([1, 2], dtype=torch.int32, device=device)
 
-    handler.set_draft_token_capacities(
-        input_batch.req_ids,
-        input_batch.idx_mapping_np,
-        draft_token_capacity,
-    )
+    handler.restore_batch(input_batch, draft_token_capacity)
     assert handler.copy_event_pending
 
     torch.accelerator.synchronize()
-    assert handler.try_update_draft_token_capacities()
+    handler.trim_batch(input_batch)
     assert handler.req_states.draft_token_capacity_np.tolist() == [2, 3, 1, 3]
 
     handler.remove_request("req0")
     handler.req_states.draft_token_capacity_np.fill(3)
-    assert handler.try_update_draft_token_capacities()
+    handler.trim_batch(input_batch)
     assert handler.req_states.draft_token_capacity_np.tolist() == [2, 3, 3, 3]
-
-
-def test_effective_scheduled_token_counts_apply_capacity_before_dispatch():
-    scheduler_output: Any = SimpleNamespace(
-        num_scheduled_tokens={"req0": 4, "req1": 4, "req2": 3},
-        total_num_scheduled_tokens=11,
-        scheduled_spec_decode_tokens={
-            "req0": [11, 12, 13],
-            "req1": [21, 22, 23],
-            "req2": [31, 32],
-        },
-    )
-
-    assert get_effective_scheduled_token_counts(
-        scheduler_output,
-        {"req0": 0, "req1": 1, "req2": 2},
-        np.array([1, 3, 7], dtype=np.int32),
-    ) == (9, 4)
 
 
 def test_sampler_decompaction_metadata_maps_pruned_tails_to_compact_bonus():

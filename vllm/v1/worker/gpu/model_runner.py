@@ -1110,15 +1110,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         assert sampler_output.num_sampled is not None
         assert sampler_output.num_rejected is not None
         num_rejected_for_next_step = sampler_output.num_rejected
-        verification_capacity_manager = self.verification_capacity_manager
-        if verification_capacity_manager is not None:
-            num_rejected_for_next_step = (
-                verification_capacity_manager.get_num_rejected_for_next_step(
-                    sampler_output.num_sampled,
-                    sampler_output.num_rejected,
-                    input_batch,
-                )
-            )
+        if sampler_output.num_rejected_for_next_step is not None:
+            num_rejected_for_next_step = sampler_output.num_rejected_for_next_step
 
         return sampler_output, sampler_output.num_sampled, num_rejected_for_next_step
 
@@ -1178,16 +1171,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         # Get batch descriptor and sync across DP ranks.
         num_reqs = len(scheduler_output.num_scheduled_tokens)
         verification_capacity_manager = self.verification_capacity_manager
-        if not dummy_run and verification_capacity_manager is not None:
-            verification_capacity_manager.try_update_draft_token_capacities()
-            num_toks, max_query_len = (
-                verification_capacity_manager.get_effective_scheduled_token_counts(
-                    scheduler_output,
-                )
-            )
-        else:
-            num_toks = scheduler_output.total_num_scheduled_tokens
-            max_query_len = max(scheduler_output.num_scheduled_tokens.values())
+        num_toks = scheduler_output.total_num_scheduled_tokens
+        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
         uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
         max_req_tokens = None
         if (
@@ -1559,7 +1544,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # not have a speculator (i.e. self.speculator is None)
             verification_capacity_manager = self.verification_capacity_manager
             if verification_capacity_manager is not None:
-                verification_capacity_manager.update_draft_token_capacities(
+                verification_capacity_manager.restore_batch(
                     input_batch,
                     draft_token_capacity,
                 )

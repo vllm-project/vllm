@@ -178,6 +178,15 @@ class RejectionSampler:
             compact_input_batch.idx_mapping,
             self.sampler.req_states.prefill_len.gpu,
         )
+        num_rejected_for_next_step = None
+        if decompaction is not None:
+            _, num_rejected_for_next_step = get_num_sampled_and_rejected(
+                num_sampled,
+                compact_input_batch.seq_lens,
+                compact_input_batch.cu_num_logits,
+                compact_input_batch.idx_mapping,
+                self.sampler.req_states.prefill_len.gpu,
+            )
 
         return SamplerOutput(
             sampled_token_ids=sampled,
@@ -185,4 +194,5 @@ class RejectionSampler:
             num_nans=num_nans,
             num_sampled=num_sampled,
             num_rejected=num_rejected,
+            num_rejected_for_next_step=num_rejected_for_next_step,
         )

@@ -14,3 +14,4 @@ class SamplerOutput:
     num_nans: torch.Tensor | None
     num_sampled: torch.Tensor | None
     num_rejected: torch.Tensor | None = None
+    num_rejected_for_next_step: torch.Tensor | None = None
