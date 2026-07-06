@@ -15,6 +15,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     AnyResponseFormat,
     LegacyStructuralTagResponseFormat,
     OpenAIBaseModel,
+    PromptProgress,
     StreamOptions,
     StructuralTagResponseFormat,
     UsageInfo,
@@ -64,6 +65,7 @@ class CompletionRequest(OpenAIBaseModel):
     stop: str | list[str] | None = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
+    return_progress: bool | None = False
     suffix: str | None = None
     temperature: float | None = None
     top_p: float | None = None
@@ -372,6 +374,7 @@ class CompletionRequest(OpenAIBaseModel):
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
             thinking_token_budget=self.thinking_token_budget,
+            return_progress=self.return_progress or False,
         )
 
     @model_validator(mode="before")
@@ -586,6 +589,7 @@ class CompletionStreamResponse(OpenAIBaseModel):
     model: str
     choices: list[CompletionResponseStreamChoice]
     usage: UsageInfo | None = Field(default=None)
+    prompt_progress: PromptProgress | None = None
     # Set only on the final chunk of a stream to mirror non-streaming responses
     # without the per-chunk serialization overhead.
     system_fingerprint: str | None = None

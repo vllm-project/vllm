@@ -41,6 +41,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     FunctionCall,
+    PromptProgress,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     ToolCall,
@@ -467,6 +468,37 @@ class OpenAIServingChat(GenerateBaseServing):
                     num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
                         num_prompt_tokens += len(res.encoder_prompt_token_ids)
+
+                report_progress = (
+                    request.return_progress
+                    and res.num_computed_tokens is not None
+                    and not res.outputs[0].token_ids
+                )
+                if report_progress:
+                    start_time = (
+                        res.metrics.arrival_time
+                        if res.metrics is not None
+                        else created_time
+                    )
+                    time_ms = int((time.time() - start_time) * 1000)
+                    cached_tokens = res.num_cached_tokens or 0
+                    progress_chunk = ChatCompletionStreamResponse(
+                        id=request_id,
+                        object=chunk_object_type,
+                        created=created_time,
+                        choices=[],
+                        model=model_name,
+                        prompt_progress=PromptProgress(
+                            total=num_prompt_tokens,
+                            cache=cached_tokens
+                            if self.enable_prompt_tokens_details
+                            else 0,
+                            processed=res.num_computed_tokens,
+                            time_ms=time_ms,
+                        ),
+                    )
+                    data = progress_chunk.model_dump_json(exclude_unset=True)
+                    yield f"data: {data}\n\n"
 
                 # We need to do it here, because if there are exceptions in
                 # the result_generator, it needs to be sent as the FIRST

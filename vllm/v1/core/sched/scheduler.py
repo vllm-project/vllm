@@ -1730,11 +1730,19 @@ class Scheduler(SchedulerInterface):
 
             # Get prompt logprobs for this request.
             prompt_logprobs_tensors = prompt_logprobs_dict.get(req_id)
+            # Requests that opted into prefill-progress reporting get an output
+            # on every prefill chunk; ``num_computed_tokens`` is only carried
+            # for them so other requests pay no extra serialization cost.
+            wants_progress = (
+                request.sampling_params is not None
+                and request.sampling_params.return_progress
+            )
             if (
                 new_token_ids
                 or pooler_output is not None
                 or kv_transfer_params
                 or stopped
+                or (request.is_prefill_chunk and wants_progress)
             ):
                 # Add EngineCoreOutput for this Request.
                 outputs[request.client_index].append(
@@ -1752,10 +1760,15 @@ class Scheduler(SchedulerInterface):
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
+                        num_computed_tokens=(
+                            request.num_computed_tokens if wants_progress else None
+                        ),
                     )
                 )
             else:
-                # Invariant: EngineCore returns no partial prefill outputs.
+                # Invariant: EngineCore returns no partial prefill outputs,
+                # except for requests that opted into progress reporting
+                # (handled by the is_prefill_chunk branch above).
                 assert not prompt_logprobs_tensors
 
         # Remove the stopped requests from the running and waiting queues.

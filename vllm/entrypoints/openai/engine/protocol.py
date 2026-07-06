@@ -57,6 +57,24 @@ class OpenAIBaseModel(BaseModel):
         return result
 
 
+class PromptProgress(OpenAIBaseModel):
+    """Prefill progress reported on a streaming response.
+
+    Only emitted while a request is still prefilling and only when the request
+    set ``return_progress=True``.
+    """
+
+    total: int
+    """Total number of prompt tokens to prefill."""
+    cache: int
+    """Prompt tokens served from the prefix cache. Always ``0`` unless the
+    server was started with ``--enable-prompt-tokens-details``."""
+    processed: int
+    """Prompt tokens prefilled so far."""
+    time_ms: int
+    """Milliseconds elapsed since the request arrived in the engine."""
+
+
 class ErrorInfo(OpenAIBaseModel):
     message: str
     type: str

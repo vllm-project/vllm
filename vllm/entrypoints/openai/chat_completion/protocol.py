@@ -26,6 +26,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     FunctionDefinition,
     LegacyStructuralTagResponseFormat,
     OpenAIBaseModel,
+    PromptProgress,
     StreamOptions,
     StructuralTagResponseFormat,
     ToolCall,
@@ -157,6 +158,7 @@ class ChatCompletionStreamResponse(OpenAIBaseModel):
     system_fingerprint: str | None = None
     # not part of the OpenAI spec but for tracing the tokens
     prompt_token_ids: list[int] | None = None
+    prompt_progress: PromptProgress | None = None
     # Rendered prompt text from chat templating (only set when
     # ``return_prompt_text=True`` on the request); only sent on the first chunk.
     prompt_text: str | None = None
@@ -212,6 +214,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
     stop: str | list[str] | None = []
     stream: bool | None = False
     stream_options: StreamOptions | None = None
+    return_progress: bool | None = False
     temperature: float | None = None
     top_p: float | None = None
     tools: list[ChatCompletionToolsParam] | None = None
@@ -693,6 +696,7 @@ class ChatCompletionRequest(OpenAIBaseModel):
             extra_args=extra_args or None,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             repetition_detection=self.repetition_detection,
+            return_progress=self.return_progress or False,
         )
 
     @model_validator(mode="before")
