@@ -45,6 +45,7 @@ impl Deref for EngineCoreStreamOutput {
 /// `finish_reason` is non-`None`.
 pub struct EngineCoreOutputStream {
     request_id: String,
+    engine_index: u32,
     abort_tx: mpsc::UnboundedSender<AbortRequest>,
     state: State,
     rx: OutputReceiver,
@@ -53,11 +54,13 @@ pub struct EngineCoreOutputStream {
 impl EngineCoreOutputStream {
     pub(crate) fn new(
         request_id: String,
+        engine_index: u32,
         abort_tx: mpsc::UnboundedSender<AbortRequest>,
         rx: OutputReceiver,
     ) -> Self {
         Self {
             request_id,
+            engine_index,
             abort_tx,
             state: State::Running,
             rx,
@@ -67,6 +70,11 @@ impl EngineCoreOutputStream {
     /// Return the engine-core `request_id` bound to this stream.
     pub fn request_id(&self) -> &str {
         &self.request_id
+    }
+
+    /// Return the index of the engine that owns this request.
+    pub fn engine_index(&self) -> u32 {
+        self.engine_index
     }
 }
 
