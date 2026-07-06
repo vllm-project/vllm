@@ -37,21 +37,10 @@ sw_attn_configs=(
   # Gemma4: SW + cross-layer KV sharing
   "GPU_MEMORY_UTILIZATION=0.8 MODEL_NAMES=google/gemma-4-E2B-it VLLM_SERVE_EXTRA_ARGS=--max-model-len,8192"
 )
-# Pipeline-parallel prefill in push mode (NixlPushConnector): each PP stage
-# writes its layer slice into the matching sub-range of the decoder's regions.
-# PP=2 prefill -> TP=2 decode covers the non-MLA and MLA contiguous-slice paths.
-push_pp_configs=(
-  "KV_CONNECTOR=NixlPushConnector GPU_MEMORY_UTILIZATION=0.6 PREFILLER_PP_SIZE=2 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2" # non-MLA, Qwen3-0.6B
-  "KV_CONNECTOR=NixlPushConnector GPU_MEMORY_UTILIZATION=0.8 PREFILLER_PP_SIZE=2 PREFILLER_TP_SIZE=1 DECODER_TP_SIZE=2 MODEL_NAMES=deepseek-ai/deepseek-vl2-tiny" # MLA
-)
-
 # Select config array based on DP_EP env var
 if [[ -n "${DP_EP:-}" ]]; then
   configs=("${dp_ep_configs[@]}")
   echo "DP_EP is set, using dp_ep_configs"
-elif [[ -n "${PUSH_PP:-}" ]]; then
-  configs=("${push_pp_configs[@]}")
-  echo "PUSH_PP is set, using push_pp_configs."
 elif [[ -n "${HYBRID_SSM:-}" ]]; then
   configs=("${hybrid_ssm_configs[@]}")
   echo "HYBRID_SSM is set, using hybrid_ssm_configs."
