@@ -623,17 +623,30 @@ struct FP32Vec16 : public Vec<FP32Vec16> {
             data.reg, data.reg)) {};
   explicit FP32Vec16(const FP32Vec16& data) : reg(data.reg) {};
   explicit FP32Vec16(int64_t value, const FP32Vec16& lut) {
-    const uint64_t q_values = static_cast<uint64_t>(value);
-    auto packed = RVVI(__riscv_vmv_v_x_u64, LMUL_1024)(q_values, VEC_ELEM_NUM);
-    auto lane_ids = RVVI(__riscv_vid_v_u64, LMUL_1024)(VEC_ELEM_NUM);
+    // Split into two 32-bit halves to avoid u64 @ LMUL_1024 (m8 on
+    // VLEN=128 / m4 on VLEN=256), which causes heavy register spilling.
+    constexpr int HALF = VEC_ELEM_NUM / 2;
+    const auto q = static_cast<uint64_t>(value);
+    const uint32_t lo = static_cast<uint32_t>(q);
+    const uint32_t hi = static_cast<uint32_t>(q >> 32);
+
+    auto lane_ids = RVVI(__riscv_vid_v_u32, LMUL_256)(HALF);
     auto shifts =
-        RVVI(__riscv_vsll_vx_u64, LMUL_1024)(lane_ids, 2, VEC_ELEM_NUM);
-    auto shifted =
-        RVVI(__riscv_vsrl_vv_u64, LMUL_1024)(packed, shifts, VEC_ELEM_NUM);
-    auto idx64 =
-        RVVI(__riscv_vand_vx_u64, LMUL_1024)(shifted, 0xF, VEC_ELEM_NUM);
-    auto idx32 = RVVI(__riscv_vnsrl_wx_u32, LMUL_512)(idx64, 0, VEC_ELEM_NUM);
-    reg = RVVI(__riscv_vrgather_vv_f32, LMUL_512)(lut.reg, idx32, VEC_ELEM_NUM);
+        RVVI(__riscv_vsll_vx_u32, LMUL_256)(lane_ids, 2, HALF);
+
+    auto packed_lo = RVVI(__riscv_vmv_v_x_u32, LMUL_256)(lo, HALF);
+    auto idx_lo = RVVI(__riscv_vand_vx_u32, LMUL_256)(
+        RVVI(__riscv_vsrl_vv_u32, LMUL_256)(packed_lo, shifts, HALF),
+        0xF, HALF);
+
+    auto packed_hi = RVVI(__riscv_vmv_v_x_u32, LMUL_256)(hi, HALF);
+    auto idx_hi = RVVI(__riscv_vand_vx_u32, LMUL_256)(
+        RVVI(__riscv_vsrl_vv_u32, LMUL_256)(packed_hi, shifts, HALF),
+        0xF, HALF);
+
+    auto idx = RVVI4(__riscv_vcreate_v_u32, LMUL_256, _u32,
+                     LMUL_512)(idx_lo, idx_hi);
+    reg = RVVI(__riscv_vrgather_vv_f32, LMUL_512)(lut.reg, idx, VEC_ELEM_NUM);
   }
   explicit FP32Vec16(const FP16Vec16& v);
 
