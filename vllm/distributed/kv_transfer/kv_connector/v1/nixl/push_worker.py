@@ -86,8 +86,9 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
 
         # Push-specific state.
         # P-side: outgoing WRITE handles awaiting completion, keyed by
-        # request_id. Owned by the writer thread (it submits and polls them);
-        # the lock guards its submit/poll critical sections.
+        # request_id. Mutated by writer (submit) and main thread
+        # (``_pop_done_transfers``); guarded by
+        # ``_sending_transfers_lock``.
         self._sending_transfers = defaultdict[ReqId, list[TransferHandle]](list)
         self._sending_transfers_lock = threading.Lock()
 
@@ -108,9 +109,6 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
         # ``_push_finished_blocks`` so an unmatched entry doesn't keep the
         # writer busy-polling forever.
         self._evict_finished_inbox: queue.Queue[str] = queue.Queue()
-        # Writer → main thread: req_ids whose WRITE transfers have completed
-        # (detected by the writer's poll); ``get_finished`` drains it.
-        self._done_sends_inbox: queue.Queue[str] = queue.Queue()
 
         # Wake signal from engine main thread (start_load_kv / get_finished).
         # Writer self-polls at _PUSH_WRITER_POLL_INTERVAL_MS while it has
@@ -239,22 +237,13 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
                             self._handle_push_reg_notif(notif)
                         else:
                             self._pending_completion_notifs.put(notif)
-
-                # 4. Drive + detect in-flight WRITE transfers here (not in
-                # ``get_finished``) so they advance while the engine is idle.
-                with self._sending_transfers_lock:
-                    done_sends = self._pop_done_transfers(self._sending_transfers)
-                for done_rid in done_sends:
-                    self._done_sends_inbox.put(done_rid)
             except Exception:
                 logger.exception("nixl-push-writer error; continuing")
 
-            # Self-poll while there's work needing the writer to keep driving
-            # NIXL progress: blocks awaiting a D PUSH_REG, or in-flight WRITEs
-            # (the engine main thread may be parked when the producer idles).
-            with self._sending_transfers_lock:
-                has_inflight_sends = bool(self._sending_transfers)
-            if self._push_finished_blocks or has_inflight_sends:
+            # Self-poll only while there is no other wake source: P-side
+            # finished blocks waiting for a D PUSH_REG match. All other
+            # progress is event-driven (see module docstring).
+            if self._push_finished_blocks:
                 self._push_writer_stop.wait(timeout=sleep_s)
             else:
                 self._push_writer_wake.wait()
@@ -761,22 +750,16 @@ class NixlPushConnectorWorker(NixlBaseConnectorWorker):
     def get_finished(self) -> tuple[set[str], set[str]]:
         # Engine main thread asking for completions: also wake the writer
         # so it gets a chance to drain NIXL notifs (heartbeats, completion
-        # notifs, late PUSH_REGs) and poll in-flight WRITE transfers even if
-        # it had been parked.
+        # notifs, late PUSH_REGs) even if it had been parked.
         self._push_writer_wake.set()
 
         done_sending, done_recving = super().get_finished()
 
-        # Drain WRITE transfers the writer reported complete. Skip any request
-        # the lease-expiry path in ``super().get_finished`` already finalised,
-        # so a late completion can't double-report a freed request (asserts).
-        while True:
-            try:
-                req_id = self._done_sends_inbox.get_nowait()
-            except queue.Empty:
-                break
-            if req_id not in self._reqs_to_process and req_id not in self._reqs_to_send:
-                continue
+        # ``_pop_done_transfers`` mutates ``_sending_transfers``; the
+        # writer thread also appends to it, so guard the pop.
+        with self._sending_transfers_lock:
+            done_pushing = self._pop_done_transfers(self._sending_transfers)
+        for req_id in done_pushing:
             self._reqs_to_send.pop(req_id, None)
             self._reqs_to_process.discard(req_id)
             self.consumer_notification_counts_by_req.pop(req_id, None)
