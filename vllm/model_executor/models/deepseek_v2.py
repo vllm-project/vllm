@@ -1513,8 +1513,7 @@ class DeepseekV2Model(nn.Module):
         # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
         _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
         if _pending_wk_fp8 is None:
-            _pending_wk_fp8 = {}
-            self._pending_indexer_wk_fp8 = _pending_wk_fp8
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
 
         indexer_fused_mapping = [
             ("wk_weights_proj", "wk", 0),
