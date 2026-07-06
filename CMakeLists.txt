@@ -718,6 +718,23 @@ if(VLLM_GPU_LANG STREQUAL "CUDA" OR VLLM_GPU_LANG STREQUAL "HIP")
                    "(requires SM90+ and CUDA >= 12.0).")
   endif()
 
+  # BF16 skinny GEMM (M<=32; weight-bandwidth-bound decode shapes).
+  # Requires SM90+.
+  cuda_archs_sm90plus(BF16_SKINNY_GEMM_ARCHS "${CUDA_ARCHS}")
+  if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER_EQUAL 12.0 AND BF16_SKINNY_GEMM_ARCHS)
+    set(BF16_SKINNY_GEMM_SRCS
+      "csrc/libtorch_stable/bf16_skinny_gemm_entry.cu"
+      "csrc/libtorch_stable/bf16_skinny_gemm.cu")
+    set_gencode_flags_for_srcs(
+      SRCS "${BF16_SKINNY_GEMM_SRCS}"
+      CUDA_ARCHS "${BF16_SKINNY_GEMM_ARCHS}")
+    list(APPEND VLLM_STABLE_EXT_SRC "${BF16_SKINNY_GEMM_SRCS}")
+    message(STATUS "Building bf16_skinny_gemm for archs: ${BF16_SKINNY_GEMM_ARCHS}")
+  else()
+    message(STATUS "Not building bf16_skinny_gemm as no compatible archs found "
+                   "(requires SM90+ and CUDA >= 12.0).")
+  endif()
+
   # Only build AllSpark kernels if we are building for at least some compatible archs.
   cuda_archs_loose_intersection(ALLSPARK_ARCHS "8.0;8.6;8.7;8.9" "${CUDA_ARCHS}")
   if (ALLSPARK_ARCHS)
