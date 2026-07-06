@@ -77,17 +77,6 @@ def get_draft_token_capacity(
     return draft_token_capacity[:num_reqs]
 
 
-def get_scheduled_draft_token_counts(
-    req_ids: list[str] | tuple[str, ...],
-    draft_tokens: dict[str, list[int]],
-) -> np.ndarray:
-    return np.fromiter(
-        (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
-        dtype=np.int32,
-        count=len(req_ids),
-    )
-
-
 def apply_draft_token_capacity(
     num_scheduled_tokens: np.ndarray,
     scheduled_draft_tokens_per_req: np.ndarray,

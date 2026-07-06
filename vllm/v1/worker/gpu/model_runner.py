@@ -106,7 +106,6 @@ from vllm.v1.worker.gpu.spec_decode import init_speculator
 from vllm.v1.worker.gpu.spec_decode.dspark.capacity import (
     CapacityBasedVerificationManager,
     get_draft_token_capacity,
-    get_scheduled_draft_token_counts,
 )
 from vllm.v1.worker.gpu.spec_decode.eagle.eagle3_utils import (
     set_eagle3_aux_hidden_state_layers,
@@ -892,9 +891,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             )
         else:
             num_bonus_tokens = self.model_state.num_new_sampled_tokens_per_step
-            num_draft_tokens_per_req = get_scheduled_draft_token_counts(
-                req_ids,
-                draft_tokens,
+            num_draft_tokens_per_req = np.fromiter(
+                (len(draft_tokens.get(req_id, ())) for req_id in req_ids),
+                dtype=np.int32,
+                count=num_reqs,
             )
             total_num_draft_tokens = int(num_draft_tokens_per_req.sum())
             total_num_logits = num_reqs * num_bonus_tokens + total_num_draft_tokens
@@ -1094,10 +1094,9 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # Rejection sampling for spec decoding.
             assert self.rejection_sampler is not None
             assert self.speculator is not None
-            verification_capacity_manager = self.verification_capacity_manager
             sampler_input_batch = input_batch
-            if verification_capacity_manager is not None:
-                sampler_input_batch = verification_capacity_manager.restore_batch(
+            if self.verification_capacity_manager is not None:
+                sampler_input_batch = self.verification_capacity_manager.restore_batch(
                     input_batch
                 )
             sampler_output = self.rejection_sampler(
