@@ -296,7 +296,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GlmMoeDsaForCausalLM": _HfExamplesInfo(
         "zai-org/GLM-5", min_transformers_version="5.0.1", is_available_online=False
     ),
-    "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
+    "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2"),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
         extras={
@@ -1048,6 +1048,17 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "LlavaNextVideoForConditionalGeneration": _HfExamplesInfo(
         "llava-hf/LLaVA-NeXT-Video-7B-hf"
     ),
+    "LlavaOnevision2ForConditionalGeneration": _HfExamplesInfo(
+        "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct",
+        trust_remote_code=True,
+        # Keep the init/schema harness eager (these tests never run forward).
+        # NOTE: a separate H200-only hang exists in the core FA3 attention
+        # construction (after `FlashAttentionImpl.__init__` logs the FA3
+        # version, while building the Qwen3 backbone). enforce_eager does NOT
+        # gate that path, so this flag is hygiene, not the fix -- tracked with
+        # the maintainer.
+        enforce_eager=True,
+    ),
     "LlavaOnevisionForConditionalGeneration": _HfExamplesInfo(
         "llava-hf/llava-onevision-qwen2-0.5b-ov-hf"
     ),
@@ -1399,6 +1410,13 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
         max_num_seqs=32,
     ),
+    "DFlashLagunaForCausalLM": _HfExamplesInfo(
+        "poolside/Laguna-XS-2.1",
+        speculative_model="poolside/Laguna-XS-2.1-DFlash",
+        use_original_num_layers=True,
+        max_model_len=8192,  # Reduce max len to ensure test runs in low-VRAM CI env
+        max_num_seqs=32,
+    ),
     "DFlashQwen3NextDraftModel": _HfExamplesInfo(
         "Qwen/Qwen3-Coder-Next",
         speculative_model="z-lab/Qwen3-Coder-Next-DFlash",
@@ -1537,6 +1555,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,
     ),
     # [MTP]
+    "BailingMoeV25MTPModel": _HfExamplesInfo(
+        "inclusionAI/Ring-2.5-1T",
+        speculative_model="inclusionAI/Ring-2.5-1T",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "DeepSeekMTPModel": _HfExamplesInfo(
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
