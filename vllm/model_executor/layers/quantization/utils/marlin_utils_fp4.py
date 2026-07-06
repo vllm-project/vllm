@@ -30,9 +30,47 @@ FP4_MARLIN_SUPPORTED_GROUP_SIZES = [16]
 
 logger = init_logger(__name__)
 
+_FP4_MARLIN_REQUIRED_CUDA_OPS = (
+    "_C::gptq_marlin_repack",
+    "_C::marlin_gemm",
+)
+
+
+def _has_cuda_kernel(qualname: str) -> bool:
+    try:
+        return torch._C._dispatch_has_kernel_for_dispatch_key(qualname, "CUDA")
+    except RuntimeError:
+        return False
+
+
+def get_fp4_marlin_unavailable_reason() -> str | None:
+    """Return why Marlin FP4 cannot run in this build/platform, or None.
+
+    Capability alone is not sufficient: source builds can lack the Marlin
+    CUDA extensions (e.g. when they are skipped for a target arch), in which
+    case selecting Marlin fails much later with an opaque missing-op error
+    during weight processing.
+    """
+    if not current_platform.is_cuda():
+        return "Marlin FP4 requires CUDA"
+    if not current_platform.has_device_capability(75):
+        return "Marlin FP4 requires compute capability >= 75"
+
+    missing_cuda_ops = [
+        qualname
+        for qualname in _FP4_MARLIN_REQUIRED_CUDA_OPS
+        if not _has_cuda_kernel(qualname)
+    ]
+    if missing_cuda_ops:
+        return (
+            "Marlin FP4 CUDA kernels are not registered in this vLLM build: "
+            + ", ".join(missing_cuda_ops)
+        )
+    return None
+
 
 def is_fp4_marlin_supported():
-    return current_platform.is_cuda() and current_platform.has_device_capability(75)
+    return get_fp4_marlin_unavailable_reason() is None
 
 
 def _nvfp4_compute_scale_factor(
