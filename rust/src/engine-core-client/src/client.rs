@@ -373,10 +373,26 @@ impl EngineCoreClient {
     }
 
     /// Return the engine-side indices connected to this client.
+    ///
+    /// # Panics
+    ///
+    /// Panics if any connected engine uses an opaque identity that does not
+    /// encode an index. Use [`Self::known_engine_indices`] for a lossy,
+    /// non-panicking variant.
     pub fn engine_indices(&self) -> Vec<u32> {
         self.engines
             .iter()
             .map(|engine| engine.engine_id.engine_index().expect("engine id must encode as u16"))
+            .collect()
+    }
+
+    /// Return the engine-side indices connected to this client, skipping
+    /// engines with opaque identities that do not encode an index (e.g. mock
+    /// engines in tests).
+    pub fn known_engine_indices(&self) -> Vec<u32> {
+        self.engines
+            .iter()
+            .filter_map(|engine| engine.engine_id.engine_index())
             .collect()
     }
 

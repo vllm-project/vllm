@@ -39,6 +39,7 @@ educe = "0.6.0"
 enum-as-inner = "0.7.0"
 expect-test = "1.5.1"
 fastokens = { version = "0.2.1", default-features = false }
+form_urlencoded = "1.2.2"
 futures = "0.3.31"
 half = { version = "2.7.1", features = ["bytemuck"] }
 hex = "0.4.3"

@@ -70,6 +70,10 @@ fn build_router_with_options(
     dev_mode_enabled: bool,
     runtime_lora_updating_enabled: bool,
 ) -> Router {
+    // Default `vllm:engine_sleep_state` to awake, matching the init-time
+    // default recorded by the Python stat logger.
+    sleep::record_sleep_state(&state, None);
+
     let mut router = Router::new()
         // Health & monitoring
         .route("/health", get(health::health))

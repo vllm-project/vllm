@@ -51,7 +51,7 @@ steps:
   - tests/entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
   - tests/entrypoints/serve/instrumentator/test_basic.py
   - tests/entrypoints/serve/instrumentator/test_metrics.py
-  # - tests/entrypoints/serve/dev/test_sleep.py
+  - tests/entrypoints/serve/dev/test_sleep.py
   - tests/entrypoints/serve/tokenize/test_tokenization.py
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
@@ -62,7 +62,7 @@ steps:
   # test_generate_logprobs expects Python-style top_logprobs truncation (dedup sampled + cap at max(k, 1)).
   - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not lora and not test_generate_logprobs and not stop_string_workflow"
   - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
-  # - pytest -v -s entrypoints/serve/dev/test_sleep.py
+  - pytest -v -s entrypoints/serve/dev/test_sleep.py
   # /tokenizer_info is not implemented in the Rust frontend (the CLI flag is accepted as a no-op).
   - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
 

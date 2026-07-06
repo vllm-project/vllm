@@ -10,6 +10,7 @@ asynk-strim-attr.workspace = true
 auto_enums.workspace = true
 axum.workspace = true
 educe.workspace = true
+form_urlencoded.workspace = true
 futures.workspace = true
 http-body.workspace = true
 hyper.workspace = true

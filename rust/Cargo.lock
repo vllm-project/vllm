@@ -5268,6 +5268,7 @@ dependencies = [
  "clap",
  "educe",
  "expect-test",
+ "form_urlencoded",
  "futures",
  "http-body",
  "hyper",
