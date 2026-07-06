@@ -377,6 +377,13 @@ class EngineCore:
                 "Got kv_transfer_params, but no KVConnector found. "
                 "Disabling KVTransfer for this request."
             )
+        if request.artifact_transfer_params is not None and (
+            not self.scheduler.get_artifact_connector()
+        ):
+            logger.warning(
+                "Got artifact_transfer_params, but no ArtifactConnector found. "
+                "Disabling artifact transfer for this request."
+            )
 
         self.scheduler.add_request(request)
         if request.abort_immediately:

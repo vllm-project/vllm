@@ -5,6 +5,7 @@ sentencepiece  # Required for LLaMA tokenizer.
 numpy
 requests >= 2.26.0
 tqdm
+tensordict >= 0.13.0 # Required for async batch artifact transfer.
 blake3
 py-cpuinfo
 transformers >= 5.5.3

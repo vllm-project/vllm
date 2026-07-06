@@ -185,6 +185,7 @@ class SimpleContext(ConversationContext):
 
         self.input_messages: list[ResponseRawMessageAndToken] = []
         self.kv_transfer_params: dict[str, Any] | None = None
+        self.artifact_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output) -> None:
         self.last_output = output
@@ -195,6 +196,8 @@ class SimpleContext(ConversationContext):
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
+        if output.artifact_transfer_params is not None:
+            self.artifact_transfer_params = output.artifact_transfer_params
 
         # Accumulate text, token_ids, and logprobs for streaming mode
         delta_output = output.outputs[0]
@@ -323,6 +326,7 @@ class ParsableContext(ConversationContext):
         self.output_messages: list[ResponseRawMessageAndToken] = []
         self._accumulated_token_ids: list[int] = []
         self.kv_transfer_params: dict[str, Any] | None = None
+        self.artifact_transfer_params: dict[str, Any] | None = None
 
     def append_output(self, output: RequestOutput) -> None:
         self.num_prompt_tokens = len(output.prompt_token_ids or [])
@@ -330,6 +334,8 @@ class ParsableContext(ConversationContext):
         self.num_output_tokens += len(output.outputs[0].token_ids or [])
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
+        if output.artifact_transfer_params is not None:
+            self.artifact_transfer_params = output.artifact_transfer_params
 
         completion = output.outputs[0]
         self.finish_reason = completion.finish_reason
@@ -614,6 +620,7 @@ class HarmonyContext(ConversationContext):
         self.is_first_turn = True
         self.first_tok_of_message = True  # For streaming support
         self.kv_transfer_params: dict[str, Any] | None = None
+        self.artifact_transfer_params: dict[str, Any] | None = None
 
     def _update_num_reasoning_tokens(self):
         channel = self.parser.current_channel
@@ -635,6 +642,8 @@ class HarmonyContext(ConversationContext):
         self._update_decode_token_usage(output)
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
+        if output.artifact_transfer_params is not None:
+            self.artifact_transfer_params = output.artifact_transfer_params
         # Append current turn to all turn list for next turn's calculations
         self.all_turn_metrics.append(self.current_turn_metrics.copy())
         self.current_turn_metrics.reset()
@@ -948,6 +957,8 @@ class StreamingHarmonyContext(HarmonyContext):
         self._update_decode_token_usage(output)
         if output.kv_transfer_params is not None:
             self.kv_transfer_params = output.kv_transfer_params
+        if output.artifact_transfer_params is not None:
+            self.artifact_transfer_params = output.artifact_transfer_params
 
         # For streaming, update previous turn when message is complete
         if output.finished:

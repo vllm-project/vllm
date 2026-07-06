@@ -33,6 +33,7 @@ from typing_extensions import TypeIs
 
 import vllm.envs as envs
 from vllm.config import (
+    ArtifactTransferConfig,
     AttentionConfig,
     CacheConfig,
     CompilationConfig,
@@ -655,6 +656,7 @@ class EngineArgs:
     profiler_config: ProfilerConfig = get_field(VllmConfig, "profiler_config")
 
     kv_transfer_config: KVTransferConfig | None = None
+    artifact_transfer_config: ArtifactTransferConfig | None = None
     kv_events_config: KVEventsConfig | None = None
 
     ec_transfer_config: ECTransferConfig | None = None
@@ -731,6 +733,10 @@ class EngineArgs:
             self.kernel_config = KernelConfig(**self.kernel_config)
         if isinstance(self.eplb_config, dict):
             self.eplb_config = EPLBConfig(**self.eplb_config)
+        if isinstance(self.artifact_transfer_config, dict):
+            self.artifact_transfer_config = ArtifactTransferConfig(
+                **self.artifact_transfer_config
+            )
         if isinstance(self.weight_transfer_config, dict):
             self.weight_transfer_config = WeightTransferConfig(
                 **self.weight_transfer_config
@@ -1480,6 +1486,10 @@ class EngineArgs:
         )
         vllm_group.add_argument(
             "--kv-transfer-config", **vllm_kwargs["kv_transfer_config"]
+        )
+        vllm_group.add_argument(
+            "--artifact-transfer-config",
+            **vllm_kwargs["artifact_transfer_config"],
         )
         vllm_group.add_argument("--kv-events-config", **vllm_kwargs["kv_events_config"])
         vllm_group.add_argument(
@@ -2258,6 +2268,7 @@ class EngineArgs:
             observability_config=observability_config,
             compilation_config=compilation_config,
             kv_transfer_config=self.kv_transfer_config,
+            artifact_transfer_config=self.artifact_transfer_config,
             kv_events_config=self.kv_events_config,
             ec_transfer_config=self.ec_transfer_config,
             reasoning_config=self.reasoning_config,

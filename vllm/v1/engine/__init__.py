@@ -188,6 +188,7 @@ class EngineCoreOutput(
     stop_reason: int | str | None = None
     events: list[EngineCoreEvent] | None = None
     kv_transfer_params: dict[str, Any] | None = None
+    artifact_transfer_params: dict[str, Any] | None = None
 
     trace_headers: Mapping[str, str] | None = None
 

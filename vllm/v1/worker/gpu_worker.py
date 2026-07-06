@@ -24,6 +24,10 @@ from vllm.distributed import (
     init_distributed_environment,
     set_custom_all_reduce,
 )
+from vllm.distributed.artifact_transfer import (
+    ensure_artifact_transfer_initialized,
+    ensure_artifact_transfer_shutdown,
+)
 from vllm.distributed.ec_transfer import (
     ensure_ec_transfer_initialized,
     ensure_ec_transfer_shutdown,
@@ -573,6 +577,7 @@ class Worker(WorkerBase):
         # because `initialize_kv_cache` will inject kv cache groups not
         # related to kv cache connector (e.g. kv cache sharing layers).
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
+        ensure_artifact_transfer_initialized(self.vllm_config)
 
         with self._maybe_get_memory_pool_context(tag="kv_cache"):
             self.model_runner.initialize_kv_cache(kv_cache_config)
@@ -1142,6 +1147,8 @@ class Worker(WorkerBase):
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
+        if ensure_artifact_transfer_shutdown is not None:
+            ensure_artifact_transfer_shutdown()
         if ensure_ec_transfer_shutdown is not None:
             ensure_ec_transfer_shutdown()
         if self.profiler is not None:

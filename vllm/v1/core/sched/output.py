@@ -10,6 +10,9 @@ if TYPE_CHECKING:
     import numpy.typing as npt
     import torch
 
+    from vllm.distributed.artifact_transfer.artifact_connector.v1.base import (
+        ArtifactConnectorMetadata,
+    )
     from vllm.distributed.ec_transfer.ec_connector.base import ECConnectorMetadata
     from vllm.distributed.kv_transfer.kv_connector.v1.base import KVConnectorMetadata
     from vllm.lora.request import LoRARequest
@@ -18,6 +21,7 @@ if TYPE_CHECKING:
     from vllm.sampling_params import SamplingParams
     from vllm.v1.request import Request
 else:
+    ArtifactConnectorMetadata = object
     ECConnectorMetadata = object
     KVConnectorMetadata = object
     LoRARequest = object
@@ -234,6 +238,9 @@ class SchedulerOutput:
 
     # EC Cache Connector metadata
     ec_connector_metadata: ECConnectorMetadata | None = None
+
+    # Artifact Connector metadata.
+    artifact_connector_metadata: ArtifactConnectorMetadata | None = None
 
     # Block IDs freshly allocated from the pool during this scheduling step.
     # The worker zeros the corresponding GPU memory before the blocks are used,

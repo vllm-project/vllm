@@ -126,6 +126,9 @@ class ChatCompletionResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    artifact_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="Artifact transfer parameters or handles."
+    )
 
 
 class ChatCompletionResponseStreamChoice(OpenAIBaseModel):
@@ -401,6 +404,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+    artifact_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="Artifact transfer parameters or returned artifact handles.",
+    )
 
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
         default=None,
@@ -614,6 +621,8 @@ class ChatCompletionRequest(OpenAIBaseModel):
         if self.kv_transfer_params:
             # Pass in kv_transfer_params via extra_args
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.artifact_transfer_params:
+            extra_args["artifact_transfer_params"] = self.artifact_transfer_params
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,

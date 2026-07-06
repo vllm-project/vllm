@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from vllm.config.artifact_transfer import ArtifactTransferConfig
 from vllm.config.attention import AttentionConfig
 from vllm.config.cache import CacheConfig
 from vllm.config.compilation import (
@@ -62,6 +63,8 @@ from vllm.config.weight_transfer import WeightTransferConfig
 # __all__ should only contain classes and functions.
 # Types and globals should be imported from their respective modules.
 __all__ = [
+    # From vllm.config.artifact_transfer
+    "ArtifactTransferConfig",
     # From vllm.config.attention
     "AttentionConfig",
     # From vllm.config.cache

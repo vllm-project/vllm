@@ -242,6 +242,27 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             if isinstance(worker_cls, type):
                 kwargs["worker_cls"] = cloudpickle.dumps(worker_cls)
 
+        if "artifact_transfer_config" in kwargs and isinstance(
+            kwargs["artifact_transfer_config"], dict
+        ):
+            from vllm.config.artifact_transfer import ArtifactTransferConfig
+
+            raw_config_dict = kwargs["artifact_transfer_config"]
+            try:
+                kwargs["artifact_transfer_config"] = ArtifactTransferConfig(
+                    **raw_config_dict
+                )
+            except ValidationError as e:
+                logger.error(
+                    "Failed to convert 'artifact_transfer_config' dict to "
+                    "ArtifactTransferConfig object. Dict: %s. Error: %s",
+                    raw_config_dict,
+                    e,
+                )
+                raise ValueError(
+                    f"Invalid 'artifact_transfer_config' provided: {e}"
+                ) from e
+
         if "kv_transfer_config" in kwargs and isinstance(
             kwargs["kv_transfer_config"], dict
         ):

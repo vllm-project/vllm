@@ -53,6 +53,11 @@ from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
 from vllm.v1.outputs import DraftTokenIds, ModelRunnerOutput
 from vllm.v1.worker.cp_utils import check_attention_cp_compatibility
+from vllm.v1.worker.gpu.artifact_connector import (
+    NO_OP_ARTIFACT_CONNECTOR,
+    ArtifactConnector,
+    get_artifact_connector,
+)
 from vllm.v1.worker.gpu.async_utils import AsyncOutput, AsyncPoolingOutput
 from vllm.v1.worker.gpu.attn_utils import (
     build_slot_mappings_by_layer,
@@ -239,6 +244,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         self.lora_state = LoraState(max_num_reqs=self.max_num_reqs)
         # KV Connector if configured.
         self.kv_connector: KVConnector = NO_OP_KV_CONNECTOR
+        self.artifact_connector: ArtifactConnector = NO_OP_ARTIFACT_CONNECTOR
 
         # For transferring state from execute_model to subsequent sample_tokens call.
         self.execute_model_state: ExecuteModelState | None = None
@@ -482,6 +488,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.vllm_config,
         )
         self.kv_connector = get_kv_connector(self.vllm_config, kv_caches_dict)
+        self.artifact_connector = get_artifact_connector(self.vllm_config)
 
     def _init_kv_zero_meta(self) -> None:
         """Build KV-block zeroing metadata; invoked from gpu_worker."""
@@ -1253,6 +1260,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             # because they are already copied to the CUDA graph input buffers.
             assert self.cudagraph_manager is not None
             self.kv_connector.pre_forward(scheduler_output)
+            self.artifact_connector.pre_forward(scheduler_output)
             model_output = self.cudagraph_manager.run_fullgraph(batch_desc)
         else:
             # For piecewise and eager mode, just call model().
@@ -1272,6 +1280,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 skip_compiled=skip_compiled,
             ):
                 self.kv_connector.pre_forward(scheduler_output)
+                self.artifact_connector.pre_forward(scheduler_output)
                 if batch_desc.cg_mode == CUDAGraphMode.PIECEWISE:
                     # Run the PIECEWISE graph (compiled PW cudagraph or breakable
                     # cudagraph, chosen inside run_pw_graph). cg_mode is only
@@ -1345,9 +1354,15 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 # in the immediate next step (rather than in pp_size steps).
                 self.model_state.postprocess_state(input_batch.idx_mapping, 0)
 
-            # Post-step KV connector related operations.
+            # Post-step connector related operations.
             kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
-            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            artifact_connector_output = self.artifact_connector.post_forward(
+                finished_req_ids
+            )
+            return ModelRunnerOutput.with_connector_output_only(
+                kv_connector_output=kv_connector_output,
+                artifact_connector_output=artifact_connector_output,
+            )
 
         # Last rank: sample tokens
         sampler_output, num_sampled, num_rejected = self.sample(
@@ -1389,6 +1404,8 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             num_sampled_tokens=num_sampled,
             main_stream=self.main_stream,
             copy_stream=self.output_copy_stream,
+            artifact_connector=self.artifact_connector,
+            finished_req_ids=finished_req_ids,
         )
 
         mm_inputs: tuple[list[torch.Tensor], torch.Tensor] | None = None
@@ -1453,7 +1470,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.req_states.draft_tokens[input_batch.idx_mapping],
             )
 
-        # Post-step KV connector related operations.
+        # Post-step connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
         model_runner_output.kv_connector_output = kv_connector_output
 
@@ -1476,12 +1493,18 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         finished_req_ids = self.execute_model_state.finished_req_ids
         self.execute_model_state = None
 
-        # Post-step KV connector related operations.
+        # Post-step connector related operations.
         kv_connector_output = self.kv_connector.post_forward(finished_req_ids)
+        artifact_connector_output = self.artifact_connector.post_forward(
+            finished_req_ids
+        )
 
         if not self.is_last_pp_rank:
             self.postprocess_num_computed_tokens(input_batch)
-            return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
+            return ModelRunnerOutput.with_connector_output_only(
+                kv_connector_output=kv_connector_output,
+                artifact_connector_output=artifact_connector_output,
+            )
 
         assert self.pooling_runner is not None
         pooler_output, is_valid = self.pooling_runner.pool(
@@ -1493,6 +1516,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             req_ids=input_batch.req_ids,
             req_id_to_index={req_id: i for i, req_id in enumerate(input_batch.req_ids)},
             kv_connector_output=kv_connector_output,
+            artifact_connector_output=artifact_connector_output,
         )
         async_output = AsyncPoolingOutput(
             model_runner_output=model_runner_output,

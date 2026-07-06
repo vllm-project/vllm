@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import contextlib
+from typing import Any
 
 import numpy as np
 import torch
@@ -17,6 +18,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         num_sampled_tokens: torch.Tensor,
         main_stream: torch.cuda.Stream,
         copy_stream: torch.cuda.Stream,
+        artifact_connector: Any | None = None,
+        finished_req_ids: set[str] | None = None,
     ):
         # NOTE(woosuk): We must retain references to the GPU tensors,
         # as the copy operations are performed on a different CUDA stream than
@@ -25,6 +28,8 @@ class AsyncOutput(AsyncModelRunnerOutput):
         self.sampler_output = sampler_output
         self.num_sampled_tokens = num_sampled_tokens
         self.copy_event = torch.cuda.Event()
+        self.artifact_connector = artifact_connector
+        self.finished_req_ids = finished_req_ids or set()
 
         with stream(copy_stream, main_stream):
             copy_stream.wait_stream(main_stream)
@@ -66,6 +71,13 @@ class AsyncOutput(AsyncModelRunnerOutput):
         if self.logprobs_tensors is not None:
             self.model_runner_output.logprobs = self.logprobs_tensors.tolists()
         self.model_runner_output.prompt_logprobs_dict = self.prompt_logprobs_dict
+        if self.artifact_connector is not None:
+            self.artifact_connector.record_model_runner_output(
+                self.model_runner_output, self.finished_req_ids
+            )
+            self.model_runner_output.artifact_connector_output = (
+                self.artifact_connector.post_forward(self.finished_req_ids)
+            )
         return self.model_runner_output
 
 

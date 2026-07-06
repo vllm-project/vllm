@@ -13,12 +13,16 @@ from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.v1.core.sched.output import SchedulerOutput
 
 if TYPE_CHECKING:
+    from vllm.distributed.artifact_transfer.artifact_connector.v1.base import (
+        ArtifactConnectorOutput,
+    )
     from vllm.distributed.kv_events import KVConnectorKVEvents
     from vllm.distributed.kv_transfer.kv_connector.v1.base import (
         KVConnectorWorkerMetadata,
     )
     from vllm.distributed.kv_transfer.kv_connector.v1.metrics import KVConnectorStats
 else:
+    ArtifactConnectorOutput = object
     KVConnectorStats = object
     KVConnectorWorkerMetadata = object
     KVConnectorKVEvents = object
@@ -263,6 +267,8 @@ class ModelRunnerOutput:
 
     ec_connector_output: ECConnectorOutput | None = None
 
+    artifact_connector_output: ArtifactConnectorOutput | None = None
+
     # req_id -> num_nans_in_logits
     num_nans_in_logits: dict[str, int] | None = None
 
@@ -281,17 +287,37 @@ class ModelRunnerOutput:
     routed_experts: RoutedExpertsLists | None = None
 
     @staticmethod
+    def with_connector_output_only(
+        kv_connector_output: KVConnectorOutput | None = None,
+        artifact_connector_output: ArtifactConnectorOutput | None = None,
+    ) -> "ModelRunnerOutput":
+        """Return ModelRunnerOutput containing only connector outputs."""
+        has_kv_output = (
+            kv_connector_output is not None and not kv_connector_output.is_empty()
+        )
+        has_artifact_output = (
+            artifact_connector_output is not None
+            and not artifact_connector_output.is_empty()
+        )
+        if not has_kv_output and not has_artifact_output:
+            return EMPTY_MODEL_RUNNER_OUTPUT
+        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
+        if has_kv_output:
+            output.kv_connector_output = kv_connector_output
+        if has_artifact_output:
+            output.artifact_connector_output = artifact_connector_output
+        return output
+
+    @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,
     ) -> "ModelRunnerOutput":
         """Return ModelRunnerOutput containing the provided KVConnectorOutput,
         otherwise empty. Returns None if kv_connector_output is passed as None.
         """
-        if kv_connector_output is None or kv_connector_output.is_empty():
-            return EMPTY_MODEL_RUNNER_OUTPUT
-        output = copy(EMPTY_MODEL_RUNNER_OUTPUT)
-        output.kv_connector_output = kv_connector_output
-        return output
+        return ModelRunnerOutput.with_connector_output_only(
+            kv_connector_output=kv_connector_output
+        )
 
 
 # ModelRunnerOutput wrapper for async scheduling.

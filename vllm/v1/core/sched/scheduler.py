@@ -9,6 +9,18 @@ from typing import Any
 
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
+from vllm.distributed.artifact_transfer.artifact_connector.factory import (
+    ArtifactConnectorFactory,
+)
+from vllm.distributed.artifact_transfer.artifact_connector.v1 import (
+    ArtifactConnectorBase_V1,
+    ArtifactConnectorRole,
+)
+from vllm.distributed.artifact_transfer.artifact_connector.v1.base import (
+    ArtifactConnectorMetadata,
+    ArtifactConnectorOutput,
+    ArtifactHandle,
+)
 from vllm.distributed.ec_transfer.ec_connector.base import (
     ECConnectorMetadata,
     ECConnectorRole,
@@ -148,6 +160,12 @@ class Scheduler(SchedulerInterface):
         if self.vllm_config.ec_transfer_config is not None:
             self.ec_connector = ECConnectorFactory.create_connector(
                 config=self.vllm_config, role=ECConnectorRole.SCHEDULER
+            )
+
+        self.artifact_connector = None
+        if self.vllm_config.artifact_transfer_config is not None:
+            self.artifact_connector = ArtifactConnectorFactory.create_connector(
+                config=self.vllm_config, role=ArtifactConnectorRole.SCHEDULER
             )
 
         num_gpu_blocks = self.cache_config.num_gpu_blocks
@@ -1028,6 +1046,12 @@ class Scheduler(SchedulerInterface):
             )
             scheduler_output.ec_connector_metadata = ec_meta
 
+        if self.artifact_connector is not None:
+            artifact_meta: ArtifactConnectorMetadata = (
+                self.artifact_connector.build_connector_meta(scheduler_output)
+            )
+            scheduler_output.artifact_connector_metadata = artifact_meta
+
         with record_function_or_nullcontext("schedule: update_after_schedule"):
             self._update_after_schedule(scheduler_output)
         return scheduler_output
@@ -1404,6 +1428,7 @@ class Scheduler(SchedulerInterface):
         pooler_outputs = model_runner_output.pooler_output
         num_nans_in_logits = model_runner_output.num_nans_in_logits
         kv_connector_output = model_runner_output.kv_connector_output
+        artifact_connector_output = model_runner_output.artifact_connector_output
         cudagraph_stats = model_runner_output.cudagraph_stats
 
         perf_stats: PerfStats | None = None
@@ -1412,6 +1437,10 @@ class Scheduler(SchedulerInterface):
 
         outputs: dict[int, list[EngineCoreOutput]] = defaultdict(list)
         spec_decoding_stats: SpecDecodingStats | None = None
+
+        if artifact_connector_output:
+            self._update_from_artifact_xfer_finished(artifact_connector_output)
+            artifact_connector_output = None
 
         failed_kv_load_req_ids = None
         if kv_connector_output and kv_connector_output.invalid_block_ids:
@@ -1508,6 +1537,7 @@ class Scheduler(SchedulerInterface):
             new_token_ids = generated_token_ids
             pooler_output = pooler_outputs[req_index] if pooler_outputs else None
             kv_transfer_params = None
+            artifact_transfer_params = None
             status_before_stop = request.status
             num_output_tokens_before = len(request._output_token_ids)
 
@@ -1537,6 +1567,20 @@ class Scheduler(SchedulerInterface):
                     request.status = RequestStatus.FINISHED_ERROR
                     request.resumable = False
                     stopped = True
+
+            # Extract sampled-token logprobs after stop-token trimming so
+            # trajectory tokens and logprobs remain positionally aligned.
+            if (
+                request.sampling_params is not None
+                and request.sampling_params.num_logprobs is not None
+                and logprobs
+            ):
+                new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
+
+            if self.artifact_connector is not None:
+                self.artifact_connector.record_request_output(
+                    request, new_token_ids, new_logprobs
+                )
 
             routed_experts = None
             if (
@@ -1585,20 +1629,16 @@ class Scheduler(SchedulerInterface):
                 finish_reason = request.get_finished_reason()
                 finished = self._handle_stopped_request(request)
                 if finished:
+                    # Publish while the complete Request is still available.
+                    artifact_transfer_params = self._artifact_connector_finished(
+                        request
+                    )
                     kv_transfer_params = self._free_request(request)
 
                 if status_before_stop == RequestStatus.RUNNING:
                     stopped_running_reqs.add(request)
                 else:
                     stopped_preempted_reqs.add(request)
-
-            # Extract sample logprobs if needed.
-            if (
-                request.sampling_params is not None
-                and request.sampling_params.num_logprobs is not None
-                and logprobs
-            ):
-                new_logprobs = logprobs.slice_request(req_index, len(new_token_ids))
 
             if num_nans_in_logits is not None and req_id in num_nans_in_logits:
                 request.num_nans_in_logits = num_nans_in_logits[req_id]
@@ -1609,6 +1649,7 @@ class Scheduler(SchedulerInterface):
                 new_token_ids
                 or pooler_output is not None
                 or kv_transfer_params
+                or artifact_transfer_params
                 or stopped
             ):
                 # Add EngineCoreOutput for this Request.
@@ -1624,6 +1665,7 @@ class Scheduler(SchedulerInterface):
                         events=request.take_events(),
                         prefill_stats=request.take_prefill_stats(),
                         kv_transfer_params=kv_transfer_params,
+                        artifact_transfer_params=artifact_transfer_params,
                         trace_headers=request.trace_headers,
                         routed_experts=routed_experts,
                         num_nans_in_logits=request.num_nans_in_logits,
@@ -1903,6 +1945,8 @@ class Scheduler(SchedulerInterface):
             self.requests[request.request_id] = request
             if self.connector is not None:
                 self.connector.on_new_request(request)
+            if self.artifact_connector is not None:
+                self.artifact_connector.on_new_request(request)
             if self.log_stats:
                 request.record_event(EngineCoreEventType.QUEUED)
 
@@ -2184,6 +2228,9 @@ class Scheduler(SchedulerInterface):
         if self.ec_connector is not None:
             self.ec_connector.shutdown()
 
+        if self.artifact_connector is not None:
+            self.artifact_connector.shutdown()
+
         logger.debug_once("[shutdown] Scheduler: complete")
 
     ########################################################################
@@ -2192,6 +2239,23 @@ class Scheduler(SchedulerInterface):
 
     def get_kv_connector(self) -> KVConnectorBase_V1 | None:
         return self.connector
+
+    def get_artifact_connector(self) -> ArtifactConnectorBase_V1 | None:
+        return self.artifact_connector
+
+    def _serialize_artifact_handle(self, handle: ArtifactHandle) -> dict[str, Any]:
+        return {"artifact_handle": handle.to_dict()}
+
+    def _artifact_connector_finished(self, request: Request) -> dict[str, Any] | None:
+        """Return artifact transfer params for a finished request."""
+        if self.artifact_connector is None:
+            return None
+
+        artifact_handle = self.artifact_connector.request_finished(request)
+        if artifact_handle is None:
+            return None
+
+        return self._serialize_artifact_handle(artifact_handle)
 
     def _connector_finished(
         self, request: Request
@@ -2310,6 +2374,12 @@ class Scheduler(SchedulerInterface):
             "Unexpected blocked waiting status in promotion: "
             f"{request.status.name} for request {request.request_id}"
         )
+
+    def _update_from_artifact_xfer_finished(
+        self, artifact_connector_output: ArtifactConnectorOutput
+    ) -> None:
+        if self.artifact_connector is not None:
+            self.artifact_connector.update_connector_output(artifact_connector_output)
 
     def _update_from_kv_xfer_finished(self, kv_connector_output: KVConnectorOutput):
         """

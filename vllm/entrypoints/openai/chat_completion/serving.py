@@ -1050,6 +1050,7 @@ class OpenAIServingChat(OpenAIServing):
             ),
             prompt_text=prompt_text,
             kv_transfer_params=final_res.kv_transfer_params,
+            artifact_transfer_params=final_res.artifact_transfer_params,
         )
 
         # Log complete response if output logging is enabled

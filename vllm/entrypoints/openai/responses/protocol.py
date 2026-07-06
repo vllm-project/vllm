@@ -276,6 +276,10 @@ class ResponsesRequest(OpenAIBaseModel):
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
     )
+    artifact_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="Artifact transfer parameters or returned artifact handles.",
+    )
     chat_template_kwargs: dict[str, Any] | None = Field(
         default=None,
         description=(
@@ -400,6 +404,8 @@ class ResponsesRequest(OpenAIBaseModel):
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
         if self.kv_transfer_params:
             extra_args["kv_transfer_params"] = self.kv_transfer_params
+        if self.artifact_transfer_params:
+            extra_args["artifact_transfer_params"] = self.artifact_transfer_params
 
         return SamplingParams.from_optional(
             temperature=temperature,
@@ -650,6 +656,9 @@ class ResponsesResponse(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None, description="KVTransfer parameters."
     )
+    artifact_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="Artifact transfer parameters or handles."
+    )
 
     # --8<-- [start:responses-response-extra-params]
     # These are populated when enable_response_messages is set to True
@@ -695,6 +704,7 @@ class ResponsesResponse(OpenAIBaseModel):
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
         kv_transfer_params: dict[str, Any] | None = None,
+        artifact_transfer_params: dict[str, Any] | None = None,
     ) -> "ResponsesResponse":
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
@@ -733,6 +743,7 @@ class ResponsesResponse(OpenAIBaseModel):
             user=request.user,
             usage=usage,
             kv_transfer_params=kv_transfer_params,
+            artifact_transfer_params=artifact_transfer_params,
         )
 
 

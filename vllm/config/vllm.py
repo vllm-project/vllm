@@ -27,6 +27,7 @@ from vllm.triton_utils import HAS_TRITON
 from vllm.utils import random_uuid
 from vllm.utils.hashing import safe_hash
 
+from .artifact_transfer import ArtifactTransferConfig
 from .attention import AttentionConfig
 from .cache import CacheConfig
 from .compilation import CompilationConfig, CompilationMode, CUDAGraphMode
@@ -352,6 +353,8 @@ class VllmConfig:
     """Profiling configuration."""
     kv_transfer_config: KVTransferConfig | None = None
     """The configurations for distributed KV cache transfer."""
+    artifact_transfer_config: ArtifactTransferConfig | None = None
+    """The configurations for rollout artifact transfer."""
     kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
     ec_transfer_config: ECTransferConfig | None = None
@@ -473,6 +476,10 @@ class VllmConfig:
             vllm_factors.append(None)
         if self.kv_transfer_config:
             vllm_factors.append(self.kv_transfer_config.compute_hash())
+        else:
+            vllm_factors.append("None")
+        if self.artifact_transfer_config:
+            vllm_factors.append(self.artifact_transfer_config.compute_hash())
         else:
             vllm_factors.append("None")
         if self.ec_transfer_config:

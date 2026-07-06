@@ -900,6 +900,7 @@ class OpenAIServingResponses(OpenAIServing):
             status=status,
             usage=usage,
             kv_transfer_params=context.kv_transfer_params,
+            artifact_transfer_params=context.artifact_transfer_params,
         )
 
         if request.store:
