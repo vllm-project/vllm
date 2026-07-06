@@ -7,7 +7,7 @@
 use std::mem::take;
 
 pub use backend::{DynTextBackend, SamplingHints, SamplingLimits, TextBackend};
-pub use error::{Error, LogprobsError, OutOfVocabError, Result};
+pub use error::{Error, LogprobsError, Result, TokenIdsError};
 use futures::Stream;
 pub use lower::{
     PreparedTextRequest, lower_sampling_params, lower_text_request, resolve_max_tokens,

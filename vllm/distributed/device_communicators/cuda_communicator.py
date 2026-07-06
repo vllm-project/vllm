@@ -6,8 +6,10 @@ import torch
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.distributed.device_communicators.all_reduce_utils import (
     NCCL_SYMM_MEM_ALL_REDUCE_CONFIG,
+    should_nccl_symm_mem_ag_rs,
     should_nccl_symm_mem_allreduce,
 )
 from vllm.distributed.device_communicators.pynccl import register_nccl_symmetric_ops
@@ -18,6 +20,7 @@ from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
 from ..utils import StatelessProcessGroup
+from .aiter_custom_all_reduce import AiterCustomAllreduce
 from .base_device_communicator import DeviceCommunicatorBase
 
 logger = init_logger(__name__)
@@ -47,16 +50,21 @@ class CudaCommunicator(DeviceCommunicatorBase):
             use_custom_allreduce = False
             use_torch_symm_mem = False
             use_flashinfer_allreduce = False
+            use_aiter_allreduce = False
         else:
             from vllm.distributed.parallel_state import _ENABLE_CUSTOM_ALL_REDUCE
 
             use_custom_allreduce = _ENABLE_CUSTOM_ALL_REDUCE
             use_torch_symm_mem = envs.VLLM_ALLREDUCE_USE_SYMM_MEM
             use_flashinfer_allreduce = envs.VLLM_ALLREDUCE_USE_FLASHINFER
+            use_aiter_allreduce = use_custom_allreduce and bool(
+                rocm_aiter_ops.is_custom_all_reduce_enabled()
+            )
 
         self.use_custom_allreduce = use_custom_allreduce
         self.use_torch_symm_mem = use_torch_symm_mem
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
+        self.use_aiter_allreduce = use_aiter_allreduce
 
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
@@ -84,6 +92,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.qr_comm: QuickAllReduce | None = None
         self.symm_mem_comm: SymmMemCommunicator | None = None
         self.fi_ar_comm: FlashInferAllReduce | None = None
+        self.aiter_ar_comm: AiterCustomAllreduce | None = None
 
         if use_torch_symm_mem and current_platform.is_cuda():
             self.symm_mem_comm = SymmMemCommunicator(
@@ -97,7 +106,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 device=self.device,
             )
 
-        if use_custom_allreduce and self.world_size > 1:
+        if self.use_aiter_allreduce and self.world_size > 1:
+            self.aiter_ar_comm = AiterCustomAllreduce(
+                group=self.cpu_group,
+                device=self.device,
+            )
+
+        if use_custom_allreduce and self.aiter_ar_comm is None and self.world_size > 1:
             # Initialize a custom fast all-reduce implementation.
             self.ca_comm = CustomAllreduce(
                 group=self.cpu_group,
@@ -107,13 +122,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
                 ),
             )
 
-            if current_platform.is_rocm():
-                # Initialize a custom quick all-reduce implementation for AMD.
-                # Quick reduce is designed as a complement to custom allreduce.
-                # Based on quickreduce (https://github.com/mk1-project/quickreduce).
-                # If it's a rocm, 'use_custom_allreduce==True' means it must
-                # currently be an MI300 series.
-                self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
+        if use_custom_allreduce and self.world_size > 1 and current_platform.is_rocm():
+            # Initialize a custom quick all-reduce implementation for AMD.
+            # Quick reduce is designed as a complement to custom allreduce
+            # (vLLM's or AITER's), so it is initialized for either backend.
+            # Based on quickreduce (https://github.com/mk1-project/quickreduce).
+            # On ROCm, 'use_custom_allreduce==True' means it must currently be
+            # an MI300 series.
+            self.qr_comm = QuickAllReduce(group=self.cpu_group, device=self.device)
 
         if self.world_size > 1:
             self._log_all_reduce_backend_selection()
@@ -202,6 +218,7 @@ class CudaCommunicator(DeviceCommunicatorBase):
             "NCCL_SYMM_MEM",
             "QUICK_REDUCE",
             "FLASHINFER",
+            "AITER_CUSTOM",
             "CUSTOM",
             "SYMM_MEM",
             "PYNCCL",
@@ -235,6 +252,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             enabled_ar_backends.append("QUICK_REDUCE")
         if self.fi_ar_comm is not None and not self.fi_ar_comm.disabled:
             enabled_ar_backends.append("FLASHINFER")
+        if self.aiter_ar_comm is not None and not self.aiter_ar_comm.disabled:
+            enabled_ar_backends.append("AITER_CUSTOM")
         if self.ca_comm is not None and not self.ca_comm.disabled:
             enabled_ar_backends.append("CUSTOM")
         if self.symm_mem_comm is not None and not self.symm_mem_comm.disabled:
@@ -260,8 +279,8 @@ class CudaCommunicator(DeviceCommunicatorBase):
             out = torch.ops.vllm.all_reduce_symmetric_with_copy(input_)
             if out is not None:
                 return out
-        # always try quick reduce first, then flashinfer, then custom allreduce,
-        # and then pynccl. (quick reduce just for ROCM MI3*)
+        # always try quick reduce first, then flashinfer, then the AITER or vLLM
+        # custom allreduce, and then pynccl. (quick reduce just for ROCM MI3*)
         qr_comm = self.qr_comm
         if (
             qr_comm is not None
@@ -278,6 +297,15 @@ class CudaCommunicator(DeviceCommunicatorBase):
             and fi_ar_comm.should_use_fi_ar(input_)
         ):
             out = fi_ar_comm.all_reduce(input_)
+            assert out is not None
+            return out
+        aiter_ar_comm = self.aiter_ar_comm
+        if (
+            aiter_ar_comm is not None
+            and not aiter_ar_comm.disabled
+            and aiter_ar_comm.should_custom_ar(input_)
+        ):
+            out = aiter_ar_comm.custom_all_reduce(input_)
             assert out is not None
             return out
         ca_comm = self.ca_comm
@@ -310,6 +338,17 @@ class CudaCommunicator(DeviceCommunicatorBase):
             torch.distributed.all_reduce(out, group=self.device_group)
         return out
 
+    def all_gather(self, input_: torch.Tensor, dim: int = -1) -> torch.Tensor:
+        # Route uniform dim-0 all-gathers through NVLS symmetric memory when
+        # enabled (mirrors reduce_scatter); otherwise fall back to the
+        # base-class ring all-gather. Sequence parallelism's gather-before-GEMM
+        # uses dim=0 with tp-aligned (uniform) shards.
+        if dim < 0:
+            dim += input_.dim()
+        if dim == 0 and should_nccl_symm_mem_ag_rs():
+            return self._all_gather_symm_mem(input_.contiguous())
+        return super().all_gather(input_, dim)
+
     def reduce_scatter(self, input_: torch.Tensor, dim: int = -1):
         world_size = self.world_size
         pynccl_comm = self.pynccl_comm
@@ -326,11 +365,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
         chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        output = torch.empty(
-            output_shape, dtype=input_tensor.dtype, device=input_tensor.device
-        )
-
-        pynccl_comm.reduce_scatter(output, input_tensor)
+        if should_nccl_symm_mem_ag_rs():
+            output = self._reduce_scatter_symm_mem(input_tensor)
+        else:
+            output = torch.empty(
+                output_shape, dtype=input_tensor.dtype, device=input_tensor.device
+            )
+            pynccl_comm.reduce_scatter(output, input_tensor)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
@@ -358,17 +399,96 @@ class CudaCommunicator(DeviceCommunicatorBase):
             chunk_size = input_tensor.shape[0] // world_size
         output_shape = (chunk_size,) + input_tensor.shape[1:]
 
-        output = torch.empty(
-            output_shape, dtype=input_tensor.dtype, device=input_tensor.device
-        )
-
-        if sizes is not None and sizes.count(sizes[0]) != len(sizes):
-            pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
+        # Symmetric memory is only used when all ranks have uniform sizes.
+        # ncclCommWindowRegister is collective: asymmetric pool allocations
+        # from variable per-rank sizes cause deadlocks.
+        use_symm_mem = sizes is None and should_nccl_symm_mem_ag_rs()
+        if use_symm_mem:
+            output = self._reduce_scatter_symm_mem(input_tensor)
         else:
-            pynccl_comm.reduce_scatter(output, input_tensor)
+            output = torch.empty(
+                output_shape, dtype=input_tensor.dtype, device=input_tensor.device
+            )
+            if sizes is not None and sizes.count(sizes[0]) != len(sizes):
+                pynccl_comm.reduce_scatterv(output, input_tensor, sizes=sizes)
+            else:
+                pynccl_comm.reduce_scatter(output, input_tensor)
 
         # Reshape before returning
         return output.movedim(0, dim).contiguous()
+
+    def _get_symm_scratch(
+        self,
+        role: str,
+        shape: tuple[int, ...],
+        dtype: torch.dtype,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Persistent, pre-registered NCCL symmetric-memory scratch buffer.
+
+        Allocating a fresh symm tensor per collective pays the
+        ``nccl_symm_mem_context`` snapshot + window-registration scan on every
+        call (~0.5 ms/RS+AG pair, dwarfing the NVLS transfer itself). Instead we
+        allocate once per ``(role, shape, dtype)``, register once, and reuse.
+
+        Safe for serial (eager) sequence parallelism: each collective's result
+        is consumed on the same stream before the next same-role collective
+        reuses the buffer. Distinct roles (e.g. ``rs_in`` vs ``ag_out``, both
+        full-size) get distinct buffers so a reduce-scatter input copy never
+        clobbers a still-live all-gather output.
+        """
+        from vllm.distributed.device_communicators.pynccl_allocator import (
+            nccl_symm_mem_context,
+        )
+
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None
+        cache = self.__dict__.setdefault("_symm_scratch_bufs", {})
+        key = (role, tuple(shape), dtype)
+        buf = cache.get(key)
+        if buf is None:
+            with nccl_symm_mem_context(pynccl_comm):
+                buf = torch.empty(shape, dtype=dtype, device=device)
+            cache[key] = buf
+        return buf
+
+    def _reduce_scatter_symm_mem(
+        self,
+        input_tensor: torch.Tensor,
+    ) -> torch.Tensor:
+        """ReduceScatter using NCCL symmetric memory (NVLS).
+
+        Only called for uniform-size reduce_scatter (variable sizes are
+        guarded out by the caller to avoid asymmetric ncclCommWindowRegister).
+        Uses persistent pre-registered scratch (see _get_symm_scratch).
+        """
+        from vllm.distributed.device_communicators.pynccl_allocator import (
+            is_symmetric_memory_tensor,
+        )
+
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None
+
+        chunk = input_tensor.shape[0] // self.world_size
+        output_shape = (chunk,) + tuple(input_tensor.shape[1:])
+
+        symm_output = self._get_symm_scratch(
+            "rs_out", output_shape, input_tensor.dtype, input_tensor.device
+        )
+        # NVLS reduce-scatter (LDMC) requires the input in symmetric memory.
+        if is_symmetric_memory_tensor(input_tensor):
+            symm_input = input_tensor
+        else:
+            symm_input = self._get_symm_scratch(
+                "rs_in",
+                tuple(input_tensor.shape),
+                input_tensor.dtype,
+                input_tensor.device,
+            )
+            symm_input.copy_(input_tensor)
+
+        pynccl_comm.reduce_scatter(symm_output, symm_input)
+        return symm_output
 
     def send(self, tensor: torch.Tensor, dst: int | None = None) -> None:
         """Sends a tensor to the destination rank in a blocking way"""
@@ -416,6 +536,9 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm = None
         if self.ca_comm is not None:
             self.ca_comm = None
+        if self.aiter_ar_comm is not None:
+            self.aiter_ar_comm.close()
+            self.aiter_ar_comm = None
         if self.fi_ar_comm is not None:
             self.fi_ar_comm.destroy()
             self.fi_ar_comm = None
@@ -439,6 +562,14 @@ class CudaCommunicator(DeviceCommunicatorBase):
         # shape
         if sizes is not None and all(s == sizes[0] for s in sizes):
             sizes = None
+
+        # Symmetric memory is only used when all ranks have uniform sizes.
+        # ncclCommWindowRegister is collective: asymmetric pool allocations
+        # from variable per-rank sizes cause deadlocks.
+        if sizes is None and should_nccl_symm_mem_ag_rs():
+            if isinstance(input_, torch.Tensor):
+                return self._all_gather_symm_mem(input_)
+            return self._all_gather_batched_symm_mem(input_)
 
         def _all_gather_single(input_: torch.Tensor, sizes: list[int] | None = None):
             input_size = input_.size()
@@ -470,6 +601,56 @@ class CudaCommunicator(DeviceCommunicatorBase):
         pynccl_comm.group_end()
 
         return output_list
+
+    def _all_gather_symm_mem(self, input_: torch.Tensor) -> torch.Tensor:
+        """AllGather a single tensor using NCCL symmetric memory (NVLS).
+
+        Only the output needs to be in symmetric memory; NCCL does not
+        require the AG input to be symmetrically allocated.
+        """
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None
+
+        out_size = (input_.size(0) * self.world_size,) + tuple(input_.size()[1:])
+        # Persistent pre-registered scratch avoids the per-call symm-mem context
+        # snapshot/registration overhead (see _get_symm_scratch).
+        symm_output = self._get_symm_scratch(
+            "ag_out", out_size, input_.dtype, input_.device
+        )
+        pynccl_comm.all_gather(symm_output, input_)
+        return symm_output
+
+    def _all_gather_batched_symm_mem(
+        self, inputs: list[torch.Tensor]
+    ) -> list[torch.Tensor]:
+        """AllGather a list of tensors using NCCL symmetric memory (NVLS).
+
+        Uses group_start/group_end to batch the collectives.
+        Only the output needs to be in symmetric memory (see
+        _all_gather_symm_mem).
+        """
+        from vllm.distributed.device_communicators.pynccl_allocator import (
+            nccl_symm_mem_context,
+        )
+
+        pynccl_comm = self.pynccl_comm
+        assert pynccl_comm is not None
+        world_size = self.world_size
+
+        symm_outputs = []
+        with nccl_symm_mem_context(pynccl_comm):
+            for inp in inputs:
+                out_size = (inp.size(0) * world_size,) + inp.size()[1:]
+                symm_outputs.append(
+                    torch.empty(out_size, dtype=inp.dtype, device=inp.device)
+                )
+
+        pynccl_comm.group_start()
+        for symm_out, inp in zip(symm_outputs, inputs):
+            pynccl_comm.all_gather(symm_out, inp)
+        pynccl_comm.group_end()
+
+        return symm_outputs
 
     def dispatch_router_logits(
         self,

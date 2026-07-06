@@ -14,7 +14,6 @@ import vllm_xpu_kernels._xpu_C  # noqa
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.utils.torch_utils import supports_xpu_graph
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
 
 from .interface import DeviceCapability, Platform, PlatformEnum
@@ -27,6 +26,78 @@ else:
     VllmConfig = None
 
 logger = init_logger(__name__)
+
+
+def get_mem_info_wrapper(
+    device: int | str | torch.device | None = None,
+) -> tuple[int, int]:
+    """
+    Get memory info for a device, compatible with torch.accelerator.get_memory_info API.
+
+    Args:
+        device: Device specification. Can be:
+            - None: Use current XPU device
+            - int: Device index
+            - str: Device string (e.g., "xpu:0", "xpu")
+            - torch.device: Device object
+
+    Returns:
+        Tuple[int, int]: (free_memory, total_memory) in bytes
+    """
+    # Handle None - use current device
+    if device is None:
+        device = torch.xpu.current_device()
+
+    # Handle torch.device objects
+    elif isinstance(device, torch.device):
+        if device.type != "xpu":
+            raise RuntimeError(f"Expected 'xpu' device, got '{device.type}'")
+        # If device index is not specified, use current device
+        device = (
+            device.index if device.index is not None else torch.xpu.current_device()
+        )
+
+    # Handle string device specifications (e.g., "xpu:0", "xpu")
+    elif isinstance(device, str):
+        if not device.startswith("xpu"):
+            raise RuntimeError(f"Expected 'xpu' device string, got '{device}'")
+        # Parse device string
+        parts = device.split(":")
+        if len(parts) == 1:
+            # "xpu" -> use current device
+            device = torch.xpu.current_device()
+        elif len(parts) == 2:
+            # "xpu:0" -> use index 0
+            try:
+                device = int(parts[1])
+            except ValueError as err:
+                raise RuntimeError(
+                    f"Invalid device index: '{device}', expected integer after ':'"
+                ) from err
+        else:
+            raise RuntimeError(f"Invalid device string format: '{device}'")
+
+    # At this point, device should be an int
+    if isinstance(device, int):
+        # bounds check
+        device_count = torch.xpu.device_count()
+        if not (0 <= device < device_count):
+            raise ValueError(
+                f"Invalid device index {device}, must be in range [0, {device_count})"
+            )
+
+    elif not isinstance(device, int):
+        raise TypeError(
+            f"device must be int, str, torch.device, or None, got {type(device)}"
+        )
+
+    # Call the underlying C++ implementation
+    free, total = torch.ops._C_cache_ops.getMemoryInfo(device)
+
+    return free, total
+
+
+torch.accelerator.get_memory_info = get_mem_info_wrapper
 
 
 class XPUPlatform(Platform):
@@ -56,7 +127,7 @@ class XPUPlatform(Platform):
         from vllm.v1.attention.backends.utils import set_kv_cache_layout
 
         set_kv_cache_layout("NHD")
-        logger.info(
+        logger.info_once(
             "Setting VLLM_KV_CACHE_LAYOUT to 'NHD' for XPU; "
             "only NHD layout is supported by XPU attention kernels."
         )
@@ -77,6 +148,15 @@ class XPUPlatform(Platform):
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
             return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif attn_selector_config.use_mm_prefix:
+            # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
+            # multimodal prefix-LM bidirectional mask. Fall back to Triton
+            # Attention, which supports mm_prefix.
+            logger.warning_once(
+                "Flash Attention on XPU does not support multimodal prefix-LM "
+                "attention. Falling back to Triton Attention backend."
+            )
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif dtype == torch.float32:
             logger.warning_once(
                 "Flash Attention on XPU does not support float32 dtype. "
@@ -92,7 +172,7 @@ class XPUPlatform(Platform):
                 f"with use_mla: {attn_selector_config.use_mla}"
             )
 
-        logger.info("Using Flash Attention backend.")
+        logger.info_once("Using Flash Attention backend.")
         return AttentionBackendEnum.FLASH_ATTN.get_path()
 
     @classmethod
@@ -178,8 +258,6 @@ class XPUPlatform(Platform):
 
     @classmethod
     def check_and_update_config(cls, vllm_config: VllmConfig) -> None:
-        parallel_config = vllm_config.parallel_config
-
         # lazy import to avoid circular import
         from vllm.config import CUDAGraphMode
 
@@ -190,15 +268,19 @@ class XPUPlatform(Platform):
         attention_config = vllm_config.attention_config
         if attention_config.backend is None:
             attention_config.backend = AttentionBackendEnum.FLASH_ATTN
+
+        # lazy import to avoid circular import
+        from vllm.utils.torch_utils import supports_xpu_graph
+
         if not supports_xpu_graph():
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning(
+            logger.warning_once(
                 "XPU Graph is not supported in the current PyTorch version, "
                 "disabling cudagraph_mode."
             )
         elif not envs.VLLM_XPU_ENABLE_XPU_GRAPH:
             compilation_config.cudagraph_mode = CUDAGraphMode.NONE
-            logger.warning(
+            logger.warning_once(
                 "XPU Graph is disabled by environment variable, "
                 "please set VLLM_XPU_ENABLE_XPU_GRAPH=1 to enable it."
             )
@@ -217,7 +299,7 @@ class XPUPlatform(Platform):
         if compilation_config.mode != CompilationMode.NONE:
             for flag, feature_name in fusion_passes_to_disable.items():
                 if getattr(pass_config, flag):
-                    logger.warning(
+                    logger.warning_once(
                         "Feature %r is not yet supported on XPU and will be disabled.",
                         feature_name,
                     )
@@ -241,6 +323,16 @@ class XPUPlatform(Platform):
         # spawn is the only supported multiprocessing method on XPU
         if "VLLM_WORKER_MULTIPROC_METHOD" not in os.environ:
             os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+
+        # XPU requires graceful shutdown to allow oneCCL/Level Zero resources
+        # to be properly released. Without this, subsequent server startups on
+        # the same devices may hang during CCL initialization.
+        if vllm_config.shutdown_timeout == 0:
+            vllm_config.shutdown_timeout = 5
+            logger.info(
+                "XPU platform: set server shutdown_timeout=%d.",
+                vllm_config.shutdown_timeout,
+            )
 
     @classmethod
     def update_block_size_for_backend(cls, vllm_config: "VllmConfig") -> None:
@@ -324,9 +416,8 @@ class XPUPlatform(Platform):
 
     @classmethod
     def get_device_communicator_cls(cls) -> str:
-        from vllm.utils.torch_utils import supports_xccl
-
-        if not supports_xccl():
+        if not torch.distributed.is_xccl_available():
+            # Supports xccl with PyTorch versions >= 2.8.0.dev for XPU platform
             logger.warning(
                 "xccl is not enabled in this torch build, communication"
                 " is not available."

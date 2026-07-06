@@ -398,7 +398,9 @@ class KVCacheManager:
         # Should call this function before allocating new blocks to reduce
         # the number of evicted blocks.
         self.coordinator.remove_skipped_blocks(
-            request.request_id, total_computed_tokens
+            request.request_id,
+            total_computed_tokens,
+            num_prompt_tokens=request.num_prompt_tokens,
         )
 
         num_blocks_to_allocate = self.coordinator.get_num_blocks_to_allocate(
@@ -468,7 +470,10 @@ class KVCacheManager:
         self.coordinator.free(request.request_id)
 
     def remove_skipped_blocks(
-        self, request_id: str, total_computed_tokens: int
+        self,
+        request_id: str,
+        total_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
     ) -> None:
         """Remove the blocks that are no longer needed from `blocks` and replace
         the removed blocks with null_block.
@@ -477,8 +482,11 @@ class KVCacheManager:
             request_id: The request ID.
             total_computed_tokens: The total number of computed tokens, including
                 local computed tokens and external computed tokens.
+            num_prompt_tokens: Optional prompt length for R-SWA gap eviction.
         """
-        self.coordinator.remove_skipped_blocks(request_id, total_computed_tokens)
+        self.coordinator.remove_skipped_blocks(
+            request_id, total_computed_tokens, num_prompt_tokens
+        )
 
     def pop_blocks_for_free(self, request: Request) -> list[KVCacheBlock]:
         """Pop the request's bookkeeping and return its blocks without

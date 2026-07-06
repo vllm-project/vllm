@@ -60,7 +60,9 @@ def _indexer_k_quant_and_cache_kernel(
     slot_id = tl.load(slot_mapping_ptr + tid)
     if slot_id < 0:
         return
-    block_id = slot_id // block_size
+    # The packed KV layout makes per-block strides large
+    # enough that block_id * stride can exceed 32-bit range.
+    block_id = (slot_id // block_size).to(tl.int64)
     block_offset = slot_id % block_size
     tile_block_id = block_offset // BLOCK_TILE_SIZE
     tile_block_offset = block_offset % BLOCK_TILE_SIZE
@@ -181,7 +183,9 @@ def _cp_gather_indexer_quant_cache_kernel(
         block_table_ptr + block_table_offset, mask=valid_block_table, other=-1
     )
     valid_block = valid_block_table & (block_id >= 0) & (block_id < NUM_BLOCKS)
-    safe_block_id = tl.where(valid_block, block_id, 0)
+    # The packed KV layout makes per-block strides large
+    # enough that block_id * stride can exceed 32-bit range.
+    safe_block_id = tl.where(valid_block, block_id, 0).to(tl.int64)
     safe_block_offset = tl.where(valid_block, block_offset, 0)
     tiled_block_offset = safe_block_offset % BLOCK_TILE_SIZE
     if LAYOUT == "SHUFFLE":
