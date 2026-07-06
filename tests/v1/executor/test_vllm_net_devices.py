@@ -3,7 +3,28 @@
 
 import pytest
 
-from vllm.v1.executor.vllm_net_devices import normalize_pci
+from vllm.v1.executor.vllm_net_devices import (
+    _dp_adjusted_local_rank,
+    normalize_pci,
+)
+
+
+def _make_vllm_config(**parallel_overrides):
+    from types import SimpleNamespace
+
+    defaults = {
+        "assigned_physical_gpu_ids": None,
+        "data_parallel_backend": "mp",
+        "data_parallel_external_lb": False,
+        "data_parallel_index": 0,
+        "data_parallel_rank_local": None,
+        "distributed_executor_backend": "mp",
+        "nnodes_within_dp": 1,
+        "pipeline_parallel_size": 1,
+        "tensor_parallel_size": 1,
+    }
+    defaults.update(parallel_overrides)
+    return SimpleNamespace(parallel_config=SimpleNamespace(**defaults))
 
 
 @pytest.mark.parametrize(
@@ -74,3 +95,24 @@ def test_normalize_pci_device_out_of_range_raises():
 def test_normalize_pci_empty_string_raises():
     with pytest.raises(ValueError):
         normalize_pci("")
+
+
+@pytest.mark.parametrize("tp_local_rank", [0, 1])
+def test_dp_adjusted_local_rank_skips_external_lb(tp_local_rank):
+    config = _make_vllm_config(
+        assigned_physical_gpu_ids=[2, 3],
+        data_parallel_external_lb=True,
+        data_parallel_index=1,
+        tensor_parallel_size=2,
+    )
+
+    assert _dp_adjusted_local_rank(tp_local_rank, config) == tp_local_rank
+
+
+def test_dp_adjusted_local_rank_preserves_full_node_assigned_gpu_ids():
+    config = _make_vllm_config(
+        assigned_physical_gpu_ids=[0, 1, 2, 3],
+        data_parallel_index=2,
+    )
+
+    assert _dp_adjusted_local_rank(0, config) == 2

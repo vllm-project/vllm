@@ -205,7 +205,8 @@ def _dp_adjusted_local_rank(tp_local_rank: int, vllm_config: VllmConfig) -> int:
     """
     pc = vllm_config.parallel_config
     if (
-        pc.distributed_executor_backend not in ("ray", "external_launcher")
+        not pc.data_parallel_external_lb
+        and pc.distributed_executor_backend not in ("ray", "external_launcher")
         and pc.data_parallel_backend != "ray"
         and pc.nnodes_within_dp == 1
     ):
