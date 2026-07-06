@@ -83,7 +83,7 @@ def test_free_request_calls_ec_connector_and_surfaces_params():
     )
     request.status = RequestStatus.FINISHED_STOPPED
 
-    scheduler = create_scheduler(use_ec_connector=True)
+    scheduler = create_scheduler(use_ec_connector=True, ec_role="ec_producer")
 
     mock_ec = MagicMock()
     mock_ec.request_finished.return_value = (False, EC_PARAMS)
@@ -108,7 +108,7 @@ def test_free_request_without_ec_connector_returns_none():
     )
     request.status = RequestStatus.FINISHED_STOPPED
 
-    scheduler = create_scheduler(use_ec_connector=True)
+    scheduler = create_scheduler(use_ec_connector=True, ec_role="ec_producer")
 
     kv_params, ec_params = scheduler._free_request(request)
 
