@@ -111,6 +111,9 @@ pub fn lower_sampling_params(
         structured_outputs,
         skip_reading_prefix_cache,
         vllm_xargs,
+        use_beam_search: _,
+        n: _,
+        length_penalty: _,
     } = sampling_params;
 
     validate_logprobs(

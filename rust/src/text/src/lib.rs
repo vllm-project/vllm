@@ -10,6 +10,7 @@
 use std::mem::take;
 
 pub use backend::{DynTextBackend, SamplingHints, SamplingLimits, TextBackend};
+pub use beam_search::BeamSearchOutput;
 pub use error::{Error, LogprobsError, Result, TokenIdsError};
 use futures::Stream;
 pub use lower::{
@@ -27,6 +28,7 @@ use vllm_llm::{GenerateOutputStream, Llm};
 use vllm_tokenizer::DynTokenizer;
 
 pub mod backend;
+mod beam_search;
 mod error;
 mod lower;
 pub mod output;
@@ -168,6 +170,57 @@ impl TextLlm {
 
         let raw_stream = self.llm.generate(generate_request).await?;
         Ok((text_request, raw_stream))
+    }
+
+    /// Run beam search for a text request and return the collected beam outputs.
+    ///
+    /// Unlike `generate()`, beam search makes multiple engine calls (one per beam
+    /// per step) and returns fully collected results rather than a stream.
+    pub async fn beam_search(&self, mut request: TextRequest) -> Result<BeamSearchOutput> {
+        request.validate()?;
+
+        let tokenizer = self.backend.tokenizer();
+        let prompt_token_ids = match take(&mut request.prompt) {
+            Prompt::Text(text) => tokenizer.encode(&text, request.add_special_tokens)?,
+            Prompt::TokenIds(token_ids) => token_ids,
+        };
+
+        let sampling_hints = self.backend.sampling_hints()?;
+        let sampling_limits = SamplingLimits {
+            max_model_len: self.max_model_len,
+            max_logprobs: self.max_logprobs,
+            model_vocab_size: self.backend.model_vocab_size(),
+            tokenizer_vocab_size: self.backend.tokenizer_vocab_size(),
+        };
+
+        let max_tokens = resolve_max_tokens(
+            request.sampling_params.max_tokens,
+            sampling_hints.default_max_tokens,
+            sampling_limits.max_model_len,
+            prompt_token_ids.len() as u32,
+        )?;
+
+        let config = crate::beam_search::BeamSearchConfig {
+            beam_width: request.sampling_params.n.unwrap_or(1),
+            max_tokens,
+            temperature: request
+                .sampling_params
+                .temperature
+                .or(sampling_hints.default_temperature)
+                .unwrap_or(1.0),
+            length_penalty: request.sampling_params.length_penalty.unwrap_or(1.0),
+            ignore_eos: request.sampling_params.ignore_eos,
+            eos_token_id: (!request.sampling_params.ignore_eos)
+                .then_some(sampling_hints.primary_eos_token_id)
+                .flatten(),
+            lora_request: request.lora_request,
+            cache_salt: request.cache_salt,
+            priority: request.priority,
+            data_parallel_rank: request.data_parallel_rank,
+            stop_token_ids: request.sampling_params.stop_token_ids.unwrap_or_default(),
+        };
+
+        crate::beam_search::run_beam_search(&self.llm, prompt_token_ids, config).await
     }
 
     /// Abort in-flight requests by their external (user-supplied) request ids.

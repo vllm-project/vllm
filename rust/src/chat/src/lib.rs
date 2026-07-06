@@ -252,6 +252,45 @@ impl ChatLlm {
         Ok(token_ids)
     }
 
+    /// Render, tokenize, and run beam search for one chat request.
+    ///
+    /// Reuses the same render → finalize → prompt extraction pipeline as
+    /// [`Self::chat`], but calls [`TextLlm::beam_search`] instead of
+    /// [`TextLlm::generate`].
+    pub async fn beam_search_chat(
+        &self,
+        request: ChatRequest,
+    ) -> Result<vllm_text::BeamSearchOutput> {
+        request.validate()?;
+
+        let rendered = self.backend.chat_renderer().render(&request)?;
+
+        let (prompt, mm_features) = multimodal::finalize_rendered_prompt(
+            &request,
+            rendered,
+            self.backend.multimodal_model_info(),
+            self.model_dtype,
+        )
+        .await?;
+
+        let text_request = TextRequest {
+            request_id: request.request_id.clone(),
+            prompt,
+            mm_features,
+            sampling_params: request.sampling_params,
+            decode_options: request.decode_options,
+            intermediate: false, // beam search is never streaming
+            priority: request.priority,
+            cache_salt: request.cache_salt,
+            add_special_tokens: request.add_special_tokens,
+            data_parallel_rank: request.data_parallel_rank,
+            reasoning_parser_kwargs: None,
+            lora_request: request.lora_request,
+        };
+
+        self.text.beam_search(text_request).await.map_err(Error::from)
+    }
+
     /// Abort in-flight requests by their external (user-supplied) request ids.
     pub async fn abort(&self, external_ids: &[String]) -> Result<()> {
         self.text.abort(external_ids).await?;

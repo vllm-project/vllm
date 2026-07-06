@@ -116,6 +116,14 @@ pub struct SamplingParams {
     /// computed blocks may still populate the cache). `None` defers to
     /// engine-core defaults.
     pub skip_reading_prefix_cache: Option<bool>,
+    /// Whether to use beam search instead of sampling.
+    pub use_beam_search: bool,
+    /// Number of beams (completion choices) to generate.
+    /// When `use_beam_search` is true, this is the beam width.
+    pub n: Option<u32>,
+    /// Length penalty for beam search scoring.
+    /// > 1.0 penalizes longer sequences; < 1.0 favors longer sequences.
+    pub length_penalty: Option<f32>,
     /// Additional request parameters for custom extensions.
     pub vllm_xargs: Option<HashMap<String, Value>>,
 }
@@ -145,6 +153,9 @@ impl Default for SamplingParams {
             bad_words: None,
             logprob_token_ids: None,
             structured_outputs: None,
+            use_beam_search: false,
+            n: None,
+            length_penalty: None,
             skip_reading_prefix_cache: None,
             vllm_xargs: None,
         }
