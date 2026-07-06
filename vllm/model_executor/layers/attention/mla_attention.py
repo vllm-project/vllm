@@ -850,7 +850,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                     "quant_group_size not passed through custom op"
                 )
                 finfo = torch.finfo(_FP8_DTYPE)
-                torch.ops._C.per_token_group_fp8_quant(
+                from vllm.kernels.helion.routing import route_quant
+
+                route_quant(
+                    "per_token_group_fp8_quant",
                     actual,
                     quant_output[:quant_idx],
                     output_block_scale[:quant_idx],
