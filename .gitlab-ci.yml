@@ -1,0 +1,48 @@
+stages:
+  - lint
+
+# ---------------- lint ----------------
+# 复用仓库自带的 pre-commit 配置（ruff / typos / clang-format / mypy 等），
+# 只对本次变更的文件做增量检查（--from-ref/--to-ref）:
+#   - MR 流水线: 对比 MR 的 diff base
+#   - 分支 push: 对比 push 前的 commit; 新分支/force-push 等拿不到时
+#     退化为只检查最近一个 commit, 再不行才全量
+lint:
+  stage: lint
+  tags:
+    - iquest-inference-runner
+  image: python:3.12
+  timeout: 1h
+  variables:
+    GIT_STRATEGY: clone
+    GIT_DEPTH: "50"
+    PRE_COMMIT_HOME: ${CI_PROJECT_DIR}/.cache/pre-commit
+    PIP_CACHE_DIR: ${CI_PROJECT_DIR}/.cache/pip
+  cache:
+    key: pre-commit-${CI_PROJECT_NAME}
+    paths:
+      - .cache/pre-commit
+      - .cache/pip
+  script:
+    - pip install -r requirements/lint.txt
+    - |
+      NULL_SHA=0000000000000000000000000000000000000000
+      if [ -n "$CI_MERGE_REQUEST_DIFF_BASE_SHA" ] && git cat-file -e "$CI_MERGE_REQUEST_DIFF_BASE_SHA" 2>/dev/null; then
+        FROM_REF=$CI_MERGE_REQUEST_DIFF_BASE_SHA
+      elif [ -n "$CI_COMMIT_BEFORE_SHA" ] && [ "$CI_COMMIT_BEFORE_SHA" != "$NULL_SHA" ] && git cat-file -e "$CI_COMMIT_BEFORE_SHA" 2>/dev/null; then
+        FROM_REF=$CI_COMMIT_BEFORE_SHA
+      else
+        FROM_REF=$(git rev-parse HEAD~1 2>/dev/null || true)
+      fi
+      if [ -n "$FROM_REF" ]; then
+        echo "Linting changes from $FROM_REF to $CI_COMMIT_SHA"
+        pre-commit run --hook-stage manual --show-diff-on-failure \
+          --from-ref "$FROM_REF" --to-ref "$CI_COMMIT_SHA"
+      else
+        echo "No base ref available, falling back to linting all files"
+        pre-commit run --all-files --hook-stage manual --show-diff-on-failure
+      fi
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == "develop"
+    - if: $CI_COMMIT_TAG
