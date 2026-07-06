@@ -150,9 +150,7 @@ class HYV3MoEFused(nn.Module):
 
         self.n_logical_experts = self.n_routed_experts
         self.n_redundant_experts = (
-            eplb_config.get_num_redundant_experts(
-                self.n_routed_experts, self.ep_size
-            )
+            eplb_config.get_num_redundant_experts(self.n_routed_experts, self.ep_size)
             if self.enable_eplb
             else 0
         )

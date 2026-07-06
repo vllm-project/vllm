@@ -148,50 +148,6 @@ class MoEMixin(MixtureOfExperts):
             mlp.n_redundant_experts = self.num_redundant_experts
             mlp.experts.update_expert_map()
 
-    def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
-        """
-        Params for weights, fp8 weight scales, fp8 activation scales
-        (param_name, weight_name, expert_id, shard_id)
-        """
-        # Models saved with fused experts. These are checkpoints released:
-        # - After Transformers v5
-        # - Before Transformers v5, but re-saved with save_original_format=False
-        # In the fused experts case, we repurpose the expert_id as shard_idx for
-        # deconcatenating w1 and w3 in FusedMoE.load_weights.
-        expert_mapping = [
-            ("experts.w13_weight", "experts.gate_up_proj", 0, "w1"),
-            ("experts.w13_weight", "experts.gate_up_proj", 1, "w3"),
-            ("experts.w2_weight", "experts.down_proj", 0, "w2"),
-        ]
-        # Models saved with ModuleList experts
-        ckpt_names = [
-            # (ckpt_gate_proj_name, ckpt_down_proj_name, ckpt_up_proj_name)
-            ("gate_proj", "down_proj", "up_proj"),  # Most common MoE style
-            ("w1", "w2", "w3"),  # Granite, Mixtral, Phi MoE style
-            ("linear", "linear_1", "linear_v"),  # Grok1 style
-        ]
-        num_experts = self.model_config.get_num_experts()
-        num_redundant_experts = (
-            self.parallel_config.eplb_config.get_num_redundant_experts(
-                num_experts, get_ep_group().world_size
-            )
-            if self.parallel_config.enable_eplb
-            else 0
-        )
-        for gate_proj, down_proj, up_proj in ckpt_names:
-            expert_mapping.extend(
-                fused_moe_make_expert_params_mapping(
-                    self,
-                    ckpt_gate_proj_name=gate_proj,
-                    ckpt_down_proj_name=down_proj,
-                    ckpt_up_proj_name=up_proj,
-                    num_experts=num_experts,
-                    num_redundant_experts=num_redundant_experts,
-                    routed_experts_prefix="",
-                )
-            )
-        return expert_mapping
-
     def recursive_replace(self):
         """Initialize the MoE layers."""
         text_config = self.text_config

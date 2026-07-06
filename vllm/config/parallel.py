@@ -504,8 +504,10 @@ class ParallelConfig:
                     f"TP={self.tensor_parallel_size},DP={self.data_parallel_size}."
                 )
         else:
-            if self.eplb_config.num_redundant_experts is not None \
-                    and self.eplb_config.num_redundant_experts != 0:
+            if (
+                self.eplb_config.num_redundant_experts is not None
+                and self.eplb_config.num_redundant_experts != 0
+            ):
                 raise ValueError(
                     "num_redundant_experts is set to "
                     f"{self.eplb_config.num_redundant_experts} but EPLB is not "
