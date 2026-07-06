@@ -1106,13 +1106,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 self.speculator.draft_logits,
             )
 
-        assert sampler_output.num_sampled is not None
-        assert sampler_output.num_rejected is not None
-        num_rejected_for_next_step = sampler_output.num_rejected
         if sampler_output.num_rejected_for_next_step is not None:
-            num_rejected_for_next_step = sampler_output.num_rejected_for_next_step
-
-        return sampler_output, sampler_output.num_sampled, num_rejected_for_next_step
+            return (
+                sampler_output,
+                sampler_output.num_sampled,
+                sampler_output.num_rejected_for_next_step,
+            )
+        return sampler_output, sampler_output.num_sampled, sampler_output.num_rejected
 
     def postprocess_sampled(
         self,
@@ -1434,18 +1434,16 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             return ModelRunnerOutput.with_kv_conn_output_only(kv_connector_output)
 
         # Last rank: sample tokens
-        sampler_output, num_sampled, num_rejected_for_next_step = self.sample(
+        sampler_output, num_sampled, num_rejected = self.sample(
             hidden_states, input_batch, grammar_output
         )
-        assert sampler_output.num_rejected is not None
-        num_rejected_for_postprocess = sampler_output.num_rejected
 
         if self.pp_handler is not None:
             # Broadcast to non-last PP ranks (handles spec decode multi-token).
             self.pp_handler.broadcast(
                 sampler_output.sampled_token_ids,
                 num_sampled,
-                num_rejected_for_next_step,
+                num_rejected,
                 input_batch,
             )
 
@@ -1501,7 +1499,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             postprocess_input_batch.idx_mapping,
             sampler_output.sampled_token_ids,
             num_sampled,
-            num_rejected_for_postprocess,
+            sampler_output.num_rejected,
             postprocess_input_batch.query_start_loc,
         )
 
@@ -1522,7 +1520,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                 spec_hidden_states,
                 aux_hidden_states,
                 num_sampled,
-                num_rejected_for_next_step,
+                num_rejected,
                 self.req_states.last_sampled_tokens,
                 self.req_states.next_prefill_tokens,
                 self.sampler.sampling_states.temperature.gpu,
