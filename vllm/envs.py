@@ -194,6 +194,7 @@ if TYPE_CHECKING:
     VLLM_FLASHINFER_AUTOTUNE_CACHE_DIR: str | None = None
     VLLM_FLASHINFER_ALLREDUCE_BACKEND: Literal["auto", "trtllm", "mnnvl"] = "auto"
     VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE: int = 394 * 1024 * 1024
+    VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD: int = 0
     VLLM_XGRAMMAR_CACHE_MB: int = 0
     VLLM_REGEX_COMPILATION_TIMEOUT_S: int = 5
     VLLM_MSGPACK_ZERO_COPY_THRESHOLD: int = 256
@@ -1585,6 +1586,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Control the workspace buffer size for the FlashInfer backend.
     "VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE": lambda: int(
         os.getenv("VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE", str(394 * 1024 * 1024))
+    ),
+    # When >0 and num_tokens >= threshold, the B12x SM12x MoE wrapper routes
+    # to cutlass_fused_moe (prefill) instead of the b12x kernels (decode).
+    # 0 (default) keeps pure b12x dispatch. Requires a FlashInfer build that
+    # exposes the `cutlass_prefill_threshold` kwarg on B12xMoEWrapper.
+    "VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD": lambda: int(
+        os.getenv("VLLM_FLASHINFER_B12X_CUTLASS_PREFILL_THRESHOLD", "0")
     ),
     # Control the maximum number of tokens per expert supported by the
     # NVFP4 MoE CUTLASS Kernel. This value is used to create a buffer for
