@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import random
+from unittest.mock import patch
 
 import pytest
 import ray
@@ -130,3 +131,27 @@ def test_custom_allreduce(
     if world_size > torch.accelerator.device_count():
         pytest.skip("Not enough GPUs to run the test.")
     multi_process_parallel(monkeypatch, tp_size, pipeline_parallel_size, test_target)
+
+
+@pytest.mark.parametrize(
+    "is_cuda,is_sm12x,expected",
+    [
+        (True, True, True),  # consumer Blackwell (sm_120 / sm_121): unsupported
+        (True, False, False),  # other CUDA arch (sm_90 / sm_100 / ...): supported
+        (False, True, False),  # non-CUDA platform (e.g. ROCm): not gated
+    ],
+)
+def test_is_unsupported_arch(is_cuda, is_sm12x, expected):
+    from vllm.distributed.device_communicators import custom_all_reduce
+
+    with (
+        patch.object(
+            custom_all_reduce.current_platform, "is_cuda", return_value=is_cuda
+        ),
+        patch.object(
+            custom_all_reduce.current_platform,
+            "is_device_capability_family",
+            return_value=is_sm12x,
+        ),
+    ):
+        assert custom_all_reduce.CustomAllreduce._is_unsupported_arch() is expected
