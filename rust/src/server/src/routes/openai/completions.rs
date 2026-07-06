@@ -335,7 +335,21 @@ async fn collect_beam_search_completion(
     }: ResponseOptions,
     tokenizer: &dyn Tokenizer,
 ) -> CompletionResponse {
-    let usage = Usage::from_token_usage(beam_result.usage, enable_prompt_tokens_details, None);
+    let prompt_len = beam_result.prompt_token_ids.len();
+    let output_tokens: usize = beam_result
+        .beams
+        .iter()
+        .map(|b| b.tokens.len().saturating_sub(prompt_len))
+        .sum();
+    let usage = Usage::from_token_usage(
+        vllm_llm::TokenUsage {
+            prompt_token_count: prompt_len,
+            output_token_count: output_tokens,
+            prompt_cache_usage: vllm_llm::PromptCacheUsage::default(),
+        },
+        enable_prompt_tokens_details,
+        None,
+    );
     let metrics = PerRequestMetrics::from_request(
         enable_per_request_metrics,
         vllm_llm::RequestTimestamps::default(),
