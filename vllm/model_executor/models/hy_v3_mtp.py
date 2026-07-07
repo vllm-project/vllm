@@ -441,6 +441,12 @@ class HYV3MTP(nn.Module):
                     if "mlp.router.gate." in name:
                         name = name.replace("router.gate.", "gate.")
 
+                    # Quantized model weight_scale/weight_offset are not
+                    # standalone parameters — they are consumed by the
+                    # quantized layer's quant_method during __init__.
+                    if name.endswith("_scale") or name.endswith("_offset"):
+                        continue
+
                     param = params_dict[name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
