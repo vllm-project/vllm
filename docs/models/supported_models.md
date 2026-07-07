@@ -242,49 +242,23 @@ Use the Hugging Face CLI to [manage models](https://huggingface.co/docs/huggingf
 
 ```bash
 # List cached models
-hf scan-cache
+hf cache list -q
 
 # Show detailed (verbose) output
-hf scan-cache -v
+hf cache list
 
 # Specify a custom cache directory
-hf scan-cache --dir ~/.cache/huggingface/hub
+hf cache list --dir ~/.cache/huggingface/hub
 ```
 
 #### Delete a cached model
 
-Use the Hugging Face CLI to interactively [delete downloaded model](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#clean-your-cache) from the cache:
+Use the Hugging Face CLI to [delete downloaded model](https://huggingface.co/docs/huggingface_hub/guides/manage-cache#clean-your-cache) from the cache:
 
-<details>
-<summary>Commands</summary>
-
-```console
-# The `delete-cache` command requires extra dependencies to work with the TUI.
-# Please run `pip install huggingface_hub[cli]` to install them.
-
-# Launch the interactive TUI to select models to delete
-$ hf delete-cache
-? Select revisions to delete: 1 revisions selected counting for 438.9M.
-  ○ None of the following (if selected, nothing will be deleted).
-Model BAAI/bge-base-en-v1.5 (438.9M, used 1 week ago)
-❯ ◉ a5beb1e3: main # modified 1 week ago
-
-Model BAAI/bge-large-en-v1.5 (1.3G, used 1 week ago)
-  ○ d4aa6901: main # modified 1 week ago
-
-Model BAAI/bge-reranker-base (1.1G, used 4 weeks ago)
-  ○ 2cfc18c9: main # modified 4 weeks ago
-
-Press <space> to select, <enter> to validate and <ctrl+c> to quit without modification.
-
-# Need to confirm after selected
-? Select revisions to delete: 1 revision(s) selected.
-? 1 revisions selected counting for 438.9M. Confirm deletion ? Yes
-Start deletion.
-Done. Deleted 1 repo(s) and 0 revision(s) for a total of 438.9M.
+```bash
+# delete all the cached objects
+hf cache rm $(hf cache list -q)
 ```
-
-</details>
 
 #### Using a proxy
 
