@@ -617,6 +617,7 @@ def _make_mock_worker_for_desc_ids(
     has_mamba: bool,
     group_spec_types: tuple,
     block_len_per_layer: list[int] | None = None,
+    num_blocks: int | None = None,
 ):
     """Build a mock NixlConnectorWorker with attrs needed by _compute_desc_ids."""
     from unittest.mock import MagicMock
@@ -630,6 +631,8 @@ def _make_mock_worker_for_desc_ids(
     worker._has_mamba = has_mamba
     worker._group_spec_types = group_spec_types
     worker.block_len_per_layer = block_len_per_layer or [100]
+    nblk = num_blocks if num_blocks is not None else (block_len_per_layer or [100])[0]
+    worker._nblk_per_virtual_region = [0] + [nblk] * num_regions
     worker._conv_decomp = None
     if has_mamba:
         from vllm.distributed.kv_transfer.kv_connector.v1.ssm_conv_transfer_utils import (  # noqa: E501
@@ -690,6 +693,7 @@ def test_get_block_descs_ids_kernel_block_mismatch():
         has_mamba=True,
         group_spec_types=(FullAttentionSpec, MambaSpec),
         block_len_per_layer=[100],
+        num_blocks=num_blocks,
     )
 
     fa_blocks = [3, 7]

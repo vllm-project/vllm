@@ -39,8 +39,10 @@ PUSH_REG_NOTIF_PREFIX = b"PUSH_REG:"
 #   2: Add remote_request_id to kv_transfer_params
 #   3: Add physical_blocks_per_logical_kv_block to NixlAgentMetadata
 #   4: Add KV block lease renewal through heartbeats
+#   5: Add num_blocks_per_region to NixlAgentMetadata, enabling per-region
+#      descriptor layout for attention groups with different kernel block sizes.
 #
-NIXL_CONNECTOR_VERSION: int = 4
+NIXL_CONNECTOR_VERSION: int = 5
 
 
 @dataclass
@@ -56,6 +58,7 @@ class NixlAgentMetadata:
     ssm_sizes: tuple[int, int]
     attn_backend_name: str
     physical_blocks_per_logical_kv_block: int
+    num_blocks_per_region: list[int]
 
 
 @dataclass
