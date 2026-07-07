@@ -7,7 +7,6 @@
 
 import json
 import logging
-import time
 import uuid
 from collections.abc import AsyncGenerator
 from typing import TYPE_CHECKING, Any
@@ -383,11 +382,11 @@ class AnthropicServingMessages(OpenAIServingChat):
     def _convert_tool_use_block(cls, block, tool_calls: list[dict[str, Any]]) -> None:
         """Convert tool_use block to OpenAI function call format"""
         tool_call = {
-            "id": block.id or f"call_{int(time.time())}",
+            "id": block.id,
             "type": "function",
             "function": {
-                "name": block.name or "",
-                "arguments": json.dumps(block.input or {}),
+                "name": block.name,
+                "arguments": json.dumps(block.input),
             },
         }
         tool_calls.append(tool_call)
