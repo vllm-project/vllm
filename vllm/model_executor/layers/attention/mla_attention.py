@@ -385,16 +385,16 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         self.head_size = kv_lora_rank + qk_rope_head_dim
         self.layer_name = prefix
         self.indexer = indexer
-        self.dcp_qrep_dcp_world_size = 1
         self.dcp_qrep_local_head_offset = 0
+        dcp_world_size = 1
         if self.dcp_q_replicate:
-            self.dcp_qrep_dcp_world_size = (
+            dcp_world_size = (
                 get_current_vllm_config().parallel_config.decode_context_parallel_size
             )
             self.dcp_qrep_local_head_offset = (
-                get_tensor_model_parallel_rank() % self.dcp_qrep_dcp_world_size
+                get_tensor_model_parallel_rank() % dcp_world_size
             ) * self.num_heads
-        self.kv_b_proj_num_heads = self.num_heads * self.dcp_qrep_dcp_world_size
+        self.kv_b_proj_num_heads = self.num_heads * dcp_world_size
 
         self.num_kv_heads = 1
         self.qk_head_dim = self.qk_nope_head_dim + self.qk_rope_head_dim
@@ -473,7 +473,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             extra_impl_args["topk_indices_buffer"] = topk_indices_buffer
 
         impl_cls = cast(type[MLAAttentionImpl], self.attn_backend.get_impl_cls())
-        self.impl = impl_cls(  # type: ignore[assignment]  # impl_cls always returns an MLAAttentionImpl subclass
+        self.impl = impl_cls(  # type: ignore[assignment,call-arg]  # impl_cls always returns an MLAAttentionImpl subclass
             num_heads=self.num_heads,
             head_size=self.head_size,
             scale=self.scale,
@@ -492,6 +492,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             qk_head_dim=self.qk_nope_head_dim + self.qk_rope_head_dim,
             v_head_dim=self.v_head_dim,
             kv_b_proj=kv_b_proj,
+            dcp_q_replicate=self.dcp_q_replicate,
+            kv_b_proj_num_heads=self.kv_b_proj_num_heads,
+            dcp_qrep_local_head_offset=self.dcp_qrep_local_head_offset,
             indexer=indexer,
             **extra_impl_args,
         )
@@ -757,12 +760,12 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             )
 
         if num_mqa_tokens > 0:
-            qrep_decode = q_dcp_replicated is not None
-            if qrep_decode:
-                assert q_dcp_replicated is not None  # narrow for the type checker
+            if q_dcp_replicated is not None:
                 mqa_q = q_dcp_replicated[:num_mqa_tokens]
+                qrep_decode = True
             else:
                 mqa_q = q[:num_mqa_tokens]
+                qrep_decode = False
             mqa_output_slice = output[:num_mqa_tokens]
 
             mqa_q_nope, mqa_q_pe = mqa_q.split(
@@ -829,8 +832,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             # concatenate nope + pe -> (B, N, L + P) (fp8 op above may have fused)
             if self.impl.dcp_world_size > 1:
                 if not isinstance(mqa_q, torch.Tensor):
+                    # concatenate mqa_ql_nope and mqa_q_pe -> (B, N, L + P)
                     mqa_q = torch.cat(mqa_q, dim=-1)
                 if not qrep_decode:
+                    # mqa_q do allgather in head dim.
                     mqa_q = get_dcp_group().all_gather(mqa_q, dim=1)
 
             # call decode attn
@@ -943,9 +948,11 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             W_UK_dcp_qrep, _ = kv_b_proj_weight.split(
                 [self.qk_nope_head_dim, self.v_head_dim], dim=-1
             )
-            head_start = self.dcp_qrep_local_head_offset
             kv_b_proj_weight = kv_b_proj_weight[
-                :, head_start : head_start + self.num_heads, :
+                :,
+                self.dcp_qrep_local_head_offset : self.dcp_qrep_local_head_offset
+                + self.num_heads,
+                :,
             ]
 
         W_UK, W_UV = kv_b_proj_weight.split(
@@ -1086,17 +1093,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         else:
             # Multiply + Transpose (N, B, L) x (N, L, V)->(N, B, V)->(B, N, V)
             torch.bmm(x, self.W_UV, out=out.transpose(0, 1))
-
-    def _kv_b_proj_local_heads(self, kv_c_normed: torch.Tensor) -> torch.Tensor:
-        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
-            -1,
-            self.kv_b_proj_num_heads,
-            self.qk_nope_head_dim + self.v_head_dim,
-        )
-        if self.dcp_q_replicate:
-            head_start = self.dcp_qrep_local_head_offset
-            kv_nope = kv_nope[:, head_start : head_start + self.num_heads, :]
-        return kv_nope
 
 
 def unified_mla_kv_cache_update(
@@ -2090,6 +2086,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         # DSV3.2 MLA Specific Arguments
         indexer: object | None = None,
         q_pad_num_heads: int | None = None,
+        dcp_q_replicate: bool = False,
+        kv_b_proj_num_heads: int | None = None,
+        dcp_qrep_local_head_offset: int = 0,
     ) -> None:
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported for MLA")
@@ -2107,6 +2106,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.qk_head_dim = qk_head_dim
         self.v_head_dim = v_head_dim
         self.kv_b_proj = kv_b_proj
+        self.dcp_q_replicate = dcp_q_replicate
+        self.kv_b_proj_num_heads = kv_b_proj_num_heads or num_heads
+        self.dcp_qrep_local_head_offset = dcp_qrep_local_head_offset
         self.indexer = indexer
         self.q_pad_num_heads = q_pad_num_heads
         self.supports_quant_query_input = True
@@ -2127,6 +2129,21 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
         self.cp_kv_cache_interleave_size: int = (
             get_current_vllm_config().parallel_config.cp_kv_cache_interleave_size
         )
+
+    def _kv_b_proj_local_heads(self, kv_c_normed: torch.Tensor) -> torch.Tensor:
+        kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
+            -1,
+            self.kv_b_proj_num_heads,
+            self.qk_nope_head_dim + self.v_head_dim,
+        )
+        if self.dcp_q_replicate:
+            kv_nope = kv_nope[
+                :,
+                self.dcp_qrep_local_head_offset : self.dcp_qrep_local_head_offset
+                + self.num_heads,
+                :,
+            ]
+        return kv_nope
 
     def _concat_k_nope_k_pe(
         self, k_nope: torch.Tensor, k_pe: torch.Tensor

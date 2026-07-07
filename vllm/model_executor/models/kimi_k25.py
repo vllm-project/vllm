@@ -22,6 +22,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_dcp_qrep import (
     dcp_q_group_index,
     dcp_q_replicate_enabled,
+    dcp_qrep_kv_b_weight_names,
     dcp_qrep_replica_map,
     load_dcp_replicated_column_weight,
 )
@@ -493,11 +494,17 @@ class KimiK25ForConditionalGeneration(
         )
 
         qrep_map = dcp_qrep_replica_map(params_dict)
-        expected_qrep_params = set(qrep_map.values())
+        qrep_replicated_kv_b_names = dcp_qrep_kv_b_weight_names(params_dict)
+        expected_qrep_params = set(qrep_map.values()) | qrep_replicated_kv_b_names
         qrep_mapper = self.hf_to_vllm_mapper
-        modules = (self, *self.children())
-        iterator = (m.quant_config for m in modules if hasattr(m, "quant_config"))
-        quant_config = next(iterator, None)
+        quant_config = next(
+            (
+                m.quant_config
+                for m in (self, *self.children())
+                if hasattr(m, "quant_config")
+            ),
+            None,
+        )
         cache_scale_mapper = (
             quant_config.get_cache_scale_mapper() if quant_config is not None else None
         )
@@ -508,7 +515,14 @@ class KimiK25ForConditionalGeneration(
             # Mirror each q/kv tensor into its DCP qrep replica, then yield it
             # unchanged for the normal load.
             for name, loaded_weight in weights:
-                replica = qrep_map.get(qrep_mapper._map_name(name))
+                mapped_name = qrep_mapper._map_name(name)
+                if mapped_name in qrep_replicated_kv_b_names:
+                    load_dcp_replicated_column_weight(
+                        params_dict[mapped_name], loaded_weight, dcp_q_group_idx
+                    )
+                    qrep_loaded_params.add(mapped_name)
+                    continue
+                replica = qrep_map.get(mapped_name)
                 if replica is not None:
                     load_dcp_replicated_column_weight(
                         params_dict[replica], loaded_weight, dcp_q_group_idx

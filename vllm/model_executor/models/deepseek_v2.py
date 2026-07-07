@@ -51,6 +51,7 @@ from vllm.model_executor.layers.attention.mla_dcp_qrep import (
     dcp_q_group_index,
     dcp_q_replicate_enabled,
     dcp_q_replicated_heads,
+    dcp_qrep_kv_b_weight_names,
     dcp_qrep_replica_map,
     load_dcp_replicated_column_weight,
 )
@@ -996,11 +997,12 @@ class DeepseekV2MLAAttention(nn.Module):
 
         self.num_heads = num_heads
         tp_size = get_tensor_model_parallel_world_size()
-        tp_rank = get_tensor_model_parallel_rank()
         assert num_heads % tp_size == 0
         self.num_local_heads = num_heads // tp_size
         self.dcp_world_size = vllm_config.parallel_config.decode_context_parallel_size
-        self.dcp_q_group_idx = dcp_q_group_index(tp_rank, self.dcp_world_size)
+        self.dcp_q_group_idx = dcp_q_group_index(
+            get_tensor_model_parallel_rank(), self.dcp_world_size
+        )
         self.dcp_q_replicate = (
             dcp_q_replicate_enabled()
             and self.dcp_world_size > 1
@@ -1620,13 +1622,7 @@ class DeepseekV2Model(nn.Module):
         dcp_q_replicate = dcp_q_replicate_enabled() and dcp_world_size > 1
         qrep_map = dcp_qrep_replica_map(params_dict) if dcp_q_replicate else {}
         qrep_replicated_kv_b_names = (
-            {
-                n
-                for n in params_dict
-                if ".self_attn.kv_b_proj." in n and n.endswith(".weight")
-            }
-            if dcp_q_replicate
-            else set()
+            dcp_qrep_kv_b_weight_names(params_dict) if dcp_q_replicate else set()
         )
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
