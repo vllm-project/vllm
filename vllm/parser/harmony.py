@@ -26,12 +26,16 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     is_function_recipient,
 )
 from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
+from vllm.logger import init_logger
 from vllm.parser.abstract_parser import DelegatingParser
 from vllm.reasoning.gptoss_reasoning_parser import GptOssReasoningParser
 from vllm.tool_parsers.gptoss_tool_parser import GptOssToolParser
 
 if TYPE_CHECKING:
     from openai_harmony import Message, StreamableParser
+
+
+logger = init_logger(__name__)
 
 
 class _SegmentType(Enum):
@@ -87,6 +91,7 @@ class HarmonyParser(DelegatingParser):
         self._parser: StreamableParser | None = None
         self._next_tool_call_index = 0
         self._num_processed_messages = 0
+        self._encountered_parse_error = False
 
     @property
     def _harmony_parser(self) -> StreamableParser:
@@ -114,6 +119,7 @@ class HarmonyParser(DelegatingParser):
         # Reset to the initial assistant-parser state for the next turn.
         self._parser = None
         self._num_processed_messages = 0
+        self._encountered_parse_error = False
 
         if msg is None:
             return None
@@ -266,13 +272,22 @@ class HarmonyParser(DelegatingParser):
         return delta_message
 
     def process_chunk(self, token_ids: Sequence[int]) -> ChunkResult:
-        if not token_ids:
+        if not token_ids or self._encountered_parse_error:
             return ChunkResult(segments=[], reasoning_token_count=0)
 
         segments: list[Segment] = []
         reasoning_token_count = 0
         for token_id in token_ids:
-            self._harmony_parser.process(token_id)
+            try:
+                self._harmony_parser.process(token_id)
+            except HarmonyError as err:
+                logger.warning(
+                    "Harmony parser error at token ID %d, returning partial parse: %r",
+                    token_id,
+                    err,
+                )
+                self._encountered_parse_error = True
+                break
             channel = self._harmony_parser.current_channel
             recipient = self._harmony_parser.current_recipient
             delta = self._harmony_parser.last_content_delta or ""

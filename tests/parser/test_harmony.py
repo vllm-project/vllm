@@ -446,6 +446,73 @@ class TestParse:
             ("get_weather", json.dumps({"location": "SF"}))
         ]
 
+    @pytest.mark.parametrize(
+        ("harmony_str", "expected_reasoning", "expected_content", "warning_substr"),
+        [
+            (
+                (
+                    "<|channel|>analysis"
+                    "<|message|>Reasoning here.<|end|>"
+                    # Below 'assistant' appears 2 times => stray token.
+                    "<|start|>assistantassistant<|channel|>final"
+                    "<|message|>Final answer.<|end|>"
+                ),
+                "Reasoning here.",
+                None,
+                "Unknown role: assistantassistant",
+            ),
+            (
+                (
+                    "<|channel|>analysis"
+                    "<|message|>Reasoning here.<|end|>"
+                    # Below channel name ('final') is skipped.
+                    "<|start|>assistant<|channel|>"
+                    "<|message|>Final answer.<|end|>"
+                ),
+                "Reasoning here.",
+                None,
+                "channel marker present but no channel value found in header",
+            ),
+            (
+                (
+                    "<|channel|>analysis"
+                    "<|message|>Reasoning here.<|end|>"
+                    "<|start|>assistant<|channel|>final"
+                    "<|message|>Final answer.<|end|>"
+                    # Below 'assistant' appears 2 times => stray token.
+                    "<|start|>assistantassistant<|channel|>final"
+                    "<|message|>Ignored answer.<|end|>"
+                ),
+                "Reasoning here.",
+                "Final answer.",
+                "Unknown role: assistantassistant",
+            ),
+        ],
+    )
+    def test_malformed_stream_returns_partial_parse(
+        self,
+        harmony_parser,
+        chat_request,
+        caplog,
+        harmony_str,
+        expected_reasoning,
+        expected_content,
+        warning_substr,
+    ):
+        """Malformed Harmony output should warn, stop, and keep prior parse."""
+        with caplog.at_level("WARNING"):
+            reasoning, content, tool_calls = harmony_parser.parse(
+                "",
+                chat_request,
+                model_output_token_ids=encode_output(harmony_str),
+            )
+
+        assert reasoning == expected_reasoning
+        assert content == expected_content
+        assert tool_calls is None
+        assert warning_substr in caplog.text
+        assert harmony_parser._parser is None
+
 
 class TestParseDelta:
     def test_basic(self, gpt_oss_tokenizer, chat_request):
@@ -488,6 +555,40 @@ class TestParseDelta:
         assert delta.content == "Hello, world!"
         assert delta.reasoning is None
         assert not delta.tool_calls
+
+    def test_malformed_stream_stops_future_chunks(
+        self, gpt_oss_tokenizer, chat_request, caplog
+    ):
+        """Contents should be parsed until a malformed header is encountered."""
+        parser = HarmonyParser(gpt_oss_tokenizer)
+
+        with caplog.at_level("WARNING"):
+            first_delta = parser.parse_delta(
+                delta_text="",
+                delta_token_ids=encode_output(
+                    "<|channel|>analysis"
+                    "<|message|>Thinking.<|end|>"
+                    "<|start|>assistantassistant<|channel|>final"
+                ),
+                request=chat_request,
+                finished=False,
+            )
+            second_delta = parser.parse_delta(
+                delta_text="",
+                delta_token_ids=encode_output(
+                    "<|message|>Final answer.<|end|>"
+                ),
+                request=chat_request,
+                finished=True,
+            )
+
+        assert first_delta is not None
+        assert first_delta.reasoning == "Thinking."
+        assert first_delta.content is None
+        assert not first_delta.tool_calls
+        assert second_delta is None
+        assert "Unknown role: assistantassistant" in caplog.text
+        assert parser._parser is None
 
     @pytest.mark.parametrize("tool_channel", ["commentary", "analysis"])
     def test_tool_call_split_across_deltas(
@@ -763,3 +864,32 @@ class TestProcessChunk:
             ("analysis", "One"),
             ("final", "Two"),
         ]
+
+    def test_malformed_stream_keeps_completed_message_channels(
+        self, harmony_parser, caplog
+    ):
+        """Malformed stream should keep completed messages and log a warning."""
+        with caplog.at_level("WARNING"):
+            result = harmony_parser.process_chunk(
+                encode_output(
+                    "<|channel|>analysis<|message|>Reasoning here.<|end|>"
+                    "<|start|>assistant<|channel|>final"
+                    "<|message|>Final answer.<|end|>"
+                    "<|start|>assistantassistant<|channel|>final"
+                    "<|message|>Ignored answer.<|end|>"
+                )
+            )
+
+        boundary_segments = [
+            segment
+            for segment in result.segments
+            if segment.completed_message is not None
+        ]
+        assert [
+            (segment.completed_message.channel, get_text(segment.completed_message))
+            for segment in boundary_segments
+        ] == [
+            ("analysis", "Reasoning here."),
+            ("final", "Final answer."),
+        ]
+        assert "Unknown role: assistantassistant" in caplog.text

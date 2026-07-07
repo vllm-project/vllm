@@ -11,12 +11,10 @@ from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
     create_tool_definition,
     extract_function_from_recipient,
-    get_encoding,
     get_system_message,
     has_custom_tools,
     is_function_recipient,
     parse_chat_input_to_harmony_message,
-    parse_output_into_messages,
 )
 from vllm.entrypoints.openai.responses.harmony import (
     response_input_to_harmony,
@@ -1067,88 +1065,3 @@ class TestResponseInputToHarmonyReasoningItem:
         msg = response_input_to_harmony(item, prev_responses=[])
 
         assert msg is None
-
-
-class TestParseOutputIntoMessages:
-    """Tests ``parse_output_into_messages``."""
-
-    @pytest.mark.parametrize(
-        "stream, expected_channels, expected_texts",
-        [
-            (
-                (
-                    "<|channel|>analysis"
-                    "<|message|>Reasoning here.<|end|>"
-                    "<|start|>assistant<|channel|>final"
-                    "<|message|>Final answer.<|end|>"
-                ),
-                ["analysis", "final"],
-                ["Reasoning here.", "Final answer."],
-            ),
-        ],
-    )
-    def test_parse_output_into_messages_success(
-        self,
-        stream: str,
-        expected_channels: list[str],
-        expected_texts: list[str],
-    ) -> None:
-        """Tests if channels and contents are retrieved correctly."""
-        token_ids = get_encoding().encode(stream, allowed_special="all")
-        parser = parse_output_into_messages(token_ids)
-
-        assert [m.channel for m in parser.messages] == expected_channels
-        assert [m.content[0].text for m in parser.messages] == expected_texts
-
-    @pytest.mark.parametrize(
-        "stream, expected_channels, expected_texts, warning_substr",
-        [
-            (
-                (
-                    "<|channel|>analysis"
-                    "<|message|>Reasoning here.<|end|>"
-                    # Below 'assistant' appears 2 times => stray token.
-                    "<|start|>assistantassistant<|channel|>final"
-                    "<|message|>Final answer.<|end|>"
-                ),
-                ["analysis"],
-                ["Reasoning here."],
-                "Unknown role: assistantassistant",
-            ),
-            (
-                (
-                    "<|channel|>analysis"
-                    "<|message|>Reasoning here.<|end|>"
-                    "<|start|>assistant"
-                    # Below channel name ('final') is skipped.
-                    "<|channel|>"
-                    "<|message|>Final answer.<|end|>"
-                ),
-                ["analysis"],
-                ["Reasoning here."],
-                "channel marker present but no channel value found in header",
-            ),
-        ],
-    )
-    def test_parse_output_into_messages_malformed(
-        self,
-        stream: str,
-        expected_channels: list[str],
-        expected_texts: list[str],
-        warning_substr: str,
-        caplog,
-    ) -> None:
-        """Tests if channels and contents are retrieved up to malformed tokens.
-
-        Note:
-            Upon seeing a stray token (such as an invalid role),
-            ``parse_output_into_messages`` logs a warning and stops iteration.
-        """
-        token_ids = get_encoding().encode(stream, allowed_special="all")
-
-        with caplog.at_level("WARNING"):
-            parser = parse_output_into_messages(token_ids)
-
-        assert [m.channel for m in parser.messages] == expected_channels
-        assert [m.content[0].text for m in parser.messages] == expected_texts
-        assert warning_substr in caplog.text
