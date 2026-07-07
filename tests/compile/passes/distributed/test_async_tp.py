@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import os
 
 import pytest
 import torch
@@ -42,6 +43,78 @@ prompts = [
     "The capital of France is",
     "The future of AI is",
 ]
+
+
+def _safe_debug_value(label: str, fn):
+    try:
+        return f"{label}={fn()}"
+    except Exception as e:
+        return f"{label}=<error {type(e).__name__}: {e}>"
+
+
+def _torch_nccl_version():
+    return torch.cuda.nccl.version()
+
+
+def _log_async_tp_debug(stage: str, local_rank: int, world_size: int) -> None:
+    env_keys = [
+        "CUDA_VISIBLE_DEVICES",
+        "NVIDIA_VISIBLE_DEVICES",
+        "LOCAL_RANK",
+        "RANK",
+        "WORLD_SIZE",
+        "MASTER_ADDR",
+        "MASTER_PORT",
+        "VLLM_RAY_PER_WORKER_GPUS",
+        "VLLM_RAY_BUNDLE_INDICES",
+    ]
+    env_values = ", ".join(f"{key}={os.environ.get(key)!r}" for key in env_keys)
+
+    debug_values = [
+        f"stage={stage}",
+        f"local_rank={local_rank}",
+        f"world_size={world_size}",
+        f"DEVICE_TYPE={DEVICE_TYPE}",
+        _safe_debug_value("torch.__version__", lambda: torch.__version__),
+        _safe_debug_value("torch.version.cuda", lambda: torch.version.cuda),
+        _safe_debug_value(
+            "torch.accelerator.is_available", torch.accelerator.is_available
+        ),
+        _safe_debug_value(
+            "torch.accelerator.device_count", torch.accelerator.device_count
+        ),
+        _safe_debug_value(
+            "torch.accelerator.current_device_index",
+            torch.accelerator.current_device_index,
+        ),
+        _safe_debug_value(
+            "current_platform.get_device_name",
+            current_platform.get_device_name,
+        ),
+        _safe_debug_value(
+            "torch cuda nccl.version",
+            _torch_nccl_version,
+        ),
+        _safe_debug_value(
+            "torch.accelerator.current_accelerator",
+            torch.accelerator.current_accelerator,
+        ),
+        _safe_debug_value(
+            "current_platform.device_count", current_platform.device_count
+        ),
+        _safe_debug_value(
+            "current_platform.logical_device_id_to_visible_device_id(local_rank)",
+            lambda: current_platform.logical_device_id_to_visible_device_id(local_rank),
+        ),
+        _safe_debug_value(
+            "current_platform.visible_device_id_to_physical_device_id(local_rank)",
+            lambda: current_platform.visible_device_id_to_physical_device_id(
+                local_rank
+            ),
+        ),
+        f"env=({env_values})",
+    ]
+    print("[async_tp_debug] " + ", ".join(debug_values), flush=True)
 
 
 class TestMMRSModel(torch.nn.Module):
@@ -333,10 +406,24 @@ def async_tp_pass_on_test_model(
 ):
     set_random_seed(0)
 
+    print(
+        "[async_tp_debug] "
+        f"test_model={test_model_cls.__name__}, batch_size={batch_size}, "
+        f"seq_len={seq_len}, hidden_size={hidden_size}, dtype={dtype}, "
+        f"dynamic={dynamic}",
+        flush=True,
+    )
+    _log_async_tp_debug("before_set_device", local_rank, world_size)
+
     device = torch.device(f"{DEVICE_TYPE}:{local_rank}")
+    print(
+        f"[async_tp_debug] setting accelerator/default device to {device}",
+        flush=True,
+    )
     torch.accelerator.set_device_index(device)
     torch.set_default_device(device)
     torch.set_default_dtype(dtype)
+    _log_async_tp_debug("after_set_device", local_rank, world_size)
 
     update_environment_variables(
         {
@@ -347,9 +434,11 @@ def async_tp_pass_on_test_model(
             "MASTER_PORT": master_port,
         }
     )
+    _log_async_tp_debug("after_update_environment", local_rank, world_size)
 
     # initialize distributed
     init_distributed_environment()
+    _log_async_tp_debug("after_init_distributed_environment", local_rank, world_size)
 
     # configure vllm config for SequenceParallelismPass
     vllm_config = VllmConfig()
@@ -369,6 +458,7 @@ def async_tp_pass_on_test_model(
 
     with set_current_vllm_config(vllm_config):
         initialize_model_parallel(tensor_model_parallel_size=world_size)
+        _log_async_tp_debug("after_initialize_model_parallel", local_rank, world_size)
 
         async_tp_pass = AsyncTPPass(vllm_config)
         backend = TestBackend(async_tp_pass)
@@ -383,18 +473,41 @@ def async_tp_pass_on_test_model(
         )
 
         model = test_model_cls(hidden_size, dtype)  # Pass dtype to model constructor
+        print(
+            "[async_tp_debug] "
+            f"created model={test_model_cls.__name__}, "
+            f"model_ops_before={model.ops_in_model_before()}, "
+            f"model_ops_after={model.ops_in_model_after()}",
+            flush=True,
+        )
 
         hidden_states = torch.randn(
             (batch_size * seq_len, hidden_size), dtype=dtype, requires_grad=False
         )
+        print(
+            "[async_tp_debug] "
+            f"hidden_states.shape={tuple(hidden_states.shape)}, "
+            f"hidden_states.dtype={hidden_states.dtype}, "
+            f"hidden_states.device={hidden_states.device}, "
+            f"hidden_states.is_cuda={hidden_states.is_cuda}",
+            flush=True,
+        )
 
         if dynamic:
             torch._dynamo.mark_dynamic(hidden_states, 0)
+            print("[async_tp_debug] marked hidden_states dim 0 dynamic", flush=True)
 
+        _log_async_tp_debug("before_torch_compile", local_rank, world_size)
         compiled_model = torch.compile(model, backend=backend)
+        _log_async_tp_debug("before_compiled_model_call", local_rank, world_size)
         compiled_model(hidden_states)
+        _log_async_tp_debug("after_compiled_model_call", local_rank, world_size)
 
         assert async_tp_pass.matched_count == 1
+        print(
+            f"[async_tp_debug] matched_count={async_tp_pass.matched_count}",
+            flush=True,
+        )
 
         # In pre-nodes, all gather or reduce scatter should exist,
         # fused_matmul_reduce_scatter or fused_all_gather_matmul should not
