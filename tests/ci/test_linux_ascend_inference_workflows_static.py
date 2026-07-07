@@ -45,7 +45,7 @@ def test_inference_workflows_install_no_build_isolation_build_dependencies():
         assert '"setuptools-rust>=1.9.0"' in text
 
 
-def test_inference_workflows_remove_stale_torchvision_and_verify_server_import():
+def test_inference_workflows_remove_stale_torch_companion_packages_and_verify_server_import():
     for workflow_path in WORKFLOW_PATHS:
         text = workflow_path.read_text(encoding="utf-8")
         install_step = text[
@@ -57,9 +57,10 @@ def test_inference_workflows_remove_stale_torchvision_and_verify_server_import()
             text.index("      - name: Run real")
         ]
 
-        assert '"$PYTHON_BIN" -m pip uninstall -y torchvision' in install_step
+        assert '"$PYTHON_BIN" -m pip uninstall -y torchvision torchaudio' in install_step
         assert "import vllm.entrypoints.openai.api_server" in verify_step
         assert "torchvision importable:" in verify_step
+        assert "torchaudio importable:" in verify_step
 
 
 def test_inference_workflows_install_matching_ascend_torch_stack():
