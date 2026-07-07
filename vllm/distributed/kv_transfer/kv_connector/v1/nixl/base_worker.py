@@ -349,11 +349,9 @@ class NixlBaseConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
 
-        # GLOBAL num_blocks across all attention groups. This is the logical
-        # count from the scheduler; it is scaled by the global physical ratio in
+        # Logical block count from the scheduler; scaled by the physical ratio in
         # ``_sync_block_size_with_kernel``. Per-region counts live in
-        # ``_num_blocks_per_physical_region``. TODO: drop from NixlAgentMetadata
-        # (redundant with num_blocks_per_region) as a followup cleanup.
+        # ``_num_blocks_per_physical_region``.
         self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
         self.enable_heterogeneous_attn_post_process = False
@@ -499,11 +497,12 @@ class NixlBaseConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.xfer_stats = NixlKVConnectorStats()
 
-        # GLOBAL physical blocks per logical block (common denominator across all
+        # Physical blocks per logical block (common denominator across all
         # attention backends). Under HMA the shared tensor is allocated at this
-        # granularity, so it is the correct ratio for every group. The per-spec
-        # map (``_spec_physical_blocks_per_logical``) only applies without HMA.
-        # TODO: unify with the per-spec map as a followup cleanup.
+        # granularity, so it is the correct ratio for every attention group.
+        # Without HMA there is only one group, so the global ratio is still
+        # correct. Mamba specs have no kernel block constraint (ratio 1) and
+        # are special-cased at call sites.
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
 
@@ -548,21 +547,6 @@ class NixlBaseConnectorWorker:
             self.block_size = kernel_block_size
             # *Global* physical number of blocks (logical * ratio) across all backends
             self.num_blocks *= self._physical_blocks_per_logical_kv_block
-
-        # We need to support different num_blocks per attn group, here we build the
-        # per-spec-type mapping to corresponding nb ratio. MambaSpecs naturally get
-        # ratio 1. Keyed by spec type (not instance) because specs in the same group
-        # can differ in fields like sliding_window while sharing the same ratio.
-        self._spec_physical_blocks_per_logical: dict[type, int] = {}
-        for group in self.kv_cache_config.kv_cache_groups:
-            spec = group.kv_cache_spec
-            if isinstance(spec, UniformTypeKVCacheSpecs):
-                spec = next(iter(spec.kv_cache_specs.values()))
-            group_backends = get_current_attn_backends(
-                self.vllm_config, layer_names=group.layer_names
-            )
-            kbs = select_common_block_size(spec.block_size, group_backends)
-            self._spec_physical_blocks_per_logical[type(spec)] = spec.block_size // kbs
 
     def _nixl_handshake(
         self,
@@ -1061,14 +1045,15 @@ class NixlBaseConnectorWorker:
             cache_list = self.transfer_topo.get_transfer_cache_regions(
                 cache_or_caches, layer_spec
             )
-            # Physical blocks per logical block. With HMA, layers share a single
-            # tensor per slot, so the global ratio (common denominator across all
-            # backends) is the correct one. Without HMA, each group has its own
-            # tensor, so the per-spec ratio allows different kernel block sizes.
-            if self._is_hma_required:
-                r = self._physical_blocks_per_logical_kv_block
-            else:
-                r = self._spec_physical_blocks_per_logical[type(layer_spec)]
+            # Physical blocks per logical block. Under HMA all attention groups share
+            # a tensor at the global kernel block granularity, so the global ratio
+            # applies to all of them. Without HMA there is only one group. Mamba has
+            # no kernel block constraint, so its ratio is always 1.
+            r = (
+                1
+                if isinstance(layer_spec, MambaSpec)
+                else self._physical_blocks_per_logical_kv_block
+            )
             # `layer_spec.page_size_bytes` only accounts for logical page_size, that is
             # the page_size assuming constant `self._logical_num_blocks`.
             physical_page_size = layer_spec.page_size_bytes // r
@@ -1099,7 +1084,14 @@ class NixlBaseConnectorWorker:
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
                 seen_base_addresses.append(base_addr)
-                self.block_len_per_layer.append(physical_page_size)
+                # Mamba blocks span `ratio` physical blocks in the shared tensor,
+                # so the per-block stride is the physical page size divided by ratio.
+                if isinstance(layer_spec, MambaSpec):
+                    self.block_len_per_layer.append(
+                        physical_page_size // self._physical_blocks_per_logical_kv_block
+                    )
+                else:
+                    self.block_len_per_layer.append(physical_page_size)
                 is_mla_region = isinstance(
                     layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
                 )
@@ -2190,32 +2182,15 @@ class NixlBaseConnectorWorker:
         if self._physical_blocks_per_logical_kv_block == 1:
             # Noop when physical and logical block sizes are the same
             return block_ids
-        # With HMA, layers share a tensor with the global kernel block size,
-        # so all groups use the global ratio. Without HMA, each group has its
-        # own tensor, so the per-spec ratio allows different kernel block sizes.
-        if self._is_hma_required:
-            r = self._physical_blocks_per_logical_kv_block
-            block_arange = np.arange(0, r).reshape(1, -1)
-            return [
-                BlockTable.map_to_kernel_blocks(
-                    np.array(group), r, block_arange
-                ).tolist()
-                for group in block_ids
-            ]
+        r = self._physical_blocks_per_logical_kv_block
+        block_arange = np.arange(0, r).reshape(1, -1)
         group_specs = self.kv_cache_config.kv_cache_groups
-        result = []
-        for i, group in enumerate(block_ids):
-            spec = group_specs[i].kv_cache_spec
-            if isinstance(spec, UniformTypeKVCacheSpecs):
-                spec = next(iter(spec.kv_cache_specs.values()))
-            r = self._spec_physical_blocks_per_logical[type(spec)]
-            block_arange = np.arange(0, r).reshape(1, -1)
-            result.append(
-                BlockTable.map_to_kernel_blocks(
-                    np.array(group), r, block_arange
-                ).tolist()
-            )
-        return result
+        return [
+            BlockTable.map_to_kernel_blocks(np.array(group), r, block_arange).tolist()
+            if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
+            else group
+            for i, group in enumerate(block_ids)
+        ]
 
     def _apply_prefix_caching(
         self,
