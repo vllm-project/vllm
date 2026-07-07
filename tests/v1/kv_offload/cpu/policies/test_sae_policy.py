@@ -61,6 +61,63 @@ def test_insert_after_remove_opens_new_session():
     assert policy._sid_to_keys == {1: [key(2)]}
 
 
+def test_get_hit_sets_last_hit_sid():
+    policy = SAECachePolicy(cache_capacity=4)
+    policy.insert(key(1), make_ready_block(0))
+    policy.touch([])  # close session 0
+    policy.get(key(1))
+    assert policy._last_hit_sid == 0
+
+
+def test_get_miss_does_not_clear_last_hit_sid():
+    """The pointer must survive a trailing miss: cpu/manager.py's own
+    "already stored?" filter calls get() on every key in a request,
+    hits (old blocks) first and misses (new blocks) last — if a miss
+    cleared the pointer, insert() would never see it."""
+    policy = SAECachePolicy(cache_capacity=4)
+    policy.insert(key(1), make_ready_block(0))
+    policy.touch([])  # close session 0
+    policy.get(key(1))  # hit -> _last_hit_sid = 0
+    policy.get(key(99))  # miss on an unrelated key
+    assert policy._last_hit_sid == 0
+
+
+def test_insert_merges_into_last_hit_session():
+    policy = SAECachePolicy(cache_capacity=4)
+    policy.insert(key(1), make_ready_block(0))
+    policy.touch([])  # close session 0
+    policy.get(key(1))  # records sid 0 as the merge candidate
+    policy.insert(key(2), make_block(1))  # should merge into sid 0
+    assert policy._open_sid == 0
+    assert policy._sid_to_keys[0] == [key(1), key(2)]
+    assert policy._key_to_sid[key(2)] == 0
+    assert policy._sid_counter == 1  # no new sid was created
+
+
+def test_insert_merge_skips_ghost_reseed():
+    """Merging only bumps last_touch; unlike a fresh session, it must not
+    add the merged key's ghost score to hits."""
+    policy = SAECachePolicy(cache_capacity=4, ghost_norm=1.0)
+    policy.insert(key(1), make_ready_block(0))
+    policy.touch([])  # close session 0, hits truncated to int(0) == 0
+    policy.get(key(1))  # records sid 0 as the merge candidate
+    policy._key_ghost[key(2)] = 50.0  # would be a large reseed if not skipped
+    policy.insert(key(2), make_block(1))
+    assert policy._sid_stats[0]["hits"] == 0
+
+
+def test_last_hit_sid_consumed_once():
+    policy = SAECachePolicy(cache_capacity=4)
+    policy.insert(key(1), make_ready_block(0))
+    policy.touch([])  # close session 0
+    policy.get(key(1))  # records sid 0 as the merge candidate
+    policy.insert(key(2), make_block(1))  # merges into sid 0, consumes pointer
+    policy.touch([])  # close the (merged) open session again
+    policy.insert(key(3), make_block(2))  # no pending merge -> fresh session
+    assert policy._open_sid == 1
+    assert policy._sid_to_keys[1] == [key(3)]
+
+
 def test_insert_seeds_initial_hits_from_ghost_sum():
     policy = SAECachePolicy(cache_capacity=4, ghost_norm=2.0)
     policy._key_ghost[key(1)] = 4.0
@@ -124,8 +181,10 @@ def test_touch_ignores_unknown_keys():
 
 def test_clear_resets_all_state():
     policy = SAECachePolicy(cache_capacity=4)
-    policy.insert(key(1), make_block(0))
-    policy.touch([key(1)])
+    policy.insert(key(1), make_ready_block(0))
+    policy.touch([])  # close session 0
+    policy.get(key(1))  # sets _last_hit_sid
+    policy.insert(key(2), make_block(1))  # merges -> _merged_open_session True
     policy._key_ghost[key(2)] = 5.0
     policy.clear()
     assert policy._blocks == {}
@@ -136,21 +195,56 @@ def test_clear_resets_all_state():
     assert policy._evictable_keys == OrderedDict()
     assert policy._open_sid is None
     assert policy._last_event == "clear"
+    assert policy._last_hit_sid is None
+    assert policy._merged_open_session is False
 
 
-def test_get_hit_accumulates_ghost_score():
+def test_touch_hit_accumulates_ghost_score():
+    """Ghost scoring moved from get() to touch() — get() has no batch
+    context, so it can't be trusted with per-position weighting; touch() is
+    the only method that receives a real key batch."""
     policy = SAECachePolicy(cache_capacity=4, ghost_hit_weight=3.0)
     policy.insert(key(1), make_ready_block(0))
-    policy.get(key(1))
-    policy.get(key(1))
+    policy.touch([key(1)])
+    policy.touch([key(1)])
+    # Single-key batches -> pos_weight(0) == 1.0 each time.
     assert policy._key_ghost[key(1)] == 6.0
 
 
-def test_get_miss_accumulates_ghost_score():
+def test_touch_miss_accumulates_ghost_score():
     policy = SAECachePolicy(cache_capacity=4, ghost_miss_weight=0.5)
-    policy.get(key(1))
-    policy.get(key(1))
+    policy.touch([key(1)])
+    policy.touch([key(1)])
     assert policy._key_ghost[key(1)] == 1.0
+
+
+def test_touch_ghost_bonus_decreases_with_position():
+    """_pos_weight(i) weights earlier keys in a touch() batch more heavily,
+    matching the reference's per-batch position weighting (now recoverable
+    since touch(), unlike get(), receives the whole batch at once)."""
+    policy = SAECachePolicy(cache_capacity=4, ghost_hit_weight=10.0)
+    policy.insert(key(1), make_ready_block(0))
+    policy.insert(key(2), make_ready_block(1))
+    policy.touch([key(1), key(2)])
+    assert policy._key_ghost[key(1)] == 10.0  # pos_weight(0) == 1.0
+    assert policy._key_ghost[key(2)] == 10.0 * policy._pos_weight(1)
+    assert policy._key_ghost[key(1)] > policy._key_ghost[key(2)]
+
+
+def test_touch_reclassifies_hit_and_miss_per_key():
+    """touch()'s key batch (the group's known offload_keys) isn't
+    necessarily the exact set get() classified as hits this pass, so touch()
+    must reclassify hit/miss per key from residency rather than trusting an
+    externally supplied hit count."""
+    policy = SAECachePolicy(
+        cache_capacity=4, ghost_hit_weight=10.0, ghost_miss_weight=1.0
+    )
+    policy.insert(key(1), make_ready_block(0))
+    # key(2) was never inserted -> not resident -> miss, even though it's
+    # touched in the same batch as a hit.
+    policy.touch([key(1), key(2)])
+    assert policy._key_ghost[key(1)] == 10.0  # hit, pos_weight(0) == 1.0
+    assert policy._key_ghost[key(2)] == 1.0 * policy._pos_weight(1)  # miss
 
 
 def test_decay_runs_every_interval_and_prunes_low_ghosts():
@@ -165,11 +259,12 @@ def test_decay_runs_every_interval_and_prunes_low_ghosts():
     policy._sid_stats[0]["hits"] = 10.0
     policy._key_ghost[key(2)] = 0.05  # non-resident
     policy._key_ghost[key(1)] = 4.0  # resident
-    # 3 gets triggers one decay tick
-    policy.get(key(1))
-    policy.get(key(1))
-    policy.get(key(1))
-    assert policy._sid_stats[0]["hits"] == 5.0
+    # 3 touches trigger one decay tick. Each touch also bumps sid 0's hits
+    # by 1 (key(1) belongs to sid 0): 10 -> 11 -> 12 -> 13, then decayed.
+    policy.touch([key(1)])
+    policy.touch([key(1)])
+    policy.touch([key(1)])
+    assert policy._sid_stats[0]["hits"] == int(13 * 0.5)
     # resident key(1) accumulated 3 hits before decay: (4.0 + 3.0) * 0.5 = 3.5
     assert policy._key_ghost[key(1)] == 3.5
     # non-resident key(2) with score 0.05 -> 0.025 < 0.01? no, still 0.025 >= 0.01
@@ -184,7 +279,7 @@ def test_decay_prunes_below_threshold():
         decay_factor=0.1,
     )
     policy._key_ghost[key(99)] = 0.05  # non-resident
-    policy.get(key(1))  # triggers decay; 0.05 * 0.1 = 0.005 < 0.01
+    policy.touch([key(1)])  # triggers decay; 0.05 * 0.1 = 0.005 < 0.01
     assert key(99) not in policy._key_ghost
 
 
@@ -197,7 +292,9 @@ def test_decay_truncates_session_hits_to_int():
     )
     policy.insert(key(1), make_block(0))
     policy._sid_stats[0]["hits"] = 7
-    policy.get(key(1))  # triggers decay: int(7 * 0.9) = int(6.3) = 6
+    # Empty batch: triggers the decay tick without touch()'s own hits += 1
+    # bump, isolating the truncation behavior: int(7 * 0.9) = int(6.3) = 6.
+    policy.touch([])
     assert policy._sid_stats[0]["hits"] == 6
     assert isinstance(policy._sid_stats[0]["hits"], int)
 
@@ -333,6 +430,22 @@ def test_evict_admission_gate_ignores_ghost_scores():
     policy._key_ghost[key(2)] = 10_000_000.0
     result = policy.evict(1, {key(2)})
     assert result is None
+
+
+def test_evict_skips_admission_gate_when_merging():
+    """A live merge candidate (a recent get() hit into an existing session)
+    bypasses the gate entirely, matching the reference's
+    `if not is_merging and needed > 0`."""
+    policy = SAECachePolicy(cache_capacity=4)
+    policy.insert(key(1), make_ready_block(0))
+    policy.mark_evictable(key(1))
+    policy.touch([])  # close session 0
+    # Score high enough that the gate would normally deny (same setup as
+    # test_evict_admission_gate_denies_when_worst_incumbent_score_exceeds_baseline).
+    policy._sid_stats[0]["hits"] = 30
+    policy.get(key(1))  # records sid 0 as the merge candidate
+    result = policy.evict(1, set())
+    assert result is not None
 
 
 def test_cpu_offloading_manager_accepts_sae_policy_and_kwargs():
