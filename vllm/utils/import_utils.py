@@ -66,14 +66,12 @@ def import_triton_kernels():
 
         logger.debug_once(
             f"Loading module triton_kernels from {triton_kernels.__file__}.",
-            scope="local",
         )
     elif _has_module("vllm.third_party.triton_kernels"):
         import vllm.third_party.triton_kernels as triton_kernels
 
         logger.debug_once(
             f"Loading module triton_kernels from {triton_kernels.__file__}.",
-            scope="local",
         )
         sys.modules["triton_kernels"] = triton_kernels
     else:
@@ -394,12 +392,24 @@ class LazyLoader(ModuleType):
 # Optional dependency detection utilities
 @cache
 def _has_module(module_name: str) -> bool:
-    """Return True if *module_name* can be found in the current environment.
+    """Return True if *module_name* can be imported in the current environment.
 
-    The result is cached so that subsequent queries for the same module incur
-    no additional overhead.
+    Uses ``importlib.util.find_spec`` as a fast pre-check, then performs a
+    trial import to verify that native dependencies (shared libraries, etc.)
+    are also satisfied. Any failure during the trial import is treated as the
+    module being unavailable. The result is cached so that subsequent queries
+    for the same module incur no additional overhead.
     """
-    return importlib.util.find_spec(module_name) is not None
+    try:
+        if importlib.util.find_spec(module_name) is None:
+            return False
+        importlib.import_module(module_name)
+    except Exception:
+        logger.warning(
+            "Module %s was found but failed to import", module_name, exc_info=True
+        )
+        return False
+    return True
 
 
 def has_deep_ep() -> bool:
@@ -407,14 +417,79 @@ def has_deep_ep() -> bool:
     return _has_module("deep_ep")
 
 
+DEEPEP_V2_MIN_NCCL_VERSION_RAW = 23004  # 2.30.4
+
+
+def _get_runtime_nccl_version() -> int | None:
+    """Get the runtime NCCL version by loading the actual library.
+
+    Returns the raw version int (e.g. 23004 for 2.30.4), or None on failure.
+    torch.cuda.nccl.version() is a compile-time constant from the PyTorch
+    wheel and does not reflect a separately installed NCCL.
+    """
+    import ctypes
+
+    try:
+        from vllm.utils.nccl import find_nccl_library
+
+        lib = ctypes.CDLL(find_nccl_library())
+        version = ctypes.c_int()
+        lib.ncclGetVersion(ctypes.byref(version))
+        return version.value
+    except Exception:
+        return None
+
+
+def _format_nccl_raw_version(raw: int) -> str:
+    s = str(raw)
+    return f"{s[0]}.{s[1:3].lstrip('0') or '0'}.{s[3:].lstrip('0') or '0'}"
+
+
+def has_deep_ep_v2() -> bool:
+    """Whether deep_ep with ElasticBuffer (v2 API) is available.
+
+    Requires both the ElasticBuffer class in the deep_ep module and
+    NCCL >= 2.30.4 (GIN backend), checked against the runtime library.
+    """
+    if not _has_module("deep_ep"):
+        return False
+    import deep_ep  # type: ignore[import-not-found]
+
+    if not hasattr(deep_ep, "ElasticBuffer"):
+        return False
+    try:
+        nccl_ver = _get_runtime_nccl_version()
+        if nccl_ver is None or nccl_ver < DEEPEP_V2_MIN_NCCL_VERSION_RAW:
+            logger.info_once(
+                "DeepEP v2 requires NCCL >= %s but found %s. "
+                "deepep_v2 backend will not be available.",
+                _format_nccl_raw_version(DEEPEP_V2_MIN_NCCL_VERSION_RAW),
+                _format_nccl_raw_version(nccl_ver) if nccl_ver else "unknown",
+            )
+            return False
+    except Exception:
+        return False
+    return True
+
+
 def has_deep_gemm() -> bool:
-    """Whether the optional `deep_gemm` package is available."""
-    return _has_module("deep_gemm")
+    """Whether the optional `deep_gemm` package is available.
+
+    Prefers an externally installed ``deep_gemm`` package (so users can
+    override with a newer version), then falls back to the vendored copy
+    bundled in the vLLM wheel.
+    """
+    return _has_module("deep_gemm") or _has_module("vllm.third_party.deep_gemm")
 
 
 def has_nixl_ep() -> bool:
     """Whether the optional `nixl_ep` package is available."""
     return _has_module("nixl_ep")
+
+
+def is_numba_available() -> bool:
+    """Whether the optional `numba` package is available."""
+    return _has_module("numba")
 
 
 def has_triton_kernels() -> bool:
@@ -427,6 +502,7 @@ def has_triton_kernels() -> bool:
     return is_available
 
 
+@cache
 def has_tilelang() -> bool:
     """Whether the optional `tilelang` package is available."""
     return _has_module("tilelang")
@@ -461,3 +537,18 @@ def has_aiter() -> bool:
 def has_mori() -> bool:
     """Whether the optional `mori` package is available."""
     return _has_module("mori")
+
+
+def has_fbgemm_gpu() -> bool:
+    """Whether the optional `fbgemm_gpu` package is available."""
+    return _has_module("fbgemm_gpu")
+
+
+def has_cutedsl() -> bool:
+    """Whether the optional `cutelass` package is available."""
+    return _has_module("cutlass")
+
+
+def has_humming() -> bool:
+    """Whether the optional `humming` package is available."""
+    return _has_module("humming")

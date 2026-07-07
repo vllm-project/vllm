@@ -19,7 +19,7 @@ from vllm.model_executor.layers.fused_moe.all2all_utils import (
     maybe_make_prepare_finalize,
 )
 from vllm.model_executor.layers.fused_moe.config import nvfp4_moe_quant_config
-from vllm.model_executor.layers.fused_moe.cutlass_moe import (
+from vllm.model_executor.layers.fused_moe.experts.cutlass_moe import (
     CutlassExpertsFp4,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
@@ -105,7 +105,6 @@ def test_cutlass_fp4_moe_no_graph(
                 moe_config=moe_config,
                 quant_config=quant_config,
             ),
-            inplace=False,
         )
 
         cutlass_output = kernel.apply(
@@ -226,7 +225,6 @@ def test_cutlass_fp4_moe_swiglustep(
                 moe_config=make_dummy_moe_config(),
                 quant_config=quant_config,
             ),
-            inplace=False,
         )
 
         cutlass_output = kernel.apply(

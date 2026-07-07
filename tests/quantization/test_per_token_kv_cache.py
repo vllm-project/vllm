@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Tests for per-token-head KV cache quantization (INT8 and FP8).
+"""Tests for per-token-head KV cache quantization (INT4, INT8 and FP8).
 
 Covers:
 - Per-token-head Triton reshape-and-cache kernel
@@ -23,13 +23,16 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
 )
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
+from vllm.v1.attention.ops.int4_per_token_head import single_rht
 from vllm.v1.kv_cache_interface import KVQuantMode, is_quantized_kv_cache
+
+DEVICE_TYPE = current_platform.device_type
 
 # Skip entire module if no CUDA/ROCm GPU available
 pytestmark = [
     pytest.mark.skipif(
-        not current_platform.is_cuda_alike(),
-        reason="Per-token-head KV cache tests require CUDA or ROCm GPU.",
+        current_platform.is_cpu(),
+        reason="Per-token-head KV cache tests require GPU.",
     ),
 ]
 
@@ -59,8 +62,8 @@ class QuantConfig:
     quant_max: float
     quant_min: float
     kv_quant_mode: KVQuantMode
-    # INT8 Triton stores truncate; FP8 hardware casts round.
-    uses_trunc: bool
+    # INT8 rounds explicitly; FP8 relies on dtype cast rounding.
+    rounds_before_store: bool
 
 
 INT8_CONFIG = QuantConfig(
@@ -69,7 +72,7 @@ INT8_CONFIG = QuantConfig(
     quant_max=127.0,
     quant_min=-128.0,
     kv_quant_mode=KVQuantMode.INT8_PER_TOKEN_HEAD,
-    uses_trunc=True,
+    rounds_before_store=True,
 )
 FP8_CONFIG = QuantConfig(
     cache_dtype=FP8_DTYPE,
@@ -77,13 +80,21 @@ FP8_CONFIG = QuantConfig(
     quant_max=FP8_MAX,
     quant_min=FP8_MIN,
     kv_quant_mode=KVQuantMode.FP8_PER_TOKEN_HEAD,
-    uses_trunc=False,
+    rounds_before_store=False,
 )
+INT4_CONFIG = QuantConfig(
+    cache_dtype=torch.uint8,
+    kv_cache_dtype_str="int4_per_token_head",
+    quant_max=7.0,
+    quant_min=-8.0,
+    kv_quant_mode=KVQuantMode.INT4_PER_TOKEN_HEAD,
+    # Unused for int4 (handled by its own rint path); kept for the dataclass.
+    rounds_before_store=False,
+)
+QUANT_CONFIGS = [INT4_CONFIG, INT8_CONFIG, FP8_CONFIG]
 
-QUANT_CONFIGS = [INT8_CONFIG, FP8_CONFIG]
 
-
-@pytest.fixture(params=QUANT_CONFIGS, ids=["int8", "fp8"])
+@pytest.fixture(params=QUANT_CONFIGS, ids=["int4", "int8", "fp8"])
 def qcfg(request) -> QuantConfig:
     return request.param
 
@@ -102,7 +113,7 @@ def _quantize_per_token_head_ref(
     absmax = data.float().abs().amax(dim=2)  # [num_tokens, num_heads]
     scales = (absmax / cfg.quant_max).clamp(min=1e-6)
     scaled = data.float() * (1.0 / scales[:, :, None])
-    if cfg.uses_trunc:
+    if cfg.rounds_before_store:
         q = scaled.round().clamp(cfg.quant_min, cfg.quant_max).to(cfg.cache_dtype)
     else:
         q = scaled.clamp(cfg.quant_min, cfg.quant_max).to(cfg.cache_dtype)
@@ -118,6 +129,9 @@ class TestIsQuantizedKvCache:
         assert is_quantized_kv_cache("fp8_e4m3")
         assert is_quantized_kv_cache("fp8_e5m2")
 
+    def test_int4_per_token_head(self):
+        assert is_quantized_kv_cache("int4_per_token_head")
+
     def test_int8_per_token_head(self):
         assert is_quantized_kv_cache("int8_per_token_head")
 
@@ -129,6 +143,13 @@ class TestIsQuantizedKvCache:
 
     def test_bfloat16(self):
         assert not is_quantized_kv_cache("bfloat16")
+
+    def test_kv_quant_mode_int4(self):
+        from vllm.v1.kv_cache_interface import get_kv_quant_mode
+
+        assert (
+            get_kv_quant_mode("int4_per_token_head") == KVQuantMode.INT4_PER_TOKEN_HEAD
+        )
 
     def test_kv_quant_mode_int8(self):
         from vllm.v1.kv_cache_interface import get_kv_quant_mode
@@ -166,18 +187,20 @@ def test_reshape_and_cache_per_token_head(
     )
 
     set_random_seed(seed)
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
 
     num_blocks = (num_tokens + block_size - 1) // block_size + 4
+    is_int4 = qcfg.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD
+    cache_head_size = head_size // 2 if is_int4 else head_size
 
     key = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16)
     value = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16)
 
     key_cache = torch.zeros(
-        num_blocks, block_size, num_heads, head_size, dtype=qcfg.cache_dtype
+        num_blocks, block_size, num_heads, cache_head_size, dtype=qcfg.cache_dtype
     )
     value_cache = torch.zeros(
-        num_blocks, block_size, num_heads, head_size, dtype=qcfg.cache_dtype
+        num_blocks, block_size, num_heads, cache_head_size, dtype=qcfg.cache_dtype
     )
     k_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
     v_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
@@ -195,45 +218,68 @@ def test_reshape_and_cache_per_token_head(
         k_scale_cache,
         v_scale_cache,
         slot_mapping,
+        kv_quant_mode=qcfg.kv_quant_mode,
     )
 
-    # Reference
-    ref_k_quant, ref_k_scales = _quantize_per_token_head_ref(key, qcfg)
-    ref_v_quant, ref_v_scales = _quantize_per_token_head_ref(value, qcfg)
+    # INT4 (RHT + asymmetric), INT8/FP8 have different dequant paths.  Only
+    # INT8/FP8 can be compared to a PyTorch reference.
+    if not is_int4:
+        ref_k_quant, ref_k_scales = _quantize_per_token_head_ref(key, qcfg)
+        ref_v_quant, ref_v_scales = _quantize_per_token_head_ref(value, qcfg)
 
-    # Compare dequantized values rather than raw quantized values.
-    # Triton and PyTorch reductions can differ at FP8 rounding boundaries
-    # (up to 32 in quantized domain for fp8_e4m3), but the dequantized
-    # error is bounded by the scale.
     for i, slot in enumerate(slot_mapping.tolist()):
         blk = slot // block_size
         off = slot % block_size
 
-        actual_k_scale = k_scale_cache[blk, off]  # [num_heads]
-        k_deq = key_cache[blk, off].float() * actual_k_scale[:, None]
-        k_ref_deq = key[i].float()
-        torch.testing.assert_close(
-            k_deq,
-            k_ref_deq,
-            atol=0.1,
-            rtol=0.1,
-        )
-        actual_v_scale = v_scale_cache[blk, off]  # [num_heads]
-        v_deq = value_cache[blk, off].float() * actual_v_scale[:, None]
-        v_ref_deq = value[i].float()
-        torch.testing.assert_close(
-            v_deq,
-            v_ref_deq,
-            atol=0.1,
-            rtol=0.1,
-        )
-        # Per-head scales: [num_heads]
-        torch.testing.assert_close(
-            k_scale_cache[blk, off], ref_k_scales[i], atol=1e-4, rtol=1e-3
-        )
-        torch.testing.assert_close(
-            v_scale_cache[blk, off], ref_v_scales[i], atol=1e-4, rtol=1e-3
-        )
+        if is_int4:
+            # Coarser quantization → wider tolerance.
+            deq_atol = deq_rtol = 0.5
+            for label, data, cache, sc in [
+                ("key", key, key_cache, k_scale_cache),
+                ("val", value, value_cache, v_scale_cache),
+            ]:
+                packed_scale = sc[blk, off]  # [num_heads] float32
+                scale_bits = packed_scale.view(torch.int32)
+                zp = (scale_bits & 0xF).to(torch.float32)
+                clean_scale = (scale_bits & -16).view(torch.float32)
+
+                packed = cache[blk, off]
+                lo = (packed & 0xF).to(torch.float32)
+                hi = ((packed >> 4) & 0xF).to(torch.float32)
+                full = torch.zeros(num_heads, head_size, dtype=torch.float32)
+                full[:, 0::2] = lo
+                full[:, 1::2] = hi
+                # Asymmetric dequant in RHT domain, then IRHT/d → original
+                deq_rht = (full - zp[:, None]) * clean_scale[:, None]
+                deq = single_rht(deq_rht, inverse=True) / head_size
+                ref_deq = data[i].float()
+                torch.testing.assert_close(deq, ref_deq, atol=deq_atol, rtol=deq_rtol)
+        else:
+            actual_k_scale = k_scale_cache[blk, off]  # [num_heads]
+            k_deq = key_cache[blk, off].float() * actual_k_scale[:, None]
+            k_ref_deq = key[i].float()
+            torch.testing.assert_close(
+                k_deq,
+                k_ref_deq,
+                atol=0.1,
+                rtol=0.1,
+            )
+            actual_v_scale = v_scale_cache[blk, off]  # [num_heads]
+            v_deq = value_cache[blk, off].float() * actual_v_scale[:, None]
+            v_ref_deq = value[i].float()
+            torch.testing.assert_close(
+                v_deq,
+                v_ref_deq,
+                atol=0.1,
+                rtol=0.1,
+            )
+            # Per-head scales: [num_heads]
+            torch.testing.assert_close(
+                k_scale_cache[blk, off], ref_k_scales[i], atol=1e-4, rtol=1e-3
+            )
+            torch.testing.assert_close(
+                v_scale_cache[blk, off], ref_v_scales[i], atol=1e-4, rtol=1e-3
+            )
 
 
 # ===========================================================================
@@ -253,26 +299,28 @@ def test_per_token_head_round_trip_accuracy(
 ):
     """Verify per-token-head round-trip: kernel dequant matches reference.
 
-    INT8: Triton truncates on float->int8 store.
+    INT8: round-to-nearest before int8 store.
     FP8: hardware cast (clamp then cast).
     """
     from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
         triton_reshape_and_cache_flash_per_token_head_quant,
     )
 
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
     set_random_seed(42)
 
+    is_int4 = qcfg.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD
     num_blocks = (num_tokens + block_size - 1) // block_size + 2
+    cache_head_size = head_size // 2 if is_int4 else head_size
 
     key = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16) * 0.5
     value = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16) * 0.5
 
     key_cache = torch.zeros(
-        num_blocks, block_size, num_heads, head_size, dtype=qcfg.cache_dtype
+        num_blocks, block_size, num_heads, cache_head_size, dtype=qcfg.cache_dtype
     )
     value_cache = torch.zeros(
-        num_blocks, block_size, num_heads, head_size, dtype=qcfg.cache_dtype
+        num_blocks, block_size, num_heads, cache_head_size, dtype=qcfg.cache_dtype
     )
     k_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
     v_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
@@ -287,7 +335,10 @@ def test_per_token_head_round_trip_accuracy(
         k_scale_cache,
         v_scale_cache,
         slot_mapping,
+        kv_quant_mode=qcfg.kv_quant_mode,
     )
+
+    rt_atol = 0.5 if is_int4 else 0.1
 
     for i in range(num_tokens):
         blk = i // block_size
@@ -298,19 +349,78 @@ def test_per_token_head_round_trip_accuracy(
             ("val", value, value_cache, v_scale_cache),
         ]:
             for h in range(num_heads):
-                orig = data[i, h].float()  # [head_size]
-
-                actual_q = cache[blk, off, h]
+                orig = data[i, h].float()
                 actual_sc = sc[blk, off, h]
-                actual_deq = actual_q.float() * actual_sc
-
-                # Round-trip: dequantized should be close to original
+                if is_int4:
+                    sc_bits = actual_sc.view(torch.int32)
+                    zp = (sc_bits & 0xF).to(torch.float32)
+                    clean_sc = (sc_bits & -16).view(torch.float32)
+                    packed = cache[blk, off, h]
+                    lo = (packed & 0xF).to(torch.float32)
+                    hi = ((packed >> 4) & 0xF).to(torch.float32)
+                    full = torch.zeros(head_size)
+                    full[0::2] = lo
+                    full[1::2] = hi
+                    deq_rht = (full - zp) * clean_sc
+                    actual_deq = (
+                        single_rht(deq_rht.unsqueeze(0), inverse=True).squeeze(0)
+                        / head_size
+                    )
+                else:
+                    actual_deq = cache[blk, off, h].float() * actual_sc
                 torch.testing.assert_close(
                     actual_deq,
                     orig,
-                    atol=0.1,
-                    rtol=0.1,
+                    atol=rt_atol,
+                    rtol=rt_atol,
                 )
+
+
+@torch.inference_mode()
+def test_int8_per_token_head_raw_cache_matches_round_reference():
+    """INT8 cache writes should match round-to-nearest quantization exactly."""
+    from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
+        triton_reshape_and_cache_flash_per_token_head_quant,
+    )
+
+    torch.set_default_device(DEVICE_TYPE)
+
+    head_size = 8
+    block_size = 4
+
+    key = torch.tensor(
+        [[[-127.0, -2.6, -2.4, -1.6, -1.4, -0.6, -0.4, 127.0]]],
+        dtype=torch.bfloat16,
+    )
+    value = -key
+
+    key_cache = torch.zeros(1, block_size, 1, head_size, dtype=torch.int8)
+    value_cache = torch.zeros_like(key_cache)
+    k_scale_cache = torch.ones(1, block_size, 1, dtype=torch.float32)
+    v_scale_cache = torch.ones_like(k_scale_cache)
+    slot_mapping = torch.tensor([2], dtype=torch.long)
+
+    triton_reshape_and_cache_flash_per_token_head_quant(
+        key,
+        value,
+        key_cache,
+        value_cache,
+        k_scale_cache,
+        v_scale_cache,
+        slot_mapping,
+        kv_quant_mode=INT8_CONFIG.kv_quant_mode,
+    )
+
+    ref_k_quant, ref_k_scales = _quantize_per_token_head_ref(key, INT8_CONFIG)
+    ref_v_quant, ref_v_scales = _quantize_per_token_head_ref(value, INT8_CONFIG)
+
+    slot = slot_mapping.item()
+    blk = slot // block_size
+    off = slot % block_size
+    assert torch.equal(key_cache[blk, off], ref_k_quant[0])
+    assert torch.equal(value_cache[blk, off], ref_v_quant[0])
+    torch.testing.assert_close(k_scale_cache[blk, off], ref_k_scales[0])
+    torch.testing.assert_close(v_scale_cache[blk, off], ref_v_scales[0])
 
 
 # ===========================================================================
@@ -323,21 +433,23 @@ def test_per_token_head_negative_slot_skipped(qcfg: QuantConfig):
         triton_reshape_and_cache_flash_per_token_head_quant,
     )
 
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
     num_tokens = 4
     num_heads = 2
     head_size = 64
     block_size = 16
     num_blocks = 2
+    is_int4 = qcfg.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD
+    cache_head_size = head_size // 2 if is_int4 else head_size
 
     key = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16)
     value = torch.randn(num_tokens, num_heads, head_size, dtype=torch.bfloat16)
 
     key_cache = torch.zeros(
-        num_blocks, block_size, num_heads, head_size, dtype=qcfg.cache_dtype
+        num_blocks, block_size, num_heads, cache_head_size, dtype=qcfg.cache_dtype
     )
     value_cache = torch.zeros(
-        num_blocks, block_size, num_heads, head_size, dtype=qcfg.cache_dtype
+        num_blocks, block_size, num_heads, cache_head_size, dtype=qcfg.cache_dtype
     )
     k_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
     v_scale_cache = torch.ones(num_blocks, block_size, num_heads, dtype=torch.float32)
@@ -355,6 +467,7 @@ def test_per_token_head_negative_slot_skipped(qcfg: QuantConfig):
         k_scale_cache,
         v_scale_cache,
         slot_mapping,
+        kv_quant_mode=qcfg.kv_quant_mode,
     )
 
     # Slots 0 and 1 should have been written (tokens 0 and 2)
@@ -372,7 +485,8 @@ def test_per_token_head_negative_slot_skipped(qcfg: QuantConfig):
 # 5. process_weights_after_loading -- per-token-head early return
 # ===========================================================================
 @pytest.mark.parametrize(
-    "kv_cache_dtype", ["int8_per_token_head", "fp8_per_token_head"]
+    "kv_cache_dtype",
+    ["int4_per_token_head", "int8_per_token_head", "fp8_per_token_head"],
 )
 def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
     """Per-token-head should set _k_scale=1.0, _v_scale=1.0
@@ -406,7 +520,7 @@ def test_process_weights_sets_placeholder_scales(kv_cache_dtype: str):
 
 
 # ===========================================================================
-# 6. Triton unified_attention -- per-token-head scale cache (INT8 and FP8)
+# 6. Triton unified_attention -- per-token-head scale cache (INT4/INT8/FP8)
 # ===========================================================================
 @pytest.mark.parametrize(
     "seq_lens",
@@ -430,8 +544,10 @@ def test_triton_unified_attention_per_token_head_scale(
     from vllm.utils.math_utils import next_power_of_2
     from vllm.v1.attention.ops.triton_unified_attention import unified_attention
 
-    torch.set_default_device("cuda")
+    torch.set_default_device(DEVICE_TYPE)
     set_random_seed(0)
+
+    is_int4 = qcfg.kv_quant_mode == KVQuantMode.INT4_PER_TOKEN_HEAD
 
     num_seqs = len(seq_lens)
     query_lens = [s[0] for s in seq_lens]
@@ -451,32 +567,74 @@ def test_triton_unified_attention_per_token_head_scale(
     )
     value_cache_bf16 = torch.randn_like(key_cache_bf16)
 
-    # Per-token-head quantization: one scale per (block, slot, head)
-    k_absmax = key_cache_bf16.float().abs().amax(dim=-1)  # [..., num_kv_heads]
-    v_absmax = value_cache_bf16.float().abs().amax(dim=-1)
-    k_scale_cache = (k_absmax / qcfg.quant_max).clamp(min=1e-6).to(torch.float32)
-    v_scale_cache = (v_absmax / qcfg.quant_max).clamp(min=1e-6).to(torch.float32)
+    if is_int4:
+        # Asymmetric quantization reference (matches the Triton kernel).
+        kf = key_cache_bf16.float()
+        vf = value_cache_bf16.float()
+        k_min = kf.amin(dim=-1)
+        k_max = kf.amax(dim=-1)
+        v_min = vf.amin(dim=-1)
+        v_max = vf.amax(dim=-1)
+        k_scale_cache = ((k_max - k_min) / 15.0).clamp(min=1e-6).to(torch.float32)
+        v_scale_cache = ((v_max - v_min) / 15.0).clamp(min=1e-6).to(torch.float32)
+        k_zp = (-k_min / k_scale_cache).round().clamp(0, 15)
+        v_zp = (-v_min / v_scale_cache).round().clamp(0, 15)
 
-    scaled_k = key_cache_bf16.float() / k_scale_cache[:, :, :, None]
-    scaled_v = value_cache_bf16.float() / v_scale_cache[:, :, :, None]
-    if qcfg.uses_trunc:
-        key_cache_q = (
-            scaled_k.round().clamp(qcfg.quant_min, qcfg.quant_max).to(qcfg.cache_dtype)
+        key_cache_q_full = (
+            (kf / k_scale_cache[..., None] + k_zp[..., None]).round().clamp(0, 15)
         )
-        value_cache_q = (
-            scaled_v.round().clamp(qcfg.quant_min, qcfg.quant_max).to(qcfg.cache_dtype)
+        value_cache_q_full = (
+            (vf / v_scale_cache[..., None] + v_zp[..., None]).round().clamp(0, 15)
         )
+
+        # Dequantized reference: x_hat = (q - zp) * scale
+        key_cache_deq = (key_cache_q_full - k_zp[..., None]) * k_scale_cache[..., None]
+        value_cache_deq = (value_cache_q_full - v_zp[..., None]) * v_scale_cache[
+            ..., None
+        ]
+
+        # Pack two uint4 values into one byte
+        def _pack_int4(data_float):
+            u = data_float.to(torch.uint8)
+            lo = u[..., 0::2]
+            hi = u[..., 1::2]
+            return (lo & 0xF) | ((hi & 0xF) << 4)
+
+        key_cache_q = _pack_int4(key_cache_q_full)
+        value_cache_q = _pack_int4(value_cache_q_full)
+
+        # Steganography: pack zp into low 4 bits of scale
+        k_zp_int = k_zp.to(torch.int32)
+        k_bits = k_scale_cache.view(torch.int32)
+        k_scale_cache = ((k_bits & -16) | (k_zp_int & 0xF)).view(torch.float32)
+        v_zp_int = v_zp.to(torch.int32)
+        v_bits = v_scale_cache.view(torch.int32)
+        v_scale_cache = ((v_bits & -16) | (v_zp_int & 0xF)).view(torch.float32)
     else:
+        # Symmetric quantization for int8/fp8.
+        k_absmax = key_cache_bf16.float().abs().amax(dim=-1)
+        v_absmax = value_cache_bf16.float().abs().amax(dim=-1)
+        k_scale_cache = (k_absmax / qcfg.quant_max).clamp(min=1e-6).to(torch.float32)
+        v_scale_cache = (v_absmax / qcfg.quant_max).clamp(min=1e-6).to(torch.float32)
+        scaled_k = key_cache_bf16.float() / k_scale_cache[:, :, :, None]
+        scaled_v = value_cache_bf16.float() / v_scale_cache[:, :, :, None]
+
+        key_cache_q_full = scaled_k.round().clamp(qcfg.quant_min, qcfg.quant_max)
+        value_cache_q_full = scaled_v.round().clamp(qcfg.quant_min, qcfg.quant_max)
+
+        key_cache_deq = key_cache_q_full * k_scale_cache[:, :, :, None]
+        value_cache_deq = value_cache_q_full * v_scale_cache[:, :, :, None]
+
+    if not is_int4 and qcfg.rounds_before_store:
+        key_cache_q = key_cache_q_full.to(qcfg.cache_dtype)
+        value_cache_q = value_cache_q_full.to(qcfg.cache_dtype)
+    elif not is_int4:
         key_cache_q = scaled_k.clamp(qcfg.quant_min, qcfg.quant_max).to(
             qcfg.cache_dtype
         )
         value_cache_q = scaled_v.clamp(qcfg.quant_min, qcfg.quant_max).to(
             qcfg.cache_dtype
         )
-
-    # Dequantized reference
-    key_cache_deq = key_cache_q.float() * k_scale_cache[:, :, :, None]
-    value_cache_deq = value_cache_q.float() * v_scale_cache[:, :, :, None]
 
     cu_query_lens = torch.tensor([0] + query_lens, dtype=torch.int32).cumsum(
         dim=0, dtype=torch.int32
@@ -557,4 +715,9 @@ def test_triton_unified_attention_per_token_head_scale(
         softmax_segm_expsum=softmax_segm_expsum,
     )
 
-    torch.testing.assert_close(output_q, output_ref, atol=5e-2, rtol=5e-2)
+    # Coarser quantization → wider tolerance.
+    if is_int4:
+        atol, rtol = 0.5, 0.5
+    else:
+        atol, rtol = 5e-2, 5e-2
+    torch.testing.assert_close(output_q, output_ref, atol=atol, rtol=rtol)

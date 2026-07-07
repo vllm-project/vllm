@@ -11,6 +11,7 @@ from collections import defaultdict, deque
 from collections.abc import Awaitable, Callable, Sequence
 from concurrent.futures import Future
 from dataclasses import dataclass
+from multiprocessing.connection import Connection
 from multiprocessing.queues import Queue
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
@@ -19,6 +20,7 @@ import msgspec.msgpack
 import zmq
 import zmq.asyncio
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.envs import VLLM_ENGINE_READY_TIMEOUT_S
 from vllm.logger import init_logger
@@ -35,6 +37,7 @@ from vllm.v1.engine import (
     EEP_NOTIFICATION_CALL_ID,
     EEPNotificationType,
     EngineCoreOutputs,
+    EngineCoreReadyResponse,
     EngineCoreRequest,
     EngineCoreRequestType,
     PauseMode,
@@ -107,7 +110,7 @@ class EngineCoreClient(ABC):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ) -> "AsyncMPClient":
@@ -389,9 +392,12 @@ class BackgroundResources:
     def __call__(self):
         """Clean up background resources."""
 
+        logger.debug_once("[shutdown] MPClient: background resource cleanup start")
         self.engine_dead = True
         if self.engine_manager is not None:
-            self.engine_manager.shutdown()
+            self.engine_manager.shutdown(
+                timeout=envs.VLLM_WORKER_SHUTDOWN_TIMEOUT_SECONDS
+            )
         if self.coordinator is not None:
             self.coordinator.shutdown()
 
@@ -443,6 +449,8 @@ class BackgroundResources:
                     # Send shutdown signal.
                     shutdown_sender.send(b"")
 
+        logger.debug_once("[shutdown] MPClient: background resource cleanup complete")
+
     def validate_alive(self, frames: Sequence[zmq.Frame]):
         if len(frames) == 1 and (frames[0].buffer == EngineCoreProc.ENGINE_CORE_DEAD):
             self.engine_dead = True
@@ -475,7 +483,7 @@ class MPClient(EngineCoreClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
     ):
         self.vllm_config = vllm_config
 
@@ -506,7 +514,7 @@ class MPClient(EngineCoreClient):
                 output_address = client_addresses["output_address"]
                 self.stats_update_address = client_addresses.get("stats_update_address")
                 # Tensor queues passed via client_addresses for multi-API-server case
-                tensor_queue = client_addresses.get("tensor_queue")  # type: ignore[assignment]
+                tensor_queue = client_addresses.get("tensor_queue")
                 self.input_socket = self.resources.input_socket = make_zmq_socket(
                     self.ctx,
                     input_address,
@@ -517,6 +525,28 @@ class MPClient(EngineCoreClient):
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, output_address, zmq.PULL
                 )
+
+                # Report bound endpoints back so the parent can forward
+                # them to engines (mirrors the DPCoordinator pattern).
+                actual_address_pipe: Connection | None = client_addresses.get(
+                    "actual_address_pipe"
+                )
+                if actual_address_pipe is not None:
+                    try:
+                        actual_input = self.input_socket.getsockopt(
+                            zmq.LAST_ENDPOINT
+                        ).decode()
+                        actual_output = self.resources.output_socket.getsockopt(
+                            zmq.LAST_ENDPOINT
+                        ).decode()
+                        actual_address_pipe.send(
+                            {
+                                "input_address": actual_input,
+                                "output_address": actual_output,
+                            }
+                        )
+                    finally:
+                        actual_address_pipe.close()
             else:
                 # Engines are managed by this client.
                 addresses = get_engine_zmq_addresses(vllm_config)
@@ -530,6 +560,15 @@ class MPClient(EngineCoreClient):
                 self.resources.output_socket = make_zmq_socket(
                     self.ctx, addresses.outputs[0], zmq.PULL
                 )
+
+                # Resolve ``tcp://host:0`` placeholders to bound endpoints
+                # before engines DEALER-connect. No-op for IPC.
+                addresses.inputs[0] = self.input_socket.getsockopt(
+                    zmq.LAST_ENDPOINT
+                ).decode()
+                addresses.outputs[0] = self.resources.output_socket.getsockopt(
+                    zmq.LAST_ENDPOINT
+                ).decode()
 
                 with launch_core_engines(
                     vllm_config, executor_class, log_stats, addresses
@@ -589,8 +628,9 @@ class MPClient(EngineCoreClient):
                         f"timeout, set the environment variable: "
                         f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
                     )
-                identity, _ = sync_input_socket.recv_multipart()
+                identity, payload = sync_input_socket.recv_multipart()
                 identities.remove(identity)
+                self._apply_ready_response(payload)
 
             self.core_engine: EngineIdentity = self.core_engines[0]
             self.utility_results: dict[int, AnyFuture] = {}
@@ -611,9 +651,15 @@ class MPClient(EngineCoreClient):
     def shutdown(self, timeout: float | None = None) -> None:
         """Shutdown engine manager under timeout and clean up resources."""
         if self._finalizer.detach() is not None:
+            timeout_str = "default" if timeout is None else f"{timeout}s"
+            logger.info("[shutdown] MPClient: start timeout=%s", timeout_str)
             if self.resources.engine_manager is not None:
+                logger.info_once("[shutdown] MPClient: stopping engine manager")
                 self.resources.engine_manager.shutdown(timeout=timeout)
+                logger.info_once("[shutdown] MPClient: engine manager stopped")
+            logger.info_once("[shutdown] MPClient: cleaning up background resources")
             self.resources()
+            logger.info_once("[shutdown] MPClient: complete")
 
     def _format_exception(self, e: Exception) -> Exception:
         """If errored, use EngineDeadError so root cause is clear."""
@@ -653,6 +699,9 @@ class MPClient(EngineCoreClient):
             if not _self or not _self._finalizer.alive or _self.resources.engine_dead:
                 return
             _self.resources.engine_dead = True
+            logger.warning_once(
+                "[shutdown] MPClient: engine core exited unexpectedly; starting cleanup"
+            )
             _self.shutdown()
             # Note: For MPClient, we don't have a failure callback mechanism
             # like MultiprocExecutor, but we set engine_dead flag which will
@@ -661,6 +710,48 @@ class MPClient(EngineCoreClient):
         Thread(
             target=monitor_engine_cores, daemon=True, name="MPClientEngineMonitor"
         ).start()
+
+    def _apply_ready_response(self, payload: bytes) -> None:
+        """Decode an EngineCoreReadyResponse and sync any post-initialization
+        config changes (e.g. auto-fitted max_model_len) back to the frontend."""
+        if not payload:
+            return
+        vllm_config = self.vllm_config
+        response = msgspec.msgpack.decode(payload, type=EngineCoreReadyResponse)
+        vllm_config.model_config.max_model_len = min(
+            vllm_config.model_config.max_model_len, response.max_model_len
+        )
+
+        # Setup KV cache config with initialization state from
+        # engine core process. Sum num_gpu_blocks from all engines in DP case.
+        num_gpu_blocks = vllm_config.cache_config.num_gpu_blocks or 0
+        num_gpu_blocks += response.num_gpu_blocks
+        vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
+
+        # Sync block_size: may be enlarged by _align_hybrid_block_size in the
+        # worker for hybrid Mamba models.
+        cache_config = vllm_config.cache_config
+        cache_config.block_size = response.block_size
+        # Keep these as per-engine cache_config_info values; do not sum across DP.
+        cache_config.kv_cache_size_tokens = (
+            getattr(cache_config, "kv_cache_size_tokens", None)
+            if getattr(cache_config, "kv_cache_size_tokens", None) is not None
+            else response.kv_cache_size_tokens
+        )
+        cache_config.kv_cache_max_concurrency = (
+            getattr(cache_config, "kv_cache_max_concurrency", None)
+            if getattr(cache_config, "kv_cache_max_concurrency", None) is not None
+            else response.kv_cache_max_concurrency
+        )
+
+        # In external DP LB mode, the coordinator address that the
+        # front-end procs connect to is obtained by each engine via it's
+        # initial handshake with the rank 0 front-end.
+        if response.dp_stats_address is not None:
+            if self.stats_update_address is None:
+                self.stats_update_address = response.dp_stats_address
+            else:
+                assert response.dp_stats_address == self.stats_update_address
 
 
 def _process_utility_output(
@@ -865,7 +956,7 @@ class AsyncMPClient(MPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ):
@@ -1115,7 +1206,7 @@ class DPAsyncMPClient(AsyncMPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ):
@@ -1295,7 +1386,7 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
         vllm_config: VllmConfig,
         executor_class: type[Executor],
         log_stats: bool,
-        client_addresses: dict[str, str] | None = None,
+        client_addresses: dict[str, Any] | None = None,
         client_count: int = 1,
         client_index: int = 0,
     ):
@@ -1343,6 +1434,12 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
             # Increment local waiting count for better balancing between stats
             # updates from the coordinator (which happen every 100ms).
             current_counts[eng_index][0] += self.client_count
+            # Rotate the scan start so that ties (equal scores, e.g. right
+            # after a coordinator stats reset when engines look equally loaded)
+            # don't systematically favor the same engine. This removes the
+            # fixed tie-break bias without affecting load-aware decisions when
+            # scores actually differ.
+            self.eng_start_index = (self.eng_start_index + 1) % num_engines
 
         chosen_engine = self.core_engines[eng_index]
         # Record which engine is chosen for this request, to handle aborts.
@@ -1582,8 +1679,9 @@ class DPLBAsyncMPClient(DPAsyncMPClient):
                     f"timeout, set the environment variable: "
                     f"VLLM_ENGINE_READY_TIMEOUT_S=<seconds>"
                 )
-            identity, _ = sync_input_socket.recv_multipart()
+            identity, payload = sync_input_socket.recv_multipart()
             new_engine_identities.discard(identity)
+            self._apply_ready_response(payload)
 
         # NOTE(yongji): Before we schedule any requests on the new workers,
         # we should wait for them to switch to the new setup.

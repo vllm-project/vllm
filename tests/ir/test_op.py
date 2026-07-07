@@ -13,20 +13,40 @@ from torch.fx.experimental.proxy_tensor import make_fx
 import vllm.ir.op
 from vllm.ir.op import RESERVED_PROVIDERS, IrOp, IrOpImpl
 
-# This should not exist
-assert "_custom_add" not in IrOp.registry
-
 
 class CustomError(Exception):
     pass
 
 
-@vllm.ir.register_op
-def _custom_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return x + y
+@pytest.fixture
+def custom_add_op(fake_vllm_ir):
+    """Register ``_custom_add`` plus impl_a, impl_b, impl_even for this test."""
+
+    @vllm.ir.register_op(allow_inplace=True)
+    def _custom_add(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return x + y
+
+    @_custom_add.register_impl("impl_a")
+    def impl_a(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return x + y + 10
+
+    @_custom_add.register_impl("impl_b", inplace=True)
+    def impl_b(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        """Computes x+y+20"""
+        x.add_(y)
+        x.add_(20)
+        return x
+
+    @_custom_add.register_impl(
+        "impl_even", supports_args=lambda x, y: x.size(1) % 2 == 0
+    )
+    def impl_even(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+        return x + y + 50
+
+    return _custom_add
 
 
-def test_registration_overloads():
+def test_registration_overloads(fake_vllm_ir):
     assert all(
         n not in IrOp.registry for n in ["_custom_sub", "_custom_mul", "_custom_div"]
     )
@@ -63,7 +83,7 @@ def test_registration_overloads():
             return x * y - 100
 
 
-def test_no_kw_only_args():
+def test_no_kw_only_args(fake_vllm_ir):
     # kw-only args not supported
     with pytest.raises(ValueError, match="keyword-only arguments"):
 
@@ -78,18 +98,23 @@ def test_no_kw_only_args():
 
 class TestIrOpCustomAdd:
     # Registration invariants
-    def test_decorated_object(self):
+    def test_decorated_object(self, custom_add_op):
         """Make sure that referring directly to an op is correct"""
+        _custom_add = custom_add_op
         assert isinstance(_custom_add, IrOp)
         assert "_custom_add" in IrOp.registry
         assert _custom_add is IrOp.registry["_custom_add"]
 
-    def test_torch_op_is_registered(self):
-        assert hasattr(torch.ops.vllm_ir, "_custom_add")
-        assert callable(torch.ops.vllm_ir._custom_add.default)
+    def test_torch_op_is_registered(self, custom_add_op):
+        _custom_add = custom_add_op
+        torch_ops = getattr(torch.ops, vllm.ir.op.vllm_ir_torch_lib.ns)
+        assert hasattr(torch_ops, "_custom_add")
+        assert callable(torch_ops._custom_add.default)
+        assert _custom_add.torch_op is torch_ops._custom_add.default
 
     # Semantic correctness
-    def test_semantics_match_native(self):
+    def test_semantics_match_native(self, custom_add_op):
+        _custom_add = custom_add_op
         x = torch.randn(4, 5)
         y = torch.randn(4, 5)
 
@@ -103,7 +128,9 @@ class TestIrOpCustomAdd:
     # Implementation registration
     # -------------------------
 
-    def test_register_impl_is_non_intrusive(self):
+    def test_register_impl_is_non_intrusive(self, custom_add_op):
+        _custom_add = custom_add_op
+
         @_custom_add.register_impl("dummy_provider")
         def dummy_impl(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
             return x + y + 123
@@ -117,7 +144,8 @@ class TestIrOpCustomAdd:
         # Native semantics must still hold
         torch.testing.assert_close(_custom_add(x, y), x + y)
 
-    def test_schema_contains_tensor_signature(self):
+    def test_schema_contains_tensor_signature(self, custom_add_op):
+        _custom_add = custom_add_op
         schema = _custom_add._schema_str
 
         assert "Tensor" in schema
@@ -129,11 +157,24 @@ class TestIrOpCustomAdd:
 
     @pytest.mark.parametrize("enable_torch_wrap", [True, False])
     @pytest.mark.parametrize("symbolic_trace", [True, False])
+    @pytest.mark.parametrize("overload", ["default", "maybe_inplace"])
     def test_trace_sees_single_custom_op(
-        self, symbolic_trace: bool, enable_torch_wrap: bool
+        self,
+        custom_add_op,
+        symbolic_trace: bool,
+        enable_torch_wrap: bool,
+        overload: str,
     ):
+        _custom_add = custom_add_op
+        op_fn = _custom_add if overload == "default" else _custom_add.maybe_inplace
+        torch_op = (
+            _custom_add.torch_op
+            if overload == "default"
+            else _custom_add.maybe_inplace.torch_op
+        )
+
         def fn(x, y):
-            return _custom_add(x, y)
+            return op_fn(x, y)
 
         def find_fn(target: Any, gm: fx.GraphModule):
             return gm.graph.find_nodes(op="call_function", target=target)
@@ -155,7 +196,7 @@ class TestIrOpCustomAdd:
         torch.testing.assert_close(out_fx, out_eager)
 
         # check that IR nodes only appear if enable_torch_wrap=True
-        ir_nodes = find_fn(torch.ops.vllm_ir._custom_add.default, gm)
+        ir_nodes = find_fn(torch_op, gm)
         if enable_torch_wrap:
             assert len(ir_nodes) == 1, gm.code
         else:
@@ -167,31 +208,17 @@ class TestIrOpCustomAdd:
         else:
             gm = make_fx(fn)(torch.randn(2, 2), torch.randn(2, 2))
 
-        ir_nodes = find_fn(torch.ops.vllm_ir._custom_add.default, gm)
+        ir_nodes = find_fn(torch_op, gm)
         assert len(ir_nodes) == 1, gm.code
 
 
-@_custom_add.register_impl("impl_a")
-def impl_a(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return x + y + 10
-
-
-@_custom_add.register_impl("impl_b")
-def impl_b(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return x + y + 20
-
-
-@_custom_add.register_impl("impl_even", supports_args=lambda x, y: x.size(1) % 2 == 0)
-def impl_even(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
-    return x + y + 50
-
-
 class TestIrOpImplDispatch:
-    def test_register_impl(self):
+    def test_register_impl(self, custom_add_op):
+        _custom_add = custom_add_op
         assert "impl_a" in _custom_add.impls
         impl = _custom_add.impls["impl_a"]
 
-        assert impl is impl_a
+        assert impl is _custom_add.impls["impl_a"]
         assert impl.op is _custom_add
         assert impl.provider == "impl_a"
         assert callable(impl.impl_fn)
@@ -204,14 +231,15 @@ class TestIrOpImplDispatch:
                 return x + y + 30
 
         # Check the original impl is still intact
-        assert _custom_add.impls["impl_a"] is impl_a
+        assert _custom_add.impls["impl_a"] is impl
 
         # Check support all args
-        assert impl_a.supports_all_args
-        assert impl_b.supports_all_args
-        assert not impl_even.supports_all_args
+        assert _custom_add.impls["impl_a"].supports_all_args
+        assert _custom_add.impls["impl_b"].supports_all_args
+        assert not _custom_add.impls["impl_even"].supports_all_args
 
-    def test_reserved_provider_rejected(self):
+    def test_reserved_provider_rejected(self, custom_add_op):
+        _custom_add = custom_add_op
         for provider in RESERVED_PROVIDERS:
             with pytest.raises(AssertionError):
 
@@ -219,7 +247,8 @@ class TestIrOpImplDispatch:
                 def bad_impl(x, y):
                     return x + y
 
-    def test_set_priority_scoped(self):
+    def test_set_priority_scoped(self, custom_add_op):
+        _custom_add = custom_add_op
         assert _custom_add.get_priority() == []
 
         with _custom_add.set_priority(["impl_even", "impl_b"]):
@@ -243,19 +272,53 @@ class TestIrOpImplDispatch:
         # Restored to empty
         assert _custom_add.get_priority() == []
 
-    def test_dispatch_priority_order(self):
+    @pytest.mark.parametrize(
+        "default,override",
+        [
+            (["impl_even", "impl_b"], ["impl_a"]),
+            (["impl_a"], ["impl_even", "impl_b"]),
+        ],
+    )
+    def test_set_default_priority(
+        self, custom_add_op, default: list[str], override: list[str]
+    ):
+        _custom_add = custom_add_op
+        assert _custom_add.get_priority() == []
+
+        _custom_add.set_default(default)
+        assert _custom_add.get_priority() == default
+
+        # Priority doesn't change after exiting the set_priority context.
+        with _custom_add.set_priority(override):
+            assert _custom_add.get_priority() == override
+        assert _custom_add.get_priority() == default
+
+        # Should override the previous default.
+        _custom_add.set_default(override)
+        assert _custom_add.get_priority() == override
+
+    @pytest.mark.parametrize("overload", ["default", "maybe_inplace"])
+    def test_dispatch_priority_order(self, custom_add_op, overload: str):
+        _custom_add = custom_add_op
+        op_fn = _custom_add if overload == "default" else _custom_add.maybe_inplace
+        torch_op = (
+            _custom_add.torch_op
+            if overload == "default"
+            else _custom_add.maybe_inplace.torch_op
+        )
+
         x = torch.tensor(1, dtype=torch.int32)
         y = torch.tensor(2, dtype=torch.int32)
 
         with _custom_add.set_priority(["impl_b", "impl_a"]):
-            assert _custom_add.dispatch(x, y) is impl_b
-            out1 = _custom_add(x, y)
-            out2 = torch.ops.vllm_ir._custom_add(x, y)
+            assert _custom_add.dispatch(x, y) is _custom_add.impls["impl_b"]
+            out1 = op_fn(x.clone(), y)
+            out2 = torch_op(x.clone(), y)
 
             with _custom_add.set_priority(["impl_a"]):
-                assert _custom_add.dispatch(x, y) is impl_a
-                out3 = _custom_add(x, y)
-                out4 = torch.ops.vllm_ir._custom_add(x, y)
+                assert _custom_add.dispatch(x, y) is _custom_add.impls["impl_a"]
+                out3 = op_fn(x.clone(), y)
+                out4 = torch_op(x.clone(), y)
 
         # impl_b
         assert out1.item() == 1 + 2 + 20
@@ -264,24 +327,27 @@ class TestIrOpImplDispatch:
         assert out3.item() == 1 + 2 + 10
         assert out4.item() == 1 + 2 + 10
 
-    def test_unsupported_impl_filtered(self):
-        @_custom_add.register_impl("unsupported", supported=False)
-        def impl_bad(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    def test_unsupported_impl_filtered(self, custom_add_op):
+        _custom_add = custom_add_op
+
+        @_custom_add.register_impl("impl_unsupported", supported=False)
+        def impl_unsupported(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
             return x + y + 999
 
         x = torch.tensor(1, dtype=torch.int32)
         y = torch.tensor(2, dtype=torch.int32)
 
-        with _custom_add.set_priority(["unsupported", "impl_a"]):
+        with _custom_add.set_priority(["impl_unsupported", "impl_a"]):
             assert _custom_add.get_priority() == ["impl_a"]
             out = _custom_add(x, y)
 
-        # impl_bad skipped → impl_a
+        # impl_unsupported skipped → impl_a
         assert out.item() == 1 + 2 + 10
 
     def test_supports_args_runtime_dispatch_and_warning(
-        self, caplog_vllm: pytest.LogCaptureFixture
+        self, custom_add_op, caplog_vllm: pytest.LogCaptureFixture
     ):
+        _custom_add = custom_add_op
         x1 = torch.ones((2, 2), dtype=torch.int32)
         y1 = torch.full((2, 2), 2, dtype=torch.int32)
 
@@ -301,7 +367,7 @@ class TestIrOpImplDispatch:
 
             # Check dispatching
             assert _custom_add.get_priority() == ["impl_even", "native"]
-            assert _custom_add.dispatch(x1, y1) is impl_even
+            assert _custom_add.dispatch(x1, y1) is _custom_add.impls["impl_even"]
             assert _custom_add.dispatch(x2, y2) is _custom_add.impls["native"]
 
             out1 = _custom_add(x1, y1)  # size(1) == 2 → impl_even
@@ -313,8 +379,12 @@ class TestIrOpImplDispatch:
         assert torch.all(out2 == 1 + 2)
 
     def test_default_priority(
-        self, caplog_vllm: pytest.LogCaptureFixture, disable_log_dedup
+        self,
+        custom_add_op,
+        caplog_vllm: pytest.LogCaptureFixture,
+        disable_log_dedup,
     ):
+        _custom_add = custom_add_op
         # Make sure logs are not deduplicated to properly test the warning
         x = torch.tensor([3], dtype=torch.int32)
         y = torch.tensor([4], dtype=torch.int32)
@@ -336,15 +406,43 @@ class TestIrOpImplDispatch:
         assert "priority not set" in message
 
 
-@vllm.ir.register_op
-def _custom_mm(
-    x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor | None = None
-) -> torch.Tensor:
-    tmp = x @ y
-    return tmp if bias is None else tmp + bias
+@pytest.mark.parametrize("default", [True, False])
+def test_set_default_torch_wrap(default: bool):
+    """set_default_torch_wrap permanently flips the global flag."""
+    original = vllm.ir.op._ENABLE_TORCH_WRAP
+    try:
+        vllm.ir.set_default_torch_wrap(default)
+        assert vllm.ir.op._ENABLE_TORCH_WRAP is default
+
+        # Flag doesn't change after exiting the enable_torch_wrap context.
+        with vllm.ir.enable_torch_wrap(not default):
+            assert vllm.ir.op._ENABLE_TORCH_WRAP is (not default)
+        assert vllm.ir.op._ENABLE_TORCH_WRAP is default
+
+        # Should override the previous default.
+        vllm.ir.set_default_torch_wrap(not default)
+        assert vllm.ir.op._ENABLE_TORCH_WRAP is (not default)
+    finally:
+        vllm.ir.op._ENABLE_TORCH_WRAP = original
 
 
-def test_default_args():
+@pytest.fixture
+def custom_mm_op(fake_vllm_ir):
+    """Fixture that registers ``_custom_mm`` (isolated by ``fake_vllm_ir``)."""
+
+    @vllm.ir.register_op
+    def _custom_mm(
+        x: torch.Tensor, y: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        tmp = x @ y
+        return tmp if bias is None else tmp + bias
+
+    return _custom_mm
+
+
+def test_default_args(custom_mm_op):
+    _custom_mm = custom_mm_op
+
     # Test that default args are properly applied when dispatching and calling
     @_custom_mm.register_impl("impl_mm", supports_args=lambda x, y, bias=None: True)
     def impl_mm(
@@ -362,7 +460,8 @@ def test_default_args():
         assert _custom_mm.dispatch(x1, x2) is impl_mm
 
 
-def test_bad_impl_registrations():
+def test_bad_impl_registrations(custom_mm_op):
+    _custom_mm = custom_mm_op
     # Check bad schema
     with pytest.raises(ValueError, match="does not match native schema"):
 
@@ -435,7 +534,8 @@ def test_bad_impl_registrations():
         ) -> torch.Tensor:
             return x @ y + 40
 
-    assert set(_custom_mm.impls.keys()) == {"impl_mm", "native"}
+    # With fixture, each test gets a fresh op with only "native" impl
+    assert set(_custom_mm.impls.keys()) == {"native"}
 
 
 IMPL_OOT_SRC = """
@@ -449,14 +549,14 @@ def impl_mm_oot(
 """
 
 
-def load_custom_mm_module(file_path: Path):
+def load_custom_mm_module(file_path: Path, custom_mm_op):
     spec = importlib.util.spec_from_file_location("_custom_mm_oot", file_path)
     assert spec is not None
     module = importlib.util.module_from_spec(spec)
 
     # Inject the variable into the module's global namespace
     # This allows the @_custom_mm.register_impl decorator to work
-    module._custom_mm = _custom_mm  # type: ignore[attr-defined]
+    module._custom_mm = custom_mm_op  # type: ignore[attr-defined]
 
     # Execute the file; this triggers the decorator
     assert spec.loader is not None
@@ -464,12 +564,13 @@ def load_custom_mm_module(file_path: Path):
     return module
 
 
-def test_uuid_and_oot(tmp_path: Path):
+def test_uuid_and_oot(custom_mm_op, tmp_path: Path):
+    _custom_mm = custom_mm_op
     file_path = tmp_path / "_custom_mm_oot.py"
     file_path.write_text(IMPL_OOT_SRC)
 
     assert "impl_mm_oot" not in _custom_mm.impls
-    _ = load_custom_mm_module(file_path)
+    _ = load_custom_mm_module(file_path, _custom_mm)
     assert "impl_mm_oot" in _custom_mm.impls
 
     uuid = _custom_mm.impls["impl_mm_oot"].uuid()
@@ -478,7 +579,7 @@ def test_uuid_and_oot(tmp_path: Path):
     # Replace file source
     file_path.write_text(IMPL_OOT_SRC + " # added file source")
     assert "impl_mm_oot" not in _custom_mm.impls
-    _ = load_custom_mm_module(file_path)
+    _ = load_custom_mm_module(file_path, _custom_mm)
     assert "impl_mm_oot" in _custom_mm.impls
 
     uuid1 = _custom_mm.impls["impl_mm_oot"].uuid()
@@ -488,10 +589,178 @@ def test_uuid_and_oot(tmp_path: Path):
     # Back to original
     file_path.write_text(IMPL_OOT_SRC)
     assert "impl_mm_oot" not in _custom_mm.impls
-    _ = load_custom_mm_module(file_path)
+    _ = load_custom_mm_module(file_path, _custom_mm)
     assert "impl_mm_oot" in _custom_mm.impls
 
     uuid2 = _custom_mm.impls["impl_mm_oot"].uuid()
     assert uuid2 == uuid
     assert uuid2 != uuid1
     del _custom_mm.impls["impl_mm_oot"]
+
+
+def _test_native(x: torch.Tensor, y: torch.Tensor) -> torch.Tensor:
+    return x + y
+
+
+def _make_op_with_generator(name: str = "_ig_test"):
+    op = IrOp(name, _test_native)
+
+    @op.register_input_generator
+    def _gen(n: int = 4):
+        x = torch.randn(n, 3)
+        y = torch.randn(n, 3)
+        return x, y
+
+    return op
+
+
+def _test_native_single(x: torch.Tensor) -> torch.Tensor:
+    return x
+
+
+class TestInputGenerator:
+    def test_no_input_generator_by_default(self):
+        op = IrOp("_ig_test_no_gen", _test_native_single)
+        assert not op.has_input_generator
+
+    def test_register_input_generator(self):
+        op = _make_op_with_generator("_ig_test_reg")
+        assert op.has_input_generator
+
+    def test_generate_inputs_returns_tuple(self):
+        op = _make_op_with_generator("_ig_test_tuple")
+        result = op.generate_inputs(n=2)
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        assert result[0].shape == (2, 3)
+        assert result[1].shape == (2, 3)
+
+    def test_generate_inputs_default_kwargs(self):
+        op = _make_op_with_generator("_ig_test_default")
+        result = op.generate_inputs()
+        assert result[0].shape == (4, 3)
+
+    def test_generate_inputs_without_registration_raises(self):
+        op = IrOp("_ig_test_no_gen_raises", _test_native_single)
+        with pytest.raises(RuntimeError, match="No input generator"):
+            op.generate_inputs()
+
+
+class TestTolerance:
+    def test_override_and_get_tolerance(self):
+        op = IrOp("_tol_test", _test_native)
+
+        tol = op.get_tolerance(torch.float32)
+        assert tol == {"atol": 1e-5, "rtol": 1.3e-6}
+
+        op.override_tolerance(torch.float32, atol=0.1, rtol=0.2)
+        assert op.get_tolerance(torch.float32) == {"atol": 0.1, "rtol": 0.2}
+        assert op.get_tolerance(torch.float16) == {"atol": 1e-3, "rtol": 1e-3}
+
+    def test_get_tolerance_raises_for_unknown_dtype(self):
+        op = IrOp("_tol_test_unknown", _test_native)
+        with pytest.raises(ValueError, match="No tolerance defined"):
+            op.get_tolerance(torch.complex64)
+
+
+def test_naming_validation(fake_vllm_ir):
+    """Test that op and provider names are validated ([a-z_][a-z_0-9]*)."""
+
+    # Valid op and provider names
+    @vllm.ir.register_op
+    def _valid_name_123(x: torch.Tensor) -> torch.Tensor:
+        return x
+
+    @_valid_name_123.register_impl("valid_provider_123")
+    def valid_impl(x: torch.Tensor) -> torch.Tensor:
+        return x + 1
+
+    # Invalid op names should fail
+    with pytest.raises(ValueError, match="name.*invalid"):
+
+        @vllm.ir.register_op
+        def InvalidName(x: torch.Tensor) -> torch.Tensor:
+            return x
+
+    with pytest.raises(ValueError, match="name.*invalid"):
+
+        @vllm.ir.register_op(name="123invalid")
+        def some_func(x: torch.Tensor) -> torch.Tensor:
+            return x
+
+    # Invalid provider names should fail
+    with pytest.raises(ValueError, match="name.*invalid"):
+
+        @_valid_name_123.register_impl("Invalid-Provider")
+        def invalid_impl(x: torch.Tensor) -> torch.Tensor:
+            return x + 1
+
+
+def test_registration_stack_traces(fake_vllm_ir):
+    """Test that stack traces are captured for ops and impls."""
+
+    @vllm.ir.register_op
+    def _test_stack(x: torch.Tensor) -> torch.Tensor:
+        return x
+
+    @_test_stack.register_impl("test_provider")
+    def test_impl(x: torch.Tensor) -> torch.Tensor:
+        return x + 1
+
+    # Verify op stack trace
+    assert hasattr(_test_stack, "_registration_stack")
+    assert len(_test_stack._registration_stack) > 0
+    op_stack_str = "".join(_test_stack._registration_stack)
+    assert "test_op.py" in op_stack_str
+    # Last frame should be the decorator in user code, not internal decorator logic
+    assert "@vllm.ir.register_op" in _test_stack._registration_stack[-1]
+    assert "return decorator(f)" not in op_stack_str
+
+    # Verify impl stack trace
+    impl = _test_stack.impls["test_provider"]
+    assert hasattr(impl, "_registration_stack")
+    assert len(impl._registration_stack) > 0
+    impl_stack_str = "".join(impl._registration_stack)
+    assert "test_op.py" in impl_stack_str
+    # Last frame should be the decorator in user code
+    assert '@_test_stack.register_impl("test_provider")' in impl._registration_stack[-1]
+
+
+def test_op_repr_uses_docstring(fake_vllm_ir):
+    """Test that __str__ uses the function's docstring and __repr__ is simple."""
+
+    @vllm.ir.register_op
+    def _test_repr_with_doc(x: torch.Tensor) -> torch.Tensor:
+        """First line of docstring.
+
+        Additional details here.
+        """
+        return x
+
+    @vllm.ir.register_op
+    def _test_repr_no_doc(x: torch.Tensor) -> torch.Tensor:
+        return x
+
+    # __str__ with docstring: uses first line only
+    str_with = str(_test_repr_with_doc)
+    assert "IrOp('_test_repr_with_doc')" in str_with
+    assert "First line of docstring." in str_with
+    assert "Additional details" not in str_with
+
+    # __str__ without docstring: simple format
+    assert str(_test_repr_no_doc) == "IrOp('_test_repr_no_doc')"
+
+    # __repr__ should be simple for both
+    assert repr(_test_repr_with_doc) == "IrOp('_test_repr_with_doc')"
+    assert repr(_test_repr_no_doc) == "IrOp('_test_repr_no_doc')"
+
+
+def test_vllm_ir_fixture(fake_vllm_ir):
+    """Test that the fake_vllm_ir fixture provides test isolation."""
+
+    @vllm.ir.register_op
+    def _test_fixture(x: torch.Tensor) -> torch.Tensor:
+        return x
+
+    assert "_test_fixture" in IrOp.registry
+    # Fixture will automatically clean up after test

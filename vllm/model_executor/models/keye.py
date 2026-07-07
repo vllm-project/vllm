@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from abc import abstractmethod
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias, TypeVar
 
@@ -33,10 +33,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.rotary_embedding.common import (
     ApplyRotaryEmb,
-)
-from vllm.model_executor.model_loader.weight_utils import (
-    default_weight_loader,
-    maybe_remap_kv_scale_name,
 )
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
@@ -76,7 +72,6 @@ from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
     init_vllm_registered_model,
-    is_pp_missing_parameter,
     maybe_prefix,
 )
 from .vision import is_vit_use_data_parallel
@@ -718,6 +713,14 @@ class KeyeSiglipVisionModel(nn.Module):
     config_class = PretrainedConfig
     main_input_name = "pixel_values"
 
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_stacked={
+            ".q_proj": (".qkv_proj", "q"),
+            ".k_proj": (".qkv_proj", "k"),
+            ".v_proj": (".qkv_proj", "v"),
+        }
+    )
+
     def __init__(
         self,
         config: PretrainedConfig,
@@ -729,7 +732,7 @@ class KeyeSiglipVisionModel(nn.Module):
         self.vision_model = KeyeSiglipVisionTransformer(
             config,
             quant_config=quant_config,
-            prefix=f"{prefix}.vision_model",
+            prefix=maybe_prefix(prefix, "vision_model"),
         )
         self.quant_config = quant_config
 
@@ -776,68 +779,8 @@ class KeyeSiglipVisionModel(nn.Module):
         )
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters(remove_duplicate=False))
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-            if "head.attention" in name or "head.layernorm" in name:
-                continue
-            if "head.mlp" in name or "head.probe" in name:
-                continue
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(
-                    param,
-                    "weight_loader",
-                    default_weight_loader,
-                )
-                loaded_weight = (
-                    loaded_weight if loaded_weight.dim() == 0 else loaded_weight[0]
-                )
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
-                continue
-            for (
-                param_name,
-                weight_name,
-                shard_id,
-            ) in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                name = maybe_remap_kv_scale_name(name, params_dict)
-                if name is None:
-                    continue
-                if is_pp_missing_parameter(name, self):
-                    continue
-                param = params_dict[name]
-                weight_loader = getattr(
-                    param,
-                    "weight_loader",
-                    default_weight_loader,
-                )
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self, skip_prefixes=["vision_model.head."])
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
 
 class Projector(nn.Module):
@@ -1595,91 +1538,92 @@ class KeyeForConditionalGeneration(
             self._process_video_embeds(video_type, video_grid_thw, pixel_values_videos)
         )
 
+    @staticmethod
+    def _split_video_grid_thw(
+        grid_thw: torch.Tensor | list[list[int]] | list[int],
+    ) -> list[list[int]]:
+        """
+        Split video grid_thw along the t dimension into per-frame rows.
+
+        This preserves Keye's current M-RoPE behavior, where a video is emitted
+        as consecutive frame-level multimodal blocks rather than a single block
+        spanning the whole video.
+        """
+        if isinstance(grid_thw, list):
+            if len(grid_thw) == 0:
+                return []
+            if isinstance(grid_thw[0], int):
+                grid_thw = torch.tensor([grid_thw], dtype=torch.long)
+            else:
+                grid_thw = torch.tensor(grid_thw, dtype=torch.long)
+        elif grid_thw.ndim == 1:
+            grid_thw = grid_thw.unsqueeze(0)
+
+        if grid_thw.numel() == 0:
+            return []
+
+        t, hw = grid_thw[:, 0], grid_thw[:, 1:]
+        ones = torch.ones_like(hw[:, :1])
+        out = torch.cat([ones, hw], dim=1).repeat_interleave(t, dim=0)
+        return out.tolist()
+
+    def iter_mm_grid_thw(
+        self, mm_features: list[MultiModalFeatureSpec]
+    ) -> Iterator[tuple[int, int, int, int]]:
+        spatial_merge_size = self.config.vision_config.spatial_merge_size
+
+        for mm_feature in sorted(mm_features, key=lambda f: f.mm_position.offset):
+            if mm_feature.data is None:
+                raise ValueError("M-RoPE calculation requires multimodal feature data")
+
+            if mm_feature.modality == "image":
+                grid_thw = mm_feature.data["image_grid_thw"].data
+                if isinstance(grid_thw, torch.Tensor):
+                    if grid_thw.ndim == 2:
+                        assert grid_thw.shape[0] == 1
+                        t, h, w = grid_thw[0].tolist()
+                    else:
+                        t, h, w = grid_thw.tolist()
+                else:
+                    if isinstance(grid_thw[0], list):
+                        assert len(grid_thw) == 1
+                        t, h, w = grid_thw[0]
+                    else:
+                        t, h, w = grid_thw
+
+                yield (
+                    mm_feature.mm_position.offset,
+                    t,
+                    h // spatial_merge_size,
+                    w // spatial_merge_size,
+                )
+            elif mm_feature.modality == "video":
+                current_offset = mm_feature.mm_position.offset
+                for t, h, w in self._split_video_grid_thw(
+                    mm_feature.data["video_grid_thw"].data
+                ):
+                    llm_grid_h = h // spatial_merge_size
+                    llm_grid_w = w // spatial_merge_size
+                    yield (current_offset, t, llm_grid_h, llm_grid_w)
+                    current_offset += t * llm_grid_h * llm_grid_w
+            else:
+                raise ValueError(f"Unsupported modality: {mm_feature.modality}")
+
     def get_mrope_input_positions(
         self,
         input_tokens: list[int],
         mm_features: list[MultiModalFeatureSpec],
     ) -> tuple[torch.Tensor, int]:
-        kwargs = MultiModalFeatureSpec.gather_kwargs(
-            mm_features,
-            {"image_grid_thw", "video_grid_thw"},
-        )
-        image_grid_thw = [item.tolist() for item in kwargs.get("image_grid_thw", [])]
-        video_grid_thw = [item.tolist() for item in kwargs.get("video_grid_thw", [])]
-
-        if isinstance(video_grid_thw, list) and len(video_grid_thw) > 0:
-            video_grid_thw = video_grid_thw[0]
-
-        def split_thw(grid_thw: torch.Tensor | list[int]) -> list[list[int]]:
-            """
-            Split grid_thw along the t dimension.
-
-            Args:
-                grid_thw: shape [N, 3] tensor or nested list of [t, h, w].
-
-            Returns:
-                List of [1, h, w] rows, repeated t times for each original row.
-            """
-
-            if isinstance(grid_thw, list):
-                grid_thw = torch.tensor(grid_thw, dtype=torch.long)
-
-            if grid_thw.numel() == 0:
-                return []
-
-            t, hw = grid_thw[:, 0], grid_thw[:, 1:]
-            ones = torch.ones_like(hw[:, :1])  # [N,1]
-            out = torch.cat([ones, hw], dim=1).repeat_interleave(t, dim=0)
-            return out.tolist()
-
-        video_grid_thw = split_thw(video_grid_thw)
-
-        hf_config = self.config
-        image_token_id = hf_config.image_token_id
-        video_token_id = hf_config.video_token_id
-        spatial_merge_size = hf_config.vision_config.spatial_merge_size
-
-        image_nums = len(image_grid_thw)
-        frame_nums = len(video_grid_thw)
         llm_pos_ids_list: list = []
-
         st = 0
-        remain_images, remain_frames = image_nums, frame_nums
 
-        image_index, video_index = 0, 0
-        for _ in range(image_nums + frame_nums):
-            if remain_images > 0:
-                try:
-                    ed_image = input_tokens.index(image_token_id, st)
-                except ValueError:
-                    ed_image = len(input_tokens) + 1
-            else:
-                ed_image = len(input_tokens) + 1
-            if remain_frames > 0:
-                try:
-                    ed_video = input_tokens.index(video_token_id, st)
-                except ValueError:
-                    ed_video = len(input_tokens) + 1
-            else:
-                ed_video = len(input_tokens) + 1
-
-            if ed_image < ed_video:
-                t, h, w = image_grid_thw[image_index]
-                image_index += 1
-                remain_images -= 1
-                ed = ed_image
-            else:
-                t, h, w = video_grid_thw[video_index]
-                video_index += 1
-                remain_frames -= 1
-                ed = ed_video
-
-            llm_grid_t, llm_grid_h, llm_grid_w = (
-                t,
-                h // spatial_merge_size,
-                w // spatial_merge_size,
-            )
-            text_len = ed - st
+        for (
+            offset,
+            llm_grid_t,
+            llm_grid_h,
+            llm_grid_w,
+        ) in self.iter_mm_grid_thw(mm_features):
+            text_len = offset - st
 
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0
             llm_pos_ids_list.append(
@@ -1711,7 +1655,7 @@ class KeyeForConditionalGeneration(
             llm_pos_ids_list.append(
                 torch.stack([t_index, h_index, w_index]) + text_len + st_idx
             )
-            st = ed + llm_grid_t * llm_grid_h * llm_grid_w
+            st = offset + llm_grid_t * llm_grid_h * llm_grid_w
 
         if st < len(input_tokens):
             st_idx = llm_pos_ids_list[-1].max() + 1 if len(llm_pos_ids_list) > 0 else 0

@@ -11,7 +11,9 @@ from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import SharedFusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -30,9 +32,10 @@ from .deepseek_v2 import (
     DeepseekV2DecoderLayer,
     DeepseekV2MixtureOfExperts,
     DeepseekV2MoE,
+    _try_load_fp8_indexer_wk,
     get_spec_layer_idx_from_weight_name,
 )
-from .utils import maybe_prefix
+from .utils import get_pp_missing_layer_names, maybe_prefix
 
 logger = init_logger(__name__)
 
@@ -112,10 +115,16 @@ class DeepSeekMultiTokenPredictorLayer(nn.Module):
         )
 
         hidden_states, residual = self.mtp_block(
-            positions=positions, hidden_states=hidden_states, residual=None
+            positions=positions,
+            hidden_states=hidden_states,
+            residual=None,
         )
-        hidden_states = residual + hidden_states
-        return hidden_states
+        hidden_states = residual + hidden_states  # pre-final-norm (logits hidden)
+        # Recycle the post-final-norm hidden into the next draft step.
+        # compute_logits applies shared_head (== final norm) to the pre-norm
+        # element, so logits and the recycle each get exactly one final-norm.
+        # Matches SGLang's deepseek_nextn.
+        return hidden_states, self.shared_head(hidden_states)
 
 
 class DeepSeekMultiTokenPredictor(nn.Module):
@@ -143,6 +152,37 @@ class DeepSeekMultiTokenPredictor(nn.Module):
             prefix=maybe_prefix(prefix, "embed_tokens"),
         )
         self.logits_processor = LogitsProcessor(config.vocab_size)
+
+    def set_skip_topk(self, skip: bool):
+        """Toggle skip_topk on all MTP layers with sparse attention.
+
+        Called by the proposer to implement index_share_for_mtp_iteration:
+        step 0 sets skip=False (compute own indices), steps 1+ set skip=True
+        (reuse step 0's indices).
+        """
+        for layer in self.layers.values():
+            mtp_block = getattr(layer, "mtp_block", None)
+            if mtp_block is not None:
+                self_attn = getattr(mtp_block, "self_attn", None)
+                if self_attn is not None:
+                    mla_attn = getattr(self_attn, "mla_attn", None)
+                    if mla_attn is not None and hasattr(mla_attn, "skip_topk"):
+                        mla_attn.skip_topk = skip
+
+    def compact_topk_indices(self, slot_ids: torch.Tensor):
+        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        num_slots = slot_ids.numel()
+        for layer in self.layers.values():
+            mtp_block = getattr(layer, "mtp_block", None)
+            if mtp_block is not None:
+                self_attn = getattr(mtp_block, "self_attn", None)
+                if self_attn is not None:
+                    mla_attn = getattr(self_attn, "mla_attn", None)
+                    if mla_attn is not None and hasattr(
+                        mla_attn, "topk_indices_buffer"
+                    ):
+                        topk_indices_buffer = mla_attn.topk_indices_buffer
+                        topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -190,13 +230,8 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
         )
         # Set MoE hyperparameters
         self.set_moe_parameters()
-        self.is_fp4_ckpt = (
-            self.quant_config is not None
-            and self.quant_config.get_name() == "modelopt_fp4"
-        )
 
     def set_moe_parameters(self):
-        self.expert_weights = []
         self.num_moe_layers = self.config.num_nextn_predict_layers
         self.num_expert_groups = self.config.n_group
 
@@ -226,7 +261,11 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
         spec_step_idx: int = 0,
     ) -> torch.Tensor:
         hidden_states = self.model(
-            input_ids, positions, hidden_states, inputs_embeds, spec_step_idx
+            input_ids,
+            positions,
+            hidden_states,
+            inputs_embeds,
+            spec_step_idx,
         )
         return hidden_states
 
@@ -248,15 +287,14 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ("fused_qkv_a_proj", "kv_a_proj_with_mqa", 1),
         ]
 
-        if self.is_fp4_ckpt:
-            # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
-            indexer_fused_mapping = [
-                ("wk_weights_proj", "wk", 0),
-                ("wk_weights_proj", "weights_proj", 1),
-            ]
-            stacked_params_mapping.extend(indexer_fused_mapping)
+        # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
+        indexer_fused_mapping = [
+            ("wk_weights_proj", "wk", 0),
+            ("wk_weights_proj", "weights_proj", 1),
+        ]
+        stacked_params_mapping.extend(indexer_fused_mapping)
 
-        expert_params_mapping = SharedFusedMoE.make_expert_params_mapping(
+        expert_params_mapping = fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -269,8 +307,10 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
             ),
         )
 
+        pp_missing_layer_names = get_pp_missing_layer_names(self)
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
+        _pending_wk_fp8: dict = {}  # FP8 indexer wk dequant buffer
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
@@ -281,6 +321,17 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
                 rocm_aiter_moe_shared_expert_enabled and ("mlp.shared_experts" in name)
             )
             name = self._rewrite_spec_layer_name(spec_layer, name)
+
+            if _try_load_fp8_indexer_wk(
+                name,
+                loaded_weight,
+                _pending_wk_fp8,
+                params_dict,
+                loaded_params,
+                pp_missing_layer_names,
+            ):
+                continue
+
             for param_name, weight_name, shard_id in stacked_params_mapping:
                 # Skip non-stacked layers and experts (experts handled below).
                 if weight_name not in name:

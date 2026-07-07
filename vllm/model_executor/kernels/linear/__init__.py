@@ -19,6 +19,10 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear.base import (
+    MMLinearKernel,
+    MMLinearLayerConfig,
+)
 from vllm.model_executor.kernels.linear.mixed_precision import (
     MPLinearKernel,
     MPLinearLayerConfig,
@@ -41,36 +45,127 @@ from vllm.model_executor.kernels.linear.mixed_precision.dynamic_4bit import (
 from vllm.model_executor.kernels.linear.mixed_precision.exllama import (
     ExllamaLinearKernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.humming import (
+    HummingLinearKernel,
+)
 from vllm.model_executor.kernels.linear.mixed_precision.machete import (
     MacheteLinearKernel,
 )
 from vllm.model_executor.kernels.linear.mixed_precision.marlin import (
     MarlinLinearKernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.rdna3_w4a16 import (
+    RDNA3W4A16LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mixed_precision.triton_w4a16 import (
+    TritonW4A16LinearKernel,
+)
 from vllm.model_executor.kernels.linear.mixed_precision.xpu import (
     XPUW4A8IntLinearKernel,
     XPUwNa16LinearKernel,
 )
+from vllm.model_executor.kernels.linear.mixed_precision.zentorch import (
+    ZentorchWNA16LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp4 import (
+    MxFp4LinearKernel,
+    MxFp4LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.mxfp4.flashinfer import (
+    FlashInferMxFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp4.humming import (
+    HummingMxFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp4.marlin import (
+    MarlinMxFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp4.xpu import (
+    XPUMxFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp8 import (
+    Mxfp8LinearKernel,
+    Mxfp8LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.mxfp8.emulation import (
+    EmulationMxfp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp8.flashinfer import (
+    FlashInferCutedslMxfp8LinearKernel,
+    FlashInferCutlassMxfp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp8.humming import (
+    HummingMxfp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp8.marlin import (
+    MarlinMxfp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp8.rocm_native import (
+    RocmDotScaledMxfp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.mxfp8.xpu import (
+    XPUMxFp8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.nvfp4 import (
+    NvFp4LinearKernel,
+    NvFp4LinearLayerConfig,
+)
+from vllm.model_executor.kernels.linear.nvfp4.cutlass import (
+    CutlassNvFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.nvfp4.emulation import (
+    EmulationNvFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.nvfp4.fbgemm import (
+    FbgemmNvFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.nvfp4.flashinfer import (
+    FlashInferB12xNvFp4LinearKernel,
+    FlashInferCudnnNvFp4LinearKernel,
+    FlashInferCuteDslNvFp4LinearKernel,
+    FlashInferCutlassNvFp4LinearKernel,
+    FlashInferTrtllmNvFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.nvfp4.humming import (
+    HummingNvFp4LinearKernel,
+)
+from vllm.model_executor.kernels.linear.nvfp4.marlin import (
+    MarlinNvFp4LinearKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm import (
+    Fp8BlockScaledMMLinearKernel,
     FP8ScaledMMLinearKernel,
     FP8ScaledMMLinearLayerConfig,
     Int8ScaledMMLinearKernel,
     Int8ScaledMMLinearLayerConfig,
     ScaledMMLinearKernel,
-    ScaledMMLinearLayerConfig,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.aiter import (
+    AiterFp8BlockScaledMMKernel,
+    AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
     AiterInt8ScaledMMLinearKernel,
+    AiterPerTokenFp8ScaledMMLinearKernel,
+    AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cpu import (
+    CPUFp8BlockScaledMMKernel,
     CPUInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.cutlass import (
+    CutlassFp8BlockScaledMMKernel,
     CutlassFP8ScaledMMLinearKernel,
     CutlassInt8ScaledMMLinearKernel,
 )
+from vllm.model_executor.kernels.linear.scaled_mm.deep_gemm import (
+    DeepGemmFp8BlockScaledMMKernel,
+)
 from vllm.model_executor.kernels.linear.scaled_mm.flashinfer import (
+    FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
     FlashInferFP8ScaledMMLinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.humming import (
+    HummingFP8ScaledMMLinearKernel,
+    HummingInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.marlin import (
     MarlinFP8ScaledMMLinearKernel,
@@ -84,22 +179,141 @@ from vllm.model_executor.kernels.linear.scaled_mm.rocm import (
     ROCmFP8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.triton import (
+    TritonFp8BlockScaledMMKernel,
     TritonInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.kernels.linear.scaled_mm.xpu import (
-    XPUFP8ScaledMMLinearKernel,
+    XPUFp8BlockScaledMMKernel,
+    XPUW8A8FP8LinearKernel,
+    XPUW8A16FP8LinearKernel,
+)
+from vllm.model_executor.kernels.linear.scaled_mm.zentorch import (
+    ZentorchInt8ScaledMMLinearKernel,
 )
 from vllm.model_executor.layers.quantization.utils.quant_utils import QuantKey
 from vllm.platforms import PlatformEnum, current_platform
 
 logger = init_logger(__name__)
 
+
+def _get_linear_backend() -> str:
+    """Get the linear_backend setting from the current vllm config."""
+    from vllm.config import get_current_vllm_config_or_none
+
+    config = get_current_vllm_config_or_none()
+    if config is not None:
+        return config.kernel_config.linear_backend
+    return "auto"
+
+
+# Mapping from linear_backend name to the set of kernel classes it covers.
+# When a user sets --linear-backend <name>, only kernels in the corresponding
+# set are considered candidates. If none can implement the layer config,
+# an error is raised to respect the user's explicit intent.
+_LINEAR_BACKEND_KERNEL_MAP: dict[str, set[type]] = {
+    "cutlass": {
+        CutlassInt8ScaledMMLinearKernel,
+        CutlassFP8ScaledMMLinearKernel,
+        CutlassFp8BlockScaledMMKernel,
+        CutlassW4A8LinearKernel,
+        CutlassNvFp4LinearKernel,
+    },
+    "flashinfer_cutlass": {
+        FlashInferFP8ScaledMMLinearKernel,
+        FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+        FlashInferCutlassMxfp8LinearKernel,
+        FlashInferCutlassNvFp4LinearKernel,
+        FlashInferMxFp4LinearKernel,
+    },
+    "flashinfer_cutedsl": {
+        FlashInferCuteDslNvFp4LinearKernel,
+        FlashInferCutedslMxfp8LinearKernel,
+    },
+    "flashinfer_trtllm": {
+        FlashInferTrtllmNvFp4LinearKernel,
+    },
+    "flashinfer_cudnn": {
+        FlashInferCudnnNvFp4LinearKernel,
+    },
+    "flashinfer_b12x": {
+        FlashInferB12xNvFp4LinearKernel,
+    },
+    "humming": {
+        HummingFP8ScaledMMLinearKernel,
+        HummingInt8ScaledMMLinearKernel,
+        HummingLinearKernel,
+        HummingMxfp8LinearKernel,
+        HummingMxFp4LinearKernel,
+        HummingNvFp4LinearKernel,
+    },
+    "marlin": {
+        MarlinFP8ScaledMMLinearKernel,
+        MarlinLinearKernel,
+        MarlinMxfp8LinearKernel,
+        MarlinNvFp4LinearKernel,
+        MarlinMxFp4LinearKernel,
+    },
+    "triton": {
+        TritonInt8ScaledMMLinearKernel,
+        TritonFp8BlockScaledMMKernel,
+        TritonW4A16LinearKernel,
+    },
+    "deep_gemm": {
+        DeepGemmFp8BlockScaledMMKernel,
+    },
+    "torch": {
+        PerTensorTorchFP8ScaledMMLinearKernel,
+        ChannelWiseTorchFP8ScaledMMLinearKernel,
+        RowWiseTorchFP8ScaledMMLinearKernel,
+    },
+    "aiter": {
+        AiterInt8ScaledMMLinearKernel,
+        AiterFp8BlockScaledMMKernel,
+        AiterPerTokenFp8ScaledMMLinearKernel,
+        AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+    },
+    "machete": {
+        MacheteLinearKernel,
+    },
+    "fbgemm": {
+        FbgemmNvFp4LinearKernel,
+    },
+    "conch": {
+        ConchLinearKernel,
+    },
+    "exllama": {
+        ExllamaLinearKernel,
+    },
+    "emulation": {
+        EmulationMxfp8LinearKernel,
+        EmulationNvFp4LinearKernel,
+    },
+    "xpu": {
+        XPUW8A8FP8LinearKernel,
+        XPUFp8BlockScaledMMKernel,
+    },
+    "xpu_woq": {
+        XPUW8A16FP8LinearKernel,
+    },
+}
+
+
+def _filter_kernels_by_backend(
+    backend: str,
+    kernels: list[type],
+) -> list[type]:
+    """Filter a kernel priority list to only those matching the backend."""
+    backend_kernels = _LINEAR_BACKEND_KERNEL_MAP.get(backend, set())
+    return [k for k in kernels if k in backend_kernels]
+
+
 # in priority/performance order (when available)
 _POSSIBLE_INT8_KERNELS: dict[PlatformEnum, list[type[Int8ScaledMMLinearKernel]]] = {
-    PlatformEnum.CPU: [CPUInt8ScaledMMLinearKernel],
+    PlatformEnum.CPU: [ZentorchInt8ScaledMMLinearKernel, CPUInt8ScaledMMLinearKernel],
     PlatformEnum.CUDA: [
         CutlassInt8ScaledMMLinearKernel,
         TritonInt8ScaledMMLinearKernel,
+        HummingInt8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [AiterInt8ScaledMMLinearKernel, TritonInt8ScaledMMLinearKernel],
 }
@@ -112,8 +326,12 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         CutlassFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         ChannelWiseTorchFP8ScaledMMLinearKernel,
+        HummingFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.ROCM: [
+        AiterHipbMMPerTokenFp8ScaledMMLinearKernel,
+        AiterPreshuffledPerTokenFp8ScaledMMLinearKernel,
+        AiterPerTokenFp8ScaledMMLinearKernel,
         ROCmFP8ScaledMMLinearKernel,
         PerTensorTorchFP8ScaledMMLinearKernel,
         RowWiseTorchFP8ScaledMMLinearKernel,
@@ -124,7 +342,50 @@ _POSSIBLE_FP8_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] =
         ChannelWiseTorchFP8ScaledMMLinearKernel,
     ],
     PlatformEnum.XPU: [
-        XPUFP8ScaledMMLinearKernel,
+        XPUW8A16FP8LinearKernel,
+        XPUW8A8FP8LinearKernel,
+    ],
+}
+
+
+# in priority/performance order (when available)
+_POSSIBLE_FP8_BLOCK_KERNELS: dict[
+    PlatformEnum, list[type[Fp8BlockScaledMMLinearKernel | FP8ScaledMMLinearKernel]]
+] = {
+    PlatformEnum.CUDA: [
+        FlashInferFp8DeepGEMMDynamicBlockScaledKernel,
+        DeepGemmFp8BlockScaledMMKernel,
+        CutlassFp8BlockScaledMMKernel,
+        MarlinFP8ScaledMMLinearKernel,
+        TritonFp8BlockScaledMMKernel,
+        HummingFP8ScaledMMLinearKernel,
+    ],
+    PlatformEnum.ROCM: [
+        AiterFp8BlockScaledMMKernel,
+        TritonFp8BlockScaledMMKernel,
+    ],
+    PlatformEnum.CPU: [
+        CPUFp8BlockScaledMMKernel,
+    ],
+    PlatformEnum.XPU: [
+        XPUFp8BlockScaledMMKernel,
+        TritonFp8BlockScaledMMKernel,
+    ],
+}
+
+_POSSIBLE_WFP8A16_KERNELS: dict[PlatformEnum, list[type[FP8ScaledMMLinearKernel]]] = {
+    PlatformEnum.CUDA: [
+        HummingFP8ScaledMMLinearKernel,
+        MarlinFP8ScaledMMLinearKernel,
+    ],
+    PlatformEnum.ROCM: [
+        # To be added
+    ],
+    PlatformEnum.CPU: [
+        # To be added
+    ],
+    PlatformEnum.XPU: [
+        XPUW8A16FP8LinearKernel,
     ],
 }
 
@@ -137,8 +398,12 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
         MarlinLinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
+        TritonW4A16LinearKernel,
+        HummingLinearKernel,
     ],
     PlatformEnum.ROCM: [
+        RDNA3W4A16LinearKernel,
+        TritonW4A16LinearKernel,
         ConchLinearKernel,
         ExllamaLinearKernel,
     ],
@@ -148,12 +413,67 @@ _POSSIBLE_KERNELS: dict[PlatformEnum, list[type[MPLinearKernel]]] = {
     ],
     PlatformEnum.CPU: [
         Dynamic4bitLinearKernel,
+        ZentorchWNA16LinearKernel,
         CPUWNA16LinearKernel,
     ],
 }
 
-_KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel)
-_KernelConfigT = TypeVar("_KernelConfigT", bound=ScaledMMLinearLayerConfig)
+# in priority/performance order (when available)
+_POSSIBLE_MXFP8_KERNELS: dict[PlatformEnum, list[type[Mxfp8LinearKernel]]] = {
+    PlatformEnum.CUDA: [
+        FlashInferCutedslMxfp8LinearKernel,
+        FlashInferCutlassMxfp8LinearKernel,
+        MarlinMxfp8LinearKernel,
+        EmulationMxfp8LinearKernel,
+        HummingMxfp8LinearKernel,
+    ],
+    PlatformEnum.ROCM: [
+        # Native CDNA4 (gfx950) MX linear; is_supported() gates to gfx95x and
+        # falls through to BF16 emulation (hipBLASLt) elsewhere / on regression.
+        RocmDotScaledMxfp8LinearKernel,
+        EmulationMxfp8LinearKernel,
+    ],
+    PlatformEnum.XPU: [
+        XPUMxFp8LinearKernel,
+        EmulationMxfp8LinearKernel,
+    ],
+}
+
+_POSSIBLE_NVFP4_KERNELS: dict[PlatformEnum, list[type[NvFp4LinearKernel]]] = {
+    PlatformEnum.CUDA: [
+        FlashInferCuteDslNvFp4LinearKernel,
+        # FlashInferB12xNvFp4LinearKernel excluded from auto-selection until
+        # upstream CUTLASS SM121 MMA op guard is resolved; use
+        # --linear-backend flashinfer_b12x to opt in explicitly.
+        FlashInferCutlassNvFp4LinearKernel,
+        CutlassNvFp4LinearKernel,
+        MarlinNvFp4LinearKernel,
+        FlashInferTrtllmNvFp4LinearKernel,
+        FlashInferCudnnNvFp4LinearKernel,
+        FbgemmNvFp4LinearKernel,
+        EmulationNvFp4LinearKernel,
+        HummingNvFp4LinearKernel,
+    ],
+    PlatformEnum.ROCM: [
+        EmulationNvFp4LinearKernel,
+    ],
+}
+
+_POSSIBLE_MXFP4_KERNELS: dict[PlatformEnum, list[type[MxFp4LinearKernel]]] = {
+    PlatformEnum.CUDA: [
+        FlashInferMxFp4LinearKernel,
+        MarlinMxFp4LinearKernel,
+        HummingMxFp4LinearKernel,
+    ],
+    PlatformEnum.XPU: [
+        XPUMxFp4LinearKernel,
+    ],
+}
+
+# TODO make all kernels inherit from MMLinearKernel
+# then bound _KernelT only to MMLinearKernel
+_KernelT = TypeVar("_KernelT", bound=ScaledMMLinearKernel | MMLinearKernel)
+_KernelConfigT = TypeVar("_KernelConfigT", bound=MMLinearLayerConfig)
 
 
 def is_supported_and_can_implement_kernel(
@@ -226,7 +546,20 @@ def choose_scaled_mm_linear_kernel(
             scope="global",
         )
 
-    for kernel in possible_kernels[current_platform._enum]:
+    platform_kernels = possible_kernels[current_platform._enum]
+
+    # Apply --linear-backend filtering when set.
+    linear_backend = _get_linear_backend()
+    if linear_backend != "auto":
+        filtered = _filter_kernels_by_backend(linear_backend, platform_kernels)
+        if not filtered:
+            raise ValueError(
+                f"--linear-backend={linear_backend} was requested but no "
+                f"'{linear_backend}' kernel exists for this layer type."
+            )
+        platform_kernels = filtered
+
+    for kernel in platform_kernels:
         is_supported_and_can_implement, failure_reason = (
             is_supported_and_can_implement_kernel(kernel, config, compute_capability)
         )
@@ -243,32 +576,74 @@ def choose_scaled_mm_linear_kernel(
 def init_fp8_linear_kernel(
     activation_quant_key: QuantKey,
     weight_quant_key: QuantKey,
+    input_dtype: torch.dtype,
     out_dtype: torch.dtype,
+    weight_shape: tuple[int, int],
     force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
     module_name: str | None = None,
-) -> FP8ScaledMMLinearKernel:
+) -> FP8ScaledMMLinearKernel | Fp8BlockScaledMMLinearKernel:
     scaled_mm_linear_kernel_config = FP8ScaledMMLinearLayerConfig(
         weight_quant_key=weight_quant_key,
         activation_quant_key=activation_quant_key,
+        input_dtype=input_dtype,
         out_dtype=out_dtype,
+        weight_shape=weight_shape,
     )
 
-    kernel_type = choose_scaled_mm_linear_kernel(
-        scaled_mm_linear_kernel_config, _POSSIBLE_FP8_KERNELS, force_kernel=force_kernel
-    )
+    if activation_quant_key.scale.group_shape.is_per_group():
+        kernel_type = choose_scaled_mm_linear_kernel(
+            config=scaled_mm_linear_kernel_config,
+            possible_kernels=_POSSIBLE_FP8_BLOCK_KERNELS,  # type: ignore[misc]
+            force_kernel=force_kernel,
+        )
+        if module_name:
+            logger.info_once(
+                "Selected %s for %s",
+                kernel_type.__name__,
+                module_name,
+                scope="global",
+            )
 
-    if module_name:
-        logger.info_once(
-            "Selected %s for %s",
-            kernel_type.__name__,
-            module_name,
-            scope="global",
+        # TODO make scaled_mm kernels inherit from MMLinearKernel
+        # only MarlinFP8ScaledMMLinearKernel is a type of FP8ScaledMMLinearKernel.
+        if issubclass(kernel_type, FP8ScaledMMLinearKernel):
+            return kernel_type(
+                scaled_mm_linear_kernel_config,
+                layer_param_names=[
+                    "weight",
+                    "weight_scale",
+                    "input_scale",
+                    "input_scale_ub",
+                ],
+            )
+
+        return kernel_type(
+            scaled_mm_linear_kernel_config,
         )
 
-    return kernel_type(
-        scaled_mm_linear_kernel_config,
-        layer_param_names=["weight", "weight_scale", "input_scale", "input_scale_ub"],
-    )
+    else:
+        kernel_type = choose_scaled_mm_linear_kernel(
+            config=scaled_mm_linear_kernel_config,
+            possible_kernels=_POSSIBLE_FP8_KERNELS,  # type: ignore[arg-type]
+            force_kernel=force_kernel,
+        )
+        if module_name:
+            logger.info_once(
+                "Selected %s for %s",
+                kernel_type.__name__,
+                module_name,
+                scope="global",
+            )
+
+        return kernel_type(
+            scaled_mm_linear_kernel_config,
+            layer_param_names=[
+                "weight",
+                "weight_scale",
+                "input_scale",
+                "input_scale_ub",
+            ],
+        )
 
 
 def init_int8_linear_kernel(
@@ -335,8 +710,21 @@ def choose_mp_linear_kernel(
         if _cc is not None:
             compute_capability = _cc[0] * 10 + _cc[1]
 
+    platform_kernels = _POSSIBLE_KERNELS[current_platform._enum]
+
+    # Apply --linear-backend filtering when set.
+    linear_backend = _get_linear_backend()
+    if linear_backend != "auto":
+        filtered = _filter_kernels_by_backend(linear_backend, platform_kernels)
+        if not filtered:
+            raise ValueError(
+                f"--linear-backend={linear_backend} was requested but no "
+                f"'{linear_backend}' kernel exists for mixed-precision layers."
+            )
+        platform_kernels = filtered
+
     failure_reasons = []
-    for kernel in _POSSIBLE_KERNELS[current_platform._enum]:
+    for kernel in platform_kernels:
         if kernel.__name__ in envs.VLLM_DISABLED_KERNELS:
             failure_reasons.append(
                 f" {kernel.__name__} disabled by environment variable"
@@ -364,6 +752,231 @@ def choose_mp_linear_kernel(
     raise ValueError(
         "Failed to find a kernel that can implement the "
         "WNA16 linear layer. Reasons: \n" + "\n".join(failure_reasons)
+    )
+
+
+def init_mxfp8_linear_kernel() -> Mxfp8LinearKernel:
+    """Select and instantiate the best MXFP8 linear kernel for the
+    current platform."""
+    config = Mxfp8LinearLayerConfig()
+
+    platform = current_platform._enum
+    possible = list(_POSSIBLE_MXFP8_KERNELS.get(platform, []))
+
+    # Apply --linear-backend filtering when set.
+    linear_backend = _get_linear_backend()
+    if linear_backend != "auto":
+        filtered = _filter_kernels_by_backend(linear_backend, possible)
+        if not filtered:
+            raise ValueError(
+                f"--linear-backend={linear_backend} was requested but no "
+                f"'{linear_backend}' kernel exists for MXFP8 layers."
+            )
+        possible = filtered
+
+    failure_reasons = []
+    for kernel_cls in possible:
+        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
+            failure_reasons.append(
+                f" {kernel_cls.__name__} disabled by environment variable"
+            )
+            continue
+
+        is_supported, reason = kernel_cls.is_supported()
+        if not is_supported:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        can_implement, reason = kernel_cls.can_implement(config)
+        if not can_implement:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        logger.info_once("Using %s for MXFP8 GEMM", kernel_cls.__name__)
+        return kernel_cls(config)
+
+    raise ValueError(
+        "Failed to find a kernel that can implement the "
+        "MXFP8 linear layer. Reasons: \n" + "\n".join(failure_reasons)
+    )
+
+
+def init_mxfp4_linear_kernel() -> MxFp4LinearKernel:
+    """Select and instantiate the best MXFP4 linear kernel for the
+    current platform."""
+    linear_backend = _get_linear_backend()
+
+    platform = current_platform._enum
+    possible = list(_POSSIBLE_MXFP4_KERNELS.get(platform, []))
+
+    # Apply --linear-backend filtering when set.
+    if linear_backend != "auto":
+        filtered = _filter_kernels_by_backend(linear_backend, possible)
+        if not filtered:
+            raise ValueError(
+                f"--linear-backend={linear_backend} was requested but no "
+                f"'{linear_backend}' kernel exists for MXFP4 layers."
+            )
+        possible = filtered
+
+    failure_reasons = []
+    for kernel_cls in possible:
+        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
+            failure_reasons.append(
+                f" {kernel_cls.__name__} disabled by environment variable"
+            )
+            continue
+
+        is_supported, reason = kernel_cls.is_supported()
+        if not is_supported:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        logger.info_once("Using %s for MXFP4 GEMM", kernel_cls.__name__)
+        return kernel_cls(MxFp4LinearLayerConfig())
+
+    raise ValueError(
+        "Failed to find a kernel that can implement the "
+        "MXFP4 linear layer. Reasons: \n" + "\n".join(failure_reasons)
+    )
+
+
+def init_wfp8_a16_linear_kernel(
+    weight_quant_key: QuantKey,
+    activation_quant_key: QuantKey,
+    weight_shape: tuple[int, int],
+    input_dtype: torch.dtype,
+    out_dtype: torch.dtype,
+    force_kernel: type[FP8ScaledMMLinearKernel] | None = None,
+    module_name: str | None = None,
+) -> FP8ScaledMMLinearKernel:
+    config = FP8ScaledMMLinearLayerConfig(
+        weight_quant_key=weight_quant_key,
+        activation_quant_key=activation_quant_key,
+        weight_shape=weight_shape,
+        input_dtype=input_dtype,
+        out_dtype=out_dtype,
+    )
+
+    kernel_type = choose_scaled_mm_linear_kernel(
+        config, _POSSIBLE_WFP8A16_KERNELS, force_kernel=force_kernel
+    )
+
+    if module_name:
+        logger.info_once(
+            "Selected %s for %s",
+            kernel_type.__name__,
+            module_name,
+            scope="global",
+        )
+
+    return kernel_type(
+        config,
+        layer_param_names=["weight", "weight_scale", "input_scale", "input_scale_ub"],
+    )
+
+
+def init_nvfp4_linear_kernel(use_a16: bool = False) -> NvFp4LinearKernel:
+    """Select and instantiate the best NVFP4 linear kernel for the
+    current platform."""
+    config = NvFp4LinearLayerConfig()
+
+    # VLLM_BATCH_INVARIANT forces deterministic execution. Prefer the
+    # batch-invariant CUTLASS implementation when available, otherwise fall
+    # back to emulation. It overrides --linear-backend.
+    force_kernel: type[NvFp4LinearKernel] | None = None
+    linear_backend = _get_linear_backend()
+    if envs.VLLM_BATCH_INVARIANT:
+        bi_supported, reason = CutlassNvFp4LinearKernel.is_supported()
+        if bi_supported:
+            if linear_backend not in ("auto", "cutlass"):
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
+                    "using the CUTLASS backend for deterministic execution.",
+                    linear_backend,
+                )
+            else:
+                logger.info_once(
+                    "VLLM_BATCH_INVARIANT forces NVFP4 linear to use the "
+                    "CUTLASS backend for deterministic execution."
+                )
+            force_kernel = CutlassNvFp4LinearKernel
+        else:
+            if linear_backend not in ("auto", "emulation"):
+                logger.warning_once(
+                    "VLLM_BATCH_INVARIANT overrides --linear-backend=%s; "
+                    "using the emulation backend for deterministic execution.",
+                    linear_backend,
+                )
+            logger.info_once(
+                "VLLM_BATCH_INVARIANT is set but the batch-invariant NVFP4 "
+                "kernel is not supported on this platform; falling back to "
+                "emulation for deterministic execution. Reason: %s",
+                reason,
+            )
+            force_kernel = EmulationNvFp4LinearKernel
+    elif linear_backend == "auto" and use_a16:
+        # Force a16 (Marlin) when running weight-only quantization.
+        force_kernel = MarlinNvFp4LinearKernel
+
+    if force_kernel is not None:
+        is_supported, reason = force_kernel.is_supported()
+        if not is_supported:
+            raise ValueError(
+                f"Forced NVFP4 kernel {force_kernel.__name__} is not "
+                f"supported: {reason}"
+            )
+        logger.info_once("Using %s for NVFP4 GEMM", force_kernel.__name__)
+        return force_kernel(config)
+
+    # Auto-select from registry (or --linear-backend filtered).
+    platform = current_platform._enum
+    possible = list(_POSSIBLE_NVFP4_KERNELS.get(platform, []))
+
+    # Apply --linear-backend filtering when set.
+    if linear_backend != "auto":
+        filtered = _filter_kernels_by_backend(linear_backend, possible)
+        if not filtered:
+            raise ValueError(
+                f"--linear-backend={linear_backend} was requested but no "
+                f"'{linear_backend}' kernel exists for NVFP4 layers."
+            )
+        possible = filtered
+
+    failure_reasons = []
+    for kernel_cls in possible:
+        if kernel_cls.__name__ in envs.VLLM_DISABLED_KERNELS:
+            failure_reasons.append(
+                f" {kernel_cls.__name__} disabled by environment variable"
+            )
+            continue
+
+        is_supported, reason = kernel_cls.is_supported()
+        if not is_supported:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        can_implement, reason = kernel_cls.can_implement(config)
+        if not can_implement:
+            failure_reasons.append(f"{kernel_cls.__name__}: {reason}")
+            continue
+
+        if kernel_cls is EmulationNvFp4LinearKernel and failure_reasons:
+            logger.warning_once(
+                "NVFP4 linear falling back to the slow and unoptimized "
+                "emulation backend as no optimized backend is available "
+                "(unavailable reasons:\n - %s\n). "
+                "In case you expect one of these backends to be used, "
+                "please verify your environment.",
+                "\n - ".join(failure_reasons),
+            )
+
+        logger.info_once("Using %s for NVFP4 GEMM", kernel_cls.__name__)
+        return kernel_cls(config)
+
+    raise ValueError(
+        "Failed to find a kernel that can implement the "
+        "NVFP4 linear layer. Reasons: \n" + "\n".join(failure_reasons)
     )
 
 
@@ -396,6 +1009,18 @@ def register_linear_kernel(
         if platform not in _POSSIBLE_FP8_KERNELS:
             _POSSIBLE_FP8_KERNELS[platform] = []
         _POSSIBLE_FP8_KERNELS[platform].append(kernel_class)
+    elif kernel_type == "mxfp8":
+        if platform not in _POSSIBLE_MXFP8_KERNELS:
+            _POSSIBLE_MXFP8_KERNELS[platform] = []
+        _POSSIBLE_MXFP8_KERNELS[platform].append(kernel_class)
+    elif kernel_type == "nvfp4":
+        if platform not in _POSSIBLE_NVFP4_KERNELS:
+            _POSSIBLE_NVFP4_KERNELS[platform] = []
+        _POSSIBLE_NVFP4_KERNELS[platform].append(kernel_class)
+    elif kernel_type == "mxfp4":
+        if platform not in _POSSIBLE_MXFP4_KERNELS:
+            _POSSIBLE_MXFP4_KERNELS[platform] = []
+        _POSSIBLE_MXFP4_KERNELS[platform].append(kernel_class)
     else:
         raise ValueError(f"Unrecognized kernel type: {kernel_type}")
 
@@ -403,14 +1028,21 @@ def register_linear_kernel(
 __all__ = [
     "init_fp8_linear_kernel",
     "init_int8_linear_kernel",
+    "init_nvfp4_linear_kernel",
     "choose_mp_linear_kernel",
     "register_linear_kernel",
+    "init_wfp8_a16_linear_kernel",
     "FP8ScaledMMLinearKernel",
     "Int8ScaledMMLinearKernel",
     "ScaledMMLinearKernel",
     "FP8ScaledMMLinearLayerConfig",
     "Int8ScaledMMLinearLayerConfig",
     "ScaledMMLinearLayerConfig",
+    "AiterHipbMMPerTokenFp8ScaledMMLinearKernel",
+    "AiterPreshuffledPerTokenFp8ScaledMMLinearKernel",
+    "AiterPerTokenFp8ScaledMMLinearKernel",
+    "NvFp4LinearKernel",
+    "NvFp4LinearLayerConfig",
     "AiterInt8ScaledMMLinearKernel",
     "CPUInt8ScaledMMLinearKernel",
     "CutlassFP8ScaledMMLinearKernel",
@@ -421,6 +1053,8 @@ __all__ = [
     "RowWiseTorchFP8ScaledMMLinearKernel",
     "ROCmFP8ScaledMMLinearKernel",
     "TritonInt8ScaledMMLinearKernel",
+    "ZentorchInt8ScaledMMLinearKernel",
+    "ZentorchWNA16LinearKernel",
     "MPLinearKernel",
     "MPLinearLayerConfig",
     "AllSparkLinearKernel",
@@ -431,6 +1065,32 @@ __all__ = [
     "ExllamaLinearKernel",
     "MacheteLinearKernel",
     "MarlinLinearKernel",
+    "TritonW4A16LinearKernel",
     "XPUW4A8IntLinearKernel",
     "XPUwNa16LinearKernel",
+    "init_mxfp8_linear_kernel",
+    "Mxfp8LinearKernel",
+    "Mxfp8LinearLayerConfig",
+    "init_mxfp4_linear_kernel",
+    "MxFp4LinearKernel",
+    "MxFp4LinearLayerConfig",
+    "FlashInferMxFp4LinearKernel",
+    "MarlinMxFp4LinearKernel",
+    "FlashInferCutedslMxfp8LinearKernel",
+    "FlashInferCutlassMxfp8LinearKernel",
+    "MarlinMxfp8LinearKernel",
+    "XPUMxFp8LinearKernel",
+    "EmulationMxfp8LinearKernel",
+    "CutlassNvFp4LinearKernel",
+    "EmulationNvFp4LinearKernel",
+    "FbgemmNvFp4LinearKernel",
+    "FlashInferCuteDslNvFp4LinearKernel",
+    "FlashInferB12xNvFp4LinearKernel",
+    "FlashInferCutlassNvFp4LinearKernel",
+    "FlashInferTrtllmNvFp4LinearKernel",
+    "FlashInferCudnnNvFp4LinearKernel",
+    "MarlinNvFp4LinearKernel",
+    "_KernelT",
+    "DeepGemmFp8BlockScaledMMKernel",
+    "FlashInferFp8DeepGEMMDynamicBlockScaledKernel",
 ]

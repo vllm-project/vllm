@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import functools
 
 import torch
 import torch.nn as nn
@@ -8,349 +7,151 @@ from transformers import PretrainedConfig
 
 from vllm import envs
 from vllm.config.lora import LoRAConfig
-from vllm.distributed.parallel_state import (
-    get_tensor_model_parallel_rank,
-    get_tensor_model_parallel_world_size,
-)
 from vllm.distributed.utils import divide
 from vllm.lora.layers.base import BaseLayerWithLoRA
-from vllm.lora.ops.triton_ops.utils import get_lora_op_configs
-from vllm.model_executor.layers.fused_moe import FusedMoE
-from vllm.model_executor.layers.fused_moe.config import (
-    _get_config_dtype_str,
-)
-from vllm.model_executor.layers.fused_moe.fused_marlin_moe import (
-    MarlinExperts,
-)
-from vllm.model_executor.layers.fused_moe.fused_moe import (
-    TritonExperts,
+from vllm.model_executor.custom_op import maybe_get_oot_by_class
+from vllm.model_executor.layers.fused_moe import MoERunner
+from vllm.model_executor.layers.fused_moe.experts.lora_context import MoELoRAContext
+from vllm.model_executor.layers.fused_moe.experts.lora_experts_mixin import (
+    LoRAExpertsMixin,
 )
 from vllm.model_executor.layers.fused_moe.fused_moe_modular_method import (
     FusedMoEModularMethod,
 )
-from vllm.model_executor.layers.fused_moe.gpt_oss_triton_kernels_moe import (
-    UnfusedOAITritonExperts,
-)
 from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEKernel,
+    FusedMoEKernelModularImpl,
 )
 from vllm.model_executor.layers.fused_moe.prepare_finalize import (
     MoEPrepareAndFinalizeNoDPEPModular,
 )
+from vllm.platforms import current_platform
 
-from .utils import _get_lora_device, try_get_optimal_moe_lora_config
+from .utils import _get_lora_aux_cuda_stream, _get_lora_device
 
 
 class FusedMoEWithLoRA(BaseLayerWithLoRA):
-    def __init__(self, base_layer: FusedMoE) -> None:
+    def __init__(self, base_layer: MoERunner) -> None:
         super().__init__()
         self.base_layer = base_layer
+        self.moe_config = base_layer.moe_config
+        self._shared_experts = base_layer._shared_experts
+        self._ep_check()
 
-        assert not self.base_layer.use_ep, (
-            "EP support for Fused MoE LoRA is not implemented yet."
-        )
-        assert not self.base_layer.quant_method.is_monolithic, (
+        routed_experts = self.base_layer.routed_experts
+        routed_experts.lora_base_layer_prefix = "base_layer."
+        assert not routed_experts.quant_method.is_monolithic, (
             "Monolithic kernels are not supported for Fused MoE LoRA."
         )
-        self.tp_size = get_tensor_model_parallel_world_size()
-        self.tp_rank = get_tensor_model_parallel_rank()
+
+        # Use the MoE-aware TP rank/size: when EP is active, FusedMoE collapses
+        # moe_parallel_config.tp_size to 1 (experts are sharded across the
+        # TP group instead).
+        moe_parallel_config = self.moe_config.moe_parallel_config
+        self.tp_size = moe_parallel_config.tp_size
+        self.tp_rank = moe_parallel_config.tp_rank
         self.device = _get_lora_device(base_layer)
+
+        self._enable_aux_cuda_stream = envs.VLLM_LORA_ENABLE_DUAL_STREAM
+        self._init_lora_stream_context()
         # For non-gated MoE (is_act_and_mul=False), only 1 slice is needed
         # since there's only up_proj (w1), not gate_proj + up_proj (w1 + w3)
         self._w13_slices = 2 if base_layer.moe_config.is_act_and_mul else 1
-        self._inject_lora_into_fused_moe()
+        # Mirrors per-(lora_id) layout of `self.lora_a_stacked` (built in
+        # `create_lora_weights`) so `create_dummy_lora`'s n_slices fallback
+        # matches `lora_a_stacked` length under EP.
+        self.n_slices = self.local_num_experts * (self._w13_slices + 1)
 
-    def _normalize_keys(self, config: dict[str, int | None]) -> dict[str, int | None]:
-        normalized_config = {}
-        for key, value in config.items():
-            if key.islower():
-                if key.startswith("block_"):
-                    normalized_key = "BLOCK_SIZE_" + key.split("_")[-1].upper()
-                else:
-                    normalized_key = key.upper()
-            else:
-                normalized_key = key
-            normalized_config[normalized_key] = value
-        return normalized_config
-
-    def _get_lora_moe_configs(
-        self,
-        op_prefix: str,
-        num_loras: int,
-        rank: int,
-        num_slices: int,
-        M: int,
-        layer: FusedMoE,
-        top_k: int,
-        config_dtype: str,
-    ):
-        if envs.VLLM_TUNED_CONFIG_FOLDER:
-            hidden_size = layer.hidden_size
-            intermediate_size = (
-                self.w2_lora_a_stacked[0].shape[-1]
-                if op_prefix == "w2"
-                else self.w13_lora_b_stacked[0].shape[-2]
+        routed_experts._ensure_moe_quant_config_init()
+        if getattr(routed_experts.quant_method, "supports_internal_mk", False):
+            moe_kernel = routed_experts.quant_method.moe_kernel
+            assert moe_kernel is not None, (
+                "Fused MoE quant method must provide a moe_kernel."
             )
-            shrink_config = get_lora_op_configs(
-                op_type=f"fused_moe_lora_{op_prefix}_shrink",
-                max_loras=num_loras,
-                batch=M,
-                hidden_size=hidden_size,
-                rank=rank,
-                num_slices=num_slices,
-                moe_intermediate_size=intermediate_size,
-            )
-            expand_config = get_lora_op_configs(
-                op_type=f"fused_moe_lora_{op_prefix}_expand",
-                max_loras=num_loras,
-                batch=M,
-                hidden_size=hidden_size,  # lora_a_stacked.shape[-1],
-                rank=rank,
-                num_slices=num_slices,
-                moe_intermediate_size=intermediate_size,  # lora_b_stacked.shape[-2],
-            )
-        else:  # fall back to the default config
-            get_config_func = functools.partial(
-                try_get_optimal_moe_lora_config,
-                w1_shape=layer.w13_weight.shape,
-                w2_shape=layer.w2_weight.shape,
-                rank=rank,
-                top_k=top_k,
-                dtype=config_dtype,
-                M=M,
-                block_shape=layer.quant_method.moe_quant_config.block_shape,
-            )
-            shrink_config = get_config_func(
-                op_type=f"fused_moe_lora_{op_prefix}_shrink"
-            )
-            expand_config = get_config_func(
-                op_type=f"fused_moe_lora_{op_prefix}_expand"
-            )
-        shrink_config = self._normalize_keys(shrink_config)
-        expand_config = self._normalize_keys(expand_config)
-        return shrink_config, expand_config
-
-    def _inject_lora_into_fused_moe(self):
-        moe_state_dict = {}
-        top_k = self.base_layer.top_k
-
-        self.base_layer.ensure_moe_quant_config_init()
-        quant_config = self.base_layer.quant_method.moe_quant_config
-
-        if getattr(self.base_layer.quant_method, "supports_internal_mk", False):
-            # Use the existing modular kernel from the quant method
-            m_fused_moe_fn = self.base_layer.quant_method.moe_kernel
             # Don't let the kernel own shared experts so the runner can
             # overlap them with routed experts via a separate CUDA stream.
-            m_fused_moe_fn.shared_experts = None
+            assert isinstance(moe_kernel.impl, FusedMoEKernelModularImpl)
+            moe_kernel.impl.shared_experts = None
         else:
-            # Create a new modular kernel via select_gemm_impl.
-            # Don't pass shared_experts to the kernel so the runner can
-            # overlap them with routed experts via a separate CUDA stream.
             prepare_finalize = MoEPrepareAndFinalizeNoDPEPModular()
-            m_fused_moe_fn = FusedMoEKernel(
+            moe_kernel = FusedMoEKernel(
                 prepare_finalize,
-                self.base_layer.quant_method.select_gemm_impl(
-                    prepare_finalize, self.base_layer
+                routed_experts.quant_method.select_gemm_impl(
+                    prepare_finalize, routed_experts
                 ),
             )
-
-        if quant_config.use_mxfp4_w4a16:
-            assert isinstance(
-                m_fused_moe_fn.impl.fused_experts,
-                (MarlinExperts, UnfusedOAITritonExperts),
-            )
-        else:
-            assert isinstance(m_fused_moe_fn.impl.fused_experts, TritonExperts)
-
-        def fwd_decorator(layer, func):
-            def wrapper(*args, **kwargs):
-                moe_state_dict["hidden_states"] = kwargs["hidden_states"]
-                moe_state_dict["topk_ids"] = kwargs["topk_ids"]
-                moe_state_dict["topk_weights"] = kwargs["topk_weights"]
-                moe_state_dict["expert_map"] = kwargs["expert_map"]
-                moe_state_dict["apply_router_weight_on_input"] = kwargs[
-                    "apply_router_weight_on_input"
-                ]
-                result = func(*args, **kwargs)
-                return result
-
-            return wrapper
-
-        def act_decorator(layer, func):
-            def wrapper(*args, **kwargs):
-                _, output, input = args
-
-                hidden_states = moe_state_dict["hidden_states"]
-                topk_weights = moe_state_dict["topk_weights"]
-                curr_topk_ids = moe_state_dict["topk_ids"]
-
-                expert_map = moe_state_dict["expert_map"]
-
-                config_dtype = _get_config_dtype_str(
-                    dtype=hidden_states.dtype,
-                    use_fp8_w8a8=False,
-                    use_int8_w8a16=False,
-                    use_int4_w4a16=False,
-                )
-                num_tokens = hidden_states.size(0)
-                M = num_tokens
-                max_lora_rank = self.w13_lora_a_stacked[0].shape[-2]
-                shrink_config, expand_config = self._get_lora_moe_configs(
-                    op_prefix="w13",
-                    num_loras=self.max_loras,
-                    rank=max_lora_rank,
-                    num_slices=self._w13_slices,
-                    M=M,
-                    layer=layer,
-                    top_k=top_k,
-                    config_dtype=config_dtype,
-                )
-
-                # SPARSITY_FACTOR is a heuristic margin ensuring tokens * top_k
-                # activates only a small fraction of total experts * loras.
-                SPARSITY_FACTOR = 8
-                naive_block_assignment = (
-                    expert_map is None
-                    and num_tokens * top_k * SPARSITY_FACTOR
-                    <= self.base_layer.local_num_experts * self.max_loras
-                )
-
-                # get the block size of m from customized config or default config
-                (
-                    token_lora_mapping,
-                    sorted_token_ids_lora,
-                    expert_ids_lora,
-                    num_tokens_post_padded_lora,
-                ) = self.punica_wrapper.moe_lora_align_block_size(
-                    curr_topk_ids,
-                    num_tokens,
-                    shrink_config["BLOCK_SIZE_M"],
-                    self.base_layer.local_num_experts,
-                    self.max_loras,
-                    self.adapter_enabled,
-                    expert_map,
-                    naive_block_assignment=naive_block_assignment,
-                )
-
-                moe_state_dict["sorted_token_ids_lora"] = sorted_token_ids_lora
-                moe_state_dict["expert_ids_lora"] = expert_ids_lora
-                moe_state_dict["num_tokens_post_padded_lora"] = (
-                    num_tokens_post_padded_lora
-                )
-                moe_state_dict["token_lora_mapping"] = token_lora_mapping
-
-                if sorted_token_ids_lora is not None:
-                    expert_ids_lora = expert_ids_lora.view(self.max_loras, -1)
-                    sorted_token_ids_lora = sorted_token_ids_lora.view(
-                        self.max_loras, -1
-                    )
-                #
-
-                self.punica_wrapper.add_lora_fused_moe(
-                    input.view(-1, top_k, input.shape[-1]),
-                    hidden_states,
-                    self.w13_lora_a_stacked,
-                    self.w13_lora_b_stacked,
-                    topk_weights,
-                    sorted_token_ids_lora,
-                    expert_ids_lora,
-                    num_tokens_post_padded_lora,
-                    max_lora_rank,
-                    top_k,
-                    shrink_config,  ## pass the shrink config
-                    expand_config,  ## pass the expand config
-                    self.adapter_enabled,
-                    fully_sharded=self.fully_sharded,
-                    token_lora_mapping=token_lora_mapping,
-                )
-
-                result = func(*args, **kwargs)
-
-                moe_state_dict["intermediate_cache2"] = output
-                return result
-
-            return wrapper
-
-        def moe_sum_decorator(layer, func):
-            def wrapper(*args, **kwargs):
-                hidden_states = moe_state_dict["hidden_states"]
-                topk_weights = moe_state_dict["topk_weights"]
-
-                config_dtype = _get_config_dtype_str(
-                    dtype=hidden_states.dtype,
-                    use_fp8_w8a8=False,
-                    use_int8_w8a16=False,
-                    use_int4_w4a16=False,
-                )
-                num_tokens = hidden_states.size(0)
-                M = num_tokens
-                max_lora_rank = self.w2_lora_a_stacked[0].shape[-2]
-                shrink_config, expand_config = self._get_lora_moe_configs(
-                    op_prefix="w2",
-                    num_loras=self.max_loras,
-                    rank=max_lora_rank,
-                    num_slices=1,
-                    M=M,
-                    layer=layer,
-                    top_k=top_k,
-                    config_dtype=config_dtype,
-                )
-
-                sorted_token_ids_lora = moe_state_dict["sorted_token_ids_lora"]
-                expert_ids_lora = moe_state_dict["expert_ids_lora"]
-                num_tokens_post_padded_lora = moe_state_dict[
-                    "num_tokens_post_padded_lora"
-                ]
-                token_lora_mapping = moe_state_dict.get("token_lora_mapping")
-
-                if sorted_token_ids_lora is not None:
-                    expert_ids_lora = expert_ids_lora.view(self.max_loras, -1)
-                    sorted_token_ids_lora = sorted_token_ids_lora.view(
-                        self.max_loras, -1
-                    )
-                intermediate_cache2 = moe_state_dict["intermediate_cache2"]
-                intermediate_cache3 = args[0]
-
-                shard_size_w2 = divide(self.base_layer.hidden_size, self.tp_size)
-
-                self.punica_wrapper.add_lora_fused_moe(
-                    intermediate_cache3,
-                    intermediate_cache2,
-                    self.w2_lora_a_stacked,
-                    self.w2_lora_b_stacked,
-                    topk_weights,
-                    sorted_token_ids_lora,
-                    expert_ids_lora,
-                    num_tokens_post_padded_lora,
-                    max_lora_rank,
-                    top_k,
-                    shrink_config,  ## pass the shrink config
-                    expand_config,  ## pass the expand config
-                    self.adapter_enabled,
-                    True,
-                    fully_sharded=self.fully_sharded,
-                    offset=shard_size_w2 * self.tp_rank if self.fully_sharded else 0,
-                    token_lora_mapping=token_lora_mapping,
-                )
-
-                result = func(*args, **kwargs)
-                return result
-
-            return wrapper
-
-        fused_experts = m_fused_moe_fn.impl.fused_experts
-
-        m_fused_moe_fn.apply = fwd_decorator(self.base_layer, m_fused_moe_fn.apply)
-        fused_experts.activation = act_decorator(
-            self.base_layer, fused_experts.activation
+        assert moe_kernel.supports_lora(), (
+            f"{type(moe_kernel.fused_experts).__name__} does not support LoRA. "
+            "For unquantized MoE, set moe_backend='triton' or moe_backend='auto' "
+            "(auto selects Triton automatically when LoRA is enabled). "
+            "For quantized MoE, mix LoRAExpertsMixin into the experts class "
+            "and consume self._lora_context in apply()."
         )
-        fused_experts.moe_sum = moe_sum_decorator(
-            self.base_layer, fused_experts.moe_sum
-        )
-        # TODO(bnell): find a less intrusive way to handle this.
+        self._moe_kernel = moe_kernel
         self.base_layer._replace_quant_method(
-            FusedMoEModularMethod(self.base_layer.quant_method, m_fused_moe_fn)
+            FusedMoEModularMethod(self.base_layer._quant_method, moe_kernel)
+        )
+
+    @property
+    def hidden_size(self) -> int:
+        return self.moe_config.hidden_dim
+
+    @property
+    def local_num_experts(self) -> int:
+        return self.moe_config.num_local_experts
+
+    @property
+    def global_num_experts(self) -> int:
+        return self.moe_config.num_experts
+
+    @property
+    def ep_rank(self) -> int:
+        return self.moe_config.moe_parallel_config.ep_rank
+
+    @property
+    def use_ep(self) -> bool:
+        return self.moe_config.moe_parallel_config.use_ep
+
+    @property
+    def intermediate_size_per_partition(self) -> int:
+        return self.moe_config.intermediate_size_per_partition
+
+    def _init_lora_stream_context(self) -> None:
+        self._lora_stream: torch.cuda.Stream | None = None
+        self._events: tuple[torch.cuda.Event, ...] | None = None
+        if not self._enable_aux_cuda_stream:
+            return
+        if not current_platform.is_cuda_alike():
+            return
+        self._lora_stream = _get_lora_aux_cuda_stream()
+        # 4 events: 2 per (base GEMM, LoRA) pair so w13 and w2 don't reuse
+        # the same event objects; reuse-within-a-pair is fine because the
+        # second pair starts only after intermediate_cache1.add_() has joined.
+        self._events = tuple(torch.cuda.Event() for _ in range(4))
+
+    def _build_lora_context(self):
+        use_dual_stream = (
+            self._enable_aux_cuda_stream
+            and not self.fully_sharded
+            and self._lora_stream is not None
+        )
+        return MoELoRAContext(
+            w13_lora_a_stacked=self.w13_lora_a_stacked,
+            w13_lora_b_stacked=self.w13_lora_b_stacked,
+            w2_lora_a_stacked=self.w2_lora_a_stacked,
+            w2_lora_b_stacked=self.w2_lora_b_stacked,
+            adapter_enabled=self.adapter_enabled,
+            max_loras=self.max_loras,
+            top_k=self.moe_config.experts_per_token,
+            w13_num_slices=self._w13_slices,
+            fully_sharded=self.fully_sharded,
+            tp_rank=self.tp_rank,
+            tp_size=self.tp_size,
+            local_num_experts=self.local_num_experts,
+            punica_wrapper=self.punica_wrapper,
+            use_tuned_config=bool(envs.VLLM_TUNED_CONFIG_FOLDER),
+            aux_stream=self._lora_stream if use_dual_stream else None,
+            events=self._events if use_dual_stream else None,
         )
 
     def _create_lora_a_weights(
@@ -362,11 +163,11 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             torch.zeros(
                 (
                     max_loras,
-                    self.base_layer.local_num_experts,
+                    self.local_num_experts,
                     lora_config.max_lora_rank
                     if not self.fully_sharded
                     else divide(lora_config.max_lora_rank, self.tp_size),
-                    self.base_layer.hidden_size,
+                    self.hidden_size,
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
@@ -377,9 +178,9 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             torch.zeros(
                 (
                     max_loras,
-                    self.base_layer.local_num_experts,
+                    self.local_num_experts,
                     lora_config.max_lora_rank,
-                    self.base_layer.intermediate_size_per_partition,
+                    self.intermediate_size_per_partition,
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
@@ -391,8 +192,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             torch.zeros(
                 (
                     max_loras,
-                    self.base_layer.local_num_experts,
-                    self.base_layer.intermediate_size_per_partition,
+                    self.local_num_experts,
+                    self.intermediate_size_per_partition,
                     lora_config.max_lora_rank,
                 ),
                 dtype=lora_config.lora_dtype,
@@ -404,15 +205,35 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             torch.zeros(
                 (
                     max_loras,
-                    self.base_layer.local_num_experts,
-                    self.base_layer.hidden_size
+                    self.local_num_experts,
+                    self.hidden_size
                     if not self.fully_sharded
-                    else divide(self.base_layer.hidden_size, self.tp_size),
+                    else divide(self.hidden_size, self.tp_size),
                     lora_config.max_lora_rank,
                 ),
                 dtype=lora_config.lora_dtype,
                 device=self.device,
             ),
+        )
+
+    def _ep_check(self):
+        if self.use_ep:
+            moe_config = self.moe_config
+            all2all_backend = moe_config.moe_parallel_config.all2all_backend
+            assert all2all_backend == "allgather_reducescatter", (
+                "Fused MoE LoRA with EP currently only supports "
+                f"all2all_backend='allgather_reducescatter', got '{all2all_backend}'."
+            )
+            assert not moe_config.moe_parallel_config.is_sequence_parallel
+
+    def _verify_ep_fs(self, lora_config: LoRAConfig):
+        # EP and fully_sharded LoRA both partition along the same TP group —
+        # EP on the expert dim, fully_sharded on the LoRA rank dim — with
+        # mutually contradictory assumptions about which rank holds which
+        # expert's rank-shard.
+        assert not (self.use_ep and lora_config.fully_sharded_loras), (
+            "Fused MoE LoRA does not support enable_expert_parallel=True "
+            "together with fully_sharded_loras=True. Disable one of them."
         )
 
     def create_lora_weights(
@@ -422,6 +243,8 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> None:
         """Initializes lora matrices."""
+
+        self._verify_ep_fs(lora_config)
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
 
@@ -437,7 +260,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         self.lora_a_stacked = []
         self.lora_b_stacked = []
         for lora_id in range(max_loras):
-            for experts_id in range(self.base_layer.local_num_experts):
+            for experts_id in range(self.local_num_experts):
                 # For gated MoE: gate_proj (w1), down_proj (w2), up_proj (w3)
                 # For non-gated MoE: up_proj (w1), down_proj (w2)
                 self.lora_a_stacked.append(
@@ -484,7 +307,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             return w13_lora_b
 
         # w13_lora_b shape (num_experts,output_size,rank)
-        shard_size = self.base_layer.intermediate_size_per_partition
+        shard_size = self.intermediate_size_per_partition
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
 
@@ -497,7 +320,7 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
         if self.tp_size == 1:
             return w2_lora_a
         # w2_lora_a shape (num_experts,rank,input_size)
-        shard_size = self.base_layer.intermediate_size_per_partition
+        shard_size = self.intermediate_size_per_partition
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
 
@@ -547,6 +370,10 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
 
         w1_lora_a, w2_lora_a, w3_lora_a = lora_a
         w1_lora_b, w2_lora_b, w3_lora_b = lora_b
+
+        # EP slicing is done once at add time in
+        # LoRAModelManager._slice_moe_lora_ep, so by here the cached
+        # tensors already match the local-expert dim of the stacked buffers.
         assert (
             num_experts
             == w1_lora_a.shape[0]
@@ -589,15 +416,28 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
             index, :, : sliced_w2_lora_b.shape[1], : sliced_w2_lora_b.shape[2]
         ].copy_(sliced_w2_lora_b, non_blocking=True)
 
+    def set_mapping(self, punica_wrapper):
+        super().set_mapping(punica_wrapper)
+        lora_context = self._build_lora_context()
+        fused_experts = self._moe_kernel.fused_experts
+        assert isinstance(fused_experts, LoRAExpertsMixin), (
+            f"{type(fused_experts).__name__} does not support LoRA context setup."
+        )
+        fused_experts.set_lora_context(lora_context)
+        prepare_finalize = self._moe_kernel.prepare_finalize
+        if hasattr(prepare_finalize, "set_lora_context"):
+            prepare_finalize.set_lora_context(lora_context)
+
     def forward(self, *args, **kwargs):
         return self.base_layer.forward(*args, **kwargs)
 
-    def maybe_all_reduce_tensor_model_parallel(self, *args, **kwargs):
-        return self.base_layer.maybe_all_reduce_tensor_model_parallel(*args, **kwargs)
-
     @property
     def quant_method(self):
-        return self.base_layer.quant_method
+        return self.base_layer._quant_method
+
+    @property
+    def runner(self) -> MoERunner:
+        return self.base_layer
 
     @property
     def is_internal_router(self) -> bool:
@@ -613,12 +453,13 @@ class FusedMoEWithLoRA(BaseLayerWithLoRA):
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
 
-        # source_layer is FusedMoE or SharedFusedMoE
-        return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 2
+        # source_layer is MoERunner
+        moe_cls = maybe_get_oot_by_class(MoERunner)
+        return isinstance(source_layer, moe_cls) and len(packed_modules_list) == 2
 
 
 class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
-    def __init__(self, base_layer):
+    def __init__(self, base_layer: MoERunner):
         super().__init__(base_layer)
         self._w13_slices = 1
 
@@ -627,8 +468,8 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
             torch.zeros(
                 (
                     max_loras,
-                    self.base_layer.local_num_experts,
-                    self.base_layer.intermediate_size_per_partition * 2,
+                    self.local_num_experts,
+                    self.intermediate_size_per_partition * 2,
                     lora_config.max_lora_rank,
                 ),
                 dtype=lora_config.lora_dtype,
@@ -640,10 +481,10 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
             torch.zeros(
                 (
                     max_loras,
-                    self.base_layer.local_num_experts,
-                    self.base_layer.hidden_size
+                    self.local_num_experts,
+                    self.hidden_size
                     if not self.fully_sharded
-                    else divide(self.base_layer.hidden_size, self.tp_size),
+                    else divide(self.hidden_size, self.tp_size),
                     lora_config.max_lora_rank,
                 ),
                 dtype=lora_config.lora_dtype,
@@ -659,8 +500,13 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
     ) -> None:
         """Initializes lora matrices."""
 
-        assert isinstance(model_config, PretrainedConfig)
-        self._base_model = model_config.architectures[0]
+        if model_config is None:
+            raise ValueError("model_config must be provided for MoE LoRA.")
+        architectures = model_config.architectures
+        if not architectures:
+            raise ValueError("model_config.architectures must be defined for MoE LoRA.")
+        self._verify_ep_fs(lora_config)
+        self._base_model = architectures[0]
         self.max_loras = lora_config.max_loras
         self.fully_sharded = lora_config.fully_sharded_loras
 
@@ -676,7 +522,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
             return w13_lora_b
 
         # w13_lora_b shape (num_experts,output_size,rank)
-        shard_size = self.base_layer.intermediate_size_per_partition
+        shard_size = self.intermediate_size_per_partition
         start_idx = self.tp_rank * shard_size
         end_idx = (self.tp_rank + 1) * shard_size
         # HACK: Currently, only GPT-OSS is in interleaved order
@@ -764,7 +610,7 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         """
         Full size
         """
-        return self.base_layer.hidden_size
+        return self.hidden_size
 
     @classmethod
     def can_replace_layer(
@@ -775,5 +621,6 @@ class FusedMoE3DWithLoRA(FusedMoEWithLoRA):
         model_config: PretrainedConfig | None = None,
     ) -> bool:
         """Returns True if the layer can be replaced by this LoRA layer."""
-        # source_layer is FusedMoE or SharedFusedMoE
-        return isinstance(source_layer, FusedMoE) and len(packed_modules_list) == 1
+        # source_layer is MoERunner
+        moe_cls = maybe_get_oot_by_class(MoERunner)
+        return isinstance(source_layer, moe_cls) and len(packed_modules_list) == 1
