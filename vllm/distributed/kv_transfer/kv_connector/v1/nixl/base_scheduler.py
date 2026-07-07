@@ -216,6 +216,37 @@ class NixlBaseConnectorScheduler:
                     # Clean up empty engines so we don't leak a key when remote dies.
                     del self._heartbeat_by_engine[engine_id]
 
+    def clip_uncomputed_blocks(
+        self, block_ids: BlockIds, num_computed_tokens: int
+    ) -> BlockIds:
+        """Drop trailing blocks allocated beyond ``num_computed_tokens``.
+
+        With speculative decoding the scheduler reserves lookahead slots that
+        spill into an extra block when ``num_computed_tokens`` is a multiple of
+        the block size. Advertising such never-written blocks in
+        ``remote_block_ids`` makes the reader's prefix-cache trim
+        (``_apply_prefix_caching``) keep the lookahead block and drop a real
+        one, shifting the block mapping and reading stale KV.
+
+        Must be applied before ``get_sw_clipped_blocks`` so the sliding window
+        does not absorb the lookahead blocks.
+
+        Clips per group using each group's own block size for self-attention
+        groups; state groups (Mamba/SSM) and any other spec whose block count
+        is not indexed by token count are passed through unchanged.
+        """
+        if num_computed_tokens <= 0:
+            return block_ids
+        clipped = list(block_ids)
+        for i, group in enumerate(self.kv_cache_config.kv_cache_groups):
+            spec = group.kv_cache_spec
+            if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+                continue
+            num_computed_blocks = cdiv(num_computed_tokens, spec.block_size)
+            if len(clipped[i]) > num_computed_blocks:
+                clipped[i] = clipped[i][:num_computed_blocks]
+        return tuple(clipped)
+
     def get_sw_clipped_blocks(self, block_ids: BlockIds) -> BlockIds:
         """
         Clip the number of blocks to the sliding window size for each kv cache group
