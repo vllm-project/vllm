@@ -1,11 +1,14 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import pytest
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
+    TimingIntervals,
+    compute_timing_intervals,
 )
 
 
@@ -271,3 +274,40 @@ def test_update_from_finished_request_returns_finished_stats():
     assert iteration_stats.finished_requests[-1] is returned
     assert returned.request_id == "req-1"
     assert returned.num_cached_tokens == 3
+
+
+def test_compute_timing_intervals_fully_populated():
+    stats = RequestStateStats(
+        queued_ts=1.0,
+        scheduled_ts=1.5,
+        first_token_ts=2.0,
+        last_token_ts=3.0,
+        num_generation_tokens=2,
+    )
+    iv = compute_timing_intervals(stats, num_generation_tokens=10)
+    assert iv.queue == pytest.approx(0.5)
+    assert iv.prefill == pytest.approx(0.5)
+    assert iv.decode == pytest.approx(1.0)
+    assert iv.inference == pytest.approx(1.5)
+    assert iv.mean_per_output_token == pytest.approx(1.0 / 9)
+    assert iv.tokens_per_second == pytest.approx(10.0 / 1.5)
+
+
+def test_compute_timing_intervals_missing_first_token_is_none():
+    # Aborted before first token: first_token_ts/last_token_ts never set.
+    stats = RequestStateStats(queued_ts=1.0, scheduled_ts=1.5)
+    iv = compute_timing_intervals(stats, num_generation_tokens=0)
+    assert iv.queue == pytest.approx(0.5)
+    assert iv.prefill is None          # not negative (was 0 - 1.5 = -1.5)
+    assert iv.decode is None
+    assert iv.inference is None
+    assert iv.mean_per_output_token is None
+    assert iv.tokens_per_second is None
+
+
+def test_compute_timing_intervals_mean_itl_needs_two_tokens():
+    stats = RequestStateStats(
+        queued_ts=1.0, scheduled_ts=1.5, first_token_ts=2.0, last_token_ts=3.0
+    )
+    iv = compute_timing_intervals(stats, num_generation_tokens=1)
+    assert iv.mean_per_output_token is None  # n-1 == 0

@@ -222,6 +222,84 @@ class RequestStateStats:
 
 
 @dataclass
+class TimingIntervals:
+    """Per-request wall-clock intervals in seconds; None = not measured.
+
+    tokens_per_second is output throughput (tokens/sec), not an interval.
+    """
+
+    queue: float | None
+    prefill: float | None
+    decode: float | None
+    inference: float | None
+    mean_per_output_token: float | None
+    tokens_per_second: float | None
+
+
+def compute_timing_intervals(
+    stats: RequestStateStats,
+    num_generation_tokens: int,
+) -> TimingIntervals:
+    """Compute per-request timing intervals from raw timestamps.
+
+    Single source of truth for both the response-body ``metrics`` field and
+    ``FinishedRequestStats`` (Prometheus + response headers). Each field is
+    ``None`` when the timestamps it depends on are unavailable, so intervals
+    are never negative.
+
+    Args:
+        stats: Raw per-request timestamps.
+        num_generation_tokens: Output token count (caller-supplied; the two
+            call sites source this differently).
+
+    Returns:
+        Intervals in seconds; ``tokens_per_second`` in tokens/sec.
+    """
+    queued_ts = stats.queued_ts
+    scheduled_ts = stats.scheduled_ts
+    first_token_ts = stats.first_token_ts
+    last_token_ts = stats.last_token_ts
+
+    queue = (
+        scheduled_ts - queued_ts if queued_ts > 0 and scheduled_ts > 0 else None
+    )
+    prefill = (
+        first_token_ts - scheduled_ts
+        if scheduled_ts > 0 and first_token_ts > 0
+        else None
+    )
+    decode = (
+        last_token_ts - first_token_ts
+        if first_token_ts > 0 and last_token_ts > 0
+        else None
+    )
+    inference = (
+        last_token_ts - scheduled_ts
+        if scheduled_ts > 0 and last_token_ts > 0
+        else None
+    )
+    mean_per_output_token = (
+        decode / (num_generation_tokens - 1)
+        if decode is not None and num_generation_tokens > 1
+        else None
+    )
+    tokens_per_second = (
+        num_generation_tokens / inference
+        if inference is not None and inference > 0
+        else None
+    )
+
+    return TimingIntervals(
+        queue=queue,
+        prefill=prefill,
+        decode=decode,
+        inference=inference,
+        mean_per_output_token=mean_per_output_token,
+        tokens_per_second=tokens_per_second,
+    )
+
+
+@dataclass
 class FinishedRequestStats:
     """Stats associated with a finished request."""
 
