@@ -217,18 +217,26 @@ def deepseek_v4_mhc_warmup(
     max_tokens: int,
     cudagraph_capture_sizes: list[int] | None = None,
 ) -> None:
+    logger.info("[mhc-debug] deepseek_v4_mhc_warmup called")
+
     # Bail out early for non-DeepSeek-V4 models to avoid walking modules.
     config = getattr(model, "config", None)
     model_type = getattr(config, "model_type", None) if config is not None else None
+    logger.info("[mhc-debug] model_type=%s", model_type)
     if model_type is not None and model_type != "deepseek_v4":
+        logger.info("[mhc-debug] not deepseek_v4, return")
         return
 
     layer = _find_first_mhc_layer(model)
+    logger.info("[mhc-debug] first mhc layer found=%s", layer is not None)
     if layer is None:
+        logger.info("[mhc-debug] no mhc layer, return")
         return
 
     device = layer.hc_attn_fn.device
+    logger.info("[mhc-debug] device=%s", device)
     if device.type != "cuda":
+        logger.info("[mhc-debug] device not cuda, return")
         return
 
     deepseek_model = _find_deepseek_v4_model(model)
@@ -236,7 +244,9 @@ def deepseek_v4_mhc_warmup(
         max_tokens=max_tokens,
         cudagraph_capture_sizes=cudagraph_capture_sizes or [],
     )
+    logger.info("[mhc-debug] token_sizes count=%d, first few=%s", len(token_sizes), token_sizes[:10])
     if not token_sizes:
+        logger.info("[mhc-debug] empty token_sizes, return")
         return
 
     started = time.perf_counter()
