@@ -196,6 +196,7 @@ class MiniMaxM3MoE(nn.Module):
         config: PretrainedConfig,
         layer_id: int,
         quant_config: QuantizationConfig | None = None,
+        skip_final_all_reduce: bool = False,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -261,6 +262,7 @@ class MiniMaxM3MoE(nn.Module):
             router_logits_dtype=self.gate.out_dtype,
             shared_experts=self.shared_experts,
             quant_config=quant_config,
+            skip_final_all_reduce=skip_final_all_reduce,
             prefix=f"{prefix}.experts",
         )
 
@@ -658,14 +660,10 @@ class MiniMaxM3DecoderLayer(nn.Module):
         layer_id = int(prefix.split(sep=".")[-1])
         self.layer_id = layer_id
 
-        # Complete the preceding dense MLP's deferred all-reduce
-        # (reduce_results=False), fused into this layer's input_layernorm.
-        # Disable this fusion when PP is set
-        self.fuse_input_allreduce = (
-            layer_id > 0
-            and not _is_moe_layer(config, layer_id - 1)
-            and vllm_config.parallel_config.pipeline_parallel_size == 1
-        )
+        # When set, complete the preceding layer's deferred FFN all-reduce
+        # fused into this layer's input_layernorm.
+        # Configured by MiniMaxM3Model.__init__
+        self.fuse_input_allreduce = False
 
         is_sparse_attention_layer = (
             force_sparse_attn or layer_id in _sparse_attention_layer_ids(config)
@@ -691,12 +689,19 @@ class MiniMaxM3DecoderLayer(nn.Module):
 
         # Dense layers store the FFN under `mlp`; MoE layers under
         # `block_sparse_moe` -- matching the checkpoint's naming.
+        # Leave the FFN output un-reduced so its all-reduce fuses into the
+        # next RMSNorm. MTP blocks add the residual directly and PP sends
+        # hidden states across stages, so both must reduce.
+        skip_ffn_all_reduce = (
+            not is_mtp_block and vllm_config.parallel_config.pipeline_parallel_size == 1
+        )
         self.is_moe_layer = force_moe or _is_moe_layer(config, layer_id)
         if self.is_moe_layer:
             self.block_sparse_moe = MiniMaxM3MoE(
                 config=config,
                 layer_id=layer_id,
                 quant_config=quant_config,
+                skip_final_all_reduce=skip_ffn_all_reduce,
                 prefix=f"{prefix}.block_sparse_moe",
             )
         else:
@@ -705,7 +710,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 intermediate_size=config.dense_intermediate_size,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
-                reduce_results=vllm_config.parallel_config.pipeline_parallel_size > 1,
+                reduce_results=not skip_ffn_all_reduce,
             )
 
         # config.use_gemma_norm is True for M3 -> Gemma-style RMSNorm.
@@ -744,12 +749,12 @@ class MiniMaxM3DecoderLayer(nn.Module):
         hidden_states = ffn(hidden_states)
         return hidden_states, residual
 
-    def defer_ffn_all_reduce(self) -> bool:
-        """Defer this layer's FFN output all-reduce to fuse with next layer's
-        input_layernorm. Returns True if the deferral is active, False otherwise.
-        """
+    @property
+    def ffn_all_reduce_deferred(self) -> bool:
+        """This layer's FFN output is left un-reduced; the caller fuses the
+        all-reduce into the next RMSNorm."""
         if self.is_moe_layer:
-            return self.block_sparse_moe.experts.try_defer_final_all_reduce()
+            return self.block_sparse_moe.experts.moe_config.skip_final_all_reduce
         return not self.mlp.down_proj.reduce_results
 
 
@@ -813,7 +818,15 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
         )
-        self.fuse_final_norm_allreduce = False
+
+        # Configure cross-layer all-reduce/RMSNorm fusion: a layer whose FFN output
+        # is left un-reduced has that all-reduce fused into the next layer's
+        # input_layernorm (or the final norm).
+        prev_defers = False
+        for idx, layer in enumerate(self.layers[self.start_layer : self.end_layer]):
+            layer.fuse_input_allreduce = idx > 0 and prev_defers
+            prev_defers = layer.ffn_all_reduce_deferred
+        self.fuse_final_norm_allreduce = prev_defers
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
@@ -994,26 +1007,8 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
             self.model.make_empty_intermediate_tensors
         )
 
-        # Lazy configure cross-layer allreduce/RMSNorm fusion on first forward
-        self._ar_fusion_configured = False
-
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)
-
-    def _configure_allreduce_fusion(self) -> None:
-        """Configure cross-layer all-reduce/RMSNorm fusion after weights load."""
-        if self._ar_fusion_configured:
-            return
-        self._ar_fusion_configured = True
-        if get_pp_group().world_size > 1:
-            return
-        model = self.model
-        prev_defers = False
-        layers = model.layers[model.start_layer : model.end_layer]
-        for idx, layer in enumerate(layers):
-            layer.fuse_input_allreduce = idx > 0 and prev_defers
-            prev_defers = layer.defer_ffn_all_reduce()
-        model.fuse_final_norm_allreduce = prev_defers
 
     def forward(
         self,
@@ -1023,7 +1018,6 @@ class MiniMaxM3SparseForCausalLM(nn.Module, SupportsPP, SupportsEagle3):
         inputs_embeds: torch.Tensor | None = None,
         **kwargs,
     ) -> torch.Tensor | IntermediateTensors:
-        self._configure_allreduce_fusion()
         return self.model(input_ids, positions, intermediate_tensors, inputs_embeds)
 
     def compute_logits(self, hidden_states: torch.Tensor) -> torch.Tensor | None:
