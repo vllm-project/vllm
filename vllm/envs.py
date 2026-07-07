@@ -154,6 +154,7 @@ if TYPE_CHECKING:
     VLLM_RAY_PER_WORKER_GPUS: float = 1.0
     VLLM_RAY_BUNDLE_INDICES: str = ""
     VLLM_CUDART_SO_PATH: str | None = None
+    VLLM_XPURT_SO_PATH: str | None = None
     VLLM_DP_RANK: int = 0
     VLLM_DP_RANK_LOCAL: int = -1
     VLLM_DP_SIZE: int = 1
@@ -1339,6 +1340,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # In some system, find_loaded_library() may not work. So we allow users to
     # specify the path through environment variable VLLM_CUDART_SO_PATH.
     "VLLM_CUDART_SO_PATH": lambda: os.getenv("VLLM_CUDART_SO_PATH", None),
+    # Same as VLLM_CUDART_SO_PATH, but for the Level Zero loader (libze_loader)
+    # used by the XPU (Intel GPU) runtime wrapper.
+    "VLLM_XPURT_SO_PATH": lambda: os.getenv("VLLM_XPURT_SO_PATH", None),
     # Rank of the process in the data parallel setting
     "VLLM_DP_RANK": lambda: int(os.getenv("VLLM_DP_RANK", "0")),
     # Rank of the process in the data parallel setting.

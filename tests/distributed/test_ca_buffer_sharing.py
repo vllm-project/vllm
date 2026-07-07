@@ -6,11 +6,21 @@
 # torchrun --nproc_per_node=2 tests/distributed/test_ca_buffer_sharing.py
 
 import ctypes
+import sys
 
 import torch
 import torch.distributed as dist
 
-from vllm.distributed.device_communicators.cuda_wrapper import CudaRTLibrary
+from vllm.platforms import current_platform
+
+# only runs on CUDA-like platforms (CUDA / ROCm); skip cleanly everywhere else
+if not current_platform.is_cuda_alike():
+    print("Skipping: requires a CUDA-like (CUDA/ROCm) device")
+    sys.exit(0)
+
+from vllm.distributed.device_communicators.cuda_wrapper import (  # noqa: E402
+    CudaRTLibrary,
+)
 from vllm.distributed.device_communicators.custom_all_reduce import (  # noqa
     CustomAllreduce,
 )
