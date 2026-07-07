@@ -28,6 +28,17 @@
 ###############################################################################
 set -o pipefail
 
+: "${BUILDKIT_PROGRESS:=plain}"
+: "${TERM:=xterm-256color}"
+: "${FORCE_COLOR:=1}"
+: "${CLICOLOR_FORCE:=1}"
+: "${PY_COLORS:=1}"
+: "${ROCM_DOCKER_TTY:=1}"
+if [[ " ${PYTEST_ADDOPTS:-} " != *" --color"* ]]; then
+  PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--color=yes"
+fi
+export BUILDKIT_PROGRESS TERM FORCE_COLOR CLICOLOR_FORCE PY_COLORS PYTEST_ADDOPTS ROCM_DOCKER_TTY
+
 # Export Python path for commands that run directly on the host. Containerized
 # tests set this to /vllm-workspace below so spawned Python processes do not
 # depend on their current working directory.
@@ -149,6 +160,7 @@ EOF
   echo "--- Building local ROCm test image"
   docker build \
     --pull=false \
+    --progress "${BUILDKIT_PROGRESS}" \
     --build-arg "BASE_IMAGE=${base_image}" \
     -t "${artifact_image}" \
     "${context_dir}" || return 1
@@ -448,9 +460,11 @@ checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
 if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
   checkout="."
 fi
-if git -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# Pass safe.directory per-command (-c) because buildkite runs will always fail
+# the next check on git 2.35.2+ due to mixed uses of root and buildkite-agent/uids.
+if git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   vllm_standalone_merge_base="$(
-    git -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
+    git -c "safe.directory=${checkout}" -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
   )"
 fi
 if [[ -z "${vllm_standalone_merge_base}" ]]; then
@@ -533,6 +547,13 @@ if is_multi_node "$commands"; then
 else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+  docker_run_terminal_args=(-i)
+  if [[ "${ROCM_DOCKER_TTY}" == "1" ]]; then
+    docker_run_terminal_args+=(-t)
+    echo "Docker interactive stdin: enabled; TTY allocation: enabled"
+  else
+    echo "Docker interactive stdin: enabled; TTY allocation: disabled"
+  fi
 
   ulimit_core_hard=$(ulimit -H -c)
   if [[ "$ulimit_core_hard" == "unlimited" ]]; then
@@ -549,6 +570,7 @@ else
   fi
 
   docker run \
+    "${docker_run_terminal_args[@]}" \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
     --network=host \
@@ -563,6 +585,11 @@ else
     -e AWS_SECRET_ACCESS_KEY \
     -e BUILDKITE_PARALLEL_JOB \
     -e BUILDKITE_PARALLEL_JOB_COUNT \
+    -e TERM \
+    -e FORCE_COLOR \
+    -e CLICOLOR_FORCE \
+    -e PY_COLORS \
+    -e PYTEST_ADDOPTS \
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
