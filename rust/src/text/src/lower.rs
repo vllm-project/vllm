@@ -56,7 +56,7 @@ pub fn lower_text_request(
         data_parallel_rank: request.data_parallel_rank,
         reasoning_parser_kwargs: request.reasoning_parser_kwargs.clone(),
         lora_request: request.lora_request.clone(),
-        arrival_time: None,
+        arrival_time: request.arrival_time,
         trace_headers: None,
     };
 
@@ -1141,6 +1141,44 @@ mod tests {
 
         assert!(!prepared.text_request.intermediate);
         assert_eq!(prepared.generate_request.request_id, "text-1");
+    }
+
+    #[test]
+    fn lower_text_request_passes_arrival_time_through() {
+        let request = TextRequest {
+            arrival_time: Some(42.5),
+            ..sample_request()
+        };
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.generate_request.arrival_time, Some(42.5));
+    }
+
+    #[test]
+    fn lower_text_request_leaves_arrival_time_unset_when_absent() {
+        let request = TextRequest {
+            arrival_time: None,
+            ..sample_request()
+        };
+
+        let prepared = lower_text_request(
+            request,
+            vec![1, 2, 3],
+            sample_sampling_hints(),
+            sample_sampling_limits(),
+            &stub_tokenizer(),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.generate_request.arrival_time, None);
     }
 
     #[test]
