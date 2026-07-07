@@ -262,7 +262,7 @@ class Scheduler(SchedulerInterface):
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            max_num_batched_tokens=self.scheduler_config.max_num_batched_tokens,
+            max_in_flight_tokens=vllm_config.max_in_flight_tokens,
             enable_caching=self.cache_config.enable_prefix_caching,
             use_eagle=self.use_eagle,
             log_stats=self.log_stats,
@@ -273,7 +273,6 @@ class Scheduler(SchedulerInterface):
             hash_block_size=hash_block_size,
             metrics_collector=self.kv_metrics_collector,
             watermark=self.scheduler_config.watermark,
-            max_concurrent_batches=vllm_config.max_concurrent_batches,
         )
         # Bind GPU block pool to the KV connector. This must happen after
         # kv_cache_manager is constructed so block_pool is available.
@@ -2367,7 +2366,7 @@ class Scheduler(SchedulerInterface):
         # the connector, on the processed-token basis (see `allocate_slots`).
         self.kv_cache_manager.remove_skipped_blocks(
             request_id=request.request_id,
-            total_computed_tokens=max(
+            processed_computed_tokens=max(
                 0, request.num_computed_tokens - request.num_in_flight_tokens
             ),
             num_prompt_tokens=request.num_prompt_tokens,

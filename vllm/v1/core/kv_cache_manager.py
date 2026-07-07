@@ -114,7 +114,7 @@ class KVCacheManager:
         max_model_len: int,
         scheduler_block_size: int,
         hash_block_size: int,
-        max_num_batched_tokens: int | None = None,
+        max_in_flight_tokens: int | None = None,
         enable_caching: bool = True,
         use_eagle: bool = False,
         log_stats: bool = False,
@@ -123,14 +123,13 @@ class KVCacheManager:
         pcp_world_size: int = 1,
         metrics_collector: KVCacheMetricsCollector | None = None,
         watermark: float = 0.0,
-        max_concurrent_batches: int = 1,
     ) -> None:
         self.max_model_len = max_model_len
         # When unset, fall back to `max_model_len` so the recycling-aware cap
         # collapses to the prior (uncapped) admission behavior. The scheduler
         # always supplies the real value at runtime.
-        if max_num_batched_tokens is None:
-            max_num_batched_tokens = max_model_len
+        if max_in_flight_tokens is None:
+            max_in_flight_tokens = max_model_len
 
         self.enable_caching = enable_caching
         self.use_eagle = use_eagle
@@ -144,7 +143,7 @@ class KVCacheManager:
         self.coordinator = get_kv_cache_coordinator(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
-            max_num_batched_tokens=max_num_batched_tokens,
+            max_in_flight_tokens=max_in_flight_tokens,
             use_eagle=self.use_eagle,
             enable_caching=self.enable_caching,
             enable_kv_cache_events=enable_kv_cache_events,
@@ -153,7 +152,6 @@ class KVCacheManager:
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
             metrics_collector=self.metrics_collector,
-            max_concurrent_batches=max_concurrent_batches,
         )
         self.num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
         self.block_pool = self.coordinator.block_pool
@@ -477,7 +475,7 @@ class KVCacheManager:
     def remove_skipped_blocks(
         self,
         request_id: str,
-        total_computed_tokens: int,
+        processed_computed_tokens: int,
         num_prompt_tokens: int | None = None,
     ) -> None:
         """Remove the blocks that are no longer needed from `blocks` and replace
@@ -485,12 +483,12 @@ class KVCacheManager:
 
         Args:
             request_id: The request ID.
-            total_computed_tokens: The total number of computed tokens, including
-                local computed tokens and external computed tokens.
+            processed_computed_tokens: Computed-token prefix length covering
+                fully processed and committed tokens only (safe to free).
             num_prompt_tokens: Optional prompt length for R-SWA gap eviction.
         """
         self.coordinator.remove_skipped_blocks(
-            request_id, total_computed_tokens, num_prompt_tokens
+            request_id, processed_computed_tokens, num_prompt_tokens
         )
 
     def pop_blocks_for_free(self, request: Request) -> list[KVCacheBlock]:

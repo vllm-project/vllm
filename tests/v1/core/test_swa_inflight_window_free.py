@@ -157,12 +157,12 @@ def test_swa_admission_cap_accounts_for_overlapping_batches():
         sliding_window=1024,
     )
     base = spec.max_admission_blocks_per_request(
-        max_num_batched_tokens=1024, max_model_len=16384
+        max_in_flight_tokens=1024, max_model_len=16384
     )
     # (1024 - 1 + 1024) tokens -> 128 blocks, +1 for window misalignment.
     assert base == 129
     overlapped = spec.max_admission_blocks_per_request(
-        max_num_batched_tokens=1024, max_model_len=16384, max_concurrent_batches=2
+        max_in_flight_tokens=2 * 1024, max_model_len=16384
     )
     # One extra in-flight chunk is held back: (1024 - 1 + 2 * 1024) tokens.
     assert overlapped == 193
@@ -210,12 +210,12 @@ def test_chunked_local_admission_cap_accounts_for_overlapping_batches():
         attention_chunk_size=1024,
     )
     base = spec.max_admission_blocks_per_request(
-        max_num_batched_tokens=1024, max_model_len=16384
+        max_in_flight_tokens=1024, max_model_len=16384
     )
     # (1024 + 1024) tokens -> 128 blocks.
     assert base == 128
     overlapped = spec.max_admission_blocks_per_request(
-        max_num_batched_tokens=1024, max_model_len=16384, max_concurrent_batches=2
+        max_in_flight_tokens=2 * 1024, max_model_len=16384
     )
     # One extra in-flight chunk is held back: (1024 + 2 * 1024) tokens.
     assert overlapped == 192
