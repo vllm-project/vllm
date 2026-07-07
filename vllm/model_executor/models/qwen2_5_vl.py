@@ -46,8 +46,8 @@ from vllm.compilation.decorators import (
     should_torch_compile_mm_encoder,
     support_torch_compile,
 )
-from vllm.config import VllmConfig
-from vllm.distributed import parallel_state
+from vllm.config import VllmConfig, get_current_vllm_config
+from vllm.distributed import get_sp_group, parallel_state
 from vllm.distributed import utils as dist_utils
 from vllm.logger import init_logger
 from vllm.model_executor.layers.activation import get_act_and_mul_fn
@@ -404,8 +404,10 @@ class Qwen2_5_VisionAttention(nn.Module):
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
         # Only used for FlashInfer CuDNN backend.
         sequence_lengths: torch.Tensor | None,
+        sp_enabled: bool = False,
     ) -> torch.Tensor:
         # [s, b, c] --> [s, b, head * 3 * head_dim]
+        self.proj.reduce_results = False if sp_enabled else True
         x, _ = self.qkv(x)
         seq_len, batch_size, _ = x.shape
 
@@ -508,15 +510,23 @@ class Qwen2_5_VisionBlock(nn.Module):
         max_seqlen: torch.Tensor,  # Only used for Flash Attention
         # Only used for FlashInfer CuDNN backend.
         sequence_lengths: torch.Tensor | None = None,
+        sp_enabled: bool = False,
+        sp_group: torch.distributed.ProcessGroup | None = None,
     ) -> torch.Tensor:
+        x_normed = self.norm1(x)
+        if sp_enabled:
+            x_normed = sp_group.all_gather(x_normed, dim=0)
         x_attn = self.attn(
-            self.norm1(x),
+            x_normed,
             cu_seqlens=cu_seqlens,
             rotary_pos_emb_cos=rotary_pos_emb_cos,
             rotary_pos_emb_sin=rotary_pos_emb_sin,
             max_seqlen=max_seqlen,
             sequence_lengths=sequence_lengths,
+            sp_enabled=sp_enabled,
         )
+        if sp_enabled:
+            x_attn = sp_group.reduce_scatter(x_attn, dim=0)
         x_fused_norm, residual = self.norm2(x, residual=x_attn)
         x = residual + self.mlp(x_fused_norm)
         return x
@@ -657,6 +667,22 @@ class Qwen2_5_VisionTransformer(nn.Module):
             in_channels=in_channels,
             hidden_size=self.hidden_size,
         )
+        
+        self.sp_group = None
+        self.sp_size = None
+        self.sp_rank = None
+        self.sp_min_token_num = 500
+        
+        config = get_current_vllm_config()
+        multimodal_config = config.model_config.multimodal_config
+        if multimodal_config.enable_mm_encoder_sp:
+            self.sp_group = get_sp_group()
+            self.sp_size = self.sp_group.world_size
+            self.sp_rank = (
+                1
+                if use_data_parallel
+                else self.sp_group.rank_in_group
+            )
 
         norm_layer = partial(RMSNorm, eps=norm_eps)
         head_dim = self.hidden_size // self.num_heads
@@ -1095,6 +1121,16 @@ class Qwen2_5_VisionTransformer(nn.Module):
 
         hidden_states = hidden_states.unsqueeze(1)
 
+        sp_enabled = False
+        if self.sp_group is not None and self.sp_size > 1:
+            sp_enabled = (
+                seq_len >= self.sp_min_token_num
+                and seq_len % self.sp_size == 0
+            )
+        if sp_enabled:
+            seq_chunk = hidden_states.shape[0] // self.sp_size
+            hidden_states = hidden_states[self.sp_rank * seq_chunk : (self.sp_rank + 1) * seq_chunk]
+
         for layer_num, blk in enumerate(self.blocks):
             if layer_num in self.fullatt_block_indexes:
                 cu_seqlens_now = cu_seqlens
@@ -1112,7 +1148,11 @@ class Qwen2_5_VisionTransformer(nn.Module):
                 rotary_pos_emb_sin=rotary_pos_emb_sin,
                 max_seqlen=max_seqlen_now,
                 sequence_lengths=sequence_lengths_now,
+                sp_enabled=sp_enabled,
+                sp_group=self.sp_group,
             )
+        if sp_enabled:
+            hidden_states = self.sp_group.all_gather(hidden_states, dim=0)
 
         # For Qwen2.5-VL-3B, float16 will overflow at last block
         # for long visual tokens sequences.

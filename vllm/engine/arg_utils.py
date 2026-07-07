@@ -577,6 +577,9 @@ class EngineArgs:
     mm_encoder_fp8_scale_save_margin: float = (
         MultiModalConfig.mm_encoder_fp8_scale_save_margin
     )
+    enable_mm_encoder_sp: bool = (
+        MultiModalConfig.enable_mm_encoder_sp
+    )
     io_processor_plugin: str | None = None
     renderer_num_workers: int = 1
     skip_mm_profiling: bool = MultiModalConfig.skip_mm_profiling
@@ -1283,6 +1286,9 @@ class EngineArgs:
             **multimodal_kwargs["mm_encoder_fp8_scale_save_margin"],
         )
         multimodal_group.add_argument(
+            "--enable-mm-encoder-sp", **multimodal_kwargs["enable_mm_encoder_sp"]
+        )
+        multimodal_group.add_argument(
             "--interleave-mm-strings", **multimodal_kwargs["interleave_mm_strings"]
         )
         multimodal_group.add_argument(
@@ -1655,6 +1661,7 @@ class EngineArgs:
             mm_encoder_fp8_scale_path=self.mm_encoder_fp8_scale_path,
             mm_encoder_fp8_scale_save_path=self.mm_encoder_fp8_scale_save_path,
             mm_encoder_fp8_scale_save_margin=self.mm_encoder_fp8_scale_save_margin,
+            enable_mm_encoder_sp=self.enable_mm_encoder_sp,
             pooler_config=self.pooler_config,
             generation_config=self.generation_config,
             override_generation_config=self.override_generation_config,

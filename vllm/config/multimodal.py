@@ -177,6 +177,9 @@ class MultiModalConfig:
     """Safety margin multiplied onto scales when auto-saving. A value > 1
     leaves headroom so that inputs with larger activations than the
     calibration set do not overflow FP8 range. Default 1.5."""
+    enable_mm_encoder_sp: bool = False
+    """When enabled, uses sequence parallelism (SP) to partition the multi-modal
+    encoder across sequence parallel ranks."""
     interleave_mm_strings: bool = False
     """Enable fully interleaved support for multimodal prompts, while using
     --chat-template-content-format=string."""

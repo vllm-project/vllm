@@ -1406,6 +1406,11 @@ def get_pcp_group() -> GroupCoordinator:
     assert _PCP is not None, "prefill context parallel group is not initialized"
     return _PCP
 
+_SP: GroupCoordinator | None = None
+
+def get_sp_group() -> GroupCoordinator:
+    assert _SP is not None, "sequence parallel group is not initialized"
+    return _SP
 
 @contextmanager
 def graph_capture(device: torch.device):
@@ -1920,16 +1925,35 @@ def initialize_model_parallel(
     # If no EP group needed, _EP remains None
     # If no EPLB group needed, _EPLB remains None
 
+    global _SP
+    assert _SP is None, "sequence parallel group is already initialized"
+    if config.model_config.multimodal_config.enable_mm_encoder_sp:
+        group_ranks = all_ranks.view(-1, tensor_model_parallel_size).unbind(0)
+        group_ranks = [x.tolist() for x in group_ranks]
+        if enable_elastic_ep:
+            group_ranks = local_all_ranks.view(-1, tensor_model_parallel_size).unbind(0)
+            group_ranks = [x.tolist() for x in group_ranks]
+        # message queue broadcaster is only used in tensor model parallel group
+        _SP = init_model_parallel_group(
+            group_ranks,
+            get_world_group().local_rank,
+            backend,
+            use_message_queue_broadcaster=True,
+            group_name="sp",
+        )
+
+
     logger.info_once(
         "rank %s in world size %s is assigned as "
         "DP rank %s, PP rank %s, PCP rank %s, "
-        "TP rank %s, EP rank %s, EPLB rank %s",
+        "TP rank %s, SP rank %s, EP rank %s, EPLB rank %s",
         rank,
         world_size,
         _DP.rank_in_group,
         _PP.rank_in_group,
         _PCP.rank_in_group,
         _TP.rank_in_group,
+        _SP.rank_in_group if _SP is not None else "N/A",
         _EP.rank_in_group if _EP is not None else "N/A",
         _EPLB.rank_in_group if _EPLB is not None else "N/A",
     )
@@ -1999,7 +2023,8 @@ def prepare_communication_buffer_for_model(model: torch.nn.Module):
         _EP.prepare_communication_buffer_for_model(model)
     if _EPLB is not None:
         _EPLB.prepare_communication_buffer_for_model(model)
-
+    if _SP is not None:
+        _SP.prepare_communication_buffer_for_model(model)
 
 def model_parallel_is_initialized():
     """Check if tensor and pipeline parallel groups are initialized."""
@@ -2063,6 +2088,10 @@ def destroy_model_parallel():
         _EPLB.destroy()
     _EPLB = None
 
+    global _SP
+    if _SP:
+        _SP.destroy()
+    SP = None
 
 def destroy_distributed_environment():
     global _WORLD, _NODE_COUNT
