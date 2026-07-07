@@ -627,9 +627,7 @@ class MessageQueue:
             self.started = time.monotonic()
             self.deadline = sys.maxsize if timeout is None else self.started + timeout
 
-            # Never park indefinitely on the best-effort notify channel (PUB
-            # SNDHWM=1 drops silently, SUB CONFLATE): cap every idle wait at
-            # SHM_READER_RECHECK_INTERVAL_MS so a lost ping recovers within it.
+            # if should_warn, we need to wake up periodically to log
             self.warning_wait_time_ms = (
                 VLLM_RINGBUFFER_WARNING_INTERVAL * 1000 if should_warn else None
             )
@@ -639,10 +637,12 @@ class MessageQueue:
             self.timeout = timeout
 
         def timeout_ms(self) -> int:
-            """Wait bounded by min(recheck interval, next warning when warning,
-            time to deadline when a timeout is set). Never None, so an idle
-            reader always wakes to re-read the authoritative SHM written-flag.
-            Raises TimeoutError once past the deadline."""
+            """Returns a timeout, capped at the recheck interval, that is:
+            - min(time to deadline, time to next warning) if we're logging warnings
+            - time to deadline, if we're not logging warnings
+            - recheck interval if the timeout is None and we're not logging warnings
+            - raise TimeoutError if we are past the deadline
+            """
             wait_ms = SHM_READER_RECHECK_INTERVAL_MS
             if self.warning_wait_time_ms is not None:
                 wait_ms = min(wait_ms, self.warning_wait_time_ms)
@@ -715,8 +715,8 @@ class MessageQueue:
                     try:
                         yield buf
                     finally:
-                        # The context is exiting: the caller either finished
-                        # reading or raised. Release the slot for the writer.
+                        # caller has read from the buffer
+                        # set the read flag
                         metadata_buffer[self.local_reader_rank + 1] = 1
                         # Memory fence ensures the read flag is visible to the writer.
                         # Without this, writer may not see our read completion and
