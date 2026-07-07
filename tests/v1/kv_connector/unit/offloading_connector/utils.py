@@ -129,6 +129,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.manager = MagicMock(spec=OffloadingManager)
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
         self.manager.lookup.return_value = LookupResult.MISS
+        self.manager.get_stats.return_value = None
         self.manager.on_new_request.return_value = RequestOffloadingContext()
         self.handler = MockOffloadingWorker()
 
@@ -331,6 +332,7 @@ class RequestRunner:
         self.completed_loads: list[TransferSummary] = []
         self.completed_stores: list[TransferSummary] = []
         self.flushed_gpu_blocks: set[GPUBlock] = set()
+        self.kv_connector_stats: list[Any] = []
 
         # block_id -> GPUBlock
         self.gpu_blocks: dict[int, GPUBlock] = {}
@@ -343,6 +345,12 @@ class RequestRunner:
             attn_metadata={},
             slot_mapping={},
         )
+
+    def _record_kv_connector_stats(self, engine_outputs: dict[int, Any]) -> None:
+        for output in engine_outputs.values():
+            scheduler_stats = output.scheduler_stats
+            if scheduler_stats is not None and scheduler_stats.kv_connector_stats:
+                self.kv_connector_stats.append(scheduler_stats.kv_connector_stats)
 
     def new_request(
         self,
@@ -520,13 +528,17 @@ class RequestRunner:
             if self.async_scheduling:
                 # in async scheduling we update the output of the previous step
                 if prev_model_runner_output is not None:
-                    self.scheduler.update_from_output(
+                    engine_outputs = self.scheduler.update_from_output(
                         prev_scheduler_output, prev_model_runner_output
                     )
+                    self._record_kv_connector_stats(engine_outputs)
                 prev_scheduler_output = scheduler_output
                 prev_model_runner_output = model_runner_output
             else:
-                self.scheduler.update_from_output(scheduler_output, model_runner_output)
+                engine_outputs = self.scheduler.update_from_output(
+                    scheduler_output, model_runner_output
+                )
+                self._record_kv_connector_stats(engine_outputs)
 
             if post_step_fn is not None:
                 post_step_fn()
@@ -542,9 +554,10 @@ class RequestRunner:
             if token_id is None:
                 if self.async_scheduling:
                     # sample last token
-                    self.scheduler.update_from_output(
+                    engine_outputs = self.scheduler.update_from_output(
                         prev_scheduler_output, prev_model_runner_output
                     )
+                    self._record_kv_connector_stats(engine_outputs)
                 break
 
         self._parse_transfers()
