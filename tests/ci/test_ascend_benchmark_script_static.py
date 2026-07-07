@@ -52,6 +52,7 @@ def test_e2e_inference_scripts_retry_http_requests_and_print_server_log():
         assert "print_server_log_tail() {" in text
         assert "curl_with_server_log() {" in text
         assert "E2E_HTTP_REQUEST_ATTEMPTS" in text
+        assert "else\n      rc=$?\n    fi" in text
         assert "failed after ${max_attempts} attempts" in text
         assert (
             'done\n\ncurl -fsS "http://$HOST:$PORT/v1/models" >/dev/null'

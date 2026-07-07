@@ -431,8 +431,9 @@ curl_with_server_log() {
   while [[ "$attempt" -le "$max_attempts" ]]; do
     if curl -fsS "$@"; then
       return 0
+    else
+      rc=$?
     fi
-    rc=$?
 
     if [[ -n "$server_pid" ]] && ! kill -0 "$server_pid" 2>/dev/null; then
       echo "$description failed because the vLLM server exited (curl exit $rc)" >&2
