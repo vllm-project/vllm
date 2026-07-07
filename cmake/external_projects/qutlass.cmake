@@ -22,7 +22,7 @@ if(QUTLASS_SRC_DIR)
   set(qutlass_BINARY_DIR "${CMAKE_BINARY_DIR}/qutlass-binary-dir-unused")
 else()
   set(_QUTLASS_UPSTREAM_REPO "https://github.com/cleonard530/qutlass.git")
-  set(_QUTLASS_UPSTREAM_TAG "d1a46aea044883760b878e4bcdb914d5aacb3e8b")
+  set(_QUTLASS_UPSTREAM_TAG "7b2601a46dfc6e17c2bf86f801e318aa17a1423a")
 
   set(_qutlass_fc_root "${FETCHCONTENT_BASE_DIR}")
   if(NOT _qutlass_fc_root)
