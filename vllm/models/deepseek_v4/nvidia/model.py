@@ -761,10 +761,8 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
 
     The generic CUDA backend selector does not instantiate DSv4 layers directly,
     so map generic sparse-MLA choices to the DSv4-specialized attention class.
-    Without an explicit backend, SM12x defaults to FlashInfer. SM10x also uses
-    FlashInfer for plain FP8 KV cache so the default respects the requested
-    per-tensor FP8 row layout; FlashMLA sparse uses DeepSeek V4's fp8_ds_mla
-    uint8 row format instead.
+    Without an explicit backend, SM12 defaults to FlashInfer while the other
+    CUDA arches keep the FlashMLA path.
     """
     backend = vllm_config.attention_config.backend
     device_capability = current_platform.get_device_capability()
@@ -787,13 +785,6 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     ):
         return DeepseekV4FlashMLAAttention
 
-    cache_dtype = vllm_config.cache_config.cache_dtype
-    if (
-        device_capability is not None
-        and device_capability.major == 10
-        and cache_dtype in ("fp8", "fp8_e4m3", "fp8_e5m2")
-    ):
-        return DeepseekV4FlashInferMLAAttention
     if device_capability is not None and device_capability.major == 12:
         return DeepseekV4FlashInferSM120Attention
     return DeepseekV4FlashMLAAttention
