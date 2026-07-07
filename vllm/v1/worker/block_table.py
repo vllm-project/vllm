@@ -26,6 +26,7 @@ class BlockTable:
         device: torch.device,
         kernel_block_size: int,
         cp_kv_cache_interleave_size: int,
+        dcp_override: tuple[int, int] | None = None,
     ):
         """
         Args:
@@ -38,6 +39,8 @@ class BlockTable:
             kernel_block_size: The block_size of underlying attention kernel.
                 Will be the same as `block_size` if `block_size` is supported
                 by the attention kernel.
+            dcp_override: Optional (world_size, rank) override for this
+                group's DCP. SWA groups use (1, 0) to replicate KV cache.
         """
         self.max_num_reqs = max_num_reqs
         self.max_num_batched_tokens = max_num_batched_tokens
@@ -90,13 +93,16 @@ class BlockTable:
             # PCP might not be initialized in testing
             self.pcp_world_size = 1
             self.pcp_rank = 0
-        try:
-            self.dcp_world_size = get_dcp_group().world_size
-            self.dcp_rank = get_dcp_group().rank_in_group
-        except AssertionError:
-            # DCP might not be initialized in testing
-            self.dcp_world_size = 1
-            self.dcp_rank = 0
+        if dcp_override is not None:
+            self.dcp_world_size, self.dcp_rank = dcp_override
+        else:
+            try:
+                self.dcp_world_size = get_dcp_group().world_size
+                self.dcp_rank = get_dcp_group().rank_in_group
+            except AssertionError:
+                # DCP might not be initialized in testing
+                self.dcp_world_size = 1
+                self.dcp_rank = 0
         self.cp_kv_cache_interleave_size = cp_kv_cache_interleave_size
 
     def append_row(
@@ -234,12 +240,15 @@ class MultiGroupBlockTable:
         kernel_block_sizes: list[int],
         max_num_blocks: list[int] | None = None,
         cp_kv_cache_interleave_size: int = 1,
+        dcp_overrides: list[tuple[int, int] | None] | None = None,
     ) -> None:
         if len(kernel_block_sizes) != len(block_sizes):
             raise ValueError(
                 f"kernel_block_sizes length ({len(kernel_block_sizes)}) "
                 f"must match block_sizes length ({len(block_sizes)})"
             )
+        if dcp_overrides is None:
+            dcp_overrides = [None] * len(block_sizes)
         if max_num_blocks is None:
             # Note(hc): each dcp rank only store
             # (max_model_len//dcp_world_size) tokens in kvcache,
@@ -247,8 +256,11 @@ class MultiGroupBlockTable:
             # must be multiplied by dcp_world_size.
             total_cp_world_size = get_total_cp_world_size()
             max_num_blocks = [
-                cdiv(max_model_len, block_size * total_cp_world_size)
-                for block_size in block_sizes
+                cdiv(
+                    max_model_len,
+                    block_size * (ovr[0] if ovr is not None else total_cp_world_size),
+                )
+                for block_size, ovr in zip(block_sizes, dcp_overrides)
             ]
 
         if len(max_num_blocks) != len(block_sizes):
@@ -274,9 +286,10 @@ class MultiGroupBlockTable:
                 device,
                 kernel_block_size,
                 cp_kv_cache_interleave_size,
+                dcp_override=ovr,
             )
-            for block_size, kernel_block_size, max_num_blocks_per_req in zip(
-                block_sizes, kernel_block_sizes, max_num_blocks
+            for block_size, kernel_block_size, max_num_blocks_per_req, ovr in zip(
+                block_sizes, kernel_block_sizes, max_num_blocks, dcp_overrides
             )
         ]
 
