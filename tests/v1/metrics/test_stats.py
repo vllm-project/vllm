@@ -276,6 +276,54 @@ def test_update_from_finished_request_returns_finished_stats():
     assert returned.num_cached_tokens == 3
 
 
+def test_update_from_finished_request_no_negative_intervals():
+    # Aborted before first token: first_token_ts/last_token_ts == 0.0.
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    req_stats.queued_ts = 1.0
+    req_stats.scheduled_ts = 1.5
+    # first_token_ts and last_token_ts remain 0.0
+
+    finished = iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.ABORT,
+        request_id="aborted-req",
+        num_prompt_tokens=10,
+        max_tokens_param=None,
+        req_stats=req_stats,
+    )
+
+    # Previously these were negative (0.0 - 1.5). Now clamped to 0.0.
+    assert finished.prefill_time == 0.0
+    assert finished.decode_time == 0.0
+    assert finished.inference_time == 0.0
+    assert finished.mean_time_per_output_token == 0.0
+    assert finished.queued_time == pytest.approx(0.5)  # measured, unchanged
+
+
+def test_update_from_finished_request_populated_unchanged():
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    req_stats.queued_ts = 1.0
+    req_stats.scheduled_ts = 1.5
+    req_stats.first_token_ts = 2.0
+    req_stats.last_token_ts = 3.0
+    req_stats.num_generation_tokens = 2
+
+    finished = iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        request_id="ok-req",
+        num_prompt_tokens=10,
+        max_tokens_param=None,
+        req_stats=req_stats,
+    )
+
+    assert finished.queued_time == pytest.approx(0.5)
+    assert finished.prefill_time == pytest.approx(0.5)
+    assert finished.decode_time == pytest.approx(1.0)
+    assert finished.inference_time == pytest.approx(1.5)
+    assert finished.mean_time_per_output_token == pytest.approx(1.0)  # 1.0/(2-1)
+
+
 def test_compute_timing_intervals_fully_populated():
     stats = RequestStateStats(
         queued_ts=1.0,
