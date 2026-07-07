@@ -56,7 +56,7 @@ steps:
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
   # server_load can be flaky under the Rust frontend; keep it excluded for now.
   - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not server_load"
   # test_generate_logprobs expects Python-style top_logprobs truncation (dedup sampled + cap at max(k, 1)).
@@ -92,7 +92,7 @@ steps:
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2
+  - pytest -v -s tool_use --ignore=tool_use/mistral --models hermes
 
 - label: Rust Frontend Distributed
   timeout_in_minutes: 30

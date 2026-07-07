@@ -404,6 +404,36 @@ steps:
   - pytest -v -s transformers_utils
   - pytest -v -s config
 
+#------------------------------------------------------------  mi250 · rust  -----------------------------------------------------------#
+
+- label: Rust Frontend Cargo Style + Clippy # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - rust/
+  - rust-toolchain.toml
+  - .buildkite/test_areas/rust_frontend_cargo.yaml
+  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
+  commands:
+  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh style-clippy
+
+- label: Rust Frontend Cargo Tests # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx90anightly, amdmi250]
+  agent_pool: mi250_1
+  no_gpu: true
+  working_dir: "/vllm-workspace"
+  source_file_dependencies:
+  - rust/
+  - rust-toolchain.toml
+  - .buildkite/test_areas/rust_frontend_cargo.yaml
+  - .buildkite/scripts/run-rust-frontend-cargo-ci.sh
+  commands:
+  - bash .buildkite/scripts/run-rust-frontend-cargo-ci.sh test
+
 #-----------------------------------------------------------  mi250 · docker  ----------------------------------------------------------#
 
 - label: Docker Build Metadata (ROCm) # TBD
@@ -1929,6 +1959,128 @@ steps:
   commands:
   - pip install "vllm-gguf-plugin >= 0.0.2"
   - pytest -v -s plugins_tests/gguf
+
+#-------------------------------------------------------  mi300 · rust_frontend  -------------------------------------------------------#
+
+- label: Rust Frontend OpenAI Coverage # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - rust/
+  - vllm/benchmarks/
+  - vllm/entrypoints/openai/
+  - vllm/entrypoints/serve/
+  - vllm/v1/sample/
+  - tests/utils.py
+  - tests/benchmarks/test_serve_cli.py
+  - tests/entrypoints/openai/chat_completion/test_chat_completion.py
+  - tests/entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py
+  - tests/entrypoints/openai/completion/test_shutdown.py
+  - tests/entrypoints/openai/test_return_token_ids.py
+  - tests/entrypoints/openai/test_uds.py
+  - tests/v1/sample/test_logprobs_e2e.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s benchmarks/test_serve_cli.py -k "not insecure"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_completion.py -k "not test_invalid_json_schema and not test_invalid_regex"
+  - pytest -v -s entrypoints/openai/chat_completion/test_chat_logit_bias_validation.py -k "not multiple"
+  - pytest -v -s entrypoints/openai/completion/test_shutdown.py -k "not engine_failure and not test_abort_timeout_exits_quickly"
+  - pytest -v -s entrypoints/openai/test_return_token_ids.py -k "not test_comparison"
+  - pytest -v -s entrypoints/openai/test_uds.py
+  - pytest -v -s v1/sample/test_logprobs_e2e.py -k "test_prompt_logprobs_e2e_server"
+
+- label: Rust Frontend Serve Admin Coverage # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - rust/
+  - vllm/entrypoints/openai/
+  - vllm/entrypoints/serve/
+  - vllm/v1/engine/
+  - tests/utils.py
+  - tests/entrypoints/serve/dev/rpc/test_collective_rpc.py
+  - tests/entrypoints/scale_out/token_in_token_out/test_serving_tokens.py
+  - tests/entrypoints/serve/instrumentator/test_basic.py
+  - tests/entrypoints/serve/instrumentator/test_metrics.py
+  - tests/entrypoints/serve/tokenize/test_tokenization.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - PYTHONPATH=/vllm-workspace pytest -v -s entrypoints/serve/dev/rpc/test_collective_rpc.py
+  - pytest -v -s entrypoints/serve/instrumentator/test_basic.py -k "not server_load"
+  - pytest -v -s entrypoints/scale_out/token_in_token_out/test_serving_tokens.py -k "not lora and not test_generate_logprobs and not stop_string_workflow"
+  - pytest -v -s entrypoints/serve/instrumentator/test_metrics.py -k "text and not show and not run_batch and not test_metrics_counts and not test_metrics_exist"
+  - pytest -v -s entrypoints/serve/tokenize/test_tokenization.py -k "not tokenizer_info"
+
+- label: Rust Frontend Core Correctness # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - rust/
+  - vllm/entrypoints/openai/
+  - tests/utils.py
+  - tests/entrypoints/openai/correctness/test_lmeval.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -s entrypoints/openai/correctness/test_lmeval.py::test_lm_eval_accuracy_v1_engine
+
+- label: Rust Frontend Tool Use # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_1
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - rust/
+  - vllm/entrypoints/openai/
+  - vllm/tool_parsers/
+  - tests/utils.py
+  - tests/tool_use/
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - pytest -v -s tool_use --ignore=tool_use/mistral --models hermes
+
+- label: Rust Frontend Distributed # TBD
+  timeout_in_minutes: 180
+  mirror_hardwares: [amdexperimental, amdproduction, amdgfx942nightly, amdmi300]
+  agent_pool: mi300_4
+  num_gpus: 4
+  optional: true
+  working_dir: "/vllm-workspace/tests"
+  source_file_dependencies:
+  - rust/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/executor/
+  - vllm/v1/engine/
+  - vllm/v1/worker/
+  - tests/utils.py
+  - tests/v1/distributed/test_external_lb_dp.py
+  - tests/v1/distributed/test_hybrid_lb_dp.py
+  - tests/v1/distributed/test_internal_lb_dp.py
+  - vllm/platforms/rocm.py
+  commands:
+  - export VLLM_USE_RUST_FRONTEND=1
+  - export VLLM_WORKER_MULTIPROC_METHOD=spawn
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_internal_lb_dp.py -k "not 4 and not server_info"
+  - TP_SIZE=1 DP_SIZE=2 pytest -v -s v1/distributed/test_external_lb_dp.py -k "not 4 and not server_info"
+  - TP_SIZE=1 DP_SIZE=4 pytest -v -s v1/distributed/test_hybrid_lb_dp.py -k "not 4 and not server_info"
 
 #-------------------------------------------------------  mi300 · quantization  --------------------------------------------------------#
 
