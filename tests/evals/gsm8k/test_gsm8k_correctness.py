@@ -56,6 +56,7 @@ def run_gsm8k_eval(eval_config: dict, server_url: str) -> dict:
         host=host,
         port=port,
         request_timeout_seconds=request_timeout_seconds,
+        gen_prefix=eval_config.get("gen_prefix", ""),
     )
 
     return results

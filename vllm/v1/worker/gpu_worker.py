@@ -55,7 +55,7 @@ from vllm.multimodal.video import (
     PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
     PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
     PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
-    PYNVVIDEOCODEC_VIDEO_BACKEND,
+    VIDEO_LOADER_REGISTRY,
 )
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
@@ -374,7 +374,7 @@ class Worker(WorkerBase):
                 "worker requested memory: %sGiB", format_gib(self.requested_memory)
             )
         else:
-            raise RuntimeError(f"Not support device type: {self.device_config.device}")
+            raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
         # Initialize workspace manager
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
@@ -584,15 +584,15 @@ class Worker(WorkerBase):
         )
 
     @staticmethod
-    def _uses_pynvvideocodec_video_backend(mm_config) -> bool:
+    def _uses_gpu_video_backend(mm_config) -> bool:
         video_kwargs = mm_config.media_io_kwargs.get("video", {})
         video_loader_backend = (
             video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
         )
         codec_backend = video_kwargs.get("backend")
-        return (
-            video_loader_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
-            or codec_backend == PYNVVIDEOCODEC_VIDEO_BACKEND
+        return VIDEO_LOADER_REGISTRY.backend_requires_gpu(video_loader_backend) or (
+            codec_backend is not None
+            and VIDEO_LOADER_REGISTRY.backend_requires_gpu(codec_backend)
         )
 
     def _reserve_mm_ipc_gpu_memory(self, available_kv_cache_memory_bytes: int) -> int:
@@ -623,7 +623,7 @@ class Worker(WorkerBase):
         )
         decoder_reserved_bytes = (
             num_api_servers * per_server_decoder_bytes
-            if self._uses_pynvvideocodec_video_backend(mm_config)
+            if self._uses_gpu_video_backend(mm_config)
             else 0
         )
         reserved_bytes = raw_frame_reserved_bytes + decoder_reserved_bytes
