@@ -326,3 +326,39 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
                 assert desc.num_tokens == num_tokens
                 assert desc.num_reqs is None
             assert desc.num_active_loras == 0
+
+
+def test_staging_buffer_capacity_is_capture_order_independent(monkeypatch):
+    """Output staging buffers must be sized to the largest capture descriptor,
+    not to whichever descriptor happens to run first. Otherwise the descending
+    capture order is silently load-bearing: any smaller-first order
+    under-allocates and the later, larger warmup crashes at the staging copy.
+
+    The under-allocation only manifests inside a CUDA graph capture, so this
+    CPU test pins the sizing contract on a real manager built through the
+    public constructor: capacity is one fixed value for every in-range
+    descriptor, and only a larger-than-all request exceeds it.
+    """
+
+    monkeypatch.setattr(
+        gpu_cudagraph_utils,
+        "get_pp_group",
+        lambda: SimpleNamespace(is_first_rank=True, is_last_rank=True),
+    )
+    vllm_config = _create_vllm_config_for_dsd(max_num_seqs=64, max_spec_tokens=7)
+    manager = gpu_cudagraph_utils.CudaGraphManager(
+        vllm_config=vllm_config,
+        device=torch.device("cpu"),
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        decode_query_len=8,
+    )
+
+    capacity = manager._staging_buffer_tokens(1)
+    # Real descriptors were registered by the constructor; capacity must cover
+    # the largest of them (the config's max capture size), not the current one.
+    assert capacity == 64 * 8
+    # Every in-range descriptor sees the same capacity: order cannot matter.
+    assert manager._staging_buffer_tokens(8) == capacity
+    assert manager._staging_buffer_tokens(capacity) == capacity
+    # A descriptor larger than every registered one still fits (fallback).
+    assert manager._staging_buffer_tokens(capacity + 100) == capacity + 100
