@@ -11,6 +11,10 @@ from tests.v1.kv_connector.unit.offloading_connector.utils import (
     to_keys,
 )
 from tests.v1.kv_connector.unit.utils import EOS_TOKEN_ID
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
+    OffloadingConnectorStats,
+    _ConnectorMetricName,
+)
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.scheduler import (
     OffloadingConnectorScheduler,
     RequestOffloadState,
@@ -30,6 +34,72 @@ from vllm.v1.kv_offload.base import (
     make_offload_key,
 )
 from vllm.v1.request import RequestStatus
+
+
+def _reduce_kv_connector_stats(runner):
+    reduced: dict[str, int | float] = {}
+    for payload in runner.kv_connector_stats:
+        stats = (
+            payload
+            if hasattr(payload, "reduce")
+            else OffloadingConnectorStats(data=payload)
+        )
+        for key, value in stats.reduce().items():
+            reduced[key] = reduced.get(key, 0) + value
+    return reduced
+
+
+def test_scheduler_reports_allocation_failure(request_runner):
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    runner.new_request(token_ids=[0] * 4)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: None
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    reduced = _reduce_kv_connector_stats(runner)
+    assert reduced[_ConnectorMetricName.ALLOCATION_FAILURE] == 1
+
+
+def test_scheduler_reports_lookup_sync_delay(request_runner):
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    runner.new_request(token_ids=[1] * 4)
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    reduced = _reduce_kv_connector_stats(runner)
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_count"] == 1
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_SYNC_DELAY}_sum"] > 0
+
+
+def test_scheduler_reports_lookup_async_delay_on_resolve(request_runner):
+    """A deferred lookup reports its async delay once it resolves."""
+    runner = request_runner(
+        block_size=4,
+        num_gpu_blocks=10,
+        async_scheduling=False,
+    )
+    runner.manager.lookup.side_effect = [LookupResult.RETRY, LookupResult.MISS]
+    runner.manager.prepare_store.side_effect = lambda keys, req_context: (
+        generate_store_output([])
+    )
+
+    runner.new_request(token_ids=[1] * 4)
+    runner.run(decoded_tokens=[EOS_TOKEN_ID])
+
+    reduced = _reduce_kv_connector_stats(runner)
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_ASYNC_DELAY}_count"] == 1
+    assert reduced[f"{_ConnectorMetricName.LOOKUP_ASYNC_DELAY}_sum"] > 0
 
 
 @pytest.mark.parametrize("async_scheduling", [True, False])
