@@ -45,6 +45,27 @@ def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
     return workspace
 
 
+def _packed_block_span(pool: torch.Tensor) -> int:
+    """Physical per-block stride of ``pool`` measured in tokens.
+
+    ``pool`` is ``[num_blocks, block_size, head_dim]``; a block spans
+    ``stride(0) // stride(-2)`` tokens. Equals ``block_size`` for the contiguous
+    (unpacked) layout and is larger for the packed layout (#44577), where the
+    per-block stride includes the other components interleaved in the block. The
+    flat-token TRT-LLM sparse decode kernel needs the sparse indices expressed in
+    this stride (see ``build_flashinfer_mixed_sparse_indices``).
+    """
+    block_stride = pool.stride(0)
+    token_stride = pool.stride(-2)
+    if block_stride % token_stride != 0:
+        raise NotImplementedError(
+            "FLASHINFER_MLA_SPARSE_DSV4 packed KV requires the per-block stride "
+            f"({block_stride}) to be a multiple of the per-token stride "
+            f"({token_stride}); this layout is not supported yet."
+        )
+    return block_stride // token_stride
+
+
 class DeepseekV4FlashInferMLASparseBackend(DeepseekV4FlashMLABackend):
     """FlashInfer backend using the DSv4 sparse metadata/cache layout.
 
@@ -368,6 +389,11 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         )
         cached_sparse = swa_metadata.flashinfer_sparse_index_cache.get(cache_key, None)
         if cached_sparse is None:
+            # Packed KV (#44577) inflates each pool's per-block stride; express the
+            # sparse slot ids in that stride so the flat-token kernel reads the
+            # packed address. Spans equal the block sizes for the unpacked layout.
+            swa_block_span = _packed_block_span(swa_k_cache)
+            compressed_block_span = _packed_block_span(compressed_kv_cache)
             sparse_indices, sparse_topk_lens = build_flashinfer_mixed_sparse_indices(
                 decode_swa_indices,
                 decode_compressed_indices,
@@ -385,6 +411,8 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 top_k,
                 decode_compressed_indices_are_local=decode_compressed_indices_are_local,
                 decode_is_valid_token=decode_is_valid_token,
+                swa_block_span=swa_block_span,
+                compressed_block_span=compressed_block_span,
             )
             if cache_key != "c4a":
                 swa_metadata.flashinfer_sparse_index_cache[cache_key] = (

@@ -654,6 +654,8 @@ def build_flashinfer_mixed_sparse_indices(
     topk: int,
     decode_compressed_indices_are_local: bool = False,
     decode_is_valid_token: torch.Tensor | None = None,
+    swa_block_span: int | None = None,
+    compressed_block_span: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Build the FlashInfer DSV4 sparse-index matrix for decode-first batches.
 
@@ -764,7 +766,33 @@ def build_flashinfer_mixed_sparse_indices(
         TOPK_BLOCK_SIZE=topk_block_size,
         num_warps=num_warps,
     )
+    # Packed KV layout (#44577): a block's physical stride is larger than
+    # block_size tokens. The FlashInfer flat-token kernel reads slot ``s`` at
+    # ``base + s * token_stride``, so rewrite each global slot id from the
+    # contiguous convention ``block * block_size + off`` to the packed one
+    # ``block * block_span + off`` (block_span = pool.stride(0) // token_stride).
+    # SWA columns index the SWA pool, the rest the compressed pool. No-op when a
+    # span equals its block size (unpacked layout).
+    _remap_slots_to_block_span(
+        sparse_indices[:, :window_size], swa_block_size, swa_block_span
+    )
+    _remap_slots_to_block_span(
+        sparse_indices[:, window_size:], compressed_block_size, compressed_block_span
+    )
     return sparse_indices, sparse_topk_lens
+
+
+def _remap_slots_to_block_span(
+    slots: torch.Tensor, block_size: int, block_span: int | None
+) -> None:
+    """In place: rewrite valid ``block * block_size + off`` slot ids to
+    ``block * block_span + off``. No-op when ``block_span`` is None or equals
+    ``block_size``. Negative (invalid) entries are left untouched."""
+    if block_span is None or block_span == block_size:
+        return
+    valid = slots >= 0
+    remapped = (slots // block_size) * block_span + slots % block_size
+    slots.copy_(torch.where(valid, remapped, slots))
 
 
 @triton.jit(

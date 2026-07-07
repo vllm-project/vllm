@@ -614,7 +614,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             dtype=torch.uint8 if uses_fp8_ds_mla_layout else self.kv_cache_torch_dtype,
             compress_ratio=self.compress_ratio,
             cache_dtype_str=self.kv_cache_dtype,
-            alignment=576 if uses_fp8_ds_mla_layout else None,
+            alignment=576 if uses_fp8_ds_mla_layout else 512,
             model_version="deepseek_v4",
         )
 
@@ -643,15 +643,18 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
         # head_dim already carries the fp8 scale padding
         # compress_ratio=1 for V3.2, >1 for DeepseekV4; both use the same cache layout.
+        uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
         return MLAAttentionSpec(
             block_size=self.cache_config.block_size,
             num_kv_heads=1,
             head_size=self.head_dim,
             dtype=self.dtype,
             compress_ratio=self.compress_ratio,
-            # DeepseekV4 aligns indexer pages to FlashMLA's 576B so they can pack with
-            # the indexer's compressor state cache. V3.2 keeps the legacy layout.
-            alignment=576,
+            # FlashMLA aligns indexer pages to 576B so they pack with the
+            # compressor state cache. The FlashInfer sparse backend instead needs
+            # every DSv4 page aligned to the 512B compressed-KV token stride so
+            # the packed per-block stride is a multiple of it (#44577).
+            alignment=576 if uses_fp8_ds_mla_layout else 512,
         )
 
     def forward(self): ...
