@@ -2457,16 +2457,29 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 if key.startswith(parent_dot):
                     return info["quant_algo"].upper()
 
-        # 4. Parent-prefix fallback for fused projections (qkv_proj, gate_up_proj).
-        for candidate in self._quantized_layer_prefix_candidates(prefix):
-            parent_dot = candidate.rsplit(".", 1)[0] + "."
-            algos = {
-                info["quant_algo"].upper()
-                for key, info in self.quantized_layers.items()
-                if key.startswith(parent_dot) and "." not in key[len(parent_dot) :]
-            }
-            if len(algos) == 1:
-                return algos.pop()
+        # 4. Parent-prefix fallback for fused projections whose config lists
+        # shard names instead of vLLM's packed module name.
+        fused_projection_shards = {
+            "qkv_proj": ("q_proj", "k_proj", "v_proj"),
+            "gate_up_proj": ("gate_proj", "up_proj"),
+        }
+        shard_names = fused_projection_shards.get(proj_name)
+        if shard_names is not None:
+            for candidate in self._quantized_layer_prefix_candidates(prefix):
+                parent_dot = candidate.rsplit(".", 1)[0] + "."
+                shard_algos: set[str] = set()
+                for shard_name in shard_names:
+                    shard_prefix = f"{parent_dot}{shard_name}"
+                    if shard_prefix in self.quantized_layers:
+                        algo = self.quantized_layers[shard_prefix]["quant_algo"].upper()
+                        shard_algos.add(algo)
+                if len(shard_algos) == 1:
+                    return shard_algos.pop()
+                if len(shard_algos) > 1:
+                    raise ValueError(
+                        f"Mixed quant_algo within fused layer {prefix}: "
+                        f"{shard_algos}. All shards must use the same quantization."
+                    )
 
         return None
 
