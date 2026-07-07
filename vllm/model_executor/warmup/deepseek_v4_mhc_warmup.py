@@ -21,6 +21,30 @@ from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.tracing import instrument
 from vllm.utils.math_utils import cdiv
 
+# Auto-warmup token sizes. TileLang mHC kernels treat ``num_tokens`` as a
+# dynamic dimension, but the underlying split-k / small-FMA / block-M paths
+# have breakpoints at small powers of two. A sparse power-of-2 grid covers
+# those distinct kernel configurations without warming up every integer up to
+# ``max_num_batched_tokens``.
+_AUTO_WARMUP_MAX_TOKENS = 16_384
+_DEFAULT_TOKEN_SIZE_CANDIDATES = (
+    1,
+    2,
+    4,
+    8,
+    16,
+    32,
+    64,
+    128,
+    256,
+    512,
+    1024,
+    2048,
+    4096,
+    8192,
+    16_384,
+)
+
 
 def _compute_mhc_pre_num_split(
     *,
@@ -55,8 +79,18 @@ def _select_mhc_warmup_token_sizes(
     if max_tokens <= 0:
         return []
 
-    # Warm up every size to avoid TileLang JIT during inference.
-    candidates = list(range(1, max_tokens + 1))
+    # Warm up a sparse set of token sizes that covers the distinct kernel
+    # configurations (small-FMA branches, split-k transitions, block-M
+    # specializations) instead of every integer in [1, max_tokens]. Always
+    # include ``max_tokens`` itself and any CUDA-graph capture sizes, since
+    # those exact shapes are exercised at runtime.
+    max_auto_tokens = min(max_tokens, _AUTO_WARMUP_MAX_TOKENS)
+    candidates = [
+        size
+        for size in _DEFAULT_TOKEN_SIZE_CANDIDATES
+        if size <= max_auto_tokens
+    ]
+    candidates.append(max_tokens)
     candidates.extend(cudagraph_capture_sizes)
     return _normalize_token_sizes(candidates, max_tokens=max_tokens)
 
