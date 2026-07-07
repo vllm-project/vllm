@@ -2061,11 +2061,11 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self,
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: A,
+        attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
     ):
-        assert attn_metadata.prefill is not None  # type: ignore[attr-defined]
-        prefill_metadata = attn_metadata.prefill  # type: ignore[attr-defined]
+        assert attn_metadata.prefill is not None
+        prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
         assert prefill_metadata.chunked_context is not None
 
@@ -2100,7 +2100,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     dst=workspace,
                     block_table=prefill_metadata.block_table,
                     cu_seq_lens=prefill_metadata.chunked_context.cu_seq_lens[i],
-                    batch_size=attn_metadata.num_prefills,  # type: ignore[attr-defined]
+                    batch_size=attn_metadata.num_prefills,
                     seq_starts=prefill_metadata.chunked_context.starts[i],
                 )
 
@@ -2168,12 +2168,12 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
         self,
         q: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: A,
+        attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         dcp_world_size: int,
     ):
-        assert attn_metadata.prefill is not None  # type: ignore[attr-defined]
-        prefill_metadata = attn_metadata.prefill  # type: ignore[attr-defined]
+        assert attn_metadata.prefill is not None
+        prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
         assert prefill_metadata.chunked_context is not None
         assert prefill_metadata.chunked_context.padded_local_chunk_seq_lens is not None
@@ -2219,7 +2219,7 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
                     dst=workspace,
                     block_table=prefill_metadata.block_table,
                     cu_seq_lens=padded_local_cu_seq_lens,
-                    batch_size=attn_metadata.num_prefills,  # type: ignore[attr-defined]
+                    batch_size=attn_metadata.num_prefills,
                     seq_starts=prefill_metadata.chunked_context.starts[i],
                 )
             # workspace
@@ -2307,21 +2307,21 @@ class MLACommonBaseImpl(MLAAttentionImpl[A], Generic[A]):
 
         return output, output_lse
 
-    def forward_mha(
+    def forward_mha(  # type: ignore[override]
         self,
         q: torch.Tensor,
         kv_c_normed: torch.Tensor,
         k_pe: torch.Tensor,
         kv_c_and_k_pe_cache: torch.Tensor,
-        attn_metadata: A,
+        attn_metadata: MLACommonMetadata,
         k_scale: torch.Tensor,
         output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
     ) -> None:
-        assert attn_metadata.prefill is not None  # type: ignore[attr-defined]
+        assert attn_metadata.prefill is not None
         assert self.dcp_world_size != -1
 
-        prefill_metadata = attn_metadata.prefill  # type: ignore[attr-defined]
+        prefill_metadata = attn_metadata.prefill
         assert prefill_metadata.prefill_backend is not None
         use_fp8_prefill = prefill_metadata.q_data_type == current_platform.fp8_dtype()
 
