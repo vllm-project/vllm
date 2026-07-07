@@ -251,37 +251,6 @@ def _add_vllm_audio_metadata(
     return processed
 
 
-def build_moss_transcribe_diarize_messages(
-    prompt_text: str | None = None,
-) -> list[dict[str, Any]]:
-    question = (prompt_text or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT).strip()
-    if not question:
-        question = DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
-    return [
-        {
-            "role": "user",
-            "content": [
-                {"type": "audio", "audio": ""},
-                {"type": "text", "text": question},
-            ],
-        }
-    ]
-
-
-def build_moss_transcribe_diarize_prompt(
-    processor: Any,
-    prompt_text: str | None = None,
-) -> str:
-    rendered = processor.apply_chat_template(
-        build_moss_transcribe_diarize_messages(prompt_text),
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-    if not isinstance(rendered, str):
-        raise TypeError("MOSS-Transcribe-Diarize chat template must render text.")
-    return rendered
-
-
 class MossTranscribeDiarizeWhisperEncoder(WhisperEncoder):
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
     hf_to_vllm_mapper = WeightsMapper(
@@ -323,13 +292,6 @@ class MossTranscribeDiarizeWhisperEncoder(WhisperEncoder):
         dtype = self.conv1.weight.dtype
         input_features = input_features.to(device=device, dtype=dtype)
         audio_feature_lengths = audio_feature_lengths.to(device=device)
-        if audio_feature_lengths.numel() != input_features.shape[0]:
-            raise ValueError(
-                "`audio_feature_lengths` must contain one length per "
-                "`input_features` chunk: got "
-                f"{audio_feature_lengths.numel()} lengths for "
-                f"{input_features.shape[0]} chunks."
-            )
         batch_size = self.max_encoder_batch or input_features.shape[0]
         encoded_parts: list[torch.Tensor] = []
 
@@ -599,6 +561,11 @@ class MossTranscribeDiarizeForConditionalGeneration(
     supported_languages = ISO639_1_SUPPORTED_LANGS
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
+            "language_model.layers.": "language_model.model.layers.",
+            "language_model.embed_tokens.": "language_model.model.embed_tokens.",
+            "language_model.norm.": "language_model.model.norm.",
+            "model.language_model.model.": "language_model.model.",
+            "model.language_model.lm_head.": "language_model.lm_head.",
             "model.language_model.": "language_model.model.",
             "model.whisper_encoder.": "whisper_encoder.",
             "model.vq_adaptor.": "vq_adaptor.",
@@ -639,21 +606,16 @@ class MossTranscribeDiarizeForConditionalGeneration(
         )
 
     @classmethod
-    def build_generation_prompt_text(
-        cls,
-        processor: Any,
-        prompt_text: str | None = None,
-    ) -> str:
-        return build_moss_transcribe_diarize_prompt(processor, prompt_text)
-
-    @classmethod
     def get_generation_prompt(cls, stt_params: SpeechToTextParams) -> PromptType:
-        model_config = stt_params.model_config
         stt_config = stt_params.stt_config
-        processor = cached_processor_from_config(model_config)
-        prompt = cls.build_generation_prompt_text(
-            processor,
-            stt_params.request_prompt,
+        question = stt_params.request_prompt or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
+        question = question.strip() or DEFAULT_MOSS_TRANSCRIBE_DIARIZE_PROMPT
+        prompt = (
+            "<|im_start|>system\n"
+            "You are a helpful assistant.<|im_end|>\n"
+            f"<|im_start|>user\n{AUDIO_PLACEHOLDER}\n"
+            f"{question}<|im_end|>\n"
+            "<|im_start|>assistant\n"
         )
         return TextPrompt(
             prompt=prompt,
@@ -735,6 +697,13 @@ class MossTranscribeDiarizeForConditionalGeneration(
                 "MOSS-Transcribe-Diarize audio inputs require both "
                 "`input_features` and `audio_feature_lengths`."
             )
+        if audio_feature_lengths.numel() != input_features.shape[0]:
+            raise ValueError(
+                "`audio_feature_lengths` must contain one length per "
+                "`input_features` chunk: got "
+                f"{audio_feature_lengths.numel()} lengths for "
+                f"{input_features.shape[0]} chunks."
+            )
 
         features = self.whisper_encoder(input_features, audio_feature_lengths)
         merged = self._time_merge(features.to(dtype=self.dtype))
@@ -783,19 +752,8 @@ class MossTranscribeDiarizeForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        def reject_old_format_weights() -> Iterable[tuple[str, torch.Tensor]]:
-            for name, loaded_weight in weights:
-                if name.startswith(
-                    ("language_model.", "whisper_encoder.", "vq_adaptor.")
-                ):
-                    raise ValueError(
-                        "MOSS-Transcribe-Diarize checkpoints must use the new "
-                        f"`model.*` weight layout; got old-format key: {name}"
-                    )
-                yield name, loaded_weight
-
         loader = AutoWeightsLoader(self)
         return loader.load_weights(
-            reject_old_format_weights(),
+            weights,
             mapper=self.hf_to_vllm_mapper,
         )
