@@ -536,7 +536,17 @@ class ROCMAiterMLASparseMetadataBuilder(
             self._num_attention_heads,
             clamped_seq_lens.tobytes(),
         )
-        if metadata_key != self._prev_metadata_key:
+        # The persistent MLA kernel is numerically wrong for multi-token prefill
+        # batches; errors compound across chunked prefill and break long-context
+        # decode (vllm#47042). Use it only for decode and single-chunk prefills,
+        # not chunked-prefill continuations (>1 query token, seq_len > query_len).
+        step_query_lens = seg_lengths
+        total_seq_lens = common_attn_metadata.seq_lens_cpu[:num_reqs].numpy()
+        is_chunked_continuation = (step_query_lens > 1) & (
+            total_seq_lens > step_query_lens
+        )
+        use_persistent = not is_chunked_continuation.any()
+        if use_persistent and metadata_key != self._prev_metadata_key:
             from aiter import get_mla_metadata_v1
 
             get_mla_metadata_v1(
@@ -576,7 +586,7 @@ class ROCMAiterMLASparseMetadataBuilder(
             paged_kv_last_page_len=paged_kv_last_page_len,
             paged_kv_indices=paged_kv_indices,
             paged_kv_indptr=paged_kv_indptr,
-            work_meta_data=self._mla_work_meta_data,
+            work_meta_data=self._mla_work_meta_data if use_persistent else None,
             work_indptr=self._mla_work_indptr,
             work_info_set=self._mla_work_info_set,
             reduce_indptr=self._mla_reduce_indptr,

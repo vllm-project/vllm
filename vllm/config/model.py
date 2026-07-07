@@ -289,6 +289,11 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    sleep_mode_backend: str = "cumem"
+    """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
+    (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
+    with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
+    snapshot) may be registered in-tree or by plugins (RFC #34303)."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
@@ -994,6 +999,7 @@ class ModelConfig:
                 "modelopt",
                 "modelopt_fp4",
                 "modelopt_mxfp8",
+                "mxfp8",
                 "modelopt_mixed",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
@@ -1247,7 +1253,7 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         return self.model_arch_config.is_deepseek_mla
 
-    @property
+    @cached_property
     def is_mm_prefix_lm(self) -> bool:
         return self.model_arch_config.is_mm_prefix_lm
 

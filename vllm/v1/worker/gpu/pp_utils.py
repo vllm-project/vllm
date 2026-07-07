@@ -9,6 +9,7 @@ import numpy as np
 import torch
 
 from vllm.distributed.parallel_state import get_pp_group
+from vllm.platforms import current_platform
 from vllm.v1.worker.gpu.buffer_utils import async_copy_to_gpu
 from vllm.v1.worker.gpu.input_batch import InputBatch
 
@@ -17,7 +18,7 @@ from vllm.v1.worker.gpu.input_batch import InputBatch
 class PendingRecv:
     """Per-step slot data for a deferred postprocess on the main stream."""
 
-    event: torch.Event
+    event: torch.cuda.Event
 
     sampled_tokens: torch.Tensor  # [num_reqs, max_sample_len]
     num_sampled: torch.Tensor  # [num_reqs]
@@ -217,6 +218,10 @@ class PPHandler:
             )
             padded[:, :width] = sampled_token_ids
             sampled_token_ids = padded
+
+        if current_platform.is_xpu():
+            self.main_stream.synchronize()
+
         with torch.cuda.stream(self.broadcast_stream):
             self.broadcast_stream.wait_stream(self.main_stream)
             torch.distributed.broadcast(

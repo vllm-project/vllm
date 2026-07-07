@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, ClassVar
 import numpy as np
 import torch
 
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
@@ -29,16 +30,18 @@ from vllm.v1.attention.backend import (
 )
 from vllm.v1.attention.backends.mla.sparse_utils import (
     triton_convert_req_index_to_global_index,
+    triton_filter_and_convert_dcp_index,
 )
-from vllm.v1.attention.backends.utils import KVCacheLayoutType
+from vllm.v1.attention.backends.utils import (
+    KVCacheLayoutType,
+    split_decodes_and_prefills,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec
 
 if TYPE_CHECKING:
     from vllm.model_executor.models.deepseek_v2 import Indexer
 
 logger = init_logger(__name__)
-
-FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE = 128 * 1024 * 1024
 
 
 class _FlashInferMLASparseBackendBase(AttentionBackend):
@@ -252,10 +255,13 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
 
     # Sequence lengths for all requests (context + query)
     seq_lens: torch.Tensor
+    num_decodes: int
+    num_decode_tokens: int
 
     # Sparse-specific
     block_size: int = 64
     topk_tokens: int = 2048
+    cp_kv_cache_interleave_size: int = 1
 
 
 class FlashInferMLASparseMetadataBuilder(
@@ -281,6 +287,12 @@ class FlashInferMLASparseMetadataBuilder(
         self.mla_dims = get_mla_dims(self.model_config)
         self.topk_tokens = vllm_config.model_config.hf_config.index_topk
 
+        self._init_reorder_batch_threshold(
+            1,
+            supports_spec_as_decode=True,
+            supports_dcp_with_varlen=True,
+        )
+
         self.req_id_per_token_buffer = torch.empty(
             (vllm_config.scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
@@ -295,6 +307,12 @@ class FlashInferMLASparseMetadataBuilder(
     ) -> FlashInferMLASparseMetadata:
         cm = common_attn_metadata
         num_tokens = cm.num_actual_tokens
+        assert self.reorder_batch_threshold is not None
+        num_decodes, _, num_decode_tokens, _ = split_decodes_and_prefills(
+            cm,
+            decode_threshold=self.reorder_batch_threshold,
+            treat_short_extends_as_decodes=True,
+        )
 
         # Build req_id_per_token mapping
         starts = np.asarray(cm.query_start_loc_cpu, dtype=np.int32)
@@ -320,8 +338,13 @@ class FlashInferMLASparseMetadataBuilder(
             block_table=cm.block_table_tensor,
             req_id_per_token=req_id_per_token_tensor,
             seq_lens=cm.seq_lens,
+            num_decodes=num_decodes,
+            num_decode_tokens=num_decode_tokens,
             block_size=self.kv_cache_spec.block_size,
             topk_tokens=self.topk_tokens,
+            cp_kv_cache_interleave_size=(
+                self.vllm_config.parallel_config.cp_kv_cache_interleave_size
+            ),
         )
 
 
@@ -333,7 +356,7 @@ def _get_workspace_buffer(device: torch.device) -> torch.Tensor:
     global _fi_sparse_workspace
     if _fi_sparse_workspace is None:
         _fi_sparse_workspace = torch.zeros(
-            FLASHINFER_MLA_SPARSE_WORKSPACE_BUFFER_SIZE,
+            envs.VLLM_FLASHINFER_WORKSPACE_BUFFER_SIZE,
             dtype=torch.uint8,
             device=device,
         )
@@ -346,6 +369,9 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
     Uses the TRT-LLM MLA kernel with sparse_mla_top_k parameter for
     sparse attention computation.
     """
+
+    can_return_lse_for_decode: bool = True
+    lse_base_on_e: bool = False
 
     def __init__(
         self,
@@ -427,14 +453,27 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
         assert buf is not None, "topk_indices_buffer required for sparse MLA"
         topk_indices = buf[:num_actual_toks]
 
-        topk_indices_physical, seq_lens = triton_convert_req_index_to_global_index(
-            attn_metadata.req_id_per_token[:num_actual_toks],
-            attn_metadata.block_table,
-            topk_indices,
-            BLOCK_SIZE=attn_metadata.block_size,
-            NUM_TOPK_TOKENS=topk_indices.shape[1],
-            return_valid_counts=True,
-        )
+        if self.dcp_world_size > 1:
+            topk_indices_physical, seq_lens = triton_filter_and_convert_dcp_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                topk_indices,
+                dcp_size=self.dcp_world_size,
+                dcp_rank=self.dcp_rank,
+                cp_kv_cache_interleave_size=(attn_metadata.cp_kv_cache_interleave_size),
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=True,
+            )
+        else:
+            topk_indices_physical, seq_lens = triton_convert_req_index_to_global_index(
+                attn_metadata.req_id_per_token[:num_actual_toks],
+                attn_metadata.block_table,
+                topk_indices,
+                BLOCK_SIZE=attn_metadata.block_size,
+                NUM_TOPK_TOKENS=topk_indices.shape[1],
+                return_valid_counts=True,
+            )
 
         if self._workspace_buffer is None:
             self._workspace_buffer = _get_workspace_buffer(q.device)
@@ -450,18 +489,66 @@ class FlashInferMLASparseImpl(SparseMLAAttentionImpl[FlashInferMLASparseMetadata
 
         from flashinfer.decode import trtllm_batch_decode_with_kv_cache_mla
 
-        o = trtllm_batch_decode_with_kv_cache_mla(
-            query=q.unsqueeze(1),
+        # Single-token sparse decode. trtllm-gen requires the q_len_per_request
+        # dim, but the sparse attention mask is fully per-token (each query token
+        # carries its own top-k index row), so unsqueeze is sufficient and
+        # correct. The MTP/multi-token q_len grouping is a perf-only layout and is
+        # deferred until MTP is validated end-to-end for this backend.
+        query = q.unsqueeze(1)
+        block_tables = topk_indices_physical.unsqueeze(1)
+        seq_lens_arg = seq_lens
+
+        kernel_out = trtllm_batch_decode_with_kv_cache_mla(
+            query=query,
             kv_cache=kv_c_and_k_pe_cache.unsqueeze(1),
             workspace_buffer=self._workspace_buffer,
             qk_nope_head_dim=self.qk_nope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             qk_rope_head_dim=self.qk_rope_head_dim,
-            block_tables=topk_indices_physical.unsqueeze(1),
-            seq_lens=seq_lens,
+            block_tables=block_tables,
+            seq_lens=seq_lens_arg,
             max_seq_len=attn_metadata.topk_tokens,
             bmm1_scale=self.bmm1_scale,
             bmm2_scale=self.bmm2_scale,
             sparse_mla_top_k=attn_metadata.topk_tokens,
+            return_lse=self.need_to_return_lse_for_decode,
         )
-        return o.view(-1, o.shape[-2], o.shape[-1]), None
+        if self.need_to_return_lse_for_decode:
+            assert isinstance(kernel_out, tuple)
+            o, lse = kernel_out
+        else:
+            assert isinstance(kernel_out, torch.Tensor)
+            o = kernel_out
+            lse = None
+
+        out = o.view(-1, o.shape[-2], o.shape[-1])
+        if lse is not None:
+            lse = self._normalize_lse(lse, out.shape[0], out.shape[1])
+            empty_rows = (topk_indices_physical == -1).all(dim=-1)
+            out.masked_fill_(empty_rows.view(-1, 1, 1), 0.0)
+            lse.masked_fill_(empty_rows.view(-1, 1), float("-inf"))
+        return out, lse
+
+    @staticmethod
+    def _normalize_lse(
+        lse: torch.Tensor,
+        num_tokens: int,
+        num_heads: int,
+    ) -> torch.Tensor:
+        # FlashInfer returns the decode LSE either as 2D (num_tokens, num_heads)
+        # or 3D ((num_tokens, num_heads, 1) / (num_tokens, 1, num_heads)).
+        # Collapse all of these to the (num_tokens, num_heads) the shared DCP
+        # reducer expects.
+        if lse.dim() == 3:
+            if lse.shape[-1] == 1:
+                lse = lse.squeeze(-1)
+            elif lse.shape[1] == 1:
+                lse = lse.squeeze(1)
+            elif lse.shape[0] * lse.shape[1] == num_tokens:
+                lse = lse.reshape(num_tokens, lse.shape[-1])
+        if lse.shape != (num_tokens, num_heads):
+            raise RuntimeError(
+                "Unexpected FlashInfer sparse MLA LSE shape: "
+                f"{tuple(lse.shape)}, expected ({num_tokens}, {num_heads})."
+            )
+        return lse
