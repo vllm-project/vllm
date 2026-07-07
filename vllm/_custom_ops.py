@@ -2280,6 +2280,7 @@ def topk_sigmoid(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> None:
     torch.ops._moe_C.topk_sigmoid(
         topk_weights,
@@ -2288,6 +2289,7 @@ def topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        routed_scaling_factor,
     )
 
 
