@@ -3,7 +3,7 @@
 
 import os
 import types
-from importlib.metadata import version
+from importlib.metadata import PackageNotFoundError, version
 from importlib.util import find_spec
 
 from vllm.logger import init_logger
@@ -57,8 +57,14 @@ if HAS_TRITON:
             )
             HAS_TRITON = False
 
-        # Check Triton CPU
-        if "cpu" in version("vllm"):
+        # Check Triton CPU. Source-tree execution may not have installed
+        # package metadata yet, in which case the build is not a CPU wheel.
+        try:
+            vllm_version = version("vllm")
+        except PackageNotFoundError:
+            vllm_version = ""
+
+        if "cpu" in vllm_version:
             if "cpu" in backends:
                 HAS_TRITON = True
             else:
