@@ -2459,7 +2459,38 @@ class Scheduler(SchedulerInterface):
 
         if request.status == RequestStatus.WAITING_FOR_STRUCTURED_OUTPUT_GRAMMAR:
             structured_output_req = request.structured_output_request
-            if not (structured_output_req and structured_output_req.grammar):
+            if structured_output_req is None:
+                return False
+
+            if structured_output_req.compile_error is not None:
+                logger.error(
+                    "Grammar compilation failed for request %s: %s. "
+                    "Terminating request.",
+                    request.request_id,
+                    structured_output_req.compile_error,
+                )
+                request.status = RequestStatus.FINISHED_ERROR
+                request.resumable = False
+                return True
+
+            if not structured_output_req.grammar:
+                timeout = self.vllm_config.structured_outputs_config.compilation_timeout
+                if timeout > 0 and structured_output_req.compilation_start_time > 0:
+                    elapsed = (
+                        time.monotonic() - structured_output_req.compilation_start_time
+                    )
+                    if elapsed > timeout:
+                        logger.error(
+                            "Grammar compilation timed out for request %s "
+                            "after %.1fs (limit: %ds). "
+                            "Terminating request.",
+                            request.request_id,
+                            elapsed,
+                            timeout,
+                        )
+                        request.status = RequestStatus.FINISHED_ERROR
+                        request.resumable = False
+                        return True
                 return False
             request.status = RequestStatus.WAITING
             return True

@@ -40,6 +40,12 @@ class StructuredOutputsConfig:
     loaded and registered."""
     enable_in_reasoning: bool = False
     """Whether to use structured input for reasoning."""
+    compilation_timeout: int = 10
+    """Maximum wall-clock seconds allowed for grammar compilation per request.
+    If compilation exceeds this deadline the request is failed with an error.
+    Set to 0 to disable the timeout (not recommended in untrusted
+    environments). Controlled by --structured-output-compilation-timeout or
+    the VLLM_GRAMMAR_COMPILATION_TIMEOUT_S env var."""
 
     def compute_hash(self) -> str:
         """

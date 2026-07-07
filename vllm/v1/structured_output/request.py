@@ -3,6 +3,7 @@
 import dataclasses
 import functools
 import json
+import time
 from concurrent.futures import Future
 from concurrent.futures._base import TimeoutError
 from typing import TYPE_CHECKING, Any, cast
@@ -22,6 +23,8 @@ if TYPE_CHECKING:
 class StructuredOutputRequest:
     params: StructuredOutputsParams
     _grammar: Future[StructuredOutputGrammar] | StructuredOutputGrammar | None = None
+    compilation_start_time: float = 0.0
+    compile_error: BaseException | None = None
     reasoning_ended: bool | None = None
     # Absolute index into the request's all_token_ids of the last reasoning
     # token (the reasoning-end marker). Tokens at or before this index are
@@ -45,17 +48,19 @@ class StructuredOutputRequest:
             return None
         return StructuredOutputRequest(params=params)
 
-    def _check_grammar_completion(self) -> bool:
-        # NOTE: We have to lazy import to gate circular imports
-        from vllm.v1.request import RequestStatus
+    def start_compilation(self) -> None:
+        self.compilation_start_time = time.monotonic()
 
+    def _check_grammar_completion(self) -> bool:
         if isinstance(self._grammar, Future):
             try:
-                # We will check whether the future is ready within 100 us
                 self._grammar = self._grammar.result(timeout=0.0001)
-                self.status = RequestStatus.WAITING
             except TimeoutError:
                 return False
+            except Exception as exc:
+                self._grammar = None
+                self.compile_error = exc
+                return True
         return True
 
     @property

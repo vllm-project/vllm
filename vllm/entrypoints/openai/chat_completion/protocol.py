@@ -13,6 +13,7 @@ from openai.types.chat.chat_completion_audio import (
 from openai.types.chat.chat_completion_message import Annotation as OpenAIAnnotation
 from pydantic import Field, PrivateAttr, model_serializer, model_validator
 
+import vllm.envs as envs
 from vllm.config import ModelConfig
 from vllm.config.utils import replace
 from vllm.entrypoints.chat_utils import (
@@ -987,7 +988,7 @@ class BatchChatCompletionRequest(OpenAIBaseModel):
     """
 
     messages: list[Annotated[list[ChatCompletionMessageParam], Field(min_length=1)]] = (
-        Field(..., min_length=1)
+        Field(..., min_length=1, max_length=envs.VLLM_MAX_BATCH_CONVERSATIONS)
     )
     model: str | None = None
 
