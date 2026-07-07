@@ -54,6 +54,27 @@ def pass_context(compile_range: Range) -> Generator[None, None, None]:
         _pass_context = prev_context
 
 
+def set_pass_context(compile_range: Range) -> PassContext | None:
+    """Install a process-global PassContext that outlives this call and return the
+    previous one (usually None) so a caller could restore it.
+
+    Unlike the ``pass_context`` context manager (used by VllmBackend around each
+    synchronous per-range compile), STOCK_TORCH_COMPILE is engine-global and its
+    Inductor compiles run lazily during a later forward (profile_run / warmup), so
+    there is no single span to scope. The pre/post-grad vLLM passes and
+    PostGradPassManager.uuid() must all observe one live PassContext, so this must
+    persist until that lazy compile fires. It is safe only while no co-resident
+    VllmBackend compile also reads the global: today no stock engine runs a
+    VllmBackend, but that invariant is fragile if a second SupportsStockCompile arch
+    or a multimodal encoder co-resides with a VllmBackend compile. The previous
+    context is returned so such a future caller can restore it.
+    """
+    global _pass_context
+    prev_context = _pass_context
+    _pass_context = PassContext(compile_range)
+    return prev_context
+
+
 @functools.cache
 def _hash_source_cached(*srcs: str | type | types.FunctionType) -> str:
     hasher = hashlib.sha256()

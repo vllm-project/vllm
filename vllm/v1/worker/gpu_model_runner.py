@@ -28,6 +28,7 @@ from vllm.compilation.breakable_cudagraph import (
 from vllm.compilation.counter import compilation_counter
 from vllm.compilation.cuda_graph import CUDAGraphStat, CUDAGraphWrapper
 from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+from vllm.compilation.stock_cudagraph import StockTorchCompileCUDAGraphWrapper
 from vllm.config import (
     CompilationMode,
     CUDAGraphMode,
@@ -3259,7 +3260,13 @@ class GPUModelRunner(
         if not hasattr(self, "model"):
             raise ValueError("Cannot get model before model has been initialized")
         if isinstance(
-            self.model, (CUDAGraphWrapper, UBatchWrapper, BreakableCUDAGraphWrapper)
+            self.model,
+            (
+                CUDAGraphWrapper,
+                UBatchWrapper,
+                BreakableCUDAGraphWrapper,
+                StockTorchCompileCUDAGraphWrapper,
+            ),
         ):
             # get raw model out of the cudagraph wrapper.
             return self.model.unwrap()
@@ -5336,13 +5343,14 @@ class GPUModelRunner(
             self.vllm_config.compilation_config.mode
             == CompilationMode.STOCK_TORCH_COMPILE
         ):
-            from vllm.env_override import _apply_constrain_to_fx_strides_patch
-
-            _apply_constrain_to_fx_strides_patch()
-            backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
-            compilation_counter.stock_torch_compile_count += 1
-            self.model.compile(fullgraph=True, backend=backend)
-            return
+            self._compile_model_stock()
+            # Do NOT early-return here: the cudagraph-wrapping block below already
+            # attaches vLLM's external FULL cudagraph wrapper only when
+            # cudagraph_mode.has_full_cudagraphs() (a stock model resolved to
+            # FULL_DECODE_ONLY / FULL_AND_PIECEWISE), and leaves a stock PIECEWISE/NONE
+            # model unwrapped (piecewise capture is via the Inductor partition
+            # wrappers). Falling through ensures the shared tail (ubatch wrapper,
+            # get_offloader().post_init()) runs for every stock cudagraph mode.
         # for other compilation modes, cudagraph behavior is controlled by
         # CudagraphWrapper and CudagraphDispatcher of vllm.
 
@@ -5364,10 +5372,22 @@ class GPUModelRunner(
             cudagraph_mode.has_full_cudagraphs()
             and not self.parallel_config.use_ubatching
         ):
-            self.model = CUDAGraphWrapper(
-                self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
-            )
+            if self.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE:
+                # Stock path uses its own decoupled wrapper, not the shared
+                # CUDAGraphWrapper (which is coupled to vLLM full cudagraphs).
+                self.model = StockTorchCompileCUDAGraphWrapper(
+                    self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
+                )
+            else:
+                self.model = CUDAGraphWrapper(
+                    self.model, self.vllm_config, runtime_mode=CUDAGraphMode.FULL
+                )
         elif self.parallel_config.use_ubatching:
+            # A stock-compiled model under ubatching intentionally rides
+            # UBatchWrapper's internal shared CUDAGraphWrapper rather than the
+            # decoupled StockTorchCompileCUDAGraphWrapper: the stock wrapper mirrors
+            # the shared wrapper's batch-descriptor-keyed capture/replay, so results
+            # are correct. STOCK_TORCH_COMPILE + ubatching is not exercised in CI yet.
             if cudagraph_mode.has_full_cudagraphs():
                 self.model = UBatchWrapper(
                     self.model, self.vllm_config, CUDAGraphMode.FULL, self.device
@@ -5378,6 +5398,179 @@ class GPUModelRunner(
                 )
 
         get_offloader().post_init()
+
+    def _compile_model_stock(self) -> None:
+        """Compile self.model (and any spec-decode drafter model) with stock
+        torch.compile (Inductor codegen) for STOCK_TORCH_COMPILE mode. Shared by
+        load_model and the elastic-EP rescale path so the two compile sites cannot
+        diverge on options / pass registration.
+        """
+        from vllm.env_override import _apply_constrain_to_fx_strides_patch
+
+        _apply_constrain_to_fx_strides_patch()
+        backend = self.vllm_config.compilation_config.init_backend(self.vllm_config)
+        options: dict[str, Any] | None
+        options, has_fusion = self._stock_inductor_options()
+        if has_fusion and backend != "inductor":
+            raise ValueError(
+                "STOCK_TORCH_COMPILE with active fusion passes requires "
+                f"backend='inductor', but got backend={backend!r}. vLLM fusion "
+                "passes are registered through Inductor's custom-pass hooks and "
+                "have no effect on other backends; disable fusion or use inductor."
+            )
+        if backend != "inductor":
+            # inductor_compile_config only affects the Inductor backend; an exotic
+            # non-inductor stock backend (e.g. eager) would just warn and ignore an
+            # options dict, so drop it to keep that path behaving exactly as it did
+            # before options started always carrying the base config.
+            options = None
+        options = self._maybe_enable_stock_graph_partition(options, backend)
+
+        compilation_counter.stock_torch_compile_count += 1
+        self.model.compile(fullgraph=True, backend=backend, options=options)
+
+        # A model-backed spec-decode drafter runs under the same engine-global STOCK
+        # mode; its @support_torch_compile decorator does not use vLLM's custom
+        # backend (do_not_use_custom_torch_compile_backend), so
+        # the runner compiles the drafter model here too, reusing `options` so the two
+        # compile sites stay in lockstep on fusion passes and graph partition. With
+        # graph partition on this also gives the drafter the same piecewise cudagraphs
+        # it gets under VLLM_COMPILE (its dispatcher and dummy_run capture it exactly
+        # like the target's partitions). Algorithmic drafters (ngram / suffix) have no
+        # model and are skipped.
+        drafter = getattr(self, "drafter", None)
+        drafter_model = getattr(drafter, "model", None)
+        if isinstance(drafter_model, torch.nn.Module):
+            compilation_counter.stock_torch_compile_count += 1
+            drafter_model.compile(fullgraph=True, backend=backend, options=options)
+
+    def _maybe_enable_stock_graph_partition(
+        self, options: dict[str, Any] | None, backend: str | Callable[..., Any]
+    ) -> dict[str, Any] | None:
+        """Step 2 of the VllmBackend migration: recover piecewise cudagraphs on the
+        stock path. Inductor graph partition does the *partitioning* -- it splits the
+        FX graph at the attention ops (via the scoped compile options) -- but it does
+        not itself capture cudagraphs; it exposes a hook
+        (set_customized_partition_wrappers) that lets us choose how each partition is
+        captured. For STOCK_TORCH_COMPILE + use_inductor_graph_partition we plug in
+        StockTorchCompileCUDAGraphWrapper (running in CUDAGraphMode.PIECEWISE runtime
+        mode), which is torch.compile / Inductor driven -- NOT the eager PIECEWISE
+        cudagraph framework (the shared CUDAGraphWrapper driven by vLLM's dispatcher).
+        This mirrors how VLLM_COMPILE plugs its shared CUDAGraphWrapper into the same
+        hook: graph partition chooses *where* to split, the wrapper is *how* each
+        resulting partition is captured and replayed. Under FULL_AND_PIECEWISE the
+        whole decode forward is additionally captured by the same
+        StockTorchCompileCUDAGraphWrapper class acting as the FULL wrapper. The
+        partition wrapper is installed persistently because stock torch.compile is
+        lazy (the real compile runs on the first forward).
+        """
+        cc = self.compilation_config
+        if not (
+            cc.cudagraph_mode.has_piecewise_cudagraphs()
+            and cc.use_inductor_graph_partition
+        ):
+            return options
+        if backend != "inductor":
+            raise ValueError(
+                "STOCK_TORCH_COMPILE piecewise cudagraphs require backend='inductor' "
+                f"(Inductor graph partition), but got backend={backend!r}."
+            )
+        from vllm.compilation.decorators import install_cudagraph_partition_wrapper
+
+        options = dict(options or {})
+        options["graph_partition"] = True
+        options["custom_should_partition_ops"] = list(cc.splitting_ops or [])
+        install_cudagraph_partition_wrapper(self.vllm_config)
+        return options
+
+    def _stock_inductor_options(self) -> tuple[dict[str, Any], bool]:
+        """torch.compile options for STOCK_TORCH_COMPILE mode.
+
+        Always carries the base inductor_compile_config (enable_auto_functionalized_v2,
+        combo-kernel gating on torch>=2.9, assert gating on torch<2.12, and any user
+        --compilation-config inductor_compile_config) so those apply on the stock path
+        whether or not fusion is active. When the model has active fusion
+        passes (quantized / TP-collective models), additionally register vLLM's
+        PostGradPassManager (rms+quant / act+quant / allreduce+rmsnorm /
+        sequence-parallel fusions) and the pre-grad vLLM-IR functionalization pass via
+        Inductor's standard custom-pass hooks, so they keep their fusions without the
+        custom VllmBackend. For dense bf16 (no active fusion) we skip only the pass
+        manager registration: it would add default IR/cleanup passes that buy nothing
+        and measurably regress perf.
+
+        Returns (options, has_fusion). The caller gates the "fusion requires
+        backend=inductor" error on has_fusion, and drops options entirely for a
+        non-inductor backend since inductor_compile_config only affects Inductor.
+        """
+        import torch._inductor.config as inductor_config
+
+        from vllm.compilation.passes.inductor_pass import (
+            InductorPass,
+            set_pass_context,
+        )
+        from vllm.compilation.passes.ir.inplace_functionalization import (
+            VllmIRInplaceFunctionalizationPass,
+        )
+        from vllm.compilation.passes.pass_manager import PostGradPassManager
+        from vllm.compilation.passes.utility.noop_elimination import NoOpEliminationPass
+        from vllm.config.utils import Range
+        from vllm.utils.import_utils import resolve_obj_by_qualname
+
+        pass_manager = resolve_obj_by_qualname(
+            current_platform.get_pass_manager_cls()
+        )()
+        pass_manager.configure(self.vllm_config)
+
+        # Gate registration on whether configure() produced a real fusion/IR pass,
+        # not a hand-maintained flag list that drifts from PostGradPassManager (the
+        # old list had already dropped enable_qk_norm_rope_fusion). NoOp elimination
+        # is always registered (eliminate_noops defaults True) but on its own buys
+        # nothing for dense bf16 and registering the manager there measurably
+        # regresses perf, so it does not count as active fusion.
+        has_fusion = any(
+            not isinstance(p, NoOpEliminationPass) for p in pass_manager.passes
+        )
+
+        options = dict(self.compilation_config.inductor_compile_config)
+        if not has_fusion:
+            return options, False
+
+        # The vLLM passes (pre/post-grad) and PostGradPassManager.uuid() read
+        # get_pass_context(); torch.compile here is lazy (the real Inductor compile +
+        # passes run during a later forward) and STOCK mode is engine-global, so we
+        # install a persistent pass context instead of scoping a context manager. The
+        # range is [0, max_num_tokens]: stock is a single lazy compile whose one graph
+        # serves every shape from 0 up to max_num_batched_tokens (no per-range
+        # piecewise recompile), so this is the true span of that graph. End-bounded
+        # fusions (allreduce+rmsnorm, rope+kvcache) gate on compile_range.end <=
+        # max_token_num, so this finite end GRANTS them exactly when their workspace
+        # covers max_num_batched_tokens (valid for every shape the single graph runs)
+        # and correctly drops them otherwise -- matching VllmBackend, whose compile
+        # ranges are also capped at max_num_batched_tokens. Start-based passes
+        # (sequence parallelism, gated on start >= min_token_num) stay dropped on a
+        # start=0 single graph; that is inherent to stock's single-graph design.
+        set_pass_context(Range(start=0, end=self.max_num_tokens))
+
+        pre_grad_key = "pre_grad_custom_pass"
+        options[pre_grad_key] = VllmIRInplaceFunctionalizationPass(self.vllm_config)
+        options["_cache_config_ignore_prefix"] = (
+            inductor_config._cache_config_ignore_prefix + [pre_grad_key]
+        )
+        # Merge any user-supplied post_grad_custom_post_pass into the manager rather
+        # than clobbering it, mirroring VllmBackend.configure_post_pass: the config has
+        # already wrapped it as an InductorPass, so hand it straight to the manager's
+        # add() before installing the manager under pass_key.
+        pass_key = current_platform.pass_key
+        user_post_pass = options.get(pass_key)
+        if user_post_pass is not None:
+            if isinstance(user_post_pass, PostGradPassManager):
+                raise ValueError(
+                    "PostGradPassManager can not be kept in CompilationConfig."
+                )
+            assert isinstance(user_post_pass, InductorPass)
+            pass_manager.add(user_post_pass)
+        options[pass_key] = pass_manager
+        return options, True
 
     def _setup_eagle3_aux_hidden_state_outputs(self) -> None:
         if not self.use_aux_hidden_state_outputs:
@@ -6412,6 +6605,7 @@ class GPUModelRunner(
             # graph destruction can surface HSA faults in the next engine startup.
             CUDAGraphWrapper.clear_all_graphs()
             BreakableCUDAGraphWrapper.clear_all_graphs()
+            StockTorchCompileCUDAGraphWrapper.clear_all_graphs()
             self.encoder_cudagraph_manager = None
         self.compilation_config.static_forward_context.clear()
         self.model = None  # type: ignore[assignment]
@@ -6536,8 +6730,10 @@ class GPUModelRunner(
         profiling_pool = current_platform.graph_pool_handle()
         encoder_profiling_pool = current_platform.graph_pool_handle()
         original_pools: dict[int, Any] = {}
-        all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
-            BreakableCUDAGraphWrapper._all_instances
+        all_wrappers = (
+            list(CUDAGraphWrapper._all_instances)
+            + list(BreakableCUDAGraphWrapper._all_instances)
+            + list(StockTorchCompileCUDAGraphWrapper._all_instances)
         )
         for instance in all_wrappers:
             original_pools[id(instance)] = instance.graph_pool
@@ -6611,10 +6807,13 @@ class GPUModelRunner(
             set_cudagraph_capturing_enabled(False)
             CUDAGraphWrapper.clear_all_graphs()
             BreakableCUDAGraphWrapper.clear_all_graphs()
+            StockTorchCompileCUDAGraphWrapper.clear_all_graphs()
             if encoder_cudagraph_manager is not None:
                 encoder_cudagraph_manager.clear()
-            all_wrappers = list(CUDAGraphWrapper._all_instances) + list(
-                BreakableCUDAGraphWrapper._all_instances
+            all_wrappers = (
+                list(CUDAGraphWrapper._all_instances)
+                + list(BreakableCUDAGraphWrapper._all_instances)
+                + list(StockTorchCompileCUDAGraphWrapper._all_instances)
             )
             for instance in all_wrappers:
                 if id(instance) in original_pools:

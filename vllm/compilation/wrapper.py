@@ -300,8 +300,12 @@ def reset_compile_wrapper(model: torch.nn.Module) -> None:
         model = model.model
     if not isinstance(model, TorchCompileWithNoGuardsWrapper):
         return
-    # model.do_not_compile is set by the @support_torch_compile decorator
-    if hasattr(model, "do_not_compile") and model.do_not_compile:
+    # model.do_not_use_custom_torch_compile_backend is set by the
+    # @support_torch_compile decorator
+    if (
+        hasattr(model, "do_not_use_custom_torch_compile_backend")
+        and model.do_not_use_custom_torch_compile_backend
+    ):
         return
     from vllm.compilation.counter import compilation_counter
 
