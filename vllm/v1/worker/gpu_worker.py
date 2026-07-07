@@ -75,6 +75,10 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.startup_plan import (
+    maybe_apply_startup_plan,
+    maybe_save_startup_plan,
+)
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -439,24 +443,7 @@ class Worker(WorkerBase):
             You may limit the usage of GPU memory
             by adjusting the `gpu_memory_utilization` parameter.
         """
-        if (
-            self.cache_config.kv_cache_memory_bytes is None
-            and envs.VLLM_ENABLE_STARTUP_PLAN
-        ):
-            from vllm.v1.worker.startup_plan import (
-                default_plan_dir,
-                maybe_apply_startup_plan,
-            )
-
-            applied = maybe_apply_startup_plan(
-                default_plan_dir(),
-                self.vllm_config,
-                self.rank,
-                self.parallel_config.world_size,
-                self.init_snapshot.free_memory,
-            )
-            if applied is not None:
-                self.cache_config.kv_cache_memory_bytes = applied
+        maybe_apply_startup_plan(self)
 
         if kv_cache_memory_bytes := self.cache_config.kv_cache_memory_bytes:
             # still need a profile run which compiles the model for
@@ -853,23 +840,7 @@ class Worker(WorkerBase):
 
             logger.debug(msg)
 
-            if envs.VLLM_ENABLE_STARTUP_PLAN:
-                from vllm.v1.worker.startup_plan import (
-                    compute_plan_fingerprint,
-                    default_plan_dir,
-                    save_startup_plan,
-                )
-
-                save_startup_plan(
-                    default_plan_dir(),
-                    compute_plan_fingerprint(
-                        self.vllm_config,
-                        self.rank,
-                        self.parallel_config.world_size,
-                    ),
-                    kv_cache_memory_bytes_to_requested_limit,
-                    self.init_snapshot.free_memory,
-                )
+            maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
         if self.use_v2_model_runner:
             # V2: Run full execute_model + sample_tokens to JIT compile triton kernels.

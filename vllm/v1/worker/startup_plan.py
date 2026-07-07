@@ -21,7 +21,7 @@ trusted.
 import hashlib
 import json
 import os
-import time
+from typing import TYPE_CHECKING
 
 import torch
 
@@ -30,16 +30,12 @@ from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
+if TYPE_CHECKING:
+    from vllm.v1.worker.gpu_worker import Worker
+
 logger = init_logger(__name__)
 
 PLAN_SCHEMA_VERSION = 1
-
-
-def default_plan_dir() -> str:
-    """Plans are regenerable derived state, so they live under the standard
-    vLLM cache root (like the torch.compile cache) and relocate with
-    ``VLLM_CACHE_ROOT`` instead of needing a location knob of their own."""
-    return os.path.join(envs.VLLM_CACHE_ROOT, "startup_plan")
 
 
 def compute_plan_fingerprint(
@@ -78,41 +74,19 @@ def compute_plan_fingerprint(
     return digest[:16]
 
 
-def _plan_path(plan_dir: str, fingerprint: str) -> str:
+def _plan_path(fingerprint: str) -> str:
+    """Plans are regenerable derived state, so they live under the standard
+    vLLM cache root (like the torch.compile cache) and relocate with
+    ``VLLM_CACHE_ROOT`` instead of needing a location knob of their own."""
+    # VLLM_CACHE_ROOT is already user-expanded by envs.py.
     return os.path.join(
-        os.path.expanduser(plan_dir), f"startup_plan_{fingerprint}.json"
+        envs.VLLM_CACHE_ROOT, "startup_plan", f"startup_plan_{fingerprint}.json"
     )
 
 
-def save_startup_plan(
-    plan_dir: str,
-    fingerprint: str,
-    kv_cache_memory_bytes: int,
-    free_memory_baseline: int,
-) -> None:
-    """Atomically persist the plan. Failures are logged, never raised."""
-    path = _plan_path(plan_dir, fingerprint)
-    try:
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        payload = {
-            "schema": PLAN_SCHEMA_VERSION,
-            "fingerprint": fingerprint,
-            "kv_cache_memory_bytes": int(kv_cache_memory_bytes),
-            "free_memory_baseline": int(free_memory_baseline),
-            "created_unix": int(time.time()),
-        }
-        tmp = f"{path}.tmp.{os.getpid()}"
-        with open(tmp, "w") as f:
-            json.dump(payload, f)
-        os.replace(tmp, path)
-        logger.info("Saved startup plan to %s", path)
-    except OSError as e:
-        logger.warning("Failed to save startup plan to %s: %s", path, e)
-
-
-def load_startup_plan(plan_dir: str, fingerprint: str) -> dict | None:
+def _load_plan(fingerprint: str) -> dict | None:
     """Load a plan for this fingerprint; None if absent or unreadable."""
-    path = _plan_path(plan_dir, fingerprint)
+    path = _plan_path(fingerprint)
     try:
         with open(path) as f:
             plan = json.load(f)
@@ -129,7 +103,7 @@ def load_startup_plan(plan_dir: str, fingerprint: str) -> dict | None:
     return plan
 
 
-def applicable_kv_cache_memory_bytes(
+def _applicable_kv_cache_memory_bytes(
     plan: dict, current_free_memory: int
 ) -> int | None:
     """The apply-time OOM-safety gate.
@@ -157,29 +131,61 @@ def applicable_kv_cache_memory_bytes(
     return kv_bytes
 
 
-def maybe_apply_startup_plan(
-    plan_dir: str,
-    vllm_config: VllmConfig,
-    rank: int,
-    world_size: int,
-    current_free_memory: int,
-) -> int | None:
-    """Load, validate, and return the kv-cache-memory bytes to apply."""
-    fingerprint = compute_plan_fingerprint(vllm_config, rank, world_size)
-    plan = load_startup_plan(plan_dir, fingerprint)
+def maybe_apply_startup_plan(worker: "Worker") -> None:
+    """If enabled and ``--kv-cache-memory`` was not set explicitly, apply a
+    persisted plan by setting ``worker.cache_config.kv_cache_memory_bytes``.
+    No-op unless ``VLLM_ENABLE_STARTUP_PLAN=1``."""
+    if (
+        not envs.VLLM_ENABLE_STARTUP_PLAN
+        or worker.cache_config.kv_cache_memory_bytes is not None
+    ):
+        return
+    fingerprint = compute_plan_fingerprint(
+        worker.vllm_config, worker.rank, worker.parallel_config.world_size
+    )
+    plan = _load_plan(fingerprint)
     if plan is None:
-        return None
-    kv_bytes = applicable_kv_cache_memory_bytes(plan, current_free_memory)
-    if kv_bytes is not None:
-        logger.info(
-            "Applying persisted startup plan (fingerprint %s): "
-            "kv_cache_memory_bytes=%d (%.2f GiB), recorded free-memory "
-            "baseline %.2f GiB, current %.2f GiB. Memory profiling will "
-            "be skipped.",
-            fingerprint,
-            kv_bytes,
-            kv_bytes / (1 << 30),
-            plan["free_memory_baseline"] / (1 << 30),
-            current_free_memory / (1 << 30),
-        )
-    return kv_bytes
+        return
+    current_free_memory = worker.init_snapshot.free_memory
+    kv_bytes = _applicable_kv_cache_memory_bytes(plan, current_free_memory)
+    if kv_bytes is None:
+        return
+    logger.info(
+        "Applying persisted startup plan (fingerprint %s): "
+        "kv_cache_memory_bytes=%d (%.2f GiB), recorded free-memory "
+        "baseline %.2f GiB, current %.2f GiB. Memory profiling will "
+        "be skipped.",
+        fingerprint,
+        kv_bytes,
+        kv_bytes / (1 << 30),
+        plan["free_memory_baseline"] / (1 << 30),
+        current_free_memory / (1 << 30),
+    )
+    worker.cache_config.kv_cache_memory_bytes = kv_bytes
+
+
+def maybe_save_startup_plan(worker: "Worker", kv_cache_memory_bytes: int) -> None:
+    """Atomically persist this boot's profiling result for future boots.
+    No-op unless ``VLLM_ENABLE_STARTUP_PLAN=1``; failures are logged,
+    never raised."""
+    if not envs.VLLM_ENABLE_STARTUP_PLAN:
+        return
+    fingerprint = compute_plan_fingerprint(
+        worker.vllm_config, worker.rank, worker.parallel_config.world_size
+    )
+    path = _plan_path(fingerprint)
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        payload = {
+            "schema": PLAN_SCHEMA_VERSION,
+            "fingerprint": fingerprint,
+            "kv_cache_memory_bytes": int(kv_cache_memory_bytes),
+            "free_memory_baseline": int(worker.init_snapshot.free_memory),
+        }
+        tmp = f"{path}.tmp.{os.getpid()}"
+        with open(tmp, "w") as f:
+            json.dump(payload, f)
+        os.replace(tmp, path)
+        logger.info("Saved startup plan to %s", path)
+    except OSError as e:
+        logger.warning("Failed to save startup plan to %s: %s", path, e)

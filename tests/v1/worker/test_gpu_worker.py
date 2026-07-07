@@ -18,10 +18,8 @@ from vllm.utils.mem_constants import GiB_bytes
 from vllm.v1.worker import startup_plan
 from vllm.v1.worker.gpu_worker import Worker
 from vllm.v1.worker.startup_plan import (
-    applicable_kv_cache_memory_bytes,
-    load_startup_plan,
     maybe_apply_startup_plan,
-    save_startup_plan,
+    maybe_save_startup_plan,
 )
 
 
@@ -137,6 +135,32 @@ def _plan_platform(name="NVIDIA H100 PCIe", total_mem=80 * GiB_bytes, cap=(9, 0)
     )
 
 
+def _plan_worker(
+    config_hash="abc123",
+    rank=0,
+    world_size=1,
+    free_memory=78 * GiB_bytes,
+    kv_cache_memory_bytes=None,
+):
+    """The minimal Worker surface the startup-plan entry points touch."""
+    return SimpleNamespace(
+        vllm_config=SimpleNamespace(compute_hash=lambda: config_hash),
+        rank=rank,
+        parallel_config=SimpleNamespace(world_size=world_size),
+        init_snapshot=SimpleNamespace(free_memory=free_memory),
+        cache_config=SimpleNamespace(kv_cache_memory_bytes=kv_cache_memory_bytes),
+    )
+
+
+@pytest.fixture
+def plan_env(monkeypatch: pytest.MonkeyPatch, tmp_path):
+    """Enable the startup plan and isolate it under a tmp cache root."""
+    monkeypatch.setenv("VLLM_ENABLE_STARTUP_PLAN", "1")
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
+    with patch.object(startup_plan, "current_platform", _plan_platform()):
+        yield tmp_path
+
+
 def _plan_fingerprint(config_hash="abc123", rank=0, world_size=1, **platform_kwargs):
     vllm_config = SimpleNamespace(compute_hash=lambda: config_hash)
     platform = _plan_platform(**platform_kwargs)
@@ -156,31 +180,33 @@ def test_startup_plan_fingerprint_stable_and_sensitive():
         assert base != _plan_fingerprint()
 
 
-def test_startup_plan_default_dir_under_cache_root(
-    monkeypatch: pytest.MonkeyPatch, tmp_path
-):
-    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path))
-    assert startup_plan.default_plan_dir() == str(tmp_path / "startup_plan")
+def test_startup_plan_save_load_round_trip(plan_env):
+    worker = _plan_worker()
+    maybe_save_startup_plan(worker, 50 * GiB_bytes)
 
+    # The plan lands under {VLLM_CACHE_ROOT}/startup_plan/.
+    plan_files = list((plan_env / "startup_plan").glob("startup_plan_*.json"))
+    assert len(plan_files) == 1
 
-def test_startup_plan_save_load_round_trip(tmp_path):
-    save_startup_plan(str(tmp_path), "deadbeef00000000", 50 * GiB_bytes, 78 * GiB_bytes)
-    plan = load_startup_plan(str(tmp_path), "deadbeef00000000")
+    fp = startup_plan.compute_plan_fingerprint(worker.vllm_config, 0, 1)
+    plan = startup_plan._load_plan(fp)
     assert plan is not None
     assert plan["kv_cache_memory_bytes"] == 50 * GiB_bytes
     assert plan["free_memory_baseline"] == 78 * GiB_bytes
 
 
-def test_startup_plan_load_missing_or_corrupt_returns_none(tmp_path):
-    assert load_startup_plan(str(tmp_path), "0000000000000000") is None
+def test_startup_plan_load_missing_or_corrupt_returns_none(plan_env):
+    assert startup_plan._load_plan("0000000000000000") is None
 
-    bad = tmp_path / "startup_plan_1111111111111111.json"
-    bad.write_text("{not json")
-    assert load_startup_plan(str(tmp_path), "1111111111111111") is None
+    plan_dir = plan_env / "startup_plan"
+    plan_dir.mkdir()
+    (plan_dir / "startup_plan_1111111111111111.json").write_text("{not json")
+    assert startup_plan._load_plan("1111111111111111") is None
 
-    wrong_fp = tmp_path / "startup_plan_2222222222222222.json"
-    wrong_fp.write_text(json.dumps({"schema": 1, "fingerprint": "mismatch"}))
-    assert load_startup_plan(str(tmp_path), "2222222222222222") is None
+    (plan_dir / "startup_plan_2222222222222222.json").write_text(
+        json.dumps({"schema": 1, "fingerprint": "mismatch"})
+    )
+    assert startup_plan._load_plan("2222222222222222") is None
 
 
 def test_startup_plan_free_memory_gate():
@@ -188,47 +214,61 @@ def test_startup_plan_free_memory_gate():
         "kv_cache_memory_bytes": 50 * GiB_bytes,
         "free_memory_baseline": 78 * GiB_bytes,
     }
+    gate = startup_plan._applicable_kv_cache_memory_bytes
     # Enough free memory: apply.
-    assert applicable_kv_cache_memory_bytes(plan, 78 * GiB_bytes) == 50 * GiB_bytes
-    assert applicable_kv_cache_memory_bytes(plan, 79 * GiB_bytes) == 50 * GiB_bytes
+    assert gate(plan, 78 * GiB_bytes) == 50 * GiB_bytes
+    assert gate(plan, 79 * GiB_bytes) == 50 * GiB_bytes
     # Less free memory than when measured: refuse, re-profile.
-    assert applicable_kv_cache_memory_bytes(plan, 77 * GiB_bytes) is None
+    assert gate(plan, 77 * GiB_bytes) is None
 
 
 def test_startup_plan_gate_rejects_malformed_plans():
-    assert applicable_kv_cache_memory_bytes({}, 80 * GiB_bytes) is None
+    gate = startup_plan._applicable_kv_cache_memory_bytes
+    assert gate({}, 80 * GiB_bytes) is None
     assert (
-        applicable_kv_cache_memory_bytes(
-            {"kv_cache_memory_bytes": -1, "free_memory_baseline": 1}, 80 * GiB_bytes
-        )
+        gate({"kv_cache_memory_bytes": -1, "free_memory_baseline": 1}, 80 * GiB_bytes)
         is None
     )
     assert (
-        applicable_kv_cache_memory_bytes(
-            {"kv_cache_memory_bytes": "50", "free_memory_baseline": 1}, 80 * GiB_bytes
-        )
+        gate({"kv_cache_memory_bytes": "50", "free_memory_baseline": 1}, 80 * GiB_bytes)
         is None
     )
 
 
-def test_startup_plan_maybe_apply_end_to_end(tmp_path):
-    vllm_config = SimpleNamespace(compute_hash=lambda: "abc123")
-    with patch.object(startup_plan, "current_platform", _plan_platform()):
-        fp = startup_plan.compute_plan_fingerprint(vllm_config, 0, 1)
-        save_startup_plan(str(tmp_path), fp, 50 * GiB_bytes, 78 * GiB_bytes)
+def test_startup_plan_maybe_apply_end_to_end(plan_env):
+    maybe_save_startup_plan(_plan_worker(), 50 * GiB_bytes)
 
-        # Same fingerprint + enough memory: applied.
-        assert (
-            maybe_apply_startup_plan(str(tmp_path), vllm_config, 0, 1, 78 * GiB_bytes)
-            == 50 * GiB_bytes
-        )
-        # Same fingerprint, less memory: refused.
-        assert (
-            maybe_apply_startup_plan(str(tmp_path), vllm_config, 0, 1, 60 * GiB_bytes)
-            is None
-        )
-        # Different config: fingerprint miss.
-        other = SimpleNamespace(compute_hash=lambda: "zzz999")
-        assert (
-            maybe_apply_startup_plan(str(tmp_path), other, 0, 1, 78 * GiB_bytes) is None
-        )
+    # Same fingerprint + enough memory: applied.
+    worker = _plan_worker()
+    maybe_apply_startup_plan(worker)
+    assert worker.cache_config.kv_cache_memory_bytes == 50 * GiB_bytes
+
+    # Same fingerprint, less memory: refused.
+    worker = _plan_worker(free_memory=60 * GiB_bytes)
+    maybe_apply_startup_plan(worker)
+    assert worker.cache_config.kv_cache_memory_bytes is None
+
+    # Different config: fingerprint miss.
+    worker = _plan_worker(config_hash="zzz999")
+    maybe_apply_startup_plan(worker)
+    assert worker.cache_config.kv_cache_memory_bytes is None
+
+    # An explicit --kv-cache-memory is never overridden.
+    worker = _plan_worker(kv_cache_memory_bytes=7 * GiB_bytes)
+    maybe_apply_startup_plan(worker)
+    assert worker.cache_config.kv_cache_memory_bytes == 7 * GiB_bytes
+
+
+def test_startup_plan_disabled_is_a_noop(plan_env, monkeypatch: pytest.MonkeyPatch):
+    maybe_save_startup_plan(_plan_worker(), 50 * GiB_bytes)
+    monkeypatch.setenv("VLLM_ENABLE_STARTUP_PLAN", "0")
+
+    worker = _plan_worker()
+    maybe_apply_startup_plan(worker)
+    assert worker.cache_config.kv_cache_memory_bytes is None
+
+    maybe_save_startup_plan(_plan_worker(config_hash="fresh"), 50 * GiB_bytes)
+    fp = startup_plan.compute_plan_fingerprint(
+        _plan_worker(config_hash="fresh").vllm_config, 0, 1
+    )
+    assert startup_plan._load_plan(fp) is None
