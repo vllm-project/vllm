@@ -415,11 +415,7 @@ class NemotronHMTP(nn.Module, SupportsPP):
 
         for name, loaded_weight in weights:
             # Only process MTP weights - skip all non-MTP weights
-            if (
-                not name.startswith("mtp.")
-                and "embeddings" not in name
-                and "lm_head" not in name
-            ):
+            if not name.startswith("mtp.") and "embeddings" not in name:
                 continue
             # Skip rotary embeddings (computed, not loaded)
             if "rotary_emb.inv_freq" in name:

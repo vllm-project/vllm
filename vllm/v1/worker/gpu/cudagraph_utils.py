@@ -27,6 +27,7 @@ from vllm.logger import init_logger
 from vllm.model_executor.offloader.base import get_offloader
 from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
+from vllm.utils.math_utils import round_up
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.worker.gpu.attn_utils import build_slot_mappings_by_layer
 from vllm.v1.worker.gpu.block_table import BlockTables
@@ -141,10 +142,7 @@ class CudaGraphManager:
 
         self._candidates: dict[tuple[int, int], list[BatchExecutionDescriptor]] = {}
         self._capture_descs: dict[CUDAGraphMode, list[BatchExecutionDescriptor]] = {}
-        # adjust the cudagraph sizes to be a multiple of the uniform decode query length
-        self.compilation_config.adjust_cudagraph_sizes_for_spec_decode(
-            self.decode_query_len, self.tp_size
-        )
+
         self._init_candidates()
 
         # Breakable CUDA graph (PW CUDA graph without torch.compile)
@@ -191,31 +189,72 @@ class CudaGraphManager:
         decode_mode = self.cudagraph_mode.decode_mode()
         mixed_mode = self.cudagraph_mode.mixed_mode()
         separate_decode_routine = self.cudagraph_mode.separate_routine()
+        max_cg_capture_size = self.compilation_config.max_cudagraph_capture_size
 
         descs_by_token_lora: dict[tuple[int, int], list[BatchExecutionDescriptor]] = (
             defaultdict(list)
         )
-        descs_by_mode = defaultdict(list)
+        descs_by_mode: defaultdict[CUDAGraphMode, list[BatchExecutionDescriptor]] = (
+            defaultdict(list)
+        )
+
+        # When using Dynamic SD, num_speculative_tokens is the max number of
+        # draft tokens. The scheduler might use a smaller number so we need
+        # to capture graphs for all possible values during decode.
+        speculative_config = self.vllm_config.speculative_config
+        if (
+            speculative_config
+            and speculative_config.uses_dynamic_speculative_decoding()
+        ):
+            num_spec_per_batch_size = (
+                speculative_config.num_speculative_tokens_per_batch_size
+            )
+            # uses_dynamic_speculative_decoding() guarantees this is set.
+            assert num_spec_per_batch_size is not None
+            # decode_query_len = num_speculative_steps + num_new_sampled_tokens
+            # _per_step. Recover num_new_sampled_tokens_per_step
+            # from the values the manager already has.
+            num_new_sampled_tokens_per_step = (
+                self.decode_query_len - self.vllm_config.num_speculative_tokens
+            )
+            # Each entry is (range_start, range_end, num_speculative_tokens).
+            decode_query_lens = [
+                x[2] + num_new_sampled_tokens_per_step for x in num_spec_per_batch_size
+            ]
+        else:
+            decode_query_lens = [self.decode_query_len]
 
         for num_tokens, num_active_loras in product(
             capture_sizes, self.lora_capture_cases
         ):
             # Capture uniform decode specfifc graphs if required
             #  (i.e. separate decode routine)
-            if (
-                separate_decode_routine
-                and decode_mode
-                and self.decode_query_len <= num_tokens <= max_decode_tokens
-            ):
-                desc = BatchExecutionDescriptor(
-                    cg_mode=decode_mode,
-                    num_tokens=num_tokens,
-                    num_reqs=num_tokens // self.decode_query_len,
-                    uniform_token_count=self.decode_query_len,
-                    num_active_loras=num_active_loras,
-                )
-                descs_by_mode[decode_mode].append(desc)
-                descs_by_token_lora[(num_tokens, num_active_loras)].append(desc)
+            if separate_decode_routine and decode_mode:
+                for decode_query_len in decode_query_lens:
+                    rounded_num_tokens = round_up(num_tokens, decode_query_len)
+                    rounded_num_reqs = rounded_num_tokens // decode_query_len
+
+                    if (
+                        rounded_num_tokens > max_decode_tokens
+                        or rounded_num_tokens > max_cg_capture_size
+                        or rounded_num_reqs > self.max_num_reqs
+                    ):
+                        continue
+
+                    desc = BatchExecutionDescriptor(
+                        cg_mode=decode_mode,
+                        num_tokens=rounded_num_tokens,
+                        num_reqs=rounded_num_reqs,
+                        uniform_token_count=decode_query_len,
+                        num_active_loras=num_active_loras,
+                    )
+
+                    # avoid duplicate graphs
+                    if desc not in descs_by_mode[decode_mode]:
+                        descs_by_mode[decode_mode].append(desc)
+                        descs_by_token_lora[
+                            (rounded_num_tokens, num_active_loras)
+                        ].append(desc)
 
             if mixed_mode:
                 # for PIECEWISE graphs there is no limit on requests when replaying
