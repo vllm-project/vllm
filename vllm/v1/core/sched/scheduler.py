@@ -1158,6 +1158,16 @@ class Scheduler(SchedulerInterface):
         request.num_computed_tokens = 0
         if request.spec_token_ids:
             request.spec_token_ids = []
+        # Async scheduling: this request's in-flight output frame is now stale
+        # (rolled back above) and must be discarded when it returns, or it
+        # drains num_output_placeholders below zero (assert in
+        # AsyncScheduler._update_request_with_output). async_tokens_to_discard
+        # counts frames, not placeholder tokens; a decode request has at most
+        # one in-flight frame (eligible-step gating), so discard one -- not
+        # num_output_placeholders (= 1 + spec_width, which would over-discard).
+        if request.num_output_placeholders > 0:
+            request.async_tokens_to_discard += 1
+        request.num_output_placeholders = 0
         request.num_preemptions += 1
         if self.log_stats:
             request.record_event(EngineCoreEventType.PREEMPTED, timestamp)
@@ -2218,15 +2228,8 @@ class Scheduler(SchedulerInterface):
             # running queue in FIFO order.
             while self.running:
                 request = self.running.pop()
+                # _preempt_request discards any in-flight async output frame.
                 self._preempt_request(request, timestamp)
-                # For async scheduling, any output frames already in flight at
-                # preemption time are now stale and must be discarded when they
-                # return. num_output_placeholders is exactly that count: 0 if
-                # the engine has drained (e.g. pause_generation(keep) waited
-                # for idle), 1 for vanilla async mid-step, or 1 + spec/PP frames
-                # otherwise.
-                request.async_tokens_to_discard = request.num_output_placeholders
-                request.num_output_placeholders = 0
 
             # Clear scheduled request ids cache. Since we are forcing preemption
             # + resumption in the same step, we must act as if these requests were
