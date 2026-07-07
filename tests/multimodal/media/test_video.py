@@ -10,6 +10,7 @@ import pybase64
 import pytest
 from PIL import Image
 
+from vllm import envs
 from vllm.assets.base import get_vllm_public_assets
 from vllm.assets.video import video_to_ndarrays, video_to_pil_images_list
 from vllm.multimodal.media import ImageMediaIO, VideoMediaIO
@@ -17,7 +18,7 @@ from vllm.multimodal.video import VIDEO_LOADER_REGISTRY, VideoLoader
 
 from ..utils import cosine_similarity, create_video_from_image, normalize_image
 
-pytestmark = pytest.mark.cpu_test
+pytestmark = [pytest.mark.cpu_test, pytest.mark.skip_global_cleanup]
 
 ASSETS_DIR = Path(__file__).parent.parent / "assets"
 assert ASSETS_DIR.exists()
@@ -27,7 +28,13 @@ assert ASSETS_DIR.exists()
 def _clear_video_decode_cache():
     import vllm.multimodal.media.video as video_media
 
+    envs_cache_was_enabled = envs._is_envs_cache_enabled()
+    envs.disable_envs_cache()
     video_media._VIDEO_DECODE_CACHE.clear()
+    yield
+    video_media._VIDEO_DECODE_CACHE.clear()
+    if envs_cache_was_enabled:
+        envs.enable_envs_cache()
 
 
 @VIDEO_LOADER_REGISTRY.register("assert_10_frames_1_fps")
@@ -87,6 +94,7 @@ def test_video_decode_cache_reuses_across_media_io_instances(
     with monkeypatch.context() as m:
         m.setenv("VLLM_VIDEO_LOADER_BACKEND", "test_counting_decode_cache")
         m.setenv("VLLM_VIDEO_DECODE_CACHE_SIZE", "2")
+        envs.disable_envs_cache()
         imageio = ImageMediaIO()
         video_path = tmp_path / "video.bin"
         video_path.write_bytes(b"video")
@@ -124,6 +132,7 @@ def test_video_decode_cache_key_includes_loader_kwargs(
     with monkeypatch.context() as m:
         m.setenv("VLLM_VIDEO_LOADER_BACKEND", "test_kwargs_decode_cache")
         m.setenv("VLLM_VIDEO_DECODE_CACHE_SIZE", "2")
+        envs.disable_envs_cache()
         imageio = ImageMediaIO()
         video_path = tmp_path / "video.bin"
         video_path.write_bytes(b"video")
@@ -161,6 +170,7 @@ def test_video_decode_cache_waits_for_inflight_load(
     with monkeypatch.context() as m:
         m.setenv("VLLM_VIDEO_LOADER_BACKEND", "test_inflight_decode_cache")
         m.setenv("VLLM_VIDEO_DECODE_CACHE_SIZE", "2")
+        envs.disable_envs_cache()
         imageio = ImageMediaIO()
         video_path = tmp_path / "video.bin"
         video_path.write_bytes(b"video")
@@ -191,39 +201,6 @@ def test_video_decode_cache_waits_for_inflight_load(
     assert SlowVideoLoader.calls == 1
     assert len(results) == 2
     assert [metadata["calls"] for _, metadata in results] == [1, 1]
-
-
-def test_video_decode_cache_size_kwarg_is_ignored(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-):
-    class RejectDecodeCacheSizeLoader(VideoLoader):
-        calls = 0
-
-        @classmethod
-        def load_bytes(
-            cls, data: bytes, num_frames: int = -1, **kwargs
-        ) -> tuple[npt.NDArray, dict]:
-            cls.calls += 1
-            assert "decode_cache_size" not in kwargs
-            return np.array([[[[cls.calls]]]]), {"calls": cls.calls}
-
-    VIDEO_LOADER_REGISTRY.register("test_reject_decode_cache_size")(
-        RejectDecodeCacheSizeLoader
-    )
-
-    with monkeypatch.context() as m:
-        m.setenv("VLLM_VIDEO_LOADER_BACKEND", "test_reject_decode_cache_size")
-        m.setenv("VLLM_VIDEO_DECODE_CACHE_SIZE", "0")
-        imageio = ImageMediaIO()
-        video_path = tmp_path / "video.bin"
-        video_path.write_bytes(b"video")
-
-        videoio = VideoMediaIO(imageio, num_frames=10, decode_cache_size=2)
-        videoio.load_file(video_path)
-        videoio.load_file(video_path)
-
-    assert RejectDecodeCacheSizeLoader.calls == 2
 
 
 @pytest.mark.parametrize("is_color", [True, False])

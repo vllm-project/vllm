@@ -77,7 +77,7 @@ if TYPE_CHECKING:
     VLLM_MEDIA_URL_ALLOW_REDIRECTS: bool = True
     VLLM_MEDIA_LOADING_THREAD_COUNT: int = 8
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
-    VLLM_VIDEO_DECODE_CACHE_SIZE: int = 32
+    VLLM_VIDEO_DECODE_CACHE_SIZE: int = 0
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
@@ -945,7 +945,7 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Maximum number of decoded video files retained by the in-process media
     # IO cache. Set to 0 to disable.
     "VLLM_VIDEO_DECODE_CACHE_SIZE": lambda: int(
-        os.getenv("VLLM_VIDEO_DECODE_CACHE_SIZE", "32")
+        os.getenv("VLLM_VIDEO_DECODE_CACHE_SIZE", "0")
     ),
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.

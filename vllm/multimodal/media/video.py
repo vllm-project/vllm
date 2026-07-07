@@ -15,13 +15,10 @@ import pybase64
 from PIL import Image
 
 from vllm import envs
-from vllm.logger import init_logger
 
 from ..video import VIDEO_LOADER_REGISTRY
 from .base import MediaIO
 from .image import ImageMediaIO
-
-logger = init_logger(__name__)
 
 _VideoDecodeCacheKey = tuple[str, int, int, int, str, tuple[tuple[str, Any], ...]]
 _VideoDecodeCacheValue = tuple[npt.NDArray, dict[str, Any]]
