@@ -26,6 +26,10 @@ ARG CUDA_VERSION=13.0.2
 ARG PYTHON_VERSION=3.12
 ARG UBUNTU_VERSION=22.04
 
+# Keep in sync with flashinfer-python in requirements/cuda.txt
+# From versions.json: .flashinfer.version
+ARG FLASHINFER_VERSION=0.6.14
+
 # By parameterizing the base images, we allow third-party to use their own
 # base images. One use case is hermetic builds with base images stored in
 # private registries that use a different repository naming conventions.
@@ -276,6 +280,12 @@ RUN --mount=type=cache,target=/opt/uv/cache \
                 "nvidia-cutlass-dsl-libs-cu13==${CUTLASS_DSL_VERSION}"; \
         fi; \
     fi
+
+# flashinfer-cubin is not published to PyPI, only on the FlashInfer index
+ARG FLASHINFER_VERSION
+RUN --mount=type=cache,target=/opt/uv/cache \
+    uv pip install --python /opt/venv/bin/python3 flashinfer-cubin==${FLASHINFER_VERSION} \
+        --index-url https://flashinfer.ai/whl
 
 # Track PyTorch lib versions used during build and match in downstream instances.
 # We do this for both nightly and release so we can strip dependencies/*.txt as needed.
@@ -812,10 +822,13 @@ RUN --mount=type=cache,target=/opt/uv/cache \
     fi && \
     rm /tmp/requirements-cuda.txt /tmp/common.txt
 
-# Install FlashInfer JIT cache (requires CUDA-version-specific index URL)
+# Install FlashInfer cubins and JIT cache (not published to PyPI; the JIT
+# cache requires a CUDA-version-specific index URL)
 # https://docs.flashinfer.ai/installation.html
-# From versions.json: .flashinfer.version
-ARG FLASHINFER_VERSION=0.6.14
+ARG FLASHINFER_VERSION
+RUN --mount=type=cache,target=/opt/uv/cache \
+    uv pip install --system flashinfer-cubin==${FLASHINFER_VERSION} \
+        --index-url https://flashinfer.ai/whl
 RUN --mount=type=cache,target=/opt/uv/cache \
     uv pip install --system flashinfer-jit-cache==${FLASHINFER_VERSION} \
         --index-url https://flashinfer.ai/whl/cu$(echo $CUDA_VERSION | cut -d. -f1,2 | tr -d '.')
