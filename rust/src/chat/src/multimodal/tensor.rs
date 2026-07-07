@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use half::{bf16, f16};
-use llm_multimodal::{ModelSpecificValue, PreprocessedEncoderInputs as PreprocessedImages};
+use llm_multimodal::{ModelSpecificValue, PreprocessedEncoderInputs as PreprocessedMedia};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::MmKwargValue as ProtocolKwargValue;
 use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireTensor};
@@ -25,12 +25,12 @@ pub(super) enum KwargValue {
     Passthrough(ProtocolKwargValue),
 }
 
-/// Collect `pixel_values` and model-specific outputs into one tensor map.
+/// Collect encoder inputs and model-specific outputs into one tensor map.
 pub(super) fn collect_tensors(
-    preprocessed: PreprocessedImages,
+    preprocessed: PreprocessedMedia,
     float_dtype: ModelDtype,
 ) -> Result<HashMap<String, KwargValue>> {
-    let PreprocessedImages {
+    let PreprocessedMedia {
         encoder_input,
         model_specific,
         ..

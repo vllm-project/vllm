@@ -140,7 +140,10 @@ fn resolve_multimodal_render_info(
     info: Option<&MultimodalModelInfo>,
 ) -> Option<MultimodalRenderInfo> {
     info.map(|info| MultimodalRenderInfo {
-        placeholder_token: info.placeholder_token().to_string(),
+        image_placeholder_token: info.placeholder_token().to_string(),
+        video_placeholder_token: info
+            .placeholder_token_for(llm_multimodal::Modality::Video)
+            .map(str::to_string),
     })
 }
 

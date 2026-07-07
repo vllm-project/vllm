@@ -33,7 +33,8 @@ pub use self::format::ChatTemplateContentFormatOption;
 
 #[derive(Debug, Clone)]
 pub struct MultimodalRenderInfo {
-    pub placeholder_token: String,
+    pub image_placeholder_token: String,
+    pub video_placeholder_token: Option<String>,
 }
 
 /// Hugging Face chat-template renderer backed by the local Jinja chat-template
@@ -235,6 +236,7 @@ enum TemplateContent {
 enum TemplateContentPart {
     Text { text: String },
     Image,
+    Video,
 }
 
 #[derive(Debug, Serialize)]
@@ -401,6 +403,15 @@ fn to_template_openai_content(
                     multimodal.ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
                     Ok(TemplateContentPart::Image)
                 }
+                ChatContentPart::VideoUrl { .. } => {
+                    let multimodal =
+                        multimodal.ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
+                    multimodal
+                        .video_placeholder_token
+                        .as_ref()
+                        .ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
+                    Ok(TemplateContentPart::Video)
+                }
             })
             .collect(),
     }
@@ -420,7 +431,16 @@ fn to_template_string_content(
                     ChatContentPart::ImageUrl { .. } => {
                         let multimodal =
                             multimodal.ok_or(Error::UnsupportedMultimodalContent("image_url"))?;
-                        out.push_str(&multimodal.placeholder_token);
+                        out.push_str(&multimodal.image_placeholder_token);
+                    }
+                    ChatContentPart::VideoUrl { .. } => {
+                        let multimodal =
+                            multimodal.ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
+                        let placeholder = multimodal
+                            .video_placeholder_token
+                            .as_ref()
+                            .ok_or(Error::UnsupportedMultimodalContent("video_url"))?;
+                        out.push_str(placeholder);
                     }
                 }
             }
@@ -490,7 +510,8 @@ mod tests {
     ) -> Result<crate::RenderedPrompt> {
         HfChatRenderer::new(Some(template.to_string()), HashMap::new(), content_format)?
             .with_multimodal(Some(MultimodalRenderInfo {
-                placeholder_token: "<image>".to_string(),
+                image_placeholder_token: "<image>".to_string(),
+                video_placeholder_token: Some("<video>".to_string()),
             }))
             .render(request)
     }
@@ -499,6 +520,14 @@ mod tests {
         sample_request(vec![ChatMessage::user(vec![
             ChatContentPart::text("a"),
             ChatContentPart::image_url("data:image/png;base64,test"),
+            ChatContentPart::text("b"),
+        ])])
+    }
+
+    fn video_request() -> ChatRequest {
+        sample_request(vec![ChatMessage::user(vec![
+            ChatContentPart::text("a"),
+            ChatContentPart::video_url("data:video/mp4;base64,test"),
             ChatContentPart::text("b"),
         ])])
     }
@@ -525,6 +554,30 @@ mod tests {
         .unwrap();
 
         assert_eq!(rendered.prompt, Prompt::Text("a<|image_pad|>b".to_string()));
+    }
+
+    #[test]
+    fn string_content_format_replaces_video_with_placeholder_text() {
+        let rendered = render_mm(
+            "{{ messages[0].content }}",
+            &video_request(),
+            ChatTemplateContentFormatOption::String,
+        )
+        .unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("a<video>b".to_string()));
+    }
+
+    #[test]
+    fn openai_content_format_normalizes_video_url_for_template() {
+        let rendered = render_mm(
+            "{% for item in messages[0].content %}{% if item.type == 'video' %}<|video_pad|>{% else %}{{ item.text }}{% endif %}{% endfor %}",
+            &video_request(),
+            ChatTemplateContentFormatOption::OpenAi,
+        )
+        .unwrap();
+
+        assert_eq!(rendered.prompt, Prompt::Text("a<|video_pad|>b".to_string()));
     }
 
     #[test]
