@@ -1763,8 +1763,8 @@ class DPEngineCoreProc(EngineCoreProc):
         scheduler_config = vllm_config.scheduler_config
         self.prefill_schedule_interval = scheduler_config.prefill_schedule_interval
 
-        # Counts forward-passes for prefill-admission cadence and wave stats.
-        # The DP finish-state sync now runs every scheduler step.
+        # Counts forward-passes of the model so that we can synchronize
+        # finished with DP peers every step.
         self.step_counter = 0
         self.current_wave = 0
         self.last_counts = (0, 0)
@@ -1983,9 +1983,6 @@ class DPEngineCoreProc(EngineCoreProc):
         raise SystemExit
 
     def _has_global_unfinished_reqs(self, local_unfinished: bool) -> bool:
-        # Sync every step: if engines_running is stale, multi-node DP ranks
-        # can diverge on the dummy-vs-real-step branch and issue a different
-        # number of coordination all-reduces, deadlocking the process group.
         self.step_counter += 1
 
         has_unfinished, pause_consensus = ParallelConfig.sync_dp_state(
