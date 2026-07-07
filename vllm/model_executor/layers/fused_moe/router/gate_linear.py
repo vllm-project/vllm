@@ -82,7 +82,11 @@ class GateLinear(ReplicatedLinear):
                 is_available,
             )
 
-            self.allow_ll_bf16_gemm = is_available()
+            self.allow_ll_bf16_gemm = (
+                self.weight.dtype == torch.bfloat16
+                and self.out_dtype == torch.float32
+                and is_available()
+            )
 
     def set_out_dtype(self, out_dtype: torch.dtype) -> None:
         """Set output dtype for the router logits after init.
@@ -101,13 +105,29 @@ class GateLinear(ReplicatedLinear):
         ):
             self.allow_cublas_router_gemm = self.weight.dtype == torch.bfloat16
 
+        # out_dtype is intentionally allowed to start as None -> recompute eligibility here
+        if self.allow_specialized_router_gemm:
+            from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
+                is_available,
+            )
+
+            self.allow_ll_bf16_gemm = (
+                self.weight.dtype == torch.bfloat16
+                and out_dtype == torch.float32
+                and is_available()
+            )
+
     def forward(
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         import vllm._custom_ops as ops
 
         # Tier 1: cuteDSL ll_bf16_gemm (SM90+, any dims)
-        if self.allow_ll_bf16_gemm and x.shape[0] <= 16:
+        if (
+            self.allow_ll_bf16_gemm
+            and x.shape[0] <= 16
+            and x.dtype == torch.bfloat16
+        ):
             from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import (
                 ll_bf16_gemm,
             )

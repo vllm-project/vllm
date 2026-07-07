@@ -161,6 +161,21 @@ def ll_bf16_gemm(
     router_weight: torch.Tensor,  # [N, K] bf16
     output_dtype: torch.dtype = torch.float32,
 ) -> torch.Tensor:  # [M, N] fp32
+    if hidden_states.dim() != 2 or router_weight.dim() != 2:
+        raise ValueError("hidden_states and router_weight must be 2D tensors")
+    if hidden_states.dtype != torch.bfloat16 or router_weight.dtype != torch.bfloat16:
+        raise ValueError("hidden_states and router_weight must have dtype=bfloat16")
+    if hidden_states.device.type != "cuda" or router_weight.device.type != "cuda":
+        raise ValueError("hidden_states and router_weight must have device_type=cuda")
+    if hidden_states.device != router_weight.device:
+        raise ValueError("hidden_states and router_weight must be on the same CUDA device")
+    if output_dtype != torch.float32:
+        raise ValueError("ll_bf16_gemm only supports output_dtype=torch.float32")
+    if hidden_states.shape[1] != router_weight.shape[1]:
+        raise ValueError("hidden_states and router_weight must have matching K dimensions")
+    if not hidden_states.is_contiguous() or not router_weight.is_contiguous():
+        raise ValueError("hidden_states and router_weight must be contiguous row-major inputs")
+
     M, K = hidden_states.shape
     N = router_weight.shape[0]
     stream = _stream()

@@ -324,6 +324,133 @@ def test_cudagraph_input_update():
 
 
 # =================================================================
+# GateLinear dispatch integration
+# =================================================================
+
+
+def _make_gate_linear(monkeypatch, *, params_dtype, out_dtype=torch.float32):
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.linear.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.layers.linear.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_rank",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        "vllm.model_executor.parameter.get_tensor_model_parallel_world_size",
+        lambda: 1,
+    )
+
+    from vllm.model_executor.layers.fused_moe.router.gate_linear import GateLinear
+
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.is_available",
+        lambda: True,
+    )
+    return GateLinear(
+        input_size=2048,
+        output_size=64,
+        bias=False,
+        out_dtype=out_dtype,
+        params_dtype=params_dtype,
+    ).cuda()
+
+
+def test_gate_linear_uses_ll_bf16_for_bf16_fast_path(monkeypatch):
+    gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16)
+    x = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
+    calls = []
+
+    def fake_ll_bf16_gemm(hidden_states, router_weight):
+        calls.append((hidden_states, router_weight))
+        return torch.full(
+            (hidden_states.shape[0], router_weight.shape[0]),
+            1.0,
+            dtype=torch.float32,
+            device=hidden_states.device,
+        )
+
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        fake_ll_bf16_gemm,
+    )
+    out, bias = gate(x)
+    assert bias is None
+    assert out.shape == (4, 64)
+    assert out.dtype == torch.float32
+    assert len(calls) == 1
+    assert calls[0][0] is x
+    assert calls[0][1] is gate.weight
+
+
+def test_gate_linear_fp32_weight_falls_back(monkeypatch):
+    gate = _make_gate_linear(monkeypatch, params_dtype=torch.float32)
+    assert not gate.allow_ll_bf16_gemm
+    x = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
+
+    def fail_ll_bf16_gemm(hidden_states, router_weight):
+        raise AssertionError("ll_bf16_gemm should not run for fp32 weights")
+
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        fail_ll_bf16_gemm,
+    )
+    out, _ = gate(x)
+    assert out.shape == (4, 64)
+    assert out.dtype == torch.float32
+
+
+def test_gate_linear_non_bf16_activation_falls_back(monkeypatch):
+    gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16)
+    x = torch.randn(4, 2048, dtype=torch.float16, device="cuda")
+
+    def fail_ll_bf16_gemm(hidden_states, router_weight):
+        raise AssertionError("ll_bf16_gemm should not run for non-bf16 activations")
+
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        fail_ll_bf16_gemm,
+    )
+    out, _ = gate(x)
+    assert out.shape == (4, 64)
+    assert out.dtype == torch.float32
+
+
+def test_gate_linear_set_out_dtype_enables_ll_bf16(monkeypatch):
+    gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16, out_dtype=None)
+    assert not gate.allow_ll_bf16_gemm
+    gate.set_out_dtype(torch.float32)
+    assert gate.allow_ll_bf16_gemm
+
+
+def test_gate_linear_non_fp32_out_dtype_disables_ll_bf16(monkeypatch):
+    gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16, out_dtype=None)
+    gate.set_out_dtype(torch.bfloat16)
+    assert not gate.allow_ll_bf16_gemm
+
+
+def test_gate_linear_m_gt_16_falls_back(monkeypatch):
+    gate = _make_gate_linear(monkeypatch, params_dtype=torch.bfloat16)
+    x = torch.randn(17, 2048, dtype=torch.bfloat16, device="cuda")
+
+    def fail_ll_bf16_gemm(hidden_states, router_weight):
+        raise AssertionError("ll_bf16_gemm should not run for M > 16")
+
+    monkeypatch.setattr(
+        "vllm.model_executor.kernels.linear.cute_dsl.ll_bf16.ll_bf16_gemm",
+        fail_ll_bf16_gemm,
+    )
+    out, _ = gate(x)
+    assert out.shape == (17, 64)
+    assert out.dtype == torch.float32
+
+
+# =================================================================
 # Negative tests — invalid inputs
 # =================================================================
 
@@ -353,8 +480,32 @@ def test_invalid_device_cpu():
 def test_invalid_1d_input():
     a = torch.randn(2048, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(64, 2048, dtype=torch.bfloat16, device="cuda")
-    with pytest.raises((RuntimeError, ValueError, IndexError)):
+    with pytest.raises(ValueError, match="2D tensors"):
         _gemm(a, b)
+
+
+def test_mismatched_K():
+    a = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, 1024, dtype=torch.bfloat16, device="cuda")
+    with pytest.raises(ValueError, match="matching K dimensions"):
+        _gemm(a, b)
+
+
+def test_non_contiguous_input():
+    a = torch.randn(2048, 4, dtype=torch.bfloat16, device="cuda").T
+    b = torch.randn(64, 2048, dtype=torch.bfloat16, device="cuda")
+    assert not a.is_contiguous()
+    with pytest.raises(ValueError, match="contiguous row-major"):
+        _gemm(a, b)
+
+
+def test_invalid_output_dtype():
+    a = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
+    b = torch.randn(64, 2048, dtype=torch.bfloat16, device="cuda")
+    with pytest.raises(ValueError, match="output_dtype=torch.float32"):
+        from vllm.model_executor.kernels.linear.cute_dsl.ll_bf16 import ll_bf16_gemm
+
+        ll_bf16_gemm(a, b, output_dtype=torch.bfloat16)
 
 
 if __name__ == "__main__":
