@@ -184,7 +184,14 @@ class KnormFullAttentionManager(FullAttentionManager):
             for idx, _ in to_evict:
                 self._block_scores[request_id].pop(idx, None)
 
-    def free(self, request_id: str) -> None:
+    def free(
+        self,
+        request_id: str,
+        prioritize_uncached_for_reuse: bool = False,
+    ) -> None:
         """Free blocks and clean up score records."""
-        super().free(request_id)
+        super().free(
+            request_id,
+            prioritize_uncached_for_reuse=prioritize_uncached_for_reuse,
+        )
         self._block_scores.pop(request_id, None)

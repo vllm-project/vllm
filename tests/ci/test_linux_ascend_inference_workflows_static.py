@@ -18,7 +18,7 @@ def test_pr_inference_workflows_checkout_with_https_without_ssh_known_hosts():
 
         assert "Checkout target repo with retry" in text
         assert "github.event_name == 'pull_request'" in text
-        assert "format('https://github.com/{0}.git', github.repository)" in text
+        assert "TARGET_REPO_URL: https://github.com/${{ github.repository }}.git" in text
         assert "format('refs/pull/{0}/merge', github.event.pull_request.number)" in text
         assert "https://github.com/vLLM-HUST/vllm-ascend-hust.git" in text
         assert "https://github.com/vLLM-HUST/ascend-runtime-manager.git" in text
@@ -26,9 +26,7 @@ def test_pr_inference_workflows_checkout_with_https_without_ssh_known_hosts():
         env_block = text[
             text.index("    env:") : text.index("    steps:")
         ]
-        assert "TARGET_REPO_URL: git@github.com:${{ github.repository }}.git" not in (
-            env_block
-        )
+        assert "git@github.com" not in env_block
         assert (
             "VLLM_ASCEND_HUST_REPO_URL: git@github.com:vLLM-HUST/"
             "vllm-ascend-hust.git"
