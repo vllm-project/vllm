@@ -928,29 +928,11 @@ class Worker(WorkerBase):
         return self.model_runner.get_model()
 
     def get_draft_model(self) -> nn.Module | None:
-        """Return the speculative draft model nn.Module, or None.
+        return self.model_runner.get_draft_model()
 
-        Covers both V1 runner (model_runner.drafter) and
-        V2 runner (model_runner.speculator).
-        """
-        drafter = getattr(self.model_runner, "drafter", None)
-        if drafter is None:
-            drafter = getattr(self.model_runner, "speculator", None)
-        if drafter is None:
-            return None
-        if hasattr(drafter, "get_model"):
-            return drafter.get_model()
-        return getattr(drafter, "model", None)
+    def _set_draft_weight_update_target(self) -> None:
+        assert self.weight_transfer_engine is not None
 
-    @staticmethod
-    def _validate_weight_update_target(include_draft: bool) -> None:
-        if not isinstance(include_draft, bool):
-            raise TypeError(
-                "Weight update include_draft must be a boolean, "
-                f"got {type(include_draft)}."
-            )
-
-    def _get_draft_weight_update_target(self) -> tuple[nn.Module, Any]:
         draft_model = self.get_draft_model()
         if draft_model is None:
             raise RuntimeError(
@@ -964,14 +946,8 @@ class Worker(WorkerBase):
                 "config is configured."
             )
 
-        return draft_model, speculative_config.draft_model_config
-
-    def _set_draft_weight_update_target(self) -> None:
-        assert self.weight_transfer_engine is not None
-
-        draft_model, draft_model_config = self._get_draft_weight_update_target()
         self.weight_transfer_engine.set_weight_update_target(
-            draft_model, draft_model_config
+            draft_model, speculative_config.draft_model_config
         )
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
@@ -1244,7 +1220,6 @@ class Worker(WorkerBase):
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
-        self._validate_weight_update_target(include_draft)
 
         if self._weight_update_active:
             raise RuntimeError(
