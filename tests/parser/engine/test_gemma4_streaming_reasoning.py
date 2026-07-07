@@ -768,7 +768,7 @@ class TestNonStreamingToolCalls:
 
         assert result.tools_called is True
         args = json.loads(result.tool_calls[0].function.arguments)
-        assert args == {"is_active": "true", "count": "42", "score": "3.14"}
+        assert args == {"is_active": True, "count": 42, "score": 3.14}
 
     def test_no_arguments(self, tool_call_parser, mock_request):
         text = "<|tool_call>call:get_status{}<tool_call|>"
@@ -881,8 +881,8 @@ class TestStreamingToolCallEdgeCases:
         args_text = collect_tool_arguments(results)
         if args_text:
             parsed = json.loads(args_text)
-            assert parsed["count"] == "42"
-            assert parsed["active"] == "true"
+            assert parsed["count"] == 42
+            assert parsed["active"] is True
 
     def test_streaming_empty_args(self, tool_call_parser, mock_request):
         chunks = [
@@ -924,7 +924,7 @@ class TestStreamingToolCallEdgeCases:
         args_text = collect_tool_arguments(results)
         assert args_text
         parsed = json.loads(args_text)
-        assert parsed["input"]["all"] == "true"
+        assert parsed["input"]["all"] is True
 
     def test_streaming_number_split(self, tool_call_parser, mock_request):
         chunks = [
@@ -938,7 +938,7 @@ class TestStreamingToolCallEdgeCases:
         args_text = collect_tool_arguments(results)
         assert args_text
         parsed = json.loads(args_text)
-        assert parsed["count"] == "42"
+        assert parsed["count"] == 42
 
     def test_streaming_trailing_bare_bool(self, tool_call_parser, mock_request):
         chunks = [
@@ -961,7 +961,7 @@ class TestStreamingToolCallEdgeCases:
             "file_path": "src/env.py",
             "old_string": "old_val",
             "new_string": "new_val",
-            "replace_all": "false",
+            "replace_all": False,
         }
 
         assert args_text.count("replace_all") == 1
