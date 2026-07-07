@@ -53,6 +53,8 @@ audioread==3.0.1
     # via
     #   -r requirements/test/xpu.in
     #   librosa
+av==16.1.0
+    # via -r requirements/test/xpu.in
 blake3==1.0.9
     # via -r requirements/test/../common.txt
 blobfile==3.0.0

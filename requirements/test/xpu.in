@@ -38,6 +38,7 @@ num2words
 pqdm
 
 # --- Vision & Multimodal ---
+av  # required for audio_in_video tests
 timm
 albumentations
 mistral-common[image,audio]

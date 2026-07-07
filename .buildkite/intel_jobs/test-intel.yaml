@@ -33,8 +33,7 @@ steps:
     commands:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-        'pip install tblib==3.1.0 &&
-        python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager &&
+        'python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager &&
         python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 -O3 -cc.cudagraph_mode=NONE &&
         python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager -tp 2 --distributed-executor-backend mp &&
         python3 examples/basic/offline_inference/generate.py --model facebook/opt-125m --block-size 64 --enforce-eager --attention-backend=TRITON_ATTN &&
@@ -120,8 +119,7 @@ steps:
     commands:
       - >-
         bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-        'pip install av &&
-        cd tests &&
+        'cd tests &&
         pytest -v -s entrypoints/multimodal/openai/chat_completion/test_audio_in_video.py &&
         pytest -v -s benchmarks/test_serve_cli.py'
   - label: "XPU quantization test"

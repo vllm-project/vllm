@@ -22,8 +22,7 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install av &&
-      cd tests &&
+      'cd tests &&
       pytest -v -s models/multimodal/generation/test_common.py -m core_model -k "qwen2" &&
       pytest -v -s models/multimodal/generation/test_ultravox.py -m core_model'
 
@@ -94,8 +93,7 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install av &&
-      cd tests &&
+      'cd tests &&
       pytest -v -s models/multimodal -m core_model --ignore models/multimodal/generation/test_common.py --ignore models/multimodal/generation/test_ultravox.py --ignore models/multimodal/generation/test_qwen2_5_vl.py --ignore models/multimodal/generation/test_qwen2_vl.py --ignore models/multimodal/generation/test_whisper.py  --ignore models/multimodal/generation/test_memory_leak.py --ignore models/multimodal/processing'
 
 - label: Multi-Modal Processor # 44min
@@ -119,7 +117,7 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'pip install av matplotlib ftfy &&
+      'pip install matplotlib ftfy &&
       pip install open-clip-torch --no-deps &&
       cd tests &&
       pytest -v -s models/multimodal/processing/test_tensor_schema.py
