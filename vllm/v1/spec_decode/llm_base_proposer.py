@@ -1468,7 +1468,7 @@ class SpecDecodeBaseProposer:
                     "Sharing target model embedding weights with the draft model."
                 )
 
-            if share_embeddings:
+            if share_embeddings and hasattr(self.model, "has_own_embed_tokens"):
                 draft_embed = self.model.model.embed_tokens
                 # Only share when both models use the same embedding width.
                 # Guard with isinstance so non-Tensor weights (e.g. in tests)
