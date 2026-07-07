@@ -651,11 +651,11 @@ class OutputProcessor:
                 req_state.logprobs_processor.update_from_output(engine_core_output)
 
             # 4) Finalize per-request stats before constructing RequestOutput
-            # so that finished_stats is populated on the output we hand off.
+            # so finished_stats is populated on the output we hand off. Parent/
+            # LoRA observation is deferred to _observe_finished_request, which
+            # must run after make_request_output empties child_requests.
             if finish_reason is not None and not req_state.streaming_input:
-                self._update_stats_from_finished(
-                    req_state, finish_reason, iteration_stats
-                )
+                self._finalize_request_stats(req_state, finish_reason, iteration_stats)
 
             # 5) Create and handle RequestOutput objects.
             if request_output := req_state.make_request_output(
@@ -690,6 +690,7 @@ class OutputProcessor:
                         # detected stop string, abort needed in EngineCore.
                         reqs_to_abort.append(req_id)
 
+                    self._observe_finished_request(req_state, iteration_stats)
                     if self.tracing_enabled:
                         self.do_tracing(engine_core_output, req_state, iteration_stats)
 
@@ -798,12 +799,19 @@ class OutputProcessor:
             req_state.lora_name,
         )
 
-    def _update_stats_from_finished(
+    def _finalize_request_stats(
         self,
         req_state: RequestState,
         finish_reason: FinishReason | None,
         iteration_stats: IterationStats | None,
-    ):
+    ) -> None:
+        """Produce FinishedRequestStats and stash it on req_state.
+
+        Runs before make_request_output so finished_stats is populated on the
+        RequestOutput we hand off. Parent/LoRA observation is deferred to
+        _observe_finished_request, which must run after make_request_output
+        empties parent_req.child_requests.
+        """
         if iteration_stats is None:
             return
 
@@ -817,8 +825,20 @@ class OutputProcessor:
             req_stats=req_state.stats,
             num_cached_tokens=req_state.num_cached_tokens,
         )
-        self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
 
+    def _observe_finished_request(
+        self,
+        req_state: RequestState,
+        iteration_stats: IterationStats | None,
+    ) -> None:
+        """Parent/LoRA bookkeeping that depends on make_request_output having
+        already removed this child from parent_req.child_requests.
+        """
+        if iteration_stats is None:
+            return
+
+        assert req_state.stats is not None
+        self.lora_states.request_finished(req_state.request_id, req_state.lora_name)
         ParentRequest.observe_finished_request(
             req_state.parent_req, iteration_stats, req_state.stats.num_generation_tokens
         )
