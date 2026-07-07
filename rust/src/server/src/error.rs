@@ -206,6 +206,57 @@ mod tests {
     }
 
     #[test]
+    fn invalid_truncate_prompt_tokens_maps_to_invalid_request() {
+        let error = vllm_text::Error::InvalidTruncatePromptTokens {
+            request_id: "req-1".to_string(),
+            value: -7,
+        };
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("truncate_prompt_tokens"));
+    }
+
+    #[test]
+    fn truncate_prompt_tokens_exceeds_budget_maps_to_invalid_request() {
+        let error = vllm_text::Error::TruncatePromptTokensExceedsBudget {
+            value: 9000,
+            max_input_tokens: 4096,
+            max_model_len: 8192,
+            max_tokens: 4096,
+        };
+        let api_error = text_submit_error("failed to submit completion request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("9000"));
+        assert!(response.error.message.contains("4096"));
+    }
+
+    #[test]
+    fn chat_wrapped_truncate_prompt_tokens_exceeds_budget_maps_to_invalid_request() {
+        let error = vllm_chat::Error::Text(vllm_text::Error::TruncatePromptTokensExceedsBudget {
+            value: 9000,
+            max_input_tokens: 4096,
+            max_model_len: 8192,
+            max_tokens: 4096,
+        });
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn chat_multimodal_truncate_maps_to_invalid_request() {
+        let error = vllm_chat::Error::TruncateUnsupportedWithMultimodal;
+        let api_error = chat_submit_error("failed to submit chat request", error);
+        assert_eq!(api_error.status_code(), StatusCode::BAD_REQUEST);
+        let response = api_error.to_error_response();
+        assert_eq!(response.error.error_type, "invalid_request_error");
+        assert!(response.error.message.contains("multimodal"));
+    }
+
+    #[test]
     fn other_submit_errors_stay_internal() {
         let error = vllm_text::Error::Tokenizer("backend exploded".to_string());
         let api_error = text_submit_error("failed to submit completion request", error);

@@ -70,6 +70,10 @@ pub(super) fn prepare_generate_request(
         data_parallel_rank: ctx.data_parallel_rank,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
+        // /generate is internal infra; rely on the engine-side max_model_len
+        // enforcement rather than letting callers truncate prompts here.
+        truncate_prompt_tokens: None,
+        truncation_side: None,
     };
 
     Ok(PreparedRequest {

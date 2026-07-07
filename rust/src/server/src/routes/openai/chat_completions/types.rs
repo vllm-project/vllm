@@ -156,6 +156,12 @@ pub struct ChatCompletionRequest {
     /// Truncate prompt tokens to this length
     pub truncate_prompt_tokens: Option<i64>,
 
+    /// Which side to truncate from when `truncate_prompt_tokens` is active
+    /// (`"left"` drops the prompt prefix and is the default when unset,
+    /// matching the generate-tokenizer default; `"right"` drops the prompt
+    /// suffix instead).
+    pub truncation_side: Option<vllm_text::TruncationSide>,
+
     /// Number of prompt logprobs to return
     pub prompt_logprobs: Option<i32>,
 
@@ -280,6 +286,7 @@ impl Default for ChatCompletionRequest {
             skip_special_tokens: true,
             spaces_between_special_tokens: true,
             truncate_prompt_tokens: None,
+            truncation_side: None,
             prompt_logprobs: None,
             allowed_token_ids: None,
             bad_words: None,

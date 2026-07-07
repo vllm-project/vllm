@@ -158,6 +158,8 @@ pub(super) fn prepare_chat_request(
         add_special_tokens: request.add_special_tokens,
         data_parallel_rank: ctx.data_parallel_rank,
         lora_request: lora_resolution.lora_request.clone(),
+        truncate_prompt_tokens: request.truncate_prompt_tokens,
+        truncation_side: request.truncation_side,
     };
 
     Ok(PreparedRequest {

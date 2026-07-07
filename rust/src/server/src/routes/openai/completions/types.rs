@@ -132,6 +132,12 @@ pub struct CompletionRequest {
     /// Truncate prompt tokens to this length
     pub truncate_prompt_tokens: Option<i64>,
 
+    /// Which side to truncate from when `truncate_prompt_tokens` is active
+    /// (`"left"` drops the prompt prefix and is the default when unset,
+    /// matching the generate-tokenizer default; `"right"` drops the prompt
+    /// suffix instead).
+    pub truncation_side: Option<vllm_text::TruncationSide>,
+
     /// Restrict output to these token IDs only
     pub allowed_token_ids: Option<Vec<u32>>,
 

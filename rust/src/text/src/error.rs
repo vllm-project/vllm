@@ -12,6 +12,21 @@ pub enum Error {
     #[error("text request `{request_id}` must contain at least one prompt token ID")]
     EmptyPromptTokenIds { request_id: String },
     #[error(
+        "text request `{request_id}` has invalid `truncate_prompt_tokens = {value}`; \
+         expected a non-negative integer or the sentinel value -1"
+    )]
+    InvalidTruncatePromptTokens { request_id: String, value: i64 },
+    #[error(
+        "`truncate_prompt_tokens = {value}` exceeds the input-token budget \
+         {max_input_tokens} (= max_model_len {max_model_len} - max_tokens {max_tokens})"
+    )]
+    TruncatePromptTokensExceedsBudget {
+        value: i64,
+        max_input_tokens: u32,
+        max_model_len: u32,
+        max_tokens: u32,
+    },
+    #[error(
         "this model's maximum context length is {max_model_len} tokens, \
          but the prompt contains {prompt_len} input tokens"
     )]
@@ -45,6 +60,8 @@ impl Error {
         match self {
             Self::PromptTooLong { .. }
             | Self::EmptyPromptTokenIds { .. }
+            | Self::InvalidTruncatePromptTokens { .. }
+            | Self::TruncatePromptTokensExceedsBudget { .. }
             | Self::Logprobs(_)
             | Self::TokenIds(_)
             | Self::MinTokensExceedsMaxTokens { .. }

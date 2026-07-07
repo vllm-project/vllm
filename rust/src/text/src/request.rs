@@ -148,6 +148,21 @@ impl Default for SamplingParams {
     }
 }
 
+/// Which side of the prompt to discard when `truncate_prompt_tokens` is
+/// active.
+///
+/// Mirrors the Python `truncation_side` option on `TokenizeParams`:
+/// `Right` keeps the first N tokens (truncates from the end); `Left` keeps
+/// the last N tokens (truncates from the start).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TruncationSide {
+    /// Keep the last N tokens, discarding the prompt prefix.
+    Left,
+    /// Keep the first N tokens, discarding the prompt suffix.
+    Right,
+}
+
 /// One raw text-generation request ready to be tokenized or sent directly to
 /// the engine.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -187,6 +202,21 @@ pub struct TextRequest {
     /// LoRA adapter selected for this request.
     #[serde(default)]
     pub lora_request: Option<LoraRequest>,
+    /// Truncate the encoded prompt to this many tokens before submission.
+    ///
+    /// `None` disables truncation. `Some(-1)` is a sentinel that means "use
+    /// the input-token budget derived from `max_model_len - max_tokens`",
+    /// matching the Python `TokenizeParams.truncate_prompt_tokens` contract.
+    /// Other negative values are rejected by [`TextRequest::validate`].
+    #[serde(default)]
+    pub truncate_prompt_tokens: Option<i64>,
+    /// Which side to truncate from when `truncate_prompt_tokens` is active.
+    ///
+    /// Defaults to [`TruncationSide::Left`] (drop prompt prefix) when unset,
+    /// matching the `generate` / `draft` default in
+    /// `vllm/tokenizers/registry.py`.
+    #[serde(default)]
+    pub truncation_side: Option<TruncationSide>,
 }
 
 impl TextRequest {
@@ -205,6 +235,8 @@ impl TextRequest {
             data_parallel_rank: None,
             reasoning_parser_kwargs: None,
             lora_request: None,
+            truncate_prompt_tokens: None,
+            truncation_side: None,
         }
     }
 
@@ -213,6 +245,14 @@ impl TextRequest {
         if matches!(&self.prompt, Prompt::TokenIds(ids) if ids.is_empty()) {
             return Err(Error::EmptyPromptTokenIds {
                 request_id: self.request_id.clone(),
+            });
+        }
+        if let Some(n) = self.truncate_prompt_tokens
+            && n < -1
+        {
+            return Err(Error::InvalidTruncatePromptTokens {
+                request_id: self.request_id.clone(),
+                value: n,
             });
         }
         Ok(())

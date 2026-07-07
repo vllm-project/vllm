@@ -94,6 +94,11 @@ pub fn to_text_request(
         data_parallel_rank: None,
         reasoning_parser_kwargs: None,
         lora_request: None,
+        // The gRPC generate surface mirrors the engine-level contract; rely
+        // on engine-side max_model_len enforcement rather than letting callers
+        // truncate prompts here.
+        truncate_prompt_tokens: None,
+        truncation_side: None,
     })
 }
 

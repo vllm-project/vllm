@@ -60,6 +60,12 @@ pub enum Error {
          but the prompt contains {prompt_len} input tokens"
     )]
     PromptTooLong { max_model_len: u32, prompt_len: u32 },
+    #[error(
+        "truncate_prompt_tokens is not supported for multimodal chat requests \
+         because the encoded prompt embeds image / audio placeholders whose \
+         offsets in mm_features must stay aligned with the submitted token IDs"
+    )]
+    TruncateUnsupportedWithMultimodal,
     #[error("chat request stream `{request_id}` closed before terminal output")]
     StreamClosedBeforeTerminalOutput { request_id: String },
     #[error("tool call stream state is inconsistent: {message}")]
@@ -78,7 +84,7 @@ impl Error {
     /// Whether this error represents invalid user request parameters.
     pub fn is_request_validation_error(&self) -> bool {
         match self {
-            Self::PromptTooLong { .. } => true,
+            Self::PromptTooLong { .. } | Self::TruncateUnsupportedWithMultimodal => true,
             Self::Text(error) => error.is_request_validation_error(),
             _ => false,
         }
