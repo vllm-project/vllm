@@ -292,10 +292,11 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(default_vllm_config, vllm_runner):
             assert isinstance(gate_up_proj.quant_method, ModelOptFp8PcPtLinearMethod)
             assert isinstance(down_proj.quant_method, ModelOptFp8PcPtLinearMethod)
 
-            assert qkv_proj.weight.dtype == torch.float8_e4m3fn
-            assert o_proj.weight.dtype == torch.float8_e4m3fn
-            assert gate_up_proj.weight.dtype == torch.float8_e4m3fn
-            assert down_proj.weight.dtype == torch.float8_e4m3fn
+            fp8_dtype = current_platform.fp8_dtype()
+            assert qkv_proj.weight.dtype == fp8_dtype
+            assert o_proj.weight.dtype == fp8_dtype
+            assert gate_up_proj.weight.dtype == fp8_dtype
+            assert down_proj.weight.dtype == fp8_dtype
 
             # Per-channel scales; activations are dynamically scaled per token.
             assert hasattr(qkv_proj, "weight_scale")
