@@ -682,13 +682,15 @@ class TieringOffloadingManager(OffloadingManager):
         """
         # Catch-all poll: guarantees jobs are processed even on steps where
         # lookup()/prepare_store() were never called (e.g. no requests
-        # scheduled but a tier still has_pending_work()), before the
-        # per-step gate below is reset for the next step.
+        # scheduled but a tier still has_pending_work()).
         self._maybe_process_finished_jobs()
-        self._processed_jobs_this_step = False
 
         for tier in self.secondary_tiers:
             tier.serve_external_requests(self._tier_parents[tier])
+
+        # Reset the per-step gate AFTER serve_external_requests so that
+        # lookup() calls within it skip redundant _process_finished_jobs().
+        self._processed_jobs_this_step = False
 
         self._flush_pending_promotions()
         for tier in self.secondary_tiers:
