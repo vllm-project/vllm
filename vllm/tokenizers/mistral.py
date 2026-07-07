@@ -31,20 +31,12 @@ from mistral_common.tokens.tokenizers.sentencepiece import (
 )
 from mistral_common.tokens.tokenizers.tekken import Tekkenizer
 from pydantic import ValidationError
+from transformers.tokenization_mistral_common import MistralCommonBackend
 
 from vllm.entrypoints.chat_utils import ChatCompletionMessageParam
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.logger import init_logger
 from vllm.tokenizers.protocol import TokenizerLike
-
-try:
-    # Transformers v5
-    from transformers.tokenization_mistral_common import MistralCommonBackend
-except ImportError:
-    # Transformers v4
-    from transformers.tokenization_mistral_common import (
-        MistralCommonTokenizer as MistralCommonBackend,
-    )
 
 if TYPE_CHECKING:
     import llguidance
@@ -194,6 +186,39 @@ def _tekken_token_to_id(tokenizer: "Tekkenizer", t: str | bytes) -> int:
             "Failed to convert token %s to id, replacing with <unk>", t_bytes
         )
         return tokenizer.unk_id
+
+
+def mistral_common_tekkenizer(tokenizer: object) -> "Tekkenizer | None":
+    """Return the underlying `Tekkenizer` for a `MistralCommonBackend`."""
+    mistral = getattr(tokenizer, "tokenizer", None)
+    instruct = getattr(mistral, "instruct_tokenizer", None)
+    tekken = getattr(instruct, "tokenizer", None)
+    return tekken if isinstance(tekken, Tekkenizer) else None
+
+
+def tekken_convert_ids_to_tokens(
+    tokenizer: "Tekkenizer", ids: Sequence[int]
+) -> list[str | bytes]:
+    """Convert ids to pieces, using raw `bytes` for byte-fallback tokens."""
+    tokens: list[str | bytes] = [tokenizer.id_to_piece(i) for i in ids]
+    if any("�" in t for t in tokens):
+        tokens = [
+            tokenizer.id_to_byte_piece(i, SpecialTokenPolicy.KEEP)
+            if i >= tokenizer.num_special_tokens
+            else tokenizer.decode([i], SpecialTokenPolicy.KEEP)
+            for i in ids
+        ]
+    return tokens
+
+
+def tekken_convert_tokens_to_string(
+    tokenizer: "Tekkenizer", tokens: Sequence[str | bytes]
+) -> str:
+    """Reassemble pieces from `tekken_convert_ids_to_tokens` into text."""
+    if any(isinstance(t, bytes) for t in tokens):
+        ids = [_tekken_token_to_id(tokenizer, t) for t in tokens]
+        return tokenizer.decode(ids, SpecialTokenPolicy.KEEP)
+    return "".join(cast(Sequence[str], tokens))
 
 
 class MistralTokenizer(TokenizerLike):
@@ -461,14 +486,8 @@ class MistralTokenizer(TokenizerLike):
                 if (t in to_decode_special_tokens or t not in self._special_tokens_set)
             ]
 
-            if any(isinstance(t, bytes) for t in tokens):
-                # we need to encode and decode all tokens again
-                ids = [_tekken_token_to_id(self.tokenizer, t) for t in tokens]
-                # We filtered unwanted special tokens before
-                # so we can decode the rest.
-                decoded = self.tokenizer.decode(ids, SpecialTokenPolicy.KEEP)
-            else:
-                decoded = "".join(tokens)
+            # We filtered unwanted special tokens before so we can decode the rest.
+            decoded = tekken_convert_tokens_to_string(self.tokenizer, tokens)
         else:
             # make sure certain special tokens like Tool calls are
             # not decoded

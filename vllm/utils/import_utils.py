@@ -417,6 +417,61 @@ def has_deep_ep() -> bool:
     return _has_module("deep_ep")
 
 
+DEEPEP_V2_MIN_NCCL_VERSION_RAW = 23004  # 2.30.4
+
+
+def _get_runtime_nccl_version() -> int | None:
+    """Get the runtime NCCL version by loading the actual library.
+
+    Returns the raw version int (e.g. 23004 for 2.30.4), or None on failure.
+    torch.cuda.nccl.version() is a compile-time constant from the PyTorch
+    wheel and does not reflect a separately installed NCCL.
+    """
+    import ctypes
+
+    try:
+        from vllm.utils.nccl import find_nccl_library
+
+        lib = ctypes.CDLL(find_nccl_library())
+        version = ctypes.c_int()
+        lib.ncclGetVersion(ctypes.byref(version))
+        return version.value
+    except Exception:
+        return None
+
+
+def _format_nccl_raw_version(raw: int) -> str:
+    s = str(raw)
+    return f"{s[0]}.{s[1:3].lstrip('0') or '0'}.{s[3:].lstrip('0') or '0'}"
+
+
+def has_deep_ep_v2() -> bool:
+    """Whether deep_ep with ElasticBuffer (v2 API) is available.
+
+    Requires both the ElasticBuffer class in the deep_ep module and
+    NCCL >= 2.30.4 (GIN backend), checked against the runtime library.
+    """
+    if not _has_module("deep_ep"):
+        return False
+    import deep_ep  # type: ignore[import-not-found]
+
+    if not hasattr(deep_ep, "ElasticBuffer"):
+        return False
+    try:
+        nccl_ver = _get_runtime_nccl_version()
+        if nccl_ver is None or nccl_ver < DEEPEP_V2_MIN_NCCL_VERSION_RAW:
+            logger.info_once(
+                "DeepEP v2 requires NCCL >= %s but found %s. "
+                "deepep_v2 backend will not be available.",
+                _format_nccl_raw_version(DEEPEP_V2_MIN_NCCL_VERSION_RAW),
+                _format_nccl_raw_version(nccl_ver) if nccl_ver else "unknown",
+            )
+            return False
+    except Exception:
+        return False
+    return True
+
+
 def has_deep_gemm() -> bool:
     """Whether the optional `deep_gemm` package is available.
 
@@ -430,6 +485,11 @@ def has_deep_gemm() -> bool:
 def has_nixl_ep() -> bool:
     """Whether the optional `nixl_ep` package is available."""
     return _has_module("nixl_ep")
+
+
+def is_numba_available() -> bool:
+    """Whether the optional `numba` package is available."""
+    return _has_module("numba")
 
 
 def has_triton_kernels() -> bool:
@@ -487,3 +547,8 @@ def has_fbgemm_gpu() -> bool:
 def has_cutedsl() -> bool:
     """Whether the optional `cutelass` package is available."""
     return _has_module("cutlass")
+
+
+def has_humming() -> bool:
+    """Whether the optional `humming` package is available."""
+    return _has_module("humming")

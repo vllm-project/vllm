@@ -44,6 +44,7 @@ from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.fused_moe import (
     FusedMoE,
+    MoERunner,
     fused_moe_make_expert_params_mapping,
 )
 from vllm.model_executor.layers.layernorm import RMSNorm
@@ -655,8 +656,6 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExpe
             self.model.make_empty_intermediate_tensors
         )
 
-        self.expert_weights = []
-
         # Set MoE hyperparameters
         moe_layers_indices = [
             i
@@ -670,7 +669,7 @@ class Ernie4_5_MoeForCausalLM(nn.Module, SupportsPP, SupportsLoRA, MixtureOfExpe
         self.num_moe_layers = len(moe_layers_indices)
         self.num_expert_groups = 1
 
-        self.moe_layers: list[FusedMoE] = []
+        self.moe_layers: list[MoERunner] = []
         example_moe = None
         for layer in self.model.layers:
             if isinstance(layer, PPMissingLayer):

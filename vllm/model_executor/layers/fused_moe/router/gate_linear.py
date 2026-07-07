@@ -14,7 +14,7 @@ from vllm.utils.torch_utils import direct_register_custom_op
 class GateLinear(ReplicatedLinear):
     """MoE gate linear layer with multi-tier GEMM dispatch:
 
-    1. DSV3 specialized kernel (SM90+, fp32 out, M<=16, H=7168, E=256/384)
+    1. DSV3 specialized kernel (SM90+, M<=16, H=7168 E=256/384, H=6144 E=256)
     2. fp32 specialized kernel  (SM90+, bf16/fp32 in, fp32 out,
        M<=32, H=3072, E=256)
     3. cuBLAS bf16×bf16→fp32 (SM90+ + bf16 weight + fp32 out_dtype)
@@ -25,13 +25,18 @@ class GateLinear(ReplicatedLinear):
     method which is only known later).
     """
 
-    # Dimensions supported by the DSV3 specialized kernel
+    # Dimensions supported by the DSV3 specialized kernel.
+    # Valid (hidden_size, num_experts) combinations:
+    #   (7168, 256) -> DeepSeek-V3,  (7168, 384) -> Kimi-K2,
+    #   (6144, 256) -> GLM-5
     DSV3_SUPPORTED_NUM_EXPERTS = [256, 384]
-    DSV3_SUPPORTED_HIDDEN_SIZES = [7168]
+    DSV3_SUPPORTED_HIDDEN_SIZES = [7168, 6144]
+    # num_experts=384 is only instantiated for hidden_size=7168.
+    DSV3_UNSUPPORTED_SHAPES = {(6144, 384)}
 
-    # Dimensions supported by the fp32 specialized kernel
-    FP32_SUPPORTED_NUM_EXPERTS = [256]
-    FP32_SUPPORTED_HIDDEN_SIZES = [3072]
+    # (hidden_size, num_experts) pairs with an instantiated fp32 kernel:
+    #   (3072, 256) -> MiniMax-M2/M2.5,  (6144, 128) -> MiniMax-M3
+    FP32_SUPPORTED_SHAPES = {(3072, 256), (6144, 128)}
     FP32_MAX_TOKENS = 32
 
     def __init__(
@@ -44,11 +49,10 @@ class GateLinear(ReplicatedLinear):
         force_fp32_compute: bool = False,
         prefix: str = "",
     ):
-        is_hopper_or_blackwell = current_platform.is_device_capability(
-            (9, 0)
-        ) or current_platform.is_device_capability_family(100)
+        is_hopper = current_platform.is_device_capability((9, 0))
+        is_blackwell = current_platform.is_device_capability_family(100)
         can_use_specialized_kernels = (
-            current_platform.is_cuda() and is_hopper_or_blackwell and not bias
+            current_platform.is_cuda() and (is_hopper or is_blackwell) and not bias
         )
 
         # If fp32 compute is required and no specialized kernel is available,
@@ -70,18 +74,22 @@ class GateLinear(ReplicatedLinear):
         self.allow_specialized_router_gemm = can_use_specialized_kernels
         self.allow_dsv3_router_gemm = (
             self.allow_specialized_router_gemm
+            and self.weight.dtype == torch.bfloat16
             and output_size in self.DSV3_SUPPORTED_NUM_EXPERTS
             and input_size in self.DSV3_SUPPORTED_HIDDEN_SIZES
+            and (input_size, output_size) not in self.DSV3_UNSUPPORTED_SHAPES
         )
+        # See https://github.com/vllm-project/vllm/pull/44217
+        # for more details.
+        self._dsv3_max_batch = 16 if is_hopper else 8
 
         # fp32 specialized kernel eligibility (SM90+, exact dims, fp32 weight)
         self.allow_fp32_router_gemm = (
             not bias
             and self.weight.dtype == torch.float32
             and current_platform.is_cuda()
-            and is_hopper_or_blackwell
-            and output_size in self.FP32_SUPPORTED_NUM_EXPERTS
-            and input_size in self.FP32_SUPPORTED_HIDDEN_SIZES
+            and (is_hopper or is_blackwell)
+            and (input_size, output_size) in self.FP32_SUPPORTED_SHAPES
         )
 
         # cuBLAS bf16→fp32 eligibility
@@ -112,7 +120,7 @@ class GateLinear(ReplicatedLinear):
         self, x: torch.Tensor
     ) -> torch.Tensor | tuple[torch.Tensor, Parameter | None]:
         # Tier 1: DSV3 specialized kernel
-        if self.allow_dsv3_router_gemm and x.shape[0] <= 16:
+        if self.allow_dsv3_router_gemm and x.shape[0] <= self._dsv3_max_batch:
             output = ops.dsv3_router_gemm(
                 hidden_states=x,
                 router_weight=self.weight,

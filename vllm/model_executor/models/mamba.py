@@ -26,7 +26,6 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsAttentionFree,
@@ -37,7 +36,7 @@ from vllm.sequence import IntermediateTensors
 
 from .utils import (
     AutoWeightsLoader,
-    is_pp_missing_parameter,
+    WeightsMapper,
     make_empty_intermediate_tensors_factory,
     make_layers,
     maybe_prefix,
@@ -170,28 +169,12 @@ class MambaModel(nn.Module):
 
         return hidden_states
 
-    def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        for name, loaded_weight in weights:
-            if "A_log" in name:
-                name = name.replace("A_log", "A")
-            # Skip loading extra bias for GPTQ models.
-            if name.endswith(".bias") and name not in params_dict:
-                continue
-            if is_pp_missing_parameter(name, self):
-                continue
-
-            param = params_dict[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
-
 
 class MambaForCausalLM(
     nn.Module, HasInnerState, IsAttentionFree, SupportsPP, SupportsMambaPrefixCaching
 ):
+    hf_to_vllm_mapper = WeightsMapper(orig_to_new_substr={".A_log": ".A"})
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         config = vllm_config.model_config.hf_config
 
@@ -279,4 +262,4 @@ class MambaForCausalLM(
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         loader = AutoWeightsLoader(self)
-        return loader.load_weights(weights)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)

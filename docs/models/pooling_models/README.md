@@ -2,8 +2,7 @@
 
 !!! note
     We currently support pooling models primarily for convenience. This is not guaranteed to provide any performance
-improvements over using Hugging Face Transformers or Sentence Transformers directly.
-
+    improvements over using Hugging Face Transformers or Sentence Transformers directly.
     We plan to optimize pooling models in vLLM. Please comment on <https://github.com/vllm-project/vllm/issues/21796> if you have any suggestions!
 
 ## What are pooling models?
@@ -63,7 +62,7 @@ please refer to [IO Processor Plugins](../../design/io_processor_plugins.md).
 
 !!! note
     Within classification tasks, there is a specialized subcategory: Cross-encoder (aka reranker) models. These models
-are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
+    are a subset of classification models that accept two prompts as input and output num_labels equal to 1.
 
 ### Pooling Types
 
@@ -143,7 +142,7 @@ enabling the corresponding APIs.
 
 The [classify][vllm.LLM.classify] method outputs a probability vector for each prompt.
 It is primarily designed for [classification models](classify.md).
-For more information about `LLM.embed`, see [this page](classify.md#offline-inference).
+For more information about `LLM.classify`, see [this page](classify.md#offline-inference).
 
 ### `LLM.embed`
 
@@ -184,7 +183,7 @@ Our online Server provides endpoints that correspond to the offline APIs:
 - Corresponding to `LLM.classify`:
     - [Classification API](classify.md#online-serving)(`/classify`)
 - Corresponding to `LLM.score`:
-    - [Score API](scoring.md#score-api)(`/score`)
+    - [Score API](scoring.md#score-api) (`/score`, `/v1/score`)
     - [Cohere Rerank API](scoring.md#rerank-api) (`/rerank`, `/v1/rerank`, `/v2/rerank`)
 - Pooling API (`/pooling`) is similar to `LLM.encode`, being applicable to all types of pooling models.
 
@@ -302,7 +301,7 @@ Pooling models now support token-wise task.
 
 ### Score task
 
-`score` task have has been removed in v0.21, use `classify` instead. Only when a classification model outputs num_labels
+`score` task has been removed in v0.21, use `classify` instead. Only when a classification model outputs num_labels
 equal to 1 can it be used as a scoring model and have its scoring API enabled.
 
 ### Pooling multitask support

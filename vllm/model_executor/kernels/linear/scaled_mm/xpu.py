@@ -5,25 +5,126 @@ from collections.abc import Sequence
 
 import torch
 
-from vllm.model_executor.kernels.linear import (  # noqa: E501
-    FP8ScaledMMLinearKernel,
-    FP8ScaledMMLinearLayerConfig,
-)
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    kFp8DynamicTensorSym,
+    kFp8DynamicTokenSym,
     kFp8StaticChannelSym,
     kFp8StaticTensorSym,
+    kFp8StaticTokenSym,
 )
 from vllm.model_executor.utils import replace_parameter
 from vllm.platforms import current_platform
 
+from .BlockScaledMMLinearKernel import Fp8BlockScaledMMLinearKernel
+from .ScaledMMLinearKernel import FP8ScaledMMLinearKernel, FP8ScaledMMLinearLayerConfig
 
-class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
+
+class XPUW8A8FP8LinearKernel(FP8ScaledMMLinearKernel):
+    _SUPPORTED_ACT_QUANT_KEYS = {
+        kFp8DynamicTensorSym,
+        kFp8DynamicTokenSym,
+        kFp8StaticTensorSym,
+        kFp8StaticTokenSym,
+    }
+    _SUPPORTED_WEIGHT_QUANT_KEYS = {
+        kFp8StaticChannelSym,
+        kFp8StaticTensorSym,
+    }
+
     @classmethod
     def is_supported(
         cls, compute_capability: int | None = None
     ) -> tuple[bool, str | None]:
         if not current_platform.is_xpu():
-            return False, "XPUFP8ScaledMM only support on XPU"
+            return False, "XPUW8A8FP8Linear only support on XPU"
+        return True, None
+
+    @classmethod
+    def can_implement(cls, c: FP8ScaledMMLinearLayerConfig) -> tuple[bool, str | None]:
+        if c.weight_quant_key not in cls._SUPPORTED_WEIGHT_QUANT_KEYS:
+            return (
+                False,
+                "XPUW8A8FP8Linear only support per-channel and per-tensor quantization",
+            )
+        if c.activation_quant_key not in cls._SUPPORTED_ACT_QUANT_KEYS:
+            return (
+                False,
+                "XPUW8A8FP8Linear only support per-tensor and per-token activation "
+                "quantization",
+            )
+        if c.weight_quant_key.dtype not in {torch.float8_e5m2, torch.float8_e4m3fn}:
+            return False, "XPUW8A8FP8Linear only support FP8 weight dtype"
+        if c.activation_quant_key.dtype not in {
+            torch.float8_e5m2,
+            torch.float8_e4m3fn,
+        }:
+            return False, "XPUW8A8FP8Linear only support FP8 activation dtype"
+        return True, None
+
+    def __init__(
+        self, c: FP8ScaledMMLinearLayerConfig, layer_param_names: Sequence[str]
+    ) -> None:
+        super().__init__(c, layer_param_names)
+
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+        """Ensure weight is stored as C-contiguous [K, N] (KN layout).
+
+        Checkpoints store weight as [N, K]; fp8_gemm requires [K, N],
+        C-contiguous.  Three incoming layouts are possible:
+          • [N, K] C-contiguous   ← direct checkpoint   → .t().contiguous()
+          • [K, N] Fortran-order  ← fp8.py's weight.t() → .contiguous()
+          • [K, N] C-contiguous   ← already correct     → no-op
+
+        For square weights (K == N) the shape is ambiguous; contiguity is used
+        as a proxy: C-contiguous ≡ checkpoint [N, K] (needs transpose);
+        Fortran-order ≡ fp8.py already transposed (needs only contiguous).
+        """
+        K = getattr(layer, "input_size_per_partition", self.config.weight_shape[1])
+        N = getattr(layer, "output_size_per_partition", self.config.weight_shape[0])
+        w = layer.weight
+
+        if w.shape not in {(K, N), (N, K)}:
+            raise ValueError(
+                f"XPUFP8ScaledMM expects weight shape ({K},{N}) or ({N},{K}), "
+                f"but got {tuple(w.shape)}"
+            )
+
+        needs_transpose = w.shape == (N, K) if K != N else w.is_contiguous()
+        layer_weight = w.t() if needs_transpose else w
+        replace_parameter(layer, "weight", layer_weight)
+        ws = layer.weight_scale
+        if ws.numel() == 1:
+            replace_parameter(layer, "weight_scale", ws.reshape(1))
+
+    def apply_scaled_mm(
+        self,
+        *,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        out_dtype: torch.dtype,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+        bias: torch.Tensor | None,
+        output_shape: list,
+    ) -> torch.Tensor:
+        # B is C-contiguous [K, N] from process_weights_after_loading.
+        # fp8_gemm routes on scale dtype (float32) and numel:
+        #   As [1]   → per-tensor  (numel==1 branch)
+        #   As [M,1] → per-token   (group={1,K} branch, broadcast across K)
+        #   Bs [1]   → per-tensor
+        #   Bs [N]   → per-channel (mask=bit1 branch)
+        # No shape manipulation needed here.
+        output = torch.ops._xpu_C.fp8_gemm(A, B, out_dtype, As, Bs, bias)
+        return output.view(*output_shape)
+
+
+class XPUW8A16FP8LinearKernel(FP8ScaledMMLinearKernel):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_xpu():
+            return False, "XPUW8A16FP8Linear only support on XPU"
         return True, None
 
     @classmethod
@@ -31,10 +132,11 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         if c.weight_quant_key not in {kFp8StaticChannelSym, kFp8StaticTensorSym}:
             return (
                 False,
-                "XPUFP8ScaledMM only support per-channel and per-tensor quantization",
+                "XPUW8A16FP8Linear only support per-channel and per-tensor "
+                "quantization",
             )
         if c.weight_quant_key.dtype not in {torch.float8_e5m2, torch.float8_e4m3fn}:
-            return False, "XPUFP8ScaledMM only support FP8 weight dtype"
+            return False, "XPUW8A16FP8Linear only support FP8 weight dtype"
         return True, None
 
     def __init__(
@@ -84,3 +186,31 @@ class XPUFP8ScaledMMLinearKernel(FP8ScaledMMLinearKernel):
         output_shape: list,
     ) -> torch.Tensor:
         pass
+
+
+class XPUFp8BlockScaledMMKernel(Fp8BlockScaledMMLinearKernel):
+    @classmethod
+    def is_supported(
+        cls, compute_capability: int | None = None
+    ) -> tuple[bool, str | None]:
+        if not current_platform.is_xpu():
+            return False, "XPUFp8BlockScaledMM only support on XPU"
+        return True, None
+
+    def apply_block_scaled_mm(
+        self,
+        A: torch.Tensor,
+        B: torch.Tensor,
+        As: torch.Tensor,
+        Bs: torch.Tensor,
+    ) -> torch.Tensor:
+        # Weight is [N, K]. Use .t() to create a [K, N] view without copying.
+        # Bs is [N/128, K/128] — transpose to [K/128, N/128] for oneDNN.
+        return torch.ops._xpu_C.fp8_gemm(
+            A,
+            B.t(),
+            self.config.out_dtype,
+            As,
+            Bs.t().contiguous(),
+            torch.Tensor(),
+        )

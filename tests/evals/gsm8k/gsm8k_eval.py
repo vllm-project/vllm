@@ -106,13 +106,47 @@ async def call_vllm_api(
             completion_tokens = result.get("usage", {}).get("completion_tokens", 0)
             return text, completion_tokens
     except Exception as e:
-        print(f"Error calling vLLM API: {e}")
+        print(f"Error calling vLLM API ({type(e).__name__}): {e}")
+        return "", 0
+
+
+async def call_vllm_chat_api(
+    session: aiohttp.ClientSession,
+    model: str,
+    prompt: str,
+    temperature: float,
+    max_tokens: int,
+    stop: list[str] | None = None,
+    url: str | None = None,
+    seed: int | None = None,
+) -> tuple[str, int]:
+    """Call vLLM's OpenAI-compatible chat completions endpoint."""
+    data = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stop": stop,
+    }
+    if seed is not None:
+        data["seed"] = seed
+
+    try:
+        async with session.post(f"{url}/v1/chat/completions", json=data) as response:
+            response.raise_for_status()
+            result = await response.json()
+            text = result["choices"][0]["message"]["content"] or ""
+            completion_tokens = result.get("usage", {}).get("completion_tokens", 0)
+            return text, completion_tokens
+    except Exception as e:
+        print(f"Error calling vLLM chat API ({type(e).__name__}): {e}")
         return "", 0
 
 
 def _build_gsm8k_prompts(
     num_questions: int = 1319,
     num_shots: int = 5,
+    gen_prefix: str = "",
 ) -> tuple[list[str], list[int]]:
     """Build few-shot GSM8K completion prompts and ground-truth labels."""
     if num_questions == 0:
@@ -124,14 +158,15 @@ def _build_gsm8k_prompts(
     for i in range(num_shots):
         few_shot_examples += (
             f"Question: {train_data[i]['question']}\n"
-            f"Answer: {train_data[i]['answer']}\n\n"
+            f"Answer:{gen_prefix} {train_data[i]['answer']}\n\n"
         )
 
     prompts = []
     labels = []
     for i in range(num_questions):
         prompts.append(
-            few_shot_examples + f"Question: {test_data[i]['question']}\nAnswer:"
+            few_shot_examples
+            + f"Question: {test_data[i]['question']}\nAnswer:{gen_prefix}"
         )
         labels.append(get_answer_value(test_data[i]["answer"]))
 
@@ -173,10 +208,14 @@ def evaluate_gsm8k(
     num_questions: int = 1319,
     num_shots: int = 5,
     max_tokens: int = 256,
+    model: str | None = None,
+    use_chat_completions: bool = False,
     host: str = "http://127.0.0.1",
     port: int = 8000,
     temperature: float = 0.0,
     seed: int | None = 42,
+    request_timeout_seconds: float = 600,
+    gen_prefix: str = "",
 ) -> dict[str, float | int]:
     """
     Evaluate GSM8K accuracy using vLLM serve endpoint.
@@ -184,7 +223,7 @@ def evaluate_gsm8k(
     Returns dict with accuracy, invalid_rate, latency, etc.
     """
     base_url = f"{host}:{port}"
-    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots)
+    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots, gen_prefix)
     num_questions = len(prompts)
 
     async def run_async_evaluation():
@@ -192,22 +231,36 @@ def evaluate_gsm8k(
         output_tokens: list[int] = [0] * num_questions
 
         async def get_answer(session: aiohttp.ClientSession, i: int) -> tuple[str, int]:
-            answer, tokens = await call_vllm_api(
-                session=session,
-                prompt=prompts[i],
-                temperature=temperature,
-                max_tokens=max_tokens,
-                stop=["Question", "Assistant:", "<|separator|>"],
-                url=base_url,
-                seed=seed,
-            )
+            stop = ["Question", "Assistant:", "<|separator|>"]
+            if use_chat_completions:
+                if model is None:
+                    raise ValueError("model is required for chat completions")
+                answer, tokens = await call_vllm_chat_api(
+                    session=session,
+                    model=model,
+                    prompt=prompts[i],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stop=stop,
+                    url=base_url,
+                    seed=seed,
+                )
+            else:
+                answer, tokens = await call_vllm_api(
+                    session=session,
+                    prompt=prompts[i],
+                    temperature=temperature,
+                    max_tokens=max_tokens,
+                    stop=stop,
+                    url=base_url,
+                    seed=seed,
+                )
             states[i] = answer
             output_tokens[i] = tokens
             return answer, tokens
 
-        async with aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=600)
-        ) as session:
+        timeout = aiohttp.ClientTimeout(total=request_timeout_seconds)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
             tasks = [get_answer(session, i) for i in range(num_questions)]
             await tqdm.gather(*tasks, desc="Evaluating")
 
@@ -228,6 +281,7 @@ def evaluate_gsm8k_offline(
     num_shots: int = 5,
     max_tokens: int = 256,
     temperature: float = 0.0,
+    gen_prefix: str = "",
 ) -> dict[str, float | int]:
     """Evaluate GSM8K accuracy using an offline vllm.LLM object.
 
@@ -236,7 +290,7 @@ def evaluate_gsm8k_offline(
     """
     from vllm import SamplingParams
 
-    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots)
+    prompts, labels = _build_gsm8k_prompts(num_questions, num_shots, gen_prefix)
 
     sampling_params = SamplingParams(
         temperature=temperature,

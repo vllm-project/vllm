@@ -326,39 +326,6 @@ VLM_TEST_SETTINGS = {
             large_gpu_mark(min_gb=64),
         ],
     ),
-    "aya_vision": VLMTestInfo(
-        models=["CohereLabs/aya-vision-8b"],
-        test_type=(VLMTestType.IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",  # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts(
-            {
-                "stop_sign": "<image>What's the content in the center of the image?",
-                "cherry_blossom": "<image>What is the season?",
-            }
-        ),
-        multi_image_prompt="<image><image>Describe the two images in detail.",
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}},
-    ),
-    "aya_vision-multi_image": VLMTestInfo(
-        models=["CohereLabs/aya-vision-8b"],
-        test_type=(VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|START_OF_TURN_TOKEN|><|USER_TOKEN|>{img_prompt}<|END_OF_TURN_TOKEN|><|START_OF_TURN_TOKEN|><|CHATBOT_TOKEN|>",  # noqa: E501
-        single_image_prompts=IMAGE_ASSETS.prompts(
-            {
-                "stop_sign": "<image>What's the content in the center of the image?",
-                "cherry_blossom": "<image>What is the season?",
-            }
-        ),
-        multi_image_prompt="<image><image>Describe the two images in detail.",
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        vllm_runner_kwargs={"mm_processor_kwargs": {"crop_to_patches": True}},
-        marks=[large_gpu_mark(min_gb=32)],
-    ),
     "blip2": VLMTestInfo(
         models=["Salesforce/blip2-opt-2.7b"],
         test_type=VLMTestType.IMAGE,
@@ -604,8 +571,6 @@ VLM_TEST_SETTINGS = {
         models=[
             "OpenGVLab/InternVL2-1B",
             "OpenGVLab/InternVL2-2B",
-            # FIXME: Config cannot be loaded in transformers 4.52
-            # "OpenGVLab/Mono-InternVL-2B",
         ],
         test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
         prompt_formatter=lambda img_prompt: f"<|im_start|>User\n{img_prompt}<|im_end|>\n<|im_start|>Assistant\n",  # noqa: E501
@@ -765,16 +730,6 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         vllm_output_post_proc=model_utils.llava_video_vllm_to_hf_output,
     ),
-    "mantis": VLMTestInfo(
-        models=["TIGER-Lab/Mantis-8B-siglip-llama3"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"<|start_header_id|>user<|end_header_id|>\n\n{img_prompt}<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n",  # noqa: E501
-        max_model_len=4096,
-        get_stop_token_ids=lambda tok: [128009],
-        auto_cls=AutoModelForImageTextToText,
-        vllm_output_post_proc=model_utils.mantis_vllm_to_hf_output,
-        patch_hf_runner=model_utils.mantis_patch_hf_runner,
-    ),
     "minicpmv_25": VLMTestInfo(
         models=["openbmb/MiniCPM-Llama3-V-2_5"],
         test_type=VLMTestType.IMAGE,
@@ -811,29 +766,6 @@ VLM_TEST_SETTINGS = {
         ),
         hf_output_post_proc=model_utils.minicpmv_trunc_hf_output,
         patch_hf_runner=model_utils.minicpmv_26_patch_hf_runner,
-    ),
-    "minimax_vl_01": VLMTestInfo(
-        models=["MiniMaxAI/MiniMax-VL-01"],
-        prompt_formatter=lambda img_prompt: f"<beginning_of_sentence>user: {img_prompt} assistant:<end_of_sentence>",  # noqa: E501
-        img_idx_to_prompt=lambda _: "<image>",
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        max_model_len=8192,
-        max_num_seqs=4,
-        dtype="bfloat16",
-        hf_output_post_proc=model_utils.minimax_vl_01_hf_output,
-        patch_hf_runner=model_utils.minimax_vl_01_patch_hf_runner,
-        auto_cls=AutoModelForImageTextToText,
-        marks=[
-            large_gpu_mark(min_gb=80),
-            # TODO: [ROCm] Fix pickle issue with ROCm spawn and tp>1
-            pytest.mark.skipif(
-                current_platform.is_rocm(),
-                reason=(
-                    "ROCm: Model too large for single GPU; "
-                    "multi-GPU blocked by HF _LazyConfigMapping pickle issue with spawn"
-                ),
-            ),
-        ],
     ),
     "molmo": VLMTestInfo(
         models=["allenai/Molmo-7B-D-0924"],
@@ -974,17 +906,6 @@ VLM_TEST_SETTINGS = {
         max_model_len=4096,
         use_tokenizer_eos=True,
         auto_cls=AutoModelForImageTextToText,
-        hf_model_kwargs=model_utils.qianfan_ocr_hf_model_kwargs("baidu/Qianfan-OCR"),
-    ),
-    "qwen_vl": VLMTestInfo(
-        models=["Qwen/Qwen-VL"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=identity,
-        img_idx_to_prompt=lambda idx: f"Picture {idx}: <img></img>\n",
-        max_model_len=1024,
-        max_num_seqs=2,
-        vllm_output_post_proc=model_utils.qwen_vllm_to_hf_output,
-        prompt_path_encoder=model_utils.qwen_prompt_path_encoder,
     ),
     "qwen2_vl": VLMTestInfo(
         models=["Qwen/Qwen2-VL-2B-Instruct"],
@@ -1027,31 +948,6 @@ VLM_TEST_SETTINGS = {
         auto_cls=AutoModelForImageTextToText,
         hf_output_post_proc=model_utils.smolvlm_trunc_hf_output,
         num_logprobs=10,
-    ),
-    "tarsier": VLMTestInfo(
-        models=["omni-research/Tarsier-7b"],
-        test_type=(VLMTestType.IMAGE, VLMTestType.MULTI_IMAGE),
-        prompt_formatter=lambda img_prompt: f"USER: {img_prompt} ASSISTANT:",
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        patch_hf_runner=model_utils.tarsier_patch_hf_runner,
-    ),
-    "tarsier2": VLMTestInfo(
-        models=["omni-research/Tarsier2-Recap-7b"],
-        test_type=(
-            VLMTestType.IMAGE,
-            VLMTestType.MULTI_IMAGE,
-            VLMTestType.VIDEO,
-        ),
-        prompt_formatter=lambda img_prompt: f"<|im_start|>system\nYou are a helpful assistant.<|im_end|>\n<|im_start|>user\n{img_prompt}<|im_end|>\n<|im_start|>assistant\n",  # noqa: E501
-        img_idx_to_prompt=lambda idx: "<|vision_start|><|image_pad|><|vision_end|>",
-        video_idx_to_prompt=lambda idx: "<|vision_start|><|video_pad|><|vision_end|>",
-        max_model_len=4096,
-        max_num_seqs=2,
-        auto_cls=AutoModelForImageTextToText,
-        image_size_factors=[(0.25,), (0.25, 0.25, 0.25), (0.25, 0.2, 0.15)],
-        marks=[pytest.mark.skip("Model initialization hangs")],
     ),
     ### Tensor parallel / multi-gpu broadcast tests
     "chameleon-broadcast": VLMTestInfo(

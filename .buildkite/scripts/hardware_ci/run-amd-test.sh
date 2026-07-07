@@ -28,8 +28,21 @@
 ###############################################################################
 set -o pipefail
 
-# Export Python path
-export PYTHONPATH=".."
+: "${BUILDKIT_PROGRESS:=plain}"
+: "${TERM:=xterm-256color}"
+: "${FORCE_COLOR:=1}"
+: "${CLICOLOR_FORCE:=1}"
+: "${PY_COLORS:=1}"
+: "${ROCM_DOCKER_TTY:=1}"
+if [[ " ${PYTEST_ADDOPTS:-} " != *" --color"* ]]; then
+  PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--color=yes"
+fi
+export BUILDKIT_PROGRESS TERM FORCE_COLOR CLICOLOR_FORCE PY_COLORS PYTEST_ADDOPTS ROCM_DOCKER_TTY
+
+# Export Python path for commands that run directly on the host. Containerized
+# tests set this to /vllm-workspace below so spawned Python processes do not
+# depend on their current working directory.
+export PYTHONPATH="${PYTHONPATH:-..}"
 
 ###############################################################################
 # Helper Functions
@@ -147,6 +160,7 @@ EOF
   echo "--- Building local ROCm test image"
   docker build \
     --pull=false \
+    --progress "${BUILDKIT_PROGRESS}" \
     --build-arg "BASE_IMAGE=${base_image}" \
     -t "${artifact_image}" \
     "${context_dir}" || return 1
@@ -365,6 +379,20 @@ remove_docker_container() {
 }
 trap remove_docker_container EXIT
 
+# python_only_compile.sh runs `python setup.py develop` and needs the full repo tree
+# under /vllm-workspace (Dockerfile.rocm test stage: mkdir src && mv vllm).
+# The ROCm wheel artifact tarball only ships a thin tree (tests, etc.), so
+# artifact images cannot satisfy that test — use the full rocm/vllm-ci image.
+_cmd_probe="${VLLM_TEST_COMMANDS:-}"
+if [[ -z "${_cmd_probe}" ]]; then
+  _cmd_probe="$*"
+fi
+if [[ "${VLLM_CI_USE_ARTIFACTS:-0}" == "1" && "${_cmd_probe}" == *python_only_compile.sh* ]]; then
+  echo "INFO: disabling VLLM_CI_USE_ARTIFACTS for python_only_compile (requires full /vllm-workspace tree)"
+  export VLLM_CI_USE_ARTIFACTS=0
+fi
+unset -v _cmd_probe
+
 if ! prepare_artifact_image; then
   echo "Using full ROCm CI image: ${image_name}"
   docker pull "${image_name}" || exit 1
@@ -376,6 +404,14 @@ echo "--- Running container"
 HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p "${HF_CACHE}"
 HF_MOUNT="/root/.cache/huggingface"
+
+# Hugging Face Hub defaults to 10s request/download timeouts, while the ROCm
+# CI image currently raises downloads to 60s. AMD model-test jobs routinely
+# start from a cold or partially-populated shared cache, and the 60s read cap
+# has still timed out before pytest reached the vLLM behavior under test.
+# Keep the CI default explicit and overridable from the Buildkite environment.
+: "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
+: "${HF_HUB_ETAG_TIMEOUT:=60}"
 
 # ---- Command source selection ----
 # Prefer VLLM_TEST_COMMANDS (preserves all inner quoting intact).
@@ -416,7 +452,34 @@ fi
 
 echo "Final commands: $commands"
 
-MYPYTHONPATH=".."
+# The ROCm test image often ships /vllm-workspace without .git (artifact tarball unpack).
+# tests/standalone_tests/python_only_compile.sh uses merge-base(HEAD, origin/main) for
+# wheels.vllm.ai; compute on the agent (full git checkout) and pass into the container.
+vllm_standalone_merge_base=""
+checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
+if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
+  checkout="."
+fi
+# Pass safe.directory per-command (-c) because buildkite runs will always fail
+# the next check on git 2.35.2+ due to mixed uses of root and buildkite-agent/uids.
+if git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  vllm_standalone_merge_base="$(
+    git -c "safe.directory=${checkout}" -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
+  )"
+fi
+if [[ -z "${vllm_standalone_merge_base}" ]]; then
+  vllm_standalone_merge_base="${BUILDKITE_COMMIT:-}"
+fi
+echo "INFO: passing VLLM_STANDALONE_MERGE_BASE into container: ${vllm_standalone_merge_base}"
+
+MYPYTHONPATH="/vllm-workspace"
+
+container_job_id="${BUILDKITE_JOB_ID:-${BUILDKITE_PARALLEL_JOB:-0}}"
+container_job_id="${container_job_id//[^A-Za-z0-9_.-]/_}"
+container_job_id_short="${container_job_id:0:8}"
+CONTAINER_TMPDIR="/tmp/vllm-${container_job_id_short}"
+CONTAINER_CACHE_ROOT="/tmp/vllm-buildkite-${container_job_id}/cache"
+CONTAINER_PREFLIGHT="mkdir -p \"\$TMPDIR\" \"\$TORCHINDUCTOR_CACHE_DIR\" \"\$TRITON_CACHE_DIR\" \"\$VLLM_CACHE_ROOT\" \"\$XDG_CACHE_HOME\" && python -c \"import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing\""
 
 # Verify GPU access
 render_gid=$(getent group render | cut -d: -f3)
@@ -484,26 +547,62 @@ if is_multi_node "$commands"; then
 else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+  docker_run_terminal_args=(-i)
+  if [[ "${ROCM_DOCKER_TTY}" == "1" ]]; then
+    docker_run_terminal_args+=(-t)
+    echo "Docker interactive stdin: enabled; TTY allocation: enabled"
+  else
+    echo "Docker interactive stdin: enabled; TTY allocation: disabled"
+  fi
+
+  ulimit_core_hard=$(ulimit -H -c)
+  if [[ "$ulimit_core_hard" == "unlimited" ]]; then
+    # docker run can't pass "unlimited" to --ulimit
+    ulimit_core_hard="-1"
+  fi
+   # Disable core dumps in the ROCm test container unless the ROCm debug agent is enabled
+  coredump_flags="--ulimit core=0:$ulimit_core_hard"
+  if [[ "$commands" == *"ROCm debug agent enabled"* ]]; then
+    # Works around https://github.com/rocm/rocm-systems/issues/6206
+    coredump_flags='-e HSA_COREDUMP_PATTERN="/tmp/gpucore.%p"'
+  else
+    echo "ROCm debug agent not enabled, coredumps are disabled in the test container."
+  fi
 
   docker run \
+    "${docker_run_terminal_args[@]}" \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
     --network=host \
     --shm-size=16gb \
     --group-add "$render_gid" \
     --rm \
+    $coredump_flags \
     -e HF_TOKEN \
+    -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
+    -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \
     -e AWS_ACCESS_KEY_ID \
     -e AWS_SECRET_ACCESS_KEY \
     -e BUILDKITE_PARALLEL_JOB \
     -e BUILDKITE_PARALLEL_JOB_COUNT \
+    -e TERM \
+    -e FORCE_COLOR \
+    -e CLICOLOR_FORCE \
+    -e PY_COLORS \
+    -e PYTEST_ADDOPTS \
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
+    -e "TMPDIR=${CONTAINER_TMPDIR}/tmp" \
+    -e "TORCHINDUCTOR_CACHE_DIR=${CONTAINER_CACHE_ROOT}/torchinductor" \
+    -e "TRITON_CACHE_DIR=${CONTAINER_CACHE_ROOT}/triton" \
+    -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \
+    -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
+    -e "VLLM_STANDALONE_MERGE_BASE=${vllm_standalone_merge_base}" \
     --name "${container_name}" \
     "${image_name}" \
-    /bin/bash -c "${commands}"
+    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
 
   exit_code=$?
   handle_pytest_exit "$exit_code"

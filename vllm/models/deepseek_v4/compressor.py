@@ -104,12 +104,9 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CompressorMetadata:
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        num_reqs = common_attn_metadata.num_reqs
-        query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        x = torch.repeat_interleave(torch.arange(num_reqs), query_lens).pin_memory()
-        token_to_req_indices = self.token_to_req_indices[: x.shape[0]]
-        token_to_req_indices.copy_(x, non_blocking=True)
+        token_to_req_indices = common_attn_metadata.token_to_req_indices(
+            self.token_to_req_indices
+        )
         return CompressorMetadata(
             block_table=common_attn_metadata.block_table_tensor.clamp_(min=0),
             slot_mapping=common_attn_metadata.slot_mapping,
@@ -155,13 +152,17 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
             raise ValueError(f"Invalid compress ratio: {compress_ratio}")
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
+        # fp8_ds_mla is the UE8M0 paged layout and needs 576B alignment. Plain
+        # full-cache rows share state pages with contiguous KV pages, so padding
+        # would break page matching.
+        uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
         return SlidingWindowMLASpec(  # only has one vector instead of K + V
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=self.state_dim,
             dtype=self.dtype,
             sliding_window=self.sliding_window,
-            alignment=576,  # NOTE: FlashMLA requires 576B alignment
+            alignment=576 if uses_fp8_ds_mla_layout else None,
         )
 
     def forward(self): ...
@@ -333,26 +334,40 @@ class DeepseekCompressor(nn.Module):
         # - position used: (positions // compress_ratio) * compress_ratio
         cos_sin_cache = rotary_emb.cos_sin_cache
         k_cache_metadata = cast(Any, attn_metadata[self.k_cache_prefix])
-        kv_cache = self._static_forward_context[self.k_cache_prefix].kv_cache
+        k_cache_layer = self._static_forward_context[self.k_cache_prefix]
+        kv_cache = k_cache_layer.kv_cache
 
-        if current_platform.is_cuda():
-            # NVIDIA GPUs.
-            if self.head_dim == 512:
-                from .nvidia.ops.sparse_attn_compress_cutedsl import (
-                    compress_norm_rope_store_cutedsl,
-                )
+        # Plain-row V4 reads a contiguous bf16 / per-tensor fp8 cache row; the
+        # fp8_ds_mla path uses the UE8M0 paged uint8 layout.
+        store_full_kv = self.head_dim == 512 and kv_cache.dtype != torch.uint8
+        store_full_fp8 = kv_cache.dtype == torch.float8_e4m3fn
+        fp8_scale = (
+            getattr(k_cache_layer, "_flashinfer_fp8_kv_scale", None)
+            if store_full_fp8
+            else None
+        )
 
-                # Main compressor path.
-                # Use a cutedsl kernel for better performance.
-                compress_norm_rope_store_fn = compress_norm_rope_store_cutedsl
-            else:
-                # Indexer path (head_dim == 128).
-                # Use a triton kernel.
-                compress_norm_rope_store_fn = compress_norm_rope_store_triton
+        # cutedsl (head=512) accepts the full-cache flags; triton (indexer/AMD)
+        # does not, so the two callables have different signatures.
+        compress_norm_rope_store_fn: Any
+        if current_platform.is_cuda() and self.head_dim == 512:
+            from .nvidia.ops.sparse_attn_compress_cutedsl import (
+                compress_norm_rope_store_cutedsl,
+            )
+
+            # head=512 on CUDA always uses cutedsl, for both the fp8_ds_mla
+            # layout and the plain full-cache layout. The full-cache flags
+            # are consumed only here.
+            compress_norm_rope_store_fn = compress_norm_rope_store_cutedsl
+            extra_kwargs: dict[str, Any] = dict(
+                store_full_kv=store_full_kv,
+                store_full_fp8=store_full_fp8,
+                fp8_scale=fp8_scale,
+            )
         else:
-            # AMD GPUs.
-            # Always use a triton kernel.
+            # Indexer path (head_dim == 128) or non-CUDA GPUs (AMD, XPU, etc.).
             compress_norm_rope_store_fn = compress_norm_rope_store_triton
+            extra_kwargs = {}
 
         compress_norm_rope_store_fn(
             state_cache=state_cache,
@@ -377,4 +392,5 @@ class DeepseekCompressor(nn.Module):
             quant_block=self._quant_block,
             token_stride=self._token_stride,
             scale_dim=self._scale_dim,
+            **extra_kwargs,
         )

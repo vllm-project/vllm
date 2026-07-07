@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -36,20 +37,63 @@ def tokenizer():
     return get_tokenizer("Qwen/Qwen3-32B")
 
 
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "get_weather",
+            "parameters": {"type": "object", "properties": {}},
+        },
+    }
+]
+
+
+KIMI_K2_MODEL_CONFIG = SimpleNamespace(
+    hf_text_config=SimpleNamespace(model_type="kimi_k2"),
+    hf_overrides=None,
+)
+
+HISTORY_MESSAGES = [
+    {"role": "user", "content": "first"},
+    {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": "functions.get_current_weather:0",
+                "type": "function",
+                "function": {
+                    "name": "get_current_weather",
+                    "arguments": "{}",
+                },
+            }
+        ],
+    },
+    {
+        "role": "tool",
+        "tool_call_id": "functions.get_current_weather:0",
+        "content": "{}",
+    },
+    {"role": "user", "content": "again"},
+]
+
+
 @pytest.fixture
 def request_obj():
     return ChatCompletionRequest(
         model="test-model",
         messages=[{"role": "user", "content": "hi"}],
+        tools=TOOLS,
+        tool_choice="auto",
     )
 
 
-def make_parser(tokenizer, reasoning=False, tool=False):
+def make_parser(tokenizer, reasoning=False, tool=False, **kwargs):
     class TestParser(DelegatingParser):
         reasoning_parser_cls = ThinkReasoningParser if reasoning else None
         tool_parser_cls = Hermes2ProToolParser if tool else None
 
-    return TestParser(tokenizer)
+    return TestParser(tokenizer, **kwargs)
 
 
 def stream_text(parser, tokenizer, text, request, prompt_token_ids=None):
@@ -58,7 +102,11 @@ def stream_text(parser, tokenizer, text, request, prompt_token_ids=None):
     for tid in token_ids:
         delta_text = tokenizer.decode([tid])
         result = parser.parse_delta(
-            delta_text, [tid], request, prompt_token_ids=prompt_token_ids
+            delta_text,
+            [tid],
+            request,
+            prompt_token_ids=prompt_token_ids,
+            finished=False,
         )
         prompt_token_ids = None
         results.append(result)
@@ -146,7 +194,11 @@ def stream_chunks(parser, tokenizer, chunks, request_obj):
     for chunk in chunks:
         delta_text = tokenizer.decode(chunk)
         result = parser.parse_delta(
-            delta_text, chunk, request_obj, prompt_token_ids=prompt_token_ids
+            delta_text,
+            chunk,
+            request_obj,
+            prompt_token_ids=prompt_token_ids,
+            finished=False,
         )
         prompt_token_ids = None
         results.append(result)
@@ -320,3 +372,100 @@ def test_parse_delta_finished_appends_remaining_args(tokenizer, request_obj):
         tc.function.arguments for tc in tool_calls if tc.function.arguments
     )
     assert tool_args.endswith(remainder)
+
+
+def test_parse_delta_tool_choice_none(tokenizer, request_obj):
+    parser = make_parser(tokenizer, reasoning=False, tool=True)
+    request = request_obj.model_copy(update={"tool_choice": "none"})
+    results = stream_text(parser, tokenizer, MODEL_OUTPUT, request, prompt_token_ids=[])
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert reasoning == ""
+    assert len(tool_calls) == 0
+    assert "<tool_call>" in content
+    assert "get_weather" in content
+
+
+def test_parse_delta_tool_choice_none_with_reasoning(tokenizer, request_obj):
+    parser = make_parser(tokenizer, reasoning=True, tool=True)
+    request = request_obj.model_copy(update={"tool_choice": "none"})
+    results = stream_text(parser, tokenizer, MODEL_OUTPUT, request, prompt_token_ids=[])
+    reasoning, content, tool_calls = collect_fields(results)
+
+    assert "let me think about this" in reasoning
+    assert len(tool_calls) == 0
+    assert "<tool_call>" in content
+    assert "get_weather" in content
+
+
+def test_parse_delta_required_tool_choice_kimi_k2_ids(tokenizer, request_obj):
+    parser = make_parser(
+        tokenizer, reasoning=False, tool=True, model_config=KIMI_K2_MODEL_CONFIG
+    )
+    request = request_obj.model_copy(update={"tool_choice": "required"})
+    output = json.dumps(
+        [
+            {
+                "name": "get_current_weather",
+                "parameters": {"city": "Dallas"},
+            }
+        ]
+    )
+
+    results: list[DeltaMessage | None] = []
+    prompt_token_ids: list[int] | None = []
+    for i in range(0, len(output), 3):
+        chunk = output[i : i + 3]
+        results.append(
+            parser.parse_delta(
+                chunk,
+                [],
+                request,
+                prompt_token_ids=prompt_token_ids,
+                finished=False,
+            )
+        )
+        prompt_token_ids = None
+
+    _, content, tool_calls = collect_fields(results)
+    assert content == ""
+    assert any(tc.id == "functions.get_current_weather:0" for tc in tool_calls)
+    assert all(tc.id in (None, "functions.get_current_weather:0") for tc in tool_calls)
+
+
+def test_parse_delta_required_tool_choice_kimi_k2_ids_after_history(
+    tokenizer, request_obj
+):
+    parser = make_parser(
+        tokenizer, reasoning=False, tool=True, model_config=KIMI_K2_MODEL_CONFIG
+    )
+    request = request_obj.model_copy(
+        update={"messages": HISTORY_MESSAGES, "tool_choice": "required"}
+    )
+    output = json.dumps(
+        [
+            {
+                "name": "get_current_weather",
+                "parameters": {"city": "Dallas"},
+            }
+        ]
+    )
+
+    results: list[DeltaMessage | None] = []
+    prompt_token_ids: list[int] | None = []
+    for i in range(0, len(output), 3):
+        chunk = output[i : i + 3]
+        results.append(
+            parser.parse_delta(
+                chunk,
+                [],
+                request,
+                prompt_token_ids=prompt_token_ids,
+                finished=False,
+            )
+        )
+        prompt_token_ids = None
+
+    _, _, tool_calls = collect_fields(results)
+    assert any(tc.id == "functions.get_current_weather:1" for tc in tool_calls)
+    assert all(tc.id in (None, "functions.get_current_weather:1") for tc in tool_calls)
