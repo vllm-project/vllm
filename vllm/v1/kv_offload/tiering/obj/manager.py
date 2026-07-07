@@ -105,7 +105,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         store_config: dict,
         prefix: str = "",
         io_threads: int = 4,
-        enable_kv_cache_events: bool = False,
+        enable_secondary_tier_events: bool = False,
     ):
         """
         Args:
@@ -115,7 +115,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
             store_config: Object store connection parameters (see ObjStoreConfig).
             prefix: Key prefix prepended to all object keys.
             io_threads: Number of NIXL I/O threads.
-            enable_kv_cache_events: Emit BlockStored KV events for blocks
+            enable_secondary_tier_events: Emit BlockStored KV events for blocks
                 successfully stored to this tier. Effective only when KV
                 cache events are enabled globally (kv_events_config).
         """
@@ -123,14 +123,14 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
 
         self.medium: str = MEDIUM_OBJ
         self.events: list[OffloadingEvent] | None = None
-        if enable_kv_cache_events:
+        if enable_secondary_tier_events:
             if offloading_spec.kv_events_config.enable_kv_cache_events:
                 self.events = []
             else:
                 logger.warning(
-                    "enable_kv_cache_events is set on secondary tier '%s' but KV "
-                    "cache events are disabled globally; the tier will not "
-                    "emit events.",
+                    "enable_secondary_tier_events is set on secondary "
+                    "tier '%s' but KV cache events are disabled globally; "
+                    "the tier will not emit events.",
                     tier_type,
                 )
         # Keys of in-flight store jobs, tracked only when events are enabled.
