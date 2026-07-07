@@ -56,7 +56,11 @@ from vllm.v1.attention.backends.mla.indexer import (
     get_max_prefill_buffer_size,
 )
 from vllm.v1.attention.backends.mla.sparse_swa import DeepseekV4SWACache
-from vllm.v1.kv_cache_interface import KVCacheSpec, MLAAttentionSpec
+from vllm.v1.kv_cache_interface import (
+    KVCacheSpec,
+    MLAAttentionSpec,
+    get_kv_quant_mode,
+)
 
 logger = init_logger(__name__)
 
@@ -616,6 +620,7 @@ class DeepseekV4Attention(nn.Module, AttentionLayerBase, ABC):
             cache_dtype_str=self.kv_cache_dtype,
             alignment=576 if uses_fp8_ds_mla_layout else None,
             model_version="deepseek_v4",
+            kv_quant_mode=get_kv_quant_mode(self.kv_cache_dtype),
         )
 
 
