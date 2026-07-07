@@ -518,6 +518,7 @@ class ChunkedLocalAttentionSpec(AttentionSpec):
 class SlidingWindowSpec(AttentionSpec):
     sliding_window: int
     head_size_v: int = None  # type: ignore[assignment]
+    num_speculative_tokens: int = 0
 
     def __post_init__(self):
         if self.head_size_v is None:

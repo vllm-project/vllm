@@ -658,6 +658,11 @@ class Attention(nn.Module, AttentionLayerBase):
                 dtype=self.kv_cache_torch_dtype,
                 kv_quant_mode=quant_mode,
                 sliding_window=self.sliding_window,
+                num_speculative_tokens=(
+                    vllm_config.speculative_config.num_speculative_tokens
+                    if vllm_config.speculative_config
+                    else 0
+                ),
                 page_size_padded=shared_page,
             )
         elif self.kv_cache_dtype.startswith("turboquant_"):

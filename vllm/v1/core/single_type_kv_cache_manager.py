@@ -670,6 +670,7 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
     def __init__(self, kv_cache_spec: SlidingWindowSpec, **kwargs) -> None:
         super().__init__(kv_cache_spec, **kwargs)
         self.sliding_window = kv_cache_spec.sliding_window
+        self.num_speculative_tokens = kv_cache_spec.num_speculative_tokens
 
     @classmethod
     def _contiguous_blocks_for_hit(
@@ -861,7 +862,15 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         Returns:
             The number of tokens that will be skipped for attention computation.
         """
-        return max(0, num_computed_tokens - self.sliding_window + 1)
+        # NOTE: During async scheduling, num_computed_tokens contains the number of
+        # tokens drafted during the previous step, some of which may be rejected later.
+        # To avoid overestimating the sequence length (and freeing blocks that are
+        # actually needed) num_speculative_tokens is subtracted from
+        # num_computed_tokens.
+        return max(
+            0,
+            num_computed_tokens - self.num_speculative_tokens - self.sliding_window + 1,
+        )
 
     def get_num_common_prefix_blocks(self, running_request_id: str) -> int:
         """
