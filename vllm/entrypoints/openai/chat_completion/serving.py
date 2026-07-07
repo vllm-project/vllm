@@ -22,6 +22,7 @@ from vllm.entrypoints.chat_utils import (
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     GenerationError,
+    build_per_request_timing_metrics,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -41,6 +42,7 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     FunctionCall,
+    PerRequestTimingMetrics,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     ToolCall,
@@ -123,6 +125,7 @@ class OpenAIServingChat(GenerateBaseServing):
         enable_log_outputs: bool = False,
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        enable_per_request_metrics: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -161,6 +164,7 @@ class OpenAIServingChat(GenerateBaseServing):
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        self.enable_per_request_metrics = enable_per_request_metrics
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
         self.override_max_tokens = (
@@ -461,8 +465,10 @@ class OpenAIServingChat(GenerateBaseServing):
             stream_options, self.enable_force_include_usage
         )
 
+        last_res: RequestOutput | None = None
         try:
             async for res in result_generator:
+                last_res = res
                 if res.prompt_token_ids is not None:
                     num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
@@ -752,6 +758,21 @@ class OpenAIServingChat(GenerateBaseServing):
                     mm_token_counts,
                 )
 
+                # In streaming, metrics ride on this final usage chunk, which is
+                # only emitted when usage reporting is enabled (i.e.
+                # ``stream_options.include_usage=true`` or
+                # ``--enable-force-include-usage``).
+                stream_per_request_metrics: PerRequestTimingMetrics | None = None
+                if (
+                    self.enable_per_request_metrics
+                    # See note in chat_completion_full_generator: suppress for n>1.
+                    and (request.n or 1) == 1
+                ):
+                    last_metrics = last_res.metrics if last_res is not None else None
+                    stream_per_request_metrics = build_per_request_timing_metrics(
+                        last_metrics, completion_tokens
+                    )
+
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
                     object=chunk_object_type,
@@ -760,6 +781,7 @@ class OpenAIServingChat(GenerateBaseServing):
                     model=model_name,
                     usage=final_usage,
                     system_fingerprint=self.system_fingerprint,
+                    metrics=stream_per_request_metrics,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=True, exclude_none=True
@@ -1003,6 +1025,18 @@ class OpenAIServingChat(GenerateBaseServing):
 
         request_metadata.final_usage_info = usage
 
+        per_request_metrics: PerRequestTimingMetrics | None = None
+        if (
+            self.enable_per_request_metrics
+            # Timing metrics describe a single generation stream. For n>1 the
+            # returned stats belong to only one of the n sequences, so they
+            # cannot be accurately attributed to the request; suppress instead.
+            and (request.n or 1) == 1
+        ):
+            per_request_metrics = build_per_request_timing_metrics(
+                final_res.metrics, num_generated_tokens
+            )
+
         # ``final_res.prompt`` is the rendered chat-templated prompt text
         prompt_text = final_res.prompt if request.return_prompt_text else None
 
@@ -1020,6 +1054,7 @@ class OpenAIServingChat(GenerateBaseServing):
             prompt_text=prompt_text,
             kv_transfer_params=final_res.kv_transfer_params,
             ec_transfer_params=final_res.ec_transfer_params,
+            metrics=per_request_metrics,
         )
 
         # Log complete response if output logging is enabled

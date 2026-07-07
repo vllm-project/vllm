@@ -74,6 +74,7 @@ pub(super) fn prepare_generate_request(
         data_parallel_rank: ctx.data_parallel_rank,
         reasoning_parser_kwargs: None,
         lora_request: lora_resolution.lora_request.clone(),
+        arrival_time: None,
     };
 
     Ok(PreparedRequest {

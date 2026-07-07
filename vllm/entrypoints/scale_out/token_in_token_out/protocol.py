@@ -196,6 +196,13 @@ class GenerateResponseChoice(BaseModel):
     # or (b) ``enable_return_routed_experts`` is off server-side.
     routed_experts: str | None = None
 
+    @field_validator("token_ids")
+    @classmethod
+    def validate_token_ids(cls, v: list[int] | None) -> list[int] | None:
+        if v is not None and any(t < 0 for t in v):
+            raise ValueError("token_ids must not contain negative values")
+        return v
+
 
 class GenerateResponseStreamChoice(BaseModel):
     index: int

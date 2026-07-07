@@ -16,6 +16,7 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.generate.base.serving import (
     GenerateBaseServing,
     GenerationError,
+    build_per_request_timing_metrics,
     clamp_prompt_logprobs,
     format_token_id_placeholder,
 )
@@ -29,6 +30,7 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
+    PerRequestTimingMetrics,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     UsageInfo,
@@ -61,6 +63,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        enable_per_request_metrics: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -72,6 +75,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
         self.online_renderer = online_renderer
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        self.enable_per_request_metrics = enable_per_request_metrics
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -300,8 +304,10 @@ class OpenAIServingCompletion(GenerateBaseServing):
             stream_options, self.enable_force_include_usage
         )
 
+        last_res: RequestOutput | None = None
         try:
             async for prompt_idx, res in result_generator:
+                last_res = res
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
 
@@ -448,6 +454,23 @@ class OpenAIServingCompletion(GenerateBaseServing):
                 )
 
             if include_usage:
+                # In streaming, metrics ride on this final usage chunk, which is
+                # only emitted when usage reporting is enabled (i.e.
+                # ``stream_options.include_usage=true`` or
+                # ``--enable-force-include-usage``).
+                stream_per_request_metrics: PerRequestTimingMetrics | None = None
+                if (
+                    self.enable_per_request_metrics
+                    # See note in request_output_to_completion_response: suppress
+                    # when not attributable to one stream (multi-prompt or n>1).
+                    and num_prompts == 1
+                    and (request.n or 1) == 1
+                ):
+                    last_metrics = last_res.metrics if last_res is not None else None
+                    stream_per_request_metrics = build_per_request_timing_metrics(
+                        last_metrics, total_completion_tokens
+                    )
+
                 final_usage_chunk = CompletionStreamResponse(
                     id=request_id,
                     created=created_time,
@@ -455,6 +478,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     choices=[],
                     usage=final_usage_info,
                     system_fingerprint=self.system_fingerprint,
+                    metrics=stream_per_request_metrics,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=False, exclude_none=True
@@ -590,6 +614,23 @@ class OpenAIServingCompletion(GenerateBaseServing):
             )
 
         request_metadata.final_usage_info = usage
+
+        per_request_metrics: PerRequestTimingMetrics | None = None
+        if (
+            self.enable_per_request_metrics
+            # Metrics describe a single generation stream, so suppress them when
+            # they cannot be attributed to one: multiple prompts (timestamps
+            # span prompts) or n>1 (stats belong to one of the n sequences).
+            and len(final_res_batch) == 1
+            and (request.n or 1) == 1
+        ):
+            last_metrics = (
+                last_final_res.metrics if last_final_res is not None else None
+            )
+            per_request_metrics = build_per_request_timing_metrics(
+                last_metrics, num_generated_tokens
+            )
+
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
             ec_transfer_params = final_res_batch[0].ec_transfer_params
@@ -603,6 +644,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
             system_fingerprint=self.system_fingerprint,
             kv_transfer_params=kv_transfer_params,
             ec_transfer_params=ec_transfer_params,
+            metrics=per_request_metrics,
         )
 
     def _create_completion_logprobs(
