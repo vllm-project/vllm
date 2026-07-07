@@ -10,9 +10,11 @@ from prometheus_client import Counter, Gauge, Histogram
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
     OffloadPromMetrics,
+    _ConnectorMetricName,
     _MetricType,
     _StatsKey,
     _TransferMetricName,
+    get_connector_metric_definitions,
 )
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading_connector import (
     OffloadingConnector,
@@ -35,6 +37,42 @@ PENDING_STORES = "vllm:kv_offload_pending_stores"
 LOOKUP_LATENCY = "vllm:kv_offload_lookup_latency_seconds"
 MY_COUNTER = "my_counter"
 MY_LABEL = "my_label"
+
+
+def test_connector_metric_histogram_buckets():
+    metadata = get_connector_metric_definitions()
+
+    sync_delay = metadata[_ConnectorMetricName.LOOKUP_SYNC_DELAY]
+    assert isinstance(sync_delay, OffloadingHistogramMetadata)
+    assert sync_delay.buckets == (
+        0.00001,
+        0.00005,
+        0.0001,
+        0.0005,
+        0.001,
+        0.005,
+        0.01,
+        0.05,
+        0.1,
+        0.5,
+        1,
+    )
+
+    async_delay = metadata[_ConnectorMetricName.LOOKUP_ASYNC_DELAY]
+    assert isinstance(async_delay, OffloadingHistogramMetadata)
+    assert async_delay.buckets == (
+        0.0001,
+        0.0005,
+        0.001,
+        0.005,
+        0.01,
+        0.05,
+        0.1,
+        0.5,
+        1,
+        5,
+        10,
+    )
 
 
 class _FakeMetric:
