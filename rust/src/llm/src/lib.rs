@@ -88,14 +88,21 @@ impl Llm {
         // Record internal engine-core request ID in the current tracing span.
         Span::current().record("engine_request_id", &internal_request_id);
 
+        let arrival_time = prepared.engine_request.arrival_time;
+        let max_tokens_param =
+            (prepared.engine_request.sampling_params.as_ref()).map(|p| p.max_tokens);
+        let prompt_len = prepared.prompt_token_ids().len() as u32;
+
+        let stream = self.client.call(prepared.engine_request).await?;
+
         let request_metrics = RequestMetricsTracker::new(
             self.client.model_name().to_string(),
-            prepared.engine_request.arrival_time,
-            prepared.prompt_token_ids().len() as u32,
-            (prepared.engine_request.sampling_params.as_ref()).map(|p| p.max_tokens),
+            stream.engine_index(),
+            arrival_time,
+            prompt_len,
+            max_tokens_param,
             1,
         );
-        let stream = self.client.call(prepared.engine_request).await?;
         let guard = self.inflight.track(external_request_id, internal_request_id);
 
         Ok(GenerateOutputStream::new(
