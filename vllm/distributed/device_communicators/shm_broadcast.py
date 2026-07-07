@@ -451,6 +451,235 @@ def _reduce_tensor(tensor: torch.Tensor):
     return tensor.__reduce_ex__(pickle.HIGHEST_PROTOCOL)
 
 
+# ---------------------------------------------------------------------------
+# Zero-copy shared-memory arena for large CPU tensors (multimodal fast path).
+#
+# Problem: `MessageQueue.enqueue` pickles the whole payload. For multimodal
+# models the payload contains raw `pixel_values` tensors (up to hundreds of
+# MB), and torch's storage pickling copies every byte into the pickle stream
+# on the writer (THPStorage_writeFileRaw) and back out on EVERY local reader
+# (THPStorage_readFileRaw). On a TP=4 engine this serialize/deserialize chain
+# blocks the EngineCore step loop for ~1s per large image with all GPUs idle.
+#
+# Fast path: intercept large contiguous CPU tensors during pickling
+# (`_ArenaPickler.reducer_override`), memcpy them ONCE into a free slot of a
+# shared-memory arena, and pickle only a tiny (slot, nbytes, dtype, shape)
+# stub. Readers rebuild the tensor as a zero-copy view of the mapped slot
+# (`torch.frombuffer`) — no byte-copy on either side.
+#
+# Slot lifecycle: single writer, n_reader readers, per-slot metadata
+# [written_flag, reader0_done, ..., readerN_done] (same protocol as
+# ShmRingBuffer). A reader does NOT release the slot when the tensor is
+# rebuilt — the tensor is still consumed (HtoD copy) while the worker
+# executes that step. Instead releases are deferred and flushed at the
+# reader's NEXT `dequeue` call: the worker loop is sequential, so by then the
+# previous step (and its pageable-source HtoD, which completes staging before
+# `cudaMemcpyAsync` returns) has finished.
+#
+# The writer NEVER blocks on the arena: if no slot is free (or the tensor is
+# larger than a slot), it falls back to the default pickle path for that
+# tensor. Worst case is the status-quo behavior, and deadlock is impossible.
+#
+# Physical memory: slots are allocated lazily by the kernel (pages are backed
+# on first write), so arenas on queues that never carry big tensors cost ~0.
+# ---------------------------------------------------------------------------
+
+VLLM_SHM_TENSOR_ARENA = os.getenv("VLLM_SHM_TENSOR_ARENA", "1") != "0"
+VLLM_SHM_TENSOR_ARENA_SLOTS = int(os.getenv("VLLM_SHM_TENSOR_ARENA_SLOTS", "8"))
+VLLM_SHM_TENSOR_ARENA_SLOT_MB = int(os.getenv("VLLM_SHM_TENSOR_ARENA_SLOT_MB", "256"))
+VLLM_SHM_TENSOR_ARENA_MIN_MB = int(os.getenv("VLLM_SHM_TENSOR_ARENA_MIN_MB", "8"))
+
+# Reader-side registry: arena shm name -> attached ShmTensorArena. Populated
+# by MessageQueue.create_from_handle; consumed by _rebuild_arena_tensor when
+# unpickling a tensor stub.
+_TENSOR_ARENAS: dict[str, "ShmTensorArena"] = {}
+
+
+class ShmTensorArena:
+    """Slotted shared-memory arena: one writer, n_reader zero-copy readers.
+
+    Memory layout: [slot0 | slot1 | ... | slotN-1 | meta0 | meta1 | ... ]
+    where each meta is (1 + n_reader) bytes: [written_flag, reader_done...].
+    Slot states mirror ShmRingBuffer:
+      written=0                      -> free (never written / being written)
+      written=1, some reader_done=0 -> in use, cannot reuse
+      written=1, all reader_done=1  -> consumed, can reuse
+    """
+
+    def __init__(
+        self,
+        n_reader: int,
+        slot_bytes: int,
+        n_slots: int,
+        name: str | None = None,
+        reader_rank: int = -1,
+    ):
+        self.n_reader = n_reader
+        self.slot_bytes = slot_bytes
+        self.n_slots = n_slots
+        self.reader_rank = reader_rank  # -1 for the writer
+        self.metadata_size = 1 + n_reader
+        self.metadata_offset = slot_bytes * n_slots
+        self.total_bytes = (slot_bytes + self.metadata_size) * n_slots
+        self._next_slot = 0
+        self._fallbacks = 0
+        # slots whose tensors were handed out by THIS reader and not yet
+        # released (flushed at the next dequeue).
+        self._pending_release: list[int] = []
+
+        if name is None:
+            self.is_creator = True
+            self.shared_memory = shared_memory.SharedMemory(
+                create=True, size=self.total_bytes
+            )
+            assert self.shared_memory.buf is not None
+            with self.shared_memory.buf[self.metadata_offset :] as meta:
+                torch.frombuffer(meta, dtype=torch.uint8).fill_(0)
+        else:
+            self.is_creator = False
+            # same resource_tracker workaround as ShmRingBuffer
+            with patch(
+                "multiprocessing.resource_tracker.register",
+                lambda *args, **kwargs: None,
+            ):
+                try:
+                    self.shared_memory = shared_memory.SharedMemory(name=name)
+                    assert self.shared_memory.size >= self.total_bytes
+                except FileNotFoundError:
+                    # deserialized on a different node; arena unused there
+                    pass
+
+    def handle(self):
+        return (self.n_reader, self.slot_bytes, self.n_slots, self.shared_memory.name)
+
+    def _meta(self, idx: int) -> memoryview:
+        start = self.metadata_offset + idx * self.metadata_size
+        assert self.shared_memory.buf is not None
+        return self.shared_memory.buf[start : start + self.metadata_size]
+
+    def _slot(self, idx: int, nbytes: int) -> memoryview:
+        start = idx * self.slot_bytes
+        assert self.shared_memory.buf is not None
+        return self.shared_memory.buf[start : start + nbytes]
+
+    # ---- writer side ----
+
+    def write_tensor(self, t: torch.Tensor) -> int | None:
+        """Copy tensor bytes into a free slot; return slot idx or None
+        (caller must then fall back to the default pickle path)."""
+        nbytes = t.numel() * t.element_size()
+        if nbytes > self.slot_bytes:
+            return None
+        memory_fence()
+        for probe in range(self.n_slots):
+            idx = (self._next_slot + probe) % self.n_slots
+            with self._meta(idx) as meta:
+                free = meta[0] == 0 or sum(meta[1:]) == self.n_reader
+                if not free:
+                    continue
+                meta[0] = 0  # claim
+            src = t.detach().reshape(-1).view(torch.uint8)
+            slot_mv = self._slot(idx, nbytes)
+            try:
+                dst = torch.frombuffer(slot_mv, dtype=torch.uint8, count=nbytes)
+                dst.copy_(src)
+            finally:
+                slot_mv.release()
+            with self._meta(idx) as meta:
+                for i in range(1, self.n_reader + 1):
+                    meta[i] = 0
+                memory_fence()
+                meta[0] = 1
+                memory_fence()
+            self._next_slot = (idx + 1) % self.n_slots
+            return idx
+        self._fallbacks += 1
+        if self._fallbacks == 1 or self._fallbacks % 100 == 0:
+            logger.info(
+                "ShmTensorArena: no free slot (%d bytes, %d fallbacks so far); "
+                "falling back to in-band pickling. Consider raising "
+                "VLLM_SHM_TENSOR_ARENA_SLOTS/SLOT_MB.",
+                nbytes,
+                self._fallbacks,
+            )
+        return None
+
+    # ---- reader side ----
+
+    def get_tensor(
+        self, idx: int, nbytes: int, dtype: torch.dtype, shape: tuple[int, ...]
+    ) -> torch.Tensor:
+        """Zero-copy view of a slot as a tensor. The slot is released at this
+        reader's next flush_releases() (called from MessageQueue.dequeue)."""
+        # NOT a context-manager view: the tensor must keep the mapping alive.
+        slot_mv = self._slot(idx, nbytes)
+        t8 = torch.frombuffer(slot_mv, dtype=torch.uint8, count=nbytes)
+        t = t8.view(dtype).view(shape)
+        self._pending_release.append(idx)
+        return t
+
+    def flush_releases(self):
+        if not self._pending_release:
+            return
+        for idx in self._pending_release:
+            with self._meta(idx) as meta:
+                meta[1 + self.reader_rank] = 1
+        memory_fence()
+        self._pending_release.clear()
+
+    def __del__(self):
+        if hasattr(self, "shared_memory"):
+            try:
+                self.shared_memory.close()
+                if self.is_creator:
+                    self.shared_memory.unlink()
+            except BufferError:
+                # zero-copy tensor views may still hold exported pointers at
+                # interpreter shutdown; the mapping dies with the process.
+                pass
+
+
+def _rebuild_arena_tensor(arena_name, slot_idx, nbytes, dtype_str, shape):
+    """Unpickle hook: rebuild a tensor as a zero-copy view of an arena slot."""
+    arena = _TENSOR_ARENAS[arena_name]
+    return arena.get_tensor(slot_idx, nbytes, getattr(torch, dtype_str), shape)
+
+
+class _ArenaPickler(pickle.Pickler):
+    """Pickler that diverts large contiguous CPU tensors into the arena."""
+
+    def __init__(self, file, arena: ShmTensorArena, buffer_callback=None):
+        super().__init__(
+            file,
+            protocol=pickle.HIGHEST_PROTOCOL,
+            buffer_callback=buffer_callback,
+        )
+        self.arena = arena
+
+    def reducer_override(self, obj):
+        if (
+            isinstance(obj, torch.Tensor)
+            and obj.device.type == "cpu"
+            and obj.layout == torch.strided
+            and obj.is_contiguous()
+            and obj.numel() * obj.element_size()
+            >= VLLM_SHM_TENSOR_ARENA_MIN_MB * 1024 * 1024
+        ):
+            idx = self.arena.write_tensor(obj)
+            if idx is not None:
+                return (
+                    _rebuild_arena_tensor,
+                    (
+                        self.arena.shared_memory.name,
+                        idx,
+                        obj.numel() * obj.element_size(),
+                        str(obj.dtype).removeprefix("torch."),
+                        tuple(obj.shape),
+                    ),
+                )
+        return NotImplemented
+
+
 @dataclass
 class Handle:
     local_reader_ranks: list[int] = field(default_factory=list)
@@ -460,6 +689,7 @@ class Handle:
     local_notify_addr: str | None = None
     remote_subscribe_addr: str | None = None
     remote_addr_ipv6: bool = False
+    tensor_arena_handle: tuple[int, int, int, str] | None = None
 
 
 class MessageQueue:
@@ -484,11 +714,23 @@ class MessageQueue:
         self.shutting_down = False
         context = Context()
 
+        self.tensor_arena: ShmTensorArena | None = None
         if n_local_reader > 0:
             # for local readers, we will:
             # 1. create a shared memory ring buffer to communicate small data
             # 2. create a publish-subscribe socket to communicate large data
             self.buffer = ShmRingBuffer(n_local_reader, max_chunk_bytes, max_chunks)
+
+            # Zero-copy arena for large CPU tensors (see ShmTensorArena).
+            # Local readers only: remote readers receive the pickled bytes
+            # over a socket and cannot map the arena, so the substitution
+            # would break them.
+            if VLLM_SHM_TENSOR_ARENA and n_remote_reader == 0:
+                self.tensor_arena = ShmTensorArena(
+                    n_local_reader,
+                    VLLM_SHM_TENSOR_ARENA_SLOT_MB * 1024 * 1024,
+                    VLLM_SHM_TENSOR_ARENA_SLOTS,
+                )
 
             # XPUB is very similar to PUB,
             # except that it can receive subscription messages
@@ -550,6 +792,9 @@ class MessageQueue:
             local_notify_addr=local_notify_addr,
             remote_subscribe_addr=remote_subscribe_addr,
             remote_addr_ipv6=remote_addr_ipv6,
+            tensor_arena_handle=(
+                self.tensor_arena.handle() if self.tensor_arena is not None else None
+            ),
         )
 
         logger.debug("vLLM message queue communication handle: %s", self.handle)
@@ -565,6 +810,7 @@ class MessageQueue:
 
         context = Context()
 
+        self.tensor_arena = None
         if rank in handle.local_reader_ranks:
             assert handle.buffer_handle is not None
             self.buffer = ShmRingBuffer(*handle.buffer_handle)
@@ -572,6 +818,15 @@ class MessageQueue:
             self.local_reader_rank = handle.local_reader_ranks.index(rank)
             self._is_local_reader = True
             self._is_remote_reader = False
+
+            arena_handle = getattr(handle, "tensor_arena_handle", None)
+            if arena_handle is not None:
+                self.tensor_arena = ShmTensorArena(
+                    *arena_handle, reader_rank=self.local_reader_rank
+                )
+                _TENSOR_ARENAS[self.tensor_arena.shared_memory.name] = (
+                    self.tensor_arena
+                )
 
             self.local_socket = context.socket(SUB)
             self.local_socket.setsockopt_string(SUBSCRIBE, "")
@@ -837,20 +1092,29 @@ class MessageQueue:
             total_bytes += len(raw_buf) + 4
             return False
 
-        # CPU tensors are routed through `_reduce_tensor` so that their
-        # bytes are emitted as out-of-band buffers instead of being
-        # copied into the pickle stream by torch's default reducer.
-        # Start from `copyreg.dispatch_table` to preserve globally
-        # registered reducers (e.g. `re.Pattern`); the per-pickler
-        # dispatch table would otherwise shadow them.
+        # CPU tensors are routed through `_reduce_tensor` so their bytes are
+        # emitted as out-of-band buffers instead of being copied into the
+        # pickle stream by torch's default reducer. Start from
+        # `copyreg.dispatch_table` to preserve globally registered reducers
+        # (e.g. `re.Pattern`); the per-pickler dispatch table would otherwise
+        # shadow them.
         dispatch_table = dict(copyreg.dispatch_table)
         dispatch_table[torch.Tensor] = _reduce_tensor
+        arena = getattr(self, "tensor_arena", None)
         with io.BytesIO() as bio:
-            pickler = pickle.Pickler(
-                bio,
-                protocol=pickle.HIGHEST_PROTOCOL,
-                buffer_callback=oob_callback,
-            )
+            pickler: pickle.Pickler
+            if arena is not None:
+                # Large contiguous CPU tensors are diverted into the zero-copy
+                # arena by `reducer_override`; whatever it declines (too small,
+                # non-contiguous, or arena full) falls through to
+                # `_reduce_tensor` via `dispatch_table`.
+                pickler = _ArenaPickler(bio, arena, buffer_callback=oob_callback)
+            else:
+                pickler = pickle.Pickler(
+                    bio,
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                    buffer_callback=oob_callback,
+                )
             pickler.dispatch_table = dispatch_table
             pickler.dump(obj)
             all_buffers[0] = bio.getvalue()
@@ -887,6 +1151,12 @@ class MessageQueue:
     ):
         """Read from message queue with optional timeout (in seconds)"""
         if self._is_local_reader:
+            # Release arena slots consumed by the PREVIOUS message: the worker
+            # loop is sequential, so the previous step (incl. its HtoD of any
+            # zero-copy tensors) has completed by the time we dequeue again.
+            arena = getattr(self, "tensor_arena", None)
+            if arena is not None:
+                arena.flush_releases()
             with self.acquire_read(timeout, indefinite) as buf:
                 overflow = buf[0] == 1
                 if not overflow:
