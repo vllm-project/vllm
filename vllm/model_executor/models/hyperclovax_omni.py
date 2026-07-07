@@ -1,6 +1,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-import math
+"""
+HyperCLOVAX Omni (SEED-Omni-8B) Implementation.
+
+This module extends the V2 architecture (Qwen2.5 Vision Transformer) with
+audio support and discrete token streams for omni-modal generation.
+
+Supports:
+- HyperCLOVAX-SEED-Omni-8B: Text + Image + Video + Audio
+"""
+
 import types
 from collections.abc import Iterable, Mapping, Sequence
 from functools import partial
@@ -19,10 +28,10 @@ from transformers import (
     SiglipVisionConfig,
     WhisperFeatureExtractor,
 )
-from transformers.image_processing_utils import BaseImageProcessor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions, MultiModalConfig
+from vllm.forward_context import set_forward_context
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization import QuantizationConfig
@@ -50,6 +59,7 @@ from vllm.multimodal.processing import (
     PromptUpdate,
 )
 from vllm.sequence import IntermediateTensors
+from vllm.transformers_utils import config
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
 from .clip import CLIPVisionModel
@@ -79,8 +89,11 @@ class HyperCLOVAXOmniAudioFeatureInputs(TensorSchema):
     """
     Dimensions:
         - nb: Number of samples
-        - na: Number of audio
-        - nc: Number of audio chunks
+        - na: Number of audios (per-audio fields)
+        - nc: Total number of audio chunks across audios (concat dim 0 of
+          audio_values / audio_attention_mask; a single audio is split into
+          one or more chunk_length-second chunks)
+        - nam: audio_attention_mask broadcast dim (size 1)
         - nm: Number of mel bins
         - ns: Number of max sequence length
         - nf: Number of max nb frames
@@ -91,7 +104,23 @@ class HyperCLOVAXOmniAudioFeatureInputs(TensorSchema):
 
     audio_values: Annotated[
         torch.Tensor,
-        TensorShape("na", "nm", "nf"),
+        TensorShape("nc", "nm", "nf"),
+    ]
+    audio_attention_mask: Annotated[
+        torch.Tensor,
+        TensorShape("nc", "nam", "nq", "nk"),
+    ]
+    discrete_audio_values: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("na", "ns", dynamic_dims={"ns"}),
+    ]
+    num_audio_tokens: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("na"),
+    ]
+    num_discrete_audio_tokens: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("na"),
     ]
 
 
@@ -112,7 +141,7 @@ class HyperCLOVAXOmniAudioEmbeddingInputs(TensorSchema):
 
     type: Literal["audio_embeds"]
 
-    audio_embeddings: Annotated[
+    audio_embeds: Annotated[
         torch.Tensor,
         TensorShape("na", "hs"),
     ]
@@ -148,6 +177,22 @@ class HyperCLOVAXOmniImagePixelInputs(TensorSchema):
         torch.Tensor,
         TensorShape("ni", 3),
     ]
+    discrete_pixel_values: Annotated[
+        torch.Tensor,
+        TensorShape("ni", 3, "dh", "dw"),
+    ]
+    discrete_image_ratios: Annotated[
+        torch.Tensor,
+        TensorShape("ni", 2),
+    ]
+    num_image_tokens: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("ni"),
+    ]
+    num_discrete_image_tokens: Annotated[
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("ni"),
+    ]
 
 
 class HyperCLOVAXOmniImageEmbeddingInputs(TensorSchema):
@@ -168,7 +213,7 @@ class HyperCLOVAXOmniImageEmbeddingInputs(TensorSchema):
 
     type: Literal["image_embeds"]
 
-    image_embeddings: Annotated[
+    image_embeds: Annotated[
         torch.Tensor,
         TensorShape("nf", "hs"),
     ]
@@ -196,14 +241,15 @@ class HyperCLOVAXOmniVideoPixelInputs(TensorSchema):
 
     pixel_values_videos: Annotated[
         torch.Tensor | list[torch.Tensor],
-        TensorShape("nb", "np", "cps", dynamic_dims={"np"}),
+        TensorShape("np", "cps", dynamic_dims={"np"}),
     ]
     video_grid_thw: Annotated[
         torch.Tensor | list[torch.Tensor],
-        TensorShape("nb", "nv", 3),
+        TensorShape("nv", 3),
     ]
     num_video_tokens: Annotated[
-        torch.Tensor | list[torch.Tensor], TensorShape("nb", "nv")
+        torch.Tensor | list[torch.Tensor],
+        TensorShape("nv"),
     ]
 
 
@@ -225,7 +271,7 @@ class HyperCLOVAXOmniVideoEmbeddingInputs(TensorSchema):
 
     type: Literal["video_embeds"]
 
-    video_embeddings: Annotated[
+    video_embeds: Annotated[
         torch.Tensor,
         TensorShape("nf", "hs"),
     ]
@@ -266,17 +312,6 @@ class HyperCLOVAXOmniProcessingInfo(BaseProcessingInfo):
             )
         return None
 
-    def get_image_processor(self, **kwargs: object):
-        hf_processor = self.get_hf_processor(**kwargs)
-        image_processor = hf_processor.image_processor
-        assert isinstance(image_processor, BaseImageProcessor)
-        return image_processor
-
-    def get_video_processor(self, **kwargs: object):
-        hf_processor = self.get_hf_processor(**kwargs)
-        video_processor = getattr(hf_processor, "video_processor", None)
-        return video_processor
-
     def get_data_parser(self):
         audio_processor = self.get_audio_processor()
         kwargs = {}
@@ -306,234 +341,106 @@ class HyperCLOVAXOmniProcessingInfo(BaseProcessingInfo):
         seq_len: int,
         mm_counts: Mapping[str, int],
     ) -> Mapping[str, int]:
-        max_image_tokens = self.get_max_image_tokens(seq_len, mm_counts)
-        max_video_tokens = self.get_max_video_tokens(seq_len, mm_counts)
-        return {"image": max_image_tokens, "video": max_video_tokens}
+        return {
+            "image": self.get_max_image_tokens(),
+            "video": self.get_max_video_tokens(),
+        }
 
-    def _get_max_image_pixels(self, max_tokens: int) -> int:
-        """Find the largest max_pixels that stays within token budget."""
-        image_processor = self.get_image_processor()
-        base_max_pixels = image_processor.size["longest_edge"]
-        unit = (
-            self.get_hf_config().vision_config.patch_size
-            * self.get_hf_config().vision_config.spatial_merge_size
-        )
-
-        max_image_pixels = unit * unit  # minimum
-        for candidate in range(unit * unit, base_max_pixels + 1, unit * unit):
-            w, h = self.get_image_size_with_most_features(max_pixels=candidate)
-            tokens = self.get_num_image_tokens(image_width=w, image_height=h)
-            if tokens <= max_tokens:
-                max_image_pixels = candidate
-            else:
-                break
-        return max_image_pixels
-
-    def get_image_size_with_most_features(
-        self,
-        max_pixels: int | None = None,
-    ) -> ImageSize:
-        # NOTE: Simply processing a huge size with _get_vision_info might not give a
-        # size that maximizes the number of features, i.e., the number of (merged)
-        # patches. This is because the number of patches limits the allowed aspect
-        # ratios. For example, suppose the maximum number of patches is 1280. A square
-        # image cannot be broken down into 1280 patches, so feeding a giant square image
-        # into _get_vision_info will not yield a size that maximizes the number of
-        # patches. Therefore, we directly factorize the maximum number of patches into
-        # height and width. The tricky part is to avoid extreme aspect ratios (>200 for
-        # qwen2-vl). If we can't find a suitable aspect ratio, we decrease the number of
-        # patches and retry. This is safe because the processor does not accept extreme
-        # aspect ratios, so there is no valid post-resize image with the number of
-        # patches that yields extreme aspect ratios.
-
-        hf_config = self.get_hf_config()
-        vision_config = hf_config.vision_config
-        patch_size = vision_config.patch_size
-        merge_size = vision_config.spatial_merge_size
-
-        if max_pixels is None:
-            image_processor = self.get_image_processor()
-
-            mm_kwargs = self.ctx.get_merged_mm_kwargs({})
-            size = image_processor.size
-            if override_size := mm_kwargs.get("size"):
-                size = size | override_size
-            if (override_min_pixels := mm_kwargs.get("min_pixels")) is not None:
-                size = size | {"shortest_edge": override_min_pixels}
-            if (override_max_pixels := mm_kwargs.get("max_pixels")) is not None:
-                size = size | {"longest_edge": override_max_pixels}
-
-            max_pixels = size["longest_edge"]
-
-        unit = patch_size * merge_size
-        max_seq_len = max_pixels // (unit * unit)
-
-        def closest_factor_pair(n: int) -> tuple[int, int]:
-            # left <= right
-            for d in range(math.isqrt(n), 0, -1):
-                if n % d == 0:
-                    return d, n // d
-            return 1, n
-
-        height_factor, width_factor = 1, max_seq_len
-        for seq_len in range(max_seq_len, 0, -1):
-            height_factor, width_factor = closest_factor_pair(seq_len)
-            if width_factor / height_factor <= 200:
-                break
-
-        return ImageSize(width=unit * width_factor, height=unit * height_factor)
-
-    def _get_max_video_frames(
-        self,
-        max_tokens: int,
-        start_num_frames: int = 1,
-    ) -> int:
-        image_processor = self.get_image_processor()
-        target_width, target_height = self.get_image_size_with_most_features()
-
-        max_video_frames = start_num_frames
-        while True:
-            next_num_frames = max_video_frames + 1
-            next_max_tokens = self.get_num_video_tokens(
-                image_width=target_width,
-                image_height=target_height,
-                num_frames=next_num_frames,
-                image_processor=image_processor,
-                mm_kwargs={},
-            )
-            if next_max_tokens > max_tokens:
-                break
-            max_video_frames = next_num_frames
-        return max_video_frames
-
-    def get_num_frames_with_most_features(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-        max_frames_per_video: int = 14,
-    ) -> int:
-        max_videos = mm_counts.get("video", 0)
-
-        max_total_frames = self._get_max_video_frames(seq_len)
-        max_frames_per_video = min(
-            max_total_frames // max(max_videos, 1), max_frames_per_video
-        )
-        return max(max_frames_per_video, 1)
+    def get_image_size_with_most_features(self) -> ImageSize:
+        vision_config = self.get_hf_config().vision_config
+        # Qwen2.5-VL uses dynamic resolution; use a reasonable square default
+        # for profiling (image_size may be absent/None in the config).
+        size = getattr(vision_config, "image_size", None) or 448
+        return ImageSize(width=size, height=size)
 
     def get_num_audio_tokens(
         self,
         *,
         audio_masks: torch.Tensor | None = None,
         discrete_audio_values: torch.Tensor | None = None,
+        include_boundary_tokens: bool | None = True,
+        return_tuple: bool | None = False,
         **kwargs: object,
     ) -> int:
-        _hf_processor = self.get_hf_processor(**kwargs)
-        audio_processor = getattr(_hf_processor, "audio_processor", None)
-        if audio_processor is not None and hasattr(
-            audio_processor, "get_num_audio_tokens"
-        ):
-            return audio_processor.get_num_audio_tokens(
-                audio_masks=audio_masks,
-                discrete_audio_values=discrete_audio_values,
-            )
-        # Fallback: Whisper-style conv output length from config
-        hf_config = self.get_hf_config()
-        audio_config = getattr(hf_config, "audio_config", None)
-        if audio_config is None:
-            return 0
-        max_pos = getattr(audio_config, "max_source_positions", 1500)
-        feat_len = (max_pos - 1) // 2 + 1
-        return (feat_len - 2) // 2 + 1
+        audio_processor = self.get_hf_processor().audio_processor
+        num_continuous, num_discrete = audio_processor.get_num_audio_tokens(
+            audio_masks=audio_masks,
+            discrete_audio_values=discrete_audio_values,
+            include_boundary_tokens=include_boundary_tokens,
+            return_tuple=True,
+        )
+        if return_tuple:
+            return num_continuous, num_discrete
+        elif audio_processor.use_discrete_token:
+            return num_continuous + num_discrete
+        else:
+            return num_continuous
 
     def get_num_image_tokens(
         self,
         *,
-        image_width: int,
-        image_height: int,
+        image_width: int | None = None,
+        image_height: int | None = None,
         pixel_values: torch.Tensor | None = None,
+        include_boundary_tokens: bool | None = True,
+        return_tuple: bool | None = False,
         **kwargs: object,
     ) -> int:
-        _hf_processor = self.get_hf_processor(**kwargs)
-        image_processor = _hf_processor.image_processor
-        if hasattr(image_processor, "get_num_image_tokens"):
-            return image_processor.get_num_image_tokens(
-                image_width=image_width,
-                image_height=image_height,
-                pixel_values=pixel_values,
-            )
-        # Fallback: Qwen2VL-style patch count
-        images_kwargs = {
-            "min_pixels": getattr(image_processor, "min_pixels", 3136),
-            "max_pixels": getattr(image_processor, "max_pixels", 2073600),
-        }
-        return image_processor.get_number_of_image_patches(
-            image_height,
-            image_width,
-            images_kwargs=images_kwargs,
+        image_processor = self.get_hf_processor().image_processor
+        num_continuous, num_discrete = image_processor.get_num_image_tokens(
+            image_width=image_width,
+            image_height=image_height,
+            pixel_values=pixel_values,
+            include_boundary_tokens=include_boundary_tokens,
+            return_tuple=True,
         )
-
-    def get_max_image_tokens(
-        self,
-        seq_len: int | None = None,
-        mm_counts: Mapping[str, int] | None = None,
-    ) -> int:
-        image_processor = self.get_image_processor()
-        if seq_len and mm_counts:
-            max_images = max(mm_counts.get("image", 1), 1)
-            max_pixels_per_image = self._get_max_image_pixels(seq_len // max_images)
-            target_width, target_height = self.get_image_size_with_most_features(
-                max_pixels=max_pixels_per_image,
-            )
+        if return_tuple:
+            return num_continuous, num_discrete
+        elif image_processor.use_discrete_token:
+            return num_continuous + num_discrete
         else:
-            target_width, target_height = self.get_image_size_with_most_features()
+            return num_continuous
 
+    def get_max_image_tokens(self) -> int:
+        target_width, target_height = self.get_image_size_with_most_features()
         return self.get_num_image_tokens(
             image_width=target_width,
             image_height=target_height,
-            image_processor=image_processor,
-            mm_kwargs={},
         )
 
     def get_num_video_tokens(
         self,
         *,
-        image_width: int,
-        image_height: int,
-        num_frames: int,
+        video_width: int | None = None,
+        video_height: int | None = None,
+        num_frames: int | None = None,
         pixel_values_videos: torch.Tensor | None = None,
+        include_boundary_tokens: bool | None = True,
+        return_tuple: bool | None = False,
         **kwargs: object,
     ) -> int:
-        _hf_processor = self.get_hf_processor(**kwargs)
-        video_processor = _hf_processor.video_processor
-        if hasattr(video_processor, "get_num_video_tokens"):
-            return video_processor.get_num_video_tokens(
-                image_width=image_width,
-                image_height=image_height,
-                num_frames=num_frames,
-                pixel_values_videos=pixel_values_videos,
-            )
-        # Fallback: Qwen2VL-style patch count
-        return video_processor.get_num_of_video_patches(
-            num_frames,
-            image_height,
-            image_width,
-            videos_kwargs={},
+        video_processor = self.get_hf_processor().video_processor
+        num_continuous, num_discrete = video_processor.get_num_video_tokens(
+            image_width=video_width,
+            image_height=video_height,
+            num_frames=num_frames,
+            pixel_values_videos=pixel_values_videos,
+            include_boundary_tokens=include_boundary_tokens,
+            return_tuple=True,
         )
+        if return_tuple:
+            return num_continuous, num_discrete
+        elif video_processor.use_discrete_token:
+            return num_continuous + num_discrete
+        else:
+            return num_continuous
 
-    def get_max_video_tokens(
-        self,
-        seq_len: int,
-        mm_counts: Mapping[str, int],
-    ) -> int:
-        image_processor = self.get_image_processor()
+    def get_max_video_tokens(self) -> int:
         target_width, target_height = self.get_image_size_with_most_features()
-
         return self.get_num_video_tokens(
-            image_width=target_width,
-            image_height=target_height,
-            num_frames=self.get_num_frames_with_most_features(seq_len, mm_counts),
-            image_processor=image_processor,
-            mm_kwargs={},
+            video_width=target_width,
+            video_height=target_height,
+            num_frames=32,
         )
 
 
@@ -639,23 +546,10 @@ class HyperCLOVAXOmniDummyInputsBuilder(
         mm_processor_kwargs: Mapping[str, object] | None = None,
     ) -> ProcessorInputs:
         """Build dummy processor inputs for memory profiling."""
-        hf_processor = self.info.get_hf_processor()
-        tokenizer = self.info.get_tokenizer()
-        added_vocab = tokenizer.get_added_vocab()
-        image_token = (
-            "<|IMAGE_PAD|>"
-            if "<|IMAGE_PAD|>" in added_vocab
-            else getattr(hf_processor, "image_token", "<|IMAGE_PAD|>")
-        )
-        video_token = (
-            "<|VIDEO_PAD|>"
-            if "<|VIDEO_PAD|>" in added_vocab
-            else getattr(hf_processor, "video_token", "<|VIDEO_PAD|>")
-        )
-
-        num_images = mm_counts.get("image", 0)
-        num_videos = mm_counts.get("video", 0)
-        prompt_text = image_token * num_images + video_token * num_videos
+        # Reuse get_dummy_text so the prompt carries placeholders for every
+        # modality (audio included); building it manually here previously
+        # omitted the audio pad, breaking prompt-update application.
+        prompt_text = self.get_dummy_text(mm_counts)
 
         dummy_mm_data = self.get_dummy_mm_data(
             seq_len,
@@ -706,53 +600,55 @@ class HyperCLOVAXOmniMultiModalProcessor(
         mm_kwargs: Mapping[str, object],
         tok_kwargs: Mapping[str, object],
     ) -> BatchFeature:
+        audios = mm_data.get("audios")
+        images = mm_data.get("images")
+        videos = mm_data.get("videos")
+        
+        # Get the HF processor
         hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        tokenizer = self.info.get_tokenizer()
-        added_vocab = tokenizer.get_added_vocab()
-        image_token = (
-            "<|IMAGE_PAD|>" if "<|IMAGE_PAD|>" in added_vocab else "<|image_pad|>"
+        
+        # Build data dict for HF processor (images/videos only)
+        # NOTE: We pass the prompt as-is without token normalization.
+        # Token expansion is handled by vLLM via _get_prompt_updates since
+        # _hf_processor_applies_updates returns False.
+        data: dict[str, object] = dict(
+            text=prompt,
+            audios=audios,
+            images=images,
+            videos=videos,
         )
-        video_token = (
-            "<|VIDEO_PAD|>" if "<|VIDEO_PAD|>" in added_vocab else "<|video_pad|>"
-        )
-        audio_token = (
-            "<|AUDIO_PAD|>" if "<|AUDIO_PAD|>" in added_vocab else "<|audio_pad|>"
-        )
-
-        # Separate audio from mm_data (HCXVisionV2Processor doesn't handle audio)
-        mm_data = dict(mm_data)  # make mutable copy
-        audios = mm_data.pop("audios", None)
-
-        # Strip placeholders from prompt when corresponding mm data is absent
-        if not mm_data.get("images") and image_token in prompt:
-            prompt = prompt.replace(image_token, "")
-        if not mm_data.get("videos") and video_token in prompt:
-            prompt = prompt.replace(video_token, "")
-        if not audios and audio_token in prompt:
-            prompt = prompt.replace(audio_token, "")
-
-        # Process text + images/videos via HF processor
+        
         processed_outputs = self.info.ctx.call_hf_processor(
-            hf_processor,
-            dict(text=prompt, **mm_data),
-            dict(**mm_kwargs, **tok_kwargs),
+            hf_processor=hf_processor,
+            data=data,
+            kwargs=dict(**mm_kwargs, **tok_kwargs),
         )
 
-        # Process audio separately via WhisperFeatureExtractor
-        if audios:
+        # The audio processor concatenates each audio's chunk_length-second
+        # chunks along dim 0 of audio_values/audio_masks/audio_attention_mask
+        # (like image pixel patches). Record per-audio chunk counts so
+        # _get_mm_fields_config can split those flat tensors back into per-audio
+        # items (the audio analog of image_grid_thw). num_audio_tokens is a post
+        # conv+pool token count, not a chunk count, so it cannot be used here.
+        if audios and "audio_values" in processed_outputs:
             audio_processor = self.info.get_audio_processor(**mm_kwargs)
-            if audio_processor is not None:
-                import torch
-
-                all_features = []
-                for audio in audios:
-                    features = audio_processor(
-                        audio,
-                        sampling_rate=audio_processor.sampling_rate,
-                        return_tensors="pt",
-                    )
-                    all_features.append(features["input_features"].squeeze(0))
-                processed_outputs["audio_features"] = torch.stack(all_features)
+            chunk_samples = int(
+                audio_processor.chunk_length * audio_processor.sampling_rate
+            )
+            lengths = [
+                (a[0] if isinstance(a, tuple) else a).shape[-1] for a in audios
+            ]
+            processed_outputs["audio_chunks"] = torch.tensor(
+                [max(1, -(-length // chunk_samples)) for length in lengths],
+                dtype=torch.long,
+            )
+            # Split concatenated discrete_audio_values (Sum of per-audio samples)
+            # into a per-audio list so it can be registered with batched("audio").
+            dav = processed_outputs.get("discrete_audio_values")
+            if dav is not None and not isinstance(dav, list):
+                processed_outputs["discrete_audio_values"] = list(
+                    torch.split(dav, lengths)
+                )
 
         return processed_outputs
 
@@ -763,63 +659,73 @@ class HyperCLOVAXOmniMultiModalProcessor(
         out_mm_kwargs: MultiModalKwargsItems,
     ) -> Sequence[PromptUpdate]:
         hf_config = self.info.get_hf_config()
-        tokenizer = self.info.get_tokenizer()
-        added_vocab = tokenizer.get_added_vocab()
 
-        # Token IDs for placeholders
-        placeholder = {}
-        for mod, tok_str in [
-            ("image", "<|IMAGE_PAD|>"),
-            ("video", "<|VIDEO_PAD|>"),
-            ("audio", "<|AUDIO_PAD|>"),
-        ]:
-            if tok_str in added_vocab:
-                placeholder[mod] = added_vocab[tok_str]
+        # Use token IDs directly from config.
+        # This matches what get_dummy_processor_inputs uses, ensuring consistency.
+        placeholder: dict[str, int] = {
+            "audio": hf_config.audio_token_id,                    # 128071 for <|AUDIO_PAD|>
+            "discrete_audio": hf_config.discrete_audio_token_id,  # 128074 for <|AUDIO_PAD|>
+            "image": hf_config.image_token_id,                    # 128062 for <|IMAGE_PAD|>
+            "discrete_image": hf_config.discrete_image_token_id,  # 128069 for <|IMAGE_PAD|>
+            "video": hf_config.video_token_id,                    # 128063 for <|VIDEO_PAD|>
+            "video_audio": hf_config.video_audio_token_id,        # 128070 for <|VIDEO_AUDIO_PAD|>
+        }
 
-        merge_size = hf_config.vision_config.spatial_merge_size
-
-        def get_replacement(item_idx, modality, out_mm_kwargs):
+        def get_replacement_omni(
+            item_idx: int,
+            modality: str,
+            out_mm_kwargs: MultiModalKwargsItems,
+        ):
             out_item = out_mm_kwargs[modality][item_idx]
-            token_id = placeholder.get(modality, 0)
-
-            if modality == "image":
-                grid_thw_elem = out_item.get("image_grid_thw")
-                if grid_thw_elem is not None:
-                    grid_thw = grid_thw_elem.data
-                    h, w = grid_thw[1].item(), grid_thw[2].item()
-                    num_tokens = (h * w) // (merge_size**2)
-                else:
-                    num_tokens = 1
-            elif modality == "video":
-                grid_thw_elem = out_item.get("video_grid_thw")
-                if grid_thw_elem is not None:
-                    grid_thw = grid_thw_elem.data
-                    t, h, w = grid_thw[0].item(), grid_thw[1].item(), grid_thw[2].item()
-                    num_tokens = (t * h * w) // (merge_size**2)
-                else:
-                    num_tokens = 1
-            elif modality == "audio":
-                num_tokens = self.info.get_num_audio_tokens()
-            else:
-                num_tokens = 1
-
-            return [token_id] * num_tokens
-
-        prompt_updates = []
-        for modality in mm_items:
-            if modality in placeholder:
-                prompt_updates.append(
-                    PromptReplacement(
-                        modality=modality,
-                        target=[placeholder[modality]],
-                        replacement=partial(
-                            get_replacement,
-                            modality=modality,
-                            out_mm_kwargs=out_mm_kwargs,
-                        ),
-                    )
+            
+            replacement = None
+            if modality == "audio":
+                num_continuous, num_discrete = self.info.get_num_audio_tokens(
+                    audio_masks=out_item["audio_masks"].data,
+                    discrete_audio_values=(
+                        out_item["discrete_audio_values"].data
+                        if "discrete_audio_values" in out_item
+                        else None
+                    ),
+                    include_boundary_tokens=True,
+                    return_tuple=True,
                 )
+                replacement = (num_discrete + num_continuous) * [placeholder.get(modality, 0), ]
+                    
+            elif modality == "image":
+                num_continuous, num_discrete = self.info.get_num_image_tokens(
+                    pixel_values=out_item["pixel_values"].data,
+                    include_boundary_tokens=True,
+                    return_tuple=True,
+                )
+                replacement = (num_discrete + num_continuous) * [placeholder.get(modality, 0), ]
 
+            elif modality == "video":
+                num_continuous, num_discrete = self.info.get_num_video_tokens(
+                    pixel_values_videos=out_item["pixel_values_videos"].data,
+                    include_boundary_tokens=True,
+                    return_tuple=True,
+                )
+                replacement = (num_discrete + num_continuous) * [placeholder.get(modality, 0), ]
+
+            return replacement
+
+        prompt_updates = list()
+        for modality in mm_items:
+            if not placeholder.get(modality):
+                continue
+                
+            prompt_updates.append(
+                PromptReplacement(
+                    modality=modality,
+                    target=[placeholder[modality]],
+                    replacement=partial(
+                        get_replacement_omni,
+                        modality=modality,
+                        out_mm_kwargs=out_mm_kwargs,
+                    ),
+                )
+            )
         return prompt_updates
 
     def _get_mm_fields_config(
@@ -827,56 +733,99 @@ class HyperCLOVAXOmniMultiModalProcessor(
         hf_inputs: BatchFeature,
         hf_processor_mm_kwargs: Mapping[str, object],
     ) -> Mapping[str, MultiModalFieldConfig]:
-        # Follow HCXVisionV2 pattern: use flat_from_sizes for pixel values
+        # Declare each modality's fields only when that modality is present in
+        # hf_inputs, so we never compute sizes for / call flat_from_sizes on an
+        # absent modality (which would feed empty/ill-shaped sizes).
         hf_config = self.info.get_hf_config()
         spatial_merge_size = hf_config.vision_config.spatial_merge_size
 
-        image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
-        image_pixel_grid_sizes = image_grid_thw.prod(-1)
-        image_embed_grid_sizes = (
-            image_pixel_grid_sizes // spatial_merge_size // spatial_merge_size
-        )
+        fields: dict[str, MultiModalFieldConfig] = {}
 
-        video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
-        video_pixel_grid_sizes = video_grid_thw.prod(-1)
-        video_embed_grid_sizes = (
-            video_pixel_grid_sizes // spatial_merge_size // spatial_merge_size
-        )
-
-        fields = dict(
-            # image (Qwen2VL flat format)
-            pixel_values=MultiModalFieldConfig.flat_from_sizes(
-                "image",
-                image_pixel_grid_sizes,
-            ),
-            image_embeds=MultiModalFieldConfig.flat_from_sizes(
-                "image",
-                image_embed_grid_sizes,
-            ),
-            image_grid_thw=MultiModalFieldConfig.batched("image"),
-            # video (Qwen2VL flat format)
-            pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
-                "video",
-                video_pixel_grid_sizes,
-            ),
-            video_embeds=MultiModalFieldConfig.flat_from_sizes(
-                "video",
-                video_embed_grid_sizes,
-            ),
-            video_grid_thw=MultiModalFieldConfig.batched("video"),
-        )
-
-        # Audio fields (only if present in inputs)
-        if "audio_features" in hf_inputs:
-            fields["audio_features"] = MultiModalFieldConfig.batched("audio")
+        # audio: audio_values/audio_masks/audio_attention_mask are per-audio
+        # chunks concatenated along dim 0 -> split by per-audio chunk counts.
+        # audio_embeds (precomputed) splits by per-audio token counts.
+        # num_audio_tokens/audio_chunks/discrete_* are (N,) -> batched.
         if "audio_values" in hf_inputs:
+            audio_chunk_sizes = hf_inputs["audio_chunks"]
+            audio_embed_sizes = hf_inputs.get("num_audio_tokens")
+            if audio_embed_sizes is None:
+                # Fallback (e.g. precomputed audio_embeds): mirror the audio
+                # processor's continuous get_num_audio_tokens (conv stride 2 ->
+                # pooling). Padded per-chunk frame length is uniform, so
+                # per-audio tokens = per_chunk_tokens * chunk_count.
+                audio_masks = hf_inputs.get("audio_masks")
+                if audio_masks is not None and audio_masks.numel() > 0:
+                    _pool_kernel_size = 2  # default
+                    _pool_stride = 2  # default
+                    conv_len = (audio_masks.shape[-1] - 1) // 2 + 1
+                    per_chunk_tokens = (
+                        conv_len - _pool_kernel_size
+                    ) // _pool_stride + 1
+                    audio_embed_sizes = per_chunk_tokens * audio_chunk_sizes
+                else:
+                    audio_embed_sizes = audio_chunk_sizes
             fields.update(
-                dict(
-                    audio_values=MultiModalFieldConfig.batched("audio"),
-                    audio_attention_mask=MultiModalFieldConfig.batched("audio"),
-                    audio_masks=MultiModalFieldConfig.batched("audio"),
-                    num_audio_tokens=MultiModalFieldConfig.batched("audio"),
-                )
+                audio_values=MultiModalFieldConfig.flat_from_sizes(
+                    "audio", audio_chunk_sizes
+                ),
+                audio_masks=MultiModalFieldConfig.flat_from_sizes(
+                    "audio", audio_chunk_sizes
+                ),
+                audio_attention_mask=MultiModalFieldConfig.flat_from_sizes(
+                    "audio", audio_chunk_sizes
+                ),
+                audio_embeds=MultiModalFieldConfig.flat_from_sizes(
+                    "audio", audio_embed_sizes
+                ),
+                num_audio_tokens=MultiModalFieldConfig.batched("audio"),
+                audio_chunks=MultiModalFieldConfig.batched("audio"),
+                discrete_audio_values=MultiModalFieldConfig.batched("audio"),
+                num_discrete_audio_tokens=MultiModalFieldConfig.batched("audio"),
+            )
+
+        # image
+        if "pixel_values" in hf_inputs or "image_embeds" in hf_inputs:
+            image_grid_thw = hf_inputs.get("image_grid_thw", torch.empty((0, 3)))
+            image_pixel_grid_sizes = image_grid_thw.prod(-1)
+            image_embed_sizes = hf_inputs.get(
+                "num_image_tokens",
+                image_pixel_grid_sizes // spatial_merge_size // spatial_merge_size,
+            )
+            fields.update(
+                pixel_values=MultiModalFieldConfig.flat_from_sizes(
+                    "image", image_pixel_grid_sizes
+                ),
+                image_grid_thw=MultiModalFieldConfig.batched(
+                    "image", keep_on_cpu=True
+                ),
+                image_embeds=MultiModalFieldConfig.flat_from_sizes(
+                    "image", image_embed_sizes
+                ),
+                num_image_tokens=MultiModalFieldConfig.batched("image"),
+                discrete_pixel_values=MultiModalFieldConfig.batched("image"),
+                discrete_image_ratios=MultiModalFieldConfig.batched("image"),
+                num_discrete_image_tokens=MultiModalFieldConfig.batched("image"),
+            )
+
+        # video
+        if "pixel_values_videos" in hf_inputs or "video_embeds" in hf_inputs:
+            video_grid_thw = hf_inputs.get("video_grid_thw", torch.empty((0, 3)))
+            video_pixel_grid_sizes = video_grid_thw.prod(-1)
+            video_embed_sizes = hf_inputs.get(
+                "num_video_tokens",
+                video_pixel_grid_sizes // spatial_merge_size // spatial_merge_size,
+            )
+            fields.update(
+                pixel_values_videos=MultiModalFieldConfig.flat_from_sizes(
+                    "video", video_pixel_grid_sizes
+                ),
+                video_grid_thw=MultiModalFieldConfig.batched(
+                    "video", keep_on_cpu=True
+                ),
+                video_embeds=MultiModalFieldConfig.flat_from_sizes(
+                    "video", video_embed_sizes
+                ),
+                num_video_tokens=MultiModalFieldConfig.batched("video"),
             )
 
         return fields
@@ -1142,10 +1091,17 @@ class HyperCLOVAXOmniForCausalLM(
     SupportsPP,
 ):
     hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={
+            # Checkpoint stores the TA-Tok decoder as a wrapped Siglip2VisionModel
+            # (`decoder.vision_model.*`), but the instantiated module is flattened
+            # (`decoder.*`). Drop the extra wrapper level. (substr rules run before
+            # the prefix rules below.)
+            "discrete_vision_model.decoder.vision_model.": "discrete_vision_model.decoder.",  # noqa: E501
+        },
         orig_to_new_prefix={
             "model.mm_projector.": "model.vision_projector.",
             "model.": "",
-        }
+        },
     )
 
     packed_modules_mapping = {
@@ -1169,16 +1125,17 @@ class HyperCLOVAXOmniForCausalLM(
         vision_config = None
         vision_model = None
         vision_projector = None
-        is_qwen_visual = False
         if isinstance(getattr(config, "vision_config", None), (dict, PretrainedConfig)):
             vision_config = config.vision_config
             vision_config.anyres = config.anyres
             vision_config.max_num_grids = config.max_num_grids
             vision_config.update({"torch_dtype": config.torch_dtype})
+            vision_projector_input_dim = vision_config.hidden_size
+            vision_projector_output_dim = config.text_config.hidden_size
             if vision_config.model_type == "qwen2_5_vl_visual":
-                is_qwen_visual = True
-            if is_qwen_visual and get_compute_capability() >= 8.0:
-                vision_config._attn_implementation = "flash_attention_2"
+                if get_compute_capability() >= 8.0:
+                    vision_config._attn_implementation = "flash_attention_2"
+                vision_projector_input_dim = vision_config.out_hidden_size
             # initialize continuous_vision_encoder
             vision_model = initialize_continuous_vision_encoder(
                 vision_config=vision_config,
@@ -1187,38 +1144,34 @@ class HyperCLOVAXOmniForCausalLM(
                 norm_eps=getattr(config.text_config, "rms_norm_eps", 1e-6),
                 prefix=maybe_prefix(prefix, "visual"),
             )
-            # initialize vision_projector
-            _vision_projector_input_dim = vision_config.hidden_size
-            if is_qwen_visual:
-                _vision_projector_input_dim = vision_config.out_hidden_size
-            _vision_projector_output_dim = config.text_config.hidden_size
-            if config.mm_projector_type == "linear":
+            # initialize vision_projector            
+            if config.vision_projector_type == "linear":
                 vision_projector = nn.Linear(
-                    in_features=_vision_projector_input_dim,
-                    out_features=_vision_projector_output_dim,
+                    in_features=vision_projector_input_dim,
+                    out_features=vision_projector_output_dim,
                 )
-            elif config.mm_projector_type == "cabstractor":
-                self.mm_projector = HyperCLOVAXOmniCAbstractor(
-                    num_queries=self.num_queries_vis_abstractor,
+            elif config.vision_projector_type == "cabstractor":
+                vision_projector = HyperCLOVAXOmniCAbstractor(
+                    num_queries=config.num_queries_vis_abstractor,
                     num_input_tokens=(
-                        self.vision_config.image_size // self.vision_config.patch_size
+                        vision_config.image_size // vision_config.patch_size
                     )
                     ** 2,
-                    encoder_hidden_size=_vision_projector_input_dim,
-                    hidden_size=_vision_projector_input_dim,
-                    output_hidden_size=_vision_projector_output_dim,
+                    encoder_hidden_size=vision_projector_input_dim,
+                    hidden_size=vision_projector_input_dim,
+                    output_hidden_size=vision_projector_output_dim,
                     pos_emb=config.proj_pos_emb,
                     prenorm=config.proj_prenorm,
                 )
-                self.mm_projector.pos_emb.to(config.torch_dtype)
-            elif config.mm_projector_type == "qwen_merger":
+                vision_projector.pos_emb.to(config.torch_dtype)
+            elif config.vision_projector_type == "qwen_merger":
                 from transformers.models.qwen2_5_vl.modeling_qwen2_5_vl import (
                     Qwen2_5_VLPatchMerger,
                 )
 
-                self.mm_projector = Qwen2_5_VLPatchMerger(
-                    dim=_vision_projector_output_dim,
-                    context_dim=_vision_projector_input_dim,
+                vision_projector = Qwen2_5_VLPatchMerger(
+                    dim=vision_projector_output_dim,
+                    context_dim=vision_projector_input_dim,
                 )
 
                 def new_forward(self, inputs) -> torch.Tensor:
@@ -1228,18 +1181,22 @@ class HyperCLOVAXOmniForCausalLM(
                     x = x[reverse_indices, :]
                     return x
 
-                self.mm_projector.forward = types.MethodType(
-                    new_forward, self.mm_projector
+                vision_projector.forward = types.MethodType(
+                    new_forward, vision_projector
                 )
             else:
-                self.mm_projector = HyperCLOVAXOmniMlp(
-                    config.mm_projector_type,
-                    _vision_projector_input_dim,
-                    hidden_features=_vision_projector_input_dim,
-                    out_features=_vision_projector_output_dim,
+                vision_projector = HyperCLOVAXOmniMlp(
+                    config.vision_projector_type,
+                    vision_projector_input_dim,
+                    hidden_features=vision_projector_input_dim,
+                    out_features=vision_projector_output_dim,
                 )
             vision_projector.to(vision_model.dtype)
-        return vision_model, vision_projector, is_qwen_visual, vision_config
+        return (
+            vision_model, 
+            vision_projector, 
+            vision_config,
+        )
 
     def _init_discrete_vision(self, config, vllm_config):
         """Initialize discrete vision encoder.
@@ -1248,44 +1205,46 @@ class HyperCLOVAXOmniForCausalLM(
             (discrete_vision_model, discrete_vision_codebook_size,
              discrete_image_unit_0_id, discrete_vision_config)
         """
-        discrete_vision_config = None
+        discrete_vision_config = getattr(config, "discrete_vision_config", None)
         discrete_vision_model = None
         discrete_vision_codebook_size = None
         discrete_image_unit_0_id = None
-        raw_dvc = getattr(config, "discrete_vision_config", None)
-        if isinstance(raw_dvc, (dict, PretrainedConfig)):
-            # Skip if dict without a loadable model path
-            can_load = not (
-                isinstance(raw_dvc, dict) and not raw_dvc.get("model_name_or_path")
+        discrete_image_ratio_token_ids = None
+        discrete_image_eol_token_id = None
+        discrete_image_eof_token_id = None
+        if isinstance(discrete_vision_config, (dict, PretrainedConfig)):
+            discrete_vision_config.update({"torch_dtype": torch.float32})
+            discrete_vision_model = AutoModel.from_config(
+                discrete_vision_config,
+                trust_remote_code=True,
             )
-            if can_load:
-                discrete_vision_config = raw_dvc
-                if isinstance(discrete_vision_config, dict):
-                    discrete_vision_config.update({"torch_dtype": config.torch_dtype})
-                discrete_vision_model = AutoModel.from_config(
-                    discrete_vision_config,
-                    trust_remote_code=True,
-                )
-                discrete_vision_codebook_size = 65536
-                discrete_image_unit_0_id = (
-                    vllm_config.model_config.hf_config.discrete_image_unit_0_id
-                )
-                if (
-                    "regularizer" in discrete_vision_model.config.bottleneck["args"]
-                    and "codebook_size"
-                    in discrete_vision_model.config.bottleneck["args"]["regularizer"][
+            discrete_vision_codebook_size = vllm_config.model_config.hf_config.discrete_vision_config.codebook_size
+            discrete_image_unit_0_id = (
+                vllm_config.model_config.hf_config.discrete_image_unit_0_id
+            )
+            discrete_image_ratio_token_ids = vllm_config.model_config.hf_config.discrete_image_ratio_token_ids  
+            discrete_image_eol_token_id = vllm_config.model_config.hf_config.discrete_image_eol_token_id
+            discrete_image_eof_token_id = vllm_config.model_config.hf_config.discrete_image_eof_token_id
+            if (
+                "regularizer" in discrete_vision_model.config.bottleneck["args"]
+                and "codebook_size"
+                in discrete_vision_model.config.bottleneck["args"]["regularizer"][
+                    "args"
+                ]
+            ):
+                discrete_vision_codebook_size = (
+                    discrete_vision_model.config.bottleneck["args"]["regularizer"][
                         "args"
-                    ]
-                ):
-                    discrete_vision_codebook_size = (
-                        discrete_vision_model.config.bottleneck["args"]["regularizer"][
-                            "args"
-                        ]["codebook_size"]
-                    )
+                    ]["codebook_size"]
+                )
+
         return (
             discrete_vision_model,
             discrete_vision_codebook_size,
             discrete_image_unit_0_id,
+            discrete_image_ratio_token_ids,
+            discrete_image_eol_token_id,
+            discrete_image_eof_token_id,
             discrete_vision_config,
         )
 
@@ -1325,10 +1284,12 @@ class HyperCLOVAXOmniForCausalLM(
 
             # initialize video_audio_compressor
             video_audio_compressor = None
-            vac_type = getattr(config, "video_audio_compressor_type", None)
-            vac_config = getattr(config, "video_audio_compressor_config", None)
-            if vac_type == "mambamia" and vac_config is not None:
-                video_audio_compressor_config = vac_config
+            video_audio_compressor_config = getattr(config, "video_audio_compressor_config", None)
+            video_audio_compressor_type = getattr(config, "video_audio_compressor_type", None)
+            if (
+                video_audio_compressor_config is not None
+                and video_audio_compressor_type == "mambamia"
+            ):
                 video_audio_compressor = AutoModel.from_config(
                     video_audio_compressor_config,
                     trust_remote_code=True,
@@ -1337,9 +1298,9 @@ class HyperCLOVAXOmniForCausalLM(
         return (
             audio_model,
             audio_projector,
-            video_audio_compressor_config,
-            video_audio_compressor,
             audio_config,
+            video_audio_compressor,
+            video_audio_compressor_config,
         )
 
     def _init_discrete_audio(self, config, vllm_config):
@@ -1349,26 +1310,23 @@ class HyperCLOVAXOmniForCausalLM(
             (discrete_audio_model, discrete_audio_unit_0_id,
              discrete_audio_config)
         """
-        discrete_audio_config = None
+        discrete_audio_config = getattr(config, "discrete_audio_config", None)
         discrete_audio_model = None
         discrete_audio_unit_0_id = None
-        raw_dac = getattr(config, "discrete_audio_config", None)
-        if isinstance(raw_dac, (dict, PretrainedConfig)):
-            can_load = not (
-                isinstance(raw_dac, dict) and not raw_dac.get("model_name_or_path")
+        if isinstance(discrete_audio_config, (dict, PretrainedConfig)):
+            discrete_audio_config.update({"torch_dtype": torch.float32})
+            discrete_audio_model = AutoModel.from_config(
+                discrete_audio_config,
+                trust_remote_code=True,
             )
-            if can_load:
-                discrete_audio_config = raw_dac
-                if isinstance(discrete_audio_config, dict):
-                    discrete_audio_config.update({"torch_dtype": config.torch_dtype})
-                discrete_audio_model = AutoModel.from_config(
-                    discrete_audio_config,
-                    trust_remote_code=True,
-                )
-                discrete_audio_unit_0_id = (
-                    vllm_config.model_config.hf_config.discrete_audio_unit_0_id
-                )
-        return (discrete_audio_model, discrete_audio_unit_0_id, discrete_audio_config)
+            discrete_audio_unit_0_id = (
+                vllm_config.model_config.hf_config.discrete_audio_unit_0_id
+            )
+        return (
+            discrete_audio_model, 
+            discrete_audio_unit_0_id, 
+            discrete_audio_config,
+        )
 
     def __init__(
         self,
@@ -1377,19 +1335,20 @@ class HyperCLOVAXOmniForCausalLM(
         prefix: str = "",
     ) -> None:
         super().__init__()
-        config = vllm_config.model_config.hf_config
+        self.vllm_config = vllm_config
+        self.hf_config = vllm_config.model_config.hf_config
         quant_config = vllm_config.quant_config
         multimodal_config = vllm_config.model_config.multimodal_config
 
         # set text_config
-        text_config = config.text_config
+        text_config = self.hf_config.text_config
         if text_config.model_type in ["llama", "hyperclovax", "gpt2"]:
-            text_config._attn_implementation = config._attn_implementation
+            text_config._attn_implementation = self.hf_config._attn_implementation
         if text_config.model_type != "hyperclovax":
             text_config.logits_scaling = 1.0
         if getattr(text_config, "padded_vocab_size", None):
             text_config.vocab_size = text_config.padded_vocab_size
-        text_config.update({"torch_dtype": config.torch_dtype})
+        text_config.update({"torch_dtype": self.hf_config.torch_dtype})
         self.text_config = text_config
 
         # Language model
@@ -1405,101 +1364,112 @@ class HyperCLOVAXOmniForCausalLM(
             (
                 self.vision_model,
                 self.vision_projector,
-                self.is_qwen_visual,
                 self.vision_config,
             ) = self._init_continuous_vision(
-                config, quant_config, multimodal_config, prefix
+                self.hf_config, quant_config, multimodal_config, prefix
             )
             (
                 self.discrete_vision_model,
                 self.discrete_vision_codebook_size,
                 self.discrete_image_unit_0_id,
+                self.discrete_image_ratio_token_ids,
+                self.discrete_image_eol_token_id,
+                self.discrete_image_eof_token_id,
                 self.discrete_vision_config,
-            ) = self._init_discrete_vision(config, vllm_config)
+            ) = self._init_discrete_vision(self.hf_config, vllm_config)
 
         # Audio tower
         with self._mark_tower_model(vllm_config, "audio"):
             (
                 self.audio_model,
                 self.audio_projector,
-                self.video_audio_compressor_config,
-                self.video_audio_compressor,
                 self.audio_config,
-            ) = self._init_continuous_audio(config, prefix)
+                self.video_audio_compressor,
+                self.video_audio_compressor_config,
+            ) = self._init_continuous_audio(self.hf_config, prefix)
             (
                 self.discrete_audio_model,
                 self.discrete_audio_unit_0_id,
                 self.discrete_audio_config,
-            ) = self._init_discrete_audio(config, vllm_config)
+            ) = self._init_discrete_audio(self.hf_config, vllm_config)
 
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
+
+    @classmethod
+    def get_placeholder_str(cls, modality: str, i: int) -> str | None:
+        if modality.startswith("image"):
+            return "<|image_start|><|IMAGE_PAD|><|image_end|>"
+        if modality.startswith("video"):
+            return "<|video_start|><|VIDEO_PAD|><|video_end|>"
+        if modality.startswith("audio"):
+            return "<|audio_start|><|AUDIO_PAD|><|audio_end|>"
+
+        raise ValueError("Only image, video or audio modality is supported")
 
     def _process_audio_input(
         self,
         audio_input: HyperCLOVAXOmniAudioInputs,
     ) -> tuple[torch.Tensor, ...]:
         if audio_input["type"] == "audio_embeds":
-            audio_embeddings = audio_input["audio_embeds"]
-        else:
-            audio_embeddings = list()
-            audio_values = audio_input["audio_values"]
-            audio_attention_mask = audio_input.get("audio_attention_mask")
-            if audio_attention_mask is None:
-                # WhisperFeatureExtractor output: process each audio individually
-                for _idx in range(len(audio_values)):
-                    _audio_values = audio_values[_idx : _idx + 1]
-                    _audio_embeddings = self.audio_model(
-                        _audio_values,
-                    ).last_hidden_state
-                    _audio_embeddings = _audio_embeddings.flatten(0, 1)
-                    _audio_embeddings = self.audio_projector(_audio_embeddings)
-                    audio_embeddings.append(_audio_embeddings)
-                return audio_embeddings
+            return audio_input["audio_embeds"]
+        
+        # continuous audio_embeds
+        audio_values = audio_input["audio_values"]
+        audio_attention_mask = audio_input["audio_attention_mask"]
+        num_audio_tokens = audio_input["num_audio_tokens"]
+        # audio_masks = audio_input["audio_masks"]
+        
+        with set_forward_context(None, self.vllm_config):
+            audio_embeds = self.audio_model(audio_values, attention_mask=audio_attention_mask).last_hidden_state
+        audio_embeds = self.audio_projector(audio_embeds)
+        audio_start_embed = self.embed_input_ids(input_ids=torch.tensor([self.hf_config.audio_start_token_id, ]).to(device=audio_embeds.device, dtype=torch.long))
+        audio_end_embed = self.embed_input_ids(input_ids=torch.tensor([self.hf_config.audio_end_token_id, ]).to(device=audio_embeds.device, dtype=torch.long))
+        
+        # discrete audio_embeds
+        discrete_audio_embeds = None
+        discrete_audio_start_embed = None
+        discrete_audio_end_embed = None
+        if (
+            self.discrete_audio_model is not None
+            and audio_input.get("discrete_audio_values", None) is not None
+        ):
+            discrete_audio_values = audio_input["discrete_audio_values"]
+            num_discrete_audio_tokens = audio_input["num_discrete_audio_tokens"]
+            with set_forward_context(None, self.vllm_config):
+                discrete_audio_token_ids = self.discrete_audio_model.forward(
+                    discrete_audio_values.to(dtype=self.discrete_audio_model.dtype),
+                )
+            # index shift to backbone embedding matrix
+            discrete_audio_token_ids += self.discrete_audio_unit_0_id
+            discrete_audio_token_ids = torch.clamp(
+                input=discrete_audio_token_ids,
+                min=0,
+                max=self.language_model.config.vocab_size - 1,
+            )
+            
+            discrete_audio_embeds = self.embed_input_ids(input_ids=discrete_audio_token_ids)
+            discrete_audio_start_embed = self.embed_input_ids(input_ids=torch.tensor([self.hf_config.discrete_audio_start_token_id, ]).to(device=discrete_audio_embeds.device, dtype=torch.long))
+            discrete_audio_end_embed = self.embed_input_ids(input_ids=torch.tensor([self.hf_config.discrete_audio_end_token_id, ]).to(device=discrete_audio_embeds.device, dtype=torch.long))
 
-            for _idx, (_audio_values, _audio_attention_mask) in enumerate(
-                zip(audio_values, audio_attention_mask)
-            ):
-                _audio_embeddings = self.audio_model(
-                    _audio_values,
-                    attention_mask=_audio_attention_mask,
-                ).last_hidden_state
-                _audio_embeddings = _audio_embeddings.flatten(0, 1)
-                _audio_embeddings = self.audio_projector(_audio_embeddings)
+        audio_embeds = list(audio_embeds)
+        for item_idx in range(0, len(audio_embeds)):
+            _audio_embeds = torch.cat([
+                audio_start_embed,
+                audio_embeds[item_idx],
+                audio_end_embed,
+            ], dim=0)
+            if discrete_audio_embeds is not None:
+                _audio_embeds = torch.cat([
+                    discrete_audio_start_embed,
+                    discrete_audio_embeds[item_idx],
+                    discrete_audio_end_embed,
+                    _audio_embeds,
+                ], dim=0)
+            audio_embeds[item_idx] = _audio_embeds
 
-                if (
-                    audio_input.get("discrete_audio_values", list()) is not None
-                    and len(audio_input["discrete_audio_values"]) > _idx
-                ):
-                    _discrete_token_ids = self.discrete_audio_model.forward(
-                        audio_input["discrete_audio_values"][0]
-                    )
-                    _discrete_token_ids = (
-                        _discrete_token_ids + self.discrete_audio_unit_0_id
-                    )
-                    if (_discrete_token_ids < 0).any() or (
-                        _discrete_token_ids >= self.language_model.config.vocab_size
-                    ).any():
-                        _discrete_token_ids = torch.clamp(
-                            input=_discrete_token_ids,
-                            min=0,
-                            max=self.language_model.config.vocab_size - 1,
-                        )
-                    _discrete_audio_embeddings = self.embed_input_ids(
-                        input_ids=_discrete_token_ids,
-                    )[0]
-                    _audio_embeddings = torch.cat(
-                        [
-                            _discrete_audio_embeddings,
-                            _audio_embeddings,
-                        ],
-                        dim=0,
-                    )
-
-                audio_embeddings.append(_audio_embeddings)
-
-        return audio_embeddings
+        return audio_embeds
 
     def _process_image_input(
         self,
@@ -1508,23 +1478,92 @@ class HyperCLOVAXOmniForCausalLM(
         if image_input["type"] == "image_embeds":
             return image_input["image_embeds"]
 
-        # Qwen2VL flat format: process all patches at once
+        # continuous image_embeds
         pixel_values = image_input["pixel_values"]
-        grid_thw = image_input["image_grid_thw"]
-        assert grid_thw.ndim == 2
-        grid_thw_list = grid_thw.tolist()
+        image_grid_thw = image_input["image_grid_thw"]
+        num_image_tokens = image_input["num_image_tokens"]
+        assert image_grid_thw.ndim == 2
+        image_grid_thw = image_grid_thw.tolist()
 
-        image_embeds = self.vision_model(pixel_values, grid_thw=grid_thw_list)
+        with set_forward_context(None, self.vllm_config):
+            image_embeds = self.vision_model(pixel_values, grid_thw=image_grid_thw)
         image_embeds = self.vision_projector(image_embeds)
+        image_start_embed = self.embed_input_ids(input_ids=torch.tensor([self.hf_config.image_start_token_id, ]).to(device=image_embeds.device, dtype=torch.long))
+        image_end_embed = self.embed_input_ids(input_ids=torch.tensor([self.hf_config.image_end_token_id, ]).to(device=image_embeds.device, dtype=torch.long))
+        image_embeds = image_embeds.split(num_image_tokens)
+        
+        # discrete image_embeds
+        discrete_image_embeds = None
+        discrete_image_start_embed = None
+        discrete_image_end_embed = None
+        if (
+            self.discrete_vision_model is not None
+            and image_input.get("discrete_pixel_values", None) is not None
+        ):
+            discrete_pixel_values = image_input["discrete_pixel_values"]
+            discrete_image_ratios = image_input["discrete_image_ratios"]
+            with set_forward_context(None, self.vllm_config):
+                discrete_image_token_ids = self.discrete_vision_model(
+                    discrete_pixel_values.to(dtype=self.discrete_vision_model.dtype),
+                )["encoded"]
+            # prevent overflow according to discrete_vision_codebook_size
+            discrete_image_token_ids = torch.clamp(discrete_image_token_ids, 0, self.discrete_vision_codebook_size - 1)
+            # index shift to backbone embedding matrix
+            discrete_image_token_ids += self.discrete_image_unit_0_id
+            discrete_image_token_ids = torch.clamp(
+                input=discrete_image_token_ids,
+                min=0,
+                max=self.language_model.config.vocab_size - 1,
+            )
+           
+            # scatter eol_token every `grid` tokens (grid = sqrt(bottleneck_token_num) = 27)
+            # reshape to rows, append an eol column, then flatten: [1, 729] -> [1, 756]
+            grid = int(round(discrete_image_token_ids.shape[-1] ** 0.5))
+            _batch = discrete_image_token_ids.shape[0]
+            discrete_image_eol_token_ids = torch.full(
+                (_batch, grid, 1),
+                self.hf_config.discrete_image_eol_token_id,
+                device=discrete_image_token_ids.device,
+                dtype=torch.long,
+            )
+            discrete_image_token_ids = torch.cat([
+                discrete_image_token_ids.reshape(_batch, grid, grid),
+                discrete_image_eol_token_ids,
+            ], dim=2).reshape(_batch, grid * (grid + 1))
+            
+            # concat ratio_token, eof_token 
+            discrete_image_ratio_token_ids = torch.tensor([
+                self.hf_config.discrete_image_ratio_token_ids[f'{_width}:{_height}'] 
+                for _width, _height in discrete_image_ratios
+            ]).to(device=discrete_image_token_ids.device, dtype=torch.long)
+            discrete_image_eof_token_ids = torch.tensor([self.hf_config.discrete_image_eof_token_id, ]).to(device=discrete_image_token_ids.device, dtype=torch.long)
+            discrete_image_token_ids = torch.concat([
+                discrete_image_ratio_token_ids.unsqueeze(dim=0),
+                discrete_image_token_ids,
+                discrete_image_eof_token_ids.unsqueeze(dim=0),
+            ], dim=1)
 
-        # Split by image using grid_thw sizes
-        merge_size = getattr(
-            self.vision_model,
-            "spatial_merge_size",
-            self.vision_config.spatial_merge_size,
-        )
-        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
-        return image_embeds.split(sizes)
+            discrete_image_embeds = self.embed_input_ids(input_ids=discrete_image_token_ids)
+            discrete_image_start_embed = self.embed_input_ids(input_ids=torch.tensor([self.hf_config.discrete_image_start_token_id, ]).to(device=discrete_image_embeds.device, dtype=torch.long))
+            discrete_image_end_embed = self.embed_input_ids(input_ids=torch.tensor([self.hf_config.discrete_image_end_token_id, ]).to(device=discrete_image_embeds.device, dtype=torch.long))
+            
+        image_embeds = list(image_embeds)
+        for item_idx in range(0, len(image_embeds)):
+            _image_embeds = torch.cat([
+                image_start_embed,
+                image_embeds[item_idx],
+                image_end_embed,
+            ], dim=0)
+            if discrete_image_embeds is not None:
+                _image_embeds = torch.cat([
+                    discrete_image_start_embed,
+                    discrete_image_embeds[item_idx],
+                    discrete_image_end_embed,
+                    _image_embeds,
+                ], dim=0)
+            image_embeds[item_idx] = _image_embeds
+
+        return image_embeds
 
     def _process_video_input(
         self,
@@ -1533,23 +1572,30 @@ class HyperCLOVAXOmniForCausalLM(
         if video_input["type"] == "video_embeds":
             return video_input["video_embeds"]
 
-        # Qwen2VL flat format: process all patches at once
+        # continuous video_embeds
         pixel_values_videos = video_input["pixel_values_videos"]
-        grid_thw = video_input["video_grid_thw"]
-        assert grid_thw.ndim == 2
-        grid_thw_list = grid_thw.tolist()
+        video_grid_thw = video_input["video_grid_thw"]
+        num_video_tokens = video_input["num_video_tokens"]
+        assert video_grid_thw.ndim == 2
+        video_grid_thw = video_grid_thw.tolist()
 
-        video_embeds = self.vision_model(pixel_values_videos, grid_thw=grid_thw_list)
+        with set_forward_context(None, self.vllm_config):
+            video_embeds = self.vision_model(pixel_values_videos, grid_thw=video_grid_thw)
         video_embeds = self.vision_projector(video_embeds)
-
-        # Split by video using grid_thw sizes
-        merge_size = getattr(
-            self.vision_model,
-            "spatial_merge_size",
-            self.vision_config.spatial_merge_size,
-        )
-        sizes = (grid_thw.prod(-1) // merge_size // merge_size).tolist()
-        return video_embeds.split(sizes)
+        video_start_embed = self.embed_input_ids(input_ids=torch.tensor([self.hf_config.video_start_token_id, ]).to(device=video_embeds.device, dtype=torch.long))
+        video_end_embed = self.embed_input_ids(input_ids=torch.tensor([self.hf_config.video_end_token_id, ]).to(device=video_embeds.device, dtype=torch.long))
+        video_embeds = video_embeds.split(num_video_tokens)
+        
+        video_embeds = list(video_embeds)
+        for item_idx in range(0, len(video_embeds)):
+            _video_embeds = torch.cat([
+                video_start_embed,
+                video_embeds[item_idx],
+                video_end_embed,
+            ], dim=0)
+            video_embeds[item_idx] = _video_embeds
+            
+        return video_embeds
 
     def _parse_and_validate_multimodal_inputs(self, **kwargs: object) -> dict:
         modalities = {}
@@ -1601,7 +1647,7 @@ class HyperCLOVAXOmniForCausalLM(
 
         if audio_embeddings is not None:
             return HyperCLOVAXOmniAudioEmbeddingInputs(
-                audio_embeddings=audio_embeddings,
+                audio_embeds=audio_embeddings,
             )
 
         raise AssertionError("Validation failed: audio_input")
@@ -1612,10 +1658,10 @@ class HyperCLOVAXOmniForCausalLM(
     ) -> HyperCLOVAXOmniImageInputs | None:
         pixel_values = kwargs.pop("pixel_values", None)
         image_grid_thw = kwargs.pop("image_grid_thw", None)
-        kwargs.pop("num_image_tokens", None)
-        kwargs.pop("discrete_pixel_values", None)
-        kwargs.pop("discrete_image_ratios", None)
-        kwargs.pop("num_discrete_image_tokens", None)
+        num_image_tokens = kwargs.pop("num_image_tokens", None)
+        discrete_pixel_values = kwargs.pop("discrete_pixel_values", None)
+        discrete_image_ratios = kwargs.pop("discrete_image_ratios", None)
+        num_discrete_image_tokens = kwargs.pop("num_discrete_image_tokens", None)
         image_embeddings = kwargs.pop("image_embeds", None)
 
         if pixel_values is None and image_embeddings is None:
@@ -1625,11 +1671,15 @@ class HyperCLOVAXOmniForCausalLM(
             return HyperCLOVAXOmniImagePixelInputs(
                 pixel_values=pixel_values,
                 image_grid_thw=image_grid_thw,
+                discrete_pixel_values=discrete_pixel_values,
+                discrete_image_ratios=discrete_image_ratios,
+                num_image_tokens=num_image_tokens,
+                num_discrete_image_tokens=num_discrete_image_tokens,
             )
 
         if image_embeddings is not None:
             return HyperCLOVAXOmniImageEmbeddingInputs(
-                image_embeddings=image_embeddings,
+                image_embeds=image_embeddings,
             )
 
         raise AssertionError("Validation failed: image_input")
@@ -1640,7 +1690,7 @@ class HyperCLOVAXOmniForCausalLM(
     ) -> HyperCLOVAXOmniVideoInputs | None:
         pixel_values_videos = kwargs.pop("pixel_values_videos", None)
         video_grid_thw = kwargs.pop("video_grid_thw", None)
-        kwargs.pop("num_video_tokens", None)
+        num_video_tokens = kwargs.pop("num_video_tokens", None)
         video_embeddings = kwargs.pop("video_embeds", None)
 
         if pixel_values_videos is None and video_embeddings is None:
@@ -1650,11 +1700,12 @@ class HyperCLOVAXOmniForCausalLM(
             return HyperCLOVAXOmniVideoPixelInputs(
                 pixel_values_videos=pixel_values_videos,
                 video_grid_thw=video_grid_thw,
+                num_video_tokens=num_video_tokens,
             )
 
         if video_embeddings is not None:
             return HyperCLOVAXOmniVideoEmbeddingInputs(
-                video_embeddings=video_embeddings,
+                video_embeds=video_embeddings,
             )
 
         raise AssertionError("Validation failed: video_input")
@@ -1742,7 +1793,7 @@ class HyperCLOVAXOmniForCausalLM(
         if self.vision_model is None:
             skip_prefixes.extend(["vision_model."])
         if self.vision_projector is None:
-            skip_prefixes.extend(["mm_projector."])
+            skip_prefixes.extend(["vision_projector."])
         if self.discrete_vision_model is None:
             skip_prefixes.extend(["discrete_vision_model."])
         if self.audio_model is None:
