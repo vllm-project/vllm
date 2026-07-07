@@ -10,6 +10,7 @@ import ast
 import asyncio
 import json
 import os
+import tempfile
 import time
 from collections.abc import Generator
 
@@ -25,7 +26,7 @@ INVALID = -9999999
 def download_and_cache_file(url: str, filename: str | None = None) -> str:
     """Download and cache a file from a URL."""
     if filename is None:
-        filename = os.path.join("/tmp", url.split("/")[-1])
+        filename = os.path.join(tempfile.gettempdir(), url.split("/")[-1])
 
     if os.path.exists(filename):
         return filename
