@@ -123,7 +123,8 @@ Use [Google-style docstrings](https://google.github.io/styleguide/pyguide.html#3
 
 ### Coding style guidelines
 
-- Match existing code style; keep comments and docstrings minimal.
+- Match existing code style
+- Minimize use of comments. Eliminate comments which are redundant, preferring legible and self-documenting code. When used, keep docstrings and comments brief and direct.
 - Assume the reader is familiar with vLLM.
 
 ### Commit messages
