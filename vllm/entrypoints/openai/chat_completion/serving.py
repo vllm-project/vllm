@@ -1024,7 +1024,11 @@ class OpenAIServingChat(GenerateBaseServing):
         )
 
         request_metadata.final_usage_info = usage
-        request_metadata._finished_stats = final_res.finished_stats
+        # x-vllm-* headers describe a single generation stream; for n>1 the
+        # stats belong to only one of the n sequences, so suppress them
+        # (mirrors the per-request-metrics guard below and the completion path).
+        if (request.n or 1) == 1:
+            request_metadata._finished_stats = final_res.finished_stats
 
         per_request_metrics: PerRequestTimingMetrics | None = None
         if (
