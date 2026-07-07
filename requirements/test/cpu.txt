@@ -962,7 +962,7 @@ s3transfer==0.10.3
     # via boto3
 sacrebleu==2.4.3
     # via lm-eval
-safetensors==0.7.0
+safetensors==0.8.0
     # via
     #   -r requirements/test/../common.txt
     #   accelerate
@@ -1159,7 +1159,7 @@ tqdm==4.67.3
     #   segmentation-models-pytorch
     #   sentence-transformers
     #   transformers
-transformers==5.10.4
+transformers==5.13.0
     # via
     #   -r requirements/test/../common.txt
     #   -r requirements/test/cuda.in

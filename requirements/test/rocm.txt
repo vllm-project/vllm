@@ -1035,7 +1035,7 @@ s3transfer==0.16.0
     # via boto3
 sacrebleu==2.6.0
     # via lm-eval
-safetensors==0.7.0
+safetensors==0.8.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
@@ -1218,7 +1218,7 @@ tqdm==4.67.3
     #   sentence-transformers
     #   tilelang
     #   transformers
-transformers==5.10.4
+transformers==5.13.0
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
