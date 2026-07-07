@@ -60,6 +60,7 @@ class MultiModalDummyOptionsBuiltins(TypedDict, total=False):
 
 MMEncoderTPMode = Literal["weights", "data"]
 MMCacheType = Literal["shm", "lru"]
+VideoPruningMethod = Literal["evs", "vidcom2"]
 MMTensorIPC = Literal["direct_rpc", "torch_shm"]
 MMDummyOptions: TypeAlias = dict[str, BaseDummyOptions]
 """
@@ -361,7 +362,7 @@ class MultiModalConfig:
     def is_multimodal_pruning_enabled(self):
         return self.get_video_pruning_spec() is not None
 
-    def get_video_pruning_spec(self) -> tuple[str, float] | None:
+    def get_video_pruning_spec(self) -> tuple[VideoPruningMethod, float] | None:
         """Return `(method, q)` where `q` is always the pruning fraction:
         `video_pruning_rate` for EVS, `1 - retention_ratio` for VidCom2."""
         if self.video_pruning_rate is not None and self.video_pruning_rate > 0:

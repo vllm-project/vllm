@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         SpeechToTextParams,
         VllmConfig,
     )
+    from vllm.config.multimodal import VideoPruningMethod
     from vllm.inputs import PromptType, TokensPrompt
     from vllm.lora.model_manager import LoRAModelManager
     from vllm.model_executor.layers.fused_moe import MoERunner
@@ -417,7 +418,9 @@ class SupportsMultiModalPruning(Protocol):
 
     supports_multimodal_pruning: ClassVar[Literal[True]] = True
 
-    supported_video_pruning_methods: ClassVar[tuple[str, ...]] = ("evs",)
+    supported_video_pruning_methods: ClassVar[tuple["VideoPruningMethod", ...]] = (
+        "evs",
+    )
     """Video pruning methods (as reported by
     `MultiModalConfig.get_video_pruning_spec`) implemented by this model.
     Models supporting methods beyond EVS should override this."""

@@ -50,7 +50,11 @@ from transformers.video_utils import VideoMetadata
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config import VllmConfig
-from vllm.config.multimodal import BaseDummyOptions, VideoDummyOptions
+from vllm.config.multimodal import (
+    BaseDummyOptions,
+    VideoDummyOptions,
+    VideoPruningMethod,
+)
 from vllm.distributed import get_pp_group, parallel_state
 from vllm.inputs import MultiModalDataDict
 from vllm.logger import init_logger
@@ -1724,7 +1728,7 @@ class Qwen3VLForConditionalGeneration(
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
         pruning_spec = multimodal_config.get_video_pruning_spec()
         if pruning_spec is None:
-            self.video_pruning_method: str | None = None
+            self.video_pruning_method: VideoPruningMethod | None = None
             self.video_pruning_rate = multimodal_config.video_pruning_rate
         else:
             self.video_pruning_method, self.video_pruning_rate = pruning_spec

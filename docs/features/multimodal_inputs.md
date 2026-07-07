@@ -354,7 +354,8 @@ Full example: [examples/generate/multimodal/vision_language_offline.py](../../ex
 
 For supported models, vLLM can prune video tokens after the vision encoder to
 reduce prefill time and KV cache usage, at some cost in accuracy. Two
-training-free methods are available, selected by mutually exclusive flags:
+training-free methods are available. They cannot be combined: the flags are
+mutually exclusive, and setting both is rejected at startup.
 
 - **EVS** (Efficient Video Sampling): `--video-pruning-rate <q>` drops the
   fraction `q` of video tokens with the lowest temporal dissimilarity to the
