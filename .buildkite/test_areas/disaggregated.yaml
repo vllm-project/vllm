@@ -160,6 +160,23 @@ steps:
     - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
     - bash v1/kv_connector/nixl_integration/run_multi_connector_accuracy_test.sh
 
+- label: MultiConnector (Nixl+Offloading) PD + Spec Decode accuracy (2 GPUs)
+  key: multiconnector-nixl-offloading-pd-spec-decode-accuracy-2-gpus
+  timeout_in_minutes: 30
+  working_dir: "/vllm-workspace/tests"
+  num_devices: 2
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/distributed/kv_transfer/kv_connector/v1/multi_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading_connector.py
+    - vllm/distributed/kv_transfer/kv_connector/v1/offloading/
+    - vllm/v1/worker/kv_connector_model_runner_mixin.py
+    - vllm/v1/spec_decode/
+    - tests/v1/kv_connector/nixl_integration/
+  commands:
+    - bash /vllm-workspace/.buildkite/scripts/install-kv-connectors.sh
+    - bash v1/kv_connector/nixl_integration/run_multi_connector_spec_decode_test.sh
+
 - label: NixlConnector PD + Spec Decode acceptance (2 GPUs)
   key: nixlconnector-pd-spec-decode-acceptance-2-gpus
   timeout_in_minutes: 45
