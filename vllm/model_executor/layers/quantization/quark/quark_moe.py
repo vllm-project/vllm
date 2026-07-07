@@ -1211,6 +1211,8 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 w2_weight_scale=layer.w2_weight_scale,
                 w13_bias=w13_bias,
                 w2_bias=w2_bias,
+                w13_input_scale=layer.w13_input_scale,
+                w2_input_scale=layer.w2_input_scale,
             )
         )
 
@@ -1278,6 +1280,7 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 gemm1_alpha=getattr(layer, "swiglu_alpha", None),
                 gemm1_beta=getattr(layer, "swiglu_beta", None),
                 swiglu_limit=getattr(layer, "swiglu_limit", None),
+                layer=layer,
             )
 
         # Emulation and other schemes
@@ -1318,6 +1321,11 @@ class QuarkOCP_MX_MoEMethod(QuarkMoEMethod):
                 gemm1_beta=getattr(layer, "swiglu_beta", None),
                 gemm1_clamp_limit=getattr(layer, "swiglu_limit", None),
             )
+
+    @property
+    def supports_eplb(self) -> bool:
+        # AITER shuffle keeps expert dim outermost, so EPLB row moves are layout-safe.
+        return True
 
     @property
     def is_monolithic(self) -> bool:
@@ -1554,7 +1562,9 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
                 moe_quant_config=self.moe_quant_config,
                 moe_config=self.moe,
                 experts_cls=self.experts_cls,
+                backend=self.nvfp4_backend,
                 routing_tables=layer._expert_routing_tables(),
+                layer=layer,
             )
 
     def get_fused_moe_quant_config(
@@ -1571,6 +1581,7 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             swiglu_alpha=getattr(layer, "swiglu_alpha", None),
             swiglu_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
         )
 
     def apply(

@@ -236,7 +236,9 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
+            backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
@@ -261,6 +263,7 @@ class CompressedTensorsW4A4Nvfp4MoEMethod(CompressedTensorsMoEMethod):
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             swiglu_alpha=getattr(layer, "swiglu_alpha", None),
             swiglu_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
         )
 
     def apply_monolithic(

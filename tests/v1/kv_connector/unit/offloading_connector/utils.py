@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from typing import Any
 from unittest.mock import MagicMock
@@ -41,21 +41,21 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheTensor,
 )
 from vllm.v1.kv_offload.base import (
+    CanonicalKVCaches,
     GPULoadStoreSpec,
     LoadStoreSpec,
+    LookupResult,
     OffloadingManager,
     OffloadingSpec,
+    OffloadingWorker,
     OffloadKey,
     PrepareStoreOutput,
     RequestOffloadingContext,
-    make_offload_key,
-)
-from vllm.v1.kv_offload.worker.worker import (
-    OffloadingHandler,
     TransferResult,
-    TransferSpec,
+    make_offload_key,
 )
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -81,9 +81,9 @@ class MockLoadStoreSpec(LoadStoreSpec):
         return repr(self.offload_keys)
 
 
-class MockOffloadingHandler(OffloadingHandler):
+class MockOffloadingWorker(OffloadingWorker):
     def __init__(self):
-        self.transfer_specs: dict[int, TransferSpec] = {}
+        self.transfer_specs: dict[int, tuple[LoadStoreSpec, LoadStoreSpec]] = {}
         self.completed_transfers: list[TransferResult] = []
         self.waiting_jobs: set[int] = set()
         self.completed_jobs: list[int] = []
@@ -94,8 +94,17 @@ class MockOffloadingHandler(OffloadingHandler):
         self.completed_transfers = []
         return finished
 
-    def transfer_async(self, job_id: int, spec: TransferSpec) -> bool:
-        self.transfer_specs[job_id] = spec
+    def submit_store(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:  # type: ignore[override]
+        self.transfer_specs[job_id] = (src_spec, dst_spec)
+        self.waiting_jobs.add(job_id)
+        return True
+
+    def submit_load(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:  # type: ignore[override]
+        self.transfer_specs[job_id] = (src_spec, dst_spec)
         self.waiting_jobs.add(job_id)
         return True
 
@@ -109,7 +118,6 @@ class MockOffloadingHandler(OffloadingHandler):
                     success=True,
                     transfer_size=None,
                     transfer_time=None,
-                    transfer_type=None,
                 )
                 self.completed_transfers.append(result)
 
@@ -123,25 +131,22 @@ class MockOffloadingSpec(OffloadingSpec):
         super().__init__(vllm_config, kv_cache_config)
 
         self.manager = MagicMock(spec=OffloadingManager)
-        self.manager.lookup.return_value = 0
         self.manager.prepare_load = lambda keys, req_context: MockLoadStoreSpec(keys)
-        self.manager.lookup.return_value = False
+        self.manager.lookup.return_value = LookupResult.MISS
+        self.manager.get_stats.return_value = None
         self.manager.on_new_request.return_value = RequestOffloadingContext()
-        self.handler = MockOffloadingHandler()
+        self.handler = MockOffloadingWorker()
 
     def get_manager(self) -> OffloadingManager:
         return self.manager
 
-    def get_handlers(
-        self, _
-    ) -> Iterator[tuple[type[LoadStoreSpec], type[LoadStoreSpec], OffloadingHandler]]:
-        yield GPULoadStoreSpec, MockLoadStoreSpec, self.handler
-        yield MockLoadStoreSpec, GPULoadStoreSpec, self.handler
+    def get_worker(self, _: CanonicalKVCaches) -> OffloadingWorker:
+        return self.handler
 
     def complete_transfers(self):
         self.handler.complete_jobs(self.handler.waiting_jobs.copy())
 
-    def get_completed_transfers(self) -> list[TransferSpec]:
+    def get_completed_transfers(self) -> list[tuple[LoadStoreSpec, LoadStoreSpec]]:
         specs = [
             self.handler.transfer_specs[job_id]
             for job_id in self.handler.completed_jobs
@@ -149,7 +154,7 @@ class MockOffloadingSpec(OffloadingSpec):
         self.handler.completed_jobs.clear()
         return specs
 
-    def get_flushed_transfers(self):
+    def get_flushed_transfers(self) -> list[tuple[LoadStoreSpec, LoadStoreSpec]]:
         specs = [
             self.handler.transfer_specs[job_id] for job_id in self.handler.flushed_jobs
         ]
@@ -238,9 +243,18 @@ class RequestRunner:
                 )
             ]
 
+        kv_cache_tensors = [
+            KVCacheTensor(
+                size=group.kv_cache_spec.page_size_bytes * num_gpu_blocks,
+                shared_by=[layer_name],
+            )
+            for group in kv_cache_groups
+            for layer_name in group.layer_names
+        ]
+
         kv_cache_config = KVCacheConfig(
             num_blocks=num_gpu_blocks,
-            kv_cache_tensors=[],
+            kv_cache_tensors=kv_cache_tensors,
             kv_cache_groups=kv_cache_groups,
         )
         vllm_config.cache_config.num_gpu_blocks = num_gpu_blocks
@@ -322,6 +336,7 @@ class RequestRunner:
         self.completed_loads: list[TransferSummary] = []
         self.completed_stores: list[TransferSummary] = []
         self.flushed_gpu_blocks: set[GPUBlock] = set()
+        self.kv_connector_stats: list[Any] = []
 
         # block_id -> GPUBlock
         self.gpu_blocks: dict[int, GPUBlock] = {}
@@ -334,6 +349,12 @@ class RequestRunner:
             attn_metadata={},
             slot_mapping={},
         )
+
+    def _record_kv_connector_stats(self, engine_outputs: dict[int, Any]) -> None:
+        for output in engine_outputs.values():
+            scheduler_stats = output.scheduler_stats
+            if scheduler_stats is not None and scheduler_stats.kv_connector_stats:
+                self.kv_connector_stats.append(scheduler_stats.kv_connector_stats)
 
     def new_request(
         self,
@@ -362,8 +383,7 @@ class RequestRunner:
         self.scheduler.add_request(req)
 
     def _parse_transfers(self):
-        for transfer_spec in self.offloading_spec.get_flushed_transfers():
-            src_spec, dst_spec = transfer_spec
+        for src_spec, dst_spec in self.offloading_spec.get_flushed_transfers():
             if isinstance(src_spec, GPULoadStoreSpec):
                 # store flush
                 for block_id in src_spec.block_ids:
@@ -375,9 +395,7 @@ class RequestRunner:
 
         block_size_factor = self.block_size_factor
 
-        for transfer_spec in self.offloading_spec.get_completed_transfers():
-            src_spec, dst_spec = transfer_spec
-
+        for src_spec, dst_spec in self.offloading_spec.get_completed_transfers():
             if isinstance(src_spec, GPULoadStoreSpec):
                 store = True
                 gpu_spec = src_spec
@@ -514,13 +532,17 @@ class RequestRunner:
             if self.async_scheduling:
                 # in async scheduling we update the output of the previous step
                 if prev_model_runner_output is not None:
-                    self.scheduler.update_from_output(
+                    engine_outputs = self.scheduler.update_from_output(
                         prev_scheduler_output, prev_model_runner_output
                     )
+                    self._record_kv_connector_stats(engine_outputs)
                 prev_scheduler_output = scheduler_output
                 prev_model_runner_output = model_runner_output
             else:
-                self.scheduler.update_from_output(scheduler_output, model_runner_output)
+                engine_outputs = self.scheduler.update_from_output(
+                    scheduler_output, model_runner_output
+                )
+                self._record_kv_connector_stats(engine_outputs)
 
             if post_step_fn is not None:
                 post_step_fn()
@@ -536,9 +558,10 @@ class RequestRunner:
             if token_id is None:
                 if self.async_scheduling:
                     # sample last token
-                    self.scheduler.update_from_output(
+                    engine_outputs = self.scheduler.update_from_output(
                         prev_scheduler_output, prev_model_runner_output
                     )
+                    self._record_kv_connector_stats(engine_outputs)
                 break
 
         self._parse_transfers()

@@ -63,6 +63,7 @@ from vllm.model_executor.layers.quantization.utils.flashinfer_utils import (
 )
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     process_fp8_input_tensor_strategy_moe,
+    process_fp8_weight_channel_strategy,
     process_fp8_weight_tensor_strategy_moe,
 )
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -604,8 +605,11 @@ class ModelOptFp8PcPtLinearMethod(LinearMethodBase):
         )
 
     def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
-        layer.weight = Parameter(layer.weight.t(), requires_grad=False)
-        layer.weight_scale = Parameter(layer.weight_scale.data, requires_grad=False)
+        weight, weight_scale, _ = process_fp8_weight_channel_strategy(
+            layer.weight, layer.weight_scale.data
+        )
+        layer.weight = Parameter(weight.t(), requires_grad=False)
+        layer.weight_scale = Parameter(weight_scale, requires_grad=False)
         self.fp8_linear.process_weights_after_loading(layer)
 
     def apply(
@@ -905,6 +909,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             fp8_backend=self.fp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
@@ -951,6 +956,7 @@ class ModelOptFp8MoEMethod(FusedMoEMethodBase):
             a1_scale=a1_scale,
             a2_scale=a2_scale,
             swiglu_limit=getattr(layer, "swiglu_limit", None),
+            layer=layer,
         )
 
     def apply_monolithic(
@@ -1602,7 +1608,9 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             moe_quant_config=self.moe_quant_config,
             moe_config=self.moe,
             experts_cls=self.experts_cls,
+            backend=self.nvfp4_backend,
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
         self.moe_kernel.fused_experts.process_weights_after_loading(layer)
 
@@ -1618,6 +1626,7 @@ class ModelOptNvFp4FusedMoE(FusedMoEMethodBase):
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             swiglu_alpha=getattr(layer, "swiglu_alpha", None),
             swiglu_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
         )
 
     @property
@@ -2164,6 +2173,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             fp8_backend=self.mxfp8_backend,
             experts_cls=self.experts_cls,
             routing_tables=layer._expert_routing_tables(),
+            layer=layer,
         )
 
         # No native MXFP8 MoE kernel on this device (e.g. gfx942): the emulation
@@ -2209,6 +2219,7 @@ class ModelOptMxFp8FusedMoE(FusedMoEMethodBase):
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
         )
 
     def apply_monolithic(
@@ -2285,6 +2296,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         fp8_config: ModelOptFp8Config,
         nvfp4_config: ModelOptNvFp4Config,
         w4a16_nvfp4_config: ModelOptNvFp4Config,
+        mxfp8_config: ModelOptMxFp8Config,
     ) -> None:
         super().__init__(exclude_modules)
         self.kv_cache_quant_method = kv_cache_quant_method
@@ -2292,6 +2304,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
         self.fp8_config = fp8_config
         self.nvfp4_config = nvfp4_config
         self.w4a16_nvfp4_config = w4a16_nvfp4_config
+        self.mxfp8_config = mxfp8_config
 
     def get_name(self) -> QuantizationMethods:
         return "modelopt_mixed"
@@ -2382,6 +2395,12 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             group_size=group_size,
         )
 
+        mxfp8_config = ModelOptMxFp8Config(
+            is_checkpoint_mxfp8_serialized=True,
+            kv_cache_quant_algo=kv_cache_quant_method,
+            exclude_modules=[],
+        )
+
         return cls(
             kv_cache_quant_method=kv_cache_quant_method,
             exclude_modules=exclude_modules,
@@ -2389,6 +2408,7 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             fp8_config=fp8_config,
             nvfp4_config=nvfp4_config,
             w4a16_nvfp4_config=w4a16_nvfp4_config,
+            mxfp8_config=mxfp8_config,
         )
 
     def _resolve_quant_algo(self, prefix: str) -> str | None:
@@ -2443,6 +2463,17 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 if key.startswith(parent_dot):
                     return info["quant_algo"].upper()
 
+        # 4. Parent-prefix fallback for fused projections (qkv_proj, gate_up_proj).
+        for candidate in self._quantized_layer_prefix_candidates(prefix):
+            parent_dot = candidate.rsplit(".", 1)[0] + "."
+            algos = {
+                info["quant_algo"].upper()
+                for key, info in self.quantized_layers.items()
+                if key.startswith(parent_dot) and "." not in key[len(parent_dot) :]
+            }
+            if len(algos) == 1:
+                return algos.pop()
+
         return None
 
     @staticmethod
@@ -2488,6 +2519,8 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
                 return ModelOptNvFp4LinearMethod(self.nvfp4_config)
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4W4A16LinearMethod(self.w4a16_nvfp4_config)
+            if quant_algo == "MXFP8":
+                return ModelOptMxFp8LinearMethod(self.mxfp8_config)
             # Layer not in quantized_layers — leave unquantized
             return UnquantizedLinearMethod()
 
@@ -2505,6 +2538,11 @@ class ModelOptMixedPrecisionConfig(ModelOptQuantConfigBase):
             if quant_algo == "W4A16_NVFP4":
                 return ModelOptNvFp4FusedMoE(
                     quant_config=self.w4a16_nvfp4_config,
+                    moe_config=layer.moe_config,
+                )
+            if quant_algo == "MXFP8":
+                return ModelOptMxFp8FusedMoE(
+                    quant_config=self.mxfp8_config,
                     moe_config=layer.moe_config,
                 )
             return None

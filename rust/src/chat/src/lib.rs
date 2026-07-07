@@ -29,8 +29,8 @@ pub use parser::reasoning::{
 pub use parser::tool::{ToolParser, ToolParserError, ToolParserFactory};
 pub use renderer::hf::ChatTemplateContentFormatOption;
 pub use renderer::{
-    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer, RenderedPrompt,
-    RendererSelection,
+    ChatRenderer, DeepSeekV4ChatRenderer, DeepSeekV32ChatRenderer, DynChatRenderer,
+    HarmonyChatRenderer, RenderedPrompt, RendererSelection,
 };
 pub use request::{
     ChatContent, ChatContentPart, ChatMessage, ChatOptions, ChatRequest, ChatRole, ChatTool,
@@ -50,7 +50,8 @@ mod request;
 mod stream;
 
 use vllm_engine_core_client::EngineCoreClient;
-use vllm_engine_core_client::protocol::ModelDtype;
+use vllm_engine_core_client::protocol::dtype::ModelDtype;
+use vllm_engine_core_client::protocol::request::ReasoningParserKwargs;
 use vllm_llm::Llm;
 use vllm_text::{Prompt, TextLlm, TextRequest};
 
@@ -171,6 +172,9 @@ impl ChatLlm {
     pub async fn chat(&self, mut request: ChatRequest) -> Result<ChatEventStream> {
         request.validate()?;
 
+        // Stamp before rendering so render and tokenize count toward TTFT/e2e.
+        let arrival_time = vllm_llm::current_unix_timestamp_secs();
+
         let output_processor = self.backend.new_chat_output_processor(
             &mut request,
             NewChatOutputProcessorOptions {
@@ -179,6 +183,14 @@ impl ChatLlm {
             },
         )?;
         let rendered = self.backend.chat_renderer().render(&request)?;
+        let reasoning_parser_kwargs =
+            request
+                .sampling_params
+                .structured_outputs
+                .is_some()
+                .then(|| ReasoningParserKwargs {
+                    chat_template_kwargs: rendered.effective_template_kwargs.clone(),
+                });
 
         let (prompt, mm_features) = multimodal::finalize_rendered_prompt(
             &request,
@@ -199,7 +211,9 @@ impl ChatLlm {
             cache_salt: request.cache_salt,
             add_special_tokens: request.add_special_tokens,
             data_parallel_rank: request.data_parallel_rank,
+            reasoning_parser_kwargs,
             lora_request: request.lora_request,
+            arrival_time: Some(arrival_time),
         };
         let decoded_stream = self.text.generate(text_request).await?.map_err(Error::from).boxed();
 
