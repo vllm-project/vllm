@@ -3,6 +3,8 @@
 
 #include <arm_neon.h>
 
+#include "cpu/cpu_tanhf_neon.hpp"
+
 #include <torch/all.h>
 #include <ATen/cpu/vec/functional.h>
 #include <ATen/cpu/vec/vec.h>
@@ -345,6 +347,10 @@ struct FP32Vec4 : public VectorizedRegWrapper<FP32Vec4, 1, float> {
   explicit FP32Vec4(float32x4_t data) : Base(VectorizedT(data)) {};
 
   explicit FP32Vec4(const FP32Vec4& data) : Base(data) {};
+
+  FORCE_INLINE FP32Vec4 tanh() const {
+    return FP32Vec4(fast_tanhf_f32x4(reg.val[0]));
+  }
 };
 
 struct FP32Vec8 : public VectorizedRegWrapper<FP32Vec8, 2, float> {
@@ -389,6 +395,13 @@ struct FP32Vec8 : public VectorizedRegWrapper<FP32Vec8, 2, float> {
   explicit FP32Vec8(float32x4x2_t data) {
     reg.val[0] = Vectorized<float>(data.val[0]);
     reg.val[1] = Vectorized<float>(data.val[1]);
+  }
+
+  FORCE_INLINE FP32Vec8 tanh() const {
+    FP32Vec8 r(uninit);
+    r.reg.val[0] = Vectorized<float>(fast_tanhf_f32x4(reg.val[0]));
+    r.reg.val[1] = Vectorized<float>(fast_tanhf_f32x4(reg.val[1]));
+    return r;
   }
 
   FORCE_INLINE float reduce_sum() const noexcept {
@@ -496,6 +509,15 @@ struct FP32Vec16 : public VectorizedRegWrapper<FP32Vec16, 4, float> {
     reg.val[2] = Vectorized<float>(vcvt_f32_f16(vget_low_f16(v.reg.val[1])));
     reg.val[3] = Vectorized<float>(vcvt_f32_f16(vget_high_f16(v.reg.val[1])));
   };
+
+  FORCE_INLINE FP32Vec16 tanh() const {
+    FP32Vec16 r(uninit);
+    r.reg.val[0] = Vectorized<float>(fast_tanhf_f32x4(reg.val[0]));
+    r.reg.val[1] = Vectorized<float>(fast_tanhf_f32x4(reg.val[1]));
+    r.reg.val[2] = Vectorized<float>(fast_tanhf_f32x4(reg.val[2]));
+    r.reg.val[3] = Vectorized<float>(fast_tanhf_f32x4(reg.val[3]));
+    return r;
+  }
 
   static FORCE_INLINE void load_even_odd(const float* ptr, FP32Vec16& even,
                                          FP32Vec16& odd) noexcept {

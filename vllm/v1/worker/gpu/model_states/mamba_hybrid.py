@@ -246,7 +246,7 @@ class MambaHybridModelState(DefaultModelState):
         # compute them during actual (non-capture) forward execution.
         num_accepted_tokens = None
         num_decode_draft_tokens_cpu = None
-        if not for_capture:
+        if not for_capture and self.vllm_config.num_speculative_tokens > 0:
             num_accepted_tokens = self.num_accepted_tokens_gpu.new_ones(num_reqs)
             num_accepted_tokens[: input_batch.num_reqs] = self.num_accepted_tokens_gpu[
                 input_batch.idx_mapping
@@ -255,11 +255,16 @@ class MambaHybridModelState(DefaultModelState):
             # GDN uses >= 0 to select spec-decode rows, so non-decode rows
             # need the -1 sentinel rather than a raw zero draft count.
             num_decode_draft_tokens_np = np.full(num_reqs, -1, dtype=np.int32)
-            if input_batch.num_draft_tokens_per_req is not None:
-                has_draft_tokens = input_batch.num_draft_tokens_per_req > 0
-                spec_decode_mask = has_draft_tokens & ~input_batch.is_prefilling_np
+            num_draft_tokens_per_req = input_batch.num_draft_tokens_per_req
+            if num_draft_tokens_per_req is not None:
+                # A row is a spec-decode row only when its whole prompt is already
+                # computed, i.e. exactly one non-draft (decode) token is scheduled.
+                is_decode = (
+                    input_batch.num_scheduled_tokens == num_draft_tokens_per_req + 1
+                )
+                spec_decode_mask = (num_draft_tokens_per_req > 0) & is_decode
                 num_decode_draft_tokens_np[: input_batch.num_reqs] = np.where(
-                    spec_decode_mask, input_batch.num_draft_tokens_per_req, -1
+                    spec_decode_mask, num_draft_tokens_per_req, -1
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
