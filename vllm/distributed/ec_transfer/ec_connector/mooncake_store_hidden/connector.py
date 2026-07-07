@@ -311,6 +311,13 @@ class MooncakeStoreECConnector(ECConnectorBase):
         if self.worker is None or not self.is_producer:
             return None, None
         finished_sending = self.worker.get_finished_sending()
+        failed_sending = self.worker.get_failed_sending()
+        for identifier, reason in failed_sending.items():
+            logger.error(
+                "hidden_store_save_failed identifier=%s reason=%s",
+                identifier,
+                reason,
+            )
         return finished_sending or None, None
 
     def _find_metadata_item(self, identifier: str) -> MMMeta | None:
