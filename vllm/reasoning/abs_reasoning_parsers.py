@@ -41,7 +41,7 @@ class ReasoningParser:
 
     @cached_property
     def vocab(self) -> dict[str, int]:
-        # NOTE: Only PreTrainedTokenizerFast is guaranteed to have .vocab
+        # NOTE: Only TokenizersBackend is guaranteed to have .vocab
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
