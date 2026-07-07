@@ -881,7 +881,7 @@ class MixtureOfExperts(Protocol):
     num_redundant_experts: int
     """Number of redundant experts in this model."""
 
-    moe_layers: Iterable["MoERunner"]
+    moe_layers: Sequence["MoERunner"]
     """List of MoE layers in this model."""
 
     def set_eplb_state(

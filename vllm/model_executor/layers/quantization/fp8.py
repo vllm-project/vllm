@@ -816,12 +816,11 @@ class Fp8MoEMethod(FusedMoEMethodBase):
         a1_scale = layer.w13_input_scale
         a2_scale = layer.w2_input_scale
         assert a1_scale is not None and a2_scale is not None
-        self.moe_quant_config._w1.alpha_or_gscale.copy_(
-            (w1_scale * a1_scale).squeeze()
-        )
-        self.moe_quant_config._w2.alpha_or_gscale.copy_(
-            (w2_scale * a2_scale).squeeze()
-        )
+        w1_alpha = self.moe_quant_config._w1.alpha_or_gscale
+        w2_alpha = self.moe_quant_config._w2.alpha_or_gscale
+        assert w1_alpha is not None and w2_alpha is not None
+        w1_alpha.copy_((w1_scale * a1_scale).squeeze())
+        w2_alpha.copy_((w2_scale * a2_scale).squeeze())
 
     def apply_monolithic(
         self,
