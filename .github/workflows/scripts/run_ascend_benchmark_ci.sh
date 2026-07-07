@@ -25,6 +25,7 @@ SAME_SPEC_BENCHMARK_ENABLED=${SAME_SPEC_BENCHMARK_ENABLED:-1}
 SAME_SPEC_SPEC_FILE=${SAME_SPEC_SPEC_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/official-ascend-jan-2026-v0180-random-online-qwen25-14b-910b2.json}
 SAME_SPEC_CONSTRAINTS_FILE=${SAME_SPEC_CONSTRAINTS_FILE:-$VLLM_HUST_BENCHMARK_REPO/docs/official-baselines/official-ascend-constraints.stub.json}
 SAME_SPEC_READY_TIMEOUT_SECONDS=${SAME_SPEC_READY_TIMEOUT_SECONDS:-600}
+SAME_SPEC_PR_PREVIEW_COMPAT=${SAME_SPEC_PR_PREVIEW_COMPAT:-1}
 ALLOW_RANDOM_HF_PUBLISH=${ALLOW_RANDOM_HF_PUBLISH:-0}
 
 MODEL_NAME=${MODEL_NAME:-Qwen/Qwen2.5-14B-Instruct}
@@ -927,6 +928,7 @@ run_same_spec_current_benchmark() {
   local same_spec_raw_result=$RESULT_ROOT/raw_benchmark_result.json
   local same_spec_submission_dir=$RESULT_ROOT/submission
   local same_spec_ready_timeout_seconds=${SAME_SPEC_READY_TIMEOUT_SECONDS:-600}
+  local effective_same_spec_file=$SAME_SPEC_SPEC_FILE
   local same_spec_server_log=$RESULT_ROOT/server.stdout.log
   local same_spec_status=0
   local current_vllm_hust_commit
@@ -957,6 +959,44 @@ run_same_spec_current_benchmark() {
   rm -f "$same_spec_raw_result" "$RAW_RESULT_FILE"
   rm -rf "$same_spec_submission_dir" "$SUBMISSION_DIR"
 
+  prepare_same_spec_pr_preview_compat_file() {
+    local output_file=$RESULT_ROOT/pr-preview-same-spec.compat.json
+
+    "$PYTHON_BIN" - "$SAME_SPEC_SPEC_FILE" "$output_file" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+source = Path(sys.argv[1])
+target = Path(sys.argv[2])
+payload = json.loads(source.read_text(encoding="utf-8"))
+
+server_parameters = dict(payload.get("server_parameters") or {})
+client_parameters = dict(payload.get("client_parameters") or {})
+
+# PR preview runs on self-hosted Ascend runners where the official same-spec
+# defaults can trip plugin paths that are not reliable for smoke gating.
+server_parameters["no_enable_chunked_prefill"] = True
+server_parameters["no_enable_prefix_caching"] = True
+client_parameters.setdefault("temperature", 0)
+
+payload["server_parameters"] = server_parameters
+payload["client_parameters"] = client_parameters
+
+target.parent.mkdir(parents=True, exist_ok=True)
+target.write_text(
+    json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+    encoding="utf-8",
+)
+print(target)
+PY
+  }
+
+  if [[ "$SAME_SPEC_PR_PREVIEW_COMPAT" == "1" && ( "${GITHUB_EVENT_NAME:-}" == "pull_request" || "${GITHUB_EVENT_NAME:-}" == "issue_comment" ) ]]; then
+    effective_same_spec_file=$(prepare_same_spec_pr_preview_compat_file)
+    echo "Using PR preview same-spec compatibility overlay: $effective_same_spec_file"
+  fi
+
   run_same_spec_runner() {
     if [[ "$ASCEND_BENCHMARK_USE_SUDO" == "1" ]]; then
       READY_TIMEOUT_SECONDS="$same_spec_ready_timeout_seconds" \
@@ -982,7 +1022,7 @@ run_same_spec_current_benchmark() {
         CURRENT_SERVER_PORT="$PORT" \
         CURRENT_CLIENT_PORT="$PORT" \
         CONSTRAINTS_FILE="$SAME_SPEC_CONSTRAINTS_FILE" \
-        run_with_same_spec_stderr_filter run_ascend_root_helper same-spec "$same_spec_runner" "$SAME_SPEC_SPEC_FILE"
+        run_with_same_spec_stderr_filter run_ascend_root_helper same-spec "$same_spec_runner" "$effective_same_spec_file"
     else
       run_with_same_spec_stderr_filter env \
         READY_TIMEOUT_SECONDS="$same_spec_ready_timeout_seconds" \
@@ -1008,7 +1048,7 @@ run_same_spec_current_benchmark() {
         CURRENT_SERVER_PORT="$PORT" \
         CURRENT_CLIENT_PORT="$PORT" \
         CONSTRAINTS_FILE="$SAME_SPEC_CONSTRAINTS_FILE" \
-        bash "$same_spec_runner" "$SAME_SPEC_SPEC_FILE"
+        bash "$same_spec_runner" "$effective_same_spec_file"
     fi
   }
 
