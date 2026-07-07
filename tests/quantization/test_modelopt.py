@@ -18,6 +18,7 @@ from vllm.model_executor.layers.linear import UnquantizedLinearMethod
 from vllm.model_executor.layers.quantization.modelopt import (
     ModelOptFp8Config,
     ModelOptMixedPrecisionConfig,
+    ModelOptMxFp8Config,
     ModelOptNvFp4Config,
     ModelOptNvFp4LinearMethod,
 )
@@ -81,6 +82,11 @@ def _mixed_precision_config(quantized_layers: dict) -> ModelOptMixedPrecisionCon
         w4a16_nvfp4_config=ModelOptNvFp4Config(
             quant_method="W4A16_NVFP4",
             is_checkpoint_nvfp4_serialized=True,
+            kv_cache_quant_algo=None,
+            exclude_modules=[],
+        ),
+        mxfp8_config=ModelOptMxFp8Config(
+            is_checkpoint_mxfp8_serialized=True,
             kv_cache_quant_algo=None,
             exclude_modules=[],
         ),
@@ -243,10 +249,11 @@ def test_modelopt_fp8_pc_pt_checkpoint_setup(default_vllm_config, vllm_runner):
             assert isinstance(gate_up_proj.quant_method, ModelOptFp8PcPtLinearMethod)
             assert isinstance(down_proj.quant_method, ModelOptFp8PcPtLinearMethod)
 
-            assert qkv_proj.weight.dtype == torch.float8_e4m3fn
-            assert o_proj.weight.dtype == torch.float8_e4m3fn
-            assert gate_up_proj.weight.dtype == torch.float8_e4m3fn
-            assert down_proj.weight.dtype == torch.float8_e4m3fn
+            fp8_dtype = current_platform.fp8_dtype()
+            assert qkv_proj.weight.dtype == fp8_dtype
+            assert o_proj.weight.dtype == fp8_dtype
+            assert gate_up_proj.weight.dtype == fp8_dtype
+            assert down_proj.weight.dtype == fp8_dtype
 
             # Per-channel scales; activations are dynamically scaled per token.
             assert hasattr(qkv_proj, "weight_scale")

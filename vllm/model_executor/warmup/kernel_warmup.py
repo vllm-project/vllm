@@ -12,6 +12,7 @@ import torch
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.model_executor.warmup.cutedsl_warmup import cutedsl_warmup
 from vllm.model_executor.warmup.deep_gemm_warmup import deep_gemm_warmup
 from vllm.model_executor.warmup.deepseek_v4_mhc_warmup import (
     deepseek_v4_mhc_warmup,
@@ -25,6 +26,12 @@ from vllm.model_executor.warmup.flashinfer_sparse_mla_warmup import (
     flashinfer_sparse_mla_decode_autotune_warmup,
 )
 from vllm.model_executor.warmup.qwen_triton_warmup import qwen_triton_warmup
+from vllm.model_executor.warmup.sparse_mla_triton_warmup import (
+    sparse_mla_triton_warmup_if_needed,
+)
+from vllm.model_executor.warmup.v1_block_table_warmup import (
+    warm_v1_block_table_kernels,
+)
 from vllm.platforms import current_platform
 from vllm.utils.deep_gemm import is_deep_gemm_supported
 from vllm.utils.flashinfer import has_flashinfer
@@ -41,6 +48,12 @@ def kernel_warmup(worker: "Worker"):
         minimax_m3_msa_warmup,
     )
 
+    # Pooling models do not use the generation slot-mapping path.
+    if not worker.use_v2_model_runner and not worker.model_runner.is_pooling_model:
+        warm_v1_block_table_kernels(
+            getattr(worker.model_runner, "device", torch.device("cuda")),
+            worker.scheduler_config.max_num_batched_tokens,
+        )
     qwen_triton_warmup(worker.model_runner, worker.vllm_config.model_config)
 
     # DSv4 mHC TileLang kernels (hc_pre/hc_post/hc_head_op) run every decoder
@@ -55,6 +68,7 @@ def kernel_warmup(worker: "Worker"):
     )
 
     # Run next so input-prep kernels JIT against pristine runner state.
+    sparse_mla_triton_warmup_if_needed(worker)
     flashinfer_sparse_mla_decode_autotune_warmup(worker)
     deepseek_v4_sparse_mla_attention_warmup(worker)
 
@@ -112,11 +126,8 @@ def kernel_warmup(worker: "Worker"):
             create_mixed_batch=True,
         )
 
-
-# TODO: remove once FlashInfer upstream fixes the persistent file cache
-# to resolve collisions like `use_8x4_sf_layout=True/False`, which causes
-# invalid tactics to be chosen
-_FLASHINFER_USE_PERSISTENT_CACHE = False
+    if worker.vllm_config.kernel_config.enable_cutedsl_warmup:
+        cutedsl_warmup()
 
 
 def flashinfer_autotune(runner: "GPUModelRunner") -> None:
@@ -135,7 +146,13 @@ def flashinfer_autotune(runner: "GPUModelRunner") -> None:
     import vllm.utils.flashinfer as fi_utils
     from vllm.distributed.parallel_state import get_world_group
 
-    if not _FLASHINFER_USE_PERSISTENT_CACHE:
+    use_persistent_cache = True
+
+    # When distributed, tune on every rank so the collectives stay synchronized.
+    if get_world_group().world_size > 1:
+        use_persistent_cache = False
+
+    if not use_persistent_cache:
         with torch.inference_mode(), fi_utils.autotune():
             runner._dummy_run(
                 num_tokens=runner.scheduler_config.max_num_batched_tokens,
