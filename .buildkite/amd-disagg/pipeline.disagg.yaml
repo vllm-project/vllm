@@ -20,7 +20,8 @@ steps:
       - vllm/platforms/rocm.py
       - .buildkite/amd-disagg/
     env:
-      IMAGE: "rocm/vllm-ci:${BUILDKITE_COMMIT}"
+      # TOOD: re-enable after testing.
+      #IMAGE: "rocm/vllm-ci:${BUILDKITE_COMMIT}"
       NODES: "2"
       GPUS_PER_NODE: "8"
       WIDE_EP_MODE: "0"
@@ -43,7 +44,8 @@ steps:
       - vllm/platforms/rocm.py
       - .buildkite/amd-disagg/
     env:
-      IMAGE: "rocm/vllm-ci:${BUILDKITE_COMMIT}"
+      # TODO: re-enable after testing
+      #IMAGE: "rocm/vllm-ci:${BUILDKITE_COMMIT}"
       NODES: "2"
       GPUS_PER_NODE: "8"
       WIDE_EP_MODE: "0"
