@@ -713,7 +713,15 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             if mha_use_quant_output:
                 mha_output = quant_output
                 mha_output_scale = output_scale
-                mha_output_scales = output_block_scale
+                # The swizzled NVFP4 scale buffer passes whole (its rows are padded to
+                # 128); per-group FP8 scales slice per token like the output. Static
+                # FP8 has no block scales.
+                if quant_key == kNvfp4Dynamic or output_block_scale is None:
+                    mha_output_scales = output_block_scale
+                else:
+                    mha_output_scales = output_block_scale[
+                        num_mqa_tokens:num_actual_toks
+                    ]
             else:
                 mha_output = output
                 mha_output_scale = None
@@ -728,13 +736,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 self._k_scale,
                 output=mha_output[num_mqa_tokens:num_actual_toks],
                 output_scale=mha_output_scale,
-                output_scales=(
-                    mha_output_scales
-                    if quant_key == kNvfp4Dynamic
-                    else mha_output_scales[num_mqa_tokens:num_actual_toks]
-                    if mha_output_scales is not None
-                    else None
-                ),
+                output_scales=mha_output_scales,
             )
 
         if num_mqa_tokens > 0:
@@ -2311,12 +2313,32 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         has_context = prefill_metadata.chunked_context is not None
         fused_output = output_scale is not None or output_scales is not None
-        is_nvfp4 = (
-            output_scales is not None and output_scales.dtype == torch.float8_e4m3fn
+        quant_key = _detect_output_quant_key(
+            output, output_scale, output_scales, self.num_heads * self.v_head_dim
         )
+        is_nvfp4 = quant_key == kNvfp4Dynamic
         assert not fused_output or not has_context, (
             "Fused FP8 output is only wired for the non-chunked-context path"
         )
+
+        fused_out = None
+        if fused_output:
+            if is_nvfp4:
+                # NVFP4: packed e2m1 codes, two per byte.
+                fused_out = output.view(torch.float4_e2m1fn_x2).view(
+                    -1, self.num_heads, self.v_head_dim // 2
+                )
+            else:
+                fused_out = output.view(-1, self.num_heads, self.v_head_dim)
+
+        # NVFP4 scales stay 2D (128x4-swizzled buffer). Per-group FP8:
+        # (tokens, heads*groups) -> (tokens, heads, groups); unflatten (not view)
+        # preserves the column-major / TMA-aligned DeepGEMM scale strides.
+        fused_out_scales = output_scales
+        if output_scales is not None and not is_nvfp4:
+            fused_out_scales = output_scales.unflatten(
+                -1, (self.num_heads, output_scales.shape[-1] // self.num_heads)
+            )
 
         kv_nope = self.kv_b_proj(kv_c_normed)[0].view(
             -1, self.num_heads, self.qk_nope_head_dim + self.v_head_dim
@@ -2333,31 +2355,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             k=k,
             v=v,
             return_softmax_lse=has_context,
-            out=(
-                (
-                    # NVFP4: packed e2m1 codes, two per byte.
-                    output.view(torch.float4_e2m1fn_x2).view(
-                        -1, self.num_heads, self.v_head_dim // 2
-                    )
-                    if is_nvfp4
-                    else output.view(-1, self.num_heads, self.v_head_dim)
-                )
-                if fused_output
-                else None
-            ),
+            out=fused_out,
             output_scale=output_scale,
-            # NVFP4 scales stay 2D (128x4-swizzled buffer). Per-group FP8:
-            # (tokens, heads*groups) -> (tokens, heads, groups); unflatten (not view)
-            # preserves the column-major / TMA-aligned DeepGEMM scale strides.
-            output_scales=(
-                output_scales
-                if is_nvfp4
-                else output_scales.unflatten(
-                    -1, (self.num_heads, output_scales.shape[-1] // self.num_heads)
-                )
-                if output_scales is not None
-                else None
-            ),
+            output_scales=fused_out_scales,
         )
 
         if has_context:
