@@ -11,35 +11,46 @@ from cuda.bindings.driver import CUstream
 
 
 def _vector_dotprod(
-    acc: cute.Tensor,
-    tA_vec: cute.Tensor,  # layout: (M, vector_width, num_tiles)
-    tB_vec: cute.Tensor,  # layout: (vector_width, num_tiles)
+    acc: cute.Tensor,              # [M] fp32 accumulators in registers
+    tA: cute.Tensor,               # this thread's A view: [M, vec_width, num_tiles]
+    tB: cute.Tensor,               # this thread's B view: [vec_width, num_tiles]
+    M: cutlass.Constexpr,          # must be constexpr for loop unrolling
+    num_tiles: cutlass.Constexpr,  # tiles this thread processes
+    align_bytes: cutlass.Constexpr,  # 16 for 128-bit loads, 8 for 64-bit tail
 ):
-    for tile in range(cute.size(tA_vec, mode=[2])):
-        bt = tB_vec[None, tile]
-        br = cute.make_rmem_tensor_like(bt)
-        cute.autovec_copy(bt, br)
+    """FMA dot-product over all K-tiles.
+
+    B is loaded once per tile and converted to fp32, then reused across all M
+    tokens to avoid redundant type conversion.
+    Alignment hints are re-applied after logical_divide to restore vectorized loads.
+    """
+    for tile in range(num_tiles):
+        bt = tB[None, tile]
+        bt_a = cute.make_tensor(bt.iterator.align(align_bytes), bt.layout)
+        br = cute.make_rmem_tensor_like(bt_a)
+        cute.autovec_copy(bt_a, br)
         br_f32 = br.load().to(cutlass.Float32)
 
-        for m in range(cute.size(tA_vec, mode=[0])):
-            at = tA_vec[m, None, tile]
-            ar = cute.make_rmem_tensor_like(at)
-            cute.autovec_copy(at, ar)
+        for m in range(M):
+            at = tA[m, None, tile]
+            at_a = cute.make_tensor(at.iterator.align(align_bytes), at.layout)
+            ar = cute.make_rmem_tensor_like(at_a)
+            cute.autovec_copy(at_a, ar)
             vec_width: cutlass.Constexpr = cute.size(ar)
             for v in range(vec_width):
                 acc[m] = acc[m] + ar[v].to(cutlass.Float32) * br_f32[v]
 
-
 def _make_thread_vector_slice(
-    gA_vec: cute.Tensor,
-    gB_vec: cute.Tensor,
+    gA_vec: cute.Tensor,  # [M, (vec_width, num_vecs)]
+    gB_vec: cute.Tensor,  # [N, (vec_width, num_vecs)]
     tidx: cutlass.Int32,
     n_idx: cutlass.Int32,
     bs: cutlass.Constexpr,
 ):
+    """Partition vectorized K-tiles across BS threads, return this thread's view."""
     tA = cute.logical_divide(gA_vec, (None, (None, bs)))
     tB = cute.logical_divide(gB_vec, (None, (None, bs)))
-    return tA[None, (None, (tidx, None))], tB[n_idx, (None, (tidx, None))]
+    return tA[None, (None, (tidx, None))], tB[n_idx, (None, (tidx, None))]                
 
 
 def _make_k_slice(
@@ -47,9 +58,12 @@ def _make_k_slice(
     k_offset: cutlass.Constexpr,
     k_extent: cutlass.Constexpr,
 ):
+    """Extract a K-dimension slice [*leading_dims, k_offset:k_offset+k_extent]."""
     # CuTe layouts require positive dimensions even when a compile-time branch
     # is eliminated. Empty K regions use a one-element layout and zero tiles.
     k_layout_extent: cutlass.Constexpr = max(k_extent, 1)
+    if k_offset == 0:
+        return cute.local_tile(gX, (cute.size(gX, mode=[0]), k_layout_extent), (0, 0))
     return cute.local_tile(
         cute.domain_offset((0, k_offset), gX),
         (cute.size(gX, mode=[0]), k_layout_extent),
@@ -64,27 +78,40 @@ def _make_k_slice(
 def make_host_bf16(k_val: int, bs: int = 128):
     _MAIN_VEC_WIDTH = 8  # bf16 elements per 128-bit vectorized load
     _TAIL_VEC_WIDTH = 4  # bf16 elements per 64-bit vectorized load
-    _BS = bs  # block size
+    _BS = bs
+
 
     @cute.kernel
     def dotprod_bf16_lf(
-        gA: cute.Tensor,  # activations, [M, K]
-        gB: cute.Tensor,  # weights, [N, K]
-        gC: cute.Tensor,  # output, [M, N]
-        M: cutlass.Constexpr,  # number of tokens (compile-time constant)
+        gA: cute.Tensor,          # activations [M, K], row-major bf16
+        gB: cute.Tensor,          # weights     [N, K], row-major bf16
+        gC: cute.Tensor,          # output      [M, N], row-major fp32
+        M: cutlass.Constexpr,     # number of tokens
+        K_dim: cutlass.Constexpr, # hidden dimension (K)
     ):
         cute.arch.setmaxregister_increase(128)
 
-        tidx = cute.arch.thread_idx()[0]  # [0, 255]
-        n_idx = cute.arch.block_idx()[0]  # which expert this CTA computes. [0, N-1]
+        tidx  = cute.arch.thread_idx()[0]   # [0, BS-1]
+        n_idx = cute.arch.block_idx()[0]    # which expert [0, N-1]
 
         # Compile-time constants
         MAIN_VEC_WIDTH: cutlass.Constexpr = _MAIN_VEC_WIDTH
+        TAIL_VEC_WIDTH: cutlass.Constexpr = _TAIL_VEC_WIDTH
         BS: cutlass.Constexpr = _BS
-        K_TOTAL: cutlass.Constexpr = cute.size(gA, mode=[1])
+        K_TOTAL: cutlass.Constexpr = K_dim
         K_MAIN_ELEMS: cutlass.Constexpr = (
             (K_TOTAL // (MAIN_VEC_WIDTH * BS)) * MAIN_VEC_WIDTH * BS
         )
+        K_AFTER_MAIN: cutlass.Constexpr = K_TOTAL - K_MAIN_ELEMS
+        K_TAIL_ELEMS: cutlass.Constexpr = (
+            (K_AFTER_MAIN // (TAIL_VEC_WIDTH * BS)) * TAIL_VEC_WIDTH * BS
+        )
+        K_DONE_ALL: cutlass.Constexpr = K_MAIN_ELEMS + K_TAIL_ELEMS
+        SCALAR_REM: cutlass.Constexpr = K_TOTAL - K_DONE_ALL
+        KS_FULL: cutlass.Constexpr = SCALAR_REM // BS
+        KS_PART: cutlass.Constexpr = SCALAR_REM % BS
+        MAIN_TILES: cutlass.Constexpr = K_MAIN_ELEMS // (MAIN_VEC_WIDTH * BS)
+        TAIL_TILES: cutlass.Constexpr = K_TAIL_ELEMS // (TAIL_VEC_WIDTH * BS)
 
         # One FP32 accumulator per token, in registers
         acc = cute.make_rmem_tensor((M,), cutlass.Float32)
@@ -92,33 +119,27 @@ def make_host_bf16(k_val: int, bs: int = 128):
 
         cute.arch.griddepcontrol_wait()  # PDL wait
 
+        # 128-bit vectorized main loop
         if K_MAIN_ELEMS > 0:
             gA_main = _make_k_slice(gA, 0, K_MAIN_ELEMS)
             gB_main = _make_k_slice(gB, 0, K_MAIN_ELEMS)
             gA_vec = cute.logical_divide(gA_main, (None, MAIN_VEC_WIDTH))
             gB_vec = cute.logical_divide(gB_main, (None, MAIN_VEC_WIDTH))
-            tA_vec, tB_vec = _make_thread_vector_slice(gA_vec, gB_vec, tidx, n_idx, BS)
-            _vector_dotprod(acc, tA_vec, tB_vec)
+            tA, tB = _make_thread_vector_slice(gA_vec, gB_vec, tidx, n_idx, BS)
+            _vector_dotprod(acc, tA, tB, M, MAIN_TILES, 16)
 
-        TAIL_VEC_WIDTH: cutlass.Constexpr = _TAIL_VEC_WIDTH
-        K_AFTER_MAIN: cutlass.Constexpr = K_TOTAL - K_MAIN_ELEMS
-        K_TAIL_ELEMS: cutlass.Constexpr = (
-            (K_AFTER_MAIN // (TAIL_VEC_WIDTH * BS)) * TAIL_VEC_WIDTH * BS
-        )
+        # 64-bit vectorized tail (K remainder after main loop)
         if K_TAIL_ELEMS > 0:
             gA_tail = _make_k_slice(gA, K_MAIN_ELEMS, K_TAIL_ELEMS)
             gB_tail = _make_k_slice(gB, K_MAIN_ELEMS, K_TAIL_ELEMS)
             gA_tail_vec = cute.logical_divide(gA_tail, (None, TAIL_VEC_WIDTH))
             gB_tail_vec = cute.logical_divide(gB_tail, (None, TAIL_VEC_WIDTH))
-            tA_tail_vec, tB_tail_vec = _make_thread_vector_slice(
+            tA_t, tB_t = _make_thread_vector_slice(
                 gA_tail_vec, gB_tail_vec, tidx, n_idx, BS
             )
-            _vector_dotprod(acc, tA_tail_vec, tB_tail_vec)
+            _vector_dotprod(acc, tA_t, tB_t, M, TAIL_TILES, 8)
 
-        # Scalar tail (one element per thread for non-aligned K)
-        K_DONE_ALL: cutlass.Constexpr = K_MAIN_ELEMS + K_TAIL_ELEMS
-        SCALAR_REM: cutlass.Constexpr = K_TOTAL - K_DONE_ALL
-        KS_FULL: cutlass.Constexpr = SCALAR_REM // BS
+        # Scalar remainder (< BS elements per thread)
         for si in cutlass.range_constexpr(KS_FULL):
             ko = K_DONE_ALL + si * BS + tidx
             bv = gB[n_idx, ko].to(cutlass.Float32)
@@ -127,7 +148,6 @@ def make_host_bf16(k_val: int, bs: int = 128):
         # Compile-time guard: no partial remainder eliminates this block.
         # Runtime guard: only the first KS_PART threads participate.
         # Remaining threads do not execute any out-of-bounds loads.
-        KS_PART: cutlass.Constexpr = SCALAR_REM % BS
         if KS_PART > 0:
             ko_p = K_DONE_ALL + KS_FULL * BS + tidx
             if tidx < KS_PART:
@@ -135,11 +155,9 @@ def make_host_bf16(k_val: int, bs: int = 128):
                 for m in cutlass.range_constexpr(M):
                     acc[m] = acc[m] + gA[m, ko_p].to(cutlass.Float32) * bv2
 
-        # Reduction
-
         # Intra-warp shuffle reduction
         WS: cutlass.Constexpr = 32
-        NW: cutlass.Constexpr = BS // WS  # = 8 warps
+        NW: cutlass.Constexpr = BS // WS # = 8 warps
         for m in cutlass.range_constexpr(M):
             acc[m] = cute.arch.warp_reduction_sum(acc[m])
 
@@ -160,36 +178,22 @@ def make_host_bf16(k_val: int, bs: int = 128):
             for m in cutlass.range_constexpr(M):
                 partials = sm[m, None].load()
                 gC[m, n_idx] = partials.reduce(
-                    cute.ReductionOp.ADD,
-                    init_val=0.0,
-                    reduction_profile=0,
+                    cute.ReductionOp.ADD, init_val=0.0, reduction_profile=0
                 )
         cute.arch.griddepcontrol_launch_dependents()  # PDL signal
 
     @cute.jit
     def host_bf16_lf(
-        gA: cute.Tensor,
-        gB: cute.Tensor,
-        gC: cute.Tensor,
+        gA: cute.Tensor,          # [M, K] bf16 row-major
+        gB: cute.Tensor,          # [N, K] bf16 row-major
+        gC: cute.Tensor,          # [M, N] fp32 row-major
         M: cutlass.Constexpr,
         K_dim: cutlass.Constexpr,
         N_dim: cutlass.Int32,
         stream: CUstream,
     ):
-        mA = cute.make_tensor(
-            gA.iterator,
-            cute.make_layout((M, K_dim), stride=(K_dim, 1)),
-        )
-        mB = cute.make_tensor(
-            gB.iterator,
-            cute.make_layout((N_dim, K_dim), stride=(K_dim, 1)),
-        )
-        mC = cute.make_tensor(
-            gC.iterator,
-            cute.make_layout((M, N_dim), stride=(N_dim, 1)),
-        )
-        dotprod_bf16_lf(mA, mB, mC, M).launch(
-            grid=[N_dim, 1, 1],  # one CTA per expert
+        dotprod_bf16_lf(gA, gB, gC, M, K_dim).launch(
+            grid=[N_dim, 1, 1], # one CTA per expert
             block=[bs, 1, 1],
             smem=M * 4 * (bs // 32),
             stream=stream,

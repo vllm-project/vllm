@@ -28,7 +28,7 @@ def is_available() -> bool:
     return _cutedsl_available
 
 
-# Two separate caches because the two kernels have different specialization axes
+# Two separate caches because the two kernels have different specialization axes.
 # Dot-prod: keyed on (M, K, bs) -> M and K are Constexpr in the kernel.
 _compiled_cache: dict[tuple[int, int, int], object] = {}
 # Split-K: keyed on (split_k, num_stages) -> compiled callable, fully shape-dynamic.
@@ -61,7 +61,7 @@ def _stream():
     return CUstream(current_stream().cuda_stream)
 
 
-# Takes full 2D row-major tensors.
+# Takes full 2D row-major tensors [M,K], [N,K], [M,N].
 def _get_compiled_dotprod(M: int, K: int, N: int, a, b, c, bs: int = 128):
     cute, from_dlpack, CUstream, current_stream = _cute()
 
@@ -69,12 +69,13 @@ def _get_compiled_dotprod(M: int, K: int, N: int, a, b, c, bs: int = 128):
     if key in _compiled_cache:
         return _compiled_cache[key]
 
-    # cache check before any expensive work.
     from ._ll_bf16_dotprod import make_host_bf16
 
     host_fn = make_host_bf16(K, bs=bs)  # creates a new kernel closure with K baked
     # into all loop bounds as Constexpr
 
+    # Pre-build 2D tensors once at compile time with alignment hints.
+    # assumed_align=32 on the base pointer; align(16) is applied per-load inside host_bf16_lf.
     a_c = from_dlpack(a, assumed_align=32, enable_tvm_ffi=True).mark_layout_dynamic(
         leading_dim=1
     )
@@ -99,21 +100,20 @@ def _get_compiled_dotprod(M: int, K: int, N: int, a, b, c, bs: int = 128):
         options="--enable-tvm-ffi --ptxas-options -maxrregcount=64",  # cap regs
     )
     _compiled_cache[key] = compiled
-    logger.debug("Compiled ll_bf16_dotprod: M=%d, K=%d", M, K)
+    logger.debug("Compiled ll_bf16_dotprod: M=%d, K=%d, bs=%d", M, K, bs)
     return compiled
 
 
-# Takes full 2D tensors (not flattened) as opposed to _get_compiled_dotprod.
+# Takes full 2D tensors (not flattened).
 def _get_compiled_splitk(a, b, c, split_k: int, num_stages: int):
     cute, from_dlpack, CUstream, current_stream = _cute()
     from ._ll_bf16_splitk import LLBf16SplitK
 
-    # shape-dynamic: one binary (same split_k and num_stages) works for all shapes.
     cache_key = (split_k, num_stages)
     if cache_key in _splitk_cache:
         return _splitk_cache[cache_key]
 
-    div = 8
+    div = 8  # K-dim divisibility: 8 bf16 elems = 16 bytes = 128-bit cp.async alignment
     mA = (
         from_dlpack(a, assumed_align=16, enable_tvm_ffi=True)
         .mark_layout_dynamic(leading_dim=1)  # dimension 1 (K) has a dynamic stride
@@ -135,7 +135,6 @@ def _get_compiled_splitk(a, b, c, split_k: int, num_stages: int):
         .mark_compact_shape_dynamic(mode=1, stride_order=(0, 1), divisibility=div)
     )
 
-    # TODO (roberto): add tile_n, tile_k and num_dma_warps to the tuning space.
     gemm = LLBf16SplitK(
         tile_n=16, tile_k=256, num_stages=num_stages, num_dma_warps=4, split_k=split_k
     )
@@ -149,7 +148,6 @@ def _get_compiled_splitk(a, b, c, split_k: int, num_stages: int):
 
 def _get_config(M: int, K: int, N: int) -> tuple:
     """Look up tuned config, fall back to default dispatch."""
-    # TODO (roberto): increase search space - autotuning system
     model_configs = _TUNED_CONFIGS.get((K, N))
     if model_configs and M in model_configs:
         return model_configs[M]
@@ -173,13 +171,14 @@ def ll_bf16_gemm(
     if config[0] == "splitk":
         _, split_k, num_stages = config
         compiled = _get_compiled_splitk(
-            hidden_states, router_weight, output, split_k, num_stages
+            hidden_states, router_weight, output,
+            split_k=split_k, num_stages=num_stages,
         )
         compiled(hidden_states, router_weight, output, stream, 1.0)
     else:
         _, bs = config
         compiled = _get_compiled_dotprod(
-            M, K, N, hidden_states, router_weight, output, bs
+            M, K, N, hidden_states, router_weight, output, bs=bs
         )
         compiled(hidden_states, router_weight, output, N, stream)
 
