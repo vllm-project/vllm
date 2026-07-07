@@ -165,7 +165,7 @@ steps:
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)"'
 
       - label: "Build release image - aarch64 - CUDA 13.0"
-        depends_on: ~ 
+        depends_on: ~
         id: build-release-image-arm64
         agents:
           queue: arm64_cpu_queue_release
@@ -365,7 +365,6 @@ steps:
               --progress plain \
               -f docker/Dockerfile.xpu .
           - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-xpu"
-          - "bash .buildkite/scripts/create-xpu-ecr-manifest.sh"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-$(uname -m)-xpu"'
         env:
           DOCKER_BUILDKIT: "1"
@@ -464,6 +463,16 @@ steps:
           - "docker manifest create public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-x86_64-cu129-ubuntu2404 public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-aarch64-cu129-ubuntu2404 --amend"
           - "docker manifest push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404"
           - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: CUDA 12.9 Ubuntu 24.04" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-cu129-ubuntu2404"'
+
+      - label: "Create manifest - XPU"
+        depends_on:
+          - build-xpu-release-image
+        id: create-manifest-xpu
+        agents:
+          queue: small_cpu_queue_release
+        commands:
+          - "bash .buildkite/scripts/create-xpu-ecr-manifest.sh"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "Manifest: XPU" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-xpu"'
 
       - label: "Publish nightly multi-arch image to DockerHub"
         depends_on:
@@ -841,7 +850,7 @@ steps:
 
   - label: "Publish nightly XPU image to DockerHub"
     depends_on:
-      - build-xpu-release-image
+      - create-manifest-xpu
     if: build.env("NIGHTLY") == "1"
     agents:
       queue: small_cpu_queue_release
@@ -886,8 +895,8 @@ steps:
       - create-multi-arch-manifest-cuda-12-9
       - create-multi-arch-manifest-ubuntu2404
       - create-multi-arch-manifest-cuda-12-9-ubuntu2404
+      - create-manifest-xpu
       - build-rocm-release-image
-      - build-xpu-release-image
       - input-release-version
       # Wait for CPU builds if their block steps were unblocked, so publish
       # doesn't race the in-progress CPU build. allow_failure lets publish
