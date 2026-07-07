@@ -70,6 +70,13 @@ class TestBasicWriteLifecycle:
         with pytest.raises(ValueError, match="not being written"):
             manager.close_write("small")
 
+    def test_double_close_write(self, manager, item_small):
+        [alloc] = manager.open_write([item_small])
+        manager.close_write("small")
+
+        with pytest.raises(ValueError, match="not being written"):
+            manager.close_write("small")
+
 
 # ---------------------------------------------------------------------------
 # Read lifecycle (reference counting & cache interaction)
@@ -122,6 +129,16 @@ class TestReadLifecycle:
         with pytest.raises(ValueError, match="not found"):
             manager.open_read("ghost")
 
+    def test_double_close_read(self, manager, item_small):
+        [alloc] = manager.open_write([item_small])
+        manager.close_write("small")
+
+        manager.open_read("small")
+        manager.close_read("small")
+
+        with pytest.raises(ValueError, match="not being written"):
+            manager.close_read("small")
+
 
 # ---------------------------------------------------------------------------
 # Pin / unpin
@@ -160,11 +177,17 @@ class TestPinUnpin:
         assert "small" in manager._lru_cache
         assert manager._total_available_blocks == 4
 
-    def test_cannot_pin_non_cacheable(self, manager, item_nocache):
+    def test_pin_non_cacheable(self, manager, item_nocache):
         manager.open_write([item_nocache])
+
+        manager.pin("nocache")
+        manager.unpin("nocache")
+        assert "nocache" in manager._all_items
+
         manager.close_write("nocache")
-        with pytest.raises(ValueError, match="Can only pin use_cache"):
-            manager.pin("nocache")
+        manager.pin("nocache")
+        manager.unpin("nocache")
+        assert "nocache" not in manager._all_items
 
 
 # ---------------------------------------------------------------------------

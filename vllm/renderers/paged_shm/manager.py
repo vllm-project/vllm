@@ -154,6 +154,8 @@ class PagedSHMManager:
             raise ValueError(f"UUID {uuid} not found")
         if item.ref_count < 0:
             raise ValueError(f"UUID {uuid} being written")
+        if item.ref_count == 0:
+            raise ValueError(f"UUID {uuid} not being read")
 
         if item.ref_count > 0:
             item.ref_count -= 1
@@ -170,8 +172,9 @@ class PagedSHMManager:
         item = self._all_items.get(uuid, None)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
+
         if not item.use_cache:
-            raise ValueError("Can only pin use_cache items.")
+            return
 
         if uuid in self._pinned_items:
             return
@@ -187,8 +190,10 @@ class PagedSHMManager:
         item = self._all_items.get(uuid, None)
         if item is None:
             raise ValueError(f"UUID {uuid} not found")
-        if not item.use_cache:
-            raise ValueError("Can only pin use_cache items.")
+
+        if not item.use_cache and item.ref_count == 0:
+            self.delete(uuid)
+            return
 
         if uuid not in self._pinned_items:
             return
