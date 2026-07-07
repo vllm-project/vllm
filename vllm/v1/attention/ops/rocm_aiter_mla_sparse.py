@@ -679,7 +679,7 @@ def rocm_aiter_sparse_attn_indexer(
         # rocm_aiter_sparse_attn_indexer's prefill path
         workspace_manager.get_simultaneous(
             ((total_seq_lens, head_dim), FP8_DTYPE),
-            ((total_seq_lens, 1), torch.float32),
+            ((total_seq_lens, 4), torch.uint8),
         )
 
         # Decode logits buffer, used by rocm_fp8_paged_mqa_logits.
@@ -762,7 +762,7 @@ def rocm_aiter_sparse_attn_indexer(
         workspace_manager = current_workspace_manager()
         k_fp8_full, k_scale_full = workspace_manager.get_simultaneous(
             ((total_seq_lens, head_dim), FP8_DTYPE),
-            ((total_seq_lens, 1), torch.float32),
+            ((total_seq_lens, 4), torch.uint8),
         )
         for chunk in prefill_metadata.chunks:
             k_fp8 = k_fp8_full[: chunk.total_seq_lens]
@@ -770,7 +770,7 @@ def rocm_aiter_sparse_attn_indexer(
             cp_gather_indexer_k_quant_cache(
                 kv_cache,
                 k_fp8,
-                k_scale.view(FP8_DTYPE),
+                k_scale,
                 chunk.block_table,
                 chunk.cu_seq_lens,
                 preshuffle=kv_cache.shape[1] > 1,
