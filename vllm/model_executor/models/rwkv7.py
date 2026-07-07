@@ -1901,6 +1901,7 @@ class RWKV7Model(nn.Module):
         cache_config = vllm_config.cache_config
         quant_config = vllm_config.quant_config
         self.config = config
+        self.runtime_dtype = model_config.dtype
 
         if config.attn is not None:
             raise NotImplementedError(
@@ -1948,11 +1949,10 @@ class RWKV7Model(nn.Module):
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
-    @staticmethod
-    def _pp_runtime_dtype() -> torch.dtype:
-        # RWKV7 keeps inter-stage activations in runtime dtype so PP dummy runs
+    def _pp_runtime_dtype(self) -> torch.dtype:
+        # RWKV7 keeps inter-stage activations in the model dtype so PP dummy runs
         # and stage-to-stage transfers match the numerics used inside blocks.
-        return RWKV7_RUNTIME_DTYPE
+        return self.runtime_dtype
 
     def make_empty_intermediate_tensors(
         self, batch_size: int, dtype: torch.dtype, device: torch.device
@@ -2058,9 +2058,10 @@ class RWKV7ForCausalLM(
         else:
             self.lm_head = PPMissingLayer()
 
-        self.model.to(RWKV7_RUNTIME_DTYPE)
+        model_dtype = vllm_config.model_config.dtype
+        self.model.to(model_dtype)
         if get_pp_group().is_last_rank:
-            self.lm_head.to(RWKV7_RUNTIME_DTYPE)
+            self.lm_head.to(model_dtype)
 
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.model.embed_input_ids(input_ids)

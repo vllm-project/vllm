@@ -337,6 +337,13 @@ def _make_cache_all_decode_metadata(
 
 
 def _require_reference_checkpoint() -> tuple[Path, object]:
+    """Resolve optional dependencies for RWKV7 reference parity tests only.
+
+    RWKV7 inference in vLLM uses the vendored recurrent kernels under
+    ``vllm.model_executor.layers.fla.ops``. The external top-level ``fla``
+    package is only needed here so parity tests can import the reference
+    Hugging Face implementation from a flash-linear-attention checkout.
+    """
     if pytest is None:
         raise RuntimeError("pytest is required to run RWKV7 integration tests.")
 
@@ -344,9 +351,16 @@ def _require_reference_checkpoint() -> tuple[Path, object]:
     fla_path = os.getenv("VLLM_RWKV7_TEST_FLA_PATH")
 
     if not model_path:
-        pytest.skip("Set VLLM_RWKV7_TEST_MODEL_PATH to run RWKV7 parity tests.")
+        pytest.skip(
+            "Set VLLM_RWKV7_TEST_MODEL_PATH to run optional RWKV7 reference "
+            "parity tests."
+        )
     if not fla_path:
-        pytest.skip("Set VLLM_RWKV7_TEST_FLA_PATH to run RWKV7 parity tests.")
+        pytest.skip(
+            "Set VLLM_RWKV7_TEST_FLA_PATH to a flash-linear-attention checkout "
+            "to run optional RWKV7 reference parity tests. vLLM runtime does "
+            "not depend on the external top-level `fla` package."
+        )
 
     model_dir = Path(model_path)
     fla_dir = Path(fla_path)
@@ -358,17 +372,32 @@ def _require_reference_checkpoint() -> tuple[Path, object]:
     if str(fla_dir) not in sys.path:
         sys.path.insert(0, str(fla_dir))
 
+    # Test-only import of the reference implementation from an external FLA
+    # checkout. RWKV7 runtime continues to use vLLM's vendored FLA ops.
     from fla.models.rwkv7 import RWKV7ForCausalLM as ReferenceRWKV7ForCausalLM
 
     return model_dir, ReferenceRWKV7ForCausalLM
 
 
-def _make_vllm_config(model_path: Path) -> VllmConfig:
+def _write_test_model_config(tmp_path: Path, config: RWKV7Config | None = None) -> Path:
+    model_dir = tmp_path / "rwkv7-test-model"
+    config = _make_config() if config is None else config
+    config.architectures = ["RWKV7ForCausalLM"]
+    config.save_pretrained(model_dir)
+    return model_dir
+
+
+def _make_vllm_config(
+    model_path: Path,
+    *,
+    dtype: str = "float32",
+    device: str = "cuda",
+) -> VllmConfig:
     return VllmConfig(
         model_config=ModelConfig(
             str(model_path),
             trust_remote_code=False,
-            dtype="float32",
+            dtype=dtype,
             runner="generate",
         ),
         parallel_config=ParallelConfig(
@@ -376,7 +405,7 @@ def _make_vllm_config(model_path: Path) -> VllmConfig:
             pipeline_parallel_size=1,
         ),
         cache_config=CacheConfig(),
-        device_config=DeviceConfig("cuda"),
+        device_config=DeviceConfig(device),
     )
 
 
@@ -902,6 +931,51 @@ def test_rwkv7_block_uses_fp32_runtime_state_dtype():
         try:
             block = RWKV7Block(config=config, layer_idx=0, prefix="model.layers.0")
             assert block.get_state_dtype() == (
+                torch.float32,
+                torch.float32,
+                torch.float32,
+            )
+        finally:
+            cleanup_dist_env_and_memory()
+
+
+def test_rwkv7_model_keeps_weights_and_pp_buffers_in_model_dtype(tmp_path: Path):
+    model_path = _write_test_model_config(tmp_path)
+    vllm_config = _make_vllm_config(
+        model_path,
+        dtype="bfloat16",
+        device="cpu",
+    )
+
+    with set_current_vllm_config(vllm_config):
+        init_distributed_environment(
+            world_size=1,
+            rank=0,
+            local_rank=0,
+            distributed_init_method=f"tcp://127.0.0.1:{get_open_port()}",
+            backend="gloo",
+        )
+        ensure_model_parallel_initialized(1, 1, backend="gloo")
+        try:
+            model = RWKV7ForCausalLM(vllm_config=vllm_config)
+
+            parameter_dtypes = {
+                parameter.dtype
+                for parameter in model.parameters()
+                if parameter.is_floating_point()
+            }
+            assert parameter_dtypes == {torch.bfloat16}
+            assert model.model._pp_runtime_dtype() == torch.bfloat16
+
+            intermediate_tensors = model.make_empty_intermediate_tensors(
+                batch_size=2,
+                dtype=torch.float32,
+                device=torch.device("cpu"),
+            )
+            assert intermediate_tensors["hidden_states"].dtype == torch.bfloat16
+            assert intermediate_tensors["v_first"].dtype == torch.bfloat16
+
+            assert model.model.layers[0].get_state_dtype() == (
                 torch.float32,
                 torch.float32,
                 torch.float32,
