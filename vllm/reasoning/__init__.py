@@ -1,0 +1,140 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+from vllm.reasoning.abs_reasoning_parsers import ReasoningParser, ReasoningParserManager
+
+__all__ = [
+    "ReasoningParser",
+    "ReasoningParserManager",
+]
+"""
+Register a lazy module mapping.
+
+Example:
+    ReasoningParserManager.register_lazy_module(
+        name="qwen3",
+        module_path="vllm.reasoning.qwen3_engine_reasoning_parser",
+        class_name="Qwen3ParserReasoningAdapter",
+    )
+"""
+
+
+_REASONING_PARSERS_TO_REGISTER = {
+    "deepseek_r1": (  # name
+        "deepseek_r1_reasoning_parser",  # filename
+        "DeepSeekR1ReasoningParser",  # class_name
+    ),
+    "deepseek_v3": (
+        "deepseek_v3_reasoning_parser",
+        "DeepSeekV3ReasoningParser",
+    ),
+    "deepseek_v4": (
+        "deepseek_v4_engine_reasoning_parser",
+        "DeepSeekV4ParserReasoningAdapter",
+    ),
+    "poolside_v1": (
+        "poolside_v1_reasoning_parser",
+        "PoolsideV1ReasoningParser",
+    ),
+    "cohere_command3": (
+        "cohere_command_reasoning_parser",
+        "CohereCommand3ReasoningParser",
+    ),
+    "cohere_command4": (
+        "cohere_command_reasoning_parser",
+        "CohereCommand4ReasoningParser",
+    ),
+    "ernie45": (
+        "ernie45_reasoning_parser",
+        "Ernie45ReasoningParser",
+    ),
+    "gemma4": (
+        "gemma4_engine_reasoning_parser",
+        "Gemma4ParserReasoningAdapter",
+    ),
+    "glm45": (
+        "glm47_moe_reasoning_parser",
+        "Glm47MoeParserReasoningAdapter",
+    ),
+    "glm47": (
+        "glm47_moe_reasoning_parser",
+        "Glm47MoeParserReasoningAdapter",
+    ),
+    "openai_gptoss": (
+        "gptoss_reasoning_parser",
+        "GptOssReasoningParser",
+    ),
+    "granite": (
+        "granite_reasoning_parser",
+        "GraniteReasoningParser",
+    ),
+    "holo2": (
+        "deepseek_v3_reasoning_parser",
+        "DeepSeekV3ReasoningWithThinkingParser",
+    ),
+    "hunyuan_a13b": (
+        "hunyuan_a13b_reasoning_parser",
+        "HunyuanA13BReasoningParser",
+    ),
+    "hy_v3": (
+        "hy_v3_reasoning_parser",
+        "HYV3ReasoningParser",
+    ),
+    "kimi_k2": (
+        "kimi_k2_reasoning_parser",
+        "KimiK2ReasoningParser",
+    ),
+    "mimo": (
+        "qwen3_engine_reasoning_parser",
+        "Qwen3ParserReasoningAdapter",
+    ),
+    "minimax_m2": (
+        "minimax_m2_reasoning_parser",
+        "MiniMaxM2ReasoningParser",
+    ),
+    "minimax_m2_append_think": (
+        "minimax_m2_reasoning_parser",
+        "MiniMaxM2AppendThinkReasoningParser",
+    ),
+    "minimax_m3": (
+        "minimax_m3_reasoning_parser",
+        "MiniMaxM3ReasoningParser",
+    ),
+    "mistral": (
+        "mistral_reasoning_parser",
+        "MistralReasoningParser",
+    ),
+    "nemotron_v3": (
+        "nemotron_v3_engine_reasoning_parser",
+        "NemotronV3ParserReasoningAdapter",
+    ),
+    "olmo3": (
+        "olmo3_reasoning_parser",
+        "Olmo3ReasoningParser",
+    ),
+    "qwen3": (
+        "qwen3_engine_reasoning_parser",
+        "Qwen3ParserReasoningAdapter",
+    ),
+    "seed_oss": (
+        "seed_oss_engine_reasoning_parser",
+        "SeedOssParserReasoningAdapter",
+    ),
+    "step3": (
+        "step3_reasoning_parser",
+        "Step3ReasoningParser",
+    ),
+    "step3p5": (
+        "step3p5_reasoning_parser",
+        "Step3p5ReasoningParser",
+    ),
+}
+
+
+def register_lazy_reasoning_parsers():
+    for name, (file_name, class_name) in _REASONING_PARSERS_TO_REGISTER.items():
+        module_path = f"vllm.reasoning.{file_name}"
+        ReasoningParserManager.register_lazy_module(name, module_path, class_name)
+
+
+register_lazy_reasoning_parsers()
