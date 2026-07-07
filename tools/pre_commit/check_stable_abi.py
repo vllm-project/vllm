@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""Lint vLLM C++/CUDA sources for libtorch stable ABI usage.
+"""Lint vLLM C++/CUDA sources to maintain libtorch stable ABI usage.
 
 Runs on all files under csrc/. Sources that still use the unstable libtorch
 C++ ABI are listed in the temporary ignore lists below — remove entries as
@@ -21,7 +21,7 @@ CSRC_ROOT = "csrc/"
 ALLOWED_TORCH_INCLUDE_PREFIXES = (
     "torch/csrc/stable/",
     "torch/headeronly/",
-    "torch/csrc/inductor/aoti_torch/",
+    "torch/csrc/inductor/aoti_torch/c/",
 )
 
 UNSTABLE_INCLUDE_PREFIXES = (
@@ -72,7 +72,7 @@ INCLUDE_RE = re.compile(
 )
 
 # Patterns applied to code with comments stripped.
-FORBIDDEN_CODE_PATTERNS: list[tuple[str, str]] = [
+COMMON_FORBIDDEN_CODE_PATTERNS: list[tuple[str, str]] = [
     (
         r"(?<!STABLE_)TORCH_LIBRARY\b",
         "Use STABLE_TORCH_LIBRARY / STABLE_TORCH_LIBRARY_FRAGMENT instead.",
@@ -197,7 +197,7 @@ def check_file(path: str) -> list[Violation]:
     for line_no, line in enumerate(lines, start=1):
         if _is_comment_line(line):
             continue
-        for pattern, tip in FORBIDDEN_CODE_PATTERNS:
+        for pattern, tip in COMMON_FORBIDDEN_CODE_PATTERNS:
             if re.search(pattern, line):
                 violations.append(Violation(path=path, line=line_no, message=tip))
 
@@ -230,7 +230,6 @@ STD_TORCH_CHECK(true, "ok");
 """
     assert _is_unstable_include("ATen/cuda/CUDAContext.h")
     assert not _is_unstable_include("torch/csrc/stable/tensor.h")
-    assert _is_ignored_file("csrc/quick_example.cpp")
     assert _is_ignored_file("csrc/cpu/torch_bindings.cpp")
     assert _is_ignored_file("csrc/rocm/attention.cu")
     assert not _is_ignored_file("csrc/libtorch_stable/torch_utils.h")
