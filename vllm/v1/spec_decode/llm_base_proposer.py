@@ -85,6 +85,11 @@ class SpecDecodeBaseProposer:
         self.dtype = vllm_config.model_config.dtype
         self.max_model_len = vllm_config.model_config.max_model_len
         self.dp_rank = vllm_config.parallel_config.data_parallel_rank
+
+        # Grammar-aware drafting: shadow grammar manager is set by the
+        # model runner when structured output + spec decode are both active.
+        self.shadow_grammar: Any = None
+        self._draft_req_ids: list[str] = []
         self.eplb_state: EplbState | None = None
         self.num_speculative_tokens = self.speculative_config.num_speculative_tokens
 
@@ -425,8 +430,17 @@ class SpecDecodeBaseProposer:
 
         self.cudagraph_dispatcher.initialize_cudagraph_keys(eagle_cudagraph_mode)
 
+    # Top-K candidates to check when argmax is grammar-invalid.
+    _GRAMMAR_TOP_K = 32
+
     def _greedy_sample(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """Greedy-sample draft tokens from hidden states."""
+        """Greedy-sample draft tokens from hidden states.
+
+        When a shadow grammar is active, checks whether the argmax token is
+        grammar-valid. If not, scans the top-K candidates for the first valid
+        alternative. This avoids the cost of full bitmask application while
+        covering ~100% of grammar-critical positions.
+        """
         if self.use_local_argmax_reduction:
             return self.model.get_top_tokens(hidden_states)
         if self.use_heterogeneous_vocab:
@@ -435,7 +449,37 @@ class SpecDecodeBaseProposer:
             logits = self.vocab_mapping.constrain_draft_logits(logits)
             draft_token_ids = logits.argmax(dim=-1)
             return self.vocab_mapping.map_draft_to_target_ids(draft_token_ids)
-        return self.model.compute_logits(hidden_states).argmax(dim=-1)
+
+        logits = self.model.compute_logits(hidden_states)
+
+        sgm = self.shadow_grammar
+        if sgm is None or not sgm._active_count:
+            return logits.argmax(dim=-1)
+
+        batch_size = logits.shape[0]
+        tokens = logits.argmax(dim=-1)
+        req_ids = self._draft_req_ids
+
+        for idx in range(min(batch_size, len(req_ids))):
+            state = sgm._states.get(req_ids[idx])
+            if state is None or state.is_terminated:
+                continue
+            tok = tokens[idx].item()
+            if state.matcher.accept_token(tok):
+                state.num_draft_tokens += 1
+                state.is_terminated = state.matcher.is_terminated()
+            else:
+                row_logits = logits[idx]
+                _, topk_ids = torch.topk(row_logits, self._GRAMMAR_TOP_K)
+                for k in range(1, self._GRAMMAR_TOP_K):
+                    candidate = topk_ids[k].item()
+                    if state.matcher.accept_token(candidate):
+                        tokens[idx] = candidate
+                        state.num_draft_tokens += 1
+                        state.is_terminated = state.matcher.is_terminated()
+                        break
+
+        return tokens
 
     def _sample_from_logits(
         self,

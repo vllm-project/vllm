@@ -4909,6 +4909,100 @@ class GPUModelRunner(
             return None
         return torch.cat(draft_probs_rows, dim=0).contiguous()
 
+    # ------------------------------------------------------------------
+    # Grammar-aware drafting helpers
+    # ------------------------------------------------------------------
+
+    def _init_shadow_grammar(self) -> None:
+        """Lazily initialize the shadow grammar manager."""
+        self._sgm_init_done = True
+        self._sgm = None
+        self._sgm_token_counts: dict[str, int] = {}
+        so_config = getattr(self.vllm_config, "structured_outputs_config", None)
+        if (
+            self.speculative_config is not None
+            and so_config is not None
+            and so_config.backend in ("auto", "xgrammar")
+        ):
+            try:
+                from vllm.v1.spec_decode.shadow_grammar import ShadowGrammarManager
+
+                self._sgm = ShadowGrammarManager(self.vllm_config)
+                if hasattr(self, "drafter") and self.drafter is not None:
+                    self.drafter.shadow_grammar = self._sgm  # type: ignore[union-attr]
+            except Exception:
+                logger.debug("Failed to init shadow grammar manager.", exc_info=True)
+
+    def _sync_shadow_grammar_before_draft(self) -> None:
+        """Advance shadow grammar state with newly verified tokens."""
+        if not hasattr(self, "_sgm_init_done"):
+            self._init_shadow_grammar()
+
+        sgm = self._sgm
+        if sgm is None:
+            return
+
+        req_ids = self.input_batch.req_ids[: self.input_batch.num_reqs]
+        token_counts = self._sgm_token_counts
+        num_tokens_arr = self.input_batch.num_tokens_no_spec
+        active_count = 0
+
+        for i, req_id in enumerate(req_ids):
+            n_tokens = int(num_tokens_arr[i])
+            prev_count = token_counts.get(req_id, -1)
+
+            if prev_count == -1:
+                req_state = self.requests.get(req_id)
+                if req_state is not None and req_state.sampling_params is not None:
+                    sgm.register_request(req_id, req_state.sampling_params)
+                    prompt_len = (
+                        len(req_state.prompt_token_ids)
+                        if req_state.prompt_token_ids
+                        else n_tokens
+                    )
+                else:
+                    prompt_len = n_tokens
+                token_counts[req_id] = prompt_len
+                prev_count = prompt_len
+
+            state = sgm._states.get(req_id)
+            if state is None:
+                token_counts[req_id] = n_tokens
+                continue
+
+            active_count += 1
+
+            if n_tokens > prev_count:
+                new_tokens = self.input_batch.token_ids_cpu[
+                    i, prev_count:n_tokens
+                ].tolist()
+                if new_tokens:
+                    sgm.advance_with_accepted_tokens(req_id, new_tokens)
+                token_counts[req_id] = n_tokens
+
+        sgm._active_count = active_count
+        self.drafter._draft_req_ids = list(req_ids)  # type: ignore[union-attr]
+
+        # Prune state for requests no longer in the batch
+        active_set = set(req_ids)
+        for rid in list(token_counts.keys()):
+            if rid not in active_set:
+                token_counts.pop(rid, None)
+                sgm.remove_request(rid)
+
+    def _rollback_shadow_grammar_after_draft(self) -> None:
+        """Roll back draft tokens so shadow grammar stays at verified state."""
+        sgm = getattr(self, "_sgm", None)
+        if sgm is None or sgm._active_count == 0:
+            return
+
+        for rid in getattr(self.drafter, "_draft_req_ids", []):
+            state = sgm._states.get(rid)
+            if state is not None and state.num_draft_tokens > 0:
+                state.matcher.rollback(state.num_draft_tokens)
+                state.num_draft_tokens = 0
+                state.is_terminated = state.matcher.is_terminated()
+
     def propose_draft_token_ids(
         self,
         scheduler_output: "SchedulerOutput",
@@ -4927,6 +5021,10 @@ class GPUModelRunner(
         num_spec_tokens_to_schedule = scheduler_output.num_spec_tokens_to_schedule
         self._draft_probs = None
         self._draft_prob_req_ids = None
+
+        # Grammar-aware drafting: sync shadow grammar state with verified tokens
+        self._sync_shadow_grammar_before_draft()
+
         if spec_config.method == "ngram":
             from vllm.v1.spec_decode.ngram_proposer import NgramProposer
 
@@ -5185,6 +5283,9 @@ class GPUModelRunner(
                 if draft_probs is not None:
                     self._draft_probs = draft_probs
                     self._draft_prob_req_ids = self.input_batch.req_ids.copy()
+
+        # Grammar-aware drafting: rollback speculative tokens from shadow state
+        self._rollback_shadow_grammar_after_draft()
 
         return draft_token_ids
 
