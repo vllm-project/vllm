@@ -119,7 +119,7 @@ class HYV3MultiTokenPredictorLayer(nn.Module):
     ) -> torch.Tensor:
         assert inputs_embeds is not None
         # masking inputs at position 0, as not needed by MTP
-        inputs_embeds[positions == 0] = 0
+        inputs_embeds = torch.where(positions.unsqueeze(-1) == 0, 0, inputs_embeds)
         inputs_embeds = self.enorm(inputs_embeds)
         previous_hidden_states = self.hnorm(previous_hidden_states)
 
@@ -440,6 +440,12 @@ class HYV3MTP(nn.Module):
                     # V3 checkpoint: mlp.router.gate -> mlp.gate
                     if "mlp.router.gate." in name:
                         name = name.replace("router.gate.", "gate.")
+
+                    # Quantized model weight_scale/weight_offset are not
+                    # standalone parameters — they are consumed by the
+                    # quantized layer's quant_method during __init__.
+                    if name.endswith("_scale") or name.endswith("_offset"):
+                        continue
 
                     param = params_dict[name]
                     weight_loader = getattr(
