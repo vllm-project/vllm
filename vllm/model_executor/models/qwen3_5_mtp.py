@@ -103,16 +103,25 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             prefix=f"{prefix}.fc",
         )
 
-        # GPTQ: quantized checkpoints may exclude MTP from quantization via
-        # quantization_config.dynamic with "-:pattern" entries. When detected,
-        # disable quantization for MTP layers so they use unquantized params.
+        # GPTQ/AWQ: MTP decoder layers use unquantized bf16 weights. Either
+        # the model opts out MTP via quantization_config.dynamic ("-:*mtp*"),
+        # or we auto-detect known non-selective quant schemes (GPTQ/AWQ) where
+        # MTP would otherwise inherit the main model's quant_config and fail
+        # in FusedMoE.__init__ with shape mismatches.
         original_quant = vllm_config.quant_config
         if quant_config and quant_config.get_name() not in ("modelopt_fp4",):
+            bypass_mtp_quant = False
             hf_qc = getattr(model_config.hf_config, "quantization_config", None)
             if isinstance(hf_qc, dict):
                 dynamic = hf_qc.get("dynamic", {})
                 if any(k.startswith("-:") and "mtp" in k for k in dynamic):
-                    vllm_config.quant_config = None
+                    bypass_mtp_quant = True
+            if not bypass_mtp_quant and quant_config.get_name() in (
+                "gptq", "auto_gptq", "gptq_marlin", "awq", "awq_marlin",
+            ):
+                bypass_mtp_quant = True
+            if bypass_mtp_quant:
+                vllm_config.quant_config = None
         self.layers = torch.nn.ModuleList(
             Qwen3_5DecoderLayer(
                 vllm_config,
