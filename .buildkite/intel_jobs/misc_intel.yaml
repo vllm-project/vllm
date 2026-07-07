@@ -38,7 +38,7 @@ steps:
   agent_tags:
     label: production
     gpu: 1+
-    mem: 16+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
@@ -79,6 +79,10 @@ steps:
 - label: Basic Models Tests (Initialization)
   timeout_in_minutes: 60
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -130,7 +134,7 @@ steps:
   agent_tags:
     label: production
     gpu: 2+
-    mem: 24+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
