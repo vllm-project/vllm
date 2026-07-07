@@ -448,9 +448,11 @@ checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
 if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
   checkout="."
 fi
-if git -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# Pass safe.directory per-command (-c) because buildkite runs will always fail
+# the next check on git 2.35.2+ due to mixed uses of root and buildkite-agent/uids.
+if git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   vllm_standalone_merge_base="$(
-    git -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
+    git -c "safe.directory=${checkout}" -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
   )"
 fi
 if [[ -z "${vllm_standalone_merge_base}" ]]; then
@@ -549,6 +551,7 @@ else
   fi
 
   docker run \
+    -t -i \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
     --network=host \
