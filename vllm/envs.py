@@ -160,6 +160,7 @@ if TYPE_CHECKING:
     VLLM_USE_STANDALONE_COMPILE: bool = True
     VLLM_ENABLE_PREGRAD_PASSES: bool = True
     VLLM_USE_BREAKABLE_CUDAGRAPH: bool = False
+    VLLM_MQA_2D: bool = True
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
@@ -709,6 +710,9 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_USE_BREAKABLE_CUDAGRAPH": lambda: (
         os.environ.get("VLLM_USE_BREAKABLE_CUDAGRAPH", "0") == "1"
     ),
+    # DeepSeek-V4/ROCm gfx942: 2D fp8_mqa_logits prefill kernel (default on;
+    # set VLLM_MQA_2D=0 to fall back to the 1D kernel).
+    "VLLM_MQA_2D": lambda: (os.environ.get("VLLM_MQA_2D", "1") == "1"),
     # Debug pattern matching inside custom passes.
     # Should be set to the fx.Node name (e.g. 'getitem_34' or 'scaled_mm_3').
     "VLLM_PATTERN_MATCH_DEBUG": lambda: os.environ.get(

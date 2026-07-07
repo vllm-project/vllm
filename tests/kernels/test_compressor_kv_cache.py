@@ -25,6 +25,7 @@ from vllm.models.deepseek_v4.common.ops.fused_compress_quant_cache import (
     _fused_kv_compress_norm_rope_insert_indexer_attn,
     _fused_kv_compress_norm_rope_insert_indexer_mxfp4_attn,
 )
+from vllm.platforms import current_platform
 
 from .test_fused_indexer_q_rope_quant import quantize_to_mxfp4
 
@@ -316,7 +317,16 @@ def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
     )
 
     # ── Manual dequant ──────────────────────────────────────────────────
-    k_fp8 = dst_k.view(torch.float8_e4m3fn).float()  # [num_tokens, 128]
+    # gfx942 (MI300X/MI300A) stores FP8 as fnuz (max=240, exp bias 8); the
+    # producer kernel uses scale_divisor=224. Other devices use OCP e4m3fn
+    # (max=448, exp bias 7) with scale_divisor=448. Half-ULP at the format
+    # max is 8 for fnuz, 16 for OCP.
+    fp8_dtype = current_platform.fp8_dtype()
+    is_fnuz = fp8_dtype == torch.float8_e4m3fnuz
+    fp8_divisor = 224.0 if is_fnuz else 448.0
+    half_ulp = 8.0 if is_fnuz else 16.0
+
+    k_fp8 = dst_k.view(fp8_dtype).float()  # [num_tokens, 128]
     scale = dst_scale.view(torch.float32)  # [num_tokens, 1]
     k_recovered = k_fp8 * scale  # [num_tokens, 128]
 
@@ -326,11 +336,9 @@ def test_indexer_quant_cache_roundtrip(num_tokens: int, block_size: int):
 
     for t in range(num_tokens):
         amax = k_abs[t].max().clamp(min=1e-4).item()
-        # UE8M0: scale = 2^ceil(log2(amax / 448))
-        exponent = math.ceil(math.log2(amax / 448.0))
+        exponent = math.ceil(math.log2(amax / fp8_divisor))
         ue8m0_scale = 2.0**exponent
-        # FP8 e4m3 (3-bit mantissa): worst-case error = 16 * scale
-        max_allowed = 16.0 * ue8m0_scale
+        max_allowed = half_ulp * ue8m0_scale
         token_diff = diff[t].max().item()
         assert token_diff <= max_allowed, (
             f"Token {t} diff {token_diff} exceeds max_allowed "
@@ -378,11 +386,13 @@ def test_indexer_gather_accepts_upper_bound_output():
     )
     torch.accelerator.synchronize()
 
-    k_recovered = dst_k[:valid_tokens].view(torch.float8_e4m3fn).float() * dst_scale[
+    fp8_dtype = current_platform.fp8_dtype()
+    half_ulp = 8.0 if fp8_dtype == torch.float8_e4m3fnuz else 16.0
+    k_recovered = dst_k[:valid_tokens].view(fp8_dtype).float() * dst_scale[
         :valid_tokens
     ].view(torch.float32)
     diff = (k_recovered - k.float()).abs()
-    max_allowed = (16.0 * dst_scale[:valid_tokens].view(torch.float32).max()).item()
+    max_allowed = (half_ulp * dst_scale[:valid_tokens].view(torch.float32).max()).item()
     assert diff.max().item() <= max_allowed
     assert torch.all(dst_k[valid_tokens:] == sentinel)
     assert torch.all(dst_scale[valid_tokens:] == sentinel)

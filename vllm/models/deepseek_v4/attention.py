@@ -79,12 +79,17 @@ def _resolve_dsv4_kv_cache_dtype(
     token's KV row in its element dtype: bf16 or per-tensor FP8 E4M3.
     """
     if use_fp8_ds_mla_layout:
-        # fp8_ds_mla block format: UE8M0 block-scaled fp8 packed as uint8.
-        assert kv_cache_dtype.startswith("fp8"), (
-            f"DeepseekV4 fp8_ds_mla layout only supports fp8 kv-cache, "
-            f"got {kv_cache_dtype}"
-        )
+        # fp8_ds_mla block format: UE8M0 block-scaled fp8 packed as uint8. This
+        # layout is mandatory for the model, so resolve any --kv-cache-dtype
+        # (including the default "auto") to it; warn only on an explicit
+        # non-fp8 request that is being overridden.
         if kv_cache_dtype != "fp8_ds_mla":
+            if not (kv_cache_dtype == "auto" or kv_cache_dtype.startswith("fp8")):
+                logger.warning_once(
+                    "DeepseekV4 fp8_ds_mla layout requires an fp8 KV cache; "
+                    "overriding requested --kv-cache-dtype=%s.",
+                    kv_cache_dtype,
+                )
             if cache_config is not None:
                 cache_config.cache_dtype = "fp8_ds_mla"
             kv_cache_dtype = "fp8_ds_mla"

@@ -3,6 +3,7 @@
 import functools
 import importlib
 import math
+import os
 from importlib.util import find_spec
 
 import torch
@@ -11,6 +12,7 @@ import torch.nn.functional as F
 import vllm.envs as envs
 from vllm.compilation.breakable_cudagraph import eager_break_during_capture
 from vllm.forward_context import get_forward_context
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.torch_utils import LayerNameType
@@ -18,11 +20,81 @@ from vllm.v1.attention.backends.mla.indexer import DeepseekV32IndexerMetadata
 from vllm.v1.attention.ops.common import pack_seq_triton, unpack_seq_triton
 from vllm.v1.worker.workspace import current_workspace_manager
 
+logger = init_logger(__name__)
+
 if current_platform.is_rocm():
     from vllm.platforms.rocm import _ON_GFX942, _ON_GFX950
 else:
     _ON_GFX942 = False
     _ON_GFX950 = False
+
+
+def _indexer_cache_layout(block_size: int, head_dim: int = 128) -> str:
+    """Layout of the persistent indexer KV cache.
+
+    The cache is written by ``indexer_k_quant_and_cache_triton`` (in-tree Triton
+    writer) on all archs, which uses the 16x16 preshuffled (SHUFFLE) layout for
+    ``block_size > 1`` and plain (NORMAL) for ``block_size == 1``. The gather and
+    the Triton paged-logits decode fallback route off this so they read the same
+    layout the writer produced; aiter's native deepgemm decode consumes the same
+    SHUFFLE cache (Preshuffle=block_size > 1).
+    """
+    return "NORMAL" if block_size <= 1 else "SHUFFLE"
+
+
+def _indexer_read_layout(cache: torch.Tensor, block_size: int, head_dim: int) -> str:
+    """Layout to READ an indexer cache, distinguishing two writers.
+
+    DeepSeek-V4's indexer cache is a *strided slice* of a combined per-block
+    record (indexer + main-MLA share blocks), written PLAIN (un-shuffled) with
+    per-token ``[head_dim fp8 | 4-byte f32 scale]`` separated as
+    ``[bs*head_dim fp8 | bs*4 scale]`` per block. It is detected by a
+    non-contiguous block stride (``stride(0) != block_size*(head_dim+4)``) and
+    must be read with the NORMAL (pos-major) offset. The V3.2/GLM cache is
+    contiguous and written by the in-tree SHUFFLE writer.
+    """
+    if cache.stride(0) != block_size * (head_dim + 4):
+        return "NORMAL"
+    return _indexer_cache_layout(block_size, head_dim)
+
+
+# Minimum amd-aiter version whose native gfx942/gfx950 paged-MQA-logits decode
+# (deepgemm_fp8_paged_mqa_logits) is validated correct and faster than the
+# in-tree Triton fallback. Below this — or when VLLM_ROCM_SPARSE_MLA_FORCE_TRITON
+# is set, or the API is absent — we use the Triton fallback, which self-adapts to
+# aiter's cache layout via _indexer_cache_layout.
+_AITER_NATIVE_PAGED_MQA_MIN = (0, 1, 16)
+
+
+@functools.lru_cache(maxsize=1)
+def _aiter_version_tuple() -> tuple[int, int, int]:
+    try:
+        from importlib.metadata import version
+
+        raw = version("amd-aiter")
+    except Exception:
+        return (0, 0, 0)
+    nums = []
+    for tok in raw.split(".")[:3]:  # "0.1.16.post3" -> [0, 1, 16]
+        digits = "".join(c for c in tok if c.isdigit())
+        nums.append(int(digits) if digits else 0)
+    while len(nums) < 3:
+        nums.append(0)
+    return (nums[0], nums[1], nums[2])
+
+
+@functools.lru_cache(maxsize=1)
+def _use_aiter_native_paged_mqa() -> bool:
+    """Whether to use aiter's native (fast) paged-MQA-logits decode instead of
+    the in-tree Triton fallback. Gated on arch + aiter version + API presence;
+    overridable via VLLM_ROCM_SPARSE_MLA_FORCE_TRITON=1."""
+    if os.environ.get("VLLM_ROCM_SPARSE_MLA_FORCE_TRITON", "0") == "1":
+        return False
+    if not (_ON_GFX942 or _ON_GFX950):
+        return False
+    if paged_mqa_logits_module() is None:
+        return False
+    return _aiter_version_tuple() >= _AITER_NATIVE_PAGED_MQA_MIN
 
 
 @triton.jit
@@ -229,14 +301,17 @@ def cp_gather_indexer_k_quant_cache_triton(
     block_table_stride = block_table.stride(0)
     head_dim = k_fp8.shape[-1]
     num_blocks = k_cache.shape[0]
-    # we assume the kv cache already been split to 2 portion
-    k_cache = k_cache.view(num_blocks, -1)
+    # Detect the read layout from the ORIGINAL cache stride (before reshape).
+    layout = _indexer_read_layout(k_cache, block_size, head_dim)
+    # reshape (not view) so V4's strided combined-cache slice yields a strided
+    # view rather than erroring; the gather kernel indexes block_id in int64 and
+    # honours kv_cache_stride, so the slice is read in place — no copy.
+    k_cache = k_cache.reshape(num_blocks, -1)
     fp8_dtype = current_platform.fp8_dtype()
     k_cache_value = k_cache[:, : block_size * head_dim].view(fp8_dtype)
     k_cache_scale = k_cache[:, block_size * head_dim :].view(torch.float32)
     grid = (num_tokens,)
     k_fp8_scale = k_fp8_scale.view(torch.float32)
-    layout = "NORMAL" if block_size == 1 else "SHUFFLE"
     _cp_gather_indexer_quant_cache_kernel[grid](
         k_cache_value,
         k_cache_scale,
@@ -260,7 +335,9 @@ def cp_gather_indexer_k_quant_cache_triton(
     )
 
 
-# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/main/tests/test_attention.py#L156
+# Taken from https://github.com/deepseek-ai/DeepGEMM/blob/main/tests/test_attention.py#L156.
+# Left here as a reference, very slow for large contexts, not currently used:
+# all pathways use triton or aiter
 def fp8_paged_mqa_logits_torch(
     q: torch.Tensor,
     kv_cache: torch.Tensor,
@@ -310,7 +387,12 @@ def fp8_paged_mqa_logits_torch(
             logits[i, :seq_len] = score[:seq_len]
         return logits
 
-    kv_cache, scale = kv_cache[..., :dim], kv_cache[..., dim:]
+    block_size = kv_cache.shape[1]
+    N = kv_cache.shape[0]
+    kv_cache = kv_cache.reshape([N, (dim + 4) * block_size])
+    kv_cache, scale = kv_cache[:, : dim * block_size], kv_cache[:, dim * block_size :]
+    kv_cache = kv_cache.reshape([N, block_size, 1, dim])
+    scale = scale.reshape([N, block_size, 1, 4])
     scale = scale.contiguous().view(torch.float)
     q = q.float()
     kv_cache = kv_cache.view(fp8_dtype).float() * scale
@@ -352,7 +434,7 @@ def fp8_paged_mqa_logits_torch(
                 (qx.transpose(0, 1) @ kx.transpose(0, 1).transpose(1, 2)).to(
                     logits.dtype
                 ),
-                float("-inf"),
+                0.0,
             )
             s = torch.relu(s) * weight_slice[..., None]
             s = s.sum(dim=0)
@@ -378,6 +460,204 @@ def paged_mqa_logits_module():
         except ImportError:
             return None
     return None
+
+
+@triton.jit
+def _fp8_paged_mqa_logits_kernel(
+    q_ptr,  # [B, next_n, H, D] fp8
+    kv_fp8_ptr,  # [num_blocks, (D_actual+4)*BLOCK_SIZE] fp8
+    kv_scale_ptr,  # [num_blocks, BLOCK_SIZE] float32
+    weights_ptr,  # [B * next_n, H] float32
+    context_lens_ptr,  # [B] int32
+    block_tables_ptr,  # [B, max_blocks_per_seq] int32
+    logits_ptr,  # [B * next_n, max_model_len] float32
+    next_n,
+    max_model_len,
+    max_blocks_per_seq,
+    q_stride_b,
+    q_stride_n,
+    q_stride_h,
+    q_stride_d,
+    logits_stride_m,
+    kv_fp8_row_stride,
+    kv_scale_row_stride,
+    BLOCK_SIZE: tl.constexpr,
+    D: tl.constexpr,  # head dim, padded to next power of 2 by caller
+    D_actual: tl.constexpr,
+    H: tl.constexpr,  # number of query heads
+    BLOCK_N: tl.constexpr,  # MFMA KV tile — must be ≥ BLOCK_SIZE and a power of 2
+    LAYOUT: tl.constexpr,  # "NORMAL" (plain pos-major) or "SHUFFLE" (16x16 tiled)
+    BLOCK_TILE_SIZE: tl.constexpr,
+    HEAD_TILE_SIZE: tl.constexpr,
+):
+    tile_rk = tl.program_id(0)  # which BLOCK_N-sized KV tile
+    i = tl.program_id(1)  # batch item
+    t = tl.program_id(2)  # speculative token index
+    query_idx = i * next_n + t
+
+    context_len = tl.load(context_lens_ptr + i)
+    logi_start = tile_rk * BLOCK_N
+
+    if logi_start >= context_len:
+        return
+
+    q_pos = context_len - next_n + t
+
+    h_offs = tl.arange(0, H)
+    d_offs = tl.arange(0, D)
+    d_mask = d_offs < D_actual
+    logi_offs = logi_start + tl.arange(0, BLOCK_N)  # [BLOCK_N] logical KV positions
+
+    # Map each logical position to a (physical_block, within-block offset) pair.
+    # Works for any BLOCK_SIZE: for BLOCK_SIZE=1, log_blk_rk == logi_offs.
+    log_blk_rk = logi_offs // BLOCK_SIZE  # [BLOCK_N]
+    within_blk = logi_offs % BLOCK_SIZE  # [BLOCK_N]
+    blk_mask = log_blk_rk < max_blocks_per_seq
+    phys_blk = tl.load(
+        block_tables_ptr + i * max_blocks_per_seq + log_blk_rk,
+        mask=blk_mask,
+        other=0,
+    )  # [BLOCK_N] physical block indices
+    # DeepSeek-V4's indexer cache is a strided slice of a combined per-block
+    # record, so the per-block row stride is large enough that phys_blk * stride
+    # overflows int32; index in int64 to keep the strided read in bounds.
+    phys_blk = phys_blk.to(tl.int64)
+
+    kv_mask = logi_offs < context_len
+    # Within-block byte offset of (position within_blk, dim d). The persistent
+    # cache is either plain pos-major (NORMAL) or 16x16 tiled (SHUFFLE), matching
+    # whatever aiter's indexer_k_quant_and_cache wrote — see _indexer_cache_layout.
+    # The SHUFFLE offset is separable into a per-position and a per-dim term;
+    # indexing the loaded tile by natural d keeps k_blk in natural dim order so
+    # the tl.dot below stays correct.
+    if LAYOUT == "SHUFFLE":
+        pos_part = (within_blk // BLOCK_TILE_SIZE) * (BLOCK_TILE_SIZE * D_actual) + (
+            within_blk % BLOCK_TILE_SIZE
+        ) * HEAD_TILE_SIZE
+        dim_part = (d_offs // HEAD_TILE_SIZE) * (BLOCK_TILE_SIZE * HEAD_TILE_SIZE) + (
+            d_offs % HEAD_TILE_SIZE
+        )
+        data_off = pos_part[:, None] + dim_part[None, :]
+    else:
+        data_off = within_blk[:, None] * D_actual + d_offs[None, :]
+    k_blk = tl.load(
+        kv_fp8_ptr + phys_blk[:, None] * kv_fp8_row_stride + data_off,
+        mask=kv_mask[:, None] & d_mask[None, :],
+        other=0.0,
+    )  # [BLOCK_N, D] fp8
+
+    # kv_scale_ptr is a float32 view of the same buffer offset to the scale region.
+    # Its row stride is kv_scale_row_stride = (D_actual+4)*BLOCK_SIZE//4.
+    scale = tl.load(
+        kv_scale_ptr + phys_blk * kv_scale_row_stride + within_blk,
+        mask=kv_mask,
+        other=1.0,
+    )  # [BLOCK_N] float32
+
+    # Load all H query heads at once → [H, D] fp8; stays in registers.
+    q_blk = tl.load(
+        q_ptr
+        + i * q_stride_b
+        + t * q_stride_n
+        + h_offs[:, None] * q_stride_h
+        + d_offs[None, :] * q_stride_d,
+        mask=d_mask[None, :],
+        other=0.0,
+        cache_modifier=".cg",
+    )  # [H, D] fp8
+
+    # MFMA: [H, D] × [D, BLOCK_N] → [H, BLOCK_N]  (fp8 × fp8, fp32 accumulate)
+    scores = tl.dot(q_blk, k_blk.T, input_precision="ieee", out_dtype=tl.float32)
+    scores = scores * scale[None, :]  # apply per-token dequant scale
+
+    w = tl.load(weights_ptr + query_idx * H + h_offs)  # [H]
+    scores = tl.maximum(scores, 0.0) * w[:, None]  # [H, BLOCK_N]
+    accum = tl.sum(scores, axis=0)  # [BLOCK_N]
+
+    valid = kv_mask & (logi_offs <= q_pos)
+    accum = tl.where(valid, accum, float("-inf"))
+
+    tl.store(
+        logits_ptr + query_idx * logits_stride_m + logi_offs,
+        accum,
+        mask=logi_offs < max_model_len,
+    )
+
+
+def fp8_paged_mqa_logits_triton(
+    q: torch.Tensor,
+    kv_cache: torch.Tensor,
+    weights: torch.Tensor,
+    context_lens: torch.Tensor,
+    block_tables: torch.Tensor,
+    max_model_len: int,
+) -> torch.Tensor:
+    """Triton implementation of fp8_paged_mqa_logits_torch."""
+    fp8_dtype = current_platform.fp8_dtype()
+    batch_size, next_n, H, D = q.shape
+    N = kv_cache.shape[0]
+    block_size = kv_cache.shape[1]
+    # Read layout from the stride: V4's indexer cache is a strided slice of a
+    # combined per-block record (read NORMAL/plain); the V3.2/GLM cache is
+    # contiguous SHUFFLE. The kernel indexes by phys_blk in int64 and honours the
+    # row strides below, so the strided V4 slice is read in place — no copy.
+    layout = _indexer_read_layout(kv_cache, block_size, D)
+
+    # Unpack kv_cache [N, block_size, 1, D+4] uint8 without copying. Within each
+    # physical block the D*block_size fp8 bytes come first, followed by
+    # 4*block_size bytes of per-position float32 scales. The fp8 region is either
+    # plain pos-major (NORMAL) or 16x16 tiled (SHUFFLE) depending on the aiter
+    # version that wrote it — see _indexer_cache_layout / _indexer_cache_uses_shuffle.
+    # reshape merges the per-block dims (internally contiguous even for V4's
+    # strided slice) into a view; the per-block row stride is preserved.
+    kv_2d = kv_cache.reshape(N, (D + 4) * block_size)
+
+    kv_fp8 = kv_2d.view(fp8_dtype)  # [N, (D+4)*block_size] fp8, same storage
+
+    kv_scale = kv_2d.view(torch.float32)[
+        :, D * block_size // 4 :
+    ]  # [N, block_size] f32
+
+    M = batch_size * next_n
+    logits = torch.full(
+        (M, max_model_len), float("-inf"), device=q.device, dtype=torch.float32
+    )
+
+    max_blocks_per_seq = block_tables.shape[1]
+    BLOCK_D = triton.next_power_of_2(D)
+    BLOCK_N = max(128, triton.next_power_of_2(block_size))
+    grid = (triton.cdiv(max_model_len, BLOCK_N), batch_size, next_n)
+    # HEAD_TILE_SIZE is in fp8 elements (writer uses 16 bytes // element_size).
+    head_tile_size = 16 // kv_fp8.element_size()
+
+    _fp8_paged_mqa_logits_kernel[grid](
+        q,
+        kv_fp8,
+        kv_scale,
+        weights,
+        context_lens,
+        block_tables,
+        logits,
+        next_n,
+        max_model_len,
+        max_blocks_per_seq,
+        q.stride(0),
+        q.stride(1),
+        q.stride(2),
+        q.stride(3),
+        logits.stride(0),
+        kv_fp8.stride(0),  # (D+4)*block_size — fp8 elements per block row
+        kv_scale.stride(0),  # (D+4)*block_size//4 — float32 elements per block row
+        BLOCK_SIZE=block_size,
+        D=BLOCK_D,
+        D_actual=D,
+        H=H,
+        BLOCK_N=BLOCK_N,
+        LAYOUT=layout,
+        BLOCK_TILE_SIZE=16,
+        HEAD_TILE_SIZE=head_tile_size,
+    )
+    return logits
 
 
 def rocm_fp8_paged_mqa_logits(
@@ -410,6 +690,34 @@ def rocm_fp8_paged_mqa_logits(
         Logits tensor of shape [B * next_n, max_model_len], dtype
         `torch.float32`.
     """
+
+    block_size = kv_cache_fp8.shape[1]
+    # DeepSeek-V4's indexer cache is a strided slice of a combined per-block
+    # record written in a plain (non-SHUFFLE) layout; aiter's native deepgemm
+    # decode mis-reads it, so always take the in-tree Triton kernel (which detects
+    # and reads that layout) for a non-contiguous cache, regardless of aiter
+    # version. V3.2/GLM caches are contiguous and keep the native fast path.
+    force_triton_v4 = not kv_cache_fp8.is_contiguous()
+    # Prefer aiter's native deepgemm decode when the installed aiter version is
+    # known-good and faster (gfx942/gfx950, version >= _AITER_NATIVE_PAGED_MQA_MIN);
+    # otherwise use the in-tree Triton kernel, which is correct at all block sizes
+    # but slower. Both consume the SHUFFLE cache produced by the Triton writer.
+    # Force the fallback with VLLM_ROCM_SPARSE_MLA_FORCE_TRITON=1 (e.g. to validate
+    # a new aiter, or if a future aiter regresses).
+    if force_triton_v4 or not _use_aiter_native_paged_mqa():
+        logger.info_once(
+            f"rocm_fp8_paged_mqa_logits: Triton fallback (aiter "
+            f"{_aiter_version_tuple()} < {_AITER_NATIVE_PAGED_MQA_MIN}, forced, or "
+            f"non-contiguous V4 cache={force_triton_v4}), block size {block_size}"
+        )
+        return fp8_paged_mqa_logits_triton(
+            q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
+        )
+    logger.info_once(
+        f"rocm_fp8_paged_mqa_logits: aiter native deepgemm decode, "
+        f"block size {block_size}"
+    )
+
     from vllm._aiter_ops import rocm_aiter_ops
 
     aiter_paged_mqa_logits_module = None
@@ -452,6 +760,9 @@ def rocm_fp8_paged_mqa_logits(
             ((heads, batch_size * next_n, max_model_len), torch.float32),
         )
         out_qk.fill_(float("-inf"))
+        ChunkQ = 64
+        while heads % ChunkQ:
+            ChunkQ = ChunkQ // 2
         deepgemm_fp8_paged_mqa_logits_stage1(
             q_fp8,
             kv_cache_fp8,
@@ -460,11 +771,11 @@ def rocm_fp8_paged_mqa_logits(
             context_lens,
             block_tables,
             max_model_len,
-            ChunkQ=heads,
+            ChunkQ,
         )
         return out_qk.sum(dim=0)
     else:
-        return fp8_paged_mqa_logits_torch(
+        return fp8_paged_mqa_logits_triton(
             q_fp8, kv_cache_fp8, weights, context_lens, block_tables, max_model_len
         )
 
@@ -496,7 +807,7 @@ def fp8_mqa_logits_torch(
     """
     k_fp8, scale = kv
     seq_len_kv = k_fp8.shape[0]
-    k = k_fp8.to(torch.bfloat16)
+    k = (k_fp8.to(torch.float32) * scale).to(torch.bfloat16)
     q = q.to(torch.bfloat16)
     device = q.device
 
@@ -508,13 +819,10 @@ def fp8_mqa_logits_torch(
     )
     mask = mask_lo & mask_hi
 
-    # ``score`` is [H, M, N]; ``scale`` is the per-KV-token scale, which
-    # vLLM callers hand us as ``[N, 1]`` (a ``[N, 4]`` uint8 buffer cast
-    # to fp32). PyTorch right-aligns dimensions for broadcasting, so a
-    # naked ``score * scale`` would align ``scale``'s leading dim with
-    # ``score``'s M dim and raise a shape mismatch. Flatten to ``[N]`` so
-    # broadcasting lines up with the last dim of ``score``.
-    score = torch.einsum("mhd,nd->hmn", q, k).float() * scale.reshape(-1)
+    # Scale is already folded into ``k`` above (k_fp8 * scale before the
+    # bf16 cast), so no post-einsum scale here. Equivalent to upstream's
+    # ``* scale.reshape(-1)`` but applied K-side.
+    score = torch.einsum("mhd,nd->hmn", q, k).float()
     logits = (score.relu() * weights.unsqueeze(-1).transpose(0, 1)).sum(dim=0)
     logits = logits.masked_fill(~mask, float("-inf"))
 
@@ -738,6 +1046,12 @@ def rocm_aiter_sparse_attn_indexer(
         raise ValueError("k must be provided when skip_k_cache_insert is False")
 
     if not skip_k_cache_insert:
+        # Write via the in-tree Triton writer on all archs so the cache layout
+        # (SHUFFLE for block_size > 1) is deterministic and matches both the
+        # Triton gather/decode fallback and aiter's native deepgemm decode
+        # (Preshuffle=block_size > 1). aiter's C++ indexer_k_quant_and_cache is
+        # avoided here: its 5-arg layout default is version-dependent (it flipped
+        # SHUFFLE->plain across releases), which silently desyncs the readers.
         indexer_k_quant_and_cache_triton(
             k,
             kv_cache,
@@ -2097,7 +2411,10 @@ def _rocm_sparse_attn_decode_ragged_triton(
     comb_dim = nope_head_dim + rope_head_dim
     is_fnuz = current_platform.is_fp8_fnuz()
 
-    if not _ON_GFX950:  # Fallback path for un-tuned architectures.
+    if not (_ON_GFX942 or _ON_GFX950):
+        # Fallback path for un-tuned architectures. The split-KV (flash-decoding)
+        # path is enabled on the validated archs (gfx942, gfx950); every other
+        # arch uses the ragged path.
         block_k = 16 if head_dim >= 256 else 32
         _sparse_attn_decode_ragged_kernel[(num_queries, heads_blocks)](
             q,
@@ -2134,7 +2451,9 @@ def _rocm_sparse_attn_decode_ragged_triton(
         )
         return out
 
-    block_k = 32  # KV tokens walked per split-K iteration. Tuned on gfx950.
+    # KV tokens walked per split-K iteration. gfx942 is fastest at 16 (paired
+    # with the partial kernel at num_warps=8 below); gfx950 tuned at 32.
+    block_k = 16 if _ON_GFX942 else 32
     # Average per-query segment lengths, read sync-free from the ragged index
     # sizes, let the split heuristic avoid over-splitting
     # main_indices/extra_indices are flat [nnz] int32.
@@ -2195,7 +2514,7 @@ def _rocm_sparse_attn_decode_ragged_triton(
         BLOCK_K=block_k,
         NUM_SPLITS=num_splits,
         NUM_STAGES=1,
-        num_warps=4,
+        num_warps=8 if _ON_GFX942 else 4,
     )
 
     _sparse_attn_decode_reduce_kernel[(num_queries, heads_blocks)](
