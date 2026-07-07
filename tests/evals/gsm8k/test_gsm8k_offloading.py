@@ -7,9 +7,9 @@ Regression guard for stride computation bugs in the offloading worker
 (e.g. https://github.com/vllm-project/vllm/pull/46888) and silent KV
 cache data corruption during CPU offloading.  Runs GSM8K twice, dropping
 the GPU prefix cache (but not the CPU cache) between runs so the second
-run reloads offloaded KV data from CPU.  The reload is best effort: the
-reset only succeeds once in-flight offload transfers have released their
-GPU blocks, so it is retried with a bounded timeout.
+run must reload offloaded KV data from CPU.  The reset only succeeds once
+in-flight offload transfers have released their GPU blocks, so retrying
+it until success also waits for offloading to complete.
 
 Covers both KV offloading connectors (OffloadingConnector and
 SimpleCPUOffloadConnector) across four architecture families:
@@ -80,15 +80,14 @@ def _force_engine_step(base_url: str) -> None:
 
 
 def _reset_gpu_prefix_cache(base_url: str) -> None:
-    """Best-effort drop of the GPU prefix cache, keeping the CPU (connector)
-    cache, so the next run reloads KV data through the connector.
+    """Drop the GPU prefix cache while keeping the CPU (connector) cache, so
+    the next run must reload KV data through the connector.
 
     The reset fails while asynchronous offload transfers still hold GPU
-    blocks; retry briefly rather than failing the test.  Requires
-    VLLM_SERVER_DEV_MODE=1.
+    blocks, so retry until it succeeds.  Requires VLLM_SERVER_DEV_MODE=1.
     """
     deadline = time.monotonic() + _OFFLOAD_SYNC_TIMEOUT
-    while time.monotonic() < deadline:
+    while True:
         resp = requests.post(
             f"{base_url}/reset_prefix_cache",
             params={"reset_external": "false"},
@@ -97,6 +96,10 @@ def _reset_gpu_prefix_cache(base_url: str) -> None:
         resp.raise_for_status()
         if resp.json().get("success"):
             return
+        assert time.monotonic() < deadline, (
+            f"prefix cache reset did not succeed within {_OFFLOAD_SYNC_TIMEOUT}s; "
+            "async offload may be stuck"
+        )
         _force_engine_step(base_url)
 
 
@@ -259,7 +262,4 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
             )
 
             if run_idx == 1:
-                # Give the async offload a moment to finish, then drop the
-                # GPU prefix cache so the second run reloads from CPU.
-                time.sleep(1)
                 _reset_gpu_prefix_cache(base_url)
