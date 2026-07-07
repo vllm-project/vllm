@@ -5211,3 +5211,417 @@ def test_async_load_reservation_prevents_wedge_e2e():
     assert b.status == RequestStatus.WAITING
     assert b.num_preemptions == 0
     assert b.request_id not in req_to_blocks
+
+
+def test_missing_req_id_no_crash():
+    """Test that missing req_id in model_runner_output does not crash.
+
+    In PP + tool-calling, a later pipeline stage may finish a request
+    and remove it from its output batch before the scheduler-side request
+    state is marked finished. The guard should handle this gracefully
+    instead of raising a KeyError.
+    """
+    scheduler = create_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=10)
+    req.num_computed_tokens = req.num_tokens
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+    req.status = RequestStatus.RUNNING
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    # Model runner output does NOT include the request
+    model_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    # Should not raise KeyError
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, model_output)
+
+    # Verify the request was properly finished
+    assert req.status == RequestStatus.FINISHED_STOPPED
+    assert req.request_id in scheduler.finished_req_ids
+    assert req not in scheduler.running
+
+    # Verify an EngineCoreOutput was emitted for the request
+    # with correct finish_reason and empty token ids
+    assert engine_core_outputs is not None
+    found = False
+    for ecos in engine_core_outputs.values():
+        for eco in ecos.outputs:
+            if eco.request_id == req.request_id:
+                assert eco.finish_reason == FinishReason.STOP, (
+                    f"Expected FinishReason.STOP, got {eco.finish_reason}"
+                )
+                assert eco.new_token_ids == [], (
+                    f"Expected empty token_ids, got {eco.new_token_ids}"
+                )
+                found = True
+    assert found, (
+        "Expected an EngineCoreOutput for the missing request")
+
+
+def test_missing_req_id_cleanup():
+    """Test that a request missing from model runner output is properly
+    cleaned up and does not become a zombie request.
+
+    If the guard only `continue`d without cleanup, the request would
+    remain in self.running, its KV blocks would stay allocated, and no
+    EngineCoreOutput would be emitted - causing a deadlock.
+    """
+    scheduler = create_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=10)
+    req.num_computed_tokens = req.num_tokens
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+    req.status = RequestStatus.RUNNING
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    model_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, model_output)
+
+    # The request should be fully cleaned up:
+    # 1. Not in running queue
+    assert req not in scheduler.running
+    # 2. Marked as finished
+    assert req.request_id in scheduler.finished_req_ids
+    # 3. Status is terminal
+    assert req.status == RequestStatus.FINISHED_STOPPED
+
+    # Verify explicit output fields
+    assert engine_core_outputs is not None
+    for ecos in engine_core_outputs.values():
+        for eco in ecos.outputs:
+            if eco.request_id == req.request_id:
+                assert eco.finish_reason == FinishReason.STOP, (
+                    f"Expected FinishReason.STOP, got {eco.finish_reason}"
+                )
+                assert eco.new_token_ids == [], (
+                    f"Expected empty token_ids, got {eco.new_token_ids}"
+                )
+
+
+def test_missing_req_id_mixed_batch():
+    """Test a mixed batch where one request is present in the model
+    runner output and another is missing. Both should be handled
+    correctly - the present one processes normally and the missing
+    one is gracefully finished.
+    """
+    scheduler = create_scheduler(num_speculative_tokens=1)
+    req_normal, req_missing = create_requests(
+        num_requests=2, num_tokens=10, req_ids=["normal", "missing"])
+    for req in [req_normal, req_missing]:
+        req.num_computed_tokens = req.num_tokens
+        scheduler.requests[req.request_id] = req
+        scheduler.running.append(req)
+        req.status = RequestStatus.RUNNING
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={
+            req_normal.request_id: 1,
+            req_missing.request_id: 1,
+        },
+        total_num_scheduled_tokens=2,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={
+            req_normal.request_id: [],
+            req_missing.request_id: [10],
+        },
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    # Only include req_normal in the model runner output
+    model_output = ModelRunnerOutput(
+        req_ids=["normal"],
+        req_id_to_index={"normal": 0},
+        sampled_token_ids=[[42]],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, model_output)
+
+    # Normal request: processed as usual (still running)
+    assert req_normal in scheduler.running
+    assert list(req_normal.output_token_ids) == [42]
+    assert not req_normal.is_finished()
+
+    # Missing request: gracefully finished
+    assert req_missing not in scheduler.running
+    assert req_missing.status == RequestStatus.FINISHED_STOPPED
+    assert req_missing.request_id in scheduler.finished_req_ids
+
+    # Both requests should have EngineCoreOutputs
+    assert engine_core_outputs is not None
+    found_normal = False
+    found_missing = False
+    for ecos in engine_core_outputs.values():
+        for eco in ecos.outputs:
+            if eco.request_id == req_normal.request_id:
+                # Normal request has normal output
+                found_normal = True
+            elif eco.request_id == req_missing.request_id:
+                # Missing request has synthetic stop output
+                assert eco.finish_reason == FinishReason.STOP, (
+                    f"Expected FinishReason.STOP, got {eco.finish_reason}"
+                )
+                assert eco.new_token_ids == [], (
+                    f"Expected empty token_ids, got {eco.new_token_ids}"
+                )
+                found_missing = True
+    assert found_normal, "Expected EngineCoreOutput for normal request"
+    assert found_missing, "Expected EngineCoreOutput for missing request"
+
+
+def test_missing_req_id_with_encoder_inputs():
+    """Test missing req_id with a request that has encoder inputs.
+
+    The guard should free encoder inputs before finishing the request,
+    matching the existing pattern in the normal stopped path.
+    """
+    scheduler = create_scheduler(
+        model="llava-hf/llava-1.5-7b-hf",
+        max_num_batched_tokens=1024,
+    )
+    mm_positions = [[PlaceholderRange(offset=100, length=600)]]
+    (req,) = create_requests(
+        num_requests=1, num_tokens=800, mm_positions=mm_positions)
+    req.num_computed_tokens = req.num_tokens
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+    req.status = RequestStatus.RUNNING
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    model_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    # Should not crash despite encoder inputs
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, model_output)
+
+    # Verify cleanup
+    assert req.status == RequestStatus.FINISHED_STOPPED
+    assert req.request_id in scheduler.finished_req_ids
+    assert req not in scheduler.running
+
+    # Verify explicit output fields on the emitted EngineCoreOutput
+    assert engine_core_outputs is not None
+    for ecos in engine_core_outputs.values():
+        for eco in ecos.outputs:
+            if eco.request_id == req.request_id:
+                assert eco.finish_reason == FinishReason.STOP, (
+                    f"Expected FinishReason.STOP, got {eco.finish_reason}"
+                )
+                assert eco.new_token_ids == [], (
+                    f"Expected empty token_ids, got {eco.new_token_ids}"
+                )
+
+
+def test_missing_req_id_preempted_path():
+    """Test that a missing req_id with PREEMPTED status is handled via the
+    stopped_preempted_reqs branch instead of stopped_running_reqs.
+
+    In PP + tool-calling, a preempted request may also disappear from the
+    model runner output. The guard should correctly add it to stopped_preempted_reqs.
+    """
+    scheduler = create_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=10)
+    req.num_computed_tokens = req.num_tokens
+    scheduler.requests[req.request_id] = req
+    req.status = RequestStatus.PREEMPTED
+    scheduler.waiting.append(req)
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={req.request_id: []},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    model_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    # Should not crash
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    # Verify the request was finished correctly
+    assert req.status == RequestStatus.FINISHED_STOPPED
+    assert req.request_id in scheduler.finished_req_ids
+    assert req not in scheduler.running
+    assert req not in scheduler.waiting
+
+
+def test_missing_req_id_resumable():
+    """Test that a resumable request missing from model output is requeued
+    by _handle_stopped_request rather than being terminally cleaned up.
+
+    A resumable request (e.g., P/D disaggregation) should survive a missing
+    output and be re-queued via the resume path.
+    """
+    scheduler = create_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=10)
+    req.num_computed_tokens = req.num_tokens
+    req.resumable = True
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+    req.status = RequestStatus.RUNNING
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={req.request_id: []},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    model_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    # Should not crash
+    scheduler.update_from_output(scheduler_output, model_output)
+
+    # A resumable request should be re-queued (not finished)
+    # _handle_stopped_request with resumable=True should transition the
+    # request back to WAITING or similar, not to FINISHED_STOPPED.
+    assert not req.is_finished(), (
+        "Resumable request should not be finished when missing from output"
+    )
+    assert req not in scheduler.running, (
+        "Resumable request should be removed from running"
+    )
+
+
+def test_missing_req_id_explicit_output_assertions():
+    """Test that the EngineCoreOutput emitted for a missing req_id has
+    the correct finish_reason and empty token ids."""
+    scheduler = create_scheduler()
+    (req,) = create_requests(num_requests=1, num_tokens=10)
+    req.num_computed_tokens = req.num_tokens
+    scheduler.requests[req.request_id] = req
+    scheduler.running.append(req)
+    req.status = RequestStatus.RUNNING
+
+    scheduler_output = SchedulerOutput(
+        scheduled_new_reqs=[],
+        scheduled_cached_reqs=CachedRequestData.make_empty(),
+        num_scheduled_tokens={req.request_id: 1},
+        total_num_scheduled_tokens=1,
+        scheduled_encoder_inputs={},
+        scheduled_spec_decode_tokens={req.request_id: []},
+        num_common_prefix_blocks=[],
+        finished_req_ids=set(),
+        free_encoder_mm_hashes=[],
+    )
+
+    model_output = ModelRunnerOutput(
+        req_ids=[],
+        req_id_to_index={},
+        sampled_token_ids=[],
+        logprobs=None,
+        prompt_logprobs_dict={},
+        pooler_output=[],
+    )
+
+    engine_core_outputs = scheduler.update_from_output(scheduler_output,
+                                                       model_output)
+
+    # Should have emitted an output for the request
+    assert engine_core_outputs is not None
+    assert len(engine_core_outputs) > 0
+
+    # Find the output for our request
+    found = False
+    for ecos in engine_core_outputs.values():
+        for output in ecos.outputs:
+            if output.request_id == req.request_id:
+                assert output.finish_reason == FinishReason.STOP, (
+                    f"Expected FinishReason.STOP, got {output.finish_reason}"
+                )
+                assert output.new_token_ids == [], (
+                    f"Expected empty token_ids, got {output.new_token_ids}"
+                )
+                found = True
+
+    assert found, (
+        f"No EngineCoreOutput found for request {req.request_id}"
+    )

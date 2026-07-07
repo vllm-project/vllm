@@ -6,6 +6,7 @@ Users of vLLM should always import **only** these wrappers.
 """
 
 import contextlib
+import contextvars
 import functools
 import importlib
 import importlib.util
@@ -166,6 +167,26 @@ autotune = _lazy_import_wrapper(
     "autotune",
     fallback_fn=lambda *args, **kwargs: contextlib.nullcontext(),
 )
+
+_FLASHINFER_AUTOTUNE_WARMUP_ACTIVE: contextvars.ContextVar[bool] = (
+    contextvars.ContextVar("flashinfer_autotune_warmup_active", default=False)
+)
+
+
+def in_flashinfer_autotune_warmup() -> bool:
+    """True if inside a FlashInfer warmup autotune pass."""
+    return _FLASHINFER_AUTOTUNE_WARMUP_ACTIVE.get()
+
+
+@contextlib.contextmanager
+def autotune_warmup(*args: Any, **kwargs: Any):
+    """Mark warmup autotune active, then call :func:`autotune`."""
+    token = _FLASHINFER_AUTOTUNE_WARMUP_ACTIVE.set(True)
+    try:
+        with autotune(*args, **kwargs):
+            yield
+    finally:
+        _FLASHINFER_AUTOTUNE_WARMUP_ACTIVE.reset(token)
 
 
 @functools.cache
@@ -1033,6 +1054,8 @@ __all__ = [
     "flashinfer_trtllm_batch_decode_with_kv_cache_mla",
     "flashinfer_trtllm_batch_decode_sparse_mla_dsv4",
     "autotune",
+    "autotune_warmup",
+    "in_flashinfer_autotune_warmup",
     "has_flashinfer_moe",
     "has_flashinfer_comm",
     "has_flashinfer_nvlink_two_sided",

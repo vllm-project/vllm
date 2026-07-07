@@ -1577,7 +1577,54 @@ class Scheduler(SchedulerInterface):
                 # In this case, we use is_finished() to check.
                 continue
 
-            req_index = model_runner_output.req_id_to_index[req_id]
+            req_index = model_runner_output.req_id_to_index.get(req_id)
+            if req_index is None:
+                # In PP + tool-calling, a later pipeline stage may have
+                # already finished the request and removed it from its
+                # output batch. The request still exists in self.requests
+                # but is absent from the model runner output. Treat it
+                # as stopped locally so we emit a terminal output and
+                # free scheduler resources instead of crashing or
+                # leaving a zombie request.
+                if request.has_encoder_inputs:
+                    self._free_encoder_inputs(request)
+
+                status_before_stop = request.status
+                request.status = RequestStatus.FINISHED_STOPPED
+                finish_reason = request.get_finished_reason()
+
+                finished = self._handle_stopped_request(request)
+                kv_transfer_params = None
+                if finished:
+                    kv_transfer_params = self._free_request(request)
+
+                if status_before_stop == RequestStatus.RUNNING:
+                    stopped_running_reqs.add(request)
+                else:
+                    stopped_preempted_reqs.add(request)
+
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=finish_reason,
+                        new_logprobs=None,
+                        new_prompt_logprobs_tensors=None,
+                        pooling_output=None,
+                        stop_reason=request.stop_reason,
+                        events=request.take_events(),
+                        prefill_stats=request.take_prefill_stats(),
+                        kv_transfer_params=kv_transfer_params,
+                        trace_headers=request.trace_headers,
+                        routed_experts=None,
+                        num_nans_in_logits=(
+                            request.num_nans_in_logits if num_nans_in_logits
+                            and req_id in num_nans_in_logits else 0
+                        ),
+                    )
+                )
+                continue
+
             generated_token_ids = (
                 sampled_token_ids[req_index] if sampled_token_ids else []
             )

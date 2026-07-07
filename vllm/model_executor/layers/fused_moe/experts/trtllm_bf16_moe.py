@@ -1,6 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+import contextlib
+
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
@@ -18,7 +20,13 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     QuantKey,
 )
 from vllm.platforms import current_platform
-from vllm.utils.flashinfer import has_flashinfer_trtllm_fused_moe
+from vllm.utils.flashinfer import (
+    autotune as flashinfer_autotune_fn,
+)
+from vllm.utils.flashinfer import (
+    has_flashinfer_trtllm_fused_moe,
+    in_flashinfer_autotune_warmup,
+)
 
 
 class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
@@ -129,20 +137,32 @@ class TrtLlmBf16Experts(mk.FusedMoEExpertsMonolithic):
 
         assert activation in [MoEActivation.SILU, MoEActivation.RELU2_NO_MUL]
 
-        return flashinfer.fused_moe.trtllm_bf16_moe(
-            routing_logits=router_logits,
-            routing_bias=e_score_correction_bias,
-            hidden_states=hidden_states,
-            gemm1_weights=w1,
-            gemm2_weights=w2,
-            num_experts=global_num_experts,
-            top_k=self.topk,
-            n_group=num_expert_group,
-            topk_group=topk_group,
-            intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.ep_rank * self.local_num_experts,
-            local_num_experts=self.local_num_experts,
-            routed_scaling_factor=routed_scaling_factor,
-            routing_method_type=self.routing_method_type,
-            activation_type=activation_to_flashinfer_int(activation),
+        # Skip autotuning for this monolithic kernel on SM100 during warmup.
+        # See https://github.com/vllm-project/vllm/issues/46083
+        _guard_autotune = (
+            current_platform.is_device_capability_family(100)
+            and in_flashinfer_autotune_warmup()
         )
+        _autotune_cm = (
+            flashinfer_autotune_fn(False) if _guard_autotune
+            else contextlib.nullcontext()
+        )
+
+        with _autotune_cm:
+            return flashinfer.fused_moe.trtllm_bf16_moe(
+                routing_logits=router_logits,
+                routing_bias=e_score_correction_bias,
+                hidden_states=hidden_states,
+                gemm1_weights=w1,
+                gemm2_weights=w2,
+                num_experts=global_num_experts,
+                top_k=self.topk,
+                n_group=num_expert_group,
+                topk_group=topk_group,
+                intermediate_size=self.intermediate_size_per_partition,
+                local_expert_offset=self.ep_rank * self.local_num_experts,
+                local_num_experts=self.local_num_experts,
+                routed_scaling_factor=routed_scaling_factor,
+                routing_method_type=self.routing_method_type,
+                activation_type=activation_to_flashinfer_int(activation),
+            )
