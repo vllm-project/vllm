@@ -174,6 +174,231 @@ def test_stock_torch_compile(vllm_runner, monkeypatch):
 
 # forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
 @pytest.mark.forked
+def test_stock_aot_torch_compile(vllm_runner, monkeypatch):
+    # VLLM_USE_AOT_COMPILE drives the stock path through the aot_compile API
+    # instead of the lazy eval-frame nn.Module.compile(). The compile fires on the
+    # first forward (profile_run), so by the time the runner is up num_aot_compiles
+    # and stock_torch_compile_count are both 1 -- the model runs off a standalone
+    # AOTCompiledFunction, not the Dynamo eval frame.
+    from vllm.compilation.stock_aot import stock_aot_available
+
+    if not stock_aot_available():
+        pytest.skip("torch build lacks the aot_compile API")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    # Isolate a fresh compile (no serialized artifact reuse) so num_aot_compiles
+    # is a reliable signal rather than a possible num_aot_artifacts_loaded hit.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    with (
+        compilation_counter.expect(
+            num_aot_compiles=1,
+            stock_torch_compile_count=1,
+        ),
+        vllm_runner(
+            "facebook/opt-125m",
+            compilation_config={
+                "mode": CompilationMode.STOCK_TORCH_COMPILE,
+                # Pin FULL_DECODE_ONLY + partition off: a piecewise cudagraph_mode
+                # without graph partition falls the config back to VllmBackend, which
+                # would (incorrectly) satisfy num_aot_compiles via the VllmBackend aot
+                # path instead of the stock aot path under test.
+                "use_inductor_graph_partition": False,
+                "cudagraph_mode": CUDAGraphMode.FULL_DECODE_ONLY,
+                "cudagraph_capture_sizes": [100],
+            },
+            gpu_memory_utilization=0.4,
+        ) as _,
+    ):
+        pass
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
+def test_stock_aot_installs_forward_not_eval_frame(vllm_runner, monkeypatch):
+    # The aot path must replace the model's forward with the _StockAOTForward
+    # driver and must NOT arm nn.Module.compile(): _compiled_call_impl stays None
+    # (no eval-frame dispatch) while forward is an _StockAOTForward carrying a live
+    # AOTCompiledFunction after the first forward.
+    from vllm.compilation.stock_aot import _StockAOTForward, stock_aot_available
+
+    if not stock_aot_available():
+        pytest.skip("torch build lacks the aot_compile API")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    monkeypatch.setenv("VLLM_USE_AOT_COMPILE", "1")
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    with vllm_runner(
+        "facebook/opt-125m",
+        compilation_config={
+            "mode": CompilationMode.STOCK_TORCH_COMPILE,
+            "use_inductor_graph_partition": False,
+            "cudagraph_mode": CUDAGraphMode.FULL_DECODE_ONLY,
+            "cudagraph_capture_sizes": [100],
+        },
+        gpu_memory_utilization=0.4,
+    ) as m:
+        runner = m.llm.llm_engine.model_executor.driver_worker.worker.model_runner
+        model = runner.get_model()
+        assert isinstance(model.forward, _StockAOTForward)
+        assert model.forward._aot_fn is not None
+        assert model._compiled_call_impl is None
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
+@pytest.mark.parametrize("use_partition", [False, True])
+def test_stock_aot_matches_eval_frame_stock(vllm_runner, monkeypatch, use_partition):
+    # The aot driver must be numerically identical to the eval-frame stock driver:
+    # same stock Inductor backend, same external cudagraph + graph-partition wiring,
+    # only the compile trigger differs. Compare greedy decode of the two drivers for
+    # each partition setting. A divergence isolates an aot-specific bug (wrong self
+    # arg, stale guard, bad artifact) rather than compile-vs-eager drift.
+    from vllm.compilation.stock_aot import stock_aot_available
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if not stock_aot_available():
+        pytest.skip("torch build lacks the aot_compile API")
+    if use_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("use_inductor_graph_partition requires torch>=2.9.0.dev")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    prompts = [
+        "The capital of France is",
+        "The quick brown fox jumps over the",
+    ]
+
+    def _greedy(use_aot):
+        cc = {
+            "mode": CompilationMode.STOCK_TORCH_COMPILE,
+            "use_inductor_graph_partition": use_partition,
+            "cudagraph_capture_sizes": [8],
+        }
+        if not use_partition:
+            cc["cudagraph_mode"] = CUDAGraphMode.FULL_DECODE_ONLY
+        with monkeypatch.context() as mp:
+            mp.setenv("VLLM_USE_AOT_COMPILE", "1" if use_aot else "0")
+            mp.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+            with vllm_runner(
+                "facebook/opt-125m",
+                compilation_config=cc,
+                gpu_memory_utilization=0.4,
+            ) as m:
+                return m.generate_greedy(prompts, max_tokens=32)
+
+    eval_frame = _greedy(use_aot=False)
+    aot = _greedy(use_aot=True)
+    for (base_ids, _), (aot_ids, _) in zip(eval_frame, aot):
+        assert base_ids == aot_ids
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
+def test_stock_torch_compile_piecewise_graph_partition(vllm_runner, monkeypatch):
+    # Stock + use_inductor_graph_partition recovers piecewise cudagraphs (step 2 of
+    # the VllmBackend migration): Inductor partitions at the attention ops and the
+    # external wrapper captures each partition (FULL_AND_PIECEWISE). opt-125m at one
+    # capture size -> 13 piecewise + 1 full decode = 14 captured graphs (the same
+    # count as the VllmBackend FaP path), proving the stock piecewise path actually
+    # captures rather than running attention inside the cudagraph.
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("use_inductor_graph_partition requires torch>=2.9.0.dev")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with (
+        compilation_counter.expect(
+            stock_torch_compile_count=1,
+            num_gpu_runner_capture_triggers=1,
+            num_cudagraph_captured=14,
+        ),
+        vllm_runner(
+            "facebook/opt-125m",
+            compilation_config={
+                "mode": CompilationMode.STOCK_TORCH_COMPILE,
+                "use_inductor_graph_partition": True,
+                "cudagraph_capture_sizes": [100],
+            },
+            gpu_memory_utilization=0.4,
+        ) as _,
+    ):
+        pass
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
+def test_stock_uses_decoupled_cudagraph_wrapper(vllm_runner, monkeypatch):
+    # The stock path must capture via its own StockTorchCompileCUDAGraphWrapper, never the shared
+    # CUDAGraphWrapper (which is coupled to vLLM's non-torch.compile full-cudagraph
+    # path). Forked so the wrapper-class instance registries start empty.
+    from vllm.compilation.cuda_graph import CUDAGraphWrapper
+    from vllm.compilation.stock_cudagraph import StockTorchCompileCUDAGraphWrapper
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("use_inductor_graph_partition requires torch>=2.9.0.dev")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with vllm_runner(
+        "facebook/opt-125m",
+        compilation_config={
+            "mode": CompilationMode.STOCK_TORCH_COMPILE,
+            "use_inductor_graph_partition": True,
+            "cudagraph_capture_sizes": [100],
+        },
+        gpu_memory_utilization=0.4,
+    ) as _:
+        assert len(StockTorchCompileCUDAGraphWrapper._all_instances) > 0
+        assert len(CUDAGraphWrapper._all_instances) == 0
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="stock cudagraph guard queries the CUDA stream capture state",
+)
+def test_stock_cudagraph_wrapper_rejects_cross_engine_capture():
+    # The stock partition wrapper is a process-global that is never unset, so a
+    # forward driven by a DIFFERENT engine's config can reach the capture branch
+    # carrying a stale compilation config. The identity guard must raise there
+    # rather than capture a graph against the wrong config (and must not run the
+    # underlying runnable).
+    from vllm.compilation.stock_cudagraph import StockTorchCompileCUDAGraphWrapper
+    from vllm.forward_context import BatchDescriptor, set_forward_context
+
+    vllm_config = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.STOCK_TORCH_COMPILE)
+    )
+    ran = {"n": 0}
+
+    def runnable(x):
+        ran["n"] += 1
+        return x
+
+    wrapper = StockTorchCompileCUDAGraphWrapper(
+        runnable, vllm_config, runtime_mode=CUDAGraphMode.FULL
+    )
+
+    # A second engine: its static_forward_context is a distinct dict object, so the
+    # forward context it drives will not alias the wrapper's compilation config.
+    foreign_config = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.STOCK_TORCH_COMPILE)
+    )
+    assert (
+        foreign_config.compilation_config.static_forward_context
+        is not vllm_config.compilation_config.static_forward_context
+    )
+
+    with (
+        set_forward_context(
+            attn_metadata=None,
+            vllm_config=foreign_config,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=BatchDescriptor(num_tokens=8),
+        ),
+        pytest.raises(RuntimeError, match="different vLLM engine"),
+    ):
+        wrapper(torch.empty(1))
+    assert ran["n"] == 0
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
 def test_no_compilation(vllm_runner, monkeypatch):
     # Disable multiprocessing so that the counter is in the same process
     monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
@@ -788,3 +1013,1002 @@ def test_inductor_asserts_user_override(monkeypatch):
     assert config.inductor_compile_config.get("size_asserts") is True
     if not _is_torch_equal_or_newer(torch.__version__, "2.12.0.dev"):
         assert config.inductor_compile_config.get("alignment_asserts") is False
+
+
+# --- STOCK_TORCH_COMPILE migration (SupportsStockCompile) config resolution ---
+# These build VllmConfig directly (no model load / GPU memory) and assert the
+# resolved compile mode / cudagraph mode. The cudagraph-mode assertions need a
+# platform that supports static graph mode (FDO is otherwise forced to NONE).
+
+
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if cudagraph mode not supported",
+)
+@pytest.mark.parametrize(
+    "user_cudagraph_mode,expected_mode,expected_cudagraph",
+    [
+        # Unset, partition explicitly off -> the opt-level default is a piecewise
+        # mode the stock path can't honor without partition, so fall back to the
+        # legacy VllmBackend (keeping the piecewise default) rather than silently
+        # degrading to a different cudagraph strategy. The partition-on default is
+        # covered by test_stock_defaults_to_graph_partition_piecewise.
+        (None, CompilationMode.VLLM_COMPILE, CUDAGraphMode.FULL_AND_PIECEWISE),
+        # Explicit NONE is the user's deliberate choice and must be preserved.
+        (CUDAGraphMode.NONE, CompilationMode.STOCK_TORCH_COMPILE, CUDAGraphMode.NONE),
+        # An explicit piecewise mode needs graph partition (off here); the stock path
+        # can't provide it, so fall back to the legacy VllmBackend (which has its own
+        # FX splitting) rather than silently dropping cudagraphs.
+        (
+            CUDAGraphMode.PIECEWISE,
+            CompilationMode.VLLM_COMPILE,
+            CUDAGraphMode.PIECEWISE,
+        ),
+        (
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            CompilationMode.VLLM_COMPILE,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+        ),
+        # Explicit full modes need no piecewise capture, so they stay on stock as-is.
+        (CUDAGraphMode.FULL, CompilationMode.STOCK_TORCH_COMPILE, CUDAGraphMode.FULL),
+        (
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+        ),
+    ],
+)
+def test_stock_cudagraph_mode_resolution(
+    user_cudagraph_mode, expected_mode, expected_cudagraph
+):
+    # Pin partition off so this isolates the no-partition resolution regardless of
+    # the torch version (the default auto-enables partition on torch>=2.9).
+    cc_kwargs = {
+        "mode": CompilationMode.STOCK_TORCH_COMPILE,
+        "use_inductor_graph_partition": False,
+    }
+    if user_cudagraph_mode is not None:
+        cc_kwargs["cudagraph_mode"] = user_cudagraph_mode
+    config = VllmConfig(compilation_config=CompilationConfig(**cc_kwargs))
+    assert config.compilation_config.mode == expected_mode
+    assert config.compilation_config.cudagraph_mode == expected_cudagraph
+    # A fallen-back stock config must be indistinguishable from a native
+    # VLLM_COMPILE one: ir_enable_torch_wrap follows the FINAL mode, not the
+    # transient STOCK mode it started in.
+    assert config.compilation_config.ir_enable_torch_wrap is (
+        expected_mode == CompilationMode.VLLM_COMPILE
+    )
+
+
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if cudagraph mode not supported",
+)
+def test_stock_late_fallback_resolves_torch_wrap():
+    # A piecewise cudagraph_mode re-introduced LATE (here via the dynamic-SD
+    # override, but also reachable via pooler / KV-connector / platform
+    # check_and_update_config) forces a stock->VLLM_COMPILE fallback AFTER the
+    # point mode is normally settled. ir_enable_torch_wrap must still resolve to
+    # True so custom IR torch-wrap/lowering stays enabled, matching a config that
+    # started as VLLM_COMPILE. Regression guard for resolving it too early.
+    def _force_piecewise(self):
+        self.compilation_config.cudagraph_mode = CUDAGraphMode.PIECEWISE
+
+    with patch.object(
+        VllmConfig, "_maybe_override_dynamic_sd_cudagraph_mode", _force_piecewise
+    ):
+        config = VllmConfig(
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.STOCK_TORCH_COMPILE,
+                use_inductor_graph_partition=False,
+            )
+        )
+    assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+    assert config.compilation_config.ir_enable_torch_wrap is True
+
+
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if cudagraph mode not supported",
+)
+def test_stock_defaults_to_graph_partition_piecewise():
+    # A stock-compile model with nothing set defaults to graph-partition piecewise
+    # (FULL_AND_PIECEWISE) on torch>=2.9, auto-enabling use_inductor_graph_partition;
+    # on older torch the piecewise default can't be honored, so it falls back to the
+    # legacy VllmBackend (preserving the cudagraph mode). The flag is folded into the
+    # SupportsStockCompile default rather than being opt-in.
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    config = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.STOCK_TORCH_COMPILE)
+    )
+    cc = config.compilation_config
+    if is_torch_equal_or_newer("2.9.0.dev"):
+        assert cc.mode == CompilationMode.STOCK_TORCH_COMPILE
+        assert cc.use_inductor_graph_partition is True
+        assert cc.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+    else:
+        assert cc.mode == CompilationMode.VLLM_COMPILE
+        assert cc.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if cudagraph mode not supported",
+)
+@pytest.mark.parametrize(
+    "supported,user_mode,expected_mode,expected_cudagraph",
+    [
+        (
+            True,
+            None,
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+        ),
+        (
+            False,
+            None,
+            CompilationMode.VLLM_COMPILE,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+        ),
+        # An explicit mode always wins over the allowlist auto-selection.
+        (
+            True,
+            CompilationMode.VLLM_COMPILE,
+            CompilationMode.VLLM_COMPILE,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+        ),
+    ],
+)
+def test_stock_mode_auto_selection(
+    supported, user_mode, expected_mode, expected_cudagraph
+):
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    cc_kwargs = {} if user_mode is None else {"mode": user_mode}
+    with patch.object(VllmConfig, "_stock_compile_supported", lambda self: supported):
+        config = VllmConfig(compilation_config=CompilationConfig(**cc_kwargs))
+    # The stock default is graph-partition piecewise only on torch>=2.9; on older
+    # torch the piecewise default can't be honored, so it falls back to VllmBackend
+    # (the cudagraph mode is preserved across the fallback).
+    if (
+        expected_mode == CompilationMode.STOCK_TORCH_COMPILE
+        and not is_torch_equal_or_newer("2.9.0.dev")
+    ):
+        expected_mode = CompilationMode.VLLM_COMPILE
+    assert config.compilation_config.mode == expected_mode
+    assert config.compilation_config.cudagraph_mode == expected_cudagraph
+
+
+@pytest.mark.parametrize(
+    "mode,cudagraph_mode,partition,expected_mode,expected_cudagraph",
+    [
+        # STOCK + a piecewise mode without graph partition can't be honored, so the
+        # engine falls back to the legacy VllmBackend (which has its own FX splitting),
+        # leaving cudagraph_mode intact for that backend to consume.
+        (
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CUDAGraphMode.PIECEWISE,
+            False,
+            CompilationMode.VLLM_COMPILE,
+            CUDAGraphMode.PIECEWISE,
+        ),
+        (
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            False,
+            CompilationMode.VLLM_COMPILE,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+        ),
+        # STOCK + piecewise WITH graph partition is supported, so it stays on stock.
+        (
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CUDAGraphMode.PIECEWISE,
+            True,
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CUDAGraphMode.PIECEWISE,
+        ),
+        # A non-piecewise mode never needs fixing.
+        (
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+            False,
+            CompilationMode.STOCK_TORCH_COMPILE,
+            CUDAGraphMode.FULL_DECODE_ONLY,
+        ),
+        # VLLM_COMPILE honors piecewise itself, so it is left untouched.
+        (
+            CompilationMode.VLLM_COMPILE,
+            CUDAGraphMode.PIECEWISE,
+            False,
+            CompilationMode.VLLM_COMPILE,
+            CUDAGraphMode.PIECEWISE,
+        ),
+        # NONE / DYNAMO_TRACE_ONCE have no compiled graph to capture piecewise, so the
+        # piecewise cudagraph_mode drops to NONE (no fallback -- there is nothing to
+        # fall back to for these explicit modes).
+        (
+            CompilationMode.NONE,
+            CUDAGraphMode.FULL_AND_PIECEWISE,
+            False,
+            CompilationMode.NONE,
+            CUDAGraphMode.NONE,
+        ),
+        (
+            CompilationMode.DYNAMO_TRACE_ONCE,
+            CUDAGraphMode.PIECEWISE,
+            False,
+            CompilationMode.DYNAMO_TRACE_ONCE,
+            CUDAGraphMode.NONE,
+        ),
+    ],
+)
+def test_fix_unsupported_piecewise_cudagraph_mode(
+    mode, cudagraph_mode, partition, expected_mode, expected_cudagraph
+):
+    # Construct with a benign non-piecewise cudagraph_mode so the config settles in
+    # the requested `mode`: an unset (piecewise) default would itself trip the
+    # stock->VLLM_COMPILE fallback during __post_init__. Then set the mode under test
+    # and invoke the helper in isolation.
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=mode,
+            use_inductor_graph_partition=partition,
+            cudagraph_mode=CUDAGraphMode.NONE,
+        )
+    )
+    config.compilation_config.cudagraph_mode = cudagraph_mode
+    config._fix_unsupported_piecewise_cudagraph_mode()
+    assert config.compilation_config.mode == expected_mode
+    assert config.compilation_config.cudagraph_mode == expected_cudagraph
+
+
+# --- step 2: piecewise cudagraphs on the stock path via Inductor graph partition ---
+
+
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if cudagraph mode not supported",
+)
+@pytest.mark.parametrize(
+    "user_cudagraph_mode,expected",
+    [
+        # Unset + graph partition -> prefill can be piecewise-captured, so default to
+        # FULL_AND_PIECEWISE rather than FULL_DECODE_ONLY.
+        (None, CUDAGraphMode.FULL_AND_PIECEWISE),
+        # Explicit piecewise modes are now honored on the stock path (Inductor graph
+        # partition provides them) instead of being clamped to NONE.
+        (CUDAGraphMode.PIECEWISE, CUDAGraphMode.PIECEWISE),
+        (CUDAGraphMode.FULL_AND_PIECEWISE, CUDAGraphMode.FULL_AND_PIECEWISE),
+        # Explicit NONE is still the user's deliberate choice.
+        (CUDAGraphMode.NONE, CUDAGraphMode.NONE),
+    ],
+)
+def test_stock_graph_partition_cudagraph_mode(user_cudagraph_mode, expected):
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("use_inductor_graph_partition requires torch>=2.9.0.dev")
+    cc_kwargs = {
+        "mode": CompilationMode.STOCK_TORCH_COMPILE,
+        "use_inductor_graph_partition": True,
+    }
+    if user_cudagraph_mode is not None:
+        cc_kwargs["cudagraph_mode"] = user_cudagraph_mode
+    config = VllmConfig(compilation_config=CompilationConfig(**cc_kwargs))
+    assert config.compilation_config.cudagraph_mode == expected
+
+
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if cudagraph mode not supported",
+)
+def test_stock_graph_partition_populates_splitting_ops():
+    # With graph partition, splitting_ops must name the attention ops so Inductor
+    # partitions there; without it the stock path cannot provide piecewise cudagraphs
+    # and falls back to the legacy VllmBackend.
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("use_inductor_graph_partition requires torch>=2.9.0.dev")
+
+    partition = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.STOCK_TORCH_COMPILE,
+            use_inductor_graph_partition=True,
+        )
+    )
+    assert partition.compilation_config.splitting_ops == list(
+        CompilationConfig._attention_ops
+    )
+
+    # An explicit empty list with partition on must still be populated (else
+    # FULL_AND_PIECEWISE would have zero piecewise partitions, silently capturing
+    # attention inside the cudagraph).
+    explicit_empty = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.STOCK_TORCH_COMPILE,
+            use_inductor_graph_partition=True,
+            splitting_ops=[],
+        )
+    )
+    assert explicit_empty.compilation_config.splitting_ops == list(
+        CompilationConfig._attention_ops
+    )
+
+    # Partition explicitly off on the stock path can't provide piecewise cudagraphs,
+    # so it falls back to the legacy VllmBackend rather than silently degrading to a
+    # whole-graph stock path.
+    no_partition = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.STOCK_TORCH_COMPILE,
+            use_inductor_graph_partition=False,
+        )
+    )
+    assert no_partition.compilation_config.mode == CompilationMode.VLLM_COMPILE
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="stock inductor-options pass wiring is exercised on CUDA",
+)
+def test_stock_inductor_options_fusion_gate():
+    # The fusion gate is derived from the configured PostGradPassManager rather than a
+    # hand-maintained flag list, so it cannot drift. Dense bf16 with no active fusion
+    # pass reports has_fusion False (only NoOpElimination, which buys nothing) but the
+    # base inductor_compile_config is still carried (only the pass manager is skipped);
+    # turning on a real fusion pass (enable_qk_norm_rope_fusion) reports fusion and
+    # wires the pre/post-grad passes.
+    from types import SimpleNamespace
+
+    import vllm.compilation.passes.inductor_pass as inductor_pass_mod
+    from vllm.compilation.passes.ir.inplace_functionalization import (
+        VllmIRInplaceFunctionalizationPass,
+    )
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+    def options_for(**pass_flags):
+        # Pin the whole-graph stock path (partition off, decode-only cudagraphs) so
+        # the gate reflects only the requested passes: the default now auto-enables
+        # Inductor graph partition, which itself turns on partition-gated fusions
+        # (e.g. rope_kvcache_cat_mla) that would mask the baseline.
+        vc = VllmConfig(
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.STOCK_TORCH_COMPILE,
+                use_inductor_graph_partition=False,
+                cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+                pass_config=PassConfig(**pass_flags),
+            )
+        )
+        vc.model_config = MagicMock(dtype=torch.bfloat16)
+        # A user-supplied inductor_compile_config entry: it must survive into the
+        # returned options even when there is no fusion.
+        vc.compilation_config.inductor_compile_config["max_autotune"] = True
+        stub = SimpleNamespace(compilation_config=vc.compilation_config, vllm_config=vc)
+        return GPUModelRunner._stock_inductor_options(stub)
+
+    # The fusion path installs a process-global pass context (set_pass_context has no
+    # teardown by design); restore it so this unit test leaves no global state.
+    prev_pass_context = inductor_pass_mod._pass_context
+    try:
+        # Dense bf16 with no active fusion pass: has_fusion False, but the base
+        # inductor_compile_config must still be carried -- dropping it silently ignored
+        # combo-kernel / auto-functionalization gating and any user
+        # --compilation-config inductor_compile_config on the stock path.
+        base_opts, has_fusion = options_for(eliminate_noops=True)
+        assert not has_fusion
+        assert "enable_auto_functionalized_v2" in base_opts
+        assert base_opts["max_autotune"] is True
+        # The pass manager and pre-grad pass are gated on fusion -> absent here.
+        assert "pre_grad_custom_pass" not in base_opts
+        assert current_platform.pass_key not in base_opts
+
+        # A real fusion pass -> has_fusion True, and the dict must actually wire the
+        # pre/post-grad passes through Inductor's custom-pass hooks (not merely report
+        # has_fusion), while still carrying the base config.
+        opts, has_fusion = options_for(
+            eliminate_noops=True,
+            enable_qk_norm_rope_fusion=True,
+        )
+        assert has_fusion
+        assert "enable_auto_functionalized_v2" in opts
+        assert isinstance(
+            opts["pre_grad_custom_pass"], VllmIRInplaceFunctionalizationPass
+        )
+        assert current_platform.pass_key in opts
+        assert "pre_grad_custom_pass" in opts["_cache_config_ignore_prefix"]
+    finally:
+        inductor_pass_mod._pass_context = prev_pass_context
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="stock inductor-options pass wiring is exercised on CUDA",
+)
+def test_stock_inductor_options_merges_user_post_grad_pass():
+    # A user-supplied post_grad_custom_post_pass must be merged into the stock path's
+    # PostGradPassManager (mirroring VllmBackend.configure_post_pass), not clobbered by
+    # the manager registration. Regression guard: the stock path used to overwrite the
+    # pass_key unconditionally, silently dropping the user's post-grad pass.
+    from types import SimpleNamespace
+
+    import vllm.compilation.passes.inductor_pass as inductor_pass_mod
+    from vllm.compilation.passes.inductor_pass import InductorPass
+    from vllm.v1.worker.gpu_model_runner import GPUModelRunner
+
+    class _MarkerPass(InductorPass):
+        def __call__(self, graph):
+            pass
+
+    marker = _MarkerPass()
+    # Pin the whole-graph stock path (partition off, decode-only cudagraphs) with a real
+    # fusion pass active (enable_qk_norm_rope_fusion) so _stock_inductor_options
+    # registers the pass manager and reaches the merge branch instead of returning the
+    # base options early.
+    vc = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.STOCK_TORCH_COMPILE,
+            use_inductor_graph_partition=False,
+            cudagraph_mode=CUDAGraphMode.FULL_DECODE_ONLY,
+            pass_config=PassConfig(
+                eliminate_noops=True, enable_qk_norm_rope_fusion=True
+            ),
+            inductor_compile_config={current_platform.pass_key: marker},
+        )
+    )
+    vc.model_config = MagicMock(dtype=torch.bfloat16)
+    stub = SimpleNamespace(compilation_config=vc.compilation_config, vllm_config=vc)
+
+    # set_pass_context installs process-global state with no teardown by design;
+    # restore it so this unit test leaves no global leak for other tests.
+    prev_pass_context = inductor_pass_mod._pass_context
+    try:
+        opts, has_fusion = GPUModelRunner._stock_inductor_options(stub)
+    finally:
+        inductor_pass_mod._pass_context = prev_pass_context
+
+    assert has_fusion
+    manager = opts[current_platform.pass_key]
+    # The manager replaces the raw pass under pass_key, and the user's pass is merged
+    # into the manager's pass list rather than dropped.
+    assert manager is not marker
+    assert marker in manager.passes
+
+
+def test_stock_inert_flag_warning():
+    # VllmBackend-only flags on a stock model emit one warning that names the
+    # working escape hatch and never the broken -O.mode=3 form.
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.STOCK_TORCH_COMPILE, compile_sizes=[1, 2]
+        )
+    )
+    config.model_config = MagicMock(architectures=["GptOssForCausalLM"])
+    with patch("vllm.config.vllm.logger.warning_once") as mock_warn:
+        config._warn_ignored_vllm_backend_only_flags()
+    assert mock_warn.call_count == 1
+    fmt, *fmt_args = mock_warn.call_args.args
+    assert "--compilation-config" in fmt
+    assert "-O.mode=3" not in fmt
+    assert "compile_sizes" in " ".join(str(a) for a in fmt_args)
+
+    # cudagraph_copy_inputs and splitting_ops (without graph partition) are also
+    # VllmBackend-only on the stock path and must each surface in the warning args.
+    copy_cfg = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.STOCK_TORCH_COMPILE, cudagraph_copy_inputs=True
+        )
+    )
+    copy_cfg.model_config = MagicMock(architectures=["GptOssForCausalLM"])
+    with patch("vllm.config.vllm.logger.warning_once") as mock_warn:
+        copy_cfg._warn_ignored_vllm_backend_only_flags()
+    assert mock_warn.call_count == 1
+    assert "cudagraph_copy_inputs" in " ".join(str(a) for a in mock_warn.call_args.args)
+
+    # VLLM_COMPILE honors these flags, so no warning.
+    other = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE, compile_sizes=[1, 2]
+        )
+    )
+    other.model_config = MagicMock(architectures=["LlamaForCausalLM"])
+    with patch("vllm.config.vllm.logger.warning_once") as mock_warn:
+        other._warn_ignored_vllm_backend_only_flags()
+    assert mock_warn.call_count == 0
+
+
+def test_stock_graph_partition_no_piecewise_override_warning():
+    # With use_inductor_graph_partition the stock path provides piecewise cudagraphs,
+    # so resolving to FULL_AND_PIECEWISE must NOT warn about an unsupported/overridden
+    # cudagraph_mode (regression: the inert-flag warning used to fire here).
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("use_inductor_graph_partition requires torch>=2.9.0.dev")
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.STOCK_TORCH_COMPILE,
+            use_inductor_graph_partition=True,
+        )
+    )
+    config.model_config = MagicMock(architectures=["GptOssForCausalLM"])
+    with patch("vllm.config.vllm.logger.warning_once") as mock_warn:
+        config._warn_ignored_vllm_backend_only_flags()
+    assert mock_warn.call_count == 0
+
+
+def test_stock_compile_cache_flags_warn(monkeypatch):
+    # vLLM's own compile cache is inert on the stock path (torch.compile uses its
+    # own cache); setting any of its knobs must warn, not be silently ignored.
+    monkeypatch.setenv("VLLM_COMPILE_CACHE_SAVE_FORMAT", "binary")
+
+    def warn_parts(**cc):
+        config = VllmConfig(
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.STOCK_TORCH_COMPILE, **cc
+            )
+        )
+        config.model_config = MagicMock(architectures=["GptOssForCausalLM"])
+        with patch("vllm.config.vllm.logger.warning_once") as mock_warn:
+            config._warn_ignored_vllm_backend_only_flags()
+        assert mock_warn.call_count == 1
+        return " ".join(str(a) for a in mock_warn.call_args.args)
+
+    assert "cache_dir" in warn_parts(cache_dir="/tmp/vllm-cache")
+    assert "compile_cache_save_format" in warn_parts(
+        compile_cache_save_format="unpacked"
+    )
+
+    # VLLM_DISABLE_COMPILE_CACHE is an env var, not a field.
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+    config = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.STOCK_TORCH_COMPILE)
+    )
+    config.model_config = MagicMock(architectures=["GptOssForCausalLM"])
+    with patch("vllm.config.vllm.logger.warning_once") as mock_warn:
+        config._warn_ignored_vllm_backend_only_flags()
+    assert mock_warn.call_count == 1
+    assert "VLLM_DISABLE_COMPILE_CACHE" in " ".join(
+        str(a) for a in mock_warn.call_args.args
+    )
+
+
+def test_stock_warn_no_false_positive_on_autopopulated_fields():
+    # compile_ranges_endpoints is auto-populated later in __post_init__ (and
+    # __post_init__ may re-run on a reused compilation_config), so a resolved
+    # non-empty value must NOT trigger a warning when the user set no inert flags.
+    config = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.STOCK_TORCH_COMPILE)
+    )
+    # simulate the resolved/auto-populated state seen on a real run / re-run
+    config.compilation_config.compile_ranges_endpoints = [16384]
+    config.model_config = MagicMock(architectures=["GptOssForCausalLM"])
+    with patch("vllm.config.vllm.logger.warning_once") as mock_warn:
+        config._warn_ignored_vllm_backend_only_flags()
+    assert mock_warn.call_count == 0
+
+
+def test_stock_warning_handles_missing_model_config():
+    # mode==STOCK with no model_config must not raise (the warn helper dereferences
+    # model_config.architectures only after a None guard).
+    config = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.STOCK_TORCH_COMPILE, compile_sizes=[1, 2]
+        )
+    )
+    config.model_config = None
+    config._warn_ignored_vllm_backend_only_flags()
+
+
+def test_stock_compile_supported_safe_defaults():
+    # The real _stock_compile_supported (not patched out) must return False for
+    # both the no-model case and any registry resolution error, so a broken/unknown
+    # model never gets auto-selected onto the stock path.
+    no_model = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.STOCK_TORCH_COMPILE)
+    )
+    no_model.model_config = None
+    assert no_model._stock_compile_supported() is False
+
+    raising = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.STOCK_TORCH_COMPILE)
+    )
+    registry = MagicMock()
+    registry.is_stock_compile_supported_model.side_effect = RuntimeError("boom")
+    raising.model_config = MagicMock(
+        architectures=["GptOssForCausalLM"], registry=registry
+    )
+    # A swallowed resolution error must still return the safe default AND be
+    # surfaced at a visible level so a stock-eligible arch silently falling
+    # back to VllmBackend is diagnosable.
+    with patch("vllm.config.vllm.logger.warning_once") as mock_warn:
+        assert raising._stock_compile_supported() is False
+    assert mock_warn.call_count == 1
+    warn_text = " ".join(str(a) for a in mock_warn.call_args.args)
+    assert "GptOssForCausalLM" in warn_text
+    assert "boom" in warn_text
+
+
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if cudagraph mode not supported",
+)
+def test_stock_dynamic_sd_overrides_to_piecewise():
+    # Dynamic spec decode varies the verification length, so the full-decode capture
+    # in FULL_AND_PIECEWISE is unsafe. The dynamic-SD override drops it to PIECEWISE;
+    # on the stock path graph partition (auto-enabled on torch>=2.9) provides those
+    # piecewise cudagraphs, so it stays on stock rather than falling back or dropping
+    # cudagraphs. An algorithmic (ngram_gpu) drafter keeps the stock path, isolating
+    # the dynamic-SD override on STOCK.
+    from types import SimpleNamespace
+
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    spec = SimpleNamespace(
+        method="ngram_gpu",
+        disable_padded_drafter_batch=False,
+        num_speculative_tokens=3,
+        max_num_new_slots_for_drafting=3,
+        parallel_drafting=False,
+        uses_dynamic_speculative_decoding=lambda: True,
+        use_eagle=lambda: False,
+        compute_hash=lambda: "spec",
+    )
+    config = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.STOCK_TORCH_COMPILE)
+    )
+    # Assign the stub after construction (pydantic's dataclass validator rejects a
+    # SimpleNamespace at construction time) and re-run resolution to exercise the
+    # dynamic-SD override in __post_init__.
+    config.speculative_config = spec
+    config.compilation_config.cudagraph_mode = None
+    # Reset the auto-resolved partition flag too so this mirrors a fresh single
+    # construction with a dynamic drafter.
+    config.compilation_config.use_inductor_graph_partition = None
+    config.__post_init__()
+    if is_torch_equal_or_newer("2.9.0.dev"):
+        assert config.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE
+        assert config.compilation_config.cudagraph_mode == CUDAGraphMode.PIECEWISE
+        assert config.compilation_config.use_inductor_graph_partition is True
+    else:
+        # Without Inductor graph partition the stock path can't do piecewise, so the
+        # dynamic-SD PIECEWISE override falls back to the legacy backend.
+        assert config.compilation_config.mode == CompilationMode.VLLM_COMPILE
+
+
+@pytest.mark.parametrize("mode", list(CompilationMode))
+def test_deepep_high_throughput_disables_cudagraphs_all_modes(mode):
+    # DeepEP high-throughput all2all kernels are CUDA-graph-incompatible; the disable
+    # must fire regardless of compile mode (it runs before the mode-specific early
+    # return in set_splitting_ops_for_v1), including on the stock path.
+    cc = CompilationConfig(
+        mode=mode,
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        use_inductor_graph_partition=True,
+    )
+    cc.set_splitting_ops_for_v1(
+        all2all_backend="deepep_high_throughput", data_parallel_size=2
+    )
+    assert cc.cudagraph_mode == CUDAGraphMode.NONE
+
+    # A non-DeepEP-HT backend leaves the cudagraph mode alone.
+    cc2 = CompilationConfig(
+        mode=mode,
+        cudagraph_mode=CUDAGraphMode.FULL_AND_PIECEWISE,
+        use_inductor_graph_partition=True,
+    )
+    cc2.set_splitting_ops_for_v1(
+        all2all_backend="allgather_reducescatter", data_parallel_size=2
+    )
+    assert cc2.cudagraph_mode == CUDAGraphMode.FULL_AND_PIECEWISE
+
+
+@pytest.mark.parametrize("decorate_outer", [True, False])
+def test_stock_support_torch_compile_routes_to_runner_compile(decorate_outer):
+    # Spec-decode drafters run under the engine-global STOCK mode with their
+    # @support_torch_compile decorator not using vLLM's custom backend
+    # (do_not_use_custom_torch_compile_backend), and the runner
+    # compiles the drafter model via nn.Module.compile().
+    # - decorate_outer=True (MTP shape): the compiled module IS the decorated class.
+    #   Because the decorator overrides nn.Module.__call__, .compile() only takes
+    #   effect if that __call__ routes to _compiled_call_impl -- with the pre-fix
+    #   decorator the backend is never invoked (calls == 0). This case guards the fix.
+    # - decorate_outer=False (eagle-head shape): an undecorated outer wraps the
+    #   decorated inner; the outer's .compile() works regardless of the fix. This is a
+    #   regression guard that the eagle shape still compiles under stock.
+    import torch
+    import torch.nn as nn
+
+    from vllm.compilation.decorators import support_torch_compile
+    from vllm.config import set_current_vllm_config
+
+    @support_torch_compile
+    class Decorated(nn.Module):
+        def __init__(self, *, vllm_config=None, prefix=""):
+            super().__init__()
+            self.lin = nn.Linear(8, 8)
+
+        def forward(self, x: torch.Tensor):
+            return self.lin(x)
+
+    cfg = VllmConfig(
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.STOCK_TORCH_COMPILE,
+            use_inductor_graph_partition=False,
+            cudagraph_mode=CUDAGraphMode.NONE,
+        )
+    )
+    with set_current_vllm_config(cfg):
+        decorated = Decorated(vllm_config=cfg)
+
+    # decorate_outer=True compiles the decorated module directly (the MTP-drafter
+    # shape); False wraps it in an undecorated outer (the eagle-head shape).
+    module = decorated if decorate_outer else nn.Sequential(decorated)
+
+    calls = {"n": 0}
+
+    def counting_backend(gm, example_inputs):
+        calls["n"] += 1
+        return gm.forward
+
+    module.compile(fullgraph=True, backend=counting_backend)
+    module(torch.randn(4, 8))
+    assert calls["n"] >= 1, (
+        "nn.Module.compile() did not take effect under STOCK_TORCH_COMPILE; the "
+        "drafter would run eager"
+    )
+
+
+def test_support_torch_compile_none_mode_runs_eager():
+    # The __call__ routing that sends do_not_use_custom_torch_compile_backend modules
+    # to _compiled_call_impl is STOCK-only: under CompilationMode.NONE the module has
+    # do_not_use_custom_torch_compile_backend set and nothing calls nn.Module.compile()
+    # on it, so _compiled_call_impl stays None and it runs eager (guards the shared
+    # decorator path against a regression).
+    import torch
+    import torch.nn as nn
+
+    from vllm.compilation.decorators import support_torch_compile
+    from vllm.config import set_current_vllm_config
+
+    @support_torch_compile
+    class Decorated(nn.Module):
+        def __init__(self, *, vllm_config=None, prefix=""):
+            super().__init__()
+            self.ran_eager = False
+
+        def forward(self, x: torch.Tensor):
+            self.ran_eager = True
+            return x
+
+    cfg = VllmConfig(compilation_config=CompilationConfig(mode=CompilationMode.NONE))
+    with set_current_vllm_config(cfg):
+        m = Decorated(vllm_config=cfg)
+    assert getattr(m, "_compiled_call_impl", None) is None
+    m(torch.randn(2, 2))
+    assert m.ran_eager
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda(),
+    reason="glue-kernel resolution comparison is CUDA-specific",
+)
+def test_stock_uses_default_glue_kernels_like_vllm_backend():
+    # Stock must NOT force the vLLM custom RMSNorm/RoPE glue kernels. A TP1-TP8 sweep
+    # found the custom glue (+rotary_embedding, ir_op_priority.rms_norm=vllm_c) is ~10%
+    # slower at batch-1 decode than the Inductor glue VllmBackend actually uses
+    # (custom_ops=none), with no throughput or prefill benefit (PR #46423). Stock must
+    # resolve to the same glue as VllmBackend so they run identical kernels.
+    stock = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.STOCK_TORCH_COMPILE)
+    )
+    vllm = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
+    )
+    # No forced custom RoPE kernel, and RMSNorm priority is not forced to vllm_c.
+    assert "+rotary_embedding" not in stock.compilation_config.custom_ops
+    assert stock.kernel_config.ir_op_priority.rms_norm[0] != "vllm_c"
+    assert stock.kernel_config.ir_op_priority.fused_add_rms_norm[0] != "vllm_c"
+    # Stock resolves to the same glue kernels as VllmBackend.
+    assert (
+        stock.kernel_config.ir_op_priority.rms_norm
+        == vllm.kernel_config.ir_op_priority.rms_norm
+    )
+    assert (
+        stock.kernel_config.ir_op_priority.fused_add_rms_norm
+        == vllm.kernel_config.ir_op_priority.fused_add_rms_norm
+    )
+
+
+@pytest.mark.parametrize(
+    "method,expected_mode",
+    [
+        # Validated drafter methods keep the stock path (runner compiles the drafter).
+        ("eagle", CompilationMode.STOCK_TORCH_COMPILE),
+        ("eagle3", CompilationMode.STOCK_TORCH_COMPILE),
+        # Algorithmic (model-less) drafters have nothing to compile, so stay stock.
+        ("ngram", CompilationMode.STOCK_TORCH_COMPILE),
+        ("ngram_gpu", CompilationMode.STOCK_TORCH_COMPILE),
+        ("suffix", CompilationMode.STOCK_TORCH_COMPILE),
+        # Unvalidated model-backed drafters fall back so they compile as before
+        # (fullgraph-compiling them on stock is unchecked / would graph-break). mtp is
+        # not yet e2e-validated on stock, so it falls back too.
+        ("mtp", CompilationMode.VLLM_COMPILE),
+        ("draft_model", CompilationMode.VLLM_COMPILE),
+        ("medusa", CompilationMode.VLLM_COMPILE),
+        ("dflash", CompilationMode.VLLM_COMPILE),
+        ("extract_hidden_states", CompilationMode.VLLM_COMPILE),
+    ],
+)
+def test_stock_drafter_method_fallback(method, expected_mode):
+    from types import SimpleNamespace
+
+    config = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.STOCK_TORCH_COMPILE)
+    )
+    config.speculative_config = SimpleNamespace(method=method)
+    config._maybe_fallback_stock_for_unsupported_drafter()
+    assert config.compilation_config.mode == expected_mode
+
+
+def test_stock_drafter_fallback_noop_cases():
+    from types import SimpleNamespace
+
+    # No speculative config -> stock preserved.
+    cfg = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.STOCK_TORCH_COMPILE)
+    )
+    cfg.speculative_config = None
+    cfg._maybe_fallback_stock_for_unsupported_drafter()
+    assert cfg.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE
+
+    # Non-stock mode is left untouched even with an unvalidated model-backed drafter.
+    cfg = VllmConfig(
+        compilation_config=CompilationConfig(mode=CompilationMode.VLLM_COMPILE)
+    )
+    cfg.speculative_config = SimpleNamespace(method="medusa")
+    cfg._maybe_fallback_stock_for_unsupported_drafter()
+    assert cfg.compilation_config.mode == CompilationMode.VLLM_COMPILE
+
+
+def test_algorithmic_drafter_methods_stay_stock():
+    from types import SimpleNamespace
+
+    # Iterate the shared constant (not a hardcoded list) so the single source of
+    # truth used by _maybe_fallback_stock_for_unsupported_drafter is what gets
+    # exercised: any model-less method added to _ALGORITHMIC_DRAFTER_METHODS is
+    # covered automatically, and the disjointness check guards against a method
+    # being listed as both algorithmic and validated-model-backed.
+    assert VllmConfig._ALGORITHMIC_DRAFTER_METHODS
+    assert not (
+        set(VllmConfig._ALGORITHMIC_DRAFTER_METHODS)
+        & set(VllmConfig._STOCK_SUPPORTED_DRAFTER_METHODS)
+    )
+    for method in VllmConfig._ALGORITHMIC_DRAFTER_METHODS:
+        config = VllmConfig(
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.STOCK_TORCH_COMPILE
+            )
+        )
+        config.speculative_config = SimpleNamespace(method=method)
+        config._maybe_fallback_stock_for_unsupported_drafter()
+        assert config.compilation_config.mode == CompilationMode.STOCK_TORCH_COMPILE, (
+            method
+        )
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if cudagraph mode not supported",
+)
+def test_stock_torch_compile_compiles_spec_decode_drafter(vllm_runner, monkeypatch):
+    # A model-backed spec-decode drafter must be compiled on the stock path (no
+    # fallback to VLLM_COMPILE): the runner compiles both the target and the eagle
+    # drafter model via stock torch.compile, so stock_torch_compile_count == 2. The
+    # drafter's own @support_torch_compile decorator is disabled under STOCK, and its
+    # piecewise cudagraphs come from the same Inductor graph partition as the target.
+    # Llama-3.2-1B is not SupportsStockCompile, so mode=STOCK is forced here.
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with (
+        compilation_counter.expect(stock_torch_compile_count=2),
+        vllm_runner(
+            "meta-llama/Llama-3.2-1B-Instruct",
+            speculative_config={
+                "method": "eagle3",
+                "model": "nm-testing/Llama3_2_1B_speculator.eagle3",
+                "num_speculative_tokens": 3,
+            },
+            compilation_config={"mode": CompilationMode.STOCK_TORCH_COMPILE},
+            max_model_len=2048,
+            gpu_memory_utilization=0.55,
+        ) as _,
+    ):
+        pass
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if cudagraph mode not supported",
+)
+def test_stock_torch_compile_captures_full_cudagraph(vllm_runner, monkeypatch):
+    # The headline parity path: a stock-compiled model must still attach vLLM's
+    # external FULL cudagraph wrapper and actually capture a FULL_DECODE_ONLY graph.
+    # opt-125m is not SupportsStockCompile, so mode=STOCK is forced explicitly here;
+    # the auto-FDO promotion is allowlist-independent, so this isolates the cudagraph
+    # fall-through (not the SupportsStockCompile selection).
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    with (
+        compilation_counter.expect(
+            stock_torch_compile_count=1,
+            num_gpu_runner_capture_triggers=1,
+            num_cudagraph_captured=1,
+        ),
+        vllm_runner(
+            "facebook/opt-125m",
+            compilation_config={
+                "mode": CompilationMode.STOCK_TORCH_COMPILE,
+                # Pin partition off: this test isolates the FULL_DECODE_ONLY fall-
+                # through, while the default now auto-enables graph-partition
+                # piecewise (covered by test_stock_torch_compile_piecewise_*).
+                "use_inductor_graph_partition": False,
+                "cudagraph_capture_sizes": [100],
+            },
+            gpu_memory_utilization=0.4,
+        ) as _,
+    ):
+        pass
+
+
+# forked needed to workaround https://github.com/vllm-project/vllm/issues/21073
+@pytest.mark.forked
+@pytest.mark.skipif(
+    not current_platform.support_static_graph_mode(),
+    reason="Skip if cudagraph mode not supported",
+)
+@pytest.mark.parametrize("use_partition", [False, True])
+def test_stock_cudagraph_replay_matches_no_cudagraph(
+    vllm_runner, monkeypatch, use_partition
+):
+    # StockTorchCompileCUDAGraphWrapper capture/replay must be numerically correct, not merely
+    # capture the right graph count. For each partition setting, compare the SAME
+    # stock-compiled model with cudagraphs off vs on: the compiled kernels are
+    # identical, so a divergence in greedy decode isolates a replay bug (wrong batch-
+    # descriptor key, stale entry.output, bad weak-ref output) rather than compile-vs-
+    # eager numeric drift. partition=False exercises the single whole-graph
+    # FULL_DECODE_ONLY wrapper; partition=True exercises the per-partition wrappers of
+    # the default FULL_AND_PIECEWISE path. The count-only capture tests stay green
+    # through such a bug.
+    from vllm.utils.torch_utils import is_torch_equal_or_newer
+
+    if use_partition and not is_torch_equal_or_newer("2.9.0.dev"):
+        pytest.skip("use_inductor_graph_partition requires torch>=2.9.0.dev")
+    monkeypatch.setenv("VLLM_ENABLE_V1_MULTIPROCESSING", "0")
+    prompts = [
+        "The capital of France is",
+        "The quick brown fox jumps over the",
+    ]
+
+    def _greedy(cudagraph_on):
+        cc = {
+            "mode": CompilationMode.STOCK_TORCH_COMPILE,
+            "use_inductor_graph_partition": use_partition,
+        }
+        if cudagraph_on:
+            cc["cudagraph_capture_sizes"] = [8]
+        else:
+            cc["cudagraph_mode"] = CUDAGraphMode.NONE
+        with vllm_runner(
+            "facebook/opt-125m",
+            compilation_config=cc,
+            gpu_memory_utilization=0.4,
+        ) as m:
+            return m.generate_greedy(prompts, max_tokens=32)
+
+    base = _greedy(cudagraph_on=False)
+    replayed = _greedy(cudagraph_on=True)
+    for (base_ids, _), (replay_ids, _) in zip(base, replayed):
+        assert base_ids == replay_ids

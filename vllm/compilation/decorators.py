@@ -385,15 +385,18 @@ def _support_torch_compile(
         self.vllm_config = vllm_config
         self.compilation_config = self.vllm_config.compilation_config
         enable_compile = enable_if is None or enable_if(vllm_config)
-        # for CompilationMode.STOCK_TORCH_COMPILE , the upper level model runner
-        # will handle the compilation, so we don't need to do anything here.
-        self.do_not_compile = (
+        # This flag means "do not use vLLM's custom torch.compile backend
+        # (VllmBackend)". It does NOT mean the module never gets compiled: under
+        # CompilationMode.STOCK_TORCH_COMPILE the upper level model runner compiles
+        # it via nn.Module.compile() with stock Inductor. For CompilationMode.NONE,
+        # ignored classes, and disabled enable_if, nothing compiles it at all.
+        self.do_not_use_custom_torch_compile_backend = (
             self.compilation_config.mode
             in [CompilationMode.NONE, CompilationMode.STOCK_TORCH_COMPILE]
             or _should_ignore_torch_compile(self.__class__)
             or not enable_compile
         )
-        if self.do_not_compile:
+        if self.do_not_use_custom_torch_compile_backend:
             return
 
         self._dynamic_arg_dims = dynamic_arg_dims
@@ -503,7 +506,30 @@ def _support_torch_compile(
         # torch.compiler.is_compiling() means we are inside the compilation
         # e.g. TPU has the compilation logic in model runner, so we don't
         # need to compile the model inside.
-        if self.do_not_compile or torch.compiler.is_compiling():
+        if torch.compiler.is_compiling():
+            return self.forward(*args, **kwargs)
+
+        if self.do_not_use_custom_torch_compile_backend:
+            # Under CompilationMode.STOCK_TORCH_COMPILE the model runner compiles
+            # this module via nn.Module.compile(), which stores the compiled
+            # callable on _compiled_call_impl. This decorator's __call__ overrides
+            # nn.Module._wrapped_call_impl, so route to that compiled callable here;
+            # otherwise a module whose top-level class carries this decorator and is
+            # compiled directly by the runner would silently run eager. No currently-
+            # allowlisted arch hits the compiled branch (GPT-OSS and the eagle drafters
+            # are undecorated at top level; their decorated inner modules are folded
+            # submodules with _compiled_call_impl=None) -- it guards a future
+            # top-level-decorated model.
+            # skip_compiled (enc-dec: shapes/types vary, no single graph) still forces
+            # eager, matching the compiled path below. When nothing compiled the module
+            # (_compiled_call_impl is None, the case for CompilationMode.NONE and for
+            # decorated submodules folded into a parent's stock compile), run eagerly.
+            compiled_call_impl = getattr(self, "_compiled_call_impl", None)
+            skip_compiled = (
+                is_forward_context_available() and get_forward_context().skip_compiled
+            )
+            if compiled_call_impl is not None and not skip_compiled:
+                return compiled_call_impl(*args, **kwargs)
             return self.forward(*args, **kwargs)
 
         # If skip_compiled is set, bypass compiled model call. This is used e.g. for
@@ -721,6 +747,116 @@ def _support_torch_compile(
     return cls
 
 
+def _make_partition_wrapper(
+    vllm_config: VllmConfig,
+    wrapper_cls: Callable[..., Any],
+    options_cls: Callable[..., Any],
+) -> Callable[..., Any]:
+    """Build an Inductor graph-partition wrapper.
+
+    Inductor splits the FX graph into partitions (subgraphs separated by
+    cudagraph-unsafe ops); this hook wraps each partition so it is captured and
+    replayed as its own PIECEWISE cudagraph. The per-partition options key off
+    ``partition_index``: only the first partition (id 0) logs (avoids per-graph
+    spam) and runs gc (per-partition gc is very slow), and only the last
+    partition weak-refs its output (safe because no later captured graph consumes
+    it). ``wrapper_cls``/``options_cls`` select the static-cudagraph
+    implementation: the VLLM_COMPILE path uses the platform's shared wrapper, the
+    STOCK_TORCH_COMPILE path uses its decoupled StockTorchCompileCUDAGraphWrapper.
+    """
+    from torch._inductor.utils import CUDAGraphWrapperMetadata
+
+    from vllm.config import CUDAGraphMode
+
+    def customized_cudagraph_wrapper(
+        f: Callable[..., Any], metadata: CUDAGraphWrapperMetadata
+    ) -> Any:
+        partition_id = metadata.partition_index
+        num_partitions = metadata.num_partitions
+        return wrapper_cls(
+            runnable=f,
+            vllm_config=vllm_config,
+            runtime_mode=CUDAGraphMode.PIECEWISE,
+            cudagraph_options=options_cls(
+                debug_log_enable=partition_id == 0,
+                gc_disable=partition_id != 0,
+                weak_ref_output=partition_id == num_partitions - 1,
+            ),
+        )
+
+    return customized_cudagraph_wrapper
+
+
+def _make_cudagraph_partition_wrapper(vllm_config: VllmConfig) -> Callable[..., Any]:
+    """VLLM_COMPILE graph-partition wrapper using the platform's shared static
+    cudagraph wrapper."""
+    from vllm.compilation.cuda_graph import CUDAGraphOptions
+    from vllm.platforms import current_platform
+
+    static_graph_wrapper_class = resolve_obj_by_qualname(
+        current_platform.get_static_graph_wrapper_cls()
+    )
+    return _make_partition_wrapper(
+        vllm_config, static_graph_wrapper_class, CUDAGraphOptions
+    )
+
+
+def _make_stock_cudagraph_partition_wrapper(
+    vllm_config: VllmConfig,
+) -> Callable[..., Any]:
+    """STOCK_TORCH_COMPILE graph-partition wrapper. Uses the decoupled
+    StockTorchCompileCUDAGraphWrapper rather than the shared CUDAGraphWrapper, which is coupled
+    to vLLM's non-torch.compile full-cudagraph path."""
+    from vllm.compilation.stock_cudagraph import (
+        StockCUDAGraphOptions,
+        StockTorchCompileCUDAGraphWrapper,
+    )
+
+    return _make_partition_wrapper(
+        vllm_config, StockTorchCompileCUDAGraphWrapper, StockCUDAGraphOptions
+    )
+
+
+def install_cudagraph_partition_wrapper(
+    vllm_config: VllmConfig,
+) -> Callable[..., Any] | None:
+    """Persistently install the STOCK graph-partition cudagraph wrapper and return
+    the previously installed wrapper (usually None) so a caller could restore it.
+
+    Stock torch.compile is lazy: the real Inductor compile and its post_compile
+    partition wrapping fire on the first forward, not during model.compile(). That
+    first forward runs in GPUModelRunner.profile_run() (driven by the worker's
+    determine_available_memory RPC), while the piecewise cudagraphs are captured
+    later in capture_model() (compile_or_warm_up_model RPC); the install itself runs
+    in _compile_model_stock() under the load_model RPC. The compile that reads this
+    global therefore spans three separate engine-core RPCs with no single Python
+    scope, so the install must outlive this call and cannot be bracketed by a
+    context manager the way VLLM_COMPILE does.
+
+    It is intentionally never unset. Any later graph_partition compile in the
+    process would also pick up this wrapper, and the wrapper is not inherently inert:
+    it captures any partition that executes under a PIECEWISE forward context
+    (StockTorchCompileCUDAGraphWrapper.__call__). Safety rests on the invariant that no unrelated
+    graph_partition compile ever runs under a PIECEWISE forward context, which vLLM
+    upholds by disabling graph_partition on its own nested compiles via
+    maybe_disable_graph_partition. As a backstop against that invariant being
+    violated (an unrelated in-forward compile, or a cross-engine binding in a
+    multi-engine process), StockTorchCompileCUDAGraphWrapper.__call__ fails loudly at capture
+    time if the stream is already capturing or the forward is driven by a different
+    engine's config. The previous wrapper is returned only so a future scoped-unset
+    can restore it.
+
+    TODO(stock-compile): scope the install to the region spanning the lazy compile
+    and every piecewise capture and restore the returned wrapper in a finally, once
+    the worker lifecycle exposes a hook that reliably brackets both.
+    """
+    prev_wrapper = torch._inductor.utils._unstable_customized_partition_wrapper.wrapper
+    torch._inductor.utils.set_customized_partition_wrappers(
+        _make_stock_cudagraph_partition_wrapper(vllm_config)
+    )
+    return prev_wrapper
+
+
 @contextlib.contextmanager
 def maybe_use_cudagraph_partition_wrapper(
     vllm_config: VllmConfig,
@@ -735,40 +871,13 @@ def maybe_use_cudagraph_partition_wrapper(
     graph wrapper class to maintain more control over static graph
     capture and replay.
     """
-    from vllm.config import CUDAGraphMode
-
     compilation_config = vllm_config.compilation_config
     if (
         compilation_config.cudagraph_mode.has_piecewise_cudagraphs()
         and compilation_config.use_inductor_graph_partition
     ):
-        from torch._inductor.utils import CUDAGraphWrapperMetadata
-
-        from vllm.compilation.cuda_graph import CUDAGraphOptions
-        from vllm.platforms import current_platform
-
-        static_graph_wrapper_class = resolve_obj_by_qualname(
-            current_platform.get_static_graph_wrapper_cls()
-        )
-
-        def customized_cudagraph_wrapper(
-            f: Callable[..., Any], metadata: CUDAGraphWrapperMetadata
-        ) -> Any:
-            partition_id = metadata.partition_index
-            num_partitions = metadata.num_partitions
-            return static_graph_wrapper_class(
-                runnable=f,
-                vllm_config=vllm_config,
-                runtime_mode=CUDAGraphMode.PIECEWISE,
-                cudagraph_options=CUDAGraphOptions(
-                    debug_log_enable=partition_id == 0,
-                    gc_disable=partition_id != 0,
-                    weak_ref_output=partition_id == num_partitions - 1,
-                ),
-            )
-
         torch._inductor.utils.set_customized_partition_wrappers(
-            customized_cudagraph_wrapper
+            _make_cudagraph_partition_wrapper(vllm_config)
         )
 
     yield
