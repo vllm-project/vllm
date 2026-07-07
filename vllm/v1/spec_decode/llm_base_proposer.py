@@ -1430,7 +1430,8 @@ class SpecDecodeBaseProposer:
                 )
 
             share_embeddings = False
-            if hasattr(self.model, "has_own_embed_tokens"):
+            is_eagle_model = hasattr(self.model, "has_own_embed_tokens")
+            if is_eagle_model:
                 # EAGLE model
                 if not self.model.has_own_embed_tokens:
                     share_embeddings = True
@@ -1468,9 +1469,15 @@ class SpecDecodeBaseProposer:
                     "Sharing target model embedding weights with the draft model."
                 )
 
-            if share_embeddings:
+            if share_embeddings and is_eagle_model:
+                # EAGLE draft models may ship their own embedding of a
+                # different width than the target (e.g. Eagle3MiniMaxM2), in
+                # which case the two must stay separate (see PR #43957).
+                # MTP draft models are excluded: their projection is built for
+                # the *target* embedding width, so they must always share the
+                # target embedding regardless of the draft checkpoint's own
+                # embed_tokens width (see issue #47794 — Gemma4 MTP).
                 draft_embed = self.model.model.embed_tokens
-                # Only share when both models use the same embedding width.
                 # Guard with isinstance so non-Tensor weights (e.g. in tests)
                 # are not affected — mirrors the weight-equality check above.
                 if isinstance(target_embed_tokens.weight, torch.Tensor) and isinstance(
