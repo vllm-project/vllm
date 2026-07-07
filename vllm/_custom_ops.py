@@ -2244,6 +2244,7 @@ def topk_sigmoid(
     gating_output: torch.Tensor,
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
+    routed_scaling_factor: float = 1.0,
 ) -> None:
     torch.ops._moe_C.topk_sigmoid(
         topk_weights,
@@ -2252,6 +2253,7 @@ def topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        routed_scaling_factor,
     )
 
 
@@ -2972,6 +2974,24 @@ if hasattr(torch.ops._C, "fused_experts_cpu"):
         is_vnni: bool,
     ) -> torch.Tensor:
         return torch.empty_like(hidden_states)
+
+
+if hasattr(torch.ops._C, "dynamic_4bit_int_moe"):
+
+    @register_fake("_C::dynamic_4bit_int_moe")
+    def dynamic_4bit_int_moe_fake(
+        x: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+        w13_packed: torch.Tensor,
+        w2_packed: torch.Tensor,
+        hidden_size: int,
+        intermediate_size: int,
+        group_size: int,
+        apply_router_weight_on_input: bool,
+        activation_kind: int,
+    ) -> torch.Tensor:
+        return x.new_empty((x.size(0), hidden_size))
 
 
 def fused_experts_cpu(
