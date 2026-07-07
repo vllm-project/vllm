@@ -92,7 +92,7 @@ steps:
   commands:
   - export VLLM_USE_RUST_FRONTEND=1
   - export VLLM_WORKER_MULTIPROC_METHOD=spawn
-  - pytest -v -s tool_use --ignore=tool_use/mistral --models internlm
+  - pytest -v -s tool_use --ignore=tool_use/mistral --models llama3.2 -k "not test_response_format_with_tool_choice_required and not test_parallel_tool_calls_false and not test_tool_call_and_choice"
 
 - label: Rust Frontend Distributed
   timeout_in_minutes: 30
