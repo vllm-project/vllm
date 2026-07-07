@@ -490,6 +490,200 @@ async def test_derender_completion_kv_transfer_params_passthrough(client):
 
 
 # ---------------------------------------------------------------------------
+# Resource bounds regression tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_bounded_payload_succeeds(client):
+    """Normal bounded derender payload succeeds (positive control)."""
+    gen_req = await _render_chat(client)
+    synthetic_ids = gen_req["token_ids"][:5]
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(synthetic_ids),
+        },
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert len(data["choices"]) == 1
+    assert data["choices"][0]["message"]["content"]
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_oversized_token_ids_rejected(client):
+    """token_ids longer than max_model_len returns 400."""
+    response = await client.get("/v1/models")
+    assert response.status_code == 200
+
+    # Use a token_ids list that exceeds any reasonable max_model_len.
+    # The tiny-random model has max_model_len of 2048.
+    oversized_ids = [42] * 1_000_000
+
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response(oversized_ids),
+        },
+    )
+    assert response.status_code == 400
+    assert "max_model_len" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_too_many_choices_rejected(client):
+    """choices count exceeding VLLM_MAX_N_SEQUENCES returns 400."""
+    # Default VLLM_MAX_N_SEQUENCES is 16384; use a larger count.
+    oversized_choices = [
+        {"index": i, "token_ids": [42], "finish_reason": "stop"} for i in range(20_000)
+    ]
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": {
+                "request_id": "test-choices-bound",
+                "choices": oversized_choices,
+            },
+        },
+    )
+    assert response.status_code == 400
+    assert "choices count" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_too_many_generate_responses_rejected(client):
+    """generate_responses count exceeding limit returns 400."""
+    oversized_responses = [
+        {
+            "request_id": f"gen-{i}",
+            "choices": [{"index": 0, "token_ids": [42], "finish_reason": "stop"}],
+        }
+        for i in range(20_000)
+    ]
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": oversized_responses,
+        },
+    )
+    assert response.status_code == 400
+    assert "generate_responses count" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_negative_token_ids_rejected(client):
+    """Negative token_ids are rejected at the protocol validation level."""
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": _make_generate_response([-1, 42, 100]),
+        },
+    )
+    # vLLM's validation_exception_handler converts Pydantic errors to 400
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_oversized_logprobs_rejected(client):
+    """logprobs.content longer than max_model_len returns 400."""
+    oversized_logprobs: dict = {
+        "content": [
+            {"token": "x", "logprob": -1.0, "bytes": None, "top_logprobs": []}
+            for _ in range(1_000_000)
+        ]
+    }
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": {
+                "request_id": "test-logprobs-bound",
+                "choices": [
+                    {
+                        "index": 0,
+                        "token_ids": [42],
+                        "finish_reason": "stop",
+                        "logprobs": oversized_logprobs,
+                    }
+                ],
+            },
+        },
+    )
+    assert response.status_code == 400
+    assert "logprobs.content length" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_derender_chat_oversized_top_logprobs_rejected(client):
+    """top_logprobs count exceeding 20 returns 400."""
+    oversized_top_logprobs = {
+        "content": [
+            {
+                "token": "x",
+                "logprob": -1.0,
+                "bytes": None,
+                "top_logprobs": [
+                    {"token": f"t{i}", "logprob": -float(i), "bytes": None}
+                    for i in range(25)
+                ],
+            }
+        ]
+    }
+    response = await client.post(
+        "/v1/chat/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_response": {
+                "request_id": "test-top-logprobs-bound",
+                "choices": [
+                    {
+                        "index": 0,
+                        "token_ids": [42],
+                        "finish_reason": "stop",
+                        "logprobs": oversized_top_logprobs,
+                    }
+                ],
+            },
+        },
+    )
+    assert response.status_code == 400
+    assert "top_logprobs count" in response.json()["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_derender_completion_oversized_token_ids_rejected(client):
+    """Completion endpoint also rejects oversized token_ids."""
+    oversized_ids = [42] * 1_000_000
+    response = await client.post(
+        "/v1/completions/derender",
+        json={
+            "model": MODEL_NAME,
+            "generate_responses": [
+                {
+                    "request_id": "gen-0",
+                    "choices": [
+                        {
+                            "index": 0,
+                            "token_ids": oversized_ids,
+                            "finish_reason": "stop",
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+    assert response.status_code == 400
+    assert "max_model_len" in response.json()["error"]["message"]
+
+
+# ---------------------------------------------------------------------------
 # E2E: render -> derender roundtrip with parser (reasoning + tool calls)
 # ---------------------------------------------------------------------------
 
