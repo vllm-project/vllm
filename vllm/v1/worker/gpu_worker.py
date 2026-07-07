@@ -91,6 +91,30 @@ if TYPE_CHECKING:
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
 
+def _subtract_model_memory_reserve(
+    available_kv_cache_memory_bytes: int,
+    extra_non_kv_cache_memory: int,
+) -> int:
+    if extra_non_kv_cache_memory < 0:
+        raise ValueError(
+            "Model-reported non-KV runtime memory reserve must be "
+            f"non-negative, got {extra_non_kv_cache_memory}."
+        )
+
+    available_kv_cache_memory_bytes -= extra_non_kv_cache_memory
+    if extra_non_kv_cache_memory > 0 and available_kv_cache_memory_bytes <= 0:
+        raise ValueError(
+            "Model-reported non-KV runtime memory reserve leaves no "
+            "available KV cache memory. Reduce the model-specific reserve, "
+            "lower --gpu-memory-utilization, or reduce "
+            "--max-model-len/--max-num-seqs. Reserve: "
+            f"{format_gib(extra_non_kv_cache_memory)} GiB; "
+            "available KV cache memory after reserve: "
+            f"{format_gib(available_kv_cache_memory_bytes)} GiB."
+        )
+    return available_kv_cache_memory_bytes
+
+
 class AsyncIntermediateTensors(IntermediateTensors):
     """IntermediateTensors with lazy comm synchronization"""
 
@@ -167,6 +191,7 @@ class Worker(WorkerBase):
             raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
 
         self.use_v2_model_runner = vllm_config.use_v2_model_runner
+        self.extra_non_kv_cache_memory = 0
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
@@ -503,6 +528,9 @@ class Worker(WorkerBase):
         self.non_torch_memory = profile_result.non_torch_increase
         self.peak_activation_memory = profile_result.torch_peak_increase
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
+        self.extra_non_kv_cache_memory = (
+            self.model_runner.get_extra_non_kv_cache_memory_bytes()
+        )
 
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
@@ -516,10 +544,11 @@ class Worker(WorkerBase):
             "To fix this, ensure consistent GPU memory allocation or "
             "isolate vLLM in its own container."
         )
-        self.available_kv_cache_memory_bytes = (
+        self.available_kv_cache_memory_bytes = _subtract_model_memory_reserve(
             self.requested_memory
             - profile_result.non_kv_cache_memory
-            - cudagraph_memory_estimate_applied
+            - cudagraph_memory_estimate_applied,
+            self.extra_non_kv_cache_memory,
         )
 
         unrequested_memory = self.init_snapshot.free_memory - self.requested_memory
@@ -535,6 +564,12 @@ class Worker(WorkerBase):
             format_gib(free_gpu_memory - unrequested_memory),
         )
         logger.debug(profile_result)
+        if self.extra_non_kv_cache_memory > 0:
+            logger.info_once(
+                "Reserving %s GiB for model-reported non-KV runtime memory "
+                "outside the startup profile.",
+                format_gib(self.extra_non_kv_cache_memory),
+            )
         logger.info_once(
             "Available KV cache memory: %s GiB",
             format_gib(self.available_kv_cache_memory_bytes),
@@ -793,11 +828,13 @@ class Worker(WorkerBase):
             # So leave a small buffer (=150MiB) to avoid OOM.
             redundancy_buffer_memory = 150 * (1 << 20)
 
+            extra_non_kv_cache_memory = self.extra_non_kv_cache_memory
             non_kv_cache_memory = (
                 self.model_runner.model_memory_usage
                 + self.peak_activation_memory
                 + self.non_torch_memory
                 + cuda_graph_memory_bytes
+                + extra_non_kv_cache_memory
             )
             kv_cache_memory_bytes_to_gpu_limit = (
                 self.init_snapshot.free_memory
@@ -810,6 +847,13 @@ class Worker(WorkerBase):
                 - redundancy_buffer_memory
             )
 
+            extra_memory_msg = (
+                ", "
+                f"{format_gib(extra_non_kv_cache_memory)} GiB for "
+                "model-reported non-KV runtime memory"
+                if extra_non_kv_cache_memory > 0
+                else ""
+            )
             msg = (
                 f"Free memory on device "
                 f"({format_gib(self.init_snapshot.free_memory)}/"
@@ -820,8 +864,9 @@ class Worker(WorkerBase):
                 f"Actual usage is {format_gib(self.model_runner.model_memory_usage)} "
                 f"GiB for weight, {format_gib(self.peak_activation_memory)} GiB "
                 f"for peak activation, {format_gib(self.non_torch_memory)} GiB "
-                f"for non-torch memory, and {format_gib(cuda_graph_memory_bytes)} "
-                f"GiB for CUDAGraph memory. Replace gpu_memory_utilization "
+                f"for non-torch memory{extra_memory_msg}, and "
+                f"{format_gib(cuda_graph_memory_bytes)} GiB for CUDAGraph "
+                f"memory. Replace gpu_memory_utilization "
                 f"config with `--kv-cache-memory="
                 f"{kv_cache_memory_bytes_to_requested_limit}` "
                 f"({format_gib(kv_cache_memory_bytes_to_requested_limit)} GiB) to fit "

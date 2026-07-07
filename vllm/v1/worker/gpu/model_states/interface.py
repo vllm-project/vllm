@@ -174,6 +174,16 @@ class ModelState(ABC):
         """
         return None
 
+    def get_extra_non_kv_cache_memory_bytes(self) -> int:
+        """Extra non-KV memory to reserve during KV-cache sizing.
+
+        Model states can override this when startup profiling does not cover a
+        runtime allocation that must coexist with KV cache. The GPU worker
+        treats the returned value generically and subtracts it from available KV
+        memory without knowing model-specific details.
+        """
+        return 0
+
     num_new_sampled_tokens_per_step: int = 1
     """New tokens sampled on each decode step 
     (excluding accepted draft tokens, a.k.a num bonus tokens)."""
