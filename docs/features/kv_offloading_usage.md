@@ -123,6 +123,31 @@ To enable KV cache sharing between multiple vLLM instances using the same `root_
 PYTHONHASHSEED=0 vllm serve ...
 ```
 
+### Object Store (OBJ)
+
+The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object store through the NIXL OBJ backend.
+
+| Key | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `type` | yes | — | Must be `obj`. |
+| `store_config` | yes | — | Object store connection parameters (see below). |
+| `prefix` | no | `""` | Key prefix prepended to all object keys. |
+| `io_threads` | no | `4` | NIXL OBJ backend I/O threads. |
+| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `OBJ`) for successfully stored blocks. Requires globally enabled KV cache events. |
+
+`store_config` fields:
+
+| Key | Required | Default | Notes |
+| --- | --- | --- | --- |
+| `bucket` | yes | — | Bucket name. |
+| `endpoint_override` | yes | — | Object store endpoint. |
+| `scheme` | no | `http` | `http` or `https`. |
+| `access_key`, `secret_key`, `session_token` | no | `""` | Explicit credentials. When left empty, the NIXL OBJ plugin falls back to the AWS SDK default credential provider chain (IAM roles, environment variables, credential files), which enables workload-identity auth on Kubernetes. |
+| `region` | no | `""` | Bucket region, if the endpoint requires one. |
+| `ca_bundle` | no | `""` | CA bundle path for TLS verification. |
+
+Object keys follow the same run-configuration digest scheme as the filesystem tier (see [On-Disk Layout](#on-disk-layout)), stored under the optional `prefix`. The [Cross-Process Sharing](#cross-process-sharing) requirement (`PYTHONHASHSEED`) applies to shared buckets as well. At startup the tier probes object store connectivity and fails fast with a configuration error if the bucket is unreachable.
+
 ### P2P (Including P/D)
 
 The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances over RDMA via NIXL. Each instance binds a control socket on `host:port` and exchanges blocks directly with peers — no shared filesystem required.
