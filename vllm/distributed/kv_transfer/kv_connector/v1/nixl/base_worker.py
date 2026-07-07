@@ -96,10 +96,12 @@ class NixlBaseConnectorWorker:
     ) -> np.ndarray:
         """Compute NIXL descriptor IDs for given block IDs.
 
-        ``num_blocks`` is per-region (from ``_nblk_per_virtual_region``) to
-        support attention groups with different kernel block sizes. When all
-        regions share the same count, the layout reduces to the original
-        rectangular ``region_id * num_blocks + block_id``.
+        ``dst_num_blocks`` is the per-region block count on the target side
+        (remote for remote descs, local for local descs). When ``block_size_ratio``
+        is set, it scales the local count to match the remote descriptor layout.
+        All FA regions share the same count (under HMA the shared tensor uses
+        the global ratio; without HMA there is only one group), so the layout
+        is rectangular: ``region_id * num_blocks + block_id``.
         """
         num_ssm_regions = 0
         if self._has_mamba:
@@ -109,13 +111,13 @@ class NixlBaseConnectorWorker:
             ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
             num_ssm_regions = len(self.block_len_per_layer) * ssm_regions_per_layer
 
-        # Per-region num_blocks. Different attention groups may have different physical
-        # block counts when their backends enforce different kernel block sizes.
+        # Per-region num_blocks on the target side. All FA regions share the
+        # same count, so we use a uniform scalar stride (matching the original
+        # rectangular layout). block_size_ratio scales local→remote when the
+        # two sides have different block sizes (heterogeneous TP).
         ratio = 1 if block_size_ratio is None else int(block_size_ratio)
-        num_blocks = np.array(self._nblk_per_virtual_region) * ratio
-        # Cumulative offset of each region's first descriptor. The list has a
-        # leading 0 so cumsum(excluding last) gives one base per real region.
-        region_bases = np.cumsum(num_blocks[:-1])
+        nblk_per_region = dst_num_blocks * ratio
+        region_bases = np.arange(self.num_regions) * nblk_per_region
 
         # All-attention fast path: single vectorized broadcast.
         if num_ssm_regions == 0:
@@ -131,7 +133,7 @@ class NixlBaseConnectorWorker:
         # Compute desc ids per group using the right stride: FA descs have
         # num_blocks entries per region (kernel granularity), SSM descs have
         # logical_blocks entries per region (no kernel splitting).
-        num_fa_descs = int(num_blocks.sum())
+        num_fa_descs = self.num_regions * nblk_per_region
         logical_blocks = (dst_num_blocks * ratio) // physical_blocks_per_logical
         all_descs: list[np.ndarray] = []
         for i, group in enumerate(block_ids):
@@ -419,8 +421,6 @@ class NixlBaseConnectorWorker:
         # (so 1 per layer for MLA, otherwise 2 per layer)
         self.num_regions = 0
         self._num_blocks_per_physical_region: list[int] = []
-        # Post-V-split per-region num_blocks (cached for _compute_desc_ids).
-        self._nblk_per_virtual_region: list[int] = []
 
         # nixl_prepped_dlist_handle.
         self.src_xfer_handles_by_block_size: dict[int, int] = {}
@@ -912,7 +912,6 @@ class NixlBaseConnectorWorker:
         self.block_len_per_layer = [block_stride]
         self.num_regions = 1
         self._num_blocks_per_physical_region = [self.num_blocks]
-        self._nblk_per_virtual_region = [0, self.num_blocks]
         self.num_descs = self.num_blocks
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = [base_addr]
 
@@ -1165,8 +1164,6 @@ class NixlBaseConnectorWorker:
                 expanded.extend([nblk] * streams)
             num_blocks_per_region = expanded
 
-        # Cached for _compute_desc_ids. Leading 0 simplifies cumsum in _compute_desc_ids
-        self._nblk_per_virtual_region = [0] + num_blocks_per_region
         # Total local FA descriptors (boundary between FA and mamba descs).
         self.num_descs = sum(num_blocks_per_region)
 
