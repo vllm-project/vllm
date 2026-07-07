@@ -62,27 +62,24 @@ ninja -j$(nproc)
 Build takes ~5 minutes on a typical workstation. The output you need lives at
 `/opt/FlyDSL/build-fly/python_packages/flydsl/`.
 
-## Step 2 — Point vLLM at the FlyDSL install
+## Step 2 — Make FlyDSL importable
+
+FlyDSL must be importable by the vLLM process — either pip-installed or on
+`PYTHONPATH`:
 
 ```bash
-export VLLM_FLYDSL_ROOT=/opt/FlyDSL
-export VLLM_FLYDSL_PKGS=/opt/FlyDSL/build-fly/python_packages
-```
-
-Verify FlyDSL is importable:
-
-```bash
-python3 -c "import sys; sys.path.insert(0, '$VLLM_FLYDSL_PKGS'); import flydsl; print('FlyDSL OK')"
+export PYTHONPATH="/opt/FlyDSL:/opt/FlyDSL/build-fly/python_packages:$PYTHONPATH"
+python3 -c "import flydsl; print('FlyDSL OK')"
 ```
 
 ## Step 3 — Enable the v4 decode kernel
 
 ```bash
-export VLLM_ROCM_TQ_FLYDSL_DECODE=1            # master enable
-export VLLM_TQ_FLYDSL_HW_TR=1      # use HW V-transpose (default; safe post-fence-fix)
+export VLLM_ROCM_TQ_FLYDSL_DECODE=1        # master enable
 ```
 
-Eligible TQ layers (`HEAD_SIZE=128`, GQA in {8, 16}, `MSE_BITS=4`, no sinks,
+The HW V-transpose is enabled automatically on gfx950+. Eligible TQ layers
+(`HEAD_SIZE=128`, GQA in {8, 16}, `MSE_BITS=4`, no sinks,
 no FP8) will route to `tq_decode_v4.py`. If the framework is missing or the
 layer is ineligible, vLLM logs a warning and falls back to Triton v3.
 
@@ -102,10 +99,8 @@ WARNING: VLLM_ROCM_TQ_FLYDSL_DECODE requested but FlyDSL is unavailable; falling
 ## Full launch example (Qwen2.5-72B, MI355X TP=4)
 
 ```bash
+PYTHONPATH=/opt/FlyDSL:/opt/FlyDSL/build-fly/python_packages:$PYTHONPATH \
 VLLM_ROCM_TQ_FLYDSL_DECODE=1 \
-VLLM_TQ_FLYDSL_HW_TR=1 \
-VLLM_FLYDSL_ROOT=/opt/FlyDSL \
-VLLM_FLYDSL_PKGS=/opt/FlyDSL/build-fly/python_packages \
 HSA_NO_SCRATCH_RECLAIM=1 \
 vllm serve Qwen/Qwen2.5-72B \
     --tensor-parallel-size 4 \

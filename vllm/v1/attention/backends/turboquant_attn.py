@@ -16,6 +16,7 @@ Per-head per-position slot layout:
   For turboquant_k3v4_nc head_dim=256: [100 bytes key | 512 bytes value] = 612
 """
 
+import contextlib
 import functools
 import math
 import os
@@ -91,9 +92,14 @@ _USE_TQ_V4 = os.environ.get("VLLM_ROCM_TQ_FLYDSL_DECODE", "0") == "1"
 if _USE_TQ_V4:
     from vllm.v1.attention.ops.flydsl_turboquant_decode_v4 import (
         flydsl_turboquant_decode_attention_v4,
+    )
+    from vllm.v1.attention.ops.flydsl_turboquant_decode_v4 import (
         is_flydsl_available as _flydsl_v4_available,
+    )
+    from vllm.v1.attention.ops.flydsl_turboquant_decode_v4 import (
         is_flydsl_gqa6_available as _flydsl_v4_gqa6_available,
     )
+
     if not _flydsl_v4_available():
         logger.warning(
             "VLLM_ROCM_TQ_FLYDSL_DECODE=1 but FlyDSL is unavailable; the decode path "
@@ -106,15 +112,16 @@ def _soa_imports():
 
     Kept lazy so the default (v4-off) path never imports these modules.
     """
-    from vllm.v1.attention.ops.turboquant_soa.triton_turboquant_store import (
-        triton_turboquant_store as soa_store,
-    )
     from vllm.v1.attention.ops.turboquant_soa.triton_turboquant_decode import (
         _tq_full_dequant_kv as soa_dequant,
+    )
+    from vllm.v1.attention.ops.turboquant_soa.triton_turboquant_store import (
+        triton_turboquant_store as soa_store,
     )
     from vllm.v1.attention.ops.turboquant_soa.triton_turboquant_unified_attention import (  # noqa: E501
         triton_turboquant_decode_attention_v3 as soa_v3,
     )
+
     return soa_store, soa_dequant, soa_v3
 
 
@@ -472,12 +479,10 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
                     + B_max * Hq * D * 2  # query-dtype output (bf16 = 2 B)
                     + 512  # alignment padding
                 )
-                try:
+                with contextlib.suppress(AssertionError):
                     current_workspace_manager().get_simultaneous(
                         ((_pre_warm_bytes,), torch.uint8)
                     )
-                except AssertionError:
-                    pass
 
         if not hasattr(layer, "_tq_cached"):
             D = self.head_size
@@ -1151,9 +1156,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
             # GQA in {6, 8, 16}). GQA-6 routes to the MiniMax sibling kernel.
             # Ineligible layers / missing FlyDSL fall back to SoA Triton v3.
             _gqa = self.num_kv_groups
-            v4_gqa_ok = (_gqa in (8, 16)) or (
-                _gqa == 6 and _flydsl_v4_gqa6_available()
-            )
+            v4_gqa_ok = (_gqa in (8, 16)) or (_gqa == 6 and _flydsl_v4_gqa6_available())
             v4_eligible = (
                 not self.tq_config.key_fp8
                 and self.tq_config.key_mse_bits == 4
@@ -1255,9 +1258,7 @@ class TurboQuantAttentionImpl(AttentionImpl["TurboQuantMetadata"]):
 
         _, _, soa_v3 = _soa_imports()
         accepted = set(inspect.signature(soa_v3).parameters)
-        dropped = [
-            k for k, v in kwargs.items() if k not in accepted and v is not None
-        ]
+        dropped = [k for k, v in kwargs.items() if k not in accepted and v is not None]
         if dropped:
             raise NotImplementedError(
                 f"SoA v3 decode does not support kwargs {sorted(dropped)}"
