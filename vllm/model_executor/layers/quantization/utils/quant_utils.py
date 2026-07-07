@@ -217,6 +217,12 @@ kInt4W4A8StaticGroupSym = QuantKey(
     torch.int8, kInt4W4A8StaticGroupScale, symmetric=True
 )
 
+kInt4W4A8StaticChannelSym = QuantKey(
+    torch.int8,
+    ScaleDesc(torch.float32, True, GroupShape.PER_CHANNEL),
+    symmetric=True,
+)
+
 
 def create_fp8_quant_key(
     static: bool,

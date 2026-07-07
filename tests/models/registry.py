@@ -296,7 +296,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "GlmMoeDsaForCausalLM": _HfExamplesInfo(
         "zai-org/GLM-5", min_transformers_version="5.0.1", is_available_online=False
     ),
-    "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2", {"alias": "gpt2"}),
+    "GPT2LMHeadModel": _HfExamplesInfo("openai-community/gpt2"),
     "GPTBigCodeForCausalLM": _HfExamplesInfo(
         "bigcode/starcoder",
         extras={
@@ -938,6 +938,7 @@ _MULTIMODAL_EXAMPLE_MODELS = {
     "HunYuanVLForConditionalGeneration": _HfExamplesInfo(
         "tencent/HunyuanOCR",
         hf_overrides={"num_experts": 0},
+        is_available_online=False,
     ),
     "Idefics3ForConditionalGeneration": _HfExamplesInfo(
         "HuggingFaceM4/Idefics3-8B-Llama3",
@@ -1491,8 +1492,6 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
     "EagleMistralLarge3ForCausalLM": _HfExamplesInfo(
         "mistralai/Mistral-Large-3-675B-Instruct-2512",
         speculative_model="mistralai/Mistral-Large-3-675B-Instruct-2512-Eagle",
-        # TODO: revert once figuring out OOM in CI
-        is_available_online=False,
     ),
     "LlamaForCausalLMEagle3": _HfExamplesInfo(
         "Qwen/Qwen3-8B",
@@ -1557,6 +1556,12 @@ _SPECULATIVE_DECODING_EXAMPLE_MODELS = {
         use_original_num_layers=True,
     ),
     # [MTP]
+    "BailingMoeV25MTPModel": _HfExamplesInfo(
+        "inclusionAI/Ring-2.5-1T",
+        speculative_model="inclusionAI/Ring-2.5-1T",
+        trust_remote_code=True,
+        is_available_online=False,
+    ),
     "DeepSeekMTPModel": _HfExamplesInfo(
         "luccafong/deepseek_mtp_main_random",
         speculative_model="luccafong/deepseek_mtp_draft_random",
