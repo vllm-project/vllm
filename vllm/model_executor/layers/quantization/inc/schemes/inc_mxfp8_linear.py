@@ -22,7 +22,7 @@ class INCMxfp8LinearScheme(INCLinearScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 0
+        return 75
 
     def create_weights(
         self,

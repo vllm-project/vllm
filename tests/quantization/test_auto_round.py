@@ -346,7 +346,7 @@ class DummyLinearScheme(INCLinearScheme):
 
     @classmethod
     def get_min_capability(cls) -> int:
-        return 75
+        return 0
 
     def create_weights(self, *args, **kwargs) -> None:
         self.calls.append(("create_weights", args, kwargs))
