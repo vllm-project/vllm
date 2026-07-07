@@ -20,6 +20,7 @@ logger = init_logger(__name__)
 
 
 _VLLM_RENDERERS = {
+    "batch_split_message": ("hf", "HfRenderer"),
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Renderer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Renderer"),
     "hf": ("hf", "HfRenderer"),
