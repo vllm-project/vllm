@@ -1045,6 +1045,59 @@ fahrenheit
     assert args["unit"] == "fahrenheit"
 
 
+def test_extract_tool_calls_streaming_unclosed_final_parameter(
+    qwen3_tokenizer,
+):
+    """Finalize valid JSON when the last parameter is not closed.
+
+    Some Qwen3 tool generations close the function/tool_call but omit the
+    last </parameter>.  Streaming may already have emitted a JSON prefix for
+    that parameter, so finish must still emit the remaining JSON suffix.
+    """
+    tools = [
+        ChatCompletionToolsParam(
+            type="function",
+            function={
+                "name": "Read",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "filePath": {"type": "string"},
+                        "limit": {"type": "string"},
+                    },
+                    "required": ["filePath"],
+                },
+            },
+        )
+    ]
+    parser = Qwen3EngineToolParser(qwen3_tokenizer, tools=tools)
+    request = ChatCompletionRequest(model=MODEL, messages=[], tools=tools)
+    model_output = """<tool_call>
+<function=Read>
+<parameter=filePath>
+/workspace/project/solution.cpp
+</parameter>
+<parameter=limit>
+200
+</function>
+</tool_call>"""
+
+    arguments = ""
+    for delta_message in stream_delta_message_generator(
+        parser, qwen3_tokenizer, model_output, request
+    ):
+        if delta_message.tool_calls:
+            for tool_call in delta_message.tool_calls:
+                if tool_call.function and tool_call.function.arguments is not None:
+                    arguments += tool_call.function.arguments
+
+    args = json.loads(arguments)
+    assert args == {
+        "filePath": "/workspace/project/solution.cpp",
+        "limit": "200",
+    }
+
+
 def test_extract_tool_calls_streaming_incremental(qwen3_tool_parser, qwen3_tokenizer):
     """Test that streaming is truly incremental"""
     model_output = """I'll check the weather.<tool_call>

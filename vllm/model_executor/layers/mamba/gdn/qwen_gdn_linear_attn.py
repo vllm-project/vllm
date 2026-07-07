@@ -3,6 +3,7 @@
 """Inference-only Qwen3-Next/Qwen3.5 model."""
 
 import functools
+import os
 from typing import Literal
 
 import torch
@@ -476,12 +477,23 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             self.num_k_heads % self.tp_size != 0
             or self.num_v_heads % self.tp_size != 0
         )
+        replicate_uneven_gdn = os.environ.get(
+            "VLLM_EXPERIMENTAL_REPLICATE_UNEVEN_GDN", ""
+        ).lower() in ("1", "true", "yes", "on")
         self.gdn_explicit_partition = incompatible_gdn_tp and (
-            not self.gqa_interleaved_layout
+            not self.gqa_interleaved_layout and not replicate_uneven_gdn
         )
         self.disable_tp_for_gdn = incompatible_gdn_tp and (
             not self.gdn_explicit_partition
         )
+        if self.disable_tp_for_gdn and replicate_uneven_gdn:
+            logger.warning(
+                "Replicating Qwen GDN layer %s on every TP rank because "
+                "VLLM_EXPERIMENTAL_REPLICATE_UNEVEN_GDN=1 and GDN heads are "
+                "not divisible by tensor_parallel_size=%d.",
+                prefix,
+                self.tp_size,
+            )
         if self.disable_tp_for_gdn:
             self.tp_size = 1
             self.tp_rank = 0

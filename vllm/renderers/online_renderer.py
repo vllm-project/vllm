@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import os
 from collections.abc import Sequence
 from http import HTTPStatus
 from typing import Any
@@ -44,6 +45,27 @@ from vllm.utils.mistral import is_mistral_tokenizer, is_mistral_tool_parser
 from vllm.utils.mistral import mt as _mt
 
 logger = init_logger(__name__)
+
+
+def _has_tool_history(request: Any) -> bool:
+    for message in getattr(request, "messages", []) or []:
+        if not isinstance(message, dict):
+            continue
+        if message.get("role") == "tool":
+            return True
+        if message.get("role") == "assistant" and message.get("tool_calls"):
+            return True
+    return False
+
+
+def _maybe_force_first_auto_tool_required(request: Any) -> None:
+    if (
+        os.getenv("VLLM_QWEN3_FORCE_FIRST_AUTO_TOOL_REQUIRED", "0") == "1"
+        and getattr(request, "tools", None)
+        and getattr(request, "tool_choice", None) == "auto"
+        and not _has_tool_history(request)
+    ):
+        request.tool_choice = "required"
 
 
 class OnlineRenderer:
@@ -342,11 +364,13 @@ class OnlineRenderer:
         """Copied from GenerateBaseServing._preprocess_chat."""
         renderer = self.renderer
         mm_config = self.model_config.multimodal_config
+        _maybe_force_first_auto_tool_required(request)
 
         default_template_kwargs = merge_kwargs(
             default_template_kwargs,
             dict(
                 tools=tool_dicts,
+                tool_choice=getattr(request, "tool_choice", "none"),
                 tokenize=(
                     is_mistral_tokenizer(renderer.tokenizer)
                     or self.model_config.enable_prompt_embeds

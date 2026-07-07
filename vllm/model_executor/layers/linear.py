@@ -1023,6 +1023,10 @@ class PaddedMergedColumnParallelLinear(MergedColumnParallelLinear):
         loaded_shard_id: tuple[int, ...] | int | None = None,
     ):
         if isinstance(loaded_shard_id, int):
+            if isinstance(param, PerTensorScaleParameter):
+                param.load_merged_column_weight(loaded_weight=loaded_weight,
+                                                shard_id=loaded_shard_id)
+                return
             if self._copy_padded_output_shard(param, loaded_weight,
                                              loaded_shard_id):
                 return
@@ -1163,6 +1167,17 @@ class ExplicitPaddedMergedColumnParallelLinear(PaddedMergedColumnParallelLinear)
         loaded_weight: torch.Tensor,
         loaded_shard_id: tuple[int, ...] | int | None = None,
     ):
+        if isinstance(loaded_shard_id, int):
+            if isinstance(param, PerTensorScaleParameter):
+                param.load_merged_column_weight(
+                    loaded_weight=loaded_weight,
+                    shard_id=loaded_shard_id,
+                )
+                return
+            if self._copy_padded_output_shard(
+                param, loaded_weight, loaded_shard_id
+            ):
+                return
         if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
             if self._copy_fused_checkpoint_weight(
                 param, loaded_weight, loaded_shard_id
@@ -1180,6 +1195,17 @@ class ExplicitPaddedMergedColumnParallelLinear(PaddedMergedColumnParallelLinear)
             assert loaded_weight.numel() == 1
             loaded_weight = loaded_weight.reshape(1)
 
+        if isinstance(loaded_shard_id, int):
+            if isinstance(param, PerTensorScaleParameter):
+                param.load_merged_column_weight(
+                    loaded_weight=loaded_weight,
+                    shard_id=loaded_shard_id,
+                )
+                return
+            if self._copy_padded_output_shard(
+                param, loaded_weight, loaded_shard_id
+            ):
+                return
         if loaded_shard_id is None or isinstance(loaded_shard_id, tuple):
             if isinstance(param, PerTensorScaleParameter):
                 return super().weight_loader_v2(
@@ -2152,6 +2178,32 @@ class PaddedRowParallelLinear(RowParallelLinear):
         if copy_size == 0:
             return True
 
+        packed_dim = getattr(param, "packed_dim", None)
+        pack_factor = getattr(param, "packed_factor",
+                              getattr(param, "pack_factor", 1))
+        if packed_dim != input_dim and copy_size > param_data.shape[input_dim]:
+            if padded_shard_size % param_data.shape[input_dim] != 0:
+                raise ValueError(
+                    "Cannot infer packing for padded row shard: "
+                    f"padded_shard_size={padded_shard_size}, "
+                    f"param_shape={tuple(param_data.shape)}, "
+                    f"input_dim={input_dim}")
+            inferred_pack_factor = (
+                padded_shard_size // param_data.shape[input_dim])
+            if (loaded_weight.shape[input_dim] * inferred_pack_factor
+                    == self.logical_input_size):
+                pack_factor = inferred_pack_factor
+                packed_dim = input_dim
+
+        if packed_dim == input_dim and pack_factor > 1:
+            if global_start % pack_factor != 0 or copy_size % pack_factor != 0:
+                raise ValueError(
+                    "Cannot load padded packed row shard with unaligned "
+                    f"span: global_start={global_start}, copy_size={copy_size}, "
+                    f"pack_factor={pack_factor}")
+            global_start //= pack_factor
+            copy_size //= pack_factor
+
         param_data = param_data.narrow(input_dim, 0, copy_size)
         loaded_weight = loaded_weight.narrow(input_dim, global_start,
                                              copy_size)
@@ -2230,9 +2282,35 @@ class ExplicitPaddedRowParallelLinear(PaddedRowParallelLinear):
         if self.local_size == 0:
             return True
 
-        param_data = param_data.narrow(input_dim, 0, self.local_size)
-        loaded_weight = loaded_weight.narrow(input_dim, self.local_start,
-                                             self.local_size)
+        local_start = self.local_start
+        local_size = self.local_size
+        packed_dim = getattr(param, "packed_dim", None)
+        pack_factor = getattr(param, "packed_factor",
+                              getattr(param, "pack_factor", 1))
+        if packed_dim != input_dim and local_size > param_data.shape[input_dim]:
+            if self.logical_input_size % loaded_weight.shape[input_dim] != 0:
+                raise ValueError(
+                    "Cannot infer packing for explicit padded row shard: "
+                    f"logical_input_size={self.logical_input_size}, "
+                    f"loaded_shape={tuple(loaded_weight.shape)}, "
+                    f"input_dim={input_dim}")
+            inferred_pack_factor = (
+                self.logical_input_size // loaded_weight.shape[input_dim])
+            if inferred_pack_factor > 1:
+                pack_factor = inferred_pack_factor
+                packed_dim = input_dim
+
+        if packed_dim == input_dim and pack_factor > 1:
+            if local_start % pack_factor != 0 or local_size % pack_factor != 0:
+                raise ValueError(
+                    "Cannot load explicit padded packed row shard with "
+                    f"unaligned span: local_start={local_start}, "
+                    f"local_size={local_size}, pack_factor={pack_factor}")
+            local_start //= pack_factor
+            local_size //= pack_factor
+
+        param_data = param_data.narrow(input_dim, 0, local_size)
+        loaded_weight = loaded_weight.narrow(input_dim, local_start, local_size)
         assert param_data.shape == loaded_weight.shape, (
             f"Tried to load explicit padded row shard {loaded_weight.shape} "
             f"into {param_data.shape}"

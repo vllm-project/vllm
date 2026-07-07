@@ -511,12 +511,40 @@ class Qwen3_5ForConditionalGeneration(Qwen3VLForConditionalGeneration, IsHybrid)
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         skip_prefixes = ["mtp."]
         if self.multimodal_config.language_model_only:
-            skip_prefixes.append("visual.")
+            # Some Qwen3.5 VLM checkpoints store vision weights under the
+            # original HF prefix ("model.visual.*") while the vLLM module uses
+            # "visual.*" after mapping.  Filter the raw iterator before any
+            # nested language-model loader can see 1152-dim vision tensors and
+            # try to shard them as 5120-dim language tensors.
+            weights = (
+                (name, weight)
+                for name, weight in weights
+                if not name.startswith(("model.visual.", "visual."))
+            )
+            skip_prefixes.extend(["visual.", "model.visual."])
         loader = AutoWeightsLoader(
             self,
             skip_prefixes=skip_prefixes,
         )
-        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        loaded_weights = loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
+        critical_weights = {
+            "language_model.lm_head.weight",
+            "language_model.model.embed_tokens.weight",
+            "language_model.model.layers.0.linear_attn.in_proj_qkvz.weight",
+            "language_model.model.layers.0.linear_attn.out_proj.weight",
+        }
+        missing_critical = sorted(critical_weights - loaded_weights)
+        if missing_critical:
+            raise RuntimeError(
+                "Qwen3.5 critical weights were not loaded: "
+                f"{missing_critical}. Sample loaded weights: "
+                f"{sorted(loaded_weights)[:20]}"
+            )
+        logger.info(
+            "Qwen3.5 critical weight audit passed: %s",
+            sorted(critical_weights),
+        )
+        return loaded_weights
 
     @classmethod
     def get_mamba_state_dtype_from_config(

@@ -148,6 +148,8 @@ def extract_required_tool_call_streaming(
     except (
         partial_json_parser.core.exceptions.MalformedJSON,
         json.JSONDecodeError,
+        IndexError,
+        ValueError,
     ):
         obj = None
 

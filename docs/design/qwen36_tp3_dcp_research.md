@@ -90,7 +90,8 @@ Observed:
 - model weights: about `7.98 GiB` per GPU;
 - GPU KV cache size: `386,477` logical tokens;
 - maximum concurrency for `153,600` tokens per request: `2.52x`;
-- warmed no-MTP sequential decode tests reached the `52-54 tok/s` class;
+- warmed no-MTP sequential decode tests without the vision tower reached the
+  `52-54 tok/s` class;
 - a real `150K` prompt smoke returned successfully;
 - no replicated full-attention fallback is required for the dense 27B target.
 
@@ -114,7 +115,10 @@ Observed:
 - available KV cache memory: `3.59 GiB`;
 - GPU KV cache size: `327,019` logical tokens;
 - maximum concurrency for `153,600` tokens per request: `2.13x`;
-- multimodal warmup completed and the server reached healthy state.
+- multimodal warmup completed and the server reached healthy state;
+- no-MTP single-request decode in this vision-enabled 150K profile measured
+  about `34 tok/s`, while aggregate throughput at `8` concurrent short
+  requests measured about `177 tok/s` wall-clock.
 
 This means vision is no longer a blocker for the 150K dense profile, but it
 does compete directly with speculative decoding and FlashInfer autotune
@@ -202,17 +206,25 @@ the usable long-context KV budget too much.
 Built-in Qwen3.5/Qwen3.6 MTP runs on the dense 27B target with:
 
 - `{"method":"mtp","num_speculative_tokens":1}`
-- `TP=3`, `DCP=3`, `150K`
+- `TP=3`, `DCP=3`, `150K`, vision enabled
 
 Observed:
 
-- model weights increased from about `7.98 GiB/GPU` to about `9.12 GiB/GPU`;
-- MTP overhead: about `+1.14 GiB/GPU`;
-- GPU KV cache size dropped to `251,200` logical tokens;
-- maximum concurrency for `153,600` tokens per request dropped to `1.64x`;
-- spec decode metrics were healthy in a short run:
-  - mean acceptance length around `1.73`;
-  - draft acceptance rate around `72.8%`.
+- model weights increased from about `8.84 GiB/GPU` in the vision/no-MTP
+  profile to about `9.19 GiB/GPU`;
+- MTP overhead in the vision profile: about `+0.35 GiB/GPU` over the
+  vision/no-MTP baseline, because the target embeddings and `lm_head` are
+  shared with the drafter;
+- GPU KV cache size in the `0.87` profile: about `168K` logical tokens in the
+  stable run, enough for about `1.09x` concurrency at `153,600` tokens;
+- single-request decode improved from the vision/no-MTP `~34 tok/s` class to
+  the `~50 tok/s` class;
+- aggregate throughput on `8` concurrent short requests improved from about
+  `177 tok/s` wall-clock without MTP to about `226 tok/s` wall-clock with
+  `num_speculative_tokens=1`;
+- spec decode metrics were healthy:
+  - draft acceptance rate typically in the `75-86%` range;
+  - mean accepted length around `1.8`.
 
 The key warning is:
 
@@ -220,21 +232,30 @@ The key warning is:
 Replicating Qwen3.5 MTP fc because hidden_size=5120 is not divisible by tensor_parallel_size=3.
 ```
 
-MTP is therefore functional, but the current TP3 implementation pays a
-replicated-memory cost and its performance benefit is not yet proven. The
-clean no-MTP baseline is the `52-54 tok/s` warmed sequential result. The next
-step is a controlled MTP A/B: matched no-MTP vs MTP runs over 10-20 warmed
-sequential requests at 256 and 512 generated tokens, then concurrency 4 and 8.
+MTP is therefore functional and beneficial for the dense 27B vision profile at
+`num_speculative_tokens=1`, but the current TP3 implementation still pays a
+replicated-memory cost in the MTP `fc` projection. The important distinction for
+reporting is:
 
-If the first controlled MTP result is slower than no-MTP, that should be treated
-as optimization debt rather than a reason to drop MTP. The draft path still
-represents one of the main remaining acceleration levers. Work items include:
+- no-MTP, vision enabled, 150K: about `34 tok/s` single request and about
+  `177 tok/s` aggregate at `8` concurrent short requests;
+- MTP K=1, vision enabled, 150K: about `50 tok/s` single request and about
+  `226 tok/s` aggregate at `8` concurrent short requests;
+- no-vision/no-MTP warmed sequential tests are a different baseline and should
+  not be quoted as the vision+MTP comparison point.
+
+`num_speculative_tokens=2` is not currently usable in this TP3/DCP3 profile.
+It starts at `gpu_memory_utilization=0.87` with about `156,767` KV tokens and
+`1.02x` max concurrency for a `153,600` token request, but the first real agent
+request crashes the engine with a CUDA illegal memory access followed by an
+NCCL watchdog cascade. Treat K=2 as debug debt, not as a serving candidate.
+
+Remaining MTP work items include:
 
 - measure acceptance by prompt class and generated-token length;
-- sweep `num_speculative_tokens` instead of assuming `1` is best;
+- debug `num_speculative_tokens > 1` with a minimal repro and
+  `CUDA_LAUNCH_BLOCKING=1`;
 - reduce or shard the replicated MTP `fc` memory cost for TP3;
-- check whether MTP improves aggregate throughput at concurrency even when a
-  single request is slower;
 - tune CUDA graph and FlashInfer warmup coverage for MTP shapes.
 
 The target is to turn MTP from "works on TP3" into an additional speedup layer

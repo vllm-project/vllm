@@ -54,24 +54,35 @@ _PARAM_RE = re.compile(
     re.DOTALL,
 )
 _PARTIAL_PARAM_RE = re.compile(r"<\s*parameter\s*=\s*([^>]+)>(.*)$", re.DOTALL)
+_TRAILING_TAG_FRAGMENT_RE = re.compile(
+    r"\s*<\s*/\s*(?:parameter|function|tool_call)\b.*$", re.DOTALL
+)
+
+
+def _clean_qwen3_param_name(name: str) -> str:
+    return name.strip()
+
+
+def _clean_qwen3_param_value(value: str) -> str:
+    return _TRAILING_TAG_FRAGMENT_RE.sub("", value).strip()
 
 
 def _qwen3_arg_converter(raw_args: str, partial: bool) -> str:
     params: dict[str, object] = {}
 
     for match in _PARAM_RE.finditer(raw_args):
-        name = match.group(1)
-        value = match.group(2)
-        params[name] = value.strip()
+        name = _clean_qwen3_param_name(match.group(1))
+        value = _clean_qwen3_param_value(match.group(2))
+        if name:
+            params[name] = value
 
-    if partial:
-        remaining = _PARAM_RE.sub("", raw_args)
-        m = _PARTIAL_PARAM_RE.search(remaining)
-        if m:
-            name = m.group(1)
-            value = m.group(2)
-            if name:
-                params[name] = value.strip()
+    remaining = _PARAM_RE.sub("", raw_args)
+    m = _PARTIAL_PARAM_RE.search(remaining)
+    if m:
+        name = _clean_qwen3_param_name(m.group(1))
+        value = _clean_qwen3_param_value(m.group(2))
+        if name and (partial or value):
+            params[name] = value
 
     return json.dumps(params, ensure_ascii=False)
 
