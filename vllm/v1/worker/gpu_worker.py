@@ -378,7 +378,7 @@ class Worker(WorkerBase):
                 "worker requested memory: %sGiB", format_gib(self.requested_memory)
             )
         else:
-            raise RuntimeError(f"Not support device type: {self.device_config.device}")
+            raise RuntimeError(f"Unsupported device type: {self.device_config.device}")
 
         # Initialize workspace manager
         num_ubatches = 2 if self.vllm_config.parallel_config.enable_dbo else 1
@@ -838,7 +838,7 @@ class Worker(WorkerBase):
                 f"{format_gib(self.available_kv_cache_memory_bytes)} GiB."
             )
 
-            logger.debug(msg)
+            logger.info(msg)
 
             maybe_save_startup_plan(self, kv_cache_memory_bytes_to_requested_limit)
 
