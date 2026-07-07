@@ -56,8 +56,9 @@ def build_per_request_timing_metrics(
 
     Thin adapter over ``compute_timing_intervals``; fields are ``None`` when
     their source timestamps are unavailable. ``tokens_per_second`` is overall
-    output throughput (all generated tokens over the inference interval), so it
-    is not the reciprocal of ``mean_itl_ms``.
+    output throughput: all generated tokens over the inference interval
+    (scheduling to the last output token), so it is not the reciprocal of
+    ``mean_itl_ms``.
     """
     if metrics is None:
         return PerRequestTimingMetrics()

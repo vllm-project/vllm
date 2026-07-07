@@ -324,6 +324,33 @@ def test_update_from_finished_request_populated_unchanged():
     assert finished.mean_time_per_output_token == pytest.approx(1.0)  # 1.0/(2-1)
 
 
+def test_update_from_finished_request_single_token_mean_is_zero():
+    # A request that finishes with exactly one output token has no
+    # inter-token interval: the core returns None for mean_per_output_token
+    # (n-1 == 0), which the engine path must coerce to 0.0 for Prometheus.
+    iteration_stats = IterationStats()
+    req_stats = RequestStateStats(arrival_time=0.0)
+    req_stats.queued_ts = 1.0
+    req_stats.scheduled_ts = 1.5
+    req_stats.first_token_ts = 2.0
+    req_stats.last_token_ts = 2.0
+    req_stats.num_generation_tokens = 1
+
+    finished = iteration_stats.update_from_finished_request(
+        finish_reason=FinishReason.STOP,
+        request_id="single-token-req",
+        num_prompt_tokens=10,
+        max_tokens_param=None,
+        req_stats=req_stats,
+    )
+
+    assert finished.mean_time_per_output_token == 0.0
+    assert finished.queued_time == pytest.approx(0.5)
+    assert finished.prefill_time == pytest.approx(0.5)
+    # decode == last - first == 0.0 (measured but zero, single token)
+    assert finished.decode_time == 0.0
+
+
 def test_compute_timing_intervals_fully_populated():
     stats = RequestStateStats(
         queued_ts=1.0,
