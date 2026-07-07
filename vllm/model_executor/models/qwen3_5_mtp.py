@@ -96,14 +96,49 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
             prefix=f"{prefix}.fc",
         )
 
-        self.layers = torch.nn.ModuleList(
-            Qwen3_5DecoderLayer(
-                vllm_config,
-                layer_type="full_attention",
-                prefix=f"{prefix}.layers.{idx}",
+        # MTP layers use unquantized bf16 weights even when the main model
+        # is GPTQ-quantized. Override the global vllm_config so that
+        # FusedMoE.__init__ (which calls get_current_vllm_config()) sees
+        # quant_config=None instead of the GPTQ config.
+        #
+        # Note: dataclasses.replace(vllm_config, quant_config=None) does NOT
+        # work because VllmConfig.__post_init__ re-resolves quant_config from
+        # model_config. We must set it AFTER construction via __setattr__.
+        _needs_noquant = (
+            quant_config is not None
+            and hasattr(quant_config, 'get_name')
+            and quant_config.get_name() in (
+                "gptq", "auto_gptq", "gptq_marlin", "awq", "awq_marlin",
             )
-            for idx in range(self.num_mtp_layers)
         )
+
+        if _needs_noquant:
+            import copy
+            from vllm.config import set_current_vllm_config
+            mtp_vllm_config = copy.copy(vllm_config)
+            object.__setattr__(mtp_vllm_config, 'quant_config', None)
+            logger.info(
+                "MTP: bypassing %s quantization for MTP layers (bf16 weights)",
+                quant_config.get_name(),
+            )
+            with set_current_vllm_config(mtp_vllm_config):
+                self.layers = torch.nn.ModuleList(
+                    Qwen3_5DecoderLayer(
+                        mtp_vllm_config,
+                        layer_type="full_attention",
+                        prefix=f"{prefix}.layers.{idx}",
+                    )
+                    for idx in range(self.num_mtp_layers)
+                )
+        else:
+            self.layers = torch.nn.ModuleList(
+                Qwen3_5DecoderLayer(
+                    vllm_config,
+                    layer_type="full_attention",
+                    prefix=f"{prefix}.layers.{idx}",
+                )
+                for idx in range(self.num_mtp_layers)
+            )
 
         self.make_empty_intermediate_tensors = make_empty_intermediate_tensors_factory(
             ["hidden_states", "residual"], config.hidden_size
