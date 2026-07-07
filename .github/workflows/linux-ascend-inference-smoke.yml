@@ -76,8 +76,8 @@ jobs:
             local target_dir=$2
             local target_ref=$3
             local target_sha=$4
-            local attempts=4
-            local delay_seconds=15
+            local attempts=${GIT_CHECKOUT_RETRY_ATTEMPTS:-6}
+            local delay_seconds=${GIT_CHECKOUT_RETRY_DELAY_SECONDS:-30}
             local try=1
             local parent_dir
             local temp_dir
@@ -89,9 +89,14 @@ jobs:
             rm -rf "$temp_dir"
             while [[ "$try" -le "$attempts" ]]; do
               mkdir -p "$temp_dir"
-              if git -C "$temp_dir" init \
+              if git -C "$temp_dir" -c init.defaultBranch=main init \
                 && git -C "$temp_dir" remote add origin "$repo_url" \
-                && git -C "$temp_dir" -c protocol.version=2 fetch --no-tags --depth 1 origin "$target_ref"; then
+                && git -C "$temp_dir" \
+                  -c http.version=HTTP/1.1 \
+                  -c http.lowSpeedLimit=1024 \
+                  -c http.lowSpeedTime=30 \
+                  -c protocol.version=2 \
+                  fetch --no-tags --depth 1 origin "$target_ref"; then
                 git -C "$temp_dir" checkout --force "$target_sha"
                 rm -rf "$target_dir"
                 mv "$temp_dir" "$target_dir"

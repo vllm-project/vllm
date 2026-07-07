@@ -97,11 +97,15 @@ def test_inference_workflows_fetch_target_sha_without_default_branch_clone():
         ]
 
         assert "git clone --depth 1 \"$repo_url\" \"$temp_dir\"" not in checkout_step
-        assert "git -C \"$temp_dir\" init" in checkout_step
+        assert "GIT_CHECKOUT_RETRY_ATTEMPTS:-6" in checkout_step
+        assert "GIT_CHECKOUT_RETRY_DELAY_SECONDS:-30" in checkout_step
+        assert "git -C \"$temp_dir\" -c init.defaultBranch=main init" in checkout_step
         assert "git -C \"$temp_dir\" remote add origin \"$repo_url\"" in checkout_step
+        assert "-c http.version=HTTP/1.1" in checkout_step
+        assert "-c http.lowSpeedLimit=1024" in checkout_step
+        assert "-c http.lowSpeedTime=30" in checkout_step
         assert (
-            'git -C "$temp_dir" -c protocol.version=2 fetch --no-tags --depth 1 '
-            'origin "$target_ref"'
+            "fetch --no-tags --depth 1 origin \"$target_ref\""
         ) in checkout_step
         assert 'git -C "$temp_dir" checkout --force "$target_sha"' in checkout_step
         assert (

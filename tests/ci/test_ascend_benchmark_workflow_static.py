@@ -385,6 +385,20 @@ def test_l3_benchmark_publish_preflight_runs_before_benchmark():
     assert "GITHUB_SNAPSHOT_SYNC_VERIFIED_COMMIT" in text[summary_step:]
 
 
+def test_target_checkout_uses_resilient_git_http_retry_settings():
+    text = workflow_text()
+    checkout_step = text[
+        text.index("      - name: Checkout target repo with retry") :
+        text.index("      - name: L3 benchmark publication preflight")
+    ]
+
+    assert "GIT_CHECKOUT_RETRY_ATTEMPTS:-6" in checkout_step
+    assert "GIT_CHECKOUT_RETRY_DELAY_SECONDS:-30" in checkout_step
+    assert "-c http.version=HTTP/1.1" in checkout_step
+    assert "-c http.lowSpeedLimit=1024" in checkout_step
+    assert "-c http.lowSpeedTime=30" in checkout_step
+
+
 def test_ascend_torch_stack_is_installed_before_preinstall_preflight():
     text = workflow_text()
 
