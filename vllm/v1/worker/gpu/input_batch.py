@@ -243,6 +243,89 @@ def prepare_prefill_inputs(
 
 
 @triton.jit
+def _prepare_prefill_pos_seq_lens_kernel(
+    input_ids_ptr,
+    next_prefill_tokens_ptr,
+    pos_ptr,
+    seq_lens_ptr,
+    idx_mapping_ptr,
+    query_start_loc_ptr,
+    all_token_ids_ptr,
+    all_token_ids_stride,
+    prefill_lens_ptr,
+    num_computed_tokens_ptr,
+    max_num_reqs,
+    BLOCK_SIZE: tl.constexpr,
+):
+    req_id = tl.program_id(0)
+    num_reqs = tl.num_programs(0) - 1
+    if req_id == num_reqs:
+        # Pad unused seq_lens as 0 for full CUDA graphs.
+        for i in tl.range(num_reqs, max_num_reqs, BLOCK_SIZE):
+            block = i + tl.arange(0, BLOCK_SIZE)
+            mask = block < max_num_reqs
+            tl.store(seq_lens_ptr + block, 0, mask=mask)
+        return
+
+    req_state_idx = tl.load(idx_mapping_ptr + req_id)
+    num_computed = tl.load(num_computed_tokens_ptr + req_state_idx)
+
+    query_start = tl.load(query_start_loc_ptr + req_id)
+    query_end = tl.load(query_start_loc_ptr + req_id + 1)
+    query_len = query_end - query_start
+
+    seq_len = num_computed + query_len
+    tl.store(seq_lens_ptr + req_id, seq_len)
+
+    prefill_len = tl.load(prefill_lens_ptr + req_state_idx)
+    is_prefilling = num_computed < prefill_len
+    request_ptr = all_token_ids_ptr + req_state_idx * all_token_ids_stride
+    for i in tl.range(0, query_len, BLOCK_SIZE):
+        block = i + tl.arange(0, BLOCK_SIZE)
+        mask = block < query_len
+        pos = num_computed + block
+        tl.store(pos_ptr + query_start + block, pos, mask=mask)
+
+        tokens = tl.load(request_ptr + pos, mask=mask & is_prefilling)
+        tl.store(input_ids_ptr + query_start + block, tokens, mask=mask & is_prefilling)
+
+    next_pos = seq_len
+    if next_pos < prefill_len:
+        next_token = tl.load(request_ptr + next_pos)
+        tl.store(next_prefill_tokens_ptr + req_state_idx, next_token)
+
+
+def prepare_prefill_pos_seq_lens(
+    input_ids: torch.Tensor,
+    next_prefill_tokens: torch.Tensor,
+    idx_mapping: torch.Tensor,
+    query_start_loc: torch.Tensor,
+    all_token_ids: torch.Tensor,
+    prefill_len: torch.Tensor,
+    num_computed_tokens: torch.Tensor,
+    pos: torch.Tensor,
+    seq_lens: torch.Tensor,
+) -> None:
+    num_reqs = idx_mapping.shape[0]
+    # NOTE(woosuk): We do +1 because the last thread block is used
+    # to pad unused seq_lens as 0 for full CUDA graphs.
+    _prepare_prefill_pos_seq_lens_kernel[(num_reqs + 1,)](
+        input_ids,
+        next_prefill_tokens,
+        pos,
+        seq_lens,
+        idx_mapping,
+        query_start_loc,
+        all_token_ids,
+        all_token_ids.stride(0),
+        prefill_len,
+        num_computed_tokens,
+        seq_lens.shape[0],
+        BLOCK_SIZE=1024,
+    )
+
+
+@triton.jit
 def _prepare_pos_seq_lens_kernel(
     pos_ptr,
     seq_lens_ptr,
