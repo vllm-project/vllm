@@ -90,17 +90,18 @@ def mma_f16(
     loc=None,
     ip=None,
 ) -> None:
-    nvvm.tcgen05_mma(
-        nvvm.Tcgen05MMAKind.F16,
-        NVVM_CTA_GROUP_MAP[cta_group],
-        _make_tmem_llvm_ptr(d_tmem, loc=loc, ip=ip),
-        Uint64(a_desc).ir_value(loc=loc, ip=ip),
-        Uint64(b_desc).ir_value(loc=loc, ip=ip),
-        Int32(idesc).ir_value(loc=loc, ip=ip),
-        Boolean(enable_input_d).ir_value(loc=loc, ip=ip),
-        loc=loc,
-        ip=ip,
-    )
+    with cute.arch.elect_one():
+        nvvm.tcgen05_mma(
+            nvvm.Tcgen05MMAKind.F16,
+            NVVM_CTA_GROUP_MAP[cta_group],
+            _make_tmem_llvm_ptr(d_tmem, loc=loc, ip=ip),
+            Uint64(a_desc).ir_value(loc=loc, ip=ip),
+            Uint64(b_desc).ir_value(loc=loc, ip=ip),
+            Int32(idesc).ir_value(loc=loc, ip=ip),
+            Boolean(enable_input_d).ir_value(loc=loc, ip=ip),
+            loc=loc,
+            ip=ip,
+        )
 
 
 @dsl_user_op
@@ -115,17 +116,18 @@ def mma_ts_f16(
     loc=None,
     ip=None,
 ) -> None:
-    nvvm.tcgen05_mma(
-        nvvm.Tcgen05MMAKind.F16,
-        NVVM_CTA_GROUP_MAP[cta_group],
-        _make_tmem_llvm_ptr(d_tmem, loc=loc, ip=ip),
-        _make_tmem_llvm_ptr(a_tmem, loc=loc, ip=ip),
-        Uint64(b_desc).ir_value(loc=loc, ip=ip),
-        Int32(idesc).ir_value(loc=loc, ip=ip),
-        Boolean(enable_input_d).ir_value(loc=loc, ip=ip),
-        loc=loc,
-        ip=ip,
-    )
+    with cute.arch.elect_one():
+        nvvm.tcgen05_mma(
+            nvvm.Tcgen05MMAKind.F16,
+            NVVM_CTA_GROUP_MAP[cta_group],
+            _make_tmem_llvm_ptr(d_tmem, loc=loc, ip=ip),
+            _make_tmem_llvm_ptr(a_tmem, loc=loc, ip=ip),
+            Uint64(b_desc).ir_value(loc=loc, ip=ip),
+            Int32(idesc).ir_value(loc=loc, ip=ip),
+            Boolean(enable_input_d).ir_value(loc=loc, ip=ip),
+            loc=loc,
+            ip=ip,
+        )
 
 
 @dsl_user_op
@@ -133,15 +135,17 @@ def commit(mbar, cta_mask=None, cta_group: int = 1, *, loc=None, ip=None):
     mbar_llvm = mbar.to_llvm_ptr(loc=loc, ip=ip)
     group = NVVM_CTA_GROUP_MAP[cta_group]
     if cutlass.const_expr(cta_mask is not None):
-        nvvm.tcgen05_commit_arrive(
-            mbar_llvm,
-            multicast_mask=cta_mask.ir_value(loc=loc, ip=ip),
-            group=group,
-            loc=loc,
-            ip=ip,
-        )
+        with cute.arch.elect_one():
+            nvvm.tcgen05_commit_arrive(
+                mbar_llvm,
+                multicast_mask=cta_mask.ir_value(loc=loc, ip=ip),
+                group=group,
+                loc=loc,
+                ip=ip,
+            )
     else:
-        nvvm.tcgen05_commit_arrive(mbar_llvm, group=group, loc=loc, ip=ip)
+        with cute.arch.elect_one():
+            nvvm.tcgen05_commit_arrive(mbar_llvm, group=group, loc=loc, ip=ip)
 
 
 @dsl_user_op
