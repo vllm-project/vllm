@@ -994,7 +994,9 @@ class VideoBackend(
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"] = "opencv",
+        backend: Literal[
+            "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
+        ] = "opencv",
         num_ffmpeg_threads: int = 0,
         seek_mode: Literal["exact", "approximate"] = "exact",
         **kwargs,
@@ -1207,7 +1209,9 @@ class Qwen3VLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"] = "opencv",
+        backend: Literal[
+            "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
+        ] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -1286,7 +1290,9 @@ class Qwen2VLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"] = "opencv",
+        backend: Literal[
+            "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
+        ] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -1378,7 +1384,9 @@ class DynamicVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"] = "opencv",
+        backend: Literal[
+            "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
+        ] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -1503,7 +1511,9 @@ class GLM46VVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"] = "opencv",
+        backend: Literal[
+            "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
+        ] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         return super().load_bytes(
@@ -1601,7 +1611,9 @@ class GLMGAVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"] = "opencv",
+        backend: Literal[
+            "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
+        ] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         frames, metadata = super().load_bytes(
@@ -1924,7 +1936,9 @@ class NemotronVLVideoBackend(VideoBackend):
         max_duration: int = 300,
         frame_recovery: bool = False,
         *,
-        backend: Literal["opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"] = "opencv",
+        backend: Literal[
+            "opencv", "pyav", "torchcodec", "pynvvideocodec", "deepstream"
+        ] = "opencv",
         **kwargs,
     ) -> tuple[npt.NDArray, dict[str, Any]]:
         frames, metadata = super().load_bytes(
