@@ -213,7 +213,7 @@ The following figure shows the class hierarchy of vLLM:
 There are several important design choices behind this class hierarchy:
 
 1\. **Extensibility**: All classes in the hierarchy accept a configuration object
-containing all the necessary information. The [VllmConfig](https://github.com/vllm-project/vllm/blob/d1c6799b8870e513bf4f2305cbf6cda9fc3d773b/vllm/config.py#L2036)
+containing all the necessary information. The [VllmConfig](https://github.com/vllm-project/vllm/blob/main/vllm/config/vllm.py)
 class is the main configuration object that is passed around. The class
 hierarchy is quite deep, and every class needs to read the configuration it is
 interested in. By encapsulating all configurations in one object, we can easily
