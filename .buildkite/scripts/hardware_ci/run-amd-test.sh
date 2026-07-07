@@ -28,6 +28,17 @@
 ###############################################################################
 set -o pipefail
 
+: "${BUILDKIT_PROGRESS:=plain}"
+: "${TERM:=xterm-256color}"
+: "${FORCE_COLOR:=1}"
+: "${CLICOLOR_FORCE:=1}"
+: "${PY_COLORS:=1}"
+: "${ROCM_DOCKER_TTY:=1}"
+if [[ " ${PYTEST_ADDOPTS:-} " != *" --color"* ]]; then
+  PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--color=yes"
+fi
+export BUILDKIT_PROGRESS TERM FORCE_COLOR CLICOLOR_FORCE PY_COLORS PYTEST_ADDOPTS ROCM_DOCKER_TTY
+
 # Export Python path for commands that run directly on the host. Containerized
 # tests set this to /vllm-workspace below so spawned Python processes do not
 # depend on their current working directory.
@@ -149,6 +160,7 @@ EOF
   echo "--- Building local ROCm test image"
   docker build \
     --pull=false \
+    --progress "${BUILDKIT_PROGRESS}" \
     --build-arg "BASE_IMAGE=${base_image}" \
     -t "${artifact_image}" \
     "${context_dir}" || return 1
@@ -535,6 +547,13 @@ if is_multi_node "$commands"; then
 else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+  docker_run_terminal_args=(-i)
+  if [[ "${ROCM_DOCKER_TTY}" == "1" ]]; then
+    docker_run_terminal_args+=(-t)
+    echo "Docker interactive stdin: enabled; TTY allocation: enabled"
+  else
+    echo "Docker interactive stdin: enabled; TTY allocation: disabled"
+  fi
 
   ulimit_core_hard=$(ulimit -H -c)
   if [[ "$ulimit_core_hard" == "unlimited" ]]; then
@@ -551,7 +570,7 @@ else
   fi
 
   docker run \
-    -t -i \
+    "${docker_run_terminal_args[@]}" \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
     --network=host \
@@ -566,6 +585,11 @@ else
     -e AWS_SECRET_ACCESS_KEY \
     -e BUILDKITE_PARALLEL_JOB \
     -e BUILDKITE_PARALLEL_JOB_COUNT \
+    -e TERM \
+    -e FORCE_COLOR \
+    -e CLICOLOR_FORCE \
+    -e PY_COLORS \
+    -e PYTEST_ADDOPTS \
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
