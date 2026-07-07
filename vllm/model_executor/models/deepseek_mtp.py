@@ -327,6 +327,24 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts, SupportsPP):
         for name, loaded_weight in weights:
             if "rotary_emb.inv_freq" in name:
                 continue
+            # Load the draft's own embed_tokens. The MTP module embeds the
+            # tokens it drafts via its own embed_tokens, but the checkpoint
+            # stores embed_tokens as a single top-level (shared/tied) weight
+            # whose spec_layer is None -- so the loop below skips it. Under
+            # pipeline parallelism the target model's embed_tokens is a
+            # PPMissingLayer on the draft's last stage, so the draft cannot
+            # borrow it and MUST load its own copy here, or it embeds tokens
+            # with uninitialized weights and produces garbage drafts.
+            if "embed_tokens" in name:
+                param = params_dict.get(name)
+                if param is not None:
+                    weight_loader = getattr(param, "weight_loader", None)
+                    if weight_loader is not None:
+                        weight_loader(param, loaded_weight)
+                    else:
+                        param.data.copy_(loaded_weight)
+                    loaded_params.add(name)
+                continue
             spec_layer = get_spec_layer_idx_from_weight_name(self.config, name)
             if spec_layer is None:
                 continue
