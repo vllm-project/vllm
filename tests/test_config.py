@@ -1471,7 +1471,6 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
-
 @pytest.mark.parametrize(
     (
         "model_id",
