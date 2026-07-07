@@ -21,14 +21,16 @@ _ALLOWED_INSTRUCTIONS = {"retry"}
 
 
 def _validate_payload(body: dict) -> tuple[str, dict]:
+    if not isinstance(body, dict):
+        raise HTTPException(400, "Request body must be a JSON object.")
     instruction = body.get("instruction")
-    params = body.get("params")
-    if not instruction or not isinstance(params, dict):
-        raise HTTPException(400, "'instruction' and 'params' are required.")
+    if not instruction:
+        raise HTTPException(400, "'instruction' is required.")
     if instruction not in _ALLOWED_INSTRUCTIONS:
         raise HTTPException(400, f"Invalid instruction: '{instruction}'.")
-    if "timeout" not in params or not isinstance(params["timeout"], (int, float)):
-        raise HTTPException(400, "Missing or invalid 'timeout' parameter.")
+    params = body.get("params", {})
+    if not isinstance(params, dict):
+        raise HTTPException(400, "'params' must be an object.")
     return instruction, params
 
 

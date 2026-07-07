@@ -16,6 +16,7 @@ from multiprocessing.queues import Queue
 from threading import Thread
 from typing import Any, TypeAlias, TypeVar
 
+import msgspec
 import msgspec.msgpack
 import zmq
 import zmq.asyncio
@@ -1230,8 +1231,7 @@ class AsyncMPClient(MPClient):
         self, ft_request: FaultToleranceRequest
     ) -> FaultToleranceResult:
         res = await self.call_utility_async(FT_UTILITY_METHOD, ft_request)
-        result = FaultToleranceResult(**res)
-        return result
+        return msgspec.convert(res, FaultToleranceResult)
 
     async def get_status(self):
         return {
