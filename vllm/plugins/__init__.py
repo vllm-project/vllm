@@ -116,12 +116,17 @@ def load_endpoint_plugins(
     Returns:
         Instantiated plugins that passed gating in discovery order.
     """
+    from importlib.metadata import entry_points
+
     if envs.VLLM_PLUGINS is None:
-        logger.warning(
-            "VLLM_PLUGINS is not set. No endpoint plugins will be loaded. "
-            "Endpoint plugins add HTTP routes and must be explicitly "
-            "allowlisted via VLLM_PLUGINS to be loaded."
-        )
+        discovered = entry_points(group=ENDPOINT_PLUGINS_GROUP)
+        if discovered:
+            logger.warning(
+                "Found endpoint plugin(s) %s but VLLM_PLUGINS is not set. "
+                "Endpoint plugins add HTTP routes and must be explicitly "
+                "allowlisted via VLLM_PLUGINS to be loaded.",
+                [p.name for p in discovered],
+            )
         return []
 
     factories = load_plugins_by_group(ENDPOINT_PLUGINS_GROUP)
