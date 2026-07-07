@@ -738,6 +738,7 @@ class FlashAttentionImpl(AttentionImpl):
                         q_descale=q_descale,
                         k_descale=k_descale,
                         v_descale=v_descale,
+                        window_size=sliding_window_size,
                     )
                 else:
                     flash_attn_varlen_func(
@@ -924,6 +925,7 @@ class FlashAttentionImpl(AttentionImpl):
         q_descale: torch.Tensor | None = None,
         k_descale: torch.Tensor | None = None,
         v_descale: torch.Tensor | None = None,
+        window_size: list[int] | None = None,
     ):
         assert self.vllm_flash_attn_version is not None, (
             "To support sink token on attention, you should provide flash attn"
@@ -980,6 +982,7 @@ class FlashAttentionImpl(AttentionImpl):
             softmax_scale=self.scale,
             causal=attn_metadata.causal,
             alibi_slopes=self.alibi_slopes,
+            window_size=window_size,
             block_table=attn_metadata.block_table,
             return_softmax_lse=True,
             softcap=self.logits_soft_cap,
