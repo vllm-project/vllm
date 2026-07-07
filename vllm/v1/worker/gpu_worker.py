@@ -77,7 +77,12 @@ from vllm.v1.outputs import (
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
-from vllm.v1.worker.workspace import init_workspace_manager
+from vllm.v1.worker.workspace import (
+    current_workspace_manager,
+    init_workspace_manager,
+    lock_workspace,
+    unlock_workspace,
+)
 
 from ...model_executor.model_loader import TensorizerLoader
 from .gpu.warmup import warmup_kernels
@@ -849,15 +854,24 @@ class Worker(WorkerBase):
             )
 
             # We skip EPLB here since we don't want to record dummy metrics
-            hidden_states, last_hidden_states = self.model_runner._dummy_run(
-                num_tokens=max_num_reqs,
-                skip_eplb=True,
-                cudagraph_runtime_mode=CUDAGraphMode.NONE,
-            )
-            if self.model_runner.is_pooling_model:
-                self.model_runner._dummy_pooler_run(hidden_states)
-            else:
-                self.model_runner._dummy_sampler_run(hidden_states=last_hidden_states)
+            workspace_was_locked = current_workspace_manager().is_locked()
+            if workspace_was_locked:
+                unlock_workspace()
+            try:
+                hidden_states, last_hidden_states = self.model_runner._dummy_run(
+                    num_tokens=max_num_reqs,
+                    skip_eplb=True,
+                    cudagraph_runtime_mode=CUDAGraphMode.NONE,
+                )
+                if self.model_runner.is_pooling_model:
+                    self.model_runner._dummy_pooler_run(hidden_states)
+                else:
+                    self.model_runner._dummy_sampler_run(
+                        hidden_states=last_hidden_states
+                    )
+            finally:
+                if workspace_was_locked:
+                    lock_workspace()
 
         # Reset the seed to ensure that the random state is not affected by
         # the model initialization and profiling.
