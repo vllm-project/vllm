@@ -552,3 +552,19 @@ def has_cutedsl() -> bool:
 def has_humming() -> bool:
     """Whether the optional `humming` package is available."""
     return _has_module("humming")
+
+
+def check_torchcodec_available():
+    """Whether the optional `torchcodec` package is available."""
+    try:
+        import torchcodec  # noqa: F401
+    except RuntimeError as e:
+        # Some modules (e.g. torchcodec) raise RuntimeError instead of
+        # ImportError when a native dependency fails to load, with a
+        # message that embeds a per-backend-version traceback dump.
+        # Trim it down to just the human-readable summary.
+        marker = "The following exceptions were raised as we tried to load libtorchcodec:"
+        message = str(e)
+        if marker in message:
+            raise RuntimeError(message.split(marker, 1)[0].rstrip()) from None
+        raise e
