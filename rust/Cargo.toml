@@ -138,6 +138,10 @@ zeromq = { version = "0.6.0", default-features = false, features = [
     "all-transport",
 ] }
 
+
+[patch."https://github.com/smg-project/llm-multimodal"]
+llm-multimodal = { path = "/home/mozf/llm-multimodal-internal" }
+
 [workspace.lints.clippy]
 too_many_arguments = "allow"
 

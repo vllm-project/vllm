@@ -95,6 +95,8 @@ struct ResolvedPlaceholder {
     token: String,
     marker_token_id: u32,
     embed_token_id: u32,
+    wrapper_start_token_id: Option<u32>,
+    wrapper_end_token_id: Option<u32>,
 }
 
 impl ResolvedMultimodalSpec {
@@ -135,10 +137,27 @@ impl ResolvedMultimodalSpec {
             .placeholder_token_id_for(&metadata, modality)
             .map_err(|error| multimodal!("{error}"))? as u32;
 
+        let wrapper_start_token_id = (modality == Modality::Video)
+            .then(|| {
+                metadata
+                    .config_u32(&["vision_start_token_id"])
+                    .or_else(|| context.tokenizer().token_to_id("<|vision_start|>"))
+            })
+            .flatten();
+        let wrapper_end_token_id = (modality == Modality::Video)
+            .then(|| {
+                metadata
+                    .config_u32(&["vision_end_token_id"])
+                    .or_else(|| context.tokenizer().token_to_id("<|vision_end|>"))
+            })
+            .flatten();
+
         Ok(ResolvedPlaceholder {
             token,
             marker_token_id,
             embed_token_id,
+            wrapper_start_token_id,
+            wrapper_end_token_id,
         })
     }
 
@@ -408,7 +427,7 @@ impl MultimodalModelInfo {
             Some(PreparedMediaBatch {
                 len: image_frames.len(),
                 replacements,
-                tensors: tensor::collect_tensors(preprocessed, model_dtype)?,
+                tensors: tensor::collect_tensors(preprocessed, model_dtype, Modality::Image)?,
             })
         };
 
@@ -429,7 +448,7 @@ impl MultimodalModelInfo {
             video_batches.push(PreparedMediaBatch {
                 len: 1,
                 replacements,
-                tensors: tensor::collect_tensors(preprocessed, model_dtype)?,
+                tensors: tensor::collect_tensors(preprocessed, model_dtype, Modality::Video)?,
             });
         }
 
@@ -775,21 +794,28 @@ fn expand_prompt_token_ids(
         }
 
         let replacement_len = replacement.tokens.len();
-        let is_embed = {
-            let mask = replacement
-                .tokens
-                .iter()
-                .map(|&token| token as u32 == placeholder.embed_token_id)
-                .collect::<Vec<_>>();
-            WireTensor::from_bool(vec![replacement_len], mask).map_err(Error::Multimodal)?
-        };
+        let mut mask = replacement
+            .tokens
+            .iter()
+            .map(|&token| token as u32 == placeholder.embed_token_id)
+            .collect::<Vec<_>>();
 
         expanded.extend_from_slice(&prompt_token_ids[cursor..offset]);
-        let expanded_offset = expanded.len();
+        let mut expanded_offset = expanded.len();
+        let mut range_len = replacement_len;
+        if should_include_video_wrapper(prompt_token_ids, offset, replacement.modality, placeholder)
+        {
+            expanded_offset = expanded_offset.saturating_sub(1);
+            range_len += 2;
+            mask.insert(0, false);
+            mask.push(false);
+        }
+        let is_embed = WireTensor::from_bool(vec![range_len], mask).map_err(Error::Multimodal)?;
+
         expanded.extend(replacement.tokens.into_iter().map(|token| token as u32));
         ranges.push(PlaceholderRange {
             offset: expanded_offset,
-            length: replacement_len,
+            length: range_len,
             is_embed: Some(is_embed),
         });
         cursor = offset + 1;
@@ -799,6 +825,26 @@ fn expand_prompt_token_ids(
     *prompt_token_ids = expanded;
 
     Ok(ranges)
+}
+
+fn should_include_video_wrapper(
+    prompt_token_ids: &[u32],
+    marker_offset: usize,
+    modality: Modality,
+    placeholder: &ResolvedPlaceholder,
+) -> bool {
+    if modality != Modality::Video {
+        return false;
+    }
+    let Some(start_token_id) = placeholder.wrapper_start_token_id else {
+        return false;
+    };
+    let Some(end_token_id) = placeholder.wrapper_end_token_id else {
+        return false;
+    };
+    marker_offset > 0
+        && prompt_token_ids.get(marker_offset - 1) == Some(&start_token_id)
+        && prompt_token_ids.get(marker_offset + 1) == Some(&end_token_id)
 }
 
 /// Find `needle` in `haystack`, starting at `start`.
@@ -990,6 +1036,8 @@ mod tests {
                 token: "<|video|>".to_string(),
                 marker_token_id: 300,
                 embed_token_id: 301,
+                wrapper_start_token_id: None,
+                wrapper_end_token_id: None,
             },
         );
         let replacements = vec![PromptReplacement::sequence(
@@ -1008,6 +1056,35 @@ mod tests {
     }
 
     #[test]
+    fn expand_prompt_token_ids_includes_video_vision_wrapper_when_present() {
+        let mut prompt_token_ids = vec![1, 302, 300, 303, 2];
+        let mut placeholders = HashMap::new();
+        placeholders.insert(
+            Modality::Video,
+            ResolvedPlaceholder {
+                token: "<|video|>".to_string(),
+                marker_token_id: 300,
+                embed_token_id: 301,
+                wrapper_start_token_id: Some(302),
+                wrapper_end_token_id: Some(303),
+            },
+        );
+        let replacements = vec![PromptReplacement::sequence(
+            Modality::Video,
+            "<|video|>",
+            vec![301, 301],
+        )];
+
+        let ranges =
+            expand_prompt_token_ids(&mut prompt_token_ids, replacements, &placeholders).unwrap();
+
+        assert_eq!(prompt_token_ids, vec![1, 302, 301, 301, 303, 2]);
+        assert_eq!(ranges[0].offset, 1);
+        assert_eq!(ranges[0].length, 4);
+        assert_bool_mask(&ranges[0], &[false, true, true, false]);
+    }
+
+    #[test]
     fn expand_prompt_token_ids_handles_mixed_image_and_video_replacements() {
         let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2, 300, 3];
         let mut placeholders = HashMap::new();
@@ -1017,6 +1094,8 @@ mod tests {
                 token: "<|image|>".to_string(),
                 marker_token_id: LLAMA4_IMAGE_ID,
                 embed_token_id: LLAMA4_PATCH_ID,
+                wrapper_start_token_id: None,
+                wrapper_end_token_id: None,
             },
         );
         placeholders.insert(
@@ -1025,6 +1104,8 @@ mod tests {
                 token: "<|video|>".to_string(),
                 marker_token_id: 300,
                 embed_token_id: 301,
+                wrapper_start_token_id: None,
+                wrapper_end_token_id: None,
             },
         );
         let replacements = vec![

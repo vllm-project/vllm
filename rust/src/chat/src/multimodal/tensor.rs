@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use half::{bf16, f16};
-use llm_multimodal::{ModelSpecificValue, PreprocessedEncoderInputs as PreprocessedMedia};
+use llm_multimodal::{
+    Modality, ModelSpecificValue, PreprocessedEncoderInputs as PreprocessedMedia,
+};
 use vllm_engine_core_client::protocol::dtype::ModelDtype;
 use vllm_engine_core_client::protocol::multimodal::MmKwargValue as ProtocolKwargValue;
 use vllm_engine_core_client::protocol::tensor::{ShapeExt as _, WireTensor};
@@ -29,6 +31,7 @@ pub(super) enum KwargValue {
 pub(super) fn collect_tensors(
     preprocessed: PreprocessedMedia,
     float_dtype: ModelDtype,
+    modality: Modality,
 ) -> Result<HashMap<String, KwargValue>> {
     let PreprocessedMedia {
         encoder_input,
@@ -43,7 +46,11 @@ pub(super) fn collect_tensors(
     };
 
     let mut tensors = HashMap::new();
-    tensors.insert("pixel_values".to_string(), pixel_values);
+    let encoder_key = match modality {
+        Modality::Image => "pixel_values",
+        Modality::Video => "pixel_values_videos",
+    };
+    tensors.insert(encoder_key.to_string(), pixel_values);
     for (key, value) in model_specific {
         tensors.insert(key, KwargValue::from_model_specific(value, float_dtype)?);
     }
