@@ -2,12 +2,10 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """TokenSpeed CuTe DSL MLA decode backend (Blackwell, FP8 KV cache only)."""
 
-import inspect
 from typing import ClassVar
 
 import torch
 
-from vllm.config import VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention.mla_attention import (
@@ -26,7 +24,6 @@ from vllm.v1.attention.backend import (
     MultipleOf,
 )
 from vllm.v1.attention.backends.utils import KVCacheLayoutType
-from vllm.v1.kv_cache_interface import AttentionSpec
 
 logger = init_logger(__name__)
 
@@ -38,8 +35,6 @@ logger = init_logger(__name__)
 _TOKENSPEED_MAX_Q_LEN = 8
 
 _g_workspace: dict[torch.device, torch.Tensor] = {}
-
-_DCP_DECODE_KWARGS = frozenset({"return_lse", "causal_seqs", "cp_world", "cp_rank"})
 
 
 def _get_workspace(
@@ -56,38 +51,9 @@ def _get_workspace(
     return _g_workspace[device]
 
 
-def _missing_dcp_decode_kwargs() -> set[str]:
-    try:
-        from tokenspeed_mla import tokenspeed_mla_decode
-    except ImportError:
-        return set(_DCP_DECODE_KWARGS)
-
-    try:
-        params = inspect.signature(tokenspeed_mla_decode).parameters
-    except (TypeError, ValueError):
-        return set(_DCP_DECODE_KWARGS)
-    return set(_DCP_DECODE_KWARGS.difference(params))
-
-
 class TokenspeedMLAMetadataBuilder(MLACommonMetadataBuilder[MLACommonMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
     query_len_support: ClassVar[QueryLenSupport] = QueryLenSupport.UNIFORM
-
-    def __init__(
-        self,
-        kv_cache_spec: "AttentionSpec",
-        layer_names: list[str],
-        vllm_config: "VllmConfig",
-        device: torch.device,
-    ) -> None:
-        super().__init__(
-            kv_cache_spec,
-            layer_names,
-            vllm_config,
-            device,
-            MLACommonMetadata,
-            supports_dcp_with_varlen=True,
-        )
 
 
 class TokenspeedMLABackend(MLACommonBackend):
@@ -145,15 +111,6 @@ class TokenspeedMLABackend(MLACommonBackend):
         from vllm.config import get_current_vllm_config
 
         vllm_config = get_current_vllm_config()
-        if vllm_config.parallel_config.decode_context_parallel_size > 1:
-            missing = _missing_dcp_decode_kwargs()
-            if missing:
-                missing_args = ", ".join(sorted(missing))
-                return (
-                    "tokenspeed_mla_decode does not support DCP decode. "
-                    "Install tokenspeed-mla>=0.1.8; missing arguments: "
-                    f"{missing_args}"
-                )
         if vllm_config.model_config is not None:
             hf_text_config = vllm_config.model_config.hf_text_config
             qk_nope_head_dim = getattr(hf_text_config, "qk_nope_head_dim", 0)
@@ -278,26 +235,23 @@ class TokenspeedMLAImpl(MLACommonImpl[MLACommonMetadata]):
 
         num_decodes = attn_metadata.num_decodes
         num_decode_tokens = attn_metadata.num_decode_tokens
-        uniform = num_decode_tokens % num_decodes == 0
-        tokens_per_req = num_decode_tokens // num_decodes if uniform else 1
         block_tables = attn_metadata.decode.block_table
         seq_lens = attn_metadata.decode.seq_lens
         causal_seqs = attn_metadata.decode.dcp_tot_seq_lens
 
         # tokenspeed_mla_decode expects query shape
         # (num_decodes, q_len_per_request, num_heads, head_dim).
-        if not uniform:
+        if num_decode_tokens % num_decodes != 0:
             logger.warning_once(
                 """TokenspeedMLAImpl got a query of uneven length.
                 This usually indicates an issue in batch reordering
                 or incorrect setup in dummy_run."""
             )
             q = q.unsqueeze(1)
-        elif self.dcp_world_size > 1 and tokens_per_req > 1:
+        elif self.dcp_world_size > 1 and num_decode_tokens != num_decodes:
             raise NotImplementedError(
-                "TokenSpeed MLA DCP only supports single-token decode in this PR. "
-                "Multi-token DCP decode for EAGLE/MTP requires follow-up "
-                "dcp_split_q support."
+                "TokenSpeed MLA DCP doesn't support when "
+                "num_decode_tokens != num_decodes."
             )
         else:
             q = q.view(num_decodes, -1, q.shape[-2], q.shape[-1])
