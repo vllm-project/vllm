@@ -17,7 +17,7 @@ use winnow::prelude::*;
 use winnow::stream::Stream;
 use winnow::token::{literal, take_till, take_until};
 
-use super::{ArgsEndScan, ConfigDrivenParser, Input, ParserFormat};
+use super::{ArgsScan, ArgsStep, ConfigDrivenParser, Input, ParserFormat};
 use crate::tool::ToolSchema;
 use crate::utils::{incomplete, partial_prefix_len};
 
@@ -75,8 +75,8 @@ pub struct Gemma4ArgsScan {
     in_string: bool,
 }
 
-impl ArgsEndScan for Gemma4ArgsScan {
-    fn scan<'i>(&mut self, input: &mut Input<'i>, end: &str) -> ModalResult<&'i str> {
+impl ArgsScan for Gemma4ArgsScan {
+    fn scan<'i>(&mut self, input: &mut Input<'i>, end: &str) -> ModalResult<ArgsStep<'i>> {
         let text = **input;
         if self.scanned_len > text.len() {
             return incomplete();
@@ -102,7 +102,9 @@ impl ArgsEndScan for Gemma4ArgsScan {
                     let body_end = self.scanned_len + call_end;
                     self.scanned_len = body_end + end.len();
                     input.next_slice(self.scanned_len);
-                    return Ok(&text[..body_end]);
+                    return Ok(ArgsStep::Buffered {
+                        body: &text[..body_end],
+                    });
                 }
                 (Some(string_delim), _) => {
                     self.scanned_len += string_delim + STRING_DELIM.len();
@@ -112,7 +114,9 @@ impl ArgsEndScan for Gemma4ArgsScan {
                     let body_end = self.scanned_len + call_end;
                     self.scanned_len = body_end + end.len();
                     input.next_slice(self.scanned_len);
-                    return Ok(&text[..body_end]);
+                    return Ok(ArgsStep::Buffered {
+                        body: &text[..body_end],
+                    });
                 }
                 (None, None) => {
                     self.scanned_len = safe_scan_len(text, self.scanned_len, &[STRING_DELIM, end]);

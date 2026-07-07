@@ -6,8 +6,8 @@ mod gemma4;
 
 pub use combined::CombinedParser;
 pub use config_driven::{
-    ArgsEndScan, ConfigDrivenParser, Gemma4ConfigDrivenParser, Gemma4Format, ParserFormat,
-    PlainArgsScan,
+    ArgsScan, ArgsStep, ConfigDrivenParser, Gemma4ConfigDrivenParser, Gemma4Format, JsonArgsScan,
+    ParserFormat, PlainArgsScan,
 };
 pub use gemma4::Gemma4UnifiedParser;
 use thiserror::Error;
