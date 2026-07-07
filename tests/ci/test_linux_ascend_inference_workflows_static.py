@@ -19,6 +19,7 @@ def test_pr_inference_workflows_checkout_with_https_without_ssh_known_hosts():
         assert "Checkout target repo with retry" in text
         assert "github.event_name == 'pull_request'" in text
         assert "format('https://github.com/{0}.git', github.repository)" in text
+        assert "format('refs/pull/{0}/merge', github.event.pull_request.number)" in text
         assert "https://github.com/vLLM-HUST/vllm-ascend-hust.git" in text
         assert "https://github.com/vLLM-HUST/ascend-runtime-manager.git" in text
 
@@ -61,3 +62,37 @@ def test_inference_workflows_remove_stale_torchvision_and_verify_server_import()
         assert '"$PYTHON_BIN" -m pip uninstall -y torchvision' in install_step
         assert "import vllm.entrypoints.openai.api_server" in verify_step
         assert "torchvision importable:" in verify_step
+
+
+def test_inference_workflows_fetch_target_sha_without_default_branch_clone():
+    for workflow_path in WORKFLOW_PATHS:
+        text = workflow_path.read_text(encoding="utf-8")
+        checkout_step = text[
+            text.index("      - name: Checkout target repo with retry") :
+            text.index("      - name: Prepare Hugging Face cache directories")
+        ]
+
+        assert "git clone --depth 1 \"$repo_url\" \"$temp_dir\"" not in checkout_step
+        assert "git -C \"$temp_dir\" init" in checkout_step
+        assert "git -C \"$temp_dir\" remote add origin \"$repo_url\"" in checkout_step
+        assert (
+            'git -C "$temp_dir" -c protocol.version=2 fetch --no-tags --depth 1 '
+            'origin "$target_ref"'
+        ) in checkout_step
+        assert 'git -C "$temp_dir" checkout --force "$target_sha"' in checkout_step
+        assert (
+            'clone_with_retry "$TARGET_REPO_URL" "$GITHUB_WORKSPACE" '
+            '"$TARGET_REPO_REF" "$TARGET_REPO_SHA"'
+        ) in checkout_step
+
+
+def test_inference_workflows_cleanup_tolerates_checkout_failure():
+    for workflow_path in WORKFLOW_PATHS:
+        text = workflow_path.read_text(encoding="utf-8")
+        cleanup_step = text[
+            text.index("      - name: Cleanup leftover Ascend CI processes") :
+        ]
+
+        assert '[[ -f "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh" ]]' in cleanup_step
+        assert '[[ -f ".github/workflows/scripts/cleanup_ascend_ci_processes.sh" ]]' in cleanup_step
+        assert "target checkout is unavailable" in cleanup_step
