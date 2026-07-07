@@ -448,9 +448,11 @@ checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
 if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
   checkout="."
 fi
-if git -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# Pass safe.directory per-command (-c) because buildkite runs will always fail
+# the next check on git 2.35.2+ due to mixed uses of root and buildkite-agent/uids.
+if git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   vllm_standalone_merge_base="$(
-    git -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
+    git -c "safe.directory=${checkout}" -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
   )"
 fi
 if [[ -z "${vllm_standalone_merge_base}" ]]; then
@@ -534,13 +536,29 @@ else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
 
+  ulimit_core_hard=$(ulimit -H -c)
+  if [[ "$ulimit_core_hard" == "unlimited" ]]; then
+    # docker run can't pass "unlimited" to --ulimit
+    ulimit_core_hard="-1"
+  fi
+   # Disable core dumps in the ROCm test container unless the ROCm debug agent is enabled
+  coredump_flags="--ulimit core=0:$ulimit_core_hard"
+  if [[ "$commands" == *"ROCm debug agent enabled"* ]]; then
+    # Works around https://github.com/rocm/rocm-systems/issues/6206
+    coredump_flags='-e HSA_COREDUMP_PATTERN="/tmp/gpucore.%p"'
+  else
+    echo "ROCm debug agent not enabled, coredumps are disabled in the test container."
+  fi
+
   docker run \
+    -t -i \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
     --network=host \
     --shm-size=16gb \
     --group-add "$render_gid" \
     --rm \
+    $coredump_flags \
     -e HF_TOKEN \
     -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
     -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \

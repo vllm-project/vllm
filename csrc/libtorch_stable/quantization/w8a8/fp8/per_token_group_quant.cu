@@ -203,6 +203,8 @@ void per_token_group_quant_8bit(const torch::stable::Tensor& input,
   STD_TORCH_CHECK(input.numel() % group_size == 0);
   STD_TORCH_CHECK(output_s.dim() == 2);
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
   cudaStream_t stream = get_current_cuda_stream();
 
   constexpr int THREADS_PER_GROUP = 16;
@@ -506,6 +508,8 @@ void per_token_group_quant_8bit_packed(const torch::stable::Tensor& input,
                   "]; got [", output_s_packed.stride(0), ", ",
                   output_s_packed.stride(1), "].");
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
   cudaStream_t stream = get_current_cuda_stream();
 
   constexpr int THREADS_PER_GROUP = 8;
