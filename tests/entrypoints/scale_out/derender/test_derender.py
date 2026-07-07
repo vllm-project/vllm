@@ -622,7 +622,7 @@ async def test_derender_chat_oversized_logprobs_rejected(client):
 
 @pytest.mark.asyncio
 async def test_derender_chat_oversized_top_logprobs_rejected(client):
-    """top_logprobs count exceeding 20 returns 400."""
+    """top_logprobs count exceeding max_logprobs (default 20) returns 400."""
     oversized_top_logprobs = {
         "content": [
             {
@@ -654,7 +654,9 @@ async def test_derender_chat_oversized_top_logprobs_rejected(client):
         },
     )
     assert response.status_code == 400
-    assert "top_logprobs count" in response.json()["error"]["message"]
+    msg = response.json()["error"]["message"]
+    assert "top_logprobs count" in msg
+    assert "max_logprobs" in msg
 
 
 @pytest.mark.asyncio
