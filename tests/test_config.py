@@ -1471,6 +1471,25 @@ def test_scheduler_config_init():
         print(SchedulerConfig.default_factory().max_model_len)
 
 
+def test_speculative_config_hash_includes_draft_model_config():
+    def make_spec_config(draft_hash: str):
+        draft_model_config = SimpleNamespace(
+            compute_hash=lambda: draft_hash,
+            hf_config=SimpleNamespace(eagle_aux_hidden_state_layer_ids=(1, 2)),
+        )
+        return SimpleNamespace(
+            method="dflash",
+            draft_model_config=draft_model_config,
+        )
+
+    k26_like = make_spec_config("draft-model-k26")
+    k27_like = make_spec_config("draft-model-k27")
+
+    assert SpeculativeConfig.compute_hash(k26_like) != SpeculativeConfig.compute_hash(
+        k27_like
+    )
+
+
 @pytest.mark.parametrize(
     (
         "model_id",
