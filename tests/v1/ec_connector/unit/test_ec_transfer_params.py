@@ -80,10 +80,11 @@ def test_free_request_calls_ec_connector_and_surfaces_params():
         prompt_token_ids=[1, 2, 3],
         sampling_params=sp,
         pooling_params=None,
+        client_index=0,
     )
-    request.status = RequestStatus.FINISHED_STOPPED
-
     scheduler = create_scheduler(use_ec_connector=True, ec_role="ec_producer")
+    scheduler.add_request(request)
+    request.status = RequestStatus.FINISHED_STOPPED
 
     mock_ec = MagicMock()
     mock_ec.request_finished.return_value = (False, EC_PARAMS)
@@ -105,10 +106,11 @@ def test_free_request_without_ec_connector_returns_none():
         prompt_token_ids=[1, 2, 3],
         sampling_params=sp,
         pooling_params=None,
+        client_index=0,
     )
-    request.status = RequestStatus.FINISHED_STOPPED
-
     scheduler = create_scheduler(use_ec_connector=True, ec_role="ec_producer")
+    scheduler.add_request(request)
+    request.status = RequestStatus.FINISHED_STOPPED
 
     kv_params, ec_params = scheduler._free_request(request)
 
