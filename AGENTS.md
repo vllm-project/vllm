@@ -86,7 +86,10 @@ When adding tests:
 - **Test behavior, not structure.** Assert observable outcomes through public
   APIs; skip trivial wiring and implementation-locked checks.
 - **Every test needs a reason.** Prefer regression tests and paths that break
-  easily; flaky tests are worse than no tests.
+  easily; state the reason in the test name or docstring. Flaky tests are worse
+  than no tests.
+- **Keep it minimal.** One behavior per test and the smallest setup that
+  triggers it; if the test diff dwarfs the code change, cut scope.
 - **No one-off kernel benchmarks in `tests/`.** Put kernel perf work in
   `benchmarks/kernels/`; prove correctness in existing pytest suites.
 - **Run model evals for model-affecting changes.** Search `tests/evals/` or use
