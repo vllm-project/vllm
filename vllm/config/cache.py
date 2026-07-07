@@ -206,6 +206,7 @@ class CacheConfig:
         ignored_factors = {
             # Runtime/derived knobs that don't affect compiled graph shape
             "gpu_memory_utilization",
+            "kv_cache_memory_bytes",
             "is_attention_free",
             "num_gpu_blocks_override",
             "enable_prefix_caching",
