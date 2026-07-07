@@ -87,6 +87,8 @@ void moe_permute_impl(
       inv_permuted_idx.sizes().equals(token_expert_indices.sizes()),
       "token_expert_indices shape must be same as inv_permuted_idx");
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      input.get_device_index());
   auto device = input.device();
   auto n_token = input.sizes()[0];
   auto n_hidden = input.sizes()[1];
@@ -182,6 +184,8 @@ void moe_unpermute(
       permuted_hidden_states.scalar_type() == hidden_states.scalar_type(),
       "permuted_hidden_states dtype must be same as hidden_states");
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      hidden_states.get_device_index());
   auto n_token = hidden_states.size(0);
   auto n_hidden = hidden_states.size(1);
   auto stream = get_current_cuda_stream(hidden_states.get_device_index());
@@ -238,6 +242,8 @@ void shuffle_rows(const torch::stable::Tensor& input_tensor,
   STD_TORCH_CHECK(input_tensor.scalar_type() == output_tensor.scalar_type(),
                   "Input and output tensors must have the same data type");
 
+  const torch::stable::accelerator::DeviceGuard device_guard(
+      output_tensor.get_device_index());
   auto stream = get_current_cuda_stream(output_tensor.get_device_index());
   const int64_t blocks = output_tensor.size(0);
   const int64_t threads = 256;
