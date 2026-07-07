@@ -146,7 +146,12 @@ class CpuPlatform(Platform):
             parallel_config.distributed_executor_backend = "mp"
 
         if parallel_config.worker_cls == "auto":
-            parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
+            if cache_config.simulate_forward:
+                parallel_config.worker_cls = (
+                    "vllm.v1.worker.simulated_cpu_worker.SimulatedCPUWorker"
+                )
+            else:
+                parallel_config.worker_cls = "vllm.v1.worker.cpu_worker.CPUWorker"
         # Disable DBO
         if parallel_config.enable_dbo:
             logger.warning_once("Dual-Batch Overlap is not supported on CPU, disabled.")

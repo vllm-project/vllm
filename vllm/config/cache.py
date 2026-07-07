@@ -179,6 +179,12 @@ class CacheConfig:
     gpu_memory_utilization. Note that kv_cache_memory_bytes
     (when not-None) ignores gpu_memory_utilization"""
 
+    simulate_forward: bool = False
+    """Use deterministic simulated token generation instead of model forward.
+    This is intended for scheduler and KV-cache simulation tests. KV-cache
+    blocks are virtual in this mode; use kv_cache_memory_bytes to set the
+    simulated capacity."""
+
     kv_offloading_size: float | None = None
     """Size of the KV cache offloading buffer in GiB. When TP > 1, this is
     the total buffer size summed across all TP ranks. By default, this is set
@@ -223,6 +229,8 @@ class CacheConfig:
             "kv_cache_max_concurrency",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
+            # Simulated cache controls do not affect a compiled graph.
+            "simulate_forward",
         }
 
         from vllm.config.utils import get_hash_factors, hash_factors

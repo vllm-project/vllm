@@ -522,6 +522,7 @@ class EngineArgs:
     offload_params: set[str] = get_field(PrefetchOffloadConfig, "offload_params")
     gpu_memory_utilization: float = CacheConfig.gpu_memory_utilization
     kv_cache_memory_bytes: int | None = CacheConfig.kv_cache_memory_bytes
+    simulate_forward: bool = CacheConfig.simulate_forward
     max_num_batched_tokens: int | None = None
     max_num_partial_prefills: int = SchedulerConfig.max_num_partial_prefills
     max_long_partial_prefills: int = SchedulerConfig.max_long_partial_prefills
@@ -1158,6 +1159,9 @@ class EngineArgs:
         cache_group.add_argument(
             "--kv-cache-memory-bytes", **cache_kwargs["kv_cache_memory_bytes"]
         )
+        cache_group.add_argument(
+            "--simulate-forward", **cache_kwargs["simulate_forward"]
+        )
         cache_group.add_argument("--kv-cache-dtype", **cache_kwargs["cache_dtype"])
         cache_group.add_argument(
             "--num-gpu-blocks-override", **cache_kwargs["num_gpu_blocks_override"]
@@ -1611,6 +1615,17 @@ class EngineArgs:
                 self.seed,
             )
 
+        hf_overrides = self.hf_overrides
+        quantization = self.quantization
+        quantization_config = self.quantization_config
+        if self.simulate_forward:
+            quantization = None
+            quantization_config = None
+            if not callable(hf_overrides):
+                # Simulated forward never loads weights; ignore checkpoint
+                # weight quantization while preserving attention/KV metadata.
+                hf_overrides = {**hf_overrides, "quantization_config": None}
+
         return ModelConfig(
             model=self.model,
             model_weights=self.model_weights,
@@ -1627,12 +1642,12 @@ class EngineArgs:
             revision=self.revision,
             code_revision=self.code_revision,
             hf_token=self.hf_token,
-            hf_overrides=self.hf_overrides,
+            hf_overrides=hf_overrides,
             model_class_overrides=self.model_class_overrides,
             tokenizer_revision=self.tokenizer_revision,
             max_model_len=self.max_model_len,
-            quantization=self.quantization,
-            quantization_config=self.quantization_config,
+            quantization=quantization,
+            quantization_config=quantization_config,
             allow_deprecated_quantization=self.allow_deprecated_quantization,
             enforce_eager=self.enforce_eager,
             enable_return_routed_experts=self.enable_return_routed_experts,
@@ -1876,6 +1891,7 @@ class EngineArgs:
             block_size=self.block_size,  # type: ignore[arg-type]
             gpu_memory_utilization=self.gpu_memory_utilization,
             kv_cache_memory_bytes=self.kv_cache_memory_bytes,
+            simulate_forward=self.simulate_forward,
             cache_dtype=resolved_cache_dtype,  # type: ignore[arg-type]
             is_attention_free=model_config.is_attention_free,
             num_gpu_blocks_override=self.num_gpu_blocks_override,
@@ -2148,6 +2164,7 @@ class EngineArgs:
         assert model_config.max_model_len is not None, (
             "max_model_len must be set by this point"
         )
+        async_scheduling = False if self.simulate_forward else self.async_scheduling
         scheduler_config = SchedulerConfig(
             runner_type=model_config.runner_type,
             max_num_batched_tokens=self.max_num_batched_tokens,
@@ -2166,7 +2183,7 @@ class EngineArgs:
             watermark=self.watermark,
             prefill_schedule_interval=self.prefill_schedule_interval,
             disable_hybrid_kv_cache_manager=self.disable_hybrid_kv_cache_manager,
-            async_scheduling=self.async_scheduling,
+            async_scheduling=async_scheduling,
             stream_interval=self.stream_interval,
         )
 
@@ -2368,6 +2385,54 @@ class EngineArgs:
 
     def _check_feature_supported(self):
         """Raise an error if the feature is not supported."""
+        if self.simulate_forward:
+            if not current_platform.is_cpu():
+                _raise_unsupported_error(
+                    feature_name="simulated forward on non-CPU platforms"
+                )
+            if self.pipeline_parallel_size != 1:
+                _raise_unsupported_error(
+                    feature_name="simulated forward with pipeline parallelism"
+                )
+            if self.tensor_parallel_size != 1:
+                _raise_unsupported_error(
+                    feature_name="simulated forward with tensor parallelism"
+                )
+            if self.data_parallel_size != 1:
+                _raise_unsupported_error(
+                    feature_name="simulated forward with data parallelism"
+                )
+            if self.enable_lora:
+                _raise_unsupported_error(feature_name="simulated forward with LoRA")
+            if self.speculative_config is not None or self.spec_model is not None:
+                _raise_unsupported_error(
+                    feature_name="simulated forward with speculative decoding"
+                )
+            if self.kv_transfer_config is not None:
+                _raise_unsupported_error(
+                    feature_name="simulated forward with KV transfer"
+                )
+            if self.ec_transfer_config is not None:
+                _raise_unsupported_error(
+                    feature_name="simulated forward with EC transfer"
+                )
+            if self.weight_transfer_config is not None:
+                _raise_unsupported_error(
+                    feature_name="simulated forward with weight transfer"
+                )
+            if self.enable_return_routed_experts:
+                _raise_unsupported_error(
+                    feature_name="simulated forward with routed experts capture"
+                )
+            if self.async_scheduling:
+                _raise_unsupported_error(
+                    feature_name="simulated forward with async scheduling"
+                )
+            if self.runner not in ("auto", "generate"):
+                _raise_unsupported_error(
+                    feature_name="simulated forward for non-generation runners"
+                )
+
         # No Concurrent Partial Prefills so far.
         if (
             self.max_num_partial_prefills != SchedulerConfig.max_num_partial_prefills
