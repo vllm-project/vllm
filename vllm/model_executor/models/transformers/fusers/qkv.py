@@ -127,7 +127,7 @@ class QKVFuser(StackedFuser):
         if len({id(block) for block, _ in blocks}) != 1:
             raise ValueError("projection calls are in different blocks")
 
-        # q(x), k(x), v(x) -> q, k, v = qkv(x).split(self.qkv.output_sizes, -1)
+        # q(x), k(x), v(x) -> q, k, v = qkv(x).split(qkv.output_sizes / qkv.tp_size, -1)
         names = {node.id for node in ast.walk(funcdef) if isinstance(node, ast.Name)}
         temps = [f"{name}_fused" for name in (self.q_name, self.k_name, self.v_name)]
         if names & set(temps):
