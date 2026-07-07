@@ -1225,6 +1225,16 @@ class MediaSettings(BaseSettings):
             "in profiling."
         ),
     )
+    max_image_pixels: int = Field(
+        default=178_956_970,
+        description=(
+            "Maximum decoded image size in pixels. Small compressed images "
+            "can expand into gigabytes of raster memory. This limit is "
+            "enforced before decoding so the memory is never allocated. "
+            "Default matches PIL's built-in 2x decompression-bomb threshold "
+            "(~179M pixels, ~680 MB RGB)."
+        ),
+    )
     video_loader_backend: str = Field(
         default="opencv",
         description=(
@@ -1365,6 +1375,13 @@ class RocmSettings(BaseSettings):
             "switch to enable the rest of the other operations."
         ),
     )
+    rocm_use_aiter_custom_ar: bool = Field(
+        default=True,
+        description=(
+            "Use AITER's CustomAllreduce as the custom-allreduce backend "
+            "inside vLLM's CudaCommunicator on ROCm."
+        ),
+    )
     mxfp8_emulation_dequant_at_load: bool = Field(
         default=True,
         description=(
@@ -1476,15 +1493,15 @@ class RocmSettings(BaseSettings):
         default=False,
         description="Whether to use the shuffled kv cache layout.",
     )
-    rocm_quick_reduce_quantization: Literal["FP", "INT8", "INT6", "INT4", "NONE"] = (
-        Field(
-            default="NONE",
-            description=(
-                "Custom quick allreduce kernel for MI3* cards. Choice of "
-                "quantization level: FP, INT8, INT6, INT4 or NONE. "
-                "Recommended for large models to get allreduce."
-            ),
-        )
+    rocm_quick_reduce_quantization: Literal[
+        "FP", "INT8", "INT6", "INT4", "INT3", "NONE"
+    ] = Field(
+        default="NONE",
+        description=(
+            "Custom quick allreduce kernel for MI3* cards. Choice of "
+            "quantization level: FP, INT8, INT6, INT4, INT3 or NONE. "
+            "Recommended for large models to get allreduce."
+        ),
     )
     rocm_quick_reduce_cast_bf16_to_fp16: bool = Field(
         default=True,
@@ -1732,6 +1749,15 @@ class QuantSettings(BaseSettings):
         default=True,
         description="Whether to use fused grouped_topk used for MoE expert selection.",
     )
+    moe_skip_padding: bool = Field(
+        default=False,
+        description=(
+            "Skip cudagraph/DP padding tokens in the MoE path by forcing "
+            "their expert ids to -1 so the dispatch and experts drop them. "
+            "Requires a MoE kernel that treats topk_id == -1 as a skip "
+            "sentinel; off by default because not all kernels support it yet."
+        ),
+    )
     deepep_buffer_size_mb: int = Field(
         default=1024,
         description="The size in MB of the buffers (NVL and RDMA) used by DeepEP.",
@@ -1869,6 +1895,16 @@ class QuantSettings(BaseSettings):
             "for A/B benchmarking the TD path."
         ),
     )
+    gpu_sync_check: Literal["warn", "error"] | None = Field(
+        default=None,
+        description=(
+            "If set, enable PyTorch's GPU<->CPU synchronization debug mode "
+            "around the worker's `execute_model` and `sample_tokens` calls. "
+            'Valid values are "warn" (print a warning on each sync) or '
+            '"error" (raise on sync). Unset disables the check. See '
+            "`torch.cuda.set_sync_debug_mode`."
+        ),
+    )
     compute_nans_in_logits: bool = Field(
         default=False,
         description=(
@@ -2002,6 +2038,17 @@ class ConnectorSettings(BaseSettings):
         description=(
             "Log per-batch memory/disk tier breakdown on external GETs in "
             "the Mooncake store connector."
+        ),
+    )
+    mooncake_load_recv_threads: int = Field(
+        default=1,
+        description=(
+            "Number of parallel KV-load receive threads per worker rank. "
+            "Lets the per-request control overhead (Python prep + master "
+            "key lookup) of one request overlap with the RDMA transfer of "
+            "another, keeping the transfer engine's queue pairs busy. Helps "
+            "when that overhead is significant or per-request batches are "
+            "too small to saturate the link on their own."
         ),
     )
     mooncake_disk_staging_usable_ratio: float = Field(
@@ -2597,6 +2644,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
         "VLLM_MAX_AUDIO_DECODE_DURATION_S",
         "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
+        "VLLM_MAX_IMAGE_PIXELS",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",

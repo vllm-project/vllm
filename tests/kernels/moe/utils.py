@@ -55,6 +55,7 @@ def make_dummy_moe_config(
     intermediate_size: int = 1,
     in_dtype: torch.dtype = torch.bfloat16,
     max_num_tokens: int = 512,
+    activation: MoEActivation = MoEActivation.SILU,
 ) -> FusedMoEConfig:
     """
     This is a dummy config for the mk constructor interface
@@ -73,7 +74,7 @@ def make_dummy_moe_config(
         else num_experts,
         num_logical_experts=num_experts,
         moe_parallel_config=FusedMoEParallelConfig.make_no_parallel(),
-        activation=MoEActivation.SILU,
+        activation=activation,
         in_dtype=in_dtype,
         device="cuda",
         routing_method=RoutingMethodType.TopK,
@@ -653,3 +654,26 @@ def make_shared_experts(
     return make_shared_experts_with_weights(
         N, K, in_dtype, w1, w2, w1_s=w1_s, w2_s=w2_s, quant_dtype=quant_dtype
     )
+
+
+def check_accuracy(a, b, atol, rtol, percent):
+    """Allow a mismatch percentage of 1 - percent."""
+    if torch.any(torch.isnan(a)):
+        raise Exception("NaN in reference output")
+    if torch.any(torch.isnan(b)):
+        raise Exception("NaN in actual output")
+    if torch.any(torch.isinf(a)):
+        raise Exception("Inf in reference output")
+    if torch.any(torch.isinf(b)):
+        raise Exception("Inf in actual output")
+    assert a.shape == b.shape, f"Shape mismatch: {a.shape} vs {b.shape}"
+
+    left = torch.abs(a - b)
+    right = atol + rtol * torch.abs(b)
+    count = torch.sum(left > right)
+    mismatch_percent = count / a.numel()
+    if mismatch_percent > 1 - percent:
+        raise Exception(
+            f"Mismatch percentage is {mismatch_percent:.4f} for rtol {rtol} "
+            f"(threshold: {1 - percent:.4f})"
+        )

@@ -15,7 +15,7 @@ Register a lazy module mapping.
 Example:
     ToolParserManager.register_lazy_module(
         name="kimi_k2",
-        module_path="vllm.tool_parsers.kimi_k2_parser",
+        module_path="vllm.tool_parsers.kimi_k2_tool_parser",
         class_name="KimiK2ToolParser",
     )
 """
@@ -31,12 +31,12 @@ _TOOL_PARSERS_TO_REGISTER = {
         "DeepSeekV31ToolParser",
     ),
     "deepseek_v32": (
-        "deepseekv32_tool_parser",
-        "DeepSeekV32ToolParser",
+        "deepseekv32_engine_tool_parser",
+        "DeepSeekV32EngineToolParser",
     ),
     "deepseek_v4": (
-        "deepseekv4_tool_parser",
-        "DeepSeekV4ToolParser",
+        "deepseekv4_engine_tool_parser",
+        "DeepSeekV4EngineToolParser",
     ),
     "cohere_command3": (
         "cohere_command_tool_parser",
@@ -51,8 +51,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Ernie45ToolParser",
     ),
     "glm45": (
-        "glm4_moe_tool_parser",
-        "Glm4MoeModelToolParser",
+        "glm47_moe_tool_parser",
+        "Glm47MoeModelToolParser",
     ),
     "glm47": (
         "glm47_moe_tool_parser",
@@ -130,10 +130,6 @@ _TOOL_PARSERS_TO_REGISTER = {
         "minimax_m3_tool_parser",
         "MinimaxM3ToolParser",
     ),
-    "minimax": (
-        "minimax_tool_parser",
-        "MinimaxToolParser",
-    ),
     "minicpm5": (
         "minicpm5xml_tool_parser",
         "MiniCPM5XMLToolParser",
@@ -167,8 +163,8 @@ _TOOL_PARSERS_TO_REGISTER = {
         "Qwen3EngineToolParser",
     ),
     "seed_oss": (
-        "seed_oss_tool_parser",
-        "SeedOssToolParser",
+        "seed_oss_engine_tool_parser",
+        "SeedOssEngineToolParser",
     ),
     "step3": (
         "step3_tool_parser",

@@ -1,6 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-from enum import Enum
 from typing import TYPE_CHECKING
 
 import torch
@@ -15,12 +14,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class FlashinferMoeBackend(Enum):
-    TENSORRT_LLM = "TensorRT-LLM"
-    CUTLASS = "CUTLASS"
-    CUTEDSL = "CUTEDSL"
-
-
 def activation_to_flashinfer_int(activation: MoEActivation) -> int:
     return activation_to_flashinfer_type(activation).value
 
@@ -33,9 +26,12 @@ def activation_to_flashinfer_type(activation: MoEActivation) -> "ActivationType"
         MoEActivation.SILU_NO_MUL: ActivationType.Silu,
         MoEActivation.GELU_NO_MUL: ActivationType.Gelu,
         MoEActivation.SILU: ActivationType.Swiglu,
+        # SwiGLU-OAI uses Swiglu; the OAI alpha/beta/clamp come from gemm1_* args.
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
         MoEActivation.GELU: ActivationType.Geglu,
         MoEActivation.GELU_TANH: ActivationType.Geglu,
         MoEActivation.RELU2_NO_MUL: ActivationType.Relu2,
+        MoEActivation.SWIGLUOAI_UNINTERLEAVE: ActivationType.Swiglu,
     }
     return ACTIVATION_TO_FI_ACTIVATION[activation]
 
@@ -94,20 +90,11 @@ def rotate_weights_for_fi_trtllm_fp8_per_tensor_moe(
     )
 
 
-def is_flashinfer_supporting_global_sf(backend: FlashinferMoeBackend | None) -> bool:
-    # TODO(shuw@nvidia): Update when new backends are added.
-    backends_supporting_global_sf = (
-        FlashinferMoeBackend.CUTLASS,
-        FlashinferMoeBackend.TENSORRT_LLM,
-        FlashinferMoeBackend.CUTEDSL,
-    )
-    return backend in backends_supporting_global_sf
-
-
 def convert_moe_weights_to_flashinfer_trtllm_block_layout(
     cache_permute_indices: dict[torch.Size, torch.Tensor],
     w13_weight: torch.Tensor,
     w2_weight: torch.Tensor,
+    is_gated_act_gemm: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert expert weights to FlashInfer's block layout.
 
@@ -166,9 +153,11 @@ def convert_moe_weights_to_flashinfer_trtllm_block_layout(
             cache_permute_indices,
             w13_expert_uint8,
             epilogue_tile_m,
+            is_gated_act_gemm=is_gated_act_gemm,
         )
-        rows = w13_expert_uint8.shape[0]
-        permute_indices = (permute_indices + rows // 2) % rows
+        if is_gated_act_gemm:
+            rows = w13_expert_uint8.shape[0]
+            permute_indices = (permute_indices + rows // 2) % rows
         _copy_permuted_expert_to_block_layout(
             w13_weights_shuffled_tensor[i],
             w13_expert_uint8,
@@ -288,12 +277,12 @@ def align_trtllm_fp4_moe_hidden_dim_for_fi(
     return padded_w13, padded_w13_scale, padded_w2, padded_w2_scale, padded_hidden_size
 
 
-def align_fp8_moe_weights_for_fi(
+def align_moe_weights_for_fi(
     w13: torch.Tensor, w2: torch.Tensor, is_act_and_mul: bool, min_alignment: int = 16
 ) -> tuple[torch.Tensor, torch.Tensor, int]:
     """Pad intermediate size so FlashInfer kernels' alignment constraints hold.
 
-    Some FlashInfer FP8 MoE kernels require the (gated) intermediate size
+    Some FlashInfer MoE kernels require the (gated) intermediate size
     used for GEMM to be divisible by a small alignment value. When this is
     not satisfied (e.g. with certain tensor-parallel sizes), we pad the
     gate/up and down projection weights along the intermediate dim.
@@ -492,7 +481,7 @@ def prepare_fp8_moe_layer_for_fi(
     # for the gate-up proj. Pad the weights to respect this.
     if not block_quant:
         min_alignment = 16 if is_gated else 128
-        w13, w2, new_intermediate = align_fp8_moe_weights_for_fi(
+        w13, w2, new_intermediate = align_moe_weights_for_fi(
             w13,
             w2,
             layer.moe_config.is_act_and_mul,
