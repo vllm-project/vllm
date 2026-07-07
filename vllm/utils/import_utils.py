@@ -559,10 +559,10 @@ def check_torchcodec_available():
     try:
         import torchcodec  # noqa: F401
     except RuntimeError as e:
-        # Some modules (e.g. torchcodec) raise RuntimeError instead of
-        # ImportError when a native dependency fails to load, with a
-        # message that embeds a per-backend-version traceback dump.
-        # Trim it down to just the human-readable summary.
+        # torchcodec will raise RuntimeError during import instead
+        # of ImportError when system ffmpeg unavailable, with a
+        # message that can leak sensitive system information.
+        # Trim it down to avoid it.
         marker = (
             "The following exceptions were raised as we tried to load libtorchcodec:"
         )
