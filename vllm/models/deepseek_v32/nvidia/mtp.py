@@ -36,7 +36,7 @@ from vllm.platforms import current_platform
 from vllm.sequence import IntermediateTensors
 
 from .kernels import fused_eh_norm
-from .model import DeepseekV32DecoderLayer
+from .model import DeepseekV32DecoderLayer, _all_gather_sp_states
 
 
 class DeepseekV32MultiTokenPredictorLayer(nn.Module):
@@ -91,8 +91,13 @@ class DeepseekV32MultiTokenPredictorLayer(nn.Module):
         )
         # mtp_block's MoE output is left un-reduced (skip_final_all_reduce); the
         # main model fuses that all-reduce into the next norm, but here the
-        # recycle hidden is consumed directly, so reduce it now.
-        hidden_states = tensor_model_parallel_all_reduce(hidden_states)
+        # recycle hidden is consumed directly.
+        if hidden_states.shape[0] != positions.shape[0]:
+            hidden_states, residual = _all_gather_sp_states(
+                hidden_states, residual, positions.shape[0]
+            )
+        else:
+            hidden_states = tensor_model_parallel_all_reduce(hidden_states)
         # Recycle the POST-final-norm hidden into the next draft step. The
         # residual-add is fused into the final RMSNorm so it is computed
         # exactly once, and the result is returned for both tuple positions:
