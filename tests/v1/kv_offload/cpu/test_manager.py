@@ -842,4 +842,3 @@ def test_touch_forwards_req_context_to_policy(monkeypatch):
     assert len(received) == 1
     assert received[0][0] == keys
     assert received[0][1] is ctx
-
