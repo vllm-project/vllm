@@ -326,3 +326,31 @@ def test_dynamic_sd_only_captures_scheduled_query_lengths(monkeypatch):
                 assert desc.num_tokens == num_tokens
                 assert desc.num_reqs is None
             assert desc.num_active_loras == 0
+
+
+def test_staging_buffer_tokens_covers_max_capture_desc():
+    """The output staging buffers must be sized to the max num_tokens across
+    ALL capture descriptors, not whichever descriptor runs first — otherwise
+    the descending capture order silently becomes load-bearing and any
+    smaller-first order under-allocates and crashes the later, larger warmup.
+    """
+    desc = gpu_cudagraph_utils.BatchExecutionDescriptor
+    fake = SimpleNamespace(
+        _capture_descs={
+            CUDAGraphMode.PIECEWISE: [
+                desc(cg_mode=CUDAGraphMode.PIECEWISE, num_tokens=512, num_reqs=None),
+                desc(cg_mode=CUDAGraphMode.PIECEWISE, num_tokens=8, num_reqs=None),
+            ],
+            CUDAGraphMode.FULL: [
+                desc(cg_mode=CUDAGraphMode.FULL, num_tokens=64, num_reqs=8),
+            ],
+        }
+    )
+    tokens = gpu_cudagraph_utils.CudaGraphManager._staging_buffer_tokens
+    # Capacity is the global max, regardless of the current descriptor.
+    assert tokens(fake, 8) == 512
+    assert tokens(fake, 512) == 512
+    # A current descriptor larger than every registered one still fits.
+    assert tokens(fake, 1024) == 1024
+    # No descriptors registered: fall back to the current size.
+    assert tokens(SimpleNamespace(_capture_descs={}), 16) == 16

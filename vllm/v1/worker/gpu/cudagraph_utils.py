@@ -296,6 +296,16 @@ class CudaGraphManager:
     def needs_capture(self) -> bool:
         return len(self._capture_descs) > 0
 
+    def _staging_buffer_tokens(self, num_tokens: int) -> int:
+        """Max num_tokens across all capture descriptors, so staging-buffer
+        capacity does not depend on capture order. Falls back to the current
+        descriptor's size if it exceeds every registered descriptor."""
+        max_desc_tokens = max(
+            (d.num_tokens for descs in self._capture_descs.values() for d in descs),
+            default=0,
+        )
+        return max(max_desc_tokens, num_tokens)
+
     @torch.inference_mode()
     def capture(
         self,
@@ -551,12 +561,16 @@ class ModelCudaGraphManager(CudaGraphManager):
                     else:
                         hidden_states = model_output
                         aux_hidden_states = []
+                    capacity = self._staging_buffer_tokens(num_tokens)
                     if self.hidden_states is None:
-                        self.hidden_states = torch.empty_like(hidden_states)
+                        self.hidden_states = hidden_states.new_empty(
+                            (capacity, *hidden_states.shape[1:])
+                        )
                     self.hidden_states[:num_tokens] = hidden_states
                     if self.use_aux_hidden_state_outputs and not self.aux_hidden_states:
                         self.aux_hidden_states = [
-                            torch.empty_like(x) for x in aux_hidden_states
+                            x.new_empty((capacity, *x.shape[1:]))
+                            for x in aux_hidden_states
                         ]
                     for i, aux in enumerate(aux_hidden_states):
                         self.aux_hidden_states[i][:num_tokens] = aux
@@ -565,8 +579,12 @@ class ModelCudaGraphManager(CudaGraphManager):
                     assert isinstance(model_output, IntermediateTensors)
                     intermediate_tensors = model_output
                     if self.intermediate_tensors is None:
-                        self.intermediate_tensors = IntermediateTensors.empty_like(
-                            intermediate_tensors
+                        capacity = self._staging_buffer_tokens(num_tokens)
+                        self.intermediate_tensors = IntermediateTensors(
+                            {
+                                k: v.new_empty((capacity, *v.shape[1:]))
+                                for k, v in intermediate_tensors.tensors.items()
+                            }
                         )
                     for k, v in intermediate_tensors.tensors.items():
                         self.intermediate_tensors[k][:num_tokens] = v
