@@ -115,9 +115,9 @@
   - `RWKV7_USE_ALT_RECURRENT_KERNEL`
   - `RWKV7_USE_FUSED_CMIX`
   - `RWKV7_USE_DIRECT_LINEAR`
-- **RWKV7 已声明 `supports_mamba_prefix_caching`**
-  - 当前 upstream-prep 分支会按 base `MambaModelConfig` 正式暴露 prefix caching `all` 支持
-  - 后续仍需继续评估：是否还需要进一步收敛 cache-all 相关实现边界，以便更适合首个 upstream PR
+- **RWKV7 首版不再公开声明 `supports_mamba_prefix_caching`**
+  - 当前 upstream-prep 分支继续保留内部 cache-all helper / 测试，用于后续 follow-up 验证
+  - 但对真实 `model_config` 的公开契约已收敛到更保守的 prefix caching `align` 路径，使首个 upstream PR 更干净
 
 ### 本轮推进优先级（与用户确认一致）
 
@@ -143,7 +143,7 @@
     - `--reasoning-parser rwkv`
     - `--tool-call-parser rwkv`
     - `--enable-auto-tool-choice`
-    - `--enable-prefix-caching --mamba-cache-mode all`
+    - `--enable-prefix-caching --mamba-cache-mode align`
   - 本地检查通过：
     - `GET /v1/models` 返回 `rwkv7-7700`
     - `POST /v1/chat/completions` 成功返回 `OK`
@@ -154,13 +154,22 @@
 ## 2026-07-06 最新状态补充
 
 1. **当前轮代码瘦身已落地**
-   - `vllm/model_executor/models/rwkv7.py`：移除 `SupportsMambaPrefixCaching`
-   - `vllm/model_executor/models/config.py`：删除 `RWKV7ForCausalLMConfig`，并把 `MODELS_CONFIG_MAP["RWKV7ForCausalLM"]` 切回 `MambaModelConfig`
-   - `tests/model_executor/test_rwkv7.py`：删掉旧 runtime-policy 测试，补上两条更贴近当前目标的断言：
+   - `vllm/model_executor/models/rwkv7.py`：移除 `SupportsMambaPrefixCaching`，不再把 RWKV7 的 cache-all prefix caching 能力作为首个 upstream PR 的公开模型契约。
+   - `vllm/model_executor/models/config.py`：继续使用通用 `MambaModelConfig`，不引入 RWKV7 专属 runtime policy 包装。
+   - `tests/model_executor/test_rwkv7.py`：把策略断言收敛到更小公开边界：
      - `test_rwkv7_uses_base_mamba_model_config`
      - `test_rwkv7_does_not_declare_mamba_prefix_caching_support`
+     - `test_rwkv7_prefix_caching_defaults_to_align`
+     - `test_rwkv7_prefix_caching_all_mode_falls_back_to_align`
 
-2. **当前分支跑测试时必须注意 import 指向**
+2. **`--trust-remote-code` 当前含义**
+   - 这不是当前 RWKV7 vLLM 适配本身的 blocker，更像是 **测试 checkpoint 的 HF 打包方式** 还保留了 custom code / `auto_map` 依赖。
+   - 对可信的本地模型验证来说，这没有直接运行时风险；但对“首个 upstream PR 要尽量干净”这个目标来说，它意味着 **该 checkpoint 还不是纯原生 HF config + vLLM 原生模型类即可加载** 的状态。
+   - 因此：
+     - **不影响** 当前分支继续验证 RWKV7 runtime / serve / parser / fused kernel 迁移；
+     - 但 **最好不要** 把“仍需 `--trust-remote-code`”当作 upstream-ready checkpoint 体验。后续若要彻底去掉它，需要单独清理模型仓库侧的 config / modeling 依赖。
+
+3. **当前分支跑测试时必须注意 import 指向**
    - `.venv` 来自 `uv venv --system-site-packages`，并复用了 `vllm` 环境。
    - 该环境里已有一个指向 `vllm-dev` 的 editable 安装。
    - 如果不显式设置 `PYTHONPATH`，测试可能误跑到 `vllm-dev`。

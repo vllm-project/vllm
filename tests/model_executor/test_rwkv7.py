@@ -912,11 +912,13 @@ def test_rwkv7_uses_base_mamba_model_config():
     assert MODELS_CONFIG_MAP["RWKV7ForCausalLM"] is MambaModelConfig
 
 
-def test_rwkv7_declares_mamba_prefix_caching_support():
-    assert getattr(RWKV7ForCausalLM, "supports_mamba_prefix_caching", False) is True
+def test_rwkv7_does_not_declare_mamba_prefix_caching_support():
+    assert (
+        getattr(RWKV7ForCausalLM, "supports_mamba_prefix_caching", False) is False
+    )
 
 
-def test_rwkv7_prefix_caching_defaults_to_cache_all(tmp_path: Path, monkeypatch):
+def test_rwkv7_prefix_caching_defaults_to_align(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "vllm_cache"))
 
     model_path = _write_test_model_config(tmp_path)
@@ -938,11 +940,39 @@ def test_rwkv7_prefix_caching_defaults_to_cache_all(tmp_path: Path, monkeypatch)
         device_config=DeviceConfig("cpu"),
     )
 
-    assert vllm_config.model_config.supports_mamba_prefix_caching is True
-    assert vllm_config.cache_config.mamba_cache_mode == "all"
+    assert vllm_config.model_config.supports_mamba_prefix_caching is False
+    assert vllm_config.cache_config.mamba_cache_mode == "align"
     assert vllm_config.cache_config.mamba_block_size == (
         vllm_config.cache_config.block_size
     )
+
+
+def test_rwkv7_prefix_caching_all_mode_falls_back_to_align(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.setenv("VLLM_CACHE_ROOT", str(tmp_path / "vllm_cache"))
+
+    model_path = _write_test_model_config(tmp_path)
+    vllm_config = VllmConfig(
+        model_config=ModelConfig(
+            str(model_path),
+            trust_remote_code=False,
+            dtype="float32",
+            runner="generate",
+        ),
+        parallel_config=ParallelConfig(
+            tensor_parallel_size=1,
+            pipeline_parallel_size=1,
+        ),
+        cache_config=CacheConfig(
+            enable_prefix_caching=True,
+            mamba_cache_mode="all",
+        ),
+        device_config=DeviceConfig("cpu"),
+    )
+
+    assert vllm_config.model_config.supports_mamba_prefix_caching is False
+    assert vllm_config.cache_config.mamba_cache_mode == "align"
 
 
 def test_rwkv7_block_uses_fp32_runtime_state_dtype():

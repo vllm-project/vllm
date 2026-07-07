@@ -316,7 +316,8 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 1. **首版先不声明 `SupportsMambaPrefixCaching`**；
 2. `MODELS_CONFIG_MAP["RWKV7ForCausalLM"]` 直接回落到通用 `MambaModelConfig`；
 3. 这样当开启 prefix caching 时，通用逻辑会自然选择更保守的 `align` 路径，而不是 `all`；
-4. 等后续单独补齐 cache-all / checkpoint emission 后，再考虑把 RWKV7 重新声明为 `SupportsMambaPrefixCaching`。
+4. 若用户显式传 `--mamba-cache-mode all`，也会回落到 `align`；
+5. 等后续单独补齐 cache-all / checkpoint emission 后，再考虑把 RWKV7 重新声明为 `SupportsMambaPrefixCaching`。
 
 ### 这样做的好处
 - 可以直接删除 `RWKV7ForCausalLMConfig` 这整个 RWKV7 专属 policy 类。
@@ -370,7 +371,10 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
   - `MODELS_CONFIG_MAP["RWKV7ForCausalLM"]` 回落到通用 `MambaModelConfig`。
   - 同步删除未发现调用方的 `apply_post_optimization_level_defaults()` 相关代码。
 - [x] `tests/model_executor/test_rwkv7.py`
-  - 删除针对 `RWKV7ForCausalLMConfig` / `supports_mamba_prefix_caching` / cudagraph override 的策略型测试。
+  - 用更小的 public contract 断言替换旧策略测试：
+    - 不再声明 `supports_mamba_prefix_caching`；
+    - 开启 prefix caching 时默认走 `align`；
+    - 即使显式请求 `all` 也先回落到 `align`。
 
 ## 本轮验证情况（2026-07-03）
 - [x] 已执行：
