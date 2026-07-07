@@ -1443,6 +1443,7 @@ def run_generate(
     engine_args.seed = seed
     if tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = tensor_parallel_size
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
     sampling_params = SamplingParams(
@@ -1484,6 +1485,7 @@ def run_chat(
     engine_args.seed = seed
     if tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = tensor_parallel_size
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
     sampling_params = (

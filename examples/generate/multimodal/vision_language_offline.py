@@ -2665,6 +2665,7 @@ def main(args):
     if args.tensor_parallel_size is not None:
         engine_args.tensor_parallel_size = args.tensor_parallel_size
     engine_args = maybe_add_vit_cuda_graph_compilation_config(args, engine_args)
+    os.environ["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
     llm = LLM.from_engine_args(engine_args)
 
     # Don't want to check the flag multiple times, so just hijack `prompts`.
