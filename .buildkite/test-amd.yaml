@@ -502,7 +502,7 @@ steps:
   commands:
   - TARGET_TEST_SUITE=MI300 pytest basic_correctness/ -v -s -m 'distributed(num_gpus=2)'
   - CUDA_VISIBLE_DEVICES=0,1 pytest -v -s model_executor/model_loader/test_sharded_state_loader.py -m '(not slow_test)'
-  - pytest models/transformers/test_backend.py -v -s -m 'distributed(num_gpus=2)'
+  - pytest models/test_transformers.py -v -s -m 'distributed(num_gpus=2)'
   - pytest models/language -v -s -m 'distributed(num_gpus=2)'
   - pytest models/multimodal -v -s -m 'distributed(num_gpus=2)' --ignore models/multimodal/generation/test_whisper.py --ignore models/multimodal/generation/test_phi4siglip.py
   - pytest models/multimodal/generation/test_phi4siglip.py -v -s -m 'distributed(num_gpus=2)'
@@ -1667,10 +1667,10 @@ steps:
   source_file_dependencies:
   - vllm/
   - tests/models/test_terratorch.py
-  - tests/models/transformers/test_backend.py
+  - tests/models/test_transformers.py
   - tests/models/test_registry.py
   commands:
-  - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
+  - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
 
 #-----------------------------------------------------  mi300 · models / language  -----------------------------------------------------#
 
@@ -1890,7 +1890,7 @@ steps:
   - examples/
   commands:
   - pip install --upgrade git+https://github.com/huggingface/transformers
-  - pytest -v -s tests/models/transformers/test_backend.py
+  - pytest -v -s tests/models/test_transformers.py
   - pytest -v -s tests/models/multimodal/test_mapping.py
   - python3 examples/basic/offline_inference/chat.py
   - python3 examples/generate/multimodal/vision_language_offline.py --model-type qwen2_5_vl

@@ -119,7 +119,7 @@
 
 # Transformers modeling backend
 /vllm/model_executor/models/transformers @hmellor
-/tests/models/transformers @hmellor
+/tests/models/test_transformers.py @hmellor
 
 # Docs
 /docs/mkdocs @hmellor

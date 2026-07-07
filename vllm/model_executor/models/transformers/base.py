@@ -31,6 +31,7 @@ from transformers.conversion_mapping import (
     WeightRenaming,
     get_model_conversion_mapping,
 )
+from transformers.modeling_utils import ALL_ATTENTION_FUNCTIONS
 
 from vllm.compilation.decorators import support_torch_compile
 from vllm.config.utils import getattr_iter
@@ -41,7 +42,6 @@ from vllm.model_executor.layers.attention import (
     Attention,
     EncoderOnlyAttention,
 )
-from vllm.model_executor.layers.fused_moe import MoERunner
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.model_executor.models.interfaces import (
     SupportsEagle,
@@ -51,7 +51,6 @@ from vllm.model_executor.models.interfaces import (
     SupportsQuant,
 )
 from vllm.model_executor.models.interfaces_base import VllmModel
-from vllm.model_executor.models.transformers.fuser import BaseFuser, Fusers
 from vllm.model_executor.models.transformers.utils import (
     can_enable_torch_compile,
     get_feature_request_tip,
@@ -59,6 +58,7 @@ from vllm.model_executor.models.transformers.utils import (
     log_replacement,
     replace_conv_class,
     replace_linear_class,
+    replace_rms_norm_class,
 )
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
@@ -74,8 +74,35 @@ if TYPE_CHECKING:
     from transformers import PreTrainedModel
 
     from vllm.config import VllmConfig
+else:
+    PreTrainedModel = object
 
 logger = init_logger(__name__)
+
+
+def vllm_flash_attention_forward(
+    # Transformers args
+    module: torch.nn.Module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    attention_mask: torch.Tensor,
+    # Transformers kwargs
+    scaling: float | None = None,
+    # vLLM kwargs
+    attention_instances: dict[int, Attention] | None = None,
+    **kwargs,
+):
+    self_attn = attention_instances[module.layer_idx]
+    if scaling is not None:
+        self_attn.impl.scale = float(scaling)
+    hidden = query.shape[-2]
+    query, key, value = (x.transpose(1, 2) for x in (query, key, value))
+    query, key, value = (x.reshape(hidden, -1) for x in (query, key, value))
+    return self_attn.forward(query, key, value), None
+
+
+ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_flash_attention_forward
 
 
 class Base(
@@ -114,9 +141,6 @@ class Base(
         """Ignore unexpected weights whose qualname starts with these prefixes."""
         self.ignore_unexpected_suffixes: list[str] = []
         """Ignore unexpected weights whose qualname ends with these suffixes."""
-        self.packed_modules_mapping: dict[str, list[str]] = {}
-        """Fused module -> constituent projections, populated by `recursive_replace`
-        for the quantization machinery and loaders (e.g. bitsandbytes)."""
 
         # Attrs for Eagle3 (see self.set_aux_hidden_state_layers)
         self._target_class: type[nn.Module] = nn.Module
@@ -193,7 +217,7 @@ class Base(
         self.text_config._attn_implementation = "vllm"
         self.config.dtype = torch.get_default_dtype()
 
-    def _get_decoder_cls(self, **kwargs: dict) -> type["PreTrainedModel"]:
+    def _get_decoder_cls(self, **kwargs: dict) -> type[PreTrainedModel]:
         """
         Get the decoder class from the model.
 
@@ -212,7 +236,7 @@ class Base(
 
     def _decorate_cls_for_torch_compile(
         self,
-        cls: type["PreTrainedModel"],
+        cls: type[PreTrainedModel],
         dynamic_arg_dims: dict[str, int] | None,
         enable_if: Callable[["VllmConfig"], bool],
         is_encoder: bool,
@@ -332,24 +356,12 @@ class Base(
         if self.pp_group.world_size <= 1:
             return
 
-        if self.model.supports_pp_plan:
-            module = self.model
-            names = list(module._pp_plan.keys())
-        else:
-            module = self.model.get_decoder()
-            has_parameters = lambda m: next(m.parameters(), None) is not None
-            names = [n for n, c in module.named_children() if has_parameters(c)]
+        if not self.model.supports_pp_plan:
             tip = get_feature_request_tip(
                 self.model_config.model, self.model_config.trust_remote_code
             )
-            logger.warning(
-                "%s does not define a pipeline parallel plan. The Transformers "
-                "modeling backend will infer the split from the layers of %s in order "
-                "of declaration and keep parameter-free modules on every rank. This "
-                "may fail if the model's structure is non-standard. %s",
-                type(self.model),
-                type(module),
-                tip,
+            raise ValueError(
+                f"{type(self.model)} does not support pipeline parallel. {tip}"
             )
 
         def attrsetter(attr: str) -> Callable[[object, object], None]:
@@ -364,9 +376,10 @@ class Base(
 
         module_lists = []
         module_list_idx = None
-        for i, name in enumerate(names):
+        pp_plan = list(self.model._pp_plan.keys())
+        for i, name in enumerate(pp_plan):
             # attrgetter in case the module is nested (e.g. "text_model.layers")
-            if isinstance(attrgetter(name)(module), nn.ModuleList):
+            if isinstance(attrgetter(name)(self.model), nn.ModuleList):
                 module_lists.append(name)
                 module_list_idx = i
 
@@ -376,16 +389,16 @@ class Base(
                 "in the base model are not supported yet!"
             )
         if module_list_idx is None:
-            raise ValueError(f"Could not find `ModuleList` in {type(module)}")
+            raise ValueError(f"Could not find `ModuleList` in {type(self.model)}")
 
         # Layers before module list
-        for name in names[:module_list_idx]:
+        for name in pp_plan[:module_list_idx]:
             if self.pp_group.is_first_rank or (
                 self._get_tie_word_embeddings() and self.pp_group.is_last_rank
             ):
                 continue
             # attrsetter in case the module is nested (e.g. "text_model.embed_tokens")
-            attrsetter(name)(module, PPMissingLayer())
+            attrsetter(name)(self.model, PPMissingLayer())
 
         # Module list
         start_layer, end_layer = get_pp_indices(
@@ -393,61 +406,41 @@ class Base(
             self.pp_group.rank_in_group,
             self.pp_group.world_size,
         )
-        layers_name = names[module_list_idx]
+        layers_name = pp_plan[module_list_idx]
         # attrgetter in case the module is nested (e.g. "text_model.layers")
-        layers = attrgetter(layers_name)(module)
+        layers = attrgetter(layers_name)(self.model)
         for i in range(len(layers)):
             if start_layer <= i and i < end_layer:
                 continue
             layers[i] = PPMissingLayer()
 
         # Layers after module list
-        for name in names[module_list_idx + 1 :]:
+        for name in pp_plan[module_list_idx + 1 :]:
             # Modules that should be on last rank
             if not self.pp_group.is_last_rank:
                 # attrsetter in case the module is nested (e.g. "text_model.norm")
-                attrsetter(name)(module, PPMissingLayer())
+                attrsetter(name)(self.model, PPMissingLayer())
 
     def recursive_replace(self):
         """Recursively replace modules in the model as needed.
 
         Currently, this replaces:
 
-        - GLUs with a fused `MergedColumnParallelLinear` + `...AndMul`
-        - Attention QKV projections with a fused `QKVParallelLinear` + split
         - `nn.Linear` with vLLM's tensor parallel linear classes
-        - `nn.Conv2d` / `nn.Conv3d` with vLLM's `Conv2d` / `Conv3d`
-        - RMSNorm (detected from their dataflow) with vLLM's `RMSNorm`or `GemmaRMSNorm`
+        - `*RMSNorm` with vLLM's `RMSNorm`
         """
-        tp_plan = self.model.tp_plan or {}
+        tp_plan = self.model.tp_plan
 
         if not tp_plan and self.tp_group.world_size > 1:
             tip = get_feature_request_tip(
                 self.model_config.model, self.model_config.trust_remote_code
             )
-            logger.warning_once(
-                "%s does not define a tensor parallel plan. The Transformers modeling "
-                "backend will shard the model the best it can during graph fusion and "
-                "replicate the rest. This may be suboptimal or fail if the model does "
-                "not fuse cleanly. %s",
-                type(self.model),
-                tip,
+            raise ValueError(
+                f"{type(self.model)} does not support tensor parallel. {tip}"
             )
 
         # Prefix the patterns because we always start from `self.model`
         tp_plan = {maybe_prefix("model", k): v for k, v in tp_plan.items()}
-        # Detect fusable patterns once per module class (cached, so this is cheap)
-        fusers = Fusers(self.model, self.model_config)
-
-        def register_fusion(fuser: BaseFuser, prefix: str):
-            """Register a fused layer's mappings just before it is built."""
-            orig_to_new_stacked = fuser.orig_to_new_stacked(prefix)
-            self.hf_to_vllm_mapper.orig_to_new_stacked.update(orig_to_new_stacked)
-
-            packed_modules_mapping = fuser.packed_modules_mapping
-            self.packed_modules_mapping.update(packed_modules_mapping)
-            if self.quant_config is not None:
-                self.quant_config.packed_modules_mapping.update(packed_modules_mapping)
 
         def _recursive_replace(module: nn.Module, prefix: str):
             for child_name, child_module in module.named_children():
@@ -486,16 +479,11 @@ class Base(
                     )
                 elif isinstance(child_module, (nn.Conv2d, nn.Conv3d)):
                     new_module = replace_conv_class(child_module)
-                elif (fuser := fusers[child_module]) is not None:
-                    register_fusion(fuser, qual_name)
-                    new_module = fuser.fuse(
-                        child_module, qual_name, self.model_config, self.quant_config
+                elif child_module.__class__.__name__.endswith("RMSNorm"):
+                    new_module = replace_rms_norm_class(
+                        child_module, self.text_config.hidden_size
                     )
-                    logger.info_once(fuser.info(child_name))
-                    _recursive_replace(new_module, prefix=qual_name)
-                elif not isinstance(child_module, MoERunner):
-                    # MoERunner can contain aliases of shared experts and gates,
-                    # so we don't want to recurse into it and break weight loading.
+                else:
                     _recursive_replace(child_module, prefix=qual_name)
 
                 if new_module is not child_module:
@@ -550,7 +538,7 @@ class Base(
                 num_heads=num_heads,
                 head_size=head_size,
                 # NOTE: We use Llama scale as default, if it's set by
-                # Transformers, it's updated in vllm_attention_forward
+                # Transformers, it's updated in vllm_flash_attention_forward
                 scale=head_size**-0.5,
                 num_kv_heads=num_kv_heads,
                 cache_config=self.cache_config,
