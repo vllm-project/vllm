@@ -4,16 +4,10 @@
 //! `DecodedTextEvent` token IDs directly and lets the official `openai-harmony`
 //! parser recover the structured assistant message shape at token granularity.
 
-use std::sync::LazyLock;
-
-use anyhow::Context;
 use asynk_strim_attr::{TryYielder, try_stream};
 use futures::StreamExt as _;
 use openai_harmony::chat::{Content as HarmonyContent, Message as HarmonyMessage, Role};
-use openai_harmony::{
-    HarmonyEncoding, HarmonyEncodingName, StreamableParser, load_harmony_encoding,
-};
-use thiserror_ext::AsReport;
+use openai_harmony::{HarmonyEncoding, StreamableParser};
 use vllm_text::output::DecodedTextEvent;
 
 use crate::Result as ChatResult;
@@ -24,6 +18,7 @@ use crate::output::{
     generate_tool_call_id,
 };
 use crate::parser::ParserSelection;
+use crate::renderer::harmony::encoding::harmony_encoding;
 use crate::request::ChatRequest;
 
 /// Request-scoped Harmony output processor used for `model_type == "gpt_oss"`.
@@ -382,18 +377,6 @@ async fn harmony_assistant_event_stream(
         }
     }
     Ok(())
-}
-
-/// Lazily load the shared GPT-OSS Harmony encoding once per process.
-fn harmony_encoding() -> Result<&'static HarmonyEncoding> {
-    static ENCODING: LazyLock<anyhow::Result<HarmonyEncoding>> = LazyLock::new(|| {
-        load_harmony_encoding(HarmonyEncodingName::HarmonyGptOss)
-            .context("failed to load harmony encoding for gpt-oss")
-    });
-
-    ENCODING.as_ref().map_err(|error| Error::HarmonyOutputParsing {
-        error: error.to_report_string().into(),
-    })
 }
 
 fn harmony_output_parsing_error(

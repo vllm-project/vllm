@@ -115,6 +115,7 @@ class KVCacheCoordinator(ABC):
                 dcp_world_size=dcp_world_size,
                 pcp_world_size=pcp_world_size,
                 scheduler_block_size=self.scheduler_block_size,
+                needs_kv_cache_zeroing=self.kv_cache_config.needs_kv_cache_zeroing,
             )
             for i, kv_cache_group in enumerate(self.kv_cache_config.kv_cache_groups)
         )
@@ -329,7 +330,10 @@ class KVCacheCoordinator(ABC):
         ]
 
     def remove_skipped_blocks(
-        self, request_id: str, total_computed_tokens: int
+        self,
+        request_id: str,
+        total_computed_tokens: int,
+        num_prompt_tokens: int | None = None,
     ) -> None:
         """
         Remove the blocks that are no longer needed from `blocks` and replace
@@ -339,9 +343,14 @@ class KVCacheCoordinator(ABC):
             request_id: The request ID.
             total_computed_tokens: The total number of computed tokens, including
                 local computed tokens and external computed tokens.
+            num_prompt_tokens: Optional prompt length. R-SWA managers use this to
+                free gap blocks between the prefill tail and decode window; other
+                manager types ignore it.
         """
         for manager in self.single_type_managers:
-            manager.remove_skipped_blocks(request_id, total_computed_tokens)
+            manager.remove_skipped_blocks(
+                request_id, total_computed_tokens, num_prompt_tokens
+            )
 
     def get_blocks(self, request_id: str) -> tuple[list[KVCacheBlock], ...]:
         """
