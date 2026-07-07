@@ -759,7 +759,12 @@ class EngineArgs:
                 **self.weight_transfer_config
             )
         if isinstance(self.fault_tolerance_config, dict):
-            self.enable_fault_tolerance = True
+            if not self.enable_fault_tolerance:
+                logger.warning(
+                    "--fault-tolerance-config was passed. Fault tolerance is being "
+                    "automatically enabled."
+                )
+                self.enable_fault_tolerance = True
             self.fault_tolerance_config = FaultToleranceConfig(
                 **self.fault_tolerance_config
             )

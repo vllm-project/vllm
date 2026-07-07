@@ -7,6 +7,8 @@ import threading
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+import msgspec
+
 from vllm.config import set_current_vllm_config
 from vllm.distributed import stateless_destroy_torch_distributed_process_group
 from vllm.distributed.utils import stateless_init_torch_distributed_process_group
@@ -18,7 +20,7 @@ from vllm.v1.engine import (
     EngineStatusType,
     UtilityOutput,
 )
-from vllm.v1.fault_tolerance.utils import FaultToleranceRequest
+from vllm.v1.fault_tolerance.utils import FaultToleranceRequest, FaultToleranceResult
 from vllm.v1.request import RequestStatus
 from vllm.v1.serial_utils import UtilityResult, run_method
 
@@ -53,14 +55,12 @@ class EngineCoreSentinel:
             result = run_method(self, ft_request.instruction, (ft_request,), {})
         except Exception as e:
             logger.exception("[FT] Instruction '%s' failed", ft_request.instruction)
-            result = {
-                "request_id": ft_request.request_id,
-                "success": False,
-                "reason": str(e),
-            }
+            result = FaultToleranceResult(
+                request_id=ft_request.request_id, success=False, reason=str(e)
+            )
 
         uo = UtilityOutput(call_id)
-        uo.result = UtilityResult(result)
+        uo.result = UtilityResult(msgspec.structs.asdict(result))
         self.engine.output_queue.put_nowait(
             (client_idx, EngineCoreOutputs(utility_output=uo))
         )
@@ -99,7 +99,7 @@ class EngineCoreSentinel:
         outputs.engine_index = self.engine_index
         self.engine.output_queue.put_nowait((0, outputs))
 
-    def retry(self, ft_request: FaultToleranceRequest) -> dict:
+    def retry(self, ft_request: FaultToleranceRequest) -> FaultToleranceResult:
         engine = self.engine
         executor = engine.model_executor
 
@@ -114,7 +114,7 @@ class EngineCoreSentinel:
         logger.info("[FT] Engine %d status -> HEALTHY", self.engine_index)
         self.resumed.set()
         self._push_status()
-        return {"request_id": ft_request.request_id, "success": True}
+        return FaultToleranceResult(request_id=ft_request.request_id, success=True)
 
     def _reinit_dp_group(self) -> dict:
         """Reinit DP process group if in DP mode. Returns worker params."""
