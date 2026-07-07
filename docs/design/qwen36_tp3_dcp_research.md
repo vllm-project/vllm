@@ -33,8 +33,7 @@ layouts contain dimensions that are not divisible by 3:
 - GQA/KV layouts;
 - full-attention heads in the MoE model;
 - MTP hidden projection size (`5120 % 3 != 0`);
-- DFlash draft attention heads (`32 % 3 != 0`);
-- DFlash draft MLP intermediate size (`17408 % 3 != 0`).
+- speculative draft projections.
 
 The naive fallback is replication or a parallel group that technically starts
 but exposes too few useful KV tokens for 128K-150K agent workloads. The research
@@ -56,7 +55,8 @@ geometry?
   too unaware of real transient workspace needs.
 
 The correct strategy is not to emulate a single large GPU blindly; it is to make
-the TP/DCP, KV-cache, draft-model, and communication layouts serve the topology.
+the TP/DCP, KV-cache, speculative-decoding, and communication layouts serve the
+topology.
 
 The high-level outcome is already positive: this setup makes dense 27B usable
 with 150K context and `2x+` long-context concurrency on a 48 GiB aggregate
@@ -184,22 +184,20 @@ correctness/performance instability on desktop/prosumer Blackwell for FP4 MoE
 grouped GEMM. In practice, FlashInfer/CuTeDSL MoE is not yet the production
 choice here; Marlin is.
 
-DFlash on MoE is still worth keeping in scope. Experimental runs showed
-approximately the `100 tok/s` class, which is materially higher than the dense
-27B no-MTP `52-54 tok/s` baseline. This needs a proper controlled benchmark
-because the first results mix several moving parts:
+Speculative decoding for MoE remains worth keeping in scope, but it needs a
+proper controlled benchmark because early results mix several moving parts:
 
 - MoE backend choice: Marlin vs FlashInfer/CuTeDSL;
-- speculative method: built-in MTP vs DFlash/external drafter;
+- speculative method: built-in MTP vs an isolated external drafter;
 - context length and prefill workspace pressure;
 - concurrency level;
 - acceptance rate by prompt type.
 
 The next MoE decision should not be based on a single throughput number. The
-correct promotion rule is: keep Marlin as the stable baseline, then test DFlash
-or other draft paths only if they preserve agent stability at `max_num_seqs=8`
-and improve either aggregate throughput or per-request latency without reducing
-the usable long-context KV budget too much.
+correct promotion rule is: keep Marlin as the stable baseline, then test draft
+paths only if they preserve agent stability at `max_num_seqs=8` and improve
+either aggregate throughput or per-request latency without reducing the usable
+long-context KV budget too much.
 
 ### MTP status
 
@@ -261,73 +259,7 @@ Remaining MTP work items include:
 The target is to turn MTP from "works on TP3" into an additional speedup layer
 on top of the already-working TP3/DCP3 long-context baseline.
 
-## DFlash Findings
-
-DFlash is attractive because it drafts a whole token block in one pass instead
-of autoregressively drafting token by token. The public Qwen3.6 draft model is
-`z-lab/Qwen3.6-27B-DFlash`.
-
-The local draft config is:
-
-- `num_hidden_layers=5`
-- `hidden_size=5120`
-- `intermediate_size=17408`
-- `num_attention_heads=32`
-- `num_key_value_heads=8`
-- `sliding_window=2048`
-- `layer_types=[sliding_attention, sliding_attention, sliding_attention,
-  sliding_attention, full_attention]`
-- `dflash_config.target_layer_ids=[1,16,31,46,61]`
-
-The first compatibility blockers on `TP=3` are:
-
-- attention heads: `32 % 3 != 0`;
-- MLP intermediate size: `17408 % 3 != 0`;
-- mixed sliding/full attention support is still experimental for this model
-  family.
-
-The current experimental patches add two opt-in escape hatches:
-
-- allow mixed SWA/full DFlash attention for proof-of-concept runs;
-- allow replicated DFlash attention projections when head count is not divisible
-  by TP size.
-
-That got past the first attention assertion but immediately exposed the MLP
-assertion. This is expected: DFlash is not a small head-only module. A naive
-"replicate DFlash on all three target TP ranks" approach would replicate both
-attention and MLP state.
-
-Approximate BF16 DFlash memory:
-
-- attention per layer: about 52M parameters;
-- MLP per layer: about 267M parameters;
-- five draft layers plus FC/context projection: roughly 1.6B-2B parameters;
-- BF16 storage: roughly 3.5-4 GiB before runtime buffers.
-
-If DFlash is truly TP-sharded over three GPUs, that is roughly `1.2-1.4 GiB/GPU`.
-If the incompatible pieces are replicated on every GPU, it can become
-`3.5-4 GiB/GPU`, likely worse than built-in MTP on this memory budget.
-
-Conclusion: replicated DFlash is useful only as a diagnostic PoC. The production
-path should be either true uneven/padded sharding or isolated draft placement.
-
 ## Alternatives to Built-in MTP
-
-### DFlash
-
-Pros:
-
-- block diffusion drafts multiple tokens in one pass;
-- vLLM has first-class `method="dflash"` plumbing;
-- can outperform autoregressive draft methods if acceptance remains high.
-
-Cons:
-
-- Qwen3.6 DFlash support is still moving due to causal/mixed SWA layers;
-- non-causal DFlash attention interacts poorly with DCP and KV-cache dtype
-  choices in some vLLM/FlashInfer versions;
-- the Qwen3.6 draft geometry is not TP3-friendly;
-- replicated fallback is too memory-expensive for `150K + vision`.
 
 ### EAGLE/EAGLE3-style draft models
 
@@ -355,7 +287,7 @@ Cons:
 
 - not a general decode accelerator;
 - gains depend on repetition and prompt structure;
-- cannot replace MTP/DFlash for arbitrary natural language.
+- cannot replace MTP-style speculative decoding for arbitrary natural language.
 
 ### External draft service
 
@@ -375,7 +307,7 @@ Cons:
 ### Custom-trained draft model
 
 Training a custom draft model is technically possible and could be attractive if
-off-the-shelf MTP/DFlash placement remains inefficient for TP3. A custom drafter
+off-the-shelf MTP or EAGLE-style placement remains inefficient for TP3. A custom drafter
 could be shaped around this exact deployment:
 
 - TP3-friendly dimensions;
@@ -385,7 +317,7 @@ could be shaped around this exact deployment:
 
 This is a last-resort route, not the first optimization. It likely costs much
 more calendar time than fixing placement/sharding and benchmarking existing
-MTP/DFlash/EAGLE-style paths.
+MTP/EAGLE-style paths.
 
 ## FlashInfer Research Direction
 
@@ -394,8 +326,7 @@ FlashInfer is involved in several distinct paths:
 - attention backend for the target model;
 - FP4/NVFP4 GEMM kernels;
 - autotune cache generation/loading;
-- optional all-reduce backend;
-- DFlash non-causal draft attention path.
+- optional all-reduce backend.
 
 Current local findings:
 
@@ -445,7 +376,7 @@ Relevant vLLM methodology:
 
 For this hardware research, the most important follow-up benchmark shape is:
 
-- no-MTP vs MTP vs DFlash/external drafter;
+- no-MTP vs MTP vs an external drafter;
 - 10-20 warmed sequential requests at fixed 256/512 generated tokens;
 - concurrency 4 and 8 for aggregate throughput;
 - long-prefill smoke at 128K-150K;
@@ -522,7 +453,7 @@ Problems seen locally:
   memory, but GDN/FLA prefill kernels need transient workspace headroom.
 - FlashInfer autotune can OOM during profiling even when the final selected
   runtime tactic would fit.
-- Vision, MTP, DFlash, and CUDA graph pools all compete for the same residual
+- Vision, MTP, external draft placement, and CUDA graph pools all compete for the same residual
   memory, but the placement policy treats many of these costs as uniform across
   ranks.
 - Replicated fallback for incompatible TP geometry can make a model "work" while
@@ -560,20 +491,14 @@ Dense 27B:
 - agent stability was achieved at `128K`, `max_num_seqs=8`, `gpu_util=0.87` for
   the MoE vision profile and `0.92` for the no-MTP text-oriented profile, but
   higher utilization failed on transient workspaces.
-- DFlash-style speculation is especially interesting for MoE because early
-  experiments reached the `~100 tok/s` class, but this must be remeasured against
-  a stable Marlin baseline with acceptance metrics and agent success criteria.
+- speculative decoding for MoE must be remeasured against a stable Marlin
+  baseline with acceptance metrics and agent success criteria.
 
 ## Upstream Research References
 
 - vLLM Qwen3.6 27B recipe: https://recipes.vllm.ai/Qwen/Qwen3.6-27B
 - vLLM speculative config docs: https://docs.vllm.ai/en/stable/api/vllm/config/speculative/
 - vLLM engine args / gpu memory utilization docs: https://docs.vllm.ai/en/v0.20.1/configuration/engine_args/
-- DFlash model card: https://huggingface.co/z-lab/Qwen3.6-27B-DFlash
-- Qwen3.6 DFlash low-acceptance discussion: https://huggingface.co/z-lab/Qwen3.6-27B-DFlash/discussions/2
-- vLLM DFlash KV dtype issue: https://github.com/vllm-project/vllm/issues/41559
-- DFlash paper: https://arxiv.org/html/2602.06036v2
-- NVIDIA DFlash Blackwell blog: https://developer.nvidia.com/blog/boost-inference-performance-up-to-15x-on-nvidia-blackwell-using-dflash-speculative-decoding/
 - FlashInfer SM120 NVFP4 MoE issue: https://github.com/flashinfer-ai/flashinfer/issues/2723
 - FlashInfer FP4 GEMM performance issue: https://github.com/flashinfer-ai/flashinfer/issues/1732
 - FlashInfer SM12x vLLM CUTLASS backend issue: https://github.com/flashinfer-ai/flashinfer/issues/3013
@@ -584,27 +509,19 @@ Dense 27B:
 
 ## Recommended Next Work
 
-1. Commit the current DFlash patch only as an experimental proof-of-concept
-   helper, not as the final production design.
-2. Add a DFlash MLP fallback only if the goal is to measure replicated-DFlash
-   memory cost; otherwise skip it and go directly to uneven/padded sharding.
-3. Design true TP3 uneven sharding for DFlash attention and MLP:
-   - attention heads split as `[11, 11, 10]` or padded to 33;
-   - MLP intermediate split as `[5803, 5803, 5802]` or padded to 17409;
-   - trim padded outputs before residual paths.
-4. Investigate external/isolated draft placement:
+1. Investigate external/isolated draft placement:
    - target remains TP3/DCP3;
    - draft model uses TP1 or its own placement;
    - hidden-state transfer and verification latency are measured explicitly.
-5. Run matched MTP A/B benchmarks:
+2. Run matched MTP A/B benchmarks:
    - no-MTP vs MTP `num_speculative_tokens=1,2,3`;
    - 10-20 warmed sequential requests;
    - 256 and 512 generated tokens;
    - then concurrency 4 and 8.
-6. Add vLLM benchmark artifacts for the promoted profiles:
+3. Add vLLM benchmark artifacts for the promoted profiles:
    - `vllm bench serve` or GuideLLM for online throughput/latency;
-   - SPEED-Bench-style speculative decoding metrics for MTP/DFlash;
+   - SPEED-Bench-style speculative decoding metrics for MTP;
    - agent harness summaries for real coding-agent traffic.
-7. Build and pin FlashInfer autotune caches separately from production startup.
-8. Keep PyNCCL as the stable interconnect baseline until a measured custom path
+4. Build and pin FlashInfer autotune caches separately from production startup.
+5. Keep PyNCCL as the stable interconnect baseline until a measured custom path
    beats it without long-context instability.

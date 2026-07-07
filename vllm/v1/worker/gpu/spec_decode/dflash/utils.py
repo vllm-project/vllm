@@ -25,7 +25,6 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     causal = get_dflash_causal(draft_model_config)
     draft_vllm_config = replace(
         vllm_config,
-        parallel_config=speculative_config.draft_parallel_config,
         attention_config=replace(
             vllm_config.attention_config,
             use_non_causal=not causal,

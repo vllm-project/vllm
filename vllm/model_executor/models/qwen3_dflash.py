@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import io
-import os
 from collections.abc import Iterable
 
 import torch
@@ -18,7 +17,6 @@ from vllm.distributed import (
     get_tensor_model_parallel_world_size,
 )
 from vllm.logger import init_logger
-from vllm.model_executor.layers.activation import SiluAndMul
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
@@ -52,26 +50,6 @@ from .utils import (
 )
 
 logger = init_logger(__name__)
-
-
-def _allow_mixed_swa_full_dflash() -> bool:
-    return os.environ.get("VLLM_EXPERIMENTAL_DFLASH_MIXED_SWA_FULL", "0").lower() in (
-        "1",
-        "true",
-        "yes",
-    )
-
-
-def _allow_replicated_uneven_dflash_attention() -> bool:
-    return os.environ.get(
-        "VLLM_EXPERIMENTAL_DFLASH_REPLICATE_UNEVEN_ATTENTION", "0"
-    ).lower() in ("1", "true", "yes")
-
-
-def _allow_replicated_uneven_dflash_mlp() -> bool:
-    return os.environ.get(
-        "VLLM_EXPERIMENTAL_DFLASH_REPLICATE_UNEVEN_MLP", "0"
-    ).lower() in ("1", "true", "yes")
 
 
 def _resolve_layer_attention(
@@ -109,19 +87,13 @@ def _resolve_layer_attention(
         num_sliding = sum(lt == SLIDING_ATTENTION for lt in layer_types)
         any_sliding = num_sliding > 0
         all_sliding = num_sliding == len(layer_types)
-        if any_sliding and not all_sliding and not _allow_mixed_swa_full_dflash():
+        if any_sliding and not all_sliding:
             # Mixed sliding/full attention needs per-layer causal metadata and
             # multiple KV-cache groups, which DFlash does not yet support.
             raise NotImplementedError(
                 "DFlash does not yet support mixed sliding/full attention via "
                 "layer_types; see "
                 "https://github.com/vllm-project/vllm/issues/40898."
-            )
-        if any_sliding and not all_sliding:
-            logger.warning_once(
-                "Allowing experimental DFlash mixed sliding/full attention. "
-                "This is intended for Qwen3.6 DFlash POC only; validate "
-                "acceptance rate and long-context correctness before production."
             )
 
     default_causal = False
@@ -180,18 +152,7 @@ class DFlashQwen3Attention(nn.Module):
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
-        disable_attn_tp = False
-        if self.total_num_heads % tp_size != 0:
-            if not _allow_replicated_uneven_dflash_attention():
-                assert self.total_num_heads % tp_size == 0
-            disable_attn_tp = True
-            logger.warning_once(
-                "Replicating DFlash attention projections because "
-                "num_attention_heads=%d is not divisible by tensor_parallel_size=%d.",
-                self.total_num_heads,
-                tp_size,
-            )
-            tp_size = 1
+        assert self.total_num_heads % tp_size == 0
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
         if self.total_num_kv_heads >= tp_size:
@@ -212,7 +173,6 @@ class DFlashQwen3Attention(nn.Module):
             bias=attention_bias,
             quant_config=quant_config,
             prefix=f"{prefix}.qkv_proj",
-            disable_tp=disable_attn_tp,
         )
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
@@ -220,7 +180,6 @@ class DFlashQwen3Attention(nn.Module):
             bias=attention_bias,  # DFlash has o_proj bias when using attention bias
             quant_config=quant_config,
             prefix=f"{prefix}.o_proj",
-            disable_tp=disable_attn_tp,
         )
 
         self.rotary_emb = get_rope(
@@ -281,107 +240,6 @@ class DFlashQwen3Attention(nn.Module):
         return output
 
 
-class DFlashReplicatedQwen3MLP(nn.Module):
-    def __init__(
-        self,
-        hidden_size: int,
-        intermediate_size: int,
-        hidden_act: str,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-    ) -> None:
-        super().__init__()
-        self.gate_up_proj = DFlashMergedReplicatedLinear(
-            hidden_size,
-            [intermediate_size, intermediate_size],
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.gate_up_proj",
-            return_bias=False,
-        )
-        self.down_proj = ReplicatedLinear(
-            intermediate_size,
-            hidden_size,
-            bias=False,
-            quant_config=quant_config,
-            prefix=f"{prefix}.down_proj",
-            return_bias=False,
-        )
-        if hidden_act != "silu":
-            raise ValueError(
-                f"Unsupported activation: {hidden_act}. Only silu is supported for now."
-            )
-        self.act_fn = SiluAndMul()
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        gate_up = self.gate_up_proj(x)
-        x = self.act_fn(gate_up)
-        return self.down_proj(x)
-
-
-class DFlashMergedReplicatedLinear(ReplicatedLinear):
-    """Replicated fused linear that can load split gate/up checkpoint weights."""
-
-    def __init__(
-        self,
-        input_size: int,
-        output_sizes: list[int],
-        bias: bool = True,
-        skip_bias_add: bool = False,
-        params_dtype: torch.dtype | None = None,
-        quant_config: QuantizationConfig | None = None,
-        prefix: str = "",
-        *,
-        return_bias: bool = True,
-        disable_tp: bool = False,
-    ) -> None:
-        self.output_sizes = output_sizes
-        super().__init__(
-            input_size=input_size,
-            output_size=sum(output_sizes),
-            bias=bias,
-            skip_bias_add=skip_bias_add,
-            params_dtype=params_dtype,
-            quant_config=quant_config,
-            prefix=prefix,
-            return_bias=return_bias,
-            disable_tp=disable_tp,
-        )
-
-    def weight_loader(
-        self,
-        param: torch.nn.Parameter,
-        loaded_weight: torch.Tensor,
-        loaded_shard_id: int | None = None,
-    ) -> None:
-        if loaded_shard_id is None:
-            super().weight_loader(param, loaded_weight)
-            return
-
-        if loaded_shard_id < 0 or loaded_shard_id >= len(self.output_sizes):
-            raise ValueError(
-                f"Shard id should be between 0 and {len(self.output_sizes) - 1}. "
-                f"Got shard id {loaded_shard_id}."
-            )
-
-        output_dim = getattr(param, "output_dim", None)
-        if output_dim is None:
-            raise ValueError(
-                "DFlashMergedReplicatedLinear only supports shard loading for "
-                "parameters with an output dimension."
-            )
-
-        shard_offset = sum(self.output_sizes[:loaded_shard_id])
-        shard_size = self.output_sizes[loaded_shard_id]
-        target = param.data.narrow(output_dim, shard_offset, shard_size)
-        if target.shape != loaded_weight.shape:
-            raise ValueError(
-                f"Tried to load DFlash merged replicated shard of size "
-                f"{loaded_weight.shape} to parameter slice of size {target.shape}."
-            )
-        target.copy_(loaded_weight)
-
-
 class DFlashQwen3DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -427,38 +285,13 @@ class DFlashQwen3DecoderLayer(nn.Module):
             prefix=f"{prefix}.self_attn",
             attn_type=attn_type,
         )
-        if config.intermediate_size % get_tensor_model_parallel_world_size() != 0:
-            if not _allow_replicated_uneven_dflash_mlp():
-                self.mlp = Qwen3MLP(
-                    hidden_size=self.hidden_size,
-                    intermediate_size=config.intermediate_size,
-                    hidden_act=config.hidden_act,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.mlp",
-                )
-            else:
-                logger.warning_once(
-                    "Replicating DFlash MLP because intermediate_size=%d is not "
-                    "divisible by tensor_parallel_size=%d. This is a PoC fallback "
-                    "and is expected to increase memory use.",
-                    config.intermediate_size,
-                    get_tensor_model_parallel_world_size(),
-                )
-                self.mlp = DFlashReplicatedQwen3MLP(
-                    hidden_size=self.hidden_size,
-                    intermediate_size=config.intermediate_size,
-                    hidden_act=config.hidden_act,
-                    quant_config=quant_config,
-                    prefix=f"{prefix}.mlp",
-                )
-        else:
-            self.mlp = Qwen3MLP(
-                hidden_size=self.hidden_size,
-                intermediate_size=config.intermediate_size,
-                hidden_act=config.hidden_act,
-                quant_config=quant_config,
-                prefix=f"{prefix}.mlp",
-            )
+        self.mlp = Qwen3MLP(
+            hidden_size=self.hidden_size,
+            intermediate_size=config.intermediate_size,
+            hidden_act=config.hidden_act,
+            quant_config=quant_config,
+            prefix=f"{prefix}.mlp",
+        )
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = RMSNorm(
             config.hidden_size, eps=config.rms_norm_eps
@@ -527,10 +360,6 @@ class DFlashQwen3Model(nn.Module):
             requires_grad=False,
         )
         self.has_separate_mask_embedding = False
-        self._kv_cache_layer_names = [
-            maybe_prefix(prefix, f"layers.{layer_idx + start_layer_id}.self_attn.attn")
-            for layer_idx in range(self.config.num_hidden_layers)
-        ]
 
         self.layers = nn.ModuleList(
             [
@@ -783,9 +612,6 @@ class DFlashQwen3Model(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def get_draft_kv_cache_layer_names(self) -> list[str]:
-        return self._kv_cache_layer_names
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
         stacked_params_mapping = [
             (".qkv_proj", ".q_proj", "q"),
@@ -910,9 +736,6 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
         self.model.precompute_and_store_context_kv(
             context_states, context_positions, context_slot_mapping
         )
-
-    def get_draft_kv_cache_layer_names(self) -> list[str]:
-        return self.model.get_draft_kv_cache_layer_names()
 
     def combine_hidden_states(
         self,
