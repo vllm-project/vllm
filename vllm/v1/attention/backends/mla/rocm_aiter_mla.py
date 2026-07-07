@@ -241,7 +241,9 @@ class AiterMLAMetadataBuilder(MLACommonMetadataBuilder[AiterMLAMetadata]):
             device=device,
         )
 
-        self._fp8_prefill_enabled = _fp8_mla_prefill_supported()
+        self._fp8_prefill_enabled = (
+            _fp8_mla_prefill_supported() and kv_cache_dtype_str == "fp8"
+        )
         if self._fp8_prefill_enabled:
             max_prefill_qlen = min(
                 vllm_config.model_config.max_model_len,
@@ -724,9 +726,11 @@ class AiterMLAImpl(MLACommonImpl[AiterMLAMetadata]):
 
         self.flash_attn_varlen_func = flash_attn_varlen_func
 
-        # FP8 MLA prefill kernel imports (lazy, only when enabled).
-        # Auto-enabled on gfx950 when AITER ships the kernels.
-        self._fp8_prefill_enabled = _fp8_mla_prefill_supported()
+        from vllm.utils.torch_utils import is_quantized_kv_cache
+
+        self._fp8_prefill_enabled = _fp8_mla_prefill_supported() and (
+            is_quantized_kv_cache(kv_cache_dtype)
+        )
         if self._fp8_prefill_enabled:
             from aiter import mla_prefill_ps_asm_fwd, mla_reduce_v1
 
