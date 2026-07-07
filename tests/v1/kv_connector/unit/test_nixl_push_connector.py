@@ -487,7 +487,7 @@ class TestPushWriterStartLoadKv:
         # path here.
         w._send_heartbeats = lambda metadata: None
         # Stub logical-to-kernel mapping used by reqs_to_recv.
-        w._logical_to_kernel_block_ids = lambda x: x
+        w._logical_to_kernel_block_ids = lambda x, ratio: x
 
         meta = NixlConnectorMetadata()
         meta.push_registrations = {
@@ -775,7 +775,7 @@ class TestPushWriterNegative:
         """Empty metadata must not wake the writer or enqueue anything."""
         w = _StubWriterWorker.fresh()
         w._send_heartbeats = lambda metadata: None
-        w._logical_to_kernel_block_ids = lambda x: x
+        w._logical_to_kernel_block_ids = lambda x, ratio: x
 
         meta = NixlConnectorMetadata()
         w.start_load_kv(meta)
