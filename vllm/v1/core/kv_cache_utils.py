@@ -4,7 +4,6 @@
 
 import copy
 import hashlib
-import heapq
 import math
 import os
 from collections import defaultdict
@@ -12,6 +11,8 @@ from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import Any, NamedTuple, NewType, TypeAlias, cast, overload
+
+from sortedcontainers import SortedDict
 
 from vllm import envs
 from vllm.config import VllmConfig
@@ -445,8 +446,7 @@ class PriorityAwareFreeKVCacheBlockQueue:
     def __init__(self, blocks: list[KVCacheBlock]) -> None:
         self.unhashed_queue = FreeKVCacheBlockQueue(blocks)
         self._num_free_blocks = len(blocks)
-        self.priority_to_queue: dict[int, FreeKVCacheBlockQueue] = {}
-        self.active_priorities_heap: list[int] = []
+        self.priority_to_queue: SortedDict[int, FreeKVCacheBlockQueue] = SortedDict()
         self.block_id_to_priority: dict[int, int | None] = {
             block.block_id: None for block in blocks
         }
@@ -530,14 +530,13 @@ class PriorityAwareFreeKVCacheBlockQueue:
             if queue is None:
                 queue = FreeKVCacheBlockQueue([])
                 self.priority_to_queue[priority] = queue
-                heapq.heappush(self.active_priorities_heap, -priority)
             queue.append(block)
             self.block_id_to_priority[block.block_id] = priority
             self._num_free_blocks += 1
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         blocks = self.unhashed_queue.get_all_free_blocks()
-        for priority in sorted(self.priority_to_queue.keys(), reverse=True):
+        for priority in reversed(self.priority_to_queue):
             blocks.extend(self.priority_to_queue[priority].get_all_free_blocks())
         return blocks
 
@@ -546,12 +545,8 @@ class PriorityAwareFreeKVCacheBlockQueue:
         return block.retention_priority if block.retention_priority is not None else 0
 
     def _peek_max_priority(self) -> int:
-        while self.active_priorities_heap:
-            priority = -self.active_priorities_heap[0]
-            queue = self.priority_to_queue.get(priority)
-            if queue is not None and queue.num_free_blocks > 0:
-                return priority
-            heapq.heappop(self.active_priorities_heap)
+        if self.priority_to_queue:
+            return self.priority_to_queue.peekitem(-1)[0]
         raise ValueError("No free blocks available")
 
 
