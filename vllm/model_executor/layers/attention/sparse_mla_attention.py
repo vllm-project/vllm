@@ -22,7 +22,6 @@ from vllm.v1.attention.backend import (
     AttentionMetadata,
     AttentionMetadataBuilder,
 )
-from vllm.v1.attention.backends.fa_utils import get_flash_attn_version
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
 
 if TYPE_CHECKING:
@@ -34,12 +33,6 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 T = TypeVar("T", bound=AttentionMetadata)
-
-
-def dense_mha_fa4_available(qk_head_dim: int) -> bool:
-    """Whether an FA4 (>=v4) varlen kernel exists for this qk_head_dim."""
-    fa_version = get_flash_attn_version(head_size=qk_head_dim)
-    return fa_version is not None and fa_version >= 4
 
 
 class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
@@ -338,8 +331,6 @@ class SparseMLACommonImpl(MLACommonBaseImpl[T], Generic[T]):
             if indexer is not None
             else topk_indices_buffer
         )
-
-        self._fa4_available = dense_mha_fa4_available(qk_head_dim)
 
         self._use_flashinfer_concat_mla_k = (
             has_flashinfer()

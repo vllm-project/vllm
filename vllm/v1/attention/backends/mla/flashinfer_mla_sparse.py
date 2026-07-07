@@ -15,7 +15,6 @@ from vllm.model_executor.layers.attention.mla_attention import MLACommonPrefillM
 from vllm.model_executor.layers.attention.sparse_mla_attention import (
     SparseMLACommonImpl,
     SparseMLACommonMetadataBuilder,
-    dense_mha_fa4_available,
 )
 from vllm.platforms.interface import DeviceCapability
 from vllm.utils.torch_utils import is_quantized_kv_cache
@@ -285,12 +284,7 @@ class FlashInferMLASparseMetadataBuilder(
         num_q_heads = vllm_config.model_config.get_num_attention_heads(
             vllm_config.parallel_config
         )
-        qk_head_dim = self.mla_dims.qk_nope_head_dim + self.mla_dims.qk_rope_head_dim
-        threshold = (
-            {16: 128, 128: 1024}.get(num_q_heads, 1024)
-            if dense_mha_fa4_available(qk_head_dim)
-            else 1
-        )
+        threshold = {16: 128, 128: 1024}.get(num_q_heads, 1024)
         self._init_reorder_batch_threshold(
             threshold,
             supports_spec_as_decode=True,
