@@ -860,13 +860,39 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         The RMSNormGated + quant sequence is eligible for fusion
         by the compilation pass when fuse_norm_quant is enabled.
         """
-        z_shape_og = z.shape
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
+        core_attn_out = self._output_norm(core_attn_out, z, num_tokens)
         output[:num_tokens], _ = self.out_proj(core_attn_out)
+
+    def _output_norm(
+        self,
+        core_attn_out: torch.Tensor,
+        z: torch.Tensor,
+        num_tokens: int,
+    ) -> torch.Tensor:
+        """Apply per-head RMSNormGated and return flattened projection input."""
+        orig_dtype = core_attn_out.dtype
+        num_heads = self.num_v_heads // self.tp_size
+        core_attn_out = core_attn_out.reshape(
+            num_tokens, num_heads, self.head_v_dim
+        ).float()
+        z = z.reshape(num_tokens, num_heads, self.head_v_dim).float()
+
+        if self.norm.activation == "sigmoid":
+            gate = torch.sigmoid(z)
+        else:
+            gate = torch.nn.functional.silu(z)
+
+        if not self.norm.norm_before_gate:
+            core_attn_out = core_attn_out * gate
+
+        variance = core_attn_out.pow(2).mean(dim=-1, keepdim=True)
+        core_attn_out = core_attn_out * torch.rsqrt(variance + self.layer_norm_epsilon)
+        core_attn_out = core_attn_out * self.norm.weight.float()
+
+        if self.norm.norm_before_gate:
+            core_attn_out = core_attn_out * gate
+
+        return core_attn_out.to(orig_dtype).reshape(num_tokens, -1)
 
     def forward_hip(
         self,
@@ -1006,13 +1032,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
         # ============================================================
         # Part 3: Output Projection
         # ============================================================
-        z_shape_og = z.shape
-        # Reshape input data into 2D tensor
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
+        core_attn_out = self._output_norm(core_attn_out, z, num_tokens)
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
     def forward_cpu(
@@ -1057,12 +1077,7 @@ class QwenGatedDeltaNetAttention(GatedDeltaNetAttention):
             _encode_layer_name(self.prefix),
         )
 
-        z_shape_og = z.shape
-        core_attn_out = core_attn_out.reshape(-1, core_attn_out.shape[-1])
-        z = z.reshape(-1, z.shape[-1])
-        core_attn_out = self.norm(core_attn_out, z)
-        core_attn_out = core_attn_out.reshape(z_shape_og)
-        core_attn_out = core_attn_out.flatten(-2)  # ... h d -> ... (h d)
+        core_attn_out = self._output_norm(core_attn_out, z, num_tokens)
         output[:num_tokens], _ = self.out_proj(core_attn_out)
 
     def _warmup_prefill_kernels(self, qkv_or_qkvz: torch.Tensor, v_dim: int) -> None:
