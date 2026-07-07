@@ -390,10 +390,10 @@ class ServingTokens(GenerateBaseServing):
                     finish_reason = output.finish_reason
                     self._raise_if_error(finish_reason, request_id)
 
-                    if not delta_token_ids:
+                    if not delta_token_ids and finish_reason is None:
                         continue
 
-                    if sampling_params.logprobs is not None:
+                    if delta_token_ids and sampling_params.logprobs is not None:
                         out_logprobs = output.logprobs
                         assert out_logprobs is not None, "Did not output logprobs"
                         logprobs = self._create_tokens_logprobs(
