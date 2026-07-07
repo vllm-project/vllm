@@ -103,6 +103,151 @@ def default_unquantized_gemm(
     return torch.nn.functional.linear(x, weight, bias)
 
 
+# Plan/run dispatch: resolve the tuned (runner, tactic) per weight once,
+# then make the per-call path a bucket lookup plus a direct kernel launch --
+# no mm_bf16 wrapper, no backend heuristic, no autotuner query per call.
+_MM_BF16_PLAN_TABLES: dict = {}  # (n,k,dtype,bias_is_none,pdl,dev) -> [(runner,tactic)]
+_MM_BF16_PLANS: dict = {}  # (weight_ptr, bias_is_none, pdl) -> _MmBf16GemmPlan
+
+
+def _closure_var(bound_method, name: str):
+    fn = bound_method.__func__
+    for var, cell in zip(fn.__code__.co_freevars, fn.__closure__ or ()):
+        if var == name:
+            return cell.cell_contents
+    raise KeyError(name)
+
+
+class _MmBf16GemmPlan:
+    __slots__ = ("weight_t", "workspace", "num_buckets", "lanes", "pdl")
+
+    def __init__(self, weight: torch.Tensor, bias: torch.Tensor | None, pdl: bool):
+        import flashinfer.gemm.gemm_base as gb
+
+        n, k = weight.shape
+        self.weight_t = weight.t()
+        self.pdl = pdl
+        self.workspace = gb._get_cache_buf(
+            "mm_bf16_workspace", gb.DEFAULT_WORKSPACE_SIZE, weight.device
+        )
+        key = (n, k, weight.dtype, bias is None, pdl, weight.device.index)
+        table = _MM_BF16_PLAN_TABLES.get(key)
+        if table is None:
+            table = _MM_BF16_PLAN_TABLES[key] = self._tune(weight, bias, pdl)
+        self.num_buckets = len(table)
+        # A2-full: pre-bind one launch lane per bucket, resolving everything
+        # runner.forward would redo per call (handle/algo/graph lookups).
+        self.lanes = [self._make_lane(r, t, gb) for r, t in table]
+
+    def _make_lane(self, runner, tactic: int, gb):
+        name = type(runner).__name__
+        wt = self.weight_t
+        w_nk = wt.transpose(-2, -1)
+        ws = self.workspace
+        if name == "CutlassBf16GemmRunner":
+            module = _closure_var(runner.forward, "module")
+            t = tactic
+
+            def lane(x, bias, out):
+                module.bf16_gemm(x, w_nk, out, ws, t)
+
+            return lane
+        if name == "CublasltBf16GemmRunner":
+            module = _closure_var(runner.forward, "module")
+            handle = torch.cuda.current_blas_handle()
+            t = max(tactic, 0)
+            get_algos = runner._get_algos
+            algo_cache: dict = {}
+
+            def lane(x, bias, out):
+                m = x.shape[0]
+                entry = algo_cache.get(m)
+                if entry is None:
+                    algo_buf, count = get_algos([x, wt, bias, False, out, ws])
+                    entry = algo_cache[m] = (algo_buf, t if t < count else 0)
+                module.mm_bf16_cublaslt_run_with_algo(
+                    x, w_nk, out, ws, handle, entry[0], entry[1]
+                )
+
+            return lane
+        if name == "CudnnBf16GemmRunner" and runner._use_override_shape:
+            t = max(tactic, 0)
+            get_graph = runner._get_override_graph
+            exec_fn = gb.execute_cudnn_gemm_bf16_graph_override_shape
+            graph_cache: dict = {}
+
+            def lane(x, bias, out):
+                m = x.shape[0]
+                g = graph_cache.get(m)
+                if g is None:
+                    g = graph_cache[m] = get_graph(x, wt, bias, out)
+                exec_fn(g, x, wt, bias, out, ws, tactic=t)
+
+            return lane
+
+        pdl = self.pdl
+
+        def lane(x, bias, out):
+            runner(inputs=[x, wt, bias, pdl, out, ws], tactic=tactic)
+
+        return lane
+
+    @staticmethod
+    def _tune(weight: torch.Tensor, bias: torch.Tensor | None, pdl: bool):
+        import os
+
+        import flashinfer.gemm.gemm_base as gb
+        from flashinfer.autotuner import AutoTuner, autotune
+        from flashinfer.fused_moe.utils import get_hybrid_num_tokens_buckets
+
+        n, k = weight.shape
+        dev = weight.device
+        max_m = int(os.environ.get("VLLM_BF16_PLAN_MAX_M", "256"))
+        buckets = get_hybrid_num_tokens_buckets(max_m)
+        weight_t = weight.t()
+        ws = gb._get_cache_buf("mm_bf16_workspace", gb.DEFAULT_WORKSPACE_SIZE, dev)
+        runners = []
+        for build in (
+            lambda: gb._cudnn_gemm_bf16_runner(is_a_k_major=True, is_b_k_major=True),
+            lambda: gb.get_mm_bf16_cublaslt_module().cublaslt_bf16_gemm_runner(),
+            lambda: gb.get_gemm_sm100_module_cutlass_bf16().cutlass_bf16_gemm_runner(),
+            lambda: gb._tgv_gemm_runner(weight.dtype, gb.is_sm100f_supported(dev)),
+        ):
+            try:
+                runners.append(build())
+            except Exception:
+                continue
+        tuner = AutoTuner.get()
+        cfg = gb._BF16_GEMM_SM100_TUNING_CONFIG
+        # Tuning the largest bucket profiles every smaller bucket in the same
+        # pass; the per-bucket queries below read the winners back.
+        with autotune(True):
+            x = torch.empty(buckets[-1], k, dtype=weight.dtype, device=dev)
+            out = torch.empty(buckets[-1], n, dtype=weight.dtype, device=dev)
+            tuner.choose_one("bf16_gemm", runners, cfg, [x, weight_t, bias, pdl, out, ws])
+        table = []
+        for b in buckets:
+            xb = torch.empty(b, k, dtype=weight.dtype, device=dev)
+            ob = torch.empty(b, n, dtype=weight.dtype, device=dev)
+            table.append(
+                tuner.choose_one("bf16_gemm", runners, cfg, [xb, weight_t, bias, pdl, ob, ws])
+            )
+        logger.info_once("Built mm_bf16 plan tables (A2 prototype).")
+        return table
+
+    def run(
+        self,
+        x_2d: torch.Tensor,
+        bias: torch.Tensor | None,
+        out: torch.Tensor,
+    ) -> torch.Tensor:
+        idx = (x_2d.shape[0] - 1).bit_length()
+        if idx >= self.num_buckets:
+            idx = self.num_buckets - 1
+        self.lanes[idx](x_2d, bias, out)
+        return out
+
+
 def cuda_flashinfer_bf16_gemm_impl(
     x: torch.Tensor,
     weight: torch.Tensor,
@@ -116,6 +261,18 @@ def cuda_flashinfer_bf16_gemm_impl(
     """
     if x.dim() == 0 or weight.dim() != 2:
         return torch.nn.functional.linear(x, weight, bias)
+
+    # Fast path: a plan keyed on this exact weight/bias/pdl already validated
+    # dtypes and devices when it was built.
+    plan = _MM_BF16_PLANS.get((weight.data_ptr(), bias is None, pdl))
+    if plan is not None:
+        K = x.shape[-1]
+        M = x.numel() // K
+        N = weight.shape[0]
+        x_2d = x.reshape(M, K)
+        out_2d = torch.empty((M, N), dtype=x.dtype, device=x.device)
+        plan.run(x_2d, bias, out_2d)
+        return out_2d.reshape(*x.shape[:-1], N)
 
     K = x.shape[-1]
     M = x.numel() // K if K > 0 else 0
@@ -141,8 +298,16 @@ def cuda_flashinfer_bf16_gemm_impl(
         logger.warning_once("Using default unquantized gemm (torch).")
         return torch.nn.functional.linear(x, weight, bias)
 
+    if torch.cuda.is_current_stream_capturing():
+        # Plans are built during the warmup dummy run; never tune inside
+        # graph capture.
+        return torch.nn.functional.linear(x, weight, bias)
+    plan = _MM_BF16_PLANS[(weight.data_ptr(), bias is None, pdl)] = _MmBf16GemmPlan(
+        weight, bias, pdl
+    )
     x_2d = x.reshape(M, K)
-    out_2d = flashinfer_bf16_mm_impl(x_2d, weight.t(), bias, pdl)
+    out_2d = torch.empty((M, N), dtype=x.dtype, device=x.device)
+    plan.run(x_2d, bias, out_2d)
     return out_2d.reshape(*x.shape[:-1], N)
 
 
