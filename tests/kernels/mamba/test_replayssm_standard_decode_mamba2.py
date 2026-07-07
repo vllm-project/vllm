@@ -448,3 +448,114 @@ def test_replayssm_standard_decode_with_batch_indices(
 
     assert torch.equal(state_cached[unused_states], state_before[unused_states])
     assert torch.equal(state_baseline[unused_states], state_before[unused_states])
+
+
+# Geometries with (nheads, ngroups) both divisible by the tp below.
+_TP_GEOMETRIES = [
+    pytest.param((8, 64, 64, 4), id="small"),
+    pytest.param((96, 80, 128, 8), id="nano4b"),
+]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Need CUDA device")
+@pytest.mark.parametrize("precision", _PRECISIONS)
+@pytest.mark.parametrize("geometry", _TP_GEOMETRIES)
+@pytest.mark.parametrize("tp", [2])
+def test_replayssm_standard_decode_tp_head_shard_equivalence(
+    precision: tuple[torch.dtype, torch.dtype],
+    geometry: tuple[int, int, int, int],
+    tp: int,
+):
+    """Tensor-parallel correctness at the kernel boundary (single GPU).
+
+    The kernel has no cross-rank communication, so head sharding must be exactly
+    separable: one run over all heads must equal concatenating ``tp`` independent
+    per-rank runs on ``nheads // tp`` heads and ``ngroups // tp`` groups. This
+    guards the per-rank divisors and group->head mapping the state-shape wiring
+    relies on. The real TP1==TP2 engine check lives in the v1/e2e suite."""
+    state_dtype, act_dtype = precision
+    nheads, headdim, dstate, ngroups = geometry
+    assert nheads % tp == 0 and ngroups % tp == 0
+    device = "cuda"
+    both_fp32 = state_dtype == torch.float32 and act_dtype == torch.float32
+    rtol, atol = _tolerances(torch.float32 if both_fp32 else torch.bfloat16)
+    set_random_seed(0)
+
+    batch = 4
+    max_cache_len = 4
+    num_steps = 2 * max_cache_len + 1
+    nh_s = nheads // tp
+    ng_s = ngroups // tp
+
+    # Shards slice the tied params; never .contiguous() -- that would drop the
+    # stride-0 broadcast the kernel's TIE_HDIM asserts require.
+    A = _tied_A(nheads, headdim, dstate, device)
+    dt_bias = _tied_dt_bias(nheads, headdim, device)
+    D = torch.randn(nheads, headdim, device=device)
+
+    state_full = torch.randn(
+        batch, nheads, headdim, dstate, dtype=state_dtype, device=device)
+    x_cache, dt_cache, B_cache, _ = allocate_update_caches(
+        batch, nheads, ngroups, headdim, dstate, max_cache_len, device,
+        act_dtype, act_dtype)
+    bc_pre = torch.empty(
+        batch, ngroups, max_cache_len, device=device, dtype=torch.float32)
+
+    # Per-rank shards, each seeded from the matching head slice so all start equal.
+    shard_state = []
+    shard_caches = []
+    for r in range(tp):
+        h0 = r * nh_s
+        shard_state.append(state_full[:, h0 : h0 + nh_s].contiguous())
+        xc, dtc, bc, _ = allocate_update_caches(
+            batch, nh_s, ng_s, headdim, dstate, max_cache_len, device,
+            act_dtype, act_dtype)
+        bcp = torch.empty(
+            batch, ng_s, max_cache_len, device=device, dtype=torch.float32)
+        shard_caches.append((xc, dtc, bc, bcp))
+
+    write_pos = torch.zeros(batch, dtype=torch.int32, device=device)
+    for _ in range(num_steps):
+        x = torch.randn(batch, nheads, headdim, device=device, dtype=act_dtype)
+        dt = _tied_dt(batch, nheads, headdim, device, act_dtype)
+        B = torch.randn(batch, ngroups, dstate, device=device, dtype=act_dtype)
+        C = torch.randn(batch, ngroups, dstate, device=device, dtype=act_dtype)
+        z = torch.randn_like(x)
+        is_flush = write_pos == max_cache_len - 1
+
+        out_full = torch.empty_like(x)
+        selective_state_update_replayssm_output_only(
+            state_full, x, dt, A, B, C, D=D, z=z, dt_bias=dt_bias,
+            dt_softplus=True, x_cache=x_cache, dt_cache=dt_cache,
+            B_cache=B_cache, bc_pre=bc_pre, write_pos=write_pos,
+            is_flush=is_flush, max_cache_len=max_cache_len, out=out_full)
+
+        for r in range(tp):
+            h0 = r * nh_s
+            g0 = r * ng_s
+            xc, dtc, bc, bcp = shard_caches[r]
+            out_shard = torch.empty(
+                batch, nh_s, headdim, device=device, dtype=act_dtype)
+            selective_state_update_replayssm_output_only(
+                shard_state[r],
+                x[:, h0 : h0 + nh_s].contiguous(),
+                dt[:, h0 : h0 + nh_s],
+                A[h0 : h0 + nh_s],
+                B[:, g0 : g0 + ng_s].contiguous(),
+                C[:, g0 : g0 + ng_s].contiguous(),
+                D=D[h0 : h0 + nh_s].contiguous(),
+                z=z[:, h0 : h0 + nh_s].contiguous(),
+                dt_bias=dt_bias[h0 : h0 + nh_s],
+                dt_softplus=True, x_cache=xc, dt_cache=dtc, B_cache=bc,
+                bc_pre=bcp, write_pos=write_pos, is_flush=is_flush,
+                max_cache_len=max_cache_len, out=out_shard)
+
+            torch.testing.assert_close(
+                out_full[:, h0 : h0 + nh_s], out_shard, rtol=rtol, atol=atol)
+            if bool(is_flush.any()):
+                torch.testing.assert_close(
+                    state_full[:, h0 : h0 + nh_s][is_flush],
+                    shard_state[r][is_flush], rtol=rtol, atol=atol)
+
+        write_pos = torch.where(
+            is_flush, torch.zeros_like(write_pos), write_pos + 1)
