@@ -523,6 +523,8 @@ class ShmTensorArena:
         self.total_bytes = (slot_bytes + self.metadata_size) * n_slots
         self._next_slot = 0
         self._fallbacks = 0
+        self._pin_attempted = False
+        self._pinned = False
         # slots whose tensors were handed out by THIS reader and not yet
         # released (flushed at the next dequeue).
         self._pending_release: list[int] = []
@@ -606,11 +608,40 @@ class ShmTensorArena:
 
     # ---- reader side ----
 
+    def _ensure_pinned(self):
+        """cudaHostRegister the whole arena mapping in THIS process (lazy,
+        once). Without it the HtoD of a zero-copy tensor pays first-touch
+        page faults on the tmpfs mapping plus pageable staging (~hundreds of
+        ms for 200MB); registration allocates+pins the pages once, making
+        every later HtoD a true DMA. Failure (no CUDA in this process, etc.)
+        is fine — the copy still works, just slower."""
+        if self._pin_attempted:
+            return
+        self._pin_attempted = True
+        try:
+            if not torch.cuda.is_available():
+                return
+            import ctypes
+
+            buf = self.shared_memory.buf
+            assert buf is not None
+            ptr = ctypes.addressof(ctypes.c_char.from_buffer(buf))
+            ret = torch.cuda.cudart().cudaHostRegister(ptr, self.total_bytes, 0)
+            self._pinned = int(ret) == 0
+            logger.info(
+                "ShmTensorArena: cudaHostRegister(%d MB) -> %s",
+                self.total_bytes >> 20,
+                "pinned" if self._pinned else f"error {int(ret)}",
+            )
+        except Exception as e:
+            logger.info("ShmTensorArena: host-register skipped: %s", e)
+
     def get_tensor(
         self, idx: int, nbytes: int, dtype: torch.dtype, shape: tuple[int, ...]
     ) -> torch.Tensor:
         """Zero-copy view of a slot as a tensor. The slot is released at this
         reader's next flush_releases() (called from MessageQueue.dequeue)."""
+        self._ensure_pinned()
         # NOT a context-manager view: the tensor must keep the mapping alive.
         slot_mv = self._slot(idx, nbytes)
         t8 = torch.frombuffer(slot_mv, dtype=torch.uint8, count=nbytes)
