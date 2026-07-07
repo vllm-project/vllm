@@ -60,6 +60,7 @@ from vllm.v1.request import Request, RequestStatus, StreamingUpdate
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 from vllm.v1.structured_output import StructuredOutputManager
 from vllm.v1.utils import record_function_or_nullcontext
+from vllm.utils.import_utils import resolve_obj_by_qualname
 
 logger = init_logger(__name__)
 
@@ -204,11 +205,18 @@ class Scheduler(SchedulerInterface):
             mm_budget.encoder_compute_budget if mm_budget else 0
         )
         encoder_cache_size = mm_budget.encoder_cache_size if mm_budget else 0
-        self.encoder_cache_manager = (
-            EncoderDecoderCacheManager(cache_size=encoder_cache_size)
-            if self.is_encoder_decoder
-            else EncoderCacheManager(cache_size=encoder_cache_size)
-        )
+        manager_cls = self._get_encoder_cache_manager_cls()
+        if manager_cls is None:
+            self.encoder_cache_manager = (
+                EncoderDecoderCacheManager(cache_size=encoder_cache_size)
+                if self.is_encoder_decoder
+                else EncoderCacheManager(cache_size=encoder_cache_size)
+            )
+        else:
+            self.encoder_cache_manager = manager_cls(
+                cache_size=encoder_cache_size,
+                vllm_config=vllm_config,
+            )
 
         speculative_config = vllm_config.speculative_config
         self.use_eagle = False
@@ -284,6 +292,15 @@ class Scheduler(SchedulerInterface):
             )
 
         self._pause_state: PauseState = PauseState.UNPAUSED
+
+    def _get_encoder_cache_manager_cls(self):
+        ec_manager_config = self.vllm_config.ec_manager_config
+        if ec_manager_config is None :
+            return None
+        cls_path = ec_manager_config.encoder_cache_manager_cls
+        if cls_path is None :
+            return None
+        return resolve_obj_by_qualname(cls_path)
 
     def _mamba_block_aligned_split(
         self,
@@ -903,6 +920,7 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
