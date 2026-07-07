@@ -471,39 +471,6 @@ class AttentionMetaData:
 
 
 @dataclass
-class GDNAttentionMetadata:
-    num_prefills: int
-    num_prefill_tokens: int
-    num_decodes: int
-    num_decode_tokens: int
-    num_spec_decodes: int
-    num_spec_decode_tokens: int
-    num_actual_tokens: int
-
-    has_initial_state: torch.Tensor | None = None
-
-    spec_query_start_loc: torch.Tensor | None = None  # shape: [num_spec_decodes + 1,]
-    non_spec_query_start_loc: torch.Tensor | None = (
-        None  # shape: [batch - num_spec_decodes + 1,]
-    )
-
-    spec_state_indices_tensor: torch.Tensor | None = None  # shape: [batch, num_spec]
-    non_spec_state_indices_tensor: torch.Tensor | None = (
-        None  # shape: [batch - num_spec_decodes,]
-    )
-    spec_sequence_masks: torch.Tensor | None = None  # shape: [batch,]
-    spec_token_indx: torch.Tensor | None = None
-    non_spec_token_indx: torch.Tensor | None = None
-
-    num_accepted_tokens: torch.Tensor | None = None  # shape: [batch,]
-
-    # The following attributes are for triton implementation of causal_conv1d
-    nums_dict: dict | None = None
-    batch_ptr: torch.Tensor | None = None
-    token_chunk_offset_ptr: torch.Tensor | None = None
-
-
-@dataclass
 class ForwardContext:
     # copy from vllm_config.compilation_config.static_forward_context
     no_compile_layers: dict[int, Any] = field(default_factory=dict)
