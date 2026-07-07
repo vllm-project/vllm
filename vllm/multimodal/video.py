@@ -248,7 +248,8 @@ class OpenCVVideoBackendMixin:
 
                     graph.push(frame)
                     try:
-                        # yadif passes progressive frames through, deinterlaces interlaced ones
+                        # yadif passes progressive frames through, 
+                        # deinterlaces interlaced ones
                         filtered = graph.pull()
                         img = filtered.to_ndarray(format="rgb24")
                     except av.FFmpegError:
