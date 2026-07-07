@@ -210,9 +210,6 @@ def persistent_masked_m_silu_mul_quant(
         DeepGemmQuantScaleFMT.UE8M0,
     ]
 
-    # Query the worker's own device (logical id 0). Passing y.device.index (a
-    # visible CUDA ordinal) would be misread as a logical id and index past a
-    # sharded assigned_physical_gpu_ids (e.g. external-LB DP).
     device_capability = current_platform.get_device_capability()
     assert device_capability is not None
     cuda_arch = device_capability.to_int()
