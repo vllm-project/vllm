@@ -10,8 +10,10 @@ if current_platform.is_rocm() or current_platform.is_xpu():
 
 from .nvidia.model import Glm5NextForCausalLM
 from .nvidia.mtp import Glm5NextMTP
+from .nvidia.multimodal import Glm5NextForConditionalGeneration
 
 __all__ = [
     "Glm5NextForCausalLM",
+    "Glm5NextForConditionalGeneration",
     "Glm5NextMTP",
 ]
