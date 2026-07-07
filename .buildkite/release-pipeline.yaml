@@ -390,6 +390,24 @@ steps:
         env:
           DOCKER_BUILDKIT: "1"
 
+      - label: "Build release image - x86_64 - XPU"
+        id: build-xpu-release-image
+        depends_on: ~
+        agents:
+          queue: cpu_queue_release
+        commands:
+          - "aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws/q9t5s3a7"
+          - |
+            DOCKER_BUILDKIT=1 docker build \
+              --file docker/Dockerfile.xpu \
+              --build-arg GIT_REPO_CHECK=1 \
+              --tag public.ecr.aws/q9t5s3a7/vllm-release-repo:$${BUILDKITE_COMMIT}-xpu \
+              --progress plain .
+          - "docker push public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-xpu"
+          - 'bash .buildkite/scripts/annotate-build-artifact.sh "$$BUILDKITE_LABEL" "public.ecr.aws/q9t5s3a7/vllm-release-repo:$BUILDKITE_COMMIT-xpu"'
+        env:
+          DOCKER_BUILDKIT: "1"
+
   - group: "Publish release images"
     key: "publish-release-images"
     steps:
@@ -850,6 +868,7 @@ steps:
       - create-multi-arch-manifest-ubuntu2404
       - create-multi-arch-manifest-cuda-12-9-ubuntu2404
       - build-rocm-release-image
+      - build-xpu-release-image
       - input-release-version
       # Wait for CPU builds if their block steps were unblocked, so publish
       # doesn't race the in-progress CPU build. allow_failure lets publish

@@ -130,6 +130,15 @@ docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${ROCM_BASE_CACHE_KEY}-rocm
 docker push vllm/vllm-openai-rocm:latest-base
 docker push vllm/vllm-openai-rocm:v${RELEASE_VERSION}-base
 
+# ---- XPU ----
+
+docker pull public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-xpu
+
+docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-xpu vllm/vllm-openai-xpu:latest
+docker tag public.ecr.aws/q9t5s3a7/vllm-release-repo:${COMMIT}-xpu vllm/vllm-openai-xpu:v${RELEASE_VERSION}
+docker push vllm/vllm-openai-xpu:latest
+docker push vllm/vllm-openai-xpu:v${RELEASE_VERSION}
+
 # ---- CPU ----
 # CPU images are behind separate block steps and may not have been built.
 # All-or-nothing: inspect both arches first, then either publish everything
