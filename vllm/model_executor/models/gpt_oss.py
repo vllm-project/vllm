@@ -155,6 +155,16 @@ class OAIAttention(nn.Module):
         # per-layer sliding-window policy.
         # Only apply sliding window to every other layer
         sliding_window = config.sliding_window if self.layer_idx % 2 == 0 else None
+        # HACK: force different backends per layer type to test per-region
+        # kernel block size handling. FA accepts any multiple of 16, FlashInfer
+        # only [16,32,64], so with block_size=128 FA gets ratio=1 and FI gets
+        # ratio=2. Revert this after testing.
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+        from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+        attn_backend = (
+            FlashInferBackend if self.layer_idx % 2 == 0 else FlashAttentionBackend
+        )
         return Attention(
             self.num_local_attention_heads,
             self.head_dim,
@@ -166,6 +176,7 @@ class OAIAttention(nn.Module):
             attn_type=AttentionType.DECODER,
             prefix=f"{prefix}.attn",
             sinks=self.sinks,
+            attn_backend=attn_backend,
         )
 
     def forward(
