@@ -800,7 +800,10 @@ class DiffusionGemmaModelState(ModelState):
             max_denoising_steps=max_denoising_steps,
             device=device,
             hidden_size=text_config.hidden_size,
-            stability_threshold=self.gen_config["stability_threshold"],
+            # In Transformers, `stability_threshold=1` (the default) means the current
+            # step must match the previous step. In vLLM, the history buffer includes
+            # the current step, so we add 1 to match the same behavior.
+            stability_threshold=self.gen_config["stability_threshold"] + 1,
         )
         self._req_id_to_index: dict[str, int] = {}
 
