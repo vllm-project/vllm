@@ -124,8 +124,9 @@ def test_benchmark_install_removes_conflicting_vllm_provider():
     text = workflow_text()
 
     install_step = text[
-        text.index("      - name: Prepare Ascend runtime and install repos") :
-        text.index("      - name: Verify installation")
+        text.index(
+            "      - name: Prepare Ascend runtime and install repos"
+        ) : text.index("      - name: Verify installation")
     ]
 
     assert '"${PYTHON_BIN}" -m pip uninstall -y vllm vllm-hust' in install_step
@@ -133,16 +134,17 @@ def test_benchmark_install_removes_conflicting_vllm_provider():
         '"${PYTHON_BIN}" scripts/ensure_vllm_provider.py --remove-conflicts'
         in install_step
     )
+    assert '          "${PYTHON_BIN}" scripts/ensure_vllm_provider.py\n' in install_step
     assert (
-        '          "${PYTHON_BIN}" scripts/ensure_vllm_provider.py\n'
-        in install_step
-    )
-    assert install_step.index(
-        '"${PYTHON_BIN}" scripts/ensure_vllm_provider.py --remove-conflicts'
-    ) < install_step.index(
-        '"${PYTHON_BIN}" -m pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]"'
-    ) < install_step.index(
-        '          "${PYTHON_BIN}" scripts/ensure_vllm_provider.py\n'
+        install_step.index(
+            '"${PYTHON_BIN}" scripts/ensure_vllm_provider.py --remove-conflicts'
+        )
+        < install_step.index(
+            '"${PYTHON_BIN}" -m pip install -e "${VLLM_HUST_BENCHMARK_REPO}[publish]"'
+        )
+        < install_step.index(
+            '          "${PYTHON_BIN}" scripts/ensure_vllm_provider.py\n'
+        )
     )
 
 
@@ -388,8 +390,9 @@ def test_l3_benchmark_publish_preflight_runs_before_benchmark():
 def test_target_checkout_uses_resilient_git_http_retry_settings():
     text = workflow_text()
     checkout_step = text[
-        text.index("      - name: Checkout target repo with retry") :
-        text.index("      - name: L3 benchmark publication preflight")
+        text.index("      - name: Checkout target repo with retry") : text.index(
+            "      - name: L3 benchmark publication preflight"
+        )
     ]
 
     assert "GIT_CHECKOUT_RETRY_ATTEMPTS:-6" in checkout_step

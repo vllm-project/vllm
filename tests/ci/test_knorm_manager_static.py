@@ -22,8 +22,7 @@ def test_knorm_free_accepts_scheduler_kwarg_without_forwarding_to_base():
     )
 
     assert any(
-        arg.arg == "prioritize_uncached_for_reuse"
-        for arg in free_func.args.args
+        arg.arg == "prioritize_uncached_for_reuse" for arg in free_func.args.args
     )
 
     super_free_calls = [

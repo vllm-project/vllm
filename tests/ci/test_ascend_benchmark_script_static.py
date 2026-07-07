@@ -79,9 +79,9 @@ def test_e2e_inference_scripts_retry_http_requests_and_print_server_log():
         assert "E2E_HTTP_REQUEST_ATTEMPTS" in text
         assert "else\n      rc=$?\n    fi" in text
         assert "failed after ${max_attempts} attempts" in text
-        assert (
-            'done\n\ncurl -fsS "http://$HOST:$PORT/v1/models" >/dev/null'
-            not in text
-        )
+        assert 'done\n\ncurl -fsS "http://$HOST:$PORT/v1/models" >/dev/null' not in text
         assert "vLLM models endpoint readiness confirmation" in text
-        assert "curl_with_server_log" in text[text.index("completion_response=$(mktemp)") :]
+        assert (
+            "curl_with_server_log"
+            in text[text.index("completion_response=$(mktemp)") :]
+        )

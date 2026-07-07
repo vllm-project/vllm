@@ -36,8 +36,12 @@ from pathlib import Path
 
 def resolve_perfgate_spec_file(*, scenario, hardware_chip_model, repo_root):
     entries = {
-        ("random-online", "910B2"): "docs/official-baselines/perfgate-random-910b2.json",
-        ("sharegpt-online", "910B2"): "docs/official-baselines/perfgate-sharegpt-910b2.json",
+        ("random-online", "910B2"): (
+            "docs/official-baselines/perfgate-random-910b2.json"
+        ),
+        ("sharegpt-online", "910B2"): (
+            "docs/official-baselines/perfgate-sharegpt-910b2.json"
+        ),
     }
     key = (scenario, hardware_chip_model.upper())
     if key not in entries:
@@ -133,10 +137,7 @@ def test_main_writes_absolute_same_spec_file(
     resolver = load_resolver()
     benchmark_repo = write_fake_benchmark_repo(tmp_path)
     spec_file = (
-        benchmark_repo
-        / "docs"
-        / "official-baselines"
-        / "perfgate-random-910b2.json"
+        benchmark_repo / "docs" / "official-baselines" / "perfgate-random-910b2.json"
     )
     github_env = tmp_path / "github-env"
 
