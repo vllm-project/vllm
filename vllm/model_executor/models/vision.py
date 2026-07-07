@@ -605,3 +605,38 @@ def get_llm_pos_ids_for_vision(
     llm_pos_ids_list.append(_llm_pos_ids + start_idx)
     llm_pos_ids = torch.cat(llm_pos_ids_list, dim=1)
     return llm_pos_ids
+
+
+# ---------------------------------------------------------------------------
+# NPU Vision Backend Support
+# ---------------------------------------------------------------------------
+
+
+def use_npu_vision_backend() -> bool:
+    """Check if NPU vision is enabled via VLLM_VISION_NPU_CACHE."""
+    import vllm.envs as envs
+
+    return bool(envs.VLLM_VISION_NPU_CACHE)
+
+
+def get_npu_vision_backend():
+    """Get FlexMLRT NPU vision backend instance if VLLM_VISION_NPU_CACHE is set.
+
+    Returns:
+        FlexMLRTVisionBackend if NPU vision is enabled, None otherwise.
+
+    Raises:
+        ValueError: If VLLM_VISION_NPU_CACHE is set but initialization fails.
+        ImportError: If backend dependencies are not available.
+    """
+    import vllm.envs as envs
+
+    model_cache = envs.VLLM_VISION_NPU_CACHE
+    if not model_cache:
+        return None
+
+    device_name = envs.VLLM_VISION_NPU_DEVICE or "stx"
+
+    from vllm.vision_npu.flexmlrt_backend import FlexMLRTVisionBackend
+
+    return FlexMLRTVisionBackend(model_cache, device_name)
