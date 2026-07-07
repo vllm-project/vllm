@@ -528,8 +528,13 @@ def dummy_hf_overrides(
             }
         )
 
-    # Update num_hidden_layers for non-Longcat architectures
-    if model_arch != "LongcatFlashForCausalLM" and model_arch != "LongCatFlashMTPModel":
+    # Update num_hidden_layers for non-Longcat architectures (Longcat derives it
+    # from num_layers for its dual-attention layers).
+    if model_arch not in (
+        "LongcatFlashForCausalLM",
+        "LongCatFlashMTPModel",
+        "LongcatFlashNgramForCausalLM",
+    ):
         update_dict["num_hidden_layers"] = num_hidden_layers
 
     text_config.update(update_dict)
