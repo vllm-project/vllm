@@ -331,7 +331,7 @@ class OnlineDerenderer:
         usage: UsageInfo | None = None
         if generate_chunk.usage is not None:
             u = generate_chunk.usage
-            pt = prompt_tokens if prompt_tokens is not None else 0
+            pt = prompt_tokens if prompt_tokens is not None else (u.prompt_tokens or 0)
             ct = u.completion_tokens or 0
             usage = UsageInfo(
                 prompt_tokens=pt,
@@ -452,7 +452,7 @@ class OnlineDerenderer:
         usage: UsageInfo | None = None
         if generate_chunk.usage is not None:
             u = generate_chunk.usage
-            pt = prompt_tokens if prompt_tokens is not None else 0
+            pt = prompt_tokens if prompt_tokens is not None else (u.prompt_tokens or 0)
             ct = u.completion_tokens or 0
             usage = UsageInfo(
                 prompt_tokens=pt,
