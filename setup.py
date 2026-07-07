@@ -1075,6 +1075,11 @@ def get_requirements() -> list[str]:
                 # vllm-flash-attn is built only for CUDA 12.x.
                 # Skip for other versions.
                 continue
+            if "flashinfer-cubin" in req:
+                # Not on PyPI since 0.6.14 (only https://flashinfer.ai/whl), so
+                # it cannot be a wheel dependency; flashinfer falls back to
+                # fetching cubins at runtime when the package is absent.
+                continue
             if "nvidia-cutlass-dsl[cu13]" in req and cuda_major == "12":
                 # [cu13] extra is the default; strip it on CUDA 12 builds.
                 req = req.replace("nvidia-cutlass-dsl[cu13]", "nvidia-cutlass-dsl")
