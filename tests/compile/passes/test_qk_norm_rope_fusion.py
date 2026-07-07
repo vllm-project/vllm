@@ -122,7 +122,7 @@ class QKNormRoPETestModel(torch.nn.Module):
 @pytest.mark.parametrize("enable_rope_custom_op", [True])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.skipif(
-    not current_platform.is_cuda_alike(),
+    not (current_platform.is_cuda_alike() or current_platform.is_xpu()),
     reason="Only test on cuda and rocm platform",
 )
 def test_qk_norm_rope_fusion(
@@ -136,7 +136,7 @@ def test_qk_norm_rope_fusion(
     if not hasattr(torch.ops._C, "fused_qk_norm_rope"):
         pytest.skip("fused_qk_norm_rope custom op not available")
 
-    torch.set_default_device("cuda")
+    torch.set_default_device(current_platform.device_type)
     torch.set_default_dtype(dtype)
     torch.manual_seed(0)
 

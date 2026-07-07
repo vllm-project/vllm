@@ -127,14 +127,15 @@ mod tests {
     use std::sync::Arc;
 
     use super::Step3p5ReasoningParser;
-    use crate::reasoning::{ReasoningParser, tests::FakeTokenizer};
+    use crate::reasoning::ReasoningParser;
+    use crate::reasoning::tests::{THINK_START_ID, fake_tokenizer};
 
     #[test]
     fn picks_up_prompt_start_boundary() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
-        // Prompt prefills `<think>` (id 1), opening reasoning before the stream.
-        parser.initialize(&[1]).unwrap();
+        // Prompt prefills `<think>`, opening reasoning before the stream.
+        parser.initialize(&[THINK_START_ID]).unwrap();
 
         let delta = parser.push("This is a reasoning section</think>This is the rest").unwrap();
         assert_eq!(
@@ -146,7 +147,7 @@ mod tests {
 
     #[test]
     fn handles_unterminated_reasoning() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
 
         let pushed = parser.push("<think>reason without end").unwrap();
@@ -159,7 +160,7 @@ mod tests {
 
     #[test]
     fn handles_empty_input() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
 
         let pushed = parser.push("").unwrap();
@@ -172,9 +173,9 @@ mod tests {
     fn complex_newline_pattern_trims_only_single_framing_newline_each_side() {
         // Only the immediately-adjacent framing `\n` is dropped on each side of
         // `</think>`; surrounding newlines remain part of reasoning/content.
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
-        parser.initialize(&[1]).unwrap();
+        parser.initialize(&[THINK_START_ID]).unwrap();
 
         let delta = parser
             .push("\n This is a \n reasoning section\n\n\n</think>\n\nThis is the rest")
@@ -188,7 +189,7 @@ mod tests {
 
     #[test]
     fn drops_framing_newlines_in_single_push() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
 
         let delta = parser.push("<think>reason\n</think>\nanswer").unwrap();
@@ -198,7 +199,7 @@ mod tests {
 
     #[test]
     fn drops_framing_newlines_across_pushes() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
 
         // The trailing `\n` from the first push is held until we know whether
@@ -219,7 +220,7 @@ mod tests {
 
     #[test]
     fn replays_held_newline_when_more_reasoning_follows() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
 
         let first = parser.push("<think>reason\n").unwrap();
@@ -232,7 +233,7 @@ mod tests {
 
     #[test]
     fn finish_flushes_held_newline_in_unterminated_stream() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
 
         let first = parser.push("<think>reason\n").unwrap();
@@ -245,7 +246,7 @@ mod tests {
 
     #[test]
     fn preserves_inner_newlines_in_reasoning() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
 
         let delta = parser.push("<think>line1\nline2</think>tail").unwrap();
@@ -257,7 +258,7 @@ mod tests {
     fn trims_only_one_trailing_reasoning_newline() {
         // Only the single framing newline immediately before `</think>` is
         // dropped; earlier newlines in the reasoning body are preserved.
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
 
         let delta = parser.push("<think>reason\n\n</think>answer").unwrap();
@@ -269,7 +270,7 @@ mod tests {
     fn drops_only_first_content_newline_after_transition() {
         // The leading-`\n` drop applies only to the first content delta after
         // `</think>`; later deltas pass through untouched.
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
 
         let first = parser.push("<think>reason</think>").unwrap();
@@ -288,7 +289,7 @@ mod tests {
 
     #[test]
     fn passes_through_clean_boundary_without_framing_newlines() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
 
         let delta = parser.push("<think>reason</think>tail").unwrap();
@@ -298,7 +299,7 @@ mod tests {
 
     #[test]
     fn handles_empty_reasoning_section() {
-        let tokenizer = Arc::new(FakeTokenizer);
+        let tokenizer = Arc::new(fake_tokenizer());
         let mut parser = Step3p5ReasoningParser::new(tokenizer).unwrap();
 
         let delta = parser.push("<think></think>answer").unwrap();
