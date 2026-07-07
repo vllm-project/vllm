@@ -1,10 +1,11 @@
-use std::collections::BTreeMap;
-use std::slice;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwapOption;
 use parking_lot::Mutex;
 use thiserror_ext::AsReport as _;
+use tokio::runtime::Handle;
 use tokio::sync::mpsc;
 use tracing::{debug, info, trace, warn};
 use vllm_metrics::METRICS;
@@ -14,19 +15,21 @@ use crate::client::state::{OutputReceiver, RequestRegistry, UtilityReceiver, Uti
 use crate::client::stream::EngineCoreStreamOutput;
 use crate::client::{AbortCause, AbortRequest};
 use crate::error::{client_closed, dispatcher_closed, unexpected_dispatcher_output};
-use crate::metrics::record_scheduler_stats;
+use crate::metrics::{LoraInfoExporter, SchedulerStatsRecorder};
+use crate::protocol::encode_msgpack;
+use crate::protocol::output::{EngineCoreOutput, EngineCoreOutputs};
+use crate::protocol::request::EngineCoreRequestType;
 use crate::protocol::stats::SchedulerStats;
 use crate::protocol::utility::UtilityOutput;
-use crate::protocol::{
-    ClassifiedEngineCoreOutputs, EngineCoreOutput, EngineCoreOutputs, EngineCoreRequestType,
-    encode_msgpack,
-};
 use crate::transport::{ConnectedEngine, EngineId};
 use crate::{Error, Result, transport};
 
 pub(crate) struct ClientInner {
     input_send: RouterSendHalf,
+    /// The runtime handle used for sending messages to the engine.
+    handle: Handle,
     model_name: String,
+    scheduler_stats_recorder: SchedulerStatsRecorder,
     request_reg: Mutex<RequestRegistry>,
     utility_reg: Mutex<UtilityRegistry>,
     health_error: ArcSwapOption<Error>,
@@ -37,12 +40,17 @@ impl ClientInner {
     /// handshake completes.
     pub fn new(
         input_send: RouterSendHalf,
+        handle: Handle,
         model_name: String,
         engines: &[ConnectedEngine],
     ) -> Self {
+        let scheduler_stats_recorder =
+            SchedulerStatsRecorder::new(&METRICS.scheduler, &model_name, engines);
         Self {
             input_send,
+            handle,
             model_name,
+            scheduler_stats_recorder,
             request_reg: Mutex::new(RequestRegistry::new(engines)),
             utility_reg: Mutex::new(UtilityRegistry::default()),
             health_error: ArcSwapOption::empty(),
@@ -59,17 +67,19 @@ impl ClientInner {
     /// per-request output channel bound to its `request_id`.
     ///
     /// When `data_parallel_rank` is provided, the request is routed to that
-    /// specific engine rank, bypassing load balancing.
+    /// specific engine rank, bypassing load balancing. `lora_name` is the
+    /// request's LoRA adapter, tracked for `vllm:lora_requests_info`.
     pub fn register_request(
         &self,
         request_id: String,
+        lora_name: Option<String>,
         data_parallel_rank: Option<u32>,
     ) -> Result<(EngineId, OutputReceiver)> {
         let mut registry = self.request_reg.lock();
         if registry.is_closed() {
             return Err(self.closed_error());
         }
-        registry.register(request_id, data_parallel_rank)
+        registry.register(request_id, lora_name, data_parallel_rank)
     }
 
     /// Allocate the next utility `call_id` and register its waiting receiver.
@@ -125,11 +135,31 @@ impl ClientInner {
         self.request_reg.lock().finish_many(request_ids)
     }
 
+    /// Finalize client-initiated aborts by pushing a terminal `Abort` output
+    /// down each request's stream and removing it from the registry. Returns
+    /// the request ids that were still active. See [`RequestRegistry::abort_many`].
+    pub fn abort_requests_locally<'a>(
+        &self,
+        request_ids: impl IntoIterator<Item = &'a String>,
+    ) -> Vec<String> {
+        let timestamp = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs_f64())
+            .unwrap_or(0.0);
+        self.request_reg.lock().abort_many(request_ids, timestamp)
+    }
+
     /// Apply one scheduler stats update for the given engine to the local
     /// routing state. Returns `false` if the engine is unknown to the
     /// client.
     pub fn apply_scheduler_stats(&self, engine_index: u32, stats: &SchedulerStats) -> bool {
         self.request_reg.lock().apply_scheduler_stats(engine_index, stats)
+    }
+
+    /// Snapshot the adapter names of tracked LoRA requests as
+    /// (running, waiting) sets.
+    pub fn lora_adapter_states(&self) -> (BTreeSet<String>, BTreeSet<String>) {
+        self.request_reg.lock().lora_adapter_states()
     }
 
     /// Close all active request streams and utility calls with the first
@@ -191,9 +221,19 @@ impl ClientInner {
         // frames instead of always producing a single msgpack frame.
         let payload = encode_msgpack(payload)?;
         let mut input_send = self.input_send.clone();
-        transport::send_message(&mut input_send, engine_id, request_type.to_frame(), payload)
-            .await?;
-        Ok(())
+        let engine_id = engine_id.clone();
+
+        self.handle
+            .spawn(async move {
+                transport::send_message(
+                    &mut input_send,
+                    &engine_id,
+                    request_type.to_frame(),
+                    payload,
+                )
+                .await
+            })
+            .await?
     }
 
     /// Handle an abort request by sending the abort message to the engine.
@@ -253,33 +293,47 @@ pub(crate) async fn run_abort_loop(
     inner: Arc<ClientInner>,
     mut abort_rx: mpsc::UnboundedReceiver<AbortRequest>,
 ) {
-    // TODO: receive and abort requests in batch
-    while let Some(AbortRequest { request_id, cause }) = abort_rx.recv().await {
-        let Some(engine_id) = inner.take_auto_abort_target(&request_id) else {
-            debug!(request_id, "skip auto-abort for inactive request");
-            continue;
-        };
+    // Coalesce bursts of auto-aborts into a single Abort message per engine.
+    // A dropped-stream storm (e.g. many clients disconnecting at once under
+    // high concurrency) would otherwise issue one engine round-trip per
+    // request. `recv_many` returns as soon as at least one item is ready, so a
+    // lone abort is still forwarded promptly.
+    const MAX_DRAIN: usize = 1024;
+    let mut batch: Vec<AbortRequest> = Vec::new();
 
-        match cause {
-            AbortCause::DroppedStream => {
-                info!(request_id, "auto-aborting request due to dropped stream")
+    while abort_rx.recv_many(&mut batch, MAX_DRAIN).await > 0 {
+        let mut by_engine: BTreeMap<EngineId, Vec<String>> = BTreeMap::new();
+
+        for AbortRequest { request_id, cause } in batch.drain(..) {
+            let Some(engine_id) = inner.take_auto_abort_target(&request_id) else {
+                debug!(request_id, "skip auto-abort for inactive request");
+                continue;
+            };
+
+            match cause {
+                AbortCause::DroppedStream => {
+                    info!(request_id, "auto-aborting request due to dropped stream")
+                }
+                AbortCause::StopStringMatched => {
+                    debug!(
+                        request_id,
+                        "auto-aborting request due to stop string matched"
+                    )
+                }
             }
-            AbortCause::StopStringMatched => {
-                debug!(
-                    request_id,
-                    "auto-aborting request due to stop string matched"
-                )
-            }
+
+            by_engine.entry(engine_id).or_default().push(request_id);
         }
 
-        if let Err(error) = inner.do_abort_requests(&engine_id, slice::from_ref(&request_id)).await
-        {
-            warn!(
-                request_id,
-                ?engine_id,
-                error = %error.as_report(),
-                "failed to auto-abort dropped request stream"
-            );
+        for (engine_id, request_ids) in by_engine {
+            if let Err(error) = inner.do_abort_requests(&engine_id, &request_ids).await {
+                warn!(
+                    ?engine_id,
+                    ?request_ids,
+                    error = %error.as_report(),
+                    "failed to auto-abort request streams"
+                );
+            }
         }
     }
 }
@@ -290,6 +344,8 @@ pub(crate) async fn run_output_dispatcher_loop(
     inner: Arc<ClientInner>,
     mut output_rx: mpsc::Receiver<Result<EngineCoreOutputs>>,
 ) {
+    let mut lora_info = LoraInfoExporter::default();
+
     let result: Result<()> = async {
         loop {
             let outputs = match output_rx.recv().await {
@@ -299,8 +355,8 @@ pub(crate) async fn run_output_dispatcher_loop(
                 )),
             }?;
 
-            match outputs.classify() {
-                ClassifiedEngineCoreOutputs::RequestBatch(batch) => {
+            match outputs {
+                EngineCoreOutputs::RequestBatch(batch) => {
                     let senders = inner.take_senders_for_outputs(&batch.outputs);
                     for (output, sender) in batch.outputs.into_iter().zip(senders) {
                         let request_id = output.request_id.clone();
@@ -337,15 +393,16 @@ pub(crate) async fn run_output_dispatcher_loop(
                                 "dropping scheduler stats for unknown engine"
                             );
                         }
-                        record_scheduler_stats(
-                            &METRICS.scheduler,
-                            inner.model_name(),
-                            batch.engine_index,
-                            scheduler_stats,
-                        );
+                        inner.scheduler_stats_recorder.record(batch.engine_index, scheduler_stats);
                     }
+
+                    // The engine's scheduler stats never carry adapter names;
+                    // the gauge is derived from the registry's frontend-side
+                    // request tracking instead.
+                    let (running, waiting) = inner.lora_adapter_states();
+                    lora_info.update(&METRICS.scheduler, running, waiting);
                 }
-                ClassifiedEngineCoreOutputs::Utility(utility) => {
+                EngineCoreOutputs::Utility(utility) => {
                     let call_id = utility.output.call_id;
                     if inner.resolve_utility_output(utility.output) {
                         trace!(
@@ -361,8 +418,7 @@ pub(crate) async fn run_output_dispatcher_loop(
                         );
                     }
                 }
-                other @ (ClassifiedEngineCoreOutputs::DpControl { .. }
-                | ClassifiedEngineCoreOutputs::Other(_)) => {
+                other => {
                     Err::<(), _>(unexpected_dispatcher_output!(
                         "received unexpected output on main dispatcher path: {other:?}"
                     ))?;
@@ -390,6 +446,7 @@ mod tests {
         let (send, _) = socket.split();
         ClientInner::new(
             send,
+            Handle::current(),
             "test-model".to_string(),
             &[ConnectedEngine {
                 engine_id: EngineId::from(b"engine-0"),

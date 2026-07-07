@@ -64,7 +64,12 @@ class MiniCPMOProcessor(ProcessorMixin):
         pool_step=2,
     ):
         super().__init__(image_processor, feature_extractor, tokenizer)
-        self.version = image_processor.version
+        # Mirror the MiniCPMVProcessor guard: newer (transformers v5.7+)
+        # MiniCPM image processors may drop the legacy `version` attribute,
+        # so fall back to None instead of hard-crashing. `version` only
+        # special-cases the 2.5 tokenization path; other values take the
+        # default branch.
+        self.version = getattr(image_processor, "version", None)
         self.pool_step = pool_step
 
     def _safe_get_token_id(self, attr_name, default_token_str):
@@ -263,7 +268,7 @@ class MiniCPMOProcessor(ProcessorMixin):
     def batch_decode(self, *args, **kwargs):
         """
         This method forwards all its arguments to LlamaTokenizerFast's
-        [`~PreTrainedTokenizer.batch_decode`]. Please refer to the
+        [`~PythonBackend.batch_decode`]. Please refer to the
         docstring of this method for more information.
         """
         output_ids = args[0]
@@ -284,7 +289,7 @@ class MiniCPMOProcessor(ProcessorMixin):
     def decode(self, *args, **kwargs):
         """
         This method forwards all its arguments to LlamaTokenizerFast's
-        [`~PreTrainedTokenizer.decode`]. Please refer to the docstring
+        [`~PythonBackend.decode`]. Please refer to the docstring
         of this method for more information.
         """
         result = args[0]

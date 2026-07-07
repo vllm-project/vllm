@@ -35,7 +35,6 @@ class EventBatch(
 
 class KVCacheEvent(
     msgspec.Struct,
-    array_like=True,  # type: ignore[call-arg]
     omit_defaults=True,  # type: ignore[call-arg]
     gc=False,  # type: ignore[call-arg]
     tag=True,
@@ -44,6 +43,7 @@ class KVCacheEvent(
 
 
 MEDIUM_GPU = "GPU"
+MEDIUM_CPU = "CPU"
 
 
 class BlockStored(KVCacheEvent):
@@ -132,7 +132,8 @@ class KVEventAggregator:
         """
         Add events from a worker batch.
 
-        :param events: List of KVCacheEvent objects.
+        Args:
+            events: List of KVCacheEvent objects.
         """
         if not isinstance(events, list):
             raise TypeError("events must be a list of KVCacheEvent.")
@@ -142,7 +143,8 @@ class KVEventAggregator:
         """
         Return events that appeared in all workers.
 
-        :return: List of events present in all workers.
+        Returns:
+            List of events present in all workers.
         """
         return [
             event
@@ -154,7 +156,8 @@ class KVEventAggregator:
         """
         Return all events for all workers.
 
-        :return: List of events for all workers.
+        Returns:
+            List of events for all workers.
         """
         return list(self._event_counter.elements())
 
@@ -168,7 +171,8 @@ class KVEventAggregator:
         """
         Increment the number of workers contributing events.
 
-        :param count: Number to increment the workers by.
+        Args:
+            count: Number to increment the workers by.
         """
         if count <= 0:
             raise ValueError("count must be positive.")
@@ -184,7 +188,8 @@ class KVEventAggregator:
         """
         Return the number of workers.
 
-        :return: int number of workers.
+        Returns:
+            int number of workers.
         """
         return self._num_workers
 

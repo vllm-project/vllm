@@ -14,9 +14,14 @@ from vllm.v1.core.kv_cache_utils import (
 )
 from vllm.v1.core.single_type_kv_cache_manager import (
     ChunkedLocalAttentionManager,
+    RSWAManager,
     SlidingWindowManager,
 )
-from vllm.v1.kv_cache_interface import ChunkedLocalAttentionSpec, SlidingWindowSpec
+from vllm.v1.kv_cache_interface import (
+    ChunkedLocalAttentionSpec,
+    RSWASpec,
+    SlidingWindowSpec,
+)
 
 pytestmark = pytest.mark.cpu_test
 
@@ -86,7 +91,7 @@ def test_chunked_local_attention_possible_cached_prefix():
             kv_cache_group_ids=[0],
             block_pool=block_pool,
             kv_cache_spec=chunked_local_attention_spec,
-            use_eagle=False,
+            drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0]
         assert len(computed_blocks) == expect_length
@@ -157,7 +162,7 @@ def test_sliding_window_possible_cached_prefix():
             kv_cache_group_ids=[0],
             block_pool=block_pool,
             kv_cache_spec=sliding_window_spec,
-            use_eagle=False,
+            drop_eagle_block=False,
             alignment_tokens=block_size,
         )[0]
         assert len(computed_blocks) == expect_length
@@ -327,6 +332,51 @@ def test_sliding_window_remove_skipped_blocks():
     assert_block_id(block_table, [null_block_id] * 4 + original_block_ids[4:])
 
 
+def test_rswa_remove_skipped_blocks_gap_range():
+    block_size = 4
+    rswa_spec = RSWASpec(
+        block_size=block_size,
+        num_kv_heads=1,
+        head_size=1,
+        dtype=torch.float32,
+        rswa_window=8,
+    )
+    block_pool = BlockPool(num_gpu_blocks=2000, enable_caching=True, hash_block_size=4)
+    manager = RSWAManager(
+        rswa_spec,
+        block_pool=block_pool,
+        enable_caching=True,
+        kv_cache_group_id=0,
+        scheduler_block_size=block_size,
+    )
+
+    null_block_id = block_pool.null_block.block_id
+    original_block_ids = list(range(1000, 1010))
+    block_table = [
+        KVCacheBlock(id_) if id_ != null_block_id else block_pool.null_block
+        for id_ in original_block_ids
+    ]
+    manager.req_to_blocks["test"] = block_table
+
+    prefix_len = 16
+
+    # Without num_prompt_tokens, R-SWA does not evict gap blocks.
+    manager.remove_skipped_blocks("test", 28)
+    assert [b.block_id for b in block_table] == original_block_ids
+
+    # Gap = block 4 only (tokens [16, 20) fall in the gap).
+    manager.remove_skipped_blocks("test", 28, num_prompt_tokens=prefix_len)
+    expected = original_block_ids.copy()
+    expected[4] = null_block_id
+    assert [b.block_id for b in block_table] == expected
+
+    # Window moves: blocks 5 and 6 also enter the gap; block 4 is already null.
+    manager.remove_skipped_blocks("test", 36, num_prompt_tokens=prefix_len)
+    expected[5] = null_block_id
+    expected[6] = null_block_id
+    assert [b.block_id for b in block_table] == expected
+
+
 def test_get_num_blocks_to_allocate():
     block_size = 2
     sliding_window_spec = SlidingWindowSpec(
@@ -390,7 +440,7 @@ def test_evictable_cached_blocks_not_double_allocated():
     # should only allocate the truly new block.
     assert num_blocks_to_allocate == 2
 
-    manager.allocate_new_computed_blocks(
+    manager.add_local_computed_blocks(
         request_id,
         [evictable_block],
         num_local_computed_tokens=block_size,
