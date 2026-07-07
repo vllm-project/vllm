@@ -20,17 +20,15 @@ from transformers.models.pixtral import PixtralProcessor
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.linear import ColumnParallelLinear, RowParallelLinear
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import BaseMultiModalProcessorCache
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
-    MultiModalInputs,
     MultiModalKwargsItems,
-    mm_inputs,
 )
 from vllm.multimodal.parse import (
     ImageEmbeddingItems,
@@ -43,11 +41,9 @@ from vllm.multimodal.processing import (
     BaseMultiModalProcessor,
     BaseProcessingInfo,
     InputProcessingContext,
-    ProcessorInputs,
     PromptReplacement,
     PromptUpdate,
     PromptUpdateDetails,
-    TimingContext,
 )
 from vllm.sequence import IntermediateTensors
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
@@ -55,6 +51,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .clip import CLIPVisionModel
 from .interfaces import (
     MultiModalEmbeddings,
+    SupportsEagle,
     SupportsEagle3,
     SupportsLoRA,
     SupportsMultiModal,
@@ -503,7 +500,12 @@ def init_vision_tower_for_llava(
     dummy_inputs=LlavaDummyInputsBuilder,
 )
 class LlavaForConditionalGeneration(
-    nn.Module, SupportsLoRA, SupportsMultiModal, SupportsPP, SupportsEagle3
+    nn.Module,
+    SupportsLoRA,
+    SupportsMultiModal,
+    SupportsPP,
+    SupportsEagle,
+    SupportsEagle3,
 ):
     packed_modules_mapping = {
         "qkv_proj": ["q_proj", "k_proj", "v_proj"],
@@ -526,13 +528,6 @@ class LlavaForConditionalGeneration(
             return "<image>"
 
         raise ValueError("Only image modality is supported")
-
-    def set_aux_hidden_state_layers(self, layers: tuple[int, ...]) -> None:
-        self.get_language_model().model.aux_hidden_state_layers = layers
-
-    def get_eagle3_aux_hidden_state_layers(self) -> tuple[int, ...]:
-        num_layers = len(self.get_language_model().model.layers)
-        return (2, num_layers // 2, num_layers - 3)
 
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
@@ -757,97 +752,3 @@ class LlavaForConditionalGeneration(
         # LLaVA's MLP projector outputs the same number of tokens
         # as it receives from the vision encoder (1:1 mapping)
         return num_vision_tokens
-
-
-class MantisProcessingInfo(LlavaProcessingInfo):
-    def get_hf_processor(self, **kwargs: object):
-        hf_config = self.get_hf_config()
-        vision_info = self.get_vision_encoder_info()
-
-        kwargs.setdefault("patch_size", vision_info.get_patch_size())
-        kwargs.setdefault(
-            "vision_feature_select_strategy",
-            hf_config.vision_feature_select_strategy,
-        )
-
-        return self.ctx.get_hf_processor(LlavaProcessor, **kwargs)
-
-
-class MantisMultiModalProcessor(LlavaMultiModalProcessor):
-    def apply(
-        self,
-        inputs: ProcessorInputs,
-        timing_ctx: TimingContext,
-    ) -> MultiModalInputs:
-        hf_config = self.info.get_hf_config()
-        image_token_id = hf_config.image_token_index
-
-        # Assume that it doesn't depend on the image size
-        num_image_tokens = self.info.get_num_image_tokens(
-            image_width=-1,
-            image_height=-1,
-        )
-
-        result = super().apply(inputs, timing_ctx)
-
-        mm_item_counts = inputs.mm_data_items.get_all_counts()
-        mm_kwargs = result["mm_kwargs"]
-        mm_hashes = result["mm_hashes"]
-
-        # We reimplement the functionality of MLlavaProcessor from
-        # https://github.com/TIGER-AI-Lab/Mantis.git
-        def get_replacement_mantis(item_idx: int):
-            return "".join(
-                [
-                    f"(image {item_idx + 1}: <Image>",  # 7 tokens
-                    "<image>" * num_image_tokens,
-                    "</Image>)",  # 3 tokens
-                ]
-            )
-
-        mantis_mm_repls = self._bind_and_group_updates(
-            [
-                PromptReplacement(
-                    modality="image",
-                    target=[image_token_id] * num_image_tokens,
-                    replacement=get_replacement_mantis,
-                )
-            ],
-            mm_item_counts,
-        )
-
-        prompt_ids, _ = self._apply_prompt_updates(
-            result["prompt_token_ids"],
-            mantis_mm_repls,
-        )
-
-        orig_repls = self._get_mm_prompt_updates(
-            inputs.mm_data_items,
-            inputs.hf_processor_mm_kwargs,
-            mm_kwargs,
-        )
-        mm_placeholders = self._find_mm_placeholders(prompt_ids, orig_repls)
-        self._validate_mm_placeholders(mm_placeholders, mm_item_counts)
-
-        mm_placeholder_ranges = {
-            modality: [item.to_range() for item in placeholders]
-            for modality, placeholders in mm_placeholders.items()
-        }
-
-        return mm_inputs(
-            prompt_token_ids=prompt_ids,
-            mm_kwargs=mm_kwargs,
-            mm_hashes=mm_hashes,
-            mm_placeholders=mm_placeholder_ranges,
-        )
-
-
-# To use this model, please use
-# `--hf_overrides '{"architectures": ["MantisForConditionalGeneration"]}'`
-@MULTIMODAL_REGISTRY.register_processor(
-    MantisMultiModalProcessor,
-    info=MantisProcessingInfo,
-    dummy_inputs=LlavaDummyInputsBuilder,
-)
-class MantisForConditionalGeneration(LlavaForConditionalGeneration):
-    pass

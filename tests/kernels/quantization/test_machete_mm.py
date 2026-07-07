@@ -29,7 +29,9 @@ if current_platform.is_rocm():
         allow_module_level=True,
     )
 
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 
 # TODO: in future PR refactor this and `is_quant_method_supported` in the kernel
 #  unit tests to a common utility function. Currently the use of

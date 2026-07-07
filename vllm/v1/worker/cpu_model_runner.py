@@ -1,15 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import sys
 from contextlib import contextmanager
 from typing import Any
 
 import torch
 import torch.nn as nn
 
+import vllm.utils.cpu_triton_utils as cpu_tl
 from vllm.config import VllmConfig
 from vllm.logger import init_logger
 from vllm.model_executor.model_loader import get_model
 from vllm.tracing import instrument
+from vllm.v1.kv_cache_interface import FullAttentionSpec, KVCacheConfig
 from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -18,16 +21,20 @@ logger = init_logger(__name__)
 
 class CPUModelRunner(GPUModelRunner):
     def __init__(self, vllm_config: VllmConfig, device: torch.device):
+        # avoid calling accelerator APIs for methods inherited from super class
+        _set_torch_accelerator_to_noop()
+
         with _torch_cuda_wrapper():
             super().__init__(vllm_config, device)
 
         assert device == torch.device("cpu")
-        assert self.speculative_config is None, "spec decode is not supported."
+        # Note: speculative decoding is now supported on CPU with C++ native impls
 
         self.use_cuda_graph = False
         self.cascade_attn_enabled = False
 
         self._postprocess_tensors()
+        self._postprocess_triton()
 
     def _postprocess_tensors(self) -> None:
         # Note: replace device tensors with cpu tensors
@@ -52,6 +59,65 @@ class CPUModelRunner(GPUModelRunner):
                 if isinstance(v, CpuGpuBuffer):
                     v.gpu = v.cpu
 
+    def _postprocess_triton(self) -> None:
+        from vllm.triton_utils import HAS_TRITON
+
+        if HAS_TRITON:
+            logger.info(
+                "Triton-CPU backend is available; skipping C++ monkey-patches "
+                "for Triton kernels."
+            )
+            return
+
+        import vllm.v1.worker.block_table
+
+        vllm.v1.worker.block_table._compute_slot_mapping_kernel = (
+            cpu_tl.compute_slot_mapping_kernel
+        )
+
+        # Speculative decoding fallbacks
+        import vllm.v1.sample.rejection_sampler
+        import vllm.v1.spec_decode.llm_base_proposer
+        import vllm.v1.spec_decode.utils as spec_decode_utils
+
+        vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_inputs_padded_kernel = (
+            cpu_tl.eagle_prepare_inputs_padded_kernel
+        )
+        vllm.v1.spec_decode.llm_base_proposer.eagle_prepare_next_token_padded_kernel = (
+            cpu_tl.eagle_prepare_next_token_padded_kernel
+        )
+        vllm.v1.spec_decode.llm_base_proposer.copy_and_expand_eagle_inputs_kernel = (
+            cpu_tl.copy_and_expand_eagle_inputs_kernel
+        )
+        spec_decode_utils.copy_and_expand_dflash_inputs_kernel = (
+            cpu_tl.copy_and_expand_dflash_inputs_kernel
+        )
+        dflash_module = sys.modules.get("vllm.v1.spec_decode.dflash")
+        if dflash_module is not None:
+            dflash_kernel_name = "copy_and_expand_dflash_inputs_kernel"
+            setattr(
+                dflash_module,
+                dflash_kernel_name,
+                cpu_tl.copy_and_expand_dflash_inputs_kernel,
+            )
+        spec_decode_utils.eagle_step_slot_mapping_metadata_kernel = (
+            cpu_tl.eagle_step_slot_mapping_metadata_kernel
+        )
+        vllm.v1.sample.rejection_sampler.rejection_greedy_sample_kernel = (
+            cpu_tl.rejection_greedy_sample_kernel
+        )
+        vllm.v1.sample.rejection_sampler.rejection_random_sample_kernel = (
+            cpu_tl.rejection_random_sample_kernel
+        )
+        vllm.v1.sample.rejection_sampler.expand_kernel = cpu_tl.expand_kernel
+        vllm.v1.sample.rejection_sampler.sample_recovered_tokens_kernel = (
+            cpu_tl.sample_recovered_tokens_kernel
+        )
+
+        import vllm.v1.worker.mamba_utils
+
+        vllm.v1.worker.mamba_utils.batch_memcpy_kernel = cpu_tl.batch_memcpy_kernel
+
     @instrument(span_name="Loading (CPU)")
     def load_model(self, load_dummy_weights: bool = False) -> None:
         if load_dummy_weights:
@@ -65,6 +131,12 @@ class CPUModelRunner(GPUModelRunner):
         if self.lora_config:
             self.model = self.load_lora_model(self.model, self.vllm_config, self.device)
 
+        if hasattr(self, "drafter"):
+            logger.info_once("Loading drafter model...")
+            self.drafter.load_model(self.model)
+
+        self._setup_eagle3_aux_hidden_state_outputs()
+
     def get_model(self) -> nn.Module:
         return self.model
 
@@ -73,14 +145,21 @@ class CPUModelRunner(GPUModelRunner):
         logger.info("Warming up model for the compilation...")
         # Only generate graph for the generic shape
         with _set_global_compilation_settings(self.vllm_config):
-            self._dummy_run(
-                min(
-                    max(16, self.max_num_reqs),
-                    self.scheduler_config.max_num_batched_tokens,
-                )
-            )
-
+            self.profile_run()
         logger.info("Warming up done.")
+
+    def initialize_kv_cache(
+        self,
+        kv_cache_config: KVCacheConfig,
+        is_profiling: bool = False,
+    ) -> None:
+        super().initialize_kv_cache(kv_cache_config, is_profiling)
+
+        if self.speculative_config:
+            if self.speculative_config.use_eagle():
+                logger.info("EAGLE drafter KV cache initialized for CPU backend")
+            elif self.speculative_config.uses_draft_model():
+                logger.info("Draft model KV cache initialized for CPU backend")
 
     def _init_device_properties(self) -> None:
         pass
@@ -88,9 +167,30 @@ class CPUModelRunner(GPUModelRunner):
     def _sync_device(self) -> None:
         pass
 
-    def get_dp_padding(self, num_tokens: int) -> tuple[int, torch.Tensor | None]:
-        # Note: For CPU backend, dp padding is not required for now.
-        return 0, None
+    def _zero_block_ids(self, block_ids: list[int]) -> None:
+        # Zero full-attention blocks to prevent stale data corruption on partial writes.
+        # Encoder-only (runner-only) layers are not FullAttentionSpec, so the
+        # spec filter below already excludes them; no runner-only skip needed.
+        seen_ptrs: set[int] = set()
+        for group in self.kv_cache_config.kv_cache_groups:
+            if not isinstance(group.kv_cache_spec, FullAttentionSpec):
+                continue
+            for layer_name in group.layer_names:
+                ctx = self.compilation_config.static_forward_context.get(layer_name)
+                if ctx is None:
+                    continue
+                kv = ctx.kv_cache
+                if not isinstance(kv, torch.Tensor):
+                    continue
+                if kv.data_ptr() in seen_ptrs:
+                    continue
+                seen_ptrs.add(kv.data_ptr())
+                for block_id in block_ids:
+                    kv[block_id].zero_()
+
+    def _to_list(self, sampled_token_ids: torch.Tensor) -> list[list[int]]:
+        """CPU-safe version: direct tolist() without CUDA events."""
+        return sampled_token_ids.tolist()
 
 
 @contextmanager
@@ -102,7 +202,8 @@ def _torch_cuda_wrapper():
 
     class _StreamPlaceholder:
         def __init__(self, *args, **kwargs) -> None:
-            pass
+            self.wait_stream = lambda *a, **kw: None
+            self.device = torch.device("cpu")
 
     cuda_event = torch.Event
     cuda_stream = torch.cuda.Stream
@@ -128,3 +229,11 @@ def _set_global_compilation_settings(config: VllmConfig):
         yield
     finally:
         torch_inductor_config.freezing = freezing_value
+
+
+def _set_torch_accelerator_to_noop() -> None:
+    def noop(*args: Any, **kwargs: Any) -> None:
+        pass
+
+    torch.accelerator.synchronize = noop
+    torch.accelerator.empty_cache = noop

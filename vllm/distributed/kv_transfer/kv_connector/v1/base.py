@@ -25,8 +25,8 @@ The class provides the following primitives:
 
     Worker-side: runs in each worker, loads/saves KV cache to/from
     the Connector based on the metadata.
-        handle_preemptions() - called if there are preempted requests,
-            before their blocks are overwritten
+        handle_preemptions() - called for handling preempted requests
+            or request evicted blocks before they are overwritten
 
         start_load_kv() - starts loading all KVs (maybe async)
         wait_for_layer_load() - blocks until layer i load is done
@@ -36,6 +36,8 @@ The class provides the following primitives:
 
         get_finished() - called with ids of finished requests, returns
             ids of requests that have completed async sending/recving.
+        build_connector_worker_meta() - builds metadata to be sent
+            back to the scheduler-side connector
 """
 
 import enum
@@ -60,6 +62,7 @@ if TYPE_CHECKING:
         PromMetricT,
     )
     from vllm.forward_context import ForwardContext
+    from vllm.v1.core.block_pool import BlockPool
     from vllm.v1.core.kv_cache_manager import KVCacheBlocks
     from vllm.v1.kv_cache_interface import KVCacheConfig
     from vllm.v1.request import Request
@@ -137,11 +140,32 @@ class KVConnectorHandshakeMetadata(ABC):  # noqa: B024
 
 class KVConnectorMetadata(ABC):  # noqa: B024
     """
-    Abstract Metadata used to communicate between the
-    Scheduler KVConnector and Worker KVConnector.
+    Abstract Metadata used to communicate
+    Scheduler KVConnector -> Worker KVConnector.
     """
 
     pass
+
+
+class KVConnectorWorkerMetadata(ABC):
+    """
+    Abstract Metadata used to communicate back
+    Worker KVConnector -> Scheduler KVConnector.
+
+    Each worker can output its own metadata.
+    For a single engine step, all metadata objects returned by workers
+    will be aggregated using the `aggregate` method below, before
+    being passed to the Scheduler KVConnector.
+    """
+
+    @abstractmethod
+    def aggregate(
+        self, other: "KVConnectorWorkerMetadata"
+    ) -> "KVConnectorWorkerMetadata":
+        """
+        Aggregate metadata with another `KVConnectorWorkerMetadata` object.
+        """
+        pass
 
 
 class KVConnectorBase_V1(ABC):
@@ -161,7 +185,7 @@ class KVConnectorBase_V1(ABC):
         self,
         vllm_config: "VllmConfig",
         role: KVConnectorRole,
-        kv_cache_config: "KVCacheConfig | None" = None,
+        kv_cache_config: "KVCacheConfig",
     ):
         logger.warning(
             "Initializing KVConnectorBase_V1. This API is experimental and "
@@ -174,13 +198,6 @@ class KVConnectorBase_V1(ABC):
         else:
             raise ValueError("kv_transfer_config must be set for KVConnectorBase_V1")
         self._kv_cache_config = kv_cache_config
-        if self._kv_cache_config is None:
-            logger.warning(
-                "KVConnectorBase_V1 initialized without kv_cache_config. "
-                "This is deprecated - please update your connector to accept "
-                "kv_cache_config as the third constructor argument and pass it "
-                "to super().__init__()."
-            )
         self._role = role
 
     @property
@@ -265,9 +282,9 @@ class KVConnectorBase_V1(ABC):
         """
         return
 
-    def handle_preemptions(self, preempted_req_ids: set[str]):
+    def handle_preemptions(self, kv_connector_metadata: KVConnectorMetadata):
         """
-        Handle preempted requests BEFORE their blocks are overwritten.
+        Handle preempted requests or evicted blocks BEFORE they are overwritten.
         Needed for connectors which use async saves (e.g., OffloadingConnector)
         """
         return
@@ -409,9 +426,29 @@ class KVConnectorBase_V1(ABC):
         """
         return None
 
+    def build_connector_worker_meta(self) -> KVConnectorWorkerMetadata | None:
+        """
+        Build the KVConnector worker metadata for this engine step.
+
+        Returns:
+            KVConnectorWorkerMetadata: the worker metadata.
+            None if no worker metadata is available.
+        """
+        return None
+
     # ==============================
     # Scheduler-side methods
     # ==============================
+
+    def bind_gpu_block_pool(self, gpu_block_pool: "BlockPool") -> None:
+        """
+        Bind the GPU block pool to the connector for per-GPU block status tracking.
+        For example, inc/dec ref counts, or iterate over the prefix cache blocks.
+
+        Args:
+            gpu_block_pool: the GPU block pool.
+        """
+        return
 
     @abstractmethod
     def get_num_new_matched_tokens(
@@ -484,6 +521,14 @@ class KVConnectorBase_V1(ABC):
         """
         pass
 
+    def on_new_request(self, request: "Request") -> None:
+        """Called by the scheduler when a new request is added.
+
+        Connectors can override this to inspect the request and perform
+        bookkeeping. The default implementation is a no-op.
+        """
+        return
+
     def update_connector_output(self, connector_output: KVConnectorOutput):
         """
         Update KVConnector state from worker-side connectors output.
@@ -523,6 +568,18 @@ class KVConnectorBase_V1(ABC):
             New KV cache events since the last call.
         """
         return ()
+
+    def has_pending_push_work(self) -> bool:
+        """Return True if the connector has push-mode work that requires
+        the engine main loop to keep stepping (e.g. a P-side request whose
+        KV blocks are waiting to be WRITTEN to a D node).
+
+        Connectors that don't implement push-based KV transfer should
+        leave this as False.
+        """
+        # TODO: replace with a more general connector hook for keeping the
+        # scheduler alive (e.g. extend has_unfinished_requests).
+        return False
 
     @classmethod
     def get_required_kvcache_layout(cls, vllm_config: "VllmConfig") -> str | None:
@@ -598,6 +655,23 @@ class KVConnectorBase_V1(ABC):
             metadata (KVConnectorHandshakeMetadata): the handshake metadata to set.
         """
         return None
+
+    def set_xfer_handshake_metadata_pp_aware(
+        self, metadata: dict[tuple[int, int], KVConnectorHandshakeMetadata]
+    ) -> None:
+        """
+        Set handshake metadata keyed by (pp_rank, tp_rank).
+        - Default implementation assumes pp_rank is always 0
+        - PP-aware connectors override this to consume all PP producer shards.
+        """
+        if any(pp_rank != 0 for pp_rank, _ in metadata):
+            raise ValueError(
+                f"{type(self).__name__} received pp_rank > 0 handshake metadata "
+                "but does not support PP-disaggregated KV transfer."
+            )
+        self.set_xfer_handshake_metadata(
+            {tp_rank: meta for (_, tp_rank), meta in metadata.items()}
+        )
 
     @classmethod
     def build_prom_metrics(

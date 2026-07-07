@@ -2,17 +2,16 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from transformers import PreTrainedTokenizerBase
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
 from vllm.entrypoints.openai.engine.protocol import DeltaMessage
-from vllm.logger import init_logger
 from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 
-logger = init_logger(__name__)
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
 class Ernie45ReasoningParser(BaseThinkingReasoningParser):
@@ -46,19 +45,11 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
                 "constructor during construction."
             )
 
-        self.start_token_id = self.vocab.get(self.start_token)
-        self.end_token_id = self.vocab.get(self.end_token)
         self.response_start_token_id = self.vocab.get(self.response_start_token)
         self.response_end_token_id = self.vocab.get(self.response_end_token)
         self.newline_token_id = self.vocab.get(self.newline_token)
 
         self.parser_token_ids = [self.end_token_id, self.response_end_token_id]
-
-        if self.start_token_id is None or self.end_token_id is None:
-            raise RuntimeError(
-                "Ernie45 reasoning parser could not locate think start/end "
-                "tokens in the tokenizer!"
-            )
 
     def extract_reasoning_streaming(
         self,
@@ -123,7 +114,8 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
                     content = content[:response_end_idx]
             elif self.response_end_token_id in delta_token_ids:
                 response_end_idx = content.rfind(self.response_end_token)
-                content = content[:response_end_idx]
+                if response_end_idx != -1:
+                    content = content[:response_end_idx]
             # remove \n after </think>  or </response>
             if previous_token_ids[-1] in self.parser_token_ids and (
                 len(delta_token_ids) > 0 and delta_token_ids[0] == self.newline_token_id
@@ -144,7 +136,7 @@ class Ernie45ReasoningParser(BaseThinkingReasoningParser):
             return DeltaMessage(reasoning=delta_text)
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         """
         Extract reasoning content from the model output.

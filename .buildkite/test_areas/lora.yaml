@@ -3,20 +3,35 @@ depends_on:
   - image-build
 steps:
 - label: LoRA %N
+  device: h200_35gb
+  key: lora
   timeout_in_minutes: 30
   source_file_dependencies:
   - vllm/lora
   - tests/lora
   commands:
-    - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_llm_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py
+    - pytest -v -s lora --shard-id=$$BUILDKITE_PARALLEL_JOB --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --ignore=lora/test_chatglm3_tp.py --ignore=lora/test_llama_tp.py --ignore=lora/test_qwen3_with_multi_loras.py --ignore=lora/test_olmoe_tp.py --ignore=lora/test_deepseekv2_tp.py --ignore=lora/test_gptoss_tp.py --ignore=lora/test_qwen3moe_tp.py --ignore=lora/test_qwen35_densemodel_lora.py 
   parallelism: 4
+  mirror:
+    amd:
+      device: mi325_1
+      working_dir: "/vllm-workspace/tests"
+      timeout_in_minutes: 60
+      source_file_dependencies:
+      - vllm/lora
+      - tests/lora
+      - vllm/platforms/rocm.py
+      depends_on:
+      - image-build-amd
 
 
 - label: LoRA TP (Distributed)
+  key: lora-tp-distributed
   timeout_in_minutes: 30
   num_devices: 4
   source_file_dependencies:
   - vllm/lora
+  - vllm/model_executor/layers/fused_moe/
   - tests/lora
   commands:
     # FIXIT: find out which code initialize cuda before running the test
@@ -28,6 +43,7 @@ steps:
     # requires multi-GPU testing for validation.
     - pytest -v -s -x lora/test_chatglm3_tp.py
     - pytest -v -s -x lora/test_llama_tp.py
-    - pytest -v -s -x lora/test_llm_with_multi_loras.py
+    - pytest -v -s -x lora/test_qwen3_with_multi_loras.py
     - pytest -v -s -x lora/test_olmoe_tp.py
     - pytest -v -s -x lora/test_gptoss_tp.py
+    - pytest -v -s -x lora/test_qwen35_densemodel_lora.py

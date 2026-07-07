@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import threading
+import time
+from collections import OrderedDict, defaultdict
+from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
 from weakref import ref as weakref_ref
 
@@ -8,7 +11,6 @@ import msgpack
 import torch
 import zmq
 
-from vllm import envs
 from vllm.logger import init_logger
 from vllm.utils.network_utils import (
     make_zmq_path,
@@ -16,9 +18,7 @@ from vllm.utils.network_utils import (
 )
 
 if TYPE_CHECKING:
-    pass
-
-from queue import Empty, Queue
+    from mori.io import BackendType
 
 from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     ROLE,
@@ -27,8 +27,10 @@ from vllm.distributed.kv_transfer.kv_connector.v1.moriio.moriio_common import (
     MoRIIOAgentMetadata,
     MoRIIOConstants,
     MoRIIOError,
+    MoRIIOTransferAck,
     RemoteAllocInfo,
     TransferError,
+    TransferId,
     WriteTask,
     get_port_offset,
     get_role,
@@ -43,11 +45,13 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 try:
     from mori.io import (
+        BackendType,
         EngineDesc,
         IOEngine,
         MemoryDesc,
         PollCqMode,
         RdmaBackendConfig,
+        XgmiBackendConfig,
     )
 
     logger.info("MoRIIO is available")
@@ -58,10 +62,25 @@ except ImportError:
 """Write task execution logic for MoRIIO connector."""
 
 
+_MAX_TERMINAL_TRANSFER_IDS = 4096
+
+
+WriteGeometryKey = tuple[tuple[int, ...], tuple[int, ...], torch.dtype]
+
+
+def _get_write_geometry_key(kv_cache: torch.Tensor) -> WriteGeometryKey:
+    return (tuple(kv_cache.shape), tuple(kv_cache.stride()), kv_cache.dtype)
+
+
 class MoRIIOWriter:
     """Handles write operations for KV cache transfers.
-    Implements distributed KV cache transfer using the MoRIIO library
-    for RDMA-based communication between prefill and decode instances."""
+
+    WRITE mode state machine:
+    D sends destination block allocation, P schedules one write per layer
+    after the layer CUDA event, P seals the scheduled write count after
+    forward, then P notifies D and releases P blocks after all scheduled
+    writes complete.
+    """
 
     def __init__(self, worker: "MoRIIOConnectorWorker"):
         """Initialize the writer.
@@ -73,7 +92,12 @@ class MoRIIOWriter:
         self._write_task_q: Queue[WriteTask] = Queue()
         self._write_worker_started = False
         self._write_worker_lock = threading.Lock()
+        self._write_state_lock = threading.Lock()
         self._deferred_tasks: list[WriteTask] = []
+        self._scheduled_writes: dict[TransferId, int] = defaultdict(int)
+        self._scheduled_layers: dict[TransferId, set[str]] = defaultdict(set)
+        self._sealed_writes: dict[TransferId, int] = {}
+        self._defer_timeout = worker.moriio_config.defer_timeout
 
     @property
     def worker(self) -> "MoRIIOConnectorWorker":
@@ -102,14 +126,55 @@ class MoRIIOWriter:
             thread.start()
             logger.info("Started MoRIIO write worker thread")
 
-    def schedule_write(self, task: WriteTask) -> None:
+    def schedule_write(self, task: WriteTask) -> bool:
         """Schedule a write task.
 
         Args:
             task: The write task to schedule
         """
         self.ensure_worker_started()
+        if self._is_transfer_terminal(task.transfer_id):
+            return False
+
+        with self._write_state_lock:
+            if self._is_transfer_terminal(task.transfer_id):
+                return False
+            if task.layer_name in self._scheduled_layers[task.transfer_id]:
+                return False
+            self._scheduled_layers[task.transfer_id].add(task.layer_name)
+            self._scheduled_writes[task.transfer_id] += 1
         self._write_task_q.put(task)
+        return True
+
+    def is_scheduled(self, transfer_id: TransferId, layer_name: str) -> bool:
+        with self._write_state_lock:
+            return layer_name in self._scheduled_layers.get(transfer_id, set())
+
+    def seal_pending_transfers(self) -> None:
+        """Seal expected WRITE counts after the model forward has run.
+
+        `save_kv_layer` is only invoked for attention layers whose backend uses
+        the standard KV connector hook. Hybrid models can register more KV
+        cache tensors than the number of hooks that fire in a forward, so WRITE
+        completion must be based on the tasks actually queued for the transfer.
+        """
+        pending: list[tuple[TransferId, RemoteAllocInfo]] = []
+        with self._write_state_lock:
+            for transfer_id, write_count in self._scheduled_writes.items():
+                if transfer_id in self._sealed_writes:
+                    continue
+                self._sealed_writes[transfer_id] = write_count
+                request_info = (
+                    self.worker.moriio_wrapper.done_remote_allocate_req_dict.get(
+                        transfer_id
+                    )
+                )
+                if request_info is not None:
+                    request_info.writes_expected = write_count
+                    pending.append((transfer_id, request_info))
+
+        for transfer_id, request_info in pending:
+            self._finalize_if_complete(transfer_id, request_info)
 
     def _write_worker_loop(self) -> None:
         """Main loop for the write worker thread."""
@@ -124,6 +189,9 @@ class MoRIIOWriter:
             except Empty:
                 continue
 
+            if self._is_transfer_terminal(task.transfer_id):
+                continue
+
             # Check if remote blocks are ready
             if not self._is_remote_ready(task):
                 # task.retry_count += 1
@@ -135,22 +203,69 @@ class MoRIIOWriter:
                 continue
 
             # Execute the task
-
-            self._execute_write_task(task)
+            try:
+                self._execute_write_task(task)
+            except Exception:
+                logger.exception(
+                    "Write task failed for request %s, marking done",
+                    task.request_id,
+                )
+                self._mark_request_done(task.transfer_id)
 
     def _process_deferred_tasks(self) -> None:
         """Process tasks that were previously deferred."""
         if not self._deferred_tasks:
             return
 
+        defer_timeout = self._defer_timeout
+        now = time.perf_counter()
         still_deferred: list[WriteTask] = []
+
         for task in self._deferred_tasks:
+            if self._is_transfer_terminal(task.transfer_id):
+                continue
+            if now - task.enqueue_time > defer_timeout:
+                logger.error(
+                    "Deferred write task for request %s expired after %.1fs "
+                    "(remote blocks never arrived), marking done",
+                    task.request_id,
+                    now - task.enqueue_time,
+                )
+                self._mark_request_done(task.transfer_id)
+                continue
             if self._is_remote_ready(task):
-                self._execute_write_task(task)
+                try:
+                    self._execute_write_task(task)
+                except Exception:
+                    logger.exception(
+                        "Deferred write task failed for request %s, marking done",
+                        task.request_id,
+                    )
+                    self._mark_request_done(task.transfer_id)
             else:
                 still_deferred.append(task)
 
         self._deferred_tasks = still_deferred
+
+    def _clear_transfer_state(self, transfer_id: TransferId) -> None:
+        with self._write_state_lock:
+            self._scheduled_writes.pop(transfer_id, None)
+            self._scheduled_layers.pop(transfer_id, None)
+            self._sealed_writes.pop(transfer_id, None)
+
+    def _is_transfer_terminal(self, transfer_id: TransferId) -> bool:
+        wrapper = self.worker.moriio_wrapper
+        with wrapper.lock:
+            return wrapper._is_transfer_terminal_locked(transfer_id)
+
+    def _mark_request_done(self, transfer_id: str) -> None:
+        """Mark a request done so its blocks are freed, even on transfer failure."""
+        wrapper = self.worker.moriio_wrapper
+        with wrapper.lock:
+            wrapper.done_req_ids.append(MoRIIOTransferAck(transfer_id))
+            wrapper.done_remote_allocate_req_dict.pop(transfer_id, None)
+            wrapper._mark_transfer_terminal_locked(transfer_id)
+        self._clear_transfer_state(transfer_id)
 
     def _is_remote_ready(self, task: WriteTask) -> bool:
         """Check if remote blocks are allocated for this task.
@@ -162,14 +277,14 @@ class MoRIIOWriter:
             True if remote blocks are ready
         """
         return (
-            task.request_id in self.worker.moriio_wrapper.done_remote_allocate_req_dict
+            task.transfer_id in self.worker.moriio_wrapper.done_remote_allocate_req_dict
         )
 
-    def _get_remote_alloc_info(self, request_id: str) -> RemoteAllocInfo:
+    def _get_remote_alloc_info(self, transfer_id: str) -> RemoteAllocInfo:
         """Get remote allocation info for a request.
 
         Args:
-            request_id: The request ID
+            transfer_id:TransferId The request ID
 
         Returns:
             Remote allocation information
@@ -178,10 +293,10 @@ class MoRIIOWriter:
             KeyError: If allocation info is missing
         """
         try:
-            return self.worker.moriio_wrapper.done_remote_allocate_req_dict[request_id]
+            return self.worker.moriio_wrapper.done_remote_allocate_req_dict[transfer_id]
         except KeyError as e:
             raise KeyError(
-                f"Remote allocation info missing for request {request_id}"
+                f"Remote allocation info missing for transfer {transfer_id}"
             ) from e
 
     def _execute_write_task(self, task: WriteTask) -> None:
@@ -192,10 +307,20 @@ class MoRIIOWriter:
 
         """
         # Get remote allocation info
-        request_info = self._get_remote_alloc_info(task.request_id)
+        request_info = self._get_remote_alloc_info(task.transfer_id)
+        with self._write_state_lock:
+            request_info.completion_request_id = task.request_id
+            request_info.completion_remote_notify_port = task.remote_notify_port
+            request_info.completion_remote_ip = task.remote_ip
+            if task.transfer_id in self._sealed_writes:
+                request_info.writes_expected = self._sealed_writes[task.transfer_id]
 
         if request_info.block_ids is None:
-            logger.debug("Request %s remote block IDs not ready", task.request_id)
+            logger.debug(
+                "Request remote block IDs not ready:request_id = %s, transfer_id = %s",
+                task.request_id,
+                task.transfer_id,
+            )
             return
 
         # Wait for CUDA event
@@ -219,10 +344,12 @@ class MoRIIOWriter:
         plan = self._prepare_transfer_plan(task, request_info, remote_moriio_meta)
 
         # Execute transfer
-        self._do_layer_write(plan, sessions)
+        transfer_statuses = self._do_layer_write(plan, sessions)
+        with self._write_state_lock:
+            request_info.transfer_statuses.extend(transfer_statuses)
 
         # Finalize if all layers complete
-        self._finalize_if_complete(task, request_info)
+        self._mark_write_done(task.transfer_id, request_info)
 
     def _prepare_transfer_plan(
         self,
@@ -239,24 +366,27 @@ class MoRIIOWriter:
         Returns:
             The transfer plan
         """
-        # Compute offsets if not cached
-        if request_info.transfer_offset is None:
+        layer_cache = self.worker.kv_caches[task.layer_name]
+        geometry_key = _get_write_geometry_key(layer_cache)
+        offsets = request_info.transfer_offsets.get(geometry_key)
+        if offsets is None:
             offsets = self.worker._compute_block_transfer_offsets(
                 task.layer_name,
                 task.local_block_ids,
                 request_info.block_ids,
                 remote_moriio_meta,
             )
-            request_info.transfer_offset = offsets
+            request_info.transfer_offsets[geometry_key] = offsets
 
         # Get session index
         layer_names = list(self.worker.layer_name_to_local_kv_cache_metadata.keys())
         sess_idx = layer_names.index(task.layer_name)
 
-        local_off, remote_off, sizes = request_info.transfer_offset
+        local_off, remote_off, sizes = offsets
 
         return LayerTransferPlan(
             request_id=task.request_id,
+            transfer_id=task.transfer_id,
             layer_name=task.layer_name,
             sess_idx=sess_idx,
             transfer_local_offsets=local_off,
@@ -265,7 +395,7 @@ class MoRIIOWriter:
             use_batch=True,
         )
 
-    def _do_layer_write(self, plan: LayerTransferPlan, sessions: list) -> None:
+    def _do_layer_write(self, plan: LayerTransferPlan, sessions: list) -> list[Any]:
         """Perform the actual layer write.
 
         Args:
@@ -273,58 +403,84 @@ class MoRIIOWriter:
             sessions: List of transfer sessions
         """
         if plan.use_batch:
-            self.worker.moriio_wrapper.write_remote_data(
-                plan.transfer_sizes,
-                plan.transfer_local_offsets,
-                plan.transfer_remote_offsets,
-                sessions[plan.sess_idx],
-            )
-        else:
-            for i in range(len(plan.transfer_local_offsets)):
+            return [
+                self.worker.moriio_wrapper.write_remote_data(
+                    plan.transfer_sizes,
+                    plan.transfer_local_offsets,
+                    plan.transfer_remote_offsets,
+                    sessions[plan.sess_idx],
+                )
+            ]
+
+        transfer_statuses: list[Any] = []
+        for i in range(len(plan.transfer_local_offsets)):
+            transfer_statuses.append(
                 self.worker.moriio_wrapper.write_remote_data_single(
                     plan.transfer_sizes[i],
                     plan.transfer_local_offsets[i],
                     plan.transfer_remote_offsets[i],
                     plan.sess_idx,
                 )
+            )
+        return transfer_statuses
+
+    def _mark_write_done(
+        self, transfer_id: TransferId, request_info: RemoteAllocInfo
+    ) -> None:
+        """Record one completed WRITE task and finalize if sealed."""
+        with self._write_state_lock:
+            request_info.writes_done += 1
+        self._finalize_if_complete(transfer_id, request_info)
 
     def _finalize_if_complete(
-        self, task: WriteTask, request_info: RemoteAllocInfo
+        self, transfer_id: TransferId, request_info: RemoteAllocInfo
     ) -> None:
-        """Finalize transfer if all layers are complete.
+        """Finalize transfer if all scheduled writes are complete."""
+        with self._write_state_lock:
+            expected = request_info.writes_expected
+            if expected is None or request_info.writes_done < expected:
+                return
+            if request_info.completion_notified:
+                return
+            request_id = request_info.completion_request_id
+            remote_notify_port = request_info.completion_remote_notify_port
+            remote_ip = request_info.completion_remote_ip
+            if request_id is None or remote_notify_port is None or remote_ip is None:
+                return
+            transfer_statuses = list(request_info.transfer_statuses)
+            request_info.transfer_statuses.clear()
+            request_info.completion_notified = True
 
-        Args:
-            task: The write task
-            request_info: Remote allocation information
-        """
-        request_info.writes_done += 1
+        # Wait for this request's transfers to complete.
+        self.worker.moriio_wrapper.waiting_for_transfer_complete(transfer_statuses)
 
-        if request_info.writes_done >= self.worker.num_layers:
-            # Wait for transfer to complete
-            self.worker.moriio_wrapper.waiting_for_transfer_complete()
+        remote_port = remote_notify_port + get_port_offset(
+            request_info.decode_dp_rank, self.worker.tp_rank
+        )
+        # Consider using RDMA immediate data in decode side
+        # to eliminate the need for this notification.
+        # Consider including the first gen token from prefill in the notification
 
-            remote_port = task.remote_notify_port + get_port_offset(
-                request_info.decode_dp_rank, self.worker.tp_rank
+        # Send completion notification
+        self.worker.moriio_wrapper.send_notify(
+            transfer_id, remote_ip, remote_port, message_type="write_done"
+        )
+        # mark request as done, then we can free the blocks
+        with self.worker.moriio_wrapper.lock:
+            self.worker.moriio_wrapper.done_req_ids.append(
+                MoRIIOTransferAck(transfer_id)
             )
-            # Consider using RDMA immediate data in decode side
-            # to eliminate the need for this notification.
-            # Consider including the first gen token from prefill in the notification
-
-            # Send completion notification
-            self.worker.moriio_wrapper.send_notify(
-                task.request_id, task.remote_ip, remote_port
+            self.worker.moriio_wrapper.done_remote_allocate_req_dict.pop(
+                transfer_id, None
             )
-            # mark request as done, then we can free the blocks
-            with self.worker.moriio_wrapper.lock:
-                self.worker.moriio_wrapper.done_req_ids.append(task.request_id)
-            del self.worker.moriio_wrapper.done_remote_allocate_req_dict[
-                task.request_id
-            ]
-            logger.debug(
-                "Completed transfer for request %s, notified port %d",
-                task.request_id,
-                remote_port,
-            )
+            self.worker.moriio_wrapper._mark_transfer_terminal_locked(transfer_id)
+        self._clear_transfer_state(transfer_id)
+        logger.debug(
+            "Completed transfer for (request, transfer) %s, %s, notified port %d",
+            request_id,
+            transfer_id,
+            remote_port,
+        )
 
 
 class MoRIIOWrapper:
@@ -343,6 +499,7 @@ class MoRIIOWrapper:
         moriio_engine: "IOEngine | None" = None,
         tp_rank: int = 0,
         dp_rank: int = 0,
+        transfer_timeout: float = MoRIIOConstants.DEFAULT_TRANSFER_TIMEOUT,
     ):
         self.tp_rank = tp_rank
         self.dp_rank = dp_rank
@@ -354,9 +511,11 @@ class MoRIIOWrapper:
         self.remote_engine_ip: str | None = None
         self.notify_port: int | None = None
         self.lock = threading.Lock()
-        self.done_req_ids: list[str] = []
-        self.done_remote_allocate_req_dict: dict[str, RemoteAllocInfo] = {}
+        self.done_req_ids: list[MoRIIOTransferAck] = []
+        self.done_remote_allocate_req_dict: dict[TransferId, RemoteAllocInfo] = {}
         self.done_write_cache_req_ids: list[str] = []
+        self._terminal_transfer_ids: OrderedDict[TransferId, None] = OrderedDict()
+        self._transfer_timeout = transfer_timeout
         self.notify_thread: threading.Thread | None = None
         self.sessions: list[IOEngine.Session] = []
         self.paths: dict[str, zmq.Socket] = {}
@@ -367,19 +526,40 @@ class MoRIIOWrapper:
         )
         self.moriio_engine = moriio_engine
 
-    def set_backend_type(self, backend_type):
+    def set_backend_type(
+        self,
+        backend_type: "BackendType",
+        qp_per_transfer: int = 1,
+        post_batch_size: int = -1,
+        num_workers: int = 1,
+    ) -> None:
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
-        qp_per_transfer = envs.VLLM_MORIIO_QP_PER_TRANSFER
-        post_batch_size = envs.VLLM_MORIIO_POST_BATCH_SIZE
-        num_worker_threads = envs.VLLM_MORIIO_NUM_WORKERS
-        poll_mode = PollCqMode.POLLING
-        rdma_cfg = RdmaBackendConfig(
-            qp_per_transfer,
-            post_batch_size,
-            num_worker_threads,
-            poll_mode,
-        )
-        self.moriio_engine.create_backend(backend_type, rdma_cfg)
+        if backend_type == BackendType.XGMI:
+            logger.info("Using MoRIIO backend: XGMI")
+            self.moriio_engine.create_backend(backend_type, XgmiBackendConfig())
+        else:
+            logger.info(
+                "Using MoRIIO backend: RDMA "
+                "(qp_per_transfer=%d, post_batch_size=%d, num_workers=%d)",
+                qp_per_transfer,
+                post_batch_size,
+                num_workers,
+            )
+            rdma_cfg = RdmaBackendConfig(
+                qp_per_transfer,
+                post_batch_size,
+                num_workers,
+                PollCqMode.POLLING,
+                # vLLM uses ZMQ for completion signaling
+                # and never calls PopInboundTransferStatus.
+                # With notifications enabled, ibv_post_send
+                # ENOMEM at high concurrency permanently
+                # poisons TransferStatus before the data WR
+                # completes, hanging requests in
+                # WAITING_FOR_REMOTE_KVS indefinitely.
+                enable_notification=False,
+            )
+            self.moriio_engine.create_backend(backend_type, rdma_cfg)
 
     def get_agent_metadata(self):
         assert self.moriio_engine is not None, "MoRIIO engine must be set first"
@@ -441,8 +621,7 @@ class MoRIIOWrapper:
         transfer_status = session.batch_write(
             local_offset, remote_offset, transfer_size_byte, write_uid
         )
-        with self.lock:
-            self.transfer_status.append(transfer_status)
+        return transfer_status
 
     def write_remote_data_single(
         self, transfer_size_byte, local_offset=0, remote_offset=0, sess_idx=0
@@ -455,29 +634,52 @@ class MoRIIOWrapper:
             transfer_size_byte,
             self.moriio_engine.allocate_transfer_uid(),
         )
-        with self.lock:
-            self.transfer_status.append(transfer_status)
+        return transfer_status
 
-    def waiting_for_transfer_complete(self):
-        if not self.transfer_status:
+    def waiting_for_transfer_complete(self, transfer_statuses: list[Any] | None = None):
+        if transfer_statuses is None:
+            with self.lock:
+                transfers_to_wait = self.transfer_status[:]
+                self.transfer_status.clear()
+        else:
+            transfers_to_wait = list(transfer_statuses)
+
+        if not transfers_to_wait:
             return
 
-        transfers_to_wait = []
-        with self.lock:
-            transfers_to_wait = self.transfer_status[:]
-            self.transfer_status.clear()
+        timeout = self._transfer_timeout
+        deadline = time.monotonic() + timeout
+        remaining = list(transfers_to_wait)
+        errors: list[str] = []
 
-        for status in transfers_to_wait:
-            try:
-                status.Wait()
-                if not status.Succeeded():
-                    logger.error(
-                        "Transfer failed: %s, Code: %s", status.Message(), status.Code()
+        while remaining:
+            timed_out = time.monotonic() > deadline
+            still_waiting = []
+            for status in remaining:
+                if status.Succeeded():
+                    continue
+                if status.Failed():
+                    errors.append(
+                        f"RDMA transfer failed: {status.Message()} "
+                        f"(code={status.Code()})"
                     )
-                    raise TransferError("MoRIIO transfer failed!")
-            except Exception as e:
-                logger.error("Transfer %s failed: %s", status, e)
-                raise
+                    continue
+                if timed_out:
+                    errors.append(
+                        f"RDMA transfer timed out after {timeout:.0f}s. "
+                        f"Check NIC queue depth or reduce concurrency; "
+                        f"adjust with kv_connector_extra_config.transfer_timeout."
+                    )
+                else:
+                    still_waiting.append(status)
+            remaining = still_waiting
+            if remaining:
+                time.sleep(0.001)
+        if errors:
+            raise TransferError(
+                f"{len(errors)}/{len(transfers_to_wait)} transfers failed:\n"
+                + "\n".join(errors)
+            )
 
     def async_wait_reqid(self):
         assert self.notify_port is not None, "Notify port cannot be None"
@@ -512,49 +714,115 @@ class MoRIIOWrapper:
         #   [read]  mode: receives block release messages from decode side
         # Decode Role:
         #   [write] mode: receives KV cache write completion notifications
+        msg_str = repr(msg)
         handled = False
         try:
             data = msgpack.loads(msg)
-            if isinstance(data, dict) and "req_id" in data:
+            if isinstance(data, dict):
                 self._handle_structured_message(data)
-
                 return
-        except (msgpack.exceptions.ExtraData, msgpack.exceptions.UnpackException):
+        except (
+            msgpack.exceptions.ExtraData,
+            msgpack.exceptions.UnpackException,
+            ValueError,
+        ):
             logger.debug("Failed to decode msgpack message, will try as string")
             pass
 
         try:
             msg_str = msg.decode("UTF-8")
-            if msg_str.startswith(MoRIIOConstants.COMPLETION_PREFIX):
+            if msg_str:
                 self._handle_completion_message(msg_str)
                 handled = True
         except UnicodeDecodeError:
-            logger.warning("Received non-UTF8 message: %s", msg_str)
+            logger.warning("Received non-UTF8 message: %r", msg)
         if not handled:
             raise MoRIIOError(f"Unhandled message format: {msg_str}")
 
     def _handle_structured_message(self, data: dict):
+        message_type = data.get("type")
+        if message_type is None and "req_id" in data:
+            message_type = "remote_blocks"
+
+        if message_type == "remote_blocks":
+            self._handle_remote_blocks_message(data)
+        elif message_type == "write_done":
+            self._handle_write_done_message(data)
+        elif message_type == "release":
+            self._handle_release_message(data)
+        else:
+            raise MoRIIOError(f"Unhandled structured message type: {message_type}")
+
+    def _handle_remote_blocks_message(self, data: dict):
         assert get_role() == ROLE.PRODUCER, "Only prefill can get block messages"
-        req_id = data["req_id"]
+        transfer_id = data["transfer_id"]
         block_notify_list = data.get("block_notify_list", [])
         decode_dp_rank = data.get("decode_rank", 0)
-        assert len(block_notify_list) > 0, (
-            "block_notify_list cannot be empty in remote allocate message"
-        )
+        if not block_notify_list:
+            raise MoRIIOError(
+                "block_notify_list cannot be empty in remote allocate message"
+            )
 
         with self.lock:
-            self.done_remote_allocate_req_dict[req_id] = RemoteAllocInfo(
+            if self._is_transfer_terminal_locked(transfer_id):
+                logger.debug(
+                    "Ignoring remote allocation for terminal transfer %s",
+                    transfer_id,
+                )
+                return
+            self.done_remote_allocate_req_dict[transfer_id] = RemoteAllocInfo(
                 block_ids=block_notify_list, decode_dp_rank=decode_dp_rank
             )
+
+    def _handle_write_done_message(self, data: dict):
+        assert get_role() != ROLE.PRODUCER, (
+            "Only decode can get WRITE completion messages"
+        )
+        transfer_id = data["transfer_id"]
+        with self.lock:
+            self.done_write_cache_req_ids.append(transfer_id)
+
+    def _handle_release_message(self, data: dict):
+        assert get_role() == ROLE.PRODUCER, (
+            "Only prefill can get transfer release messages"
+        )
+        transfer_id = data["transfer_id"]
+        consumer_tp_size = int(data.get("consumer_tp_size", 1))
+        if consumer_tp_size <= 0:
+            raise MoRIIOError(
+                f"Invalid consumer_tp_size in release message: {consumer_tp_size}"
+            )
+        with self.lock:
+            self.done_req_ids.append(MoRIIOTransferAck(transfer_id, consumer_tp_size))
+            self.done_remote_allocate_req_dict.pop(transfer_id, None)
+            self._mark_transfer_terminal_locked(transfer_id)
 
     def _handle_completion_message(self, msg: str):
         with self.lock:
             if get_role() == ROLE.PRODUCER:
-                self.done_req_ids.append(msg)
+                self.done_req_ids.append(MoRIIOTransferAck(msg))
+                self.done_remote_allocate_req_dict.pop(msg, None)
+                self._mark_transfer_terminal_locked(msg)
             else:
                 self.done_write_cache_req_ids.append(msg)
 
-    def send_notify(self, req_ids, remote_ip, remote_port):
+    def _is_transfer_terminal_locked(self, transfer_id: TransferId) -> bool:
+        return transfer_id in self._terminal_transfer_ids
+
+    def _mark_transfer_terminal_locked(self, transfer_id: TransferId) -> None:
+        self._terminal_transfer_ids[transfer_id] = None
+        self._terminal_transfer_ids.move_to_end(transfer_id)
+        while len(self._terminal_transfer_ids) > _MAX_TERMINAL_TRANSFER_IDS:
+            self._terminal_transfer_ids.popitem(last=False)
+
+    def send_notify(
+        self,
+        req_ids,
+        remote_ip,
+        remote_port,
+        message_type: str | None = None,
+        message_fields: dict[str, Any] | None = None,
+    ):
         if not remote_ip or not remote_port:
             logger.warning("Missing remote_ip or remote_port for notification")
             return
@@ -578,16 +846,24 @@ class MoRIIOWrapper:
                         "Invalid req_id type: %s, expected str", type(req_id)
                     )
                     continue
-                sock.send(req_id.encode("utf-8"))
+                if message_type is None:
+                    sock.send(req_id.encode("utf-8"))
+                else:
+                    payload = {"type": message_type, "transfer_id": req_id}
+                    if message_fields:
+                        payload.update(message_fields)
+                    sock.send(msgpack.dumps(payload))
         except Exception as e:
             logger.error("Failed to send notification to %s: %s", path, e)
             self.paths.pop(path, None)
             raise
 
     def pop_finished_req_ids(self):
-        # producer invocation: get the set of completed requests at the decode
+        # Producer invocation: return every completion message since the last
+        # call. Do not dedupe: heterogeneous TP can produce multiple release
+        # ACKs for the same transfer_id and the caller must count each one.
         with self.lock:
-            done_send = set(self.done_req_ids)
+            done_send = list(self.done_req_ids)
             self.done_req_ids = []
         return done_send
 

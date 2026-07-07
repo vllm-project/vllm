@@ -74,7 +74,30 @@ def test_embed_dimensions(model_info: EmbedModelInfo):
         pooling_params.verify(model_config)
 
 
-@pytest.mark.parametrize("task", ["score", "classify"])
+@dataclass()
+class MockMatryoshkaModelConfig:
+    pooler_config: PoolerConfig
+    is_matryoshka: bool = True
+    matryoshka_dimensions: list[int] | None = None
+    served_model_name: str = "mock-matryoshka-model"
+    embedding_size: int = 32
+
+
+def test_embed_dimensions_matryoshka_without_list_upper_bound():
+    task = "embed"
+    model_config = MockMatryoshkaModelConfig(
+        pooler_config=PoolerConfig(seq_pooling_type="CLS"),
+        matryoshka_dimensions=None,
+        embedding_size=32,
+    )
+
+    PoolingParams(task=task, dimensions=16).verify(model_config)
+
+    with pytest.raises(ValueError):
+        PoolingParams(task=task, dimensions=64).verify(model_config)
+
+
+@pytest.mark.parametrize("task", ["classify"])
 def test_classify(task):
     model_config = MockModelConfig(pooler_config=PoolerConfig(seq_pooling_type="CLS"))
 

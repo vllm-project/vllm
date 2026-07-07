@@ -1,0 +1,7 @@
+model_name: "Qwen/Qwen3.5-4B"
+needles: [2, 4, 8]
+match_ratio_threshold:
+  2: 0.99
+  4: 0.84
+  8: 0.76
+server_args: "--max-model-len 128K --reasoning-parser qwen3"

@@ -5,18 +5,73 @@ from threading import Lock
 import pytest
 import torch
 
-import vllm.lora.ops.torch_ops as torch_ops
 import vllm.lora.ops.triton_ops as triton_ops
 from vllm.lora.ops.triton_ops import LoRAKernelMeta
 from vllm.lora.ops.triton_ops.utils import _LORA_A_PTR_DICT, _LORA_B_PTR_DICT
+from vllm.platforms import current_platform
 from vllm.utils.torch_utils import set_random_seed
 
 from .utils import PunicaTensors, assert_close, generate_data_for_nslices
+
+DEVICE_TYPE = current_platform.device_type
 
 
 @pytest.fixture(autouse=True)
 def reset_device(reset_default_device):
     pass
+
+
+@pytest.fixture(autouse=True)
+def cleanup_fixture():
+    """Override conftest's cleanup_fixture— not needed for punica tests."""
+    yield
+
+
+@pytest.fixture(autouse=True)
+def dynamo_reset():
+    """Override conftest's dynamo_reset — not needed for punica tests."""
+    yield
+
+
+def _cpu_bgmv_shrink(
+    inputs, lora_weight, output, seq_len_tensor, lora_indices, scaling=1.0
+):
+    """Memory-efficient shrink reference: per-LoRA matmul loop on CPU.
+    output[mask] = scaling * inputs[mask] @ weight.T"""
+    exploded = torch.repeat_interleave(lora_indices, seq_len_tensor)
+    for lid in exploded.unique():
+        if lid < 0:
+            continue
+        mask = exploded == lid
+        inp = inputs[mask].to(output.dtype)
+        w = lora_weight[lid].to(output.dtype)
+        output[mask] = scaling * (inp @ w.T)
+
+
+def _cpu_bgmv_expand(
+    inputs,
+    lora_weight,
+    output,
+    seq_len_tensor,
+    lora_indices,
+    offset=0,
+    add_inputs=False,
+):
+    """Memory-efficient expand reference: per-LoRA matmul loop on CPU.
+    output[mask, offset:offset+n] (+)= inputs[mask] @ weight.T"""
+    exploded = torch.repeat_interleave(lora_indices, seq_len_tensor)
+    for lid in exploded.unique():
+        if lid < 0:
+            continue
+        mask = exploded == lid
+        inp = inputs[mask].to(output.dtype)
+        w = lora_weight[lid].to(output.dtype)
+        n = w.shape[0]
+        result = inp @ w.T
+        if add_inputs:
+            output[mask, offset : offset + n] += result
+        else:
+            output[mask, offset : offset + n] = result
 
 
 # Utility shrink and expand operations used as reference implementations.
@@ -33,22 +88,21 @@ def sgmv_shrink_for_nslices(
     num_tokens: int,
     scaling: float,
 ):
-    """
-    Wrapper around torch_ops.sgmv_shrink that handles any nslices.
-    """
+    """CPU reference for sgmv_shrink using per-LoRA matmul loop."""
+    inp_cpu = inputs_tensor.cpu()
+    seq_cpu = seq_len_tensor.cpu()
+    idx_cpu = prompt_lora_mapping.cpu()
+    out_cpu = out_tensor.cpu()
     for index in range(nslices):
-        torch_ops.sgmv_shrink(
-            inputs_tensor,
-            lora_weights_lst[index],
-            out_tensor[index],
-            b_seq_start_loc,
-            seq_len_tensor,
-            prompt_lora_mapping,
-            batches,
-            max_seq_length,
-            num_tokens,
-            scaling,
+        _cpu_bgmv_shrink(
+            inp_cpu,
+            lora_weights_lst[index].cpu(),
+            out_cpu[index],
+            seq_cpu,
+            idx_cpu,
+            scaling=scaling,
         )
+    out_tensor.copy_(out_cpu)
 
 
 def sgmv_expand_for_nslices(
@@ -65,42 +119,21 @@ def sgmv_expand_for_nslices(
     num_tokens: int,
     add_inputs: bool,
 ) -> None:
-    """
-    Wrapper around torch_ops.sgmv_expand that handles any nslices.
-    """
-    if nslices == 1:
-        # Verify the torch's sgmv_expand op
-        torch_ops.sgmv_expand(
-            inputs_tensor[0],
-            lora_weights_lst[0],
-            out_tensor,
-            b_seq_start_loc,
-            seq_len_tensor,
-            prompt_lora_mapping,
-            batches,
-            max_seq_length,
-            num_tokens,
+    """CPU reference for sgmv_expand using per-LoRA matmul loop."""
+    seq_cpu = seq_len_tensor.cpu()
+    idx_cpu = prompt_lora_mapping.cpu()
+    out_cpu = out_tensor.cpu()
+    for index in range(nslices):
+        _cpu_bgmv_expand(
+            inputs_tensor[index].cpu(),
+            lora_weights_lst[index].cpu(),
+            out_cpu,
+            seq_cpu,
+            idx_cpu,
+            offset=hidden_size * index,
             add_inputs=add_inputs,
         )
-    else:
-        slice_offset = 0
-        for index in range(nslices):
-            lora_weights = lora_weights_lst[index]
-            torch_ops.sgmv_expand_slice(
-                inputs_tensor[index],
-                lora_weights,
-                out_tensor,
-                b_seq_start_loc,
-                seq_len_tensor,
-                prompt_lora_mapping,
-                batches,
-                max_seq_length,
-                num_tokens,
-                slice_offset,
-                hidden_size,
-                add_inputs=add_inputs,
-            )
-            slice_offset += hidden_size
+    out_tensor.copy_(out_cpu)
 
 
 _dict_lock = Lock()
@@ -146,7 +179,9 @@ def check_lora_shrink_kernel(
 
     # Setup metadata information for the LoRA kernel.
     lora_meta = LoRAKernelMeta.make(
-        max_loras=num_loras, max_num_tokens=token_nums, device="cuda"
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=DEVICE_TYPE,
     )
     lora_meta.prepare_tensors(data.token_lora_mapping)
 
@@ -219,7 +254,9 @@ def check_lora_expand_kernel(
 
     # Setup metadata information for the LoRA kernel.
     lora_meta = LoRAKernelMeta.make(
-        max_loras=num_loras, max_num_tokens=token_nums, device="cuda"
+        max_loras=num_loras,
+        max_num_tokens=token_nums,
+        device=DEVICE_TYPE,
     )
     lora_meta.prepare_tensors(data.token_lora_mapping)
 
@@ -367,7 +404,7 @@ test_params = {
 }
 
 DTYPES = [torch.float16, torch.bfloat16]
-DEVICES = [f"cuda:{0}"]
+DEVICES = [f"{DEVICE_TYPE}:{0}"]
 SEED = [0]
 
 
@@ -395,7 +432,7 @@ def test_kernels(
     Tests LoRA kernels.
     """
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     set_random_seed(seed)
 
     if op_type == "shrink":
@@ -448,7 +485,7 @@ def test_kernels_hidden_size(
     Tests SGMV and LoRA kernels.
     """
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
     set_random_seed(seed)
 
     if op_type == "shrink":
@@ -475,3 +512,127 @@ def test_kernels_hidden_size(
             seq_length=128,
             add_inputs=True,
         )
+
+
+@pytest.mark.parametrize("device", DEVICES)
+def test_add_lora_fused_moe_early_exit(device):
+    """
+    Ensures add_lora_fused_moe does not invoke the LoRA kernel or
+    modify the output tensor when no_lora_flag_cpu is True
+    """
+    from types import SimpleNamespace
+
+    from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
+
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    max_loras, num_tokens = 4, 16
+    num_experts, top_k, max_lora_rank = 8, 2, 16
+    K, N = 256, 128
+
+    # build PunicaWrapperGPU with minimal lora_config mock
+    lora_config = SimpleNamespace(
+        max_loras=max_loras,
+        specialize_active_lora=False,
+    )
+    wrapper = PunicaWrapperGPU(
+        max_num_batched_tokens=num_tokens,
+        max_batches=num_tokens,
+        device=device,
+        lora_config=lora_config,
+    )
+
+    # simulate a prior LoRA batch so the internal mapping is
+    # populated with stale LoRA IDs
+    lora_mapping = torch.zeros(
+        num_tokens,
+        dtype=torch.int32,
+        device=device,
+    )
+    lora_mapping[:8] = 1
+    lora_mapping[8:] = 2
+    wrapper.token_mapping_meta.prepare_tensors(lora_mapping)
+
+    # simulate a base-model batch (all -1)
+    base_mapping = torch.full(
+        (num_tokens,),
+        -1,
+        dtype=torch.int32,
+        device=device,
+    )
+    wrapper.token_mapping_meta.prepare_tensors(base_mapping)
+
+    assert wrapper.token_mapping_meta.no_lora_flag_cpu[0].item() is True
+
+    # dummy tensors for add_lora_fused_moe
+    y = torch.rand(num_tokens, top_k, N, dtype=torch.bfloat16, device=device)
+    y_snapshot = y.clone()
+    x = torch.rand(num_tokens, K, dtype=torch.bfloat16, device=device)
+
+    lora_a_stacked = (
+        torch.rand(
+            max_loras,
+            num_experts,
+            max_lora_rank,
+            K,
+            dtype=torch.bfloat16,
+            device=device,
+        ),
+    )
+    lora_b_stacked = (
+        torch.rand(
+            max_loras,
+            num_experts,
+            N,
+            max_lora_rank,
+            dtype=torch.bfloat16,
+            device=device,
+        ),
+    )
+    topk_weights = torch.ones(
+        num_tokens,
+        top_k,
+        dtype=torch.float32,
+        device=device,
+    )
+    adapter_enabled = torch.ones(
+        max_loras + 1,
+        dtype=torch.int32,
+        device=device,
+    )
+    shrink_config = expand_config = {
+        "BLOCK_SIZE_M": 16,
+        "BLOCK_SIZE_N": 32,
+        "BLOCK_SIZE_K": 64,
+        "GROUP_SIZE_M": 1,
+        "NUM_WARPS": 4,
+        "NUM_STAGES": 3,
+        "SPLIT_K": 1,
+    }
+
+    # call add_lora_fused_moe - the early exit should prevent any
+    # modification to the output
+    wrapper.add_lora_fused_moe(
+        y=y,
+        x=x,
+        lora_a_stacked=lora_a_stacked,
+        lora_b_stacked=lora_b_stacked,
+        topk_weights=topk_weights,
+        sorted_token_ids=None,
+        expert_ids=torch.zeros(
+            num_tokens * top_k,
+            dtype=torch.int32,
+            device=device,
+        ),
+        num_tokens_post_padded=None,
+        max_lora_rank=max_lora_rank,
+        top_k_num=top_k,
+        shrink_config=shrink_config,
+        expand_config=expand_config,
+        adapter_enabled=adapter_enabled,
+    )
+
+    assert torch.equal(y, y_snapshot), (
+        "add_lora_fused_moe modified output tensor despite no_lora_flag_cpu=True"
+    )

@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import functools
 import hashlib
-import multiprocessing
 import os
 import pickle
 import tempfile
@@ -14,7 +12,7 @@ from unittest.mock import Mock, patch
 import pytest
 import torch
 
-import vllm.model_executor.layers.activation
+import vllm.envs as envs
 from vllm.compilation.backends import VllmBackend
 from vllm.compilation.caching import (
     StandaloneCompiledArtifacts,
@@ -162,6 +160,9 @@ def test_save_and_load(monkeypatch: pytest.MonkeyPatch):
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 def test_save_and_load_slice(monkeypatch: pytest.MonkeyPatch):
+    from torch._subclasses import FakeTensorMode
+    from torch.fx.experimental.symbolic_shapes import ShapeEnv
+
     def foo(x: torch.Tensor):
         return x[slice(0, x.shape[0])]
 
@@ -172,12 +173,13 @@ def test_save_and_load_slice(monkeypatch: pytest.MonkeyPatch):
     gm = torch.fx.symbolic_trace(foo)
     assert "getitem_1 = x[slice(0, getitem, None)]" in gm.code
     with use_vllm_config(vllm_config):
-        payload = VllmSerializableFunction.serialize_compile_artifacts(
-            VllmSerializableFunction(gm, (example_input,), "", foo)
+        payload = VllmSerializableFunction.serialize_graph_module(gm)
+        fake_mode = FakeTensorMode(shape_env=ShapeEnv())
+        loaded_gm = VllmSerializableFunction.deserialize_graph_module(
+            payload, fake_mode
         )
-        fn = VllmSerializableFunction.deserialize_compile_artifacts(payload)
 
-    assert gm.code == fn.graph_module.code
+    assert gm.code == loaded_gm.code
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
@@ -436,68 +438,95 @@ def test_partition_wrapper_applied_on_aot_load(
         )
 
 
+@create_new_process_for_each_test("spawn")
+def test_standalone_compile_correctness():
+    """Outputs must match regardless of VLLM_USE_STANDALONE_COMPILE."""
+    import json
+
+    from ..utils import compare_two_settings
+
+    compilation_config = json.dumps(
+        {
+            "mode": CompilationMode.VLLM_COMPILE,
+        }
+    )
+
+    common_args = [
+        "--dtype",
+        "float16",
+        "--max-model-len",
+        "256",
+        "--compilation_config",
+        compilation_config,
+    ]
+
+    compare_two_settings(
+        "facebook/opt-125m",
+        common_args,
+        common_args,
+        env1={"VLLM_USE_STANDALONE_COMPILE": "1"},
+        env2={
+            "VLLM_USE_STANDALONE_COMPILE": "0",
+            "VLLM_USE_MEGA_AOT_ARTIFACT": "0",
+        },
+    )
+
+
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
 @create_new_process_for_each_test("spawn")
 def test_gpt2_cache_hit(monkeypatch: pytest.MonkeyPatch):
     """
-    Test that compiling gpt2 twice results in a cache hit and
-    capture torch dynamic symbol creations to ensure make_symbol
-    not called on cache hit.
-    """
+    Test that compiling gpt2 twice results in a cache hit.
 
-    import torch.fx.experimental.symbolic_shapes as symbolic_shapes_module
-    from torch.utils._sympy.symbol import make_symbol
+    Counter values are read from the EngineCore subprocess via
+    ``LLM.collective_rpc`` so the test works under default V1
+    multiprocessing (no shared memory between test and engine).
+    """
 
     from vllm import LLM
 
-    create_symbol_counter = multiprocessing.Value("i", 0)
-    original_make_symbol = make_symbol
+    def _snap(self):
+        from vllm.compilation.counter import compilation_counter
 
-    @functools.wraps(original_make_symbol)
-    def counting_make_symbol(prefix, idx, **kwargs):
-        with create_symbol_counter.get_lock():
-            create_symbol_counter.value += 1
-        return original_make_symbol(prefix, idx, **kwargs)
+        return (
+            compilation_counter.num_aot_compiles,
+            compilation_counter.num_aot_artifacts_saved,
+            compilation_counter.num_aot_artifacts_loaded,
+        )
 
-    symbolic_shapes_module.make_symbol = counting_make_symbol
-    try:
-        with monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdirname:
-            m.setenv("VLLM_CACHE_ROOT", tmpdirname)
-            m.setenv("VLLM_USE_AOT_COMPILE", "1")
-            # First compilation - initialize model and generate
-            llm_model = LLM(
-                model="gpt2",
-                compilation_config=CompilationConfig(
-                    mode=CompilationMode.VLLM_COMPILE,
-                ),
-                max_model_len=256,
-            )
+    # collective_rpc(callable) requires pickle-based serialization.
+    monkeypatch.setenv("VLLM_ALLOW_INSECURE_SERIALIZATION", "1")
 
-            llm_model.generate("Hello, my name is")
-            assert create_symbol_counter.value == 2
-            create_symbol_counter.value = 0
+    with monkeypatch.context() as m, tempfile.TemporaryDirectory() as tmpdirname:
+        m.setenv("VLLM_CACHE_ROOT", tmpdirname)
+        m.setenv("VLLM_USE_AOT_COMPILE", "1")
+        # First compilation - initialize model and generate
+        llm_model = LLM(
+            model="openai-community/gpt2",
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+            ),
+            max_model_len=256,
+        )
 
-            # Clean up first model
-            del llm_model
-            disable_envs_cache()
-            vllm.model_executor.layers.activation._ACTIVATION_REGISTRY._dict.clear()
+        llm_model.generate("Hello, my name is")
+        assert llm_model.collective_rpc(_snap)[0] == (1, 1, 0)
 
-            # Second compilation - should hit cache
-            m.setenv("VLLM_FORCE_AOT_LOAD", "1")
-            llm_model = LLM(
-                model="gpt2",
-                compilation_config=CompilationConfig(
-                    mode=CompilationMode.VLLM_COMPILE,
-                ),
-                max_model_len=256,
-            )
-            llm_model.generate("Hello, my name is")
+        # Clean up first model
+        del llm_model
+        disable_envs_cache()
 
-            assert create_symbol_counter.value == 0
-
-    finally:
-        # Restore original method
-        symbolic_shapes_module.make_symbol = original_make_symbol
+        # Second compilation - should hit cache
+        m.setenv("VLLM_FORCE_AOT_LOAD", "1")
+        llm_model = LLM(
+            model="openai-community/gpt2",
+            compilation_config=CompilationConfig(
+                mode=CompilationMode.VLLM_COMPILE,
+            ),
+            max_model_len=256,
+        )
+        llm_model.generate("Hello, my name is")
+        assert llm_model.collective_rpc(_snap)[0] == (0, 0, 1)
 
 
 @pytest.mark.skipif(not is_torch_equal_or_newer("2.10.0"), reason="requires torch 2.10")
@@ -725,6 +754,10 @@ class TestStandaloneCompiledArtifactsIntegration:
         ]:
             assert cache.get(submod, shape) == shared_data
 
+    @pytest.mark.skipif(
+        envs.VLLM_USE_MEGA_AOT_ARTIFACT,
+        reason="There's no AOT Autograd run with mega artifact",
+    )
     def test_functorch_config(self):
         vllm_config = make_vllm_config()
         example_inputs = (torch.randn(10, 10),)

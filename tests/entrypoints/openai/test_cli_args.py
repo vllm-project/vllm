@@ -206,6 +206,14 @@ def test_chat_template_validation_for_sad_paths(serve_parser):
         validate_parsed_serve_args(args)
 
 
+def test_per_request_metrics_requires_log_stats(serve_parser):
+    args = serve_parser.parse_args(
+        args=["--enable-per-request-metrics", "--disable-log-stats"]
+    )
+    with pytest.raises(ValueError):
+        validate_parsed_serve_args(args)
+
+
 @pytest.mark.parametrize(
     "cli_args, expected_middleware",
     [
@@ -291,3 +299,32 @@ def test_served_model_name_parsing(tmp_path, vllm_parser, args, raises):
     else:
         with pytest.raises(raises):
             vllm_parser.parse_args(args=args)
+
+
+### Tests for LoRA target modules parsing
+def test_lora_target_modules_single(serve_parser):
+    """Test parsing single lora-target-modules argument"""
+    args = serve_parser.parse_args(
+        args=["--enable-lora", "--lora-target-modules", "o_proj"]
+    )
+    assert args.lora_target_modules == ["o_proj"]
+
+
+def test_lora_target_modules_multiple(serve_parser):
+    """Test parsing multiple lora-target-modules arguments"""
+    args = serve_parser.parse_args(
+        args=[
+            "--enable-lora",
+            "--lora-target-modules",
+            "o_proj",
+            "qkv_proj",
+            "down_proj",
+        ]
+    )
+    assert args.lora_target_modules == ["o_proj", "qkv_proj", "down_proj"]
+
+
+def test_lora_target_modules_default_none(serve_parser):
+    """Test that lora-target-modules defaults to None"""
+    args = serve_parser.parse_args(args=[])
+    assert args.lora_target_modules is None

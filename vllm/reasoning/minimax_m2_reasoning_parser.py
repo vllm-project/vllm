@@ -2,25 +2,21 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
-from vllm.entrypoints.openai.chat_completion.protocol import (
-    ChatCompletionRequest,
-)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
 )
-from vllm.entrypoints.openai.responses.protocol import (
-    ResponsesRequest,
-)
-from vllm.logger import init_logger
+from vllm.parser.engine.registered_adapters import MinimaxM2ParserReasoningAdapter
 from vllm.reasoning.abs_reasoning_parsers import ReasoningParser
-from vllm.reasoning.basic_parsers import BaseThinkingReasoningParser
 from vllm.tokenizers import TokenizerLike
 
-logger = init_logger(__name__)
+if TYPE_CHECKING:
+    from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+    from vllm.entrypoints.openai.responses.protocol import ResponsesRequest
 
 
-class MiniMaxM2ReasoningParser(BaseThinkingReasoningParser):
+class MiniMaxM2ReasoningParser(MinimaxM2ParserReasoningAdapter):  # type: ignore[valid-type, misc]
     """
     Reasoning parser for MiniMax M2 model.
 
@@ -28,55 +24,6 @@ class MiniMaxM2ReasoningParser(BaseThinkingReasoningParser):
     token. All content before </think> is reasoning, content after is the
     actual response.
     """
-
-    @property
-    def start_token(self) -> str:
-        """The token that starts reasoning content."""
-        return "<think>"
-
-    @property
-    def end_token(self) -> str:
-        """The token that ends reasoning content."""
-        return "</think>"
-
-    def extract_reasoning_streaming(
-        self,
-        previous_text: str,
-        current_text: str,
-        delta_text: str,
-        previous_token_ids: Sequence[int],
-        current_token_ids: Sequence[int],
-        delta_token_ids: Sequence[int],
-    ) -> DeltaMessage | None:
-        """
-        Extract reasoning content from a delta message for streaming.
-
-        MiniMax M2 models don't generate <think> start token, so we assume
-        all content is reasoning until we encounter the </think> end token.
-        """
-        # Skip single end token
-        if len(delta_token_ids) == 1 and delta_token_ids[0] == self.end_token_id:
-            return None
-
-        # Check if end token has already appeared in previous tokens
-        # meaning we're past the reasoning phase
-        if self.end_token_id in previous_token_ids:
-            # We're past the reasoning phase, this is content
-            return DeltaMessage(content=delta_text)
-
-        # Check if end token is in delta tokens
-        if self.end_token_id in delta_token_ids:
-            # End token in delta, split reasoning and content
-            end_index = delta_text.find(self.end_token)
-            reasoning = delta_text[:end_index]
-            content = delta_text[end_index + len(self.end_token) :]
-            return DeltaMessage(
-                reasoning=reasoning if reasoning else None,
-                content=content if content else None,
-            )
-
-        # No end token yet, all content is reasoning
-        return DeltaMessage(reasoning=delta_text)
 
 
 class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
@@ -114,6 +61,6 @@ class MiniMaxM2AppendThinkReasoningParser(ReasoningParser):
         return DeltaMessage(content=delta_text)
 
     def extract_reasoning(
-        self, model_output: str, request: ChatCompletionRequest | ResponsesRequest
+        self, model_output: str, request: "ChatCompletionRequest | ResponsesRequest"
     ) -> tuple[str | None, str | None]:
         return None, "<think>" + model_output

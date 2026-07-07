@@ -2,20 +2,252 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import pytest
-from openai_harmony import Message, Role
+from openai.types.responses import FunctionTool
+from openai_harmony import DeveloperContent, Message, Role
 
 from tests.entrypoints.openai.utils import verify_harmony_messages
+from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionToolsParam
 from vllm.entrypoints.openai.parser.harmony_utils import (
     auto_drop_analysis_messages,
-    get_encoding,
+    create_tool_definition,
+    extract_function_from_recipient,
     get_system_message,
     has_custom_tools,
+    is_function_recipient,
     parse_chat_input_to_harmony_message,
-    parse_chat_output,
 )
 from vllm.entrypoints.openai.responses.harmony import (
+    response_input_to_harmony,
     response_previous_input_to_harmony,
 )
+
+_TOOL_PARAMETERS = {
+    "type": "object",
+    "properties": {"status": {"type": "string"}},
+    "required": ["status"],
+    "additionalProperties": False,
+}
+
+
+class TestCreateToolDefinition:
+    def test_chat_completion_omitted_description_defaults_to_empty_string(self):
+        tool = ChatCompletionToolsParam(
+            function={
+                "name": "report_status",
+                "parameters": _TOOL_PARAMETERS,
+            }
+        )
+
+        tool_definition = create_tool_definition(tool)
+
+        assert tool_definition.name == "report_status"
+        assert tool_definition.description == ""
+        assert tool_definition.parameters == _TOOL_PARAMETERS
+
+    def test_chat_completion_none_description_defaults_to_empty_string(self):
+        tool = ChatCompletionToolsParam(
+            function={
+                "name": "report_status",
+                "description": None,
+                "parameters": _TOOL_PARAMETERS,
+            }
+        )
+
+        tool_definition = create_tool_definition(tool)
+
+        assert tool_definition.name == "report_status"
+        assert tool_definition.description == ""
+        assert tool_definition.parameters == _TOOL_PARAMETERS
+
+    def test_response_tool_none_description_defaults_to_empty_string(self):
+        tool = FunctionTool(
+            name="report_status",
+            description=None,
+            parameters=_TOOL_PARAMETERS,
+            type="function",
+        )
+
+        tool_definition = create_tool_definition(tool)
+
+        assert tool_definition.name == "report_status"
+        assert tool_definition.description == ""
+        assert tool_definition.parameters == _TOOL_PARAMETERS
+
+
+class TestIsFunctionRecipient:
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "functions.get_weather",
+            "functions.search_web",
+            "functions.math.sum",
+        ],
+    )
+    def test_functions_prefix_accepted(self, recipient):
+        assert is_function_recipient(recipient) is True
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "get_weather",
+            "search_web",
+            "calculator",
+            "my-tool",
+        ],
+    )
+    def test_bare_function_name_accepted(self, recipient):
+        assert is_function_recipient(recipient) is True
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "assistant",
+        ],
+    )
+    def test_assistant_rejected(self, recipient):
+        assert is_function_recipient(recipient) is False
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "math.sum",
+            "code.run",
+            "namespace.tool_name",
+            "my.deeply.nested.tool",
+        ],
+    )
+    def test_dotted_function_names_accepted(self, recipient):
+        assert is_function_recipient(recipient) is True
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "python",
+            "browser",
+            "container",
+        ],
+    )
+    def test_builtin_tool_names_rejected(self, recipient):
+        assert is_function_recipient(recipient) is False
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "python.run",
+            "python.execute",
+            "browser.search",
+            "browser.open",
+            "container.exec",
+        ],
+    )
+    def test_builtin_dotted_variants_rejected(self, recipient):
+        assert is_function_recipient(recipient) is False
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "",
+            "functions.",
+        ],
+    )
+    def test_empty_recipients_rejected(self, recipient):
+        assert is_function_recipient(recipient) is False
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "<|start|>",
+            "<|end|>",
+            "<|channel|>",
+        ],
+    )
+    def test_harmony_tokens_rejected(self, recipient):
+        assert is_function_recipient(recipient) is False
+
+
+class TestIsFunctionRecipientWithAllowedNames:
+    """Tests for is_function_recipient with allowed_function_tool_names."""
+
+    def test_prefixed_always_accepted(self):
+        """functions. prefix is always accepted regardless of allowed names."""
+        fn_names = frozenset({"other_tool"})
+        assert is_function_recipient("functions.get_weather", fn_names) is True
+
+    def test_bare_name_accepted_when_in_allowed_names(self):
+        fn_names = frozenset({"get_weather", "search_web"})
+        assert is_function_recipient("get_weather", fn_names) is True
+        assert is_function_recipient("search_web", fn_names) is True
+
+    def test_bare_name_rejected_when_not_in_allowed_names(self):
+        fn_names = frozenset({"get_weather"})
+        assert is_function_recipient("unknown_tool", fn_names) is False
+
+    def test_dotted_name_accepted_when_in_allowed_names(self):
+        fn_names = frozenset({"math.sum", "namespace.tool_name"})
+        assert is_function_recipient("math.sum", fn_names) is True
+        assert is_function_recipient("namespace.tool_name", fn_names) is True
+
+    def test_dotted_name_rejected_when_not_in_allowed_names(self):
+        fn_names = frozenset({"get_weather"})
+        assert is_function_recipient("custom_server.search", fn_names) is False
+
+    def test_empty_allowed_names_rejects_bare_names(self):
+        """Empty frozenset means no function tools — bare names are not functions."""
+        fn_names: frozenset[str] = frozenset()
+        assert is_function_recipient("get_weather", fn_names) is False
+        assert is_function_recipient("math.sum", fn_names) is False
+
+    def test_builtin_tools_always_rejected(self):
+        fn_names = frozenset({"python", "browser", "container"})
+        assert is_function_recipient("python", fn_names) is False
+        assert is_function_recipient("browser", fn_names) is False
+        assert is_function_recipient("container", fn_names) is False
+
+    def test_builtin_dotted_always_rejected(self):
+        fn_names = frozenset({"python.run", "browser.search"})
+        assert is_function_recipient("python.run", fn_names) is False
+        assert is_function_recipient("browser.search", fn_names) is False
+
+    def test_none_allowed_names_uses_heuristic(self):
+        """When allowed names is None (Chat Completions), use heuristic."""
+        assert is_function_recipient("get_weather", None) is True
+        assert is_function_recipient("math.sum", None) is True
+        assert is_function_recipient("python", None) is False
+
+
+class TestExtractFunctionFromRecipient:
+    @pytest.mark.parametrize(
+        "recipient,expected",
+        [
+            ("functions.get_weather", "get_weather"),
+            ("functions.search_web", "search_web"),
+            ("functions.", ""),
+        ],
+    )
+    def test_strips_functions_prefix(self, recipient, expected):
+        assert extract_function_from_recipient(recipient) == expected
+
+    @pytest.mark.parametrize(
+        "recipient",
+        [
+            "get_weather",
+            "calculator",
+            "my-tool",
+        ],
+    )
+    def test_bare_name_returned_as_is(self, recipient):
+        assert extract_function_from_recipient(recipient) == recipient
+
+    @pytest.mark.parametrize(
+        "recipient,expected",
+        [
+            ("functions.math.sum", "math.sum"),
+            ("math.sum", "math.sum"),
+            ("namespace.tool_name", "namespace.tool_name"),
+        ],
+    )
+    def test_dotted_function_name_extraction(self, recipient, expected):
+        assert extract_function_from_recipient(recipient) == expected
 
 
 class TestCommonParseInputToHarmonyMessage:
@@ -90,7 +322,8 @@ class TestCommonParseInputToHarmonyMessage:
         assert messages[0].recipient == "functions.get_current_time"
 
     def test_system_message(self, parse_function):
-        """Test parsing system message."""
+        """Test parsing system messages, which are parsed into developer messages
+        with DeveloperContent."""
         chat_msg = {
             "role": "system",
             "content": "You are a helpful assistant",
@@ -99,9 +332,9 @@ class TestCommonParseInputToHarmonyMessage:
         messages = parse_function(chat_msg)
 
         assert len(messages) == 1
-        # System messages are converted using Message.from_dict
-        # which should preserve the role
-        assert messages[0].author.role == Role.SYSTEM
+        assert messages[0].author.role == Role.DEVELOPER
+        assert isinstance(messages[0].content[0], DeveloperContent)
+        assert messages[0].content[0].instructions == "You are a helpful assistant"
 
     def test_developer_message(self, parse_function):
         """Test parsing developer message."""
@@ -114,6 +347,8 @@ class TestCommonParseInputToHarmonyMessage:
 
         assert len(messages) == 1
         assert messages[0].author.role == Role.DEVELOPER
+        assert isinstance(messages[0].content[0], DeveloperContent)
+        assert messages[0].content[0].instructions == "Use concise language"
 
     def test_user_message_with_string_content(self, parse_function):
         """Test parsing user message with string content."""
@@ -704,110 +939,6 @@ class TestAutoDropAnalysisMessages:
         assert cleaned_messages == messages[1:]
 
 
-class TestParseChatOutput:
-    def test_parse_chat_output_interrupted_first_message(self) -> None:
-        harmony_str = "<|channel|>final<|message|>I'm in the middle of answering"
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning is None
-        assert final_content == "I'm in the middle of answering"
-
-    def test_parse_chat_output_interrupted_reasoning_first_message(self) -> None:
-        harmony_str = "<|channel|>analysis<|message|>I'm in the middle of thinking"
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning == "I'm in the middle of thinking"
-        assert final_content is None
-
-    def test_parse_chat_output_complete_reasoning_interrupted_content(self) -> None:
-        harmony_str = (
-            "<|channel|>analysis<|message|>I'm thinking.<|end|>"
-            "<|start|>assistant<|channel|>final"
-            "<|message|>I'm in the middle of answering"
-        )
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning == "I'm thinking."
-        assert final_content == "I'm in the middle of answering"
-
-    def test_parse_chat_output_complete_content(self) -> None:
-        harmony_str = "<|channel|>final<|message|>The answer is 4.<|end|>"
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning is None
-        assert final_content == "The answer is 4."
-
-    def test_parse_chat_output_complete_commentary(self) -> None:
-        harmony_str = (
-            "<|channel|>commentary<|message|>I need to call some tools.<|end|>"
-        )
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning is None
-        assert final_content == "I need to call some tools."
-
-    def test_parse_chat_output_complete_reasoning(self) -> None:
-        harmony_str = (
-            "<|channel|>analysis<|message|>I've thought hard about this.<|end|>"
-        )
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning == "I've thought hard about this."
-        assert final_content is None
-
-    def test_parse_chat_output_complete_reasoning_and_content(self) -> None:
-        harmony_str = (
-            "<|channel|>analysis<|message|>I've thought hard about this.<|end|>"
-            "<|start|>assistant<|channel|>final<|message|>The answer is 4.<|end|>"
-        )
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning == "I've thought hard about this."
-        assert final_content == "The answer is 4."
-
-    def test_parse_chat_output_commentary_with_recipient_excluded(self) -> None:
-        """Commentary with a recipient (tool call) should not appear in
-        final_content — those are handled separately by the tool parser.
-
-        The first message is a preamble (visible), the second is a tool
-        call (excluded). Only the preamble should appear in final_content.
-        """
-        harmony_str = (
-            "<|channel|>commentary"
-            "<|message|>Let me check the weather.<|end|>"
-            "<|start|>assistant to=functions.get_weather"
-            "<|channel|>commentary"
-            '<|message|>{"location": "SF"}<|end|>'
-        )
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning is None
-        assert final_content == "Let me check the weather."
-
-    def test_parse_chat_output_interrupted_preamble(self) -> None:
-        """Partial/interrupted preamble (commentary without recipient) should
-        appear in final_content, not reasoning."""
-        harmony_str = "<|channel|>commentary<|message|>I'll search for that"
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning is None
-        assert final_content == "I'll search for that"
-
-    def test_parse_chat_output_preamble_then_final(self) -> None:
-        """Preamble followed by a final message should both appear in
-        final_content, joined by newline."""
-        harmony_str = (
-            "<|channel|>commentary"
-            "<|message|>Let me look that up.<|end|>"
-            "<|start|>assistant<|channel|>final"
-            "<|message|>The answer is 42.<|end|>"
-        )
-        token_ids = get_encoding().encode(harmony_str, allowed_special="all")
-        reasoning, final_content, _ = parse_chat_output(token_ids)
-        assert reasoning is None
-        assert final_content == "Let me look that up.\nThe answer is 42."
-
-
 def test_has_custom_tools() -> None:
     assert not has_custom_tools(set())
     assert not has_custom_tools({"web_search_preview", "code_interpreter", "container"})
@@ -841,3 +972,96 @@ class TestGetSystemMessage:
                 assert channel in valid_channels, (
                     f"{channel} missing when with_custom_tools={with_tools}"
                 )
+
+    def test_unsupported_reasoning_effort_raises_clear_error(self) -> None:
+        with pytest.raises(
+            ValueError,
+            match="reasoning_effort='max' is not supported by Harmony",
+        ):
+            get_system_message(reasoning_effort="max")
+
+
+class TestResponseInputToHarmonyReasoningItem:
+    """Tests for response_input_to_harmony handling of reasoning input items.
+
+    Per the OpenAI spec, ResponseReasoningItem.content is
+    Optional[List[Content]] = None. Clients like langchain-openai may omit
+    this field when constructing multi-turn input from previous responses.
+
+    Reasoning items with content are converted to Harmony messages on the
+    'analysis' channel. All content items are concatenated. Items without
+    content return None (skipped by the caller).
+    """
+
+    def test_reasoning_with_single_content(self):
+        """Test reasoning item with a single content entry."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "content": [{"type": "reasoning_text", "text": "Thinking step by step"}],
+        }
+
+        msg = response_input_to_harmony(item, prev_responses=[])
+
+        assert msg is not None
+        assert msg.author.role == Role.ASSISTANT
+        assert msg.content[0].text == "Thinking step by step"
+        assert msg.channel == "analysis"
+
+    def test_reasoning_with_multiple_content_items(self):
+        """Test reasoning item with multiple content entries concatenated."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "content": [
+                {"type": "reasoning_text", "text": "First, let me analyze"},
+                {"type": "reasoning_text", "text": "Second, I should consider"},
+                {"type": "reasoning_text", "text": "Finally, the answer is"},
+            ],
+        }
+
+        msg = response_input_to_harmony(item, prev_responses=[])
+
+        assert msg is not None
+        assert msg.author.role == Role.ASSISTANT
+        assert msg.content[0].text == (
+            "First, let me analyze\nSecond, I should consider\nFinally, the answer is"
+        )
+        assert msg.channel == "analysis"
+
+    def test_reasoning_without_content_returns_none(self):
+        """Test reasoning item without content field returns None."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "summary": [{"type": "summary_text", "text": "Thinking about math"}],
+        }
+
+        msg = response_input_to_harmony(item, prev_responses=[])
+
+        assert msg is None
+
+    def test_reasoning_with_none_content_returns_none(self):
+        """Test reasoning item with content=None returns None."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "content": None,
+            "summary": [{"type": "summary_text", "text": "Thinking about math"}],
+        }
+
+        msg = response_input_to_harmony(item, prev_responses=[])
+
+        assert msg is None
+
+    def test_reasoning_with_empty_content_returns_none(self):
+        """Test reasoning item with empty content list returns None."""
+        item = {
+            "type": "reasoning",
+            "id": "rs_123",
+            "content": [],
+        }
+
+        msg = response_input_to_harmony(item, prev_responses=[])
+
+        assert msg is None

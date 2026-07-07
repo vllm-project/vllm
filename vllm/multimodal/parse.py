@@ -19,21 +19,20 @@ import numpy as np
 import torch
 from typing_extensions import assert_never
 
+from vllm.inputs import ModalityData, MultiModalDataDict, MultiModalUUIDDict
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import LazyLoader
 
 from .audio import AudioResampler, AudioSpec, normalize_audio
+from .image import convert_image_mode, normalize_image
 from .inputs import (
     AudioItem,
     HfAudioItem,
     HfImageItem,
     HfVideoItem,
     ImageItem,
-    ModalityData,
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
-    MultiModalUUIDDict,
     VideoItem,
 )
 from .media import MediaWithBytes
@@ -336,7 +335,13 @@ class ImageProcessorItems(ProcessorBatchItems[HfImageItem | None]):
         if isinstance(image, PILImage.Image):
             return ImageSize(*image.size)
         if isinstance(image, (np.ndarray, torch.Tensor)):
-            _, h, w = image.shape
+            if image.ndim == 3 and image.shape[-1] in (1, 3, 4):
+                # HWC format (e.g. from np.array(PIL.Image)).
+                # PIL images are always channels-last.
+                h, w = image.shape[0], image.shape[1]
+            else:
+                # CHW format (standard PyTorch / numpy convention).
+                _, h, w = image.shape
             return ImageSize(w, h)
 
         assert_never(image)
@@ -380,7 +385,14 @@ class VideoProcessorItems(ProcessorBatchItems[HfVideoItem | None]):
         if isinstance(image, PILImage.Image):
             return ImageSize(*image.size)
         if isinstance(image, (np.ndarray, torch.Tensor)):
-            _, h, w = image.shape
+            if image.ndim == 3 and image.shape[-1] in (1, 3, 4):
+                # HWC format (e.g. from np.array(PIL.Image) via
+                # _get_video_with_metadata).  PIL images are always
+                # channels-last.
+                h, w = image.shape[0], image.shape[1]
+            else:
+                # CHW format (standard PyTorch / numpy convention).
+                _, h, w = image.shape
             return ImageSize(w, h)
 
         assert_never(image)
@@ -407,8 +419,8 @@ _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 class MultiModalDataItems(UserDict[str, ModalityDataItems[Any, Any]]):
     """
-    As [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict], but
-    normalized such that each entry corresponds to a list.
+    A normalized [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
+    such that each entry corresponds to a list.
     """
 
     def select(self, modalities: Set[str]):
@@ -477,7 +489,7 @@ ModalityDataParser: TypeAlias = Callable[
 
 class MultiModalDataParser:
     """
-    Parses [`MultiModalDataDict`][vllm.multimodal.inputs.MultiModalDataDict]
+    Parses [`MultiModalDataDict`][vllm.inputs.MultiModalDataDict]
     into [`MultiModalDataItems`][vllm.multimodal.parse.MultiModalDataItems].
 
     Args:
@@ -497,7 +509,7 @@ class MultiModalDataParser:
         *,
         target_sr: float | None = None,
         target_channels: int | None = None,
-        audio_resample_method: Literal["librosa", "scipy"] = "librosa",
+        audio_resample_method: Literal["pyav", "scipy", "soxr"] = "pyav",
         video_needs_metadata: bool = False,
         expected_hidden_size: int | None = None,
     ) -> None:
@@ -610,6 +622,13 @@ class MultiModalDataParser:
         else:
             data_items = data
 
+        data_items = [
+            convert_image_mode(normalize_image(item), "RGB")
+            if isinstance(item, PILImage.Image)
+            else item
+            for item in data_items
+        ]
+
         return ImageProcessorItems(data_items)
 
     def _parse_video_data(
@@ -695,8 +714,8 @@ class MultiModalDataParser:
 
 MultiModalUUIDItems: TypeAlias = dict[str, Sequence[str | None]]
 """
-As [`MultiModalUUIDDict`][vllm.multimodal.inputs.MultiModalUUIDDict], but
-normalized such that each entry corresponds to a list.
+A normalized [`MultiModalUUIDDict`][vllm.inputs.MultiModalUUIDDict]
+such that each entry corresponds to a list.
 """
 
 

@@ -27,10 +27,10 @@ from vllm.model_executor.layers.fused_moe.config import (
     RoutingMethodType,
     _get_config_dtype_str,
 )
-from vllm.model_executor.layers.fused_moe.fused_moe import *
-from vllm.model_executor.layers.fused_moe.triton_deep_gemm_moe import (
+from vllm.model_executor.layers.fused_moe.experts.triton_deep_gemm_moe import (
     TritonOrDeepGemmExperts,
 )
+from vllm.model_executor.layers.fused_moe.fused_moe import *
 from vllm.transformers_utils.config import get_config
 from vllm.triton_utils import triton
 from vllm.utils.argparse_utils import FlexibleArgumentParser
@@ -250,7 +250,7 @@ def benchmark_config(
                     num_experts=num_experts,
                     experts_per_token=topk,
                     hidden_dim=hidden_size,
-                    intermediate_size_per_partition=shard_intermediate_size,
+                    intermediate_size=shard_intermediate_size,
                     num_local_experts=num_experts,
                     num_logical_experts=num_experts,
                     activation=MoEActivation.SILU,
@@ -271,7 +271,6 @@ def benchmark_config(
                     moe_config=moe_config,
                     quant_config=quant_config,
                 ),
-                inplace=not disable_inplace(),
             )
 
         with override_config(config):
@@ -279,7 +278,6 @@ def benchmark_config(
                 x, input_gating, topk, renormalize=not use_deep_gemm
             )
 
-            inplace = not disable_inplace()
             if use_deep_gemm:
                 return deep_gemm_experts.apply(
                     x,
@@ -298,7 +296,6 @@ def benchmark_config(
                 w2,
                 topk_weights,
                 topk_ids,
-                inplace=inplace,
                 quant_config=quant_config,
             )
 
@@ -394,16 +391,19 @@ def get_configs_compute_bound(use_fp16, block_quant_shape) -> list[dict[str, int
         config = dict(zip(keys, config_values))
         configs.append(config)
 
-    # Remove configs that are not compatible with fp8 block quantization
-    # BLOCK_SIZE_K must be a multiple of block_k
-    # BLOCK_SIZE_N must be a multiple of block_n
+    # Drop configs incompatible with fp8 block quantization. A tile must align
+    # to the quant-block scale grid, i.e. tile and block must divide one
+    # another. The kernel indexes scales per element (offs_bn // group_n,
+    # k_start // group_k), so a tile narrower than the block (e.g. N=64 with
+    # block_n=128) is valid -- and often faster at small batch. An exact
+    # multiple was required before, which dropped those smaller tiles entirely.
     if block_quant_shape is not None and not use_fp16:
         block_n, block_k = block_quant_shape[0], block_quant_shape[1]
         for config in configs[:]:
-            if (
-                config["BLOCK_SIZE_K"] % block_k != 0
-                or config["BLOCK_SIZE_N"] % block_n != 0
-            ):
+            bn, bk = config["BLOCK_SIZE_N"], config["BLOCK_SIZE_K"]
+            n_aligned = bn % block_n == 0 or block_n % bn == 0
+            k_aligned = bk % block_k == 0 or block_k % bk == 0
+            if not (n_aligned and k_aligned):
                 configs.remove(config)
     return configs
 
@@ -626,7 +626,10 @@ class BenchmarkWorker:
             if visible_device != f"{self.device_id}":
                 need_device_guard = True
 
-        with torch.cuda.device(self.device_id) if need_device_guard else nullcontext():
+        with (
+            # Ray restricts each worker to one GPU; use local index 0
+            torch.accelerator.device_index(0) if need_device_guard else nullcontext()
+        ):
             for idx, config in enumerate(tqdm(search_space)):
                 try:
                     kernel_time = benchmark_config(
@@ -746,17 +749,20 @@ def get_weight_block_size_safety(config, default_value=None):
 
 
 def get_model_params(config):
-    if config.architectures[0] == "DbrxForCausalLM":
+    architectures = getattr(config, "architectures", None) or [type(config).__name__]
+    architecture = architectures[0]
+
+    if architecture == "DbrxForCausalLM":
         E = config.ffn_config.moe_num_experts
         topk = config.ffn_config.moe_top_k
         intermediate_size = config.ffn_config.ffn_hidden_size
         hidden_size = config.hidden_size
-    elif config.architectures[0] == "JambaForCausalLM":
+    elif architecture == "JambaForCausalLM":
         E = config.num_experts
         topk = config.num_experts_per_tok
         intermediate_size = config.intermediate_size
         hidden_size = config.hidden_size
-    elif config.architectures[0] in (
+    elif architecture in (
         "DeepseekV2ForCausalLM",
         "DeepseekV3ForCausalLM",
         "DeepseekV32ForCausalLM",
@@ -770,7 +776,7 @@ def get_model_params(config):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         hidden_size = config.hidden_size
-    elif config.architectures[0] in (
+    elif architecture in (
         "Qwen2MoeForCausalLM",
         "Qwen3MoeForCausalLM",
         "Qwen3NextForCausalLM",
@@ -779,23 +785,33 @@ def get_model_params(config):
         topk = config.num_experts_per_tok
         intermediate_size = config.moe_intermediate_size
         hidden_size = config.hidden_size
-    elif config.architectures[0] == "Qwen3VLMoeForConditionalGeneration":
+    elif architecture in (
+        "Qwen3VLMoeForConditionalGeneration",
+        "Qwen3_5MoeForConditionalGeneration",
+        "Qwen3_5MoeTextConfig",
+    ):
         text_config = config.get_text_config()
         E = text_config.num_experts
         topk = text_config.num_experts_per_tok
         intermediate_size = text_config.moe_intermediate_size
         hidden_size = text_config.hidden_size
-    elif config.architectures[0] == "HunYuanMoEV1ForCausalLM":
+    elif architecture == "DiffusionGemmaForBlockDiffusion":
+        text_config = config.get_text_config()
+        E = text_config.num_experts
+        topk = text_config.top_k_experts
+        intermediate_size = text_config.moe_intermediate_size
+        hidden_size = text_config.hidden_size
+    elif architecture == "HunYuanMoEV1ForCausalLM":
         E = config.num_experts
         topk = config.moe_topk[0]
         intermediate_size = config.moe_intermediate_size[0]
         hidden_size = config.hidden_size
-    elif config.architectures[0] == "Qwen3OmniMoeForConditionalGeneration":
+    elif architecture == "Qwen3OmniMoeForConditionalGeneration":
         E = config.thinker_config.text_config.num_experts
         topk = config.thinker_config.text_config.num_experts_per_tok
         intermediate_size = config.thinker_config.text_config.moe_intermediate_size
         hidden_size = config.thinker_config.text_config.hidden_size
-    elif config.architectures[0] == "PixtralForConditionalGeneration":
+    elif architecture == "PixtralForConditionalGeneration":
         # Pixtral can contain different LLM architectures,
         # recurse to get their parameters
         return get_model_params(config.get_text_config())
@@ -808,6 +824,23 @@ def get_model_params(config):
         intermediate_size = config.intermediate_size
         hidden_size = config.hidden_size
     return E, topk, intermediate_size, hidden_size
+
+
+def resolve_dtype(config) -> torch.dtype:
+    if current_platform.is_rocm():
+        return torch.float16
+
+    dtype = getattr(config, "dtype", None)
+    if dtype is not None:
+        return dtype
+
+    if hasattr(config, "get_text_config"):
+        text_config = config.get_text_config()
+        dtype = getattr(text_config, "dtype", None)
+        if dtype is not None:
+            return dtype
+
+    return torch.bfloat16
 
 
 def get_quantization_group_size(config) -> int | None:
@@ -857,7 +890,7 @@ def main(args: argparse.Namespace):
     else:
         ensure_divisibility(intermediate_size, args.tp_size, "intermediate_size")
         shard_intermediate_size = 2 * intermediate_size // args.tp_size
-    dtype = torch.float16 if current_platform.is_rocm() else config.dtype
+    dtype = resolve_dtype(config)
     use_fp8_w8a8 = args.dtype == "fp8_w8a8"
     use_int8_w8a16 = args.dtype == "int8_w8a16"
     use_int4_w4a16 = args.dtype == "int4_w4a16"

@@ -5,10 +5,12 @@ import math
 import random
 import time
 from collections.abc import Callable
+from contextlib import nullcontext
 
 import pytest
 import torch
 import torch.nn.functional as F
+from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import STR_DTYPE_TO_TORCH_DTYPE, set_random_seed
@@ -21,7 +23,9 @@ NUM_HEADS = [64]
 NUM_QUERIES_PER_KV = [1, 64]
 HEAD_SIZES = [24, 128]
 DTYPES = [torch.float16]
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 SLIDING_WINDOW = [0, 16, 2048]
 KV_CACHE_DTYPES = ["auto", "fp8", "fp8_e5m2"]
 
@@ -135,7 +139,7 @@ def test_contexted_kv_attention(
     # for GPU 1 would run on both GPU0 and GPU1 and things would hang
     #
     # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     MAX_SEQ_LEN = 1024
     MAX_CTX_LEN = 1024
@@ -356,7 +360,7 @@ def test_contexted_kv_attention_alibi(
     # for GPU 1 would run on both GPU0 and GPU1 and things would hang
     #
     # see also similar issue: https://github.com/Dao-AILab/flash-attention/issues/523
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     def _get_alibi_slopes(total_num_heads: int) -> torch.Tensor:
         # Fork from: vllm/vllm/model_executor/models/bloom.py#L44
@@ -555,15 +559,21 @@ def test_contexted_kv_attention_alibi(
             query_len, seq_len, alibi_slopes, device, dtype
         )
 
-        # Compute attention
-        out = F.scaled_dot_product_attention(
-            q_sdpa,
-            k_sdpa,
-            v_sdpa,
-            attn_mask=alibi_mask,
-            dropout_p=0.0,
-            scale=scale,
-        )
+        # Compute attention. On ROCm we force use of the Math SDPA backend rather than
+        # the Flash or Mem-Efficient backends for increased numerical accuracy
+        if current_platform.is_rocm():
+            sdpa_context = sdpa_kernel(SDPBackend.MATH)
+        else:
+            sdpa_context = nullcontext()
+        with sdpa_context:
+            out = F.scaled_dot_product_attention(
+                q_sdpa,
+                k_sdpa,
+                v_sdpa,
+                attn_mask=alibi_mask,
+                dropout_p=0.0,
+                scale=scale,
+            )
 
         # Reshape output back to [query_len, num_heads, head_size]
         out = out.view(num_heads, query_len, head_size).permute(1, 0, 2)

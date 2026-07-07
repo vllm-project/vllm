@@ -34,11 +34,7 @@ class CudagraphDispatcher:
     def __init__(self, vllm_config: VllmConfig):
         self.vllm_config = vllm_config
         self.compilation_config = vllm_config.compilation_config
-        self.uniform_decode_query_len = (
-            1
-            if not self.vllm_config.speculative_config
-            else 1 + self.vllm_config.speculative_config.num_speculative_tokens
-        )
+        self.uniform_decode_query_len = 1 + self.vllm_config.num_speculative_tokens
 
         # Dict to store valid cudagraph dispatching keys.
         self.cudagraph_keys: dict[CUDAGraphMode, set[BatchDescriptor]] = {
@@ -46,9 +42,14 @@ class CudagraphDispatcher:
             CUDAGraphMode.FULL: set(),
         }
 
+        from vllm.compilation.breakable_cudagraph import (
+            is_breakable_cudagraph_enabled,
+        )
+
         assert (
             not self.compilation_config.cudagraph_mode.requires_piecewise_compilation()
             or self.compilation_config.is_attention_compiled_piecewise()
+            or is_breakable_cudagraph_enabled()
         ), (
             "Compilation mode should be CompilationMode.VLLM_COMPILE when "
             "cudagraph_mode piecewise cudagraphs is used, "
@@ -72,6 +73,9 @@ class CudagraphDispatcher:
         """Pre-compute the mapping from batch size to padded graph size."""
         max_size = self.compilation_config.max_cudagraph_capture_size
         capture_sizes = self.compilation_config.cudagraph_capture_sizes
+        assert max_size is not None, (
+            "Maximum cudagraph capture size must be set when cudagraphs are enabled."
+        )
         assert capture_sizes is not None, (
             "Cudagraph capture sizes must be set when cudagraphs are enabled."
         )
@@ -94,7 +98,7 @@ class CudagraphDispatcher:
         ):
             for size in self.compilation_config.compile_sizes:
                 size = int(size)
-                if size <= self.compilation_config.max_cudagraph_capture_size:
+                if size <= max_size:
                     padded = self._bs_to_padded_graph_size[size]
                     if padded != size:
                         raise ValueError(
@@ -265,11 +269,13 @@ class CudagraphDispatcher:
             f"No allowed cudagraph modes: valid_modes={valid_modes}, "
             f"invalid_modes={invalid_modes}"
         )
+        max_size = self.compilation_config.max_cudagraph_capture_size
 
         if (
             not self.keys_initialized
             or self.cudagraph_mode == CUDAGraphMode.NONE
-            or num_tokens > self.compilation_config.max_cudagraph_capture_size
+            or max_size is None
+            or num_tokens > max_size
             or allowed_modes <= {CUDAGraphMode.NONE}
         ):
             return CUDAGraphMode.NONE, BatchDescriptor(num_tokens)

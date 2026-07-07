@@ -39,7 +39,7 @@ void nccl_free_plug(void* ptr, size_t size, int device, void* stream) {
 _allocator = None
 _allocator_wrapper = None
 _mem_pool = None
-_registered_base_addrs = set()
+_registered_base_addrs: dict[bytes, set] = {}
 _graph_pool_id = None
 _nccl_allocator_failed_to_compile = False
 _cached_pool_snapshot = None
@@ -151,7 +151,7 @@ class nccl_symm_mem_context:
             self.pynccl_comm = pynccl_comm
             self._mem_pool_ctx = torch.cuda.use_mem_pool(get_nccl_mem_pool())
             self.is_graph_capture = torch.cuda.is_current_stream_capturing()
-            self.device = torch.cuda.current_device()
+            self.device = torch.accelerator.current_device_index()
 
     def __enter__(self):
         if self.disabled:
@@ -181,11 +181,14 @@ class nccl_symm_mem_context:
         assert _pool is not None
         _cached_pool_snapshot = _pool.snapshot()
         assert self.pynccl_comm is not None
+        comm_key = bytes(self.pynccl_comm.unique_id.internal)
+        if comm_key not in _registered_base_addrs:
+            _registered_base_addrs[comm_key] = set()
         for segment in _cached_pool_snapshot:
-            if segment["address"] not in _registered_base_addrs:
+            if segment["address"] not in _registered_base_addrs[comm_key]:
                 self.pynccl_comm.register_comm_window_raw(
                     segment["address"], segment["total_size"]
                 )
-                _registered_base_addrs.add(segment["address"])
+                _registered_base_addrs[comm_key].add(segment["address"])
         if self.is_graph_capture:
             torch._C._cuda_beginAllocateCurrentThreadToPool(self.device, _graph_pool_id)

@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Iterable
 from typing import Any
 
 from openai.types.chat import (
@@ -11,19 +12,100 @@ from openai.types.chat import (
 from openai.types.chat.chat_completion_message_tool_call_param import (
     Function as FunctionCallTool,
 )
-from openai.types.responses import ResponseFunctionToolCall, ResponseOutputItem
+from openai.types.responses import (
+    ResponseFunctionToolCall,
+    ResponseOutputItem,
+    ResponseOutputMessage,
+    ResponseOutputText,
+    ResponseReasoningItem,
+)
 from openai.types.responses.response import ToolChoice
 from openai.types.responses.response_function_tool_call_output_item import (
     ResponseFunctionToolCallOutputItem,
 )
-from openai.types.responses.response_output_message import ResponseOutputMessage
-from openai.types.responses.response_reasoning_item import ResponseReasoningItem
+from openai.types.responses.response_output_text import Logprob
+from openai.types.responses.response_reasoning_item import (
+    Content as ResponseReasoningTextContent,
+)
 from openai.types.responses.tool import Tool
 
 from vllm import envs
-from vllm.entrypoints.constants import MCP_PREFIX
+from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionMessageParam
+from vllm.entrypoints.openai.engine.protocol import FunctionCall
 from vllm.entrypoints.openai.responses.protocol import ResponseInputOutputItem
+from vllm.logger import init_logger
+from vllm.tool_parsers.utils import (
+    build_responses_tool_call_name_map,
+    flat_namespace_tool_name,
+    iter_response_function_tool_dicts,
+    resolve_responses_tool_call_name,
+)
+from vllm.utils import random_uuid
+
+logger = init_logger(__name__)
+
+
+def build_response_output_items(
+    reasoning: str | None,
+    content: str | None,
+    tool_calls: list[FunctionCall] | None,
+    logprobs: list[Logprob] | None = None,
+    tools: list[Tool] | None = None,
+) -> list[ResponseOutputItem]:
+    outputs: list[ResponseOutputItem] = []
+    tool_call_name_map = build_responses_tool_call_name_map(tools)
+
+    if reasoning:
+        outputs.append(
+            ResponseReasoningItem(
+                id=f"rs_{random_uuid()}",
+                summary=[],
+                type="reasoning",
+                content=[
+                    ResponseReasoningTextContent(text=reasoning, type="reasoning_text")
+                ],
+                status=None,
+            )
+        )
+
+    if content:
+        outputs.append(
+            ResponseOutputMessage(
+                id=f"msg_{random_uuid()}",
+                content=[
+                    ResponseOutputText(
+                        text=content,
+                        annotations=[],
+                        type="output_text",
+                        logprobs=logprobs,
+                    )
+                ],
+                role="assistant",
+                status="completed",
+                type="message",
+            )
+        )
+
+    if tool_calls:
+        for idx, tool_call in enumerate(tool_calls):
+            call_name = resolve_responses_tool_call_name(
+                tool_call.name, tool_call_name_map=tool_call_name_map
+            )
+            outputs.append(
+                ResponseFunctionToolCall(
+                    id=f"fc_{random_uuid()}",
+                    call_id=tool_call.id
+                    or make_tool_call_id(func_name=tool_call.name, idx=idx),
+                    type="function_call",
+                    status="completed",
+                    name=call_name.name,
+                    namespace=call_name.namespace,
+                    arguments=tool_call.arguments,
+                )
+            )
+
+    return outputs
 
 
 def should_continue_final_message(
@@ -91,8 +173,10 @@ def construct_input_messages(
 
     # Prepend the conversation history.
     if prev_msg is not None:
-        # Add the previous messages.
-        messages.extend(prev_msg)
+        # Filter out system messages from previous conversation -- per the
+        # OpenAI spec, instructions should NOT carry over across responses.
+        # The current request's instructions (if any) were already added above.
+        messages.extend(m for m in prev_msg if m.get("role") != "system")
     if prev_response_output is not None:
         # Add the previous output.
         for output_item in prev_response_output:
@@ -116,93 +200,107 @@ def construct_input_messages(
     return messages
 
 
-def _maybe_combine_reasoning_and_tool_call(
-    item: ResponseInputOutputItem, messages: list[ChatCompletionMessageParam]
-) -> ChatCompletionMessageParam | None:
-    """Many models treat MCP calls and reasoning as a single message.
-    This function checks if the last message is a reasoning message and
-    the current message is a tool call"""
-    if not (
-        isinstance(item, ResponseFunctionToolCall)
-        and item.id
-        and item.id.startswith(MCP_PREFIX)
-    ):
-        return None
-    if len(messages) == 0:
-        return None
-    last_message = messages[-1]
-    if not (
-        last_message.get("role") == "assistant"
-        and last_message.get("reasoning") is not None
-    ):
-        return None
-
-    last_message["tool_calls"] = [
-        ChatCompletionMessageToolCallParam(
-            id=item.call_id,
-            function=FunctionCallTool(
-                name=item.name,
-                arguments=item.arguments,
-            ),
-            type="function",
-        )
-    ]
-    return last_message
-
-
 def construct_chat_messages_with_tool_call(
     input_messages: list[ResponseInputOutputItem],
 ) -> list[ChatCompletionMessageParam]:
-    """This function wraps _construct_single_message_from_response_item
-    Because some chatMessages come from multiple response items
-    for example a reasoning item and a MCP tool call are two response items
-    but are one chat message
+    """Build chat messages from response items.
+
+    Some chat messages span multiple response items (e.g., reasoning + tool calls).
     """
     messages: list[ChatCompletionMessageParam] = []
     for item in input_messages:
-        maybe_combined_message = _maybe_combine_reasoning_and_tool_call(item, messages)
-        if maybe_combined_message is not None:
-            messages[-1] = maybe_combined_message
-        else:
-            messages.append(_construct_single_message_from_response_item(item))
+        message = _construct_message_from_response_item(
+            item, prev_msg=messages[-1] if messages else None
+        )
+        if message is not None:
+            messages.append(message)
 
     return messages
 
 
-def _construct_single_message_from_response_item(
+def _construct_message_from_response_item(
     item: ResponseInputOutputItem,
-) -> ChatCompletionMessageParam:
+    prev_msg: ChatCompletionMessageParam | None = None,
+) -> ChatCompletionMessageParam | None:
+    """
+    Returns a new message or None. If `None`, `prev_msg` might be updated.
+    If `prev_msg` is `None`, a new message is always returned.
+    """
+    prev_assistant_msg = (
+        prev_msg if prev_msg and prev_msg.get("role") == "assistant" else None
+    )
+
     if isinstance(item, ResponseFunctionToolCall):
-        # Append the function call as a tool call.
+        tool_name = item.name
+        if item.namespace:
+            tool_name = flat_namespace_tool_name(item.namespace, item.name)
+        tool_call = ChatCompletionMessageToolCallParam(
+            id=item.call_id,
+            function=FunctionCallTool(
+                name=tool_name,
+                arguments=item.arguments,
+            ),
+            type="function",
+        )
+        if prev_assistant_msg:
+            tool_calls = prev_assistant_msg.get("tool_calls")
+            if tool_calls is None:
+                prev_assistant_msg["tool_calls"] = [tool_call]
+                return None
+            if isinstance(tool_calls, list):
+                tool_calls.append(tool_call)
+                return None
+            if isinstance(tool_calls, Iterable) and not isinstance(
+                tool_calls, (dict, str)
+            ):
+                tool_calls = list(tool_calls)
+                tool_calls.append(tool_call)
+                prev_assistant_msg["tool_calls"] = tool_calls
+                return None
+            logger.warning(
+                "Previous assistant message has unknown tool_calls format. "
+                "Tool call merging is skipped and a new assistant message is created. "
+                "Item %s",
+                item.id,
+            )
         return ChatCompletionAssistantMessageParam(
             role="assistant",
-            tool_calls=[
-                ChatCompletionMessageToolCallParam(
-                    id=item.call_id,
-                    function=FunctionCallTool(
-                        name=item.name,
-                        arguments=item.arguments,
-                    ),
-                    type="function",
-                )
-            ],
+            tool_calls=[tool_call],
         )
     elif isinstance(item, ResponseReasoningItem):
-        reasoning_content = ""
+        reasoning = ""
         if item.encrypted_content:
             raise ValueError("Encrypted content is not supported.")
-        if len(item.summary) == 1:
-            reasoning_content = item.summary[0].text
-        elif item.content and len(item.content) == 1:
-            reasoning_content = item.content[0].text
+        elif item.content and len(item.content) >= 1:
+            reasoning = item.content[0].text
+        elif len(item.summary) >= 1:
+            reasoning = item.summary[0].text
+            logger.warning(
+                "Using summary text as reasoning content for item %s. "
+                "Please use content instead of summary for "
+                "reasoning items.",
+                item.id,
+            )
+
+        if prev_assistant_msg:
+            previous_reasoning = prev_assistant_msg.get("reasoning")
+            if previous_reasoning is None:
+                prev_assistant_msg["reasoning"] = reasoning
+                return None
         return {
             "role": "assistant",
-            "reasoning": reasoning_content,
+            "reasoning": reasoning,
         }
     elif isinstance(item, ResponseOutputMessage):
+        output_text = item.content[0].text
+        if prev_assistant_msg:
+            previous_content = prev_assistant_msg.get("content")
+            if previous_content is None:
+                prev_assistant_msg["content"] = output_text
+                return None
         return {
             "role": "assistant",
-            "content": item.content[0].text,
+            "content": output_text,
         }
     elif isinstance(item, ResponseFunctionToolCallOutputItem):
         return ChatCompletionToolMessageParam(
@@ -217,7 +315,35 @@ def _construct_single_message_from_response_item(
             content=item.get("output"),
             tool_call_id=item.get("call_id"),
         )
-    return item  # type: ignore
+    elif isinstance(item, dict) and item.get("role") == "assistant":
+        content = item.get("content")
+        text: str | None = None
+        if isinstance(content, str):
+            text = content
+        elif isinstance(content, list) and content:
+            text = content[0].get("text")
+        if text is not None:
+            if prev_assistant_msg:
+                previous_content = prev_assistant_msg.get("content")
+                if previous_content is None:
+                    prev_assistant_msg["content"] = text
+                    return None
+            return {"role": "assistant", "content": text}
+    return item  # type: ignore[arg-type]
+
+
+def extract_function_tool_names(tools: list[Tool]) -> frozenset[str]:
+    names = []
+    for tool in tools:
+        if tool.type == "function":
+            names.append(tool.name)
+        elif tool.type == "namespace":
+            names.extend(
+                flat_namespace_tool_name(tool.name, namespaced_tool.name)
+                for namespaced_tool in tool.tools
+                if namespaced_tool.type == "function"
+            )
+    return frozenset(names)
 
 
 def extract_tool_types(tools: list[Tool]) -> set[str]:
@@ -253,11 +379,11 @@ def convert_tool_responses_to_completions_format(tool: dict) -> dict:
 def construct_tool_dicts(
     tools: list[Tool], tool_choice: ToolChoice
 ) -> list[dict[str, Any]] | None:
-    if tools is None or (tool_choice == "none"):
+    if not tools or (tool_choice == "none"):
         tool_dicts = None
     else:
         tool_dicts = [
-            convert_tool_responses_to_completions_format(tool.model_dump())
-            for tool in tools
+            convert_tool_responses_to_completions_format(tool)
+            for tool in iter_response_function_tool_dicts(tools)
         ]
     return tool_dicts

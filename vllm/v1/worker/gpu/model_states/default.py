@@ -9,12 +9,15 @@ from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig
-from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
+from vllm.v1.worker.gpu.attn_utils import (
+    build_attn_metadata,
+    compute_mm_prefix_ranges,
+)
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
-from vllm.v1.worker.gpu.mm.encoder_runner import EncoderRunner
-from vllm.v1.worker.gpu.mm.mrope_utils import MRopeState
+from vllm.v1.worker.gpu.mm.rope import get_rope_state
 from vllm.v1.worker.gpu.model_states.interface import ModelState
+from vllm.v1.worker.gpu.model_states.mm_pruning import maybe_create_mm_pruner
 from vllm.v1.worker.gpu.states import RequestState
 from vllm.v1.worker.utils import AttentionGroup
 
@@ -27,54 +30,39 @@ class DefaultModelState(ModelState):
         encoder_cache: EncoderCache | None,
         device: torch.device,
     ):
-        self.vllm_config = vllm_config
-        self.model_config = vllm_config.model_config
-        self.scheduler_config = vllm_config.scheduler_config
-        self.model = model
-        self.device = device
+        super().__init__(vllm_config, model, encoder_cache, device)
 
-        self.supports_mm_inputs = encoder_cache is not None
-        self.max_model_len = self.model_config.max_model_len
-        self.max_num_reqs = self.scheduler_config.max_num_seqs
-        self.max_num_tokens = self.scheduler_config.max_num_batched_tokens
-        self.inputs_embeds_size = self.model_config.get_inputs_embeds_size()
-        self.dtype = self.model_config.dtype
+        self.rope_state = get_rope_state(
+            self.model_config,
+            model,
+            max_num_reqs=self.max_num_reqs,
+            max_num_tokens=self.max_num_tokens,
+            max_model_len=self.max_model_len,
+            device=self.device,
+        )
 
-        if self.supports_mm_inputs:
-            assert encoder_cache is not None
-            self.encoder_cache = encoder_cache
-            self.encoder_runner = EncoderRunner(
-                model=self.model,
-                max_num_tokens=self.max_num_tokens,
-                hidden_size=self.inputs_embeds_size,
-                encoder_cache=encoder_cache,
-                dtype=self.dtype,
-                device=self.device,
-            )
-
-        self.uses_mrope = self.model_config.uses_mrope
-        if self.uses_mrope:
-            self.mrope_state = MRopeState(
-                max_num_reqs=self.max_num_reqs,
-                max_num_tokens=self.max_num_tokens,
-                max_model_len=self.max_model_len,
-                device=self.device,
-            )
+        # Pruner is used for multimodal embedding pruning (EVS).
+        self.mm_pruner = maybe_create_mm_pruner(
+            self.model_config, model, self.rope_state, encoder_cache
+        )
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
-        if self.uses_mrope:
-            # Pre-compute M-RoPE positions for prefill.
+        if self.rope_state is not None:
             assert new_req_data.prefill_token_ids is not None
-            self.mrope_state.init_prefill_mrope_positions(
+            self.rope_state.init_prefill_positions(
                 req_index,
-                self.model,  # type: ignore
+                self.model,
                 new_req_data.prefill_token_ids,
                 mm_features=new_req_data.mm_features,
             )
 
     def apply_staged_writes(self) -> None:
-        if self.uses_mrope:
-            self.mrope_state.apply_staged_writes()
+        if self.rope_state is not None:
+            self.rope_state.apply_staged_writes()
+
+    def dummy_inputs_embeds(self, num_tokens: int) -> torch.Tensor:
+        """Pre-allocated inputs_embeds buffer for dummy runs (contents unused)."""
+        return self.encoder_runner.inputs_embeds[:num_tokens]
 
     def get_mm_embeddings(
         self,
@@ -91,14 +79,13 @@ class DefaultModelState(ModelState):
             # Cache the encoder outputs by mm_hash
             self.encoder_cache.encoder_outputs.update(zip(mm_hashes, encoder_outputs))
 
-        mm_embeds, is_mm_embed = self.encoder_runner.gather_mm_embeddings(
-            input_batch.req_ids,
-            input_batch.num_tokens,
-            input_batch.num_scheduled_tokens,
-            input_batch.query_start_loc_np,
-            req_states.prefill_len.np[input_batch.idx_mapping_np],
-            req_states.num_computed_prefill_tokens[input_batch.idx_mapping_np],
-        )
+        mm_embeds, is_mm_embed = super().gather_mm_embeddings(input_batch)
+        if self.mm_pruner is not None and mm_embeds:
+            # EVS: recompute mrope positions for pruned media.
+            mm_embeds = self.mm_pruner.recompute(mm_embeds, input_batch, req_states)
+            # We must flush the staged rope updates for prepare_inputs() to pick up.
+            self.apply_staged_writes()
+
         # Use unpadded input_ids to match is_mm_embed size (num_tokens).
         # input_batch.input_ids may be padded for CUDA graphs.
         input_ids_unpadded = input_batch.input_ids[: input_batch.num_tokens]
@@ -107,35 +94,39 @@ class DefaultModelState(ModelState):
         )
         return inputs_embeds[: input_batch.num_tokens_after_padding]
 
+    def gather_mm_embeddings(
+        self, input_batch: InputBatch, draft_lookahead: int = 0
+    ) -> tuple[list[torch.Tensor], torch.Tensor]:
+        mm_embeds, is_mm_embed = super().gather_mm_embeddings(
+            input_batch, draft_lookahead
+        )
+        if self.mm_pruner is not None:
+            # EVS: strip the appended mrope-position channels.
+            mm_embeds = self.mm_pruner.strip(mm_embeds)
+        return mm_embeds, is_mm_embed
+
     def prepare_inputs(
         self, input_batch: InputBatch, req_states: RequestState
     ) -> dict[str, torch.Tensor | None]:
-        if not self.uses_mrope:
-            # Common case (1D positions).
-            return {}
+        if self.rope_state is None:
+            return {}  # Common case (1D positions).
 
-        # Prepare M-RoPE positions.
-        self.mrope_state.prepare_mrope_positions(
+        self.rope_state.prepare_positions(
             input_batch.idx_mapping,
             input_batch.query_start_loc,
             req_states.prefill_len.gpu,
             req_states.num_computed_tokens.gpu,
         )
-        mrope_positions = self.mrope_state.mrope_positions[
-            :, : input_batch.num_tokens_after_padding
-        ]
-        return {"positions": mrope_positions}
+        positions = self.rope_state.get_positions(input_batch.num_tokens_after_padding)
+        return {"positions": positions}
 
-    def prepare_dummy_inputs(
-        self, num_reqs: int, num_tokens: int
-    ) -> dict[str, torch.Tensor | None]:
+    def prepare_dummy_inputs(self, num_reqs: int, num_tokens: int) -> dict[str, Any]:
         model_inputs = {}
         if self.supports_mm_inputs:
             inputs_embeds = self.encoder_runner.inputs_embeds[:num_tokens]
             model_inputs["inputs_embeds"] = inputs_embeds
-        if self.uses_mrope:
-            mrope_positions = self.mrope_state.mrope_positions[:, :num_tokens]
-            model_inputs["positions"] = mrope_positions
+        if self.rope_state is not None:
+            model_inputs["positions"] = self.rope_state.get_positions(num_tokens)
         return model_inputs
 
     def prepare_attn(
@@ -146,6 +137,7 @@ class DefaultModelState(ModelState):
         slot_mappings: torch.Tensor,
         attn_groups: list[list[AttentionGroup]],
         kv_cache_config: KVCacheConfig,
+        for_capture: bool = False,
     ) -> dict[str, Any]:
         if cudagraph_mode == CUDAGraphMode.FULL:
             # Use padded sizes - padding is handled by model_runner.prepare_attn.
@@ -157,6 +149,23 @@ class DefaultModelState(ModelState):
             num_tokens = input_batch.num_tokens
         query_start_loc_cpu = torch.from_numpy(input_batch.query_start_loc_np)
         max_query_len = input_batch.num_scheduled_tokens.max().item()
+        seq_lens_cpu_upper_bound = input_batch.seq_lens_cpu_upper_bound
+        if for_capture:
+            # Capture with worst-case max_seq_len so the graph is valid at any replay.
+            max_seq_len = self.max_model_len
+        else:
+            max_seq_len = seq_lens_cpu_upper_bound[:num_reqs].max().item()
+        req_doc_ranges: dict[int, list[tuple[int, int]]] | None = None
+        if (
+            self.supports_mm_inputs
+            and self.encoder_cache is not None
+            and self.model_config.is_mm_prefix_lm
+        ):
+            req_doc_ranges = compute_mm_prefix_ranges(
+                req_ids=input_batch.req_ids,
+                mm_features=self.encoder_cache.mm_features,
+                sliding_window=self.model_config.get_sliding_window(),
+            )
         attn_metadata = build_attn_metadata(
             attn_groups=attn_groups,
             num_reqs=num_reqs,
@@ -165,10 +174,15 @@ class DefaultModelState(ModelState):
             query_start_loc_cpu=query_start_loc_cpu,
             max_query_len=max_query_len,
             seq_lens=input_batch.seq_lens,
-            max_seq_len=self.max_model_len,
+            max_seq_len=max_seq_len,
             block_tables=block_tables,
             slot_mappings=slot_mappings,
             kv_cache_config=kv_cache_config,
+            seq_lens_cpu_upper_bound=seq_lens_cpu_upper_bound,
             dcp_local_seq_lens=input_batch.dcp_local_seq_lens,
+            positions=input_batch.positions,
+            mm_req_doc_ranges=req_doc_ranges,
+            for_cudagraph_capture=for_capture,
+            rswa_prefix_lens=input_batch.prompt_lens,
         )
         return attn_metadata

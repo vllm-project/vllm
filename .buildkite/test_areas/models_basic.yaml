@@ -1,10 +1,11 @@
 group: Models - Basic
-depends_on: 
+depends_on:
   - image-build
 steps:
 - label: Basic Models Tests (Initialization)
+  key: basic-models-tests-initialization
   timeout_in_minutes: 45
-  torch_nightly: true
+  device: h200_18gb
   source_file_dependencies:
   - vllm/
   - tests/models/test_initialization.py
@@ -14,8 +15,9 @@ steps:
     - pytest -v -s models/test_initialization.py::test_can_initialize_small_subset
 
 - label: Basic Models Tests (Extra Initialization) %N
+  device: h200_35gb
+  key: basic-models-tests-extra-initialization
   timeout_in_minutes: 45
-  torch_nightly: true
   source_file_dependencies:
   - vllm/model_executor/models/
   - tests/models/test_initialization.py
@@ -28,44 +30,32 @@ steps:
   parallelism: 2
 
 - label: Basic Models Tests (Other)
+  device: h200_35gb
+  key: basic-models-tests-other
   timeout_in_minutes: 45
   source_file_dependencies:
   - vllm/
   - tests/models/test_terratorch.py
-  - tests/models/test_transformers.py
+  - tests/models/transformers/test_backend.py
   - tests/models/test_registry.py
   commands:
-    - pytest -v -s models/test_terratorch.py models/test_transformers.py models/test_registry.py
+    - pytest -v -s models/test_terratorch.py models/transformers/test_backend.py models/test_registry.py
   mirror:
     amd:
       device: mi325_1
       depends_on:
       - image-build-amd
-    
 
 - label: Basic Models Test (Other CPU) # 5min
-  depends_on: 
+  key: basic-models-test-other-cpu
+  depends_on:
   - image-build-cpu
   timeout_in_minutes: 10
   source_file_dependencies:
   - vllm/
   - tests/models/test_utils.py
   - tests/models/test_vision.py
-  device: cpu
+  - tests/models/transformers/fusers/
+  device: cpu-small
   commands:
-    - pytest -v -s models/test_utils.py models/test_vision.py
-
-- label: Transformers Nightly Models
-  working_dir: "/vllm-workspace/"
-  optional: true
-  soft_fail: true
-  commands:
-    - pip install --upgrade git+https://github.com/huggingface/transformers
-    - pytest -v -s tests/models/test_initialization.py
-    - pytest -v -s tests/models/test_transformers.py
-    - pytest -v -s tests/models/multimodal/processing/
-    - pytest -v -s tests/models/multimodal/test_mapping.py
-    - python3 examples/basic/offline_inference/chat.py
-    - python3 examples/offline_inference/vision_language.py --model-type qwen2_5_vl
-    # Whisper needs spawn method to avoid deadlock
-    - VLLM_WORKER_MULTIPROC_METHOD=spawn python3 examples/offline_inference/audio_language.py --model-type whisper
+    - pytest -v -s models/test_utils.py models/test_vision.py models/transformers/fusers/

@@ -6,7 +6,6 @@
 import time
 from typing import Any, Literal, TypeAlias
 
-import torch
 from openai.types.responses import (
     ResponseCodeInterpreterCallCodeDeltaEvent,
     ResponseCodeInterpreterCallCodeDoneEvent,
@@ -24,10 +23,13 @@ from openai.types.responses import (
     ResponseOutputItem,
     ResponseOutputItemAddedEvent,
     ResponseOutputItemDoneEvent,
+    ResponseOutputMessage,
     ResponsePrompt,
+    ResponseReasoningItem,
     ResponseReasoningTextDeltaEvent,
     ResponseReasoningTextDoneEvent,
     ResponseStatus,
+    ResponseTextConfig,
     ResponseWebSearchCallCompletedEvent,
     ResponseWebSearchCallInProgressEvent,
     ResponseWebSearchCallSearchingEvent,
@@ -39,20 +41,13 @@ from openai.types.responses import ResponseCreatedEvent as OpenAIResponseCreated
 from openai.types.responses import (
     ResponseInProgressEvent as OpenAIResponseInProgressEvent,
 )
-from openai.types.responses.tool import Tool
-from openai_harmony import Message as OpenAIHarmonyMessage
-
-# Backward compatibility for OpenAI client versions
-try:  # For older openai versions (< 1.100.0)
-    from openai.types.responses import ResponseTextConfig
-except ImportError:  # For newer openai versions (>= 1.100.0)
-    from openai.types.responses import ResponseFormatTextConfig as ResponseTextConfig
-
 from openai.types.responses.response import IncompleteDetails, ToolChoice
 from openai.types.responses.response_reasoning_item import (
     Content as ResponseReasoningTextContent,
 )
+from openai.types.responses.tool import Tool
 from openai.types.shared import Metadata, Reasoning
+from openai_harmony import Message as OpenAIHarmonyMessage
 from pydantic import (
     Field,
     ValidationError,
@@ -78,7 +73,8 @@ from vllm.utils import random_uuid
 
 logger = init_logger(__name__)
 
-_LONG_INFO = torch.iinfo(torch.long)
+_INT64_MIN = -(2**63)
+_INT64_MAX = 2**63 - 1
 
 
 class InputTokensDetails(OpenAIBaseModel):
@@ -111,8 +107,8 @@ def serialize_message(msg):
     elif hasattr(msg, "to_dict"):
         return msg.to_dict()
     else:
-        # fallback to pyandic dump
-        return msg.model_dump_json()
+        # fallback to pydantic dump
+        return msg.model_dump(mode="json", by_alias=True)
 
 
 def serialize_messages(msgs):
@@ -179,6 +175,24 @@ class ResponsesRequest(OpenAIBaseModel):
     user: str | None = None
     skip_special_tokens: bool = True
     include_stop_str_in_output: bool = False
+    presence_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The presence penalty that was used to penalize new tokens based on "
+            "whether they appear in the text so far."
+        ),
+    )
+    frequency_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The frequency penalty that was used to penalize new tokens based on "
+            "their frequency in the text so far."
+        ),
+    )
     prompt_cache_key: str | None = Field(
         default=None,
         description=(
@@ -210,6 +224,8 @@ class ResponsesRequest(OpenAIBaseModel):
     )
     priority: int = Field(
         default=0,
+        ge=_INT64_MIN,
+        le=_INT64_MAX,
         description=(
             "The priority of the request (lower means earlier handling; "
             "default: 0). Any priority other than 0 will raise an error "
@@ -246,7 +262,7 @@ class ResponsesRequest(OpenAIBaseModel):
     )
 
     repetition_penalty: float | None = None
-    seed: int | None = Field(None, ge=_LONG_INFO.min, le=_LONG_INFO.max)
+    seed: int | None = Field(None, ge=_INT64_MIN, le=_INT64_MAX)
     stop: str | list[str] | None = []
     ignore_eos: bool = False
     vllm_xargs: dict[str, str | int | float | list[str | int | float]] | None = Field(
@@ -254,6 +270,17 @@ class ResponsesRequest(OpenAIBaseModel):
         description=(
             "Additional request parameters with (list of) string or "
             "numeric values, used by custom extensions."
+        ),
+    )
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the chat template renderer. "
+            "Will be accessible by the template."
         ),
     )
     # --8<-- [end:responses-extra-params]
@@ -271,17 +298,28 @@ class ResponsesRequest(OpenAIBaseModel):
         continue_final = should_continue_final_message(self.input)
 
         reasoning = self.reasoning
+        reasoning_effort = None if reasoning is None else reasoning.effort
+
+        extra_kwargs: dict[str, Any] = dict(
+            add_generation_prompt=not continue_final,
+            continue_final_message=continue_final,
+            reasoning_effort=reasoning_effort,
+        )
+
+        # When reasoning is requested, activate thinking for models whose
+        # chat templates require explicit opt-in (e.g., Gemma4 defaults
+        # enable_thinking to false). For templates that don't declare the
+        # variable, resolve_chat_template_kwargs filters it out harmlessly.
+        user_kwargs = self.chat_template_kwargs or {}
+        if reasoning_effort is not None and "enable_thinking" not in user_kwargs:
+            extra_kwargs["enable_thinking"] = reasoning_effort != "none"
 
         return ChatParams(
             chat_template=default_template,
             chat_template_content_format=default_template_content_format,
-            chat_template_kwargs=merge_kwargs(  # To remove unset values
-                {},
-                dict(
-                    add_generation_prompt=not continue_final,
-                    continue_final_message=continue_final,
-                    reasoning_effort=None if reasoning is None else reasoning.effort,
-                ),
+            chat_template_kwargs=merge_kwargs(
+                self.chat_template_kwargs,
+                extra_kwargs,
             ),
             media_io_kwargs=self.media_io_kwargs,
         )
@@ -328,7 +366,11 @@ class ResponsesRequest(OpenAIBaseModel):
         if (repetition_penalty := self.repetition_penalty) is None:
             repetition_penalty = default_sampling_params.get("repetition_penalty", 1.0)
 
-        stop_token_ids = default_sampling_params.get("stop_token_ids")
+        if (presence_penalty := self.presence_penalty) is None:
+            presence_penalty = default_sampling_params.get("presence_penalty", 0.0)
+
+        if (frequency_penalty := self.frequency_penalty) is None:
+            frequency_penalty = default_sampling_params.get("frequency_penalty", 0.0)
 
         # Structured output
         structured_outputs = self.structured_outputs
@@ -355,14 +397,19 @@ class ResponsesRequest(OpenAIBaseModel):
         if isinstance(stop, str):
             stop = [stop]
 
+        extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
+        if self.kv_transfer_params:
+            extra_args["kv_transfer_params"] = self.kv_transfer_params
+
         return SamplingParams.from_optional(
             temperature=temperature,
             top_p=top_p,
             top_k=top_k,
             max_tokens=max_tokens,
             logprobs=self.top_logprobs if self.is_include_output_logprobs() else None,
-            stop_token_ids=stop_token_ids,
             stop=stop,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
             repetition_penalty=repetition_penalty,
             seed=self.seed,
             ignore_eos=self.ignore_eos,
@@ -371,7 +418,7 @@ class ResponsesRequest(OpenAIBaseModel):
             ),
             structured_outputs=structured_outputs,
             logit_bias=self.logit_bias,
-            extra_args=self.vllm_xargs or {},
+            extra_args=extra_args,
             skip_clone=True,  # Created fresh per request, safe to skip clone
             skip_special_tokens=self.skip_special_tokens,
             include_stop_str_in_output=self.include_stop_str_in_output,
@@ -421,18 +468,21 @@ class ResponsesRequest(OpenAIBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def function_call_parsing(cls, data):
-        """Parse function_call dictionaries into ResponseFunctionToolCall objects.
-        This ensures Pydantic can properly resolve union types in the input field.
-        Function calls provided as dicts are converted to ResponseFunctionToolCall
-        objects before validation, while invalid structures are left for Pydantic
-        to reject with appropriate error messages.
-        """
+    def input_item_parsing(cls, data):
+        """Parse input items that are missing required fields or that Pydantic
+        cannot disambiguate in a Union of TypedDict / BaseModel types.
 
+        Specifically handles:
+        - function_call -> ResponseFunctionToolCall
+        - reasoning     -> ResponseReasoningItem (auto-generates id)
+        - message(role=assistant) -> ResponseOutputMessage (auto-generates
+          id/status and annotations)
+
+        Invalid structures are left for Pydantic to reject.
+        """
         input_data = data.get("input")
 
         # Early return for None, strings, or bytes
-        # (strings are iterable but shouldn't be processed)
         if input_data is None or isinstance(input_data, (str, bytes)):
             return data
 
@@ -446,20 +496,121 @@ class ResponsesRequest(OpenAIBaseModel):
 
         processed_input = []
         for item in input_data:
-            if isinstance(item, dict) and item.get("type") == "function_call":
+            if not isinstance(item, dict):
+                processed_input.append(item)
+                continue
+
+            item_type = item.get("type")
+
+            if item_type == "function_call":
                 try:
                     processed_input.append(ResponseFunctionToolCall(**item))
                 except ValidationError:
-                    # Let Pydantic handle validation for malformed function calls
                     logger.debug(
                         "Failed to parse function_call to ResponseFunctionToolCall, "
                         "leaving for Pydantic validation"
                     )
                     processed_input.append(item)
+
+            elif item_type == "reasoning":
+                if "id" not in item:
+                    item = {**item, "id": f"rs_{random_uuid()}"}
+                try:
+                    processed_input.append(ResponseReasoningItem(**item))
+                except ValidationError:
+                    logger.debug(
+                        "Failed to parse reasoning to ResponseReasoningItem, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(item)
+
+            elif item_type == "message" and item.get("role") == "assistant":
+                content = item.get("content")
+                if not isinstance(content, list):
+                    # String content is a valid EasyInputMessageParam,
+                    # do not coerce it to ResponseOutputMessage
+                    processed_input.append(item)
+                    continue
+
+                original_item = item
+                item = dict(item)
+                if "id" not in item:
+                    item["id"] = f"msg_{random_uuid()}"
+                if "status" not in item:
+                    item["status"] = "completed"
+                # ResponseOutputText requires annotations
+                new_content = []
+                for c in content:
+                    if (
+                        isinstance(c, dict)
+                        and c.get("type") == "output_text"
+                        and "annotations" not in c
+                    ):
+                        c = {**c, "annotations": []}
+                    new_content.append(c)
+                item["content"] = new_content
+                try:
+                    processed_input.append(ResponseOutputMessage(**item))
+                except ValidationError:
+                    logger.debug(
+                        "Failed to parse assistant message to ResponseOutputMessage, "
+                        "leaving for Pydantic validation"
+                    )
+                    processed_input.append(original_item)
+
             else:
                 processed_input.append(item)
 
         data["input"] = processed_input
+        return data
+
+    @model_validator(mode="before")
+    @classmethod
+    def check_tool_usage(cls, data):
+        if not isinstance(data, dict):
+            return data
+
+        tools = data.get("tools")
+        tool_choice = data.get("tool_choice", "auto")
+        has_tools = tools is not None and len(tools) > 0
+        is_named_tool_choice = (
+            isinstance(tool_choice, dict) and tool_choice.get("type") == "function"
+        )
+
+        if not has_tools:
+            if tool_choice in ("auto", "none"):
+                data["tool_choice"] = "none"
+            elif tool_choice == "required":
+                raise VLLMValidationError(
+                    "Tool choice 'required' must be specified with 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+            elif is_named_tool_choice:
+                raise VLLMValidationError(
+                    "Tool choice 'function' not found in 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+        elif is_named_tool_choice and tools is not None:
+            tool_name = tool_choice.get("name")
+            tool_names = set()
+            for tool in tools:
+                if isinstance(tool, dict):
+                    if tool.get("type") == "namespace":
+                        namespace = tool.get("name")
+                        for namespaced_tool in tool.get("tools", []):
+                            namespaced_name = namespaced_tool.get("name")
+                            tool_names.add(namespaced_name)
+                            tool_names.add(f"{namespace}__{namespaced_name}")
+                    else:
+                        tool_names.add(tool.get("name"))
+                else:
+                    tool_names.add(getattr(tool, "name", None))
+            if not tool_name or tool_name not in tool_names:
+                raise VLLMValidationError(
+                    "Tool choice 'function' not found in 'tools' parameter.",
+                    parameter="tool_choice",
+                )
+
         return data
 
 
@@ -491,6 +642,30 @@ class ResponsesResponse(OpenAIBaseModel):
     truncation: Literal["auto", "disabled"]
     usage: ResponseUsage | None = None
     user: str | None = None
+
+    presence_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The presence penalty that was used to penalize new tokens based on "
+            "whether they appear in the text so far."
+        ),
+    )
+    frequency_penalty: float | None = Field(
+        default=None,
+        ge=-2.0,
+        le=2.0,
+        description=(
+            "The frequency penalty that was used to penalize new tokens based on "
+            "their frequency in the text so far."
+        ),
+    )
+
+    # vLLM-specific fields that are not in OpenAI spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
 
     # --8<-- [start:responses-response-extra-params]
     # These are populated when enable_response_messages is set to True
@@ -535,6 +710,7 @@ class ResponsesResponse(OpenAIBaseModel):
         usage: ResponseUsage | None = None,
         input_messages: ResponseInputOutputMessage | None = None,
         output_messages: ResponseInputOutputMessage | None = None,
+        kv_transfer_params: dict[str, Any] | None = None,
     ) -> "ResponsesResponse":
         incomplete_details: IncompleteDetails | None = None
         if status == "incomplete":
@@ -564,12 +740,15 @@ class ResponsesResponse(OpenAIBaseModel):
             prompt=request.prompt,
             reasoning=request.reasoning,
             service_tier=request.service_tier,
+            presence_penalty=sampling_params.presence_penalty,
+            frequency_penalty=sampling_params.frequency_penalty,
             status=status,
             text=request.text,
             top_logprobs=sampling_params.logprobs,
             truncation=request.truncation,
             user=request.user,
             usage=usage,
+            kv_transfer_params=kv_transfer_params,
         )
 
 

@@ -26,6 +26,9 @@ Examples:
 """
 
 import argparse
+import os
+import shutil
+import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
@@ -47,6 +50,18 @@ from common import (
     is_mla_backend,
 )
 
+from vllm.v1.worker.workspace import init_workspace_manager
+
+
+def _str2bool(v) -> bool:
+    if isinstance(v, bool):
+        return v
+    if v.lower() in ("true", "1", "yes", "t"):
+        return True
+    if v.lower() in ("false", "0", "no", "f"):
+        return False
+    raise argparse.ArgumentTypeError(f"expected a boolean, got {v!r}")
+
 
 def run_standard_attention_benchmark(config: BenchmarkConfig) -> BenchmarkResult:
     """Run standard attention benchmark (Flash/Triton/FlashInfer)."""
@@ -59,7 +74,9 @@ def run_mla_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
     """Run MLA benchmark with appropriate backend."""
     from mla_runner import run_mla_benchmark as run_mla
 
-    return run_mla(config.backend, config, **kwargs)
+    return run_mla(
+        config.backend, config, prefill_backend=config.prefill_backend, **kwargs
+    )
 
 
 def run_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
@@ -79,13 +96,15 @@ def run_benchmark(config: BenchmarkConfig, **kwargs) -> BenchmarkResult:
         else:
             return run_standard_attention_benchmark(config)
     except Exception as e:
+        error_msg = str(e) or repr(e)
         return BenchmarkResult(
             config=config,
             mean_time=float("inf"),
+            median_time=float("inf"),
             std_time=0,
             min_time=float("inf"),
             max_time=float("inf"),
-            error=str(e),
+            error=error_msg,
         )
 
 
@@ -111,9 +130,12 @@ def run_model_parameter_sweep(
     """
     all_results = []
 
-    console.print(
-        f"[yellow]Model sweep mode: testing {sweep.param_name} = {sweep.values}[/]"
+    sweep_desc = (
+        f"{sweep.param_name} = {sweep.values}"
+        if sweep.param_name
+        else f"{len(sweep.values)} configurations"
     )
+    console.print(f"[yellow]Model sweep mode: testing {sweep_desc}[/]")
 
     total = len(backends) * len(batch_specs) * len(sweep.values)
 
@@ -121,9 +143,9 @@ def run_model_parameter_sweep(
         for backend in backends:
             for spec in batch_specs:
                 for value in sweep.values:
-                    # Create config with modified model parameter
+                    # Create config with modified model parameter(s)
                     config_args = base_config_args.copy()
-                    config_args[sweep.param_name] = value
+                    sweep.apply(config_args, value)
 
                     # Create config with original backend for running
                     clean_config = BenchmarkConfig(
@@ -140,12 +162,20 @@ def run_model_parameter_sweep(
                     all_results.append(result)
 
                     if not result.success:
+                        err_label = (
+                            f"{sweep.param_name}={value}"
+                            if sweep.param_name
+                            else f"{value}"
+                        )
                         console.print(
-                            f"[red]Error {backend} {spec} {sweep.param_name}="
-                            f"{value}: {result.error}[/]"
+                            f"[red]Error {backend} {spec} {err_label}"
+                            f": {result.error}[/]"
                         )
 
                     pbar.update(1)
+
+    if base_config_args.get("ncu_profile"):
+        return all_results
 
     # Display sweep results - create separate table for each parameter value
     console.print("\n[bold green]Model Parameter Sweep Results:[/]")
@@ -180,7 +210,10 @@ def run_model_parameter_sweep(
     )
 
     for param_value in sorted_param_values:
-        console.print(f"\n[bold cyan]{sweep.param_name} = {param_value}[/]")
+        label = (
+            f"{sweep.param_name} = {param_value}" if sweep.param_name else param_value
+        )
+        console.print(f"\n[bold cyan]{label}[/]")
         param_results = by_param_value[param_value]
 
         # Create modified results with original backend names
@@ -196,8 +229,9 @@ def run_model_parameter_sweep(
         formatter.print_table(modified_results, backends, compare_to_fastest=True)
 
     # Show optimal backend for each (param_value, batch_spec) combination
+    sweep_name = sweep.param_name or "config"
     console.print(
-        f"\n[bold cyan]Optimal backend for each ({sweep.param_name}, batch_spec):[/]"
+        f"\n[bold cyan]Optimal backend for each ({sweep_name}, batch_spec):[/]"
     )
 
     # Group by (param_value, batch_spec)
@@ -232,7 +266,10 @@ def run_model_parameter_sweep(
     for param_value, spec in sorted_keys:
         # Print header when param value changes
         if param_value != current_param_value:
-            console.print(f"\n  [bold]{sweep.param_name}={param_value}:[/]")
+            header = (
+                f"{sweep.param_name}={param_value}" if sweep.param_name else param_value
+            )
+            console.print(f"\n  [bold]{header}:[/]")
             current_param_value = param_value
 
         results = by_param_and_spec[(param_value, spec)]
@@ -317,6 +354,9 @@ def run_parameter_sweep(
                         )
 
                     pbar.update(1)
+
+    if base_config_args.get("ncu_profile"):
+        return all_results
 
     # Display sweep results
     console.print("\n[bold green]Sweep Results:[/]")
@@ -440,20 +480,41 @@ def main():
     # Backend selection
     parser.add_argument(
         "--backends",
+        "--decode-backends",
         nargs="+",
-        help="Backends to benchmark (flash, triton, flashinfer, cutlass_mla, "
+        help="Decode backends to benchmark (flash, triton, flashinfer, cutlass_mla, "
         "flashinfer_mla, flashattn_mla, flashmla)",
     )
     parser.add_argument(
         "--backend",
         help="Single backend (alternative to --backends)",
     )
+    parser.add_argument(
+        "--prefill-backends",
+        nargs="+",
+        help="Prefill backends to compare (fa2, fa3, fa4). "
+        "Uses the first decode backend for impl construction.",
+    )
+    parser.add_argument(
+        "--fp8-output-scale",
+        type=float,
+        help="Static per-tensor scale enabling the MLA prefill FP8-output "
+        "comparison on FA4 (fused write vs standalone post-quant).",
+    )
+    parser.add_argument(
+        "--fuse-quant-op",
+        nargs="+",
+        type=_str2bool,
+        help="FP8-output write path(s) to run: false = bf16 attention + "
+        "standalone static-FP8 quant, true = FA4 writes FP8 directly. "
+        "Default: both.",
+    )
 
     # Batch specifications
     parser.add_argument(
         "--batch-specs",
         nargs="+",
-        default=["q2k", "8q1s1k"],
+        default=None,
         help="Batch specifications using extended grammar",
     )
 
@@ -463,12 +524,74 @@ def main():
     parser.add_argument("--num-q-heads", type=int, default=32, help="Query heads")
     parser.add_argument("--num-kv-heads", type=int, default=8, help="KV heads")
     parser.add_argument("--block-size", type=int, default=16, help="Block size")
+    parser.add_argument(
+        "--v-head-dim",
+        type=int,
+        default=None,
+        help="Value head dimension (defaults to --head-dim if unset)",
+    )
+
+    # MLA-specific model dimensions
+    parser.add_argument(
+        "--kv-lora-rank", type=int, default=None, help="MLA KV LoRA rank"
+    )
+    parser.add_argument(
+        "--qk-nope-head-dim", type=int, default=None, help="MLA non-RoPE QK head dim"
+    )
+    parser.add_argument(
+        "--qk-rope-head-dim", type=int, default=None, help="MLA RoPE QK head dim"
+    )
 
     # Benchmark settings
     parser.add_argument("--device", default="cuda:0", help="Device")
-    parser.add_argument("--repeats", type=int, default=1, help="Repetitions")
-    parser.add_argument("--warmup-iters", type=int, default=3, help="Warmup iterations")
+    parser.add_argument(
+        "--warmup-ms",
+        type=int,
+        default=None,
+        help=(
+            "Warmup window in ms for triton's do_bench (default: triton's own). "
+            "Has no effect with CUDA graphs; pass --no-cuda-graphs to use it."
+        ),
+    )
     parser.add_argument("--profile-memory", action="store_true", help="Profile memory")
+    parser.add_argument(
+        "--kv-cache-dtype",
+        default="auto",
+        choices=["auto", "fp8"],
+        help="KV cache dtype: auto or fp8",
+    )
+    parser.add_argument(
+        "--cuda-graphs",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Use triton do_bench_cudagraph (True) or do_bench (False) "
+            "for timing. CUDA graphs eliminate CPU launch overhead "
+            "(default: True)"
+        ),
+    )
+    parser.add_argument(
+        "--num-splits",
+        type=int,
+        default=None,
+        help="FlashAttention split-K factor (0=auto heuristic, 1=disabled, >1=force N)",
+    )
+    parser.add_argument(
+        "--ncu-profile",
+        action="store_true",
+        default=False,
+        help=(
+            "Enable Nsight Compute profiling mode. Automatically wraps the "
+            "script with ncu, capturing a profile with source correlation. "
+            "Use --ncu-output to set the output file name."
+        ),
+    )
+    parser.add_argument(
+        "--ncu-output",
+        type=str,
+        default="profile",
+        help="Output file name for ncu profile (default: 'profile').",
+    )
 
     # Parameter sweep (use YAML config for advanced sweeps)
     parser.add_argument(
@@ -502,7 +625,7 @@ def main():
 
         # Override args with YAML values, but CLI args take precedence
         # Check if CLI provided backends (they would be non-None and not default)
-        cli_backends_provided = args.backends is not None or args.backend is not None
+        cli_backends_provided = args.backend is not None or args.backends is not None
 
         # Backend(s) - only use YAML if CLI didn't specify
         if not cli_backends_provided:
@@ -512,54 +635,72 @@ def main():
             elif "backends" in yaml_config:
                 args.backends = yaml_config["backends"]
                 args.backend = None
+            elif "decode_backends" in yaml_config:
+                args.backends = yaml_config["decode_backends"]
+                args.backend = None
+
+        # Prefill backends (e.g., ["fa3", "fa4"])
+        args.prefill_backends = yaml_config.get("prefill_backends", None)
+
+        # FP8 output benchmark knobs; CLI wins.
+        if args.fp8_output_scale is None:
+            args.fp8_output_scale = yaml_config.get("fp8_output_scale", None)
+        if args.fuse_quant_op is None:
+            args.fuse_quant_op = yaml_config.get("fuse_quant_op", None)
 
         # Check for special modes
-        if "mode" in yaml_config:
-            args.mode = yaml_config["mode"]
-        else:
-            args.mode = None
+        args.mode = yaml_config.get("mode", None)
 
         # Batch specs and sizes
         # Support both explicit batch_specs and generated batch_spec_ranges
-        if "batch_spec_ranges" in yaml_config:
-            # Generate batch specs from ranges
-            generated_specs = generate_batch_specs_from_ranges(
-                yaml_config["batch_spec_ranges"]
-            )
-            # Combine with any explicit batch_specs
-            if "batch_specs" in yaml_config:
-                args.batch_specs = yaml_config["batch_specs"] + generated_specs
-            else:
-                args.batch_specs = generated_specs
-            console.print(
-                f"[dim]Generated {len(generated_specs)} batch specs from ranges[/]"
-            )
-        elif "batch_specs" in yaml_config:
-            args.batch_specs = yaml_config["batch_specs"]
+        # CLI --batch-specs takes precedence over YAML when provided.
+        cli_batch_specs_provided = args.batch_specs is not None
+        if not cli_batch_specs_provided:
+            if "batch_spec_ranges" in yaml_config:
+                # Generate batch specs from ranges
+                generated_specs = generate_batch_specs_from_ranges(
+                    yaml_config["batch_spec_ranges"]
+                )
+                # Combine with any explicit batch_specs
+                if "batch_specs" in yaml_config:
+                    args.batch_specs = yaml_config["batch_specs"] + generated_specs
+                else:
+                    args.batch_specs = generated_specs
+                console.print(
+                    f"[dim]Generated {len(generated_specs)} batch specs from ranges[/]"
+                )
+            elif "batch_specs" in yaml_config:
+                args.batch_specs = yaml_config["batch_specs"]
 
-        if "batch_sizes" in yaml_config:
-            args.batch_sizes = yaml_config["batch_sizes"]
-        else:
-            args.batch_sizes = None
+        args.batch_sizes = yaml_config.get("batch_sizes", None)
 
         # Model config
         if "model" in yaml_config:
             model = yaml_config["model"]
             args.num_layers = model.get("num_layers", args.num_layers)
             args.head_dim = model.get("head_dim", args.head_dim)
+            args.v_head_dim = model.get("v_head_dim", args.v_head_dim)
             args.num_q_heads = model.get("num_q_heads", args.num_q_heads)
             args.num_kv_heads = model.get("num_kv_heads", args.num_kv_heads)
             args.block_size = model.get("block_size", args.block_size)
+            # MLA-specific dimensions
+            args.kv_lora_rank = model.get("kv_lora_rank", args.kv_lora_rank)
+            args.qk_nope_head_dim = model.get("qk_nope_head_dim", args.qk_nope_head_dim)
+            args.qk_rope_head_dim = model.get("qk_rope_head_dim", args.qk_rope_head_dim)
 
         # Benchmark settings (top-level keys)
         if "device" in yaml_config:
             args.device = yaml_config["device"]
-        if "repeats" in yaml_config:
-            args.repeats = yaml_config["repeats"]
-        if "warmup_iters" in yaml_config:
-            args.warmup_iters = yaml_config["warmup_iters"]
+        if "warmup_ms" in yaml_config:
+            args.warmup_ms = yaml_config["warmup_ms"]
         if "profile_memory" in yaml_config:
             args.profile_memory = yaml_config["profile_memory"]
+        if "kv_cache_dtype" in yaml_config:
+            args.kv_cache_dtype = yaml_config["kv_cache_dtype"]
+        if "cuda_graphs" in yaml_config:
+            args.cuda_graphs = yaml_config["cuda_graphs"]
+        if "ncu_profile" in yaml_config:
+            args.ncu_profile = yaml_config["ncu_profile"]
 
         # Parameter sweep configuration
         if "parameter_sweep" in yaml_config:
@@ -579,7 +720,7 @@ def main():
         if "model_parameter_sweep" in yaml_config:
             sweep_config = yaml_config["model_parameter_sweep"]
             args.model_parameter_sweep = ModelParameterSweep(
-                param_name=sweep_config["param_name"],
+                param_name=sweep_config.get("param_name"),
                 values=sweep_config["values"],
                 label_format=sweep_config.get(
                     "label_format", "{backend}_{param_name}_{value}"
@@ -598,6 +739,32 @@ def main():
 
         console.print()
 
+    # Re-exec under ncu if --ncu-profile and not already inside ncu. This runs
+    # after YAML processing so ncu_profile set via config file is honored.
+    if args.ncu_profile and "_NCU_INNER" not in os.environ:
+        ncu = shutil.which("ncu")
+        if ncu is None:
+            print("Error: 'ncu' not found in PATH", file=sys.stderr)
+            sys.exit(1)
+        cmd = [
+            ncu,
+            "--profile-from-start",
+            "off",
+            "--set",
+            "full",
+            "--import-source",
+            "yes",
+            "-o",
+            args.ncu_output,
+            sys.executable,
+            *sys.argv,
+        ]
+        env = os.environ.copy()
+        env["CUTE_DSL_LINEINFO"] = "1"
+        env["_NCU_INNER"] = "1"
+        print(f"Launching: {' '.join(cmd)}")
+        sys.exit(subprocess.call(cmd, env=env))
+
     # Handle CLI-based parameter sweep (if not from YAML)
     if (
         (not hasattr(args, "parameter_sweep") or args.parameter_sweep is None)
@@ -613,15 +780,96 @@ def main():
 
     # Determine backends
     backends = args.backends or ([args.backend] if args.backend else ["flash"])
+    prefill_backends = getattr(args, "prefill_backends", None)
+    if not args.batch_specs:
+        args.batch_specs = ["q2k", "8q1s1k"]
     console.print(f"Backends: {', '.join(backends)}")
+    if prefill_backends:
+        console.print(f"Prefill backends: {', '.join(prefill_backends)}")
     console.print(f"Batch specs: {', '.join(args.batch_specs)}")
+    console.print(f"KV cache dtype: {args.kv_cache_dtype}")
+    console.print(f"CUDA graphs: {args.cuda_graphs}")
+    if args.warmup_ms is not None and args.cuda_graphs:
+        console.print(
+            "[yellow]Warning: --warmup-ms is ignored with CUDA graphs "
+            "(do_bench_cudagraph warms up internally). Pass --no-cuda-graphs "
+            "to use it.[/]"
+        )
+    if args.num_splits == 0 and args.cuda_graphs:
+        console.print(
+            "[yellow]Warning: --num-splits 0 (FA3 heuristic) is not CUDA-graph "
+            "compatible and may fail or fall back. Pass --no-cuda-graphs or use "
+            "--num-splits >=1.[/]"
+        )
     console.print()
+
+    init_workspace_manager(args.device)
 
     # Run benchmarks
     all_results = []
 
+    # Under ncu profiling the kernels run only to be captured by the profiler;
+    # timings are placeholder zeros, so the result tables and saved metrics are
+    # skipped. The Nsight Compute report (--ncu-output) holds the real data.
+    if args.ncu_profile:
+        console.print(
+            "[dim]ncu profiling enabled: result tables and saved metrics are "
+            "skipped (timings are placeholder zeros).[/]"
+        )
+
+    # FA4 fused FP8 output vs standalone post-quant, on the same fa4 kernel:
+    # the delta is the post-quant kernel the fused path removes.
+    fp8_output_scale = getattr(args, "fp8_output_scale", None)
+    if fp8_output_scale is not None:
+        decode_backend = backends[0]
+        fuse_variants = args.fuse_quant_op or [False, True]
+        label_of = {False: "post_quant", True: "fused"}
+        console.print(
+            f"[yellow]FP8 output comparison @ scale={fp8_output_scale} "
+            f"(prefill=fa4, decode impl={decode_backend})[/]"
+        )
+        fp8_results = []
+        total = len(fuse_variants) * len(args.batch_specs)
+        with tqdm(total=total, desc="FP8 output benchmarking") as pbar:
+            for spec in args.batch_specs:
+                for fuse in fuse_variants:
+                    config = BenchmarkConfig(
+                        backend=decode_backend,
+                        batch_spec=spec,
+                        num_layers=args.num_layers,
+                        head_dim=args.head_dim,
+                        num_q_heads=args.num_q_heads,
+                        num_kv_heads=args.num_kv_heads,
+                        block_size=args.block_size,
+                        device=args.device,
+                        repeats=args.repeats,
+                        warmup_iters=args.warmup_iters,
+                        profile_memory=args.profile_memory,
+                        kv_cache_dtype=args.kv_cache_dtype,
+                        use_cuda_graphs=args.cuda_graphs,
+                        prefill_backend="fa4",
+                    )
+                    result = run_benchmark(
+                        config, output_scale=fp8_output_scale, fuse_quant_op=fuse
+                    )
+                    label = label_of[fuse]
+                    labeled_config = replace(result.config, backend=label)
+                    result = replace(result, config=labeled_config)
+                    fp8_results.append(result)
+
+                    if not result.success:
+                        console.print(f"[red]Error {label} {spec}: {result.error}[/]")
+
+                    pbar.update(1)
+
+        console.print("\n[bold green]FP8 Output Results:[/]")
+        formatter = ResultsFormatter(console)
+        labels = [label_of[f] for f in fuse_variants]
+        formatter.print_table(fp8_results, labels, compare_to_fastest=True)
+        all_results = fp8_results
+
     # Handle special mode: decode_vs_prefill comparison
-    if hasattr(args, "mode") and args.mode == "decode_vs_prefill":
+    elif hasattr(args, "mode") and args.mode == "decode_vs_prefill":
         console.print("[yellow]Mode: Decode vs Prefill pipeline comparison[/]")
         console.print(
             "[dim]For each query length, testing both decode and prefill pipelines[/]"
@@ -666,9 +914,11 @@ def main():
                         num_kv_heads=args.num_kv_heads,
                         block_size=args.block_size,
                         device=args.device,
-                        repeats=args.repeats,
-                        warmup_iters=args.warmup_iters,
                         profile_memory=args.profile_memory,
+                        kv_cache_dtype=args.kv_cache_dtype,
+                        use_cuda_graphs=args.cuda_graphs,
+                        ncu_profile=args.ncu_profile,
+                        warmup_ms=args.warmup_ms,
                     )
 
                     # Add decode pipeline config
@@ -705,6 +955,7 @@ def main():
                         result = BenchmarkResult(
                             config=config,
                             mean_time=timing["mean"],
+                            median_time=timing.get("median", timing["mean"]),
                             std_time=timing["std"],
                             min_time=timing["min"],
                             max_time=timing["max"],
@@ -726,6 +977,7 @@ def main():
                         result = BenchmarkResult(
                             config=config,
                             mean_time=float("inf"),
+                            median_time=float("inf"),
                             std_time=0,
                             min_time=float("inf"),
                             max_time=float("inf"),
@@ -734,6 +986,9 @@ def main():
                         all_results.append(result)
 
                 pbar.update(1)
+
+        if args.ncu_profile:
+            return
 
         # Display decode vs prefill results
         console.print("\n[bold green]Decode vs Prefill Results:[/]")
@@ -814,13 +1069,20 @@ def main():
         base_config_args = {
             "num_layers": args.num_layers,
             "head_dim": args.head_dim,
+            "v_head_dim": args.v_head_dim,
             "num_q_heads": args.num_q_heads,
             "num_kv_heads": args.num_kv_heads,
             "block_size": args.block_size,
             "device": args.device,
-            "repeats": args.repeats,
-            "warmup_iters": args.warmup_iters,
             "profile_memory": args.profile_memory,
+            "kv_cache_dtype": args.kv_cache_dtype,
+            "use_cuda_graphs": args.cuda_graphs,
+            "ncu_profile": args.ncu_profile,
+            "warmup_ms": args.warmup_ms,
+            "num_splits": args.num_splits,
+            "kv_lora_rank": args.kv_lora_rank,
+            "qk_nope_head_dim": args.qk_nope_head_dim,
+            "qk_rope_head_dim": args.qk_rope_head_dim,
         }
         all_results = run_model_parameter_sweep(
             backends,
@@ -836,13 +1098,17 @@ def main():
         base_config_args = {
             "num_layers": args.num_layers,
             "head_dim": args.head_dim,
+            "v_head_dim": args.v_head_dim,
             "num_q_heads": args.num_q_heads,
             "num_kv_heads": args.num_kv_heads,
             "block_size": args.block_size,
             "device": args.device,
-            "repeats": args.repeats,
-            "warmup_iters": args.warmup_iters,
             "profile_memory": args.profile_memory,
+            "kv_cache_dtype": args.kv_cache_dtype,
+            "use_cuda_graphs": args.cuda_graphs,
+            "ncu_profile": args.ncu_profile,
+            "warmup_ms": args.warmup_ms,
+            "num_splits": args.num_splits,
         }
         all_results = run_parameter_sweep(
             backends, args.batch_specs, base_config_args, args.parameter_sweep, console
@@ -850,40 +1116,101 @@ def main():
 
     else:
         # Normal mode: compare backends
-        total = len(backends) * len(args.batch_specs)
+        decode_results = []
+        prefill_results = []
 
-        with tqdm(total=total, desc="Benchmarking") as pbar:
-            for spec in args.batch_specs:
-                for backend in backends:
-                    config = BenchmarkConfig(
-                        backend=backend,
-                        batch_spec=spec,
-                        num_layers=args.num_layers,
-                        head_dim=args.head_dim,
-                        num_q_heads=args.num_q_heads,
-                        num_kv_heads=args.num_kv_heads,
-                        block_size=args.block_size,
-                        device=args.device,
-                        repeats=args.repeats,
-                        warmup_iters=args.warmup_iters,
-                        profile_memory=args.profile_memory,
-                    )
+        # Run decode backend comparison
+        if not prefill_backends:
+            # No prefill backends specified: compare decode backends as before
+            total = len(backends) * len(args.batch_specs)
 
-                    result = run_benchmark(config)
-                    all_results.append(result)
+            with tqdm(total=total, desc="Benchmarking") as pbar:
+                for spec in args.batch_specs:
+                    for backend in backends:
+                        config = BenchmarkConfig(
+                            backend=backend,
+                            batch_spec=spec,
+                            num_layers=args.num_layers,
+                            head_dim=args.head_dim,
+                            v_head_dim=getattr(args, "v_head_dim", None),
+                            num_q_heads=args.num_q_heads,
+                            num_kv_heads=args.num_kv_heads,
+                            block_size=args.block_size,
+                            device=args.device,
+                            profile_memory=args.profile_memory,
+                            kv_cache_dtype=args.kv_cache_dtype,
+                            use_cuda_graphs=args.cuda_graphs,
+                            ncu_profile=args.ncu_profile,
+                            warmup_ms=args.warmup_ms,
+                            num_splits=args.num_splits,
+                        )
 
-                    if not result.success:
-                        console.print(f"[red]Error {backend} {spec}: {result.error}[/]")
+                        result = run_benchmark(config)
+                        decode_results.append(result)
 
-                    pbar.update(1)
+                        if not result.success:
+                            console.print(
+                                f"[red]Error {backend} {spec}: {result.error}[/]"
+                            )
 
-        # Display results
-        console.print("\n[bold green]Results:[/]")
-        formatter = ResultsFormatter(console)
-        formatter.print_table(all_results, backends)
+                        pbar.update(1)
 
-    # Save results
-    if all_results:
+            if not args.ncu_profile:
+                console.print("\n[bold green]Results:[/]")
+                formatter = ResultsFormatter(console)
+                formatter.print_table(decode_results, backends)
+
+        # Run prefill backend comparison
+        if prefill_backends:
+            # Use first decode backend for impl construction
+            decode_backend = backends[0]
+            total = len(prefill_backends) * len(args.batch_specs)
+
+            console.print(
+                f"[yellow]Prefill comparison mode: "
+                f"using {decode_backend} for decode impl[/]"
+            )
+
+            with tqdm(total=total, desc="Prefill benchmarking") as pbar:
+                for spec in args.batch_specs:
+                    for pb in prefill_backends:
+                        config = BenchmarkConfig(
+                            backend=decode_backend,
+                            batch_spec=spec,
+                            num_layers=args.num_layers,
+                            head_dim=args.head_dim,
+                            num_q_heads=args.num_q_heads,
+                            num_kv_heads=args.num_kv_heads,
+                            block_size=args.block_size,
+                            device=args.device,
+                            profile_memory=args.profile_memory,
+                            warmup_ms=args.warmup_ms,
+                            prefill_backend=pb,
+                        )
+
+                        result = run_benchmark(config)
+
+                        # Label result with prefill backend name for display
+                        labeled_config = replace(result.config, backend=pb)
+                        result = replace(result, config=labeled_config)
+                        prefill_results.append(result)
+
+                        if not result.success:
+                            console.print(f"[red]Error {pb} {spec}: {result.error}[/]")
+
+                        pbar.update(1)
+
+            if not args.ncu_profile:
+                console.print("\n[bold green]Prefill Backend Results:[/]")
+                formatter = ResultsFormatter(console)
+                formatter.print_table(
+                    prefill_results, prefill_backends, compare_to_fastest=True
+                )
+
+        all_results = decode_results + prefill_results
+
+    # Save results (skip ncu profiling runs: timings are placeholder zeros)
+    if all_results and not args.ncu_profile:
         formatter = ResultsFormatter(console)
         if args.output_csv:
             formatter.save_csv(all_results, args.output_csv)

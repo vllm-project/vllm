@@ -3,6 +3,7 @@ depends_on:
   - image-build
 steps:
 - label: Weight Loading Multiple GPU  # 33min
+  key: weight-loading-multiple-gpu
   timeout_in_minutes: 45
   working_dir: "/vllm-workspace/tests"
   num_devices: 2
@@ -12,6 +13,13 @@ steps:
   - tests/weight_loading
   commands:
     - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models.txt
+  mirror:
+    amd:
+      device: mi300_2
+      depends_on:
+      - image-build-amd
+      commands:
+      - bash weight_loading/run_model_weight_loading_test.sh -c weight_loading/models-amd.txt
 
 # - label: Weight Loading Multiple GPU - Large Models # optional
 #   working_dir: "/vllm-workspace/tests"

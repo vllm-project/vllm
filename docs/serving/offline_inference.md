@@ -2,24 +2,78 @@
 
 Offline inference is possible in your own code using vLLM's [`LLM`][vllm.LLM] class.
 
-For example, the following code downloads the [`facebook/opt-125m`](https://huggingface.co/facebook/opt-125m) model from HuggingFace
-and runs it in vLLM using the default configuration.
+## Model Types
 
-```python
-from vllm import LLM
+vLLM models can be categorized into two types:
 
-# Initialize the vLLM engine.
-llm = LLM(model="facebook/opt-125m")
-```
+- **[Generative Models](../models/supported_models.md)** - Models that produce text completions or chat responses (e.g., LLaMA, Qwen, DeepSeek). Use `LLM.generate()` and `LLM.chat()` for these models.
 
-After initializing the `LLM` instance, use the available APIs to perform model inference.
-The available APIs depend on the model type:
+- **[Pooling Models](../models/pooling_models/README.md)** - These models do not generate content. They are primarily used for classification and retrieval tasks, such as bge-m3 and Qwen3 Reranker.
 
-- [Generative models](../models/generative_models.md) output logprobs which are sampled from to obtain the final output text.
-- [Pooling models](../models/pooling_models.md) output their hidden states directly.
+## Generative APIs
 
-!!! info
-    [API Reference](../api/README.md#offline-inference)
+For further details on generative models, please refer to [this page](../models/supported_models.md).
+
+- `LLM.generate` - Generates completions for the given input prompts.
+- `LLM.chat` - Generates responses for a chat conversation.
+
+## Asynchronous Queue APIs
+
+- `LLM.enqueue` - Enqueues prompts for generation without waiting for completion.
+- `LLM.enqueue_chat` - Enqueues chat conversations for generation without waiting.
+- `LLM.wait_for_completion` - Waits for all enqueued requests to complete and returns results.
+
+## Pooling APIs
+
+For further details on pooling models, please refer to [this page](../models/pooling_models/README.md).
+
+- `LLM.classify` - Only applicable to [classification models](../models/pooling_models/classify.md).
+- `LLM.embed` - Only applicable to [embedding models](../models/pooling_models/embed.md).
+- `LLM.score` - Applicable to [score models](../models/pooling_models/scoring.md) (cross-encoder, bi-encoder, late-interaction).
+- `LLM.encode` - Applicable to all [pooling models](../models/pooling_models/README.md).
+
+## Profiling APIs
+
+For further details on profiling, please refer to [this page](../contributing/profiling.md).
+
+- `LLM.start_profile` - Starts profiling with an optional custom trace prefix.
+- `LLM.stop_profile` - Stops the ongoing profiling session.
+
+## Sleep Mode APIs
+
+For further details on sleep mode, please refer to [this page](../features/sleep_mode.md).
+
+- `LLM.sleep` - Puts the engine into sleep mode.
+- `LLM.wake_up` - Wakes up the engine from sleep mode.
+
+## Cache Management APIs
+
+- `LLM.reset_mm_cache` - Resets the multi-modal cache.
+- `LLM.reset_prefix_cache` - Resets the prefix cache.
+
+## Metrics APIs
+
+For further details on metrics, please refer to [this page](../design/metrics.md).
+
+- `LLM.get_metrics` - Returns a snapshot of aggregated metrics from Prometheus.
+
+## Weight Transfer APIs (RL Training)
+
+For further details on Weight Transfer, please refer to [this page](../training/weight_transfer/README.md).
+
+- `LLM.init_weight_transfer_engine` - Initializes the weight transfer engine for RL training.
+- `LLM.start_weight_update` - Starts a new weight update cycle.
+- `LLM.update_weights` - Updates the model weights.
+- `LLM.finish_weight_update` - Finishes the current weight update cycle.
+
+## Additional APIs
+
+- `LLM.collective_rpc` - Executes a method or callable collectively across all workers.
+- `LLM.apply_model` - Applies a function directly to the model inside each worker.
+
+## API Reference
+
+[Offline Inference](../api/README.md#offline-inference)
 
 ## Ray Data LLM API
 

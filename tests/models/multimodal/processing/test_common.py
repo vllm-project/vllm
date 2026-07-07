@@ -6,9 +6,6 @@ from functools import partial
 
 import numpy as np
 import pytest
-from mistral_common.protocol.instruct.chunk import ImageChunk, TextChunk
-from mistral_common.protocol.instruct.messages import UserMessage
-from mistral_common.protocol.instruct.request import ChatCompletionRequest
 from PIL import Image
 
 from vllm.config import ModelConfig
@@ -18,10 +15,12 @@ from vllm.config.multimodal import (
     ImageDummyOptions,
     VideoDummyOptions,
 )
-from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalDataDict
+from vllm.inputs import MultiModalDataDict, MultiModalInput
+from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.cache import MultiModalProcessorOnlyCache
-from vllm.multimodal.inputs import MultiModalInputs, batched_tensors_equal
+from vllm.multimodal.inputs import batched_tensors_equal
 from vllm.multimodal.processing import BaseMultiModalProcessor, InputProcessingContext
+from vllm.platforms import current_platform
 from vllm.tokenizers import TokenizerLike, cached_tokenizer_from_config
 from vllm.utils.mistral import is_mistral_tokenizer
 
@@ -74,20 +73,6 @@ def glmasr_patch_mm_data(mm_data: MultiModalDataDict) -> MultiModalDataDict:
     return mm_data
 
 
-# For some multimodal models, tokenizer will always add bos_token
-# at the beginning of prompt by default, causing hf_processor outputs
-# incorrect token ids. So we need use `add_special_tokens=False` here
-# to leave bos_token to be added by the processor.
-_ADD_SPECIAL_TOKENS_OVERRIDES = {
-    "lfm2_vl": False,
-    "nemotron_parse": False,
-    "ovis": False,
-    "ovis2_5": False,
-    "paligemma": False,
-    "ultravox": False,
-    "whisper": False,
-}
-
 _IGNORE_MM_KEYS = {
     # In Ultravox, the audio_features can be different depending on padding
     # The slight difference should not be a problem though, since
@@ -97,6 +82,12 @@ _IGNORE_MM_KEYS = {
 
 MM_DATA_PATCHES = {
     "glmasr": glmasr_patch_mm_data,
+}
+
+_XPU_EXCLUDED_MODEL_IDS = {
+    "baidu/Unlimited-OCR",
+    "mistralai/Mistral-Large-3-675B-Instruct-2512-NVFP4",
+    "Qwen/Qwen2.5-Omni-7B-AWQ",
 }
 
 
@@ -113,7 +104,14 @@ def _iter_model_ids_to_test(model_arch_list: AbstractSet[str]):
 
 
 def _get_model_ids_to_test(model_arch_list: AbstractSet[str]):
-    return list(_iter_model_ids_to_test(model_arch_list))
+    model_ids = list(_iter_model_ids_to_test(model_arch_list))
+
+    if current_platform.is_xpu():
+        for excluded_model_id in _XPU_EXCLUDED_MODEL_IDS:
+            while excluded_model_id in model_ids:
+                model_ids.remove(excluded_model_id)
+
+    return model_ids
 
 
 def get_model_ids_to_test():
@@ -152,63 +150,34 @@ def get_text_token_prompts(
     parsed_data = processor.info.parse_mm_data(mm_data)
     mm_counts = {k: len(vs) for k, vs in parsed_data.items()}
 
-    text_prompt: str | None
-    token_prompt: list[int]
     if is_mistral_tokenizer(tokenizer):
-        # ChatCompletionRequest only supports ImageChunk natively;
-        # for other modalities (e.g. audio), fall back to the model's
-        # own dummy inputs builder which knows the right placeholders.
-        has_non_image = any(
-            k != "image" and count > 0 for k, count in mm_counts.items()
+        inputs = dummy_inputs.get_dummy_processor_inputs(
+            model_config.max_model_len,
+            mm_counts,
+            mm_options={},
+            # Assume all Mistral models define this extra argument
+            mm_data=mm_data,  # type: ignore[call-arg]
         )
-
-        if has_non_image:
-            inputs = dummy_inputs.get_dummy_processor_inputs(
-                model_config.max_model_len,
-                mm_counts,
-                mm_options={},
-            )
-            text_prompt = None
-            token_prompt = (
-                inputs.prompt
-                if isinstance(inputs.prompt, list)
-                else tokenizer.encode(inputs.prompt, add_special_tokens=False)
-            )
-        else:
-            images = parsed_data.get("image", [])
-            request = ChatCompletionRequest(
-                messages=[
-                    UserMessage(
-                        content=[
-                            TextChunk(text=""),
-                            *(ImageChunk(image=image) for image in images),
-                        ]
-                    ),
-                ]
-            )
-            res = tokenizer.mistral.encode_chat_completion(request)
-
-            # Mistral does not support decode_tokens with
-            # skip_special_tokens=False
-            text_prompt = None
-            token_prompt = res.tokens
     else:
         inputs = dummy_inputs.get_dummy_processor_inputs(
             model_config.max_model_len,
             mm_counts,
             mm_options={},
         )
-        # Some models (e.g., Kimi-Audio) return token IDs directly instead of str
-        if isinstance(inputs.prompt, list):
-            text_prompt = None
-            token_prompt = inputs.prompt
-        else:
-            assert isinstance(inputs.prompt, str)
-            text_prompt = inputs.prompt
-            token_prompt = tokenizer.encode(
-                text_prompt,
-                add_special_tokens=_ADD_SPECIAL_TOKENS_OVERRIDES.get(model_type, True),
-            )
+
+    text_prompt: str | None
+    token_prompt: list[int]
+    if isinstance(inputs.prompt, list):
+        text_prompt = None
+        token_prompt = inputs.prompt
+    elif isinstance(inputs.prompt, str):
+        text_prompt = inputs.prompt
+        token_prompt = tokenizer.encode(
+            text_prompt,
+            **processor.info.get_default_tok_params().get_encode_kwargs(),
+        )
+    else:
+        raise TypeError(type(inputs.prompt))
 
     return text_prompt, token_prompt
 
@@ -356,6 +325,9 @@ def _test_processing_correctness(
             baseline_processor,
             cached_processor,
             batch_idx,
+            hit_rate,
+            num_batches,
+            simplify_rate,
         )
 
 
@@ -365,6 +337,9 @@ def _test_processing_correctness_one(
     baseline_processor: BaseMultiModalProcessor,
     cached_processor: BaseMultiModalProcessor,
     batch_idx: int,
+    hit_rate: float,
+    num_batches: int,
+    simplify_rate: float,
 ):
     model_type = model_config.hf_config.model_type
 
@@ -388,7 +363,11 @@ def _test_processing_correctness_one(
         baseline_tokenized_result,
         cached_tokenized_result,
         ignore_mm_keys=ignore_mm_keys,
-        msg=f"Failed ({batch_idx=}, {token_prompt=}, {mm_data=})",
+        msg=(
+            f"Failed ({batch_idx=}, {hit_rate=}, "
+            f"{num_batches=}, {simplify_rate=}, "
+            f"{text_prompt=}, {token_prompt=}, {mm_data=})"
+        ),
     )
 
     if text_prompt is not None:
@@ -407,21 +386,33 @@ def _test_processing_correctness_one(
             baseline_text_result,
             cached_text_result,
             ignore_mm_keys=ignore_mm_keys,
-            msg=f"Failed ({batch_idx=}, {text_prompt=}, {mm_data=})",
+            msg=(
+                f"Failed ({batch_idx=}, {hit_rate=}, "
+                f"{num_batches=}, {simplify_rate=}, "
+                f"{text_prompt=}, {token_prompt=}, {mm_data=})"
+            ),
         )
 
         _assert_inputs_equal(
             baseline_text_result,
             baseline_tokenized_result,
             ignore_mm_keys=ignore_mm_keys,
-            msg=f"Failed ({batch_idx=}, {text_prompt=}, {token_prompt=}, {mm_data=})",
+            msg=(
+                f"Failed ({batch_idx=}, {hit_rate=}, "
+                f"{num_batches=}, {simplify_rate=}, "
+                f"{text_prompt=}, {token_prompt=}, {mm_data=})"
+            ),
         )
 
         _assert_inputs_equal(
             cached_text_result,
             cached_tokenized_result,
             ignore_mm_keys=ignore_mm_keys,
-            msg=f"Failed ({batch_idx=}, {text_prompt=}, {token_prompt=}, {mm_data=})",
+            msg=(
+                f"Failed ({batch_idx=}, {hit_rate=}, "
+                f"{num_batches=}, {simplify_rate=}, "
+                f"{text_prompt=}, {token_prompt=}, {mm_data=})"
+            ),
         )
 
 
@@ -439,19 +430,36 @@ def test_processing_correctness(
         pytest.skip("Fix later")
     if model_id == "OpenGVLab/InternVL2-2B":
         pytest.skip("Fix later")
+    if model_id == "openvla/openvla-7b":
+        pytest.skip(
+            "OpenVLA uses a custom vLLM processor because its HF remote "
+            "processor is incompatible with current Transformers."
+        )
     if model_id == "jinaai/jina-reranker-m0":
         pytest.skip("Fix later")
-    if model_id in {"Qwen/Qwen-VL", "Qwen/Qwen-VL-Chat"}:
-        pytest.skip(
-            "Qwen-VL tokenizer requires downloading a font file from "
-            "servers that often refuse connections in CI"
-        )
     if model_id == "mistralai/Voxtral-Mini-4B-Realtime-2602":
         pytest.skip(
-            "Voxtral Realtime doesn't make use of any place-holder"
+            "Voxtral Realtime doesn't make use of any place-holder "
             "tokens and hence cannot pass the processing "
             "correctness test as is. Let's revisit adapting this "
             "test once more realtime models exist."
+        )
+    if model_id == "CohereLabs/cohere-transcribe-03-2026":
+        pytest.skip("Fix later")
+    if model_id.startswith("OpenMOSS-Team/MOSS-Audio-"):
+        pytest.skip(
+            "MOSS-Audio uses a custom processor that dynamically expands "
+            "audio placeholders from processed audio lengths. Its vLLM "
+            "processor paths are covered by test_moss_audio.py."
+        )
+    if model_id == "lmms-lab-encoder/LLaVA-OneVision-2-8B-Instruct":
+        pytest.skip(
+            "LLaVA-OneVision-2 video processing routes frames through custom "
+            "video backends (qwen_vl_utils / codec) that require real encoded "
+            "video bytes and metadata. The synthetic numpy-array videos used by "
+            "this test yield empty video features, so the generic correctness "
+            "check cannot exercise the video path. Image processing is covered "
+            "by registration/inference tests."
         )
 
     _test_processing_correctness(
@@ -463,8 +471,8 @@ def test_processing_correctness(
 
 
 def _assert_inputs_equal(
-    a: MultiModalInputs,
-    b: MultiModalInputs,
+    a: MultiModalInput,
+    b: MultiModalInput,
     *,
     ignore_mm_keys: set[str] | None = None,
     msg: str = "",

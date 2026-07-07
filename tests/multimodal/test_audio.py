@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 # test_audio.py
+import math
 from unittest.mock import patch
 
 import numpy as np
@@ -14,7 +15,7 @@ from vllm.multimodal.audio import (
     AudioSpec,
     ChannelReduction,
     normalize_audio,
-    resample_audio_librosa,
+    resample_audio_pyav,
     resample_audio_scipy,
     split_audio,
 )
@@ -25,14 +26,14 @@ def dummy_audio():
     return np.array([0.0, 0.1, 0.2, 0.3, 0.4], dtype=float)
 
 
-def test_resample_audio_librosa(dummy_audio):
-    with patch("vllm.multimodal.audio.librosa.resample") as mock_resample:
-        mock_resample.return_value = dummy_audio * 2
-        out = resample_audio_librosa(dummy_audio, orig_sr=44100, target_sr=22050)
-        mock_resample.assert_called_once_with(
-            dummy_audio, orig_sr=44100, target_sr=22050
-        )
-        assert np.all(out == dummy_audio * 2)
+def test_resample_audio_pyav(dummy_audio):
+    out_down = resample_audio_pyav(dummy_audio, orig_sr=4, target_sr=2)
+    out_up = resample_audio_pyav(dummy_audio, orig_sr=2, target_sr=4)
+    out_same = resample_audio_pyav(dummy_audio, orig_sr=4, target_sr=4)
+
+    assert len(out_down) == 3
+    assert len(out_up) == 10
+    assert np.all(out_same == dummy_audio)
 
 
 def test_resample_audio_scipy(dummy_audio):
@@ -45,7 +46,6 @@ def test_resample_audio_scipy(dummy_audio):
     assert np.all(out_same == dummy_audio)
 
 
-@pytest.mark.xfail(reason="resample_audio_scipy is buggy for non-integer ratios")
 def test_resample_audio_scipy_non_integer_ratio(dummy_audio):
     out = resample_audio_scipy(dummy_audio, orig_sr=5, target_sr=3)
 
@@ -56,9 +56,29 @@ def test_resample_audio_scipy_non_integer_ratio(dummy_audio):
     assert np.isfinite(out).all()
 
 
-def test_audio_resampler_librosa_calls_resample(dummy_audio):
-    resampler = AudioResampler(target_sr=22050, method="librosa")
-    with patch("vllm.multimodal.audio.resample_audio_librosa") as mock_resample:
+def test_resample_audio_scipy_non_divisible_sample_rates():
+    audio = np.arange(441, dtype=float)
+    out = resample_audio_scipy(audio, orig_sr=44100, target_sr=16000)
+
+    expected_len = math.ceil(len(audio) * 16000 / 44100)
+    assert len(out) == expected_len
+
+    assert isinstance(out, np.ndarray)
+    assert np.isfinite(out).all()
+
+
+def test_resample_audio_scipy_resamples_last_axis_for_multichannel():
+    audio = np.arange(2 * 441, dtype=float).reshape(2, 441)
+    out = resample_audio_scipy(audio, orig_sr=44100, target_sr=16000)
+
+    expected_len = math.ceil(audio.shape[-1] * 16000 / 44100)
+    assert out.shape == (2, expected_len)
+    assert np.isfinite(out).all()
+
+
+def test_audio_resampler_pyav_calls_resample(dummy_audio):
+    resampler = AudioResampler(target_sr=22050, method="pyav")
+    with patch("vllm.multimodal.audio.resample_audio_pyav") as mock_resample:
         mock_resample.return_value = dummy_audio
         out = resampler.resample(dummy_audio, orig_sr=44100)
         mock_resample.assert_called_once_with(
@@ -423,13 +443,13 @@ class TestAudioPipelineE2E:
         # Verify channel averaging: mean of [0.5, -0.5] = 0.0
         np.testing.assert_array_almost_equal(audio_output, np.zeros(16000), decimal=5)
 
-    def test_librosa_mono_passthrough_e2e(self):
-        """Full pipeline: librosa mono format → preserved as mono."""
+    def test_pyav_mono_passthrough_e2e(self):
+        """Full pipeline: pyav mono format → preserved as mono."""
         from vllm.multimodal.parse import MultiModalDataParser
 
-        # Simulate librosa output: already mono (time,) format
-        mono_librosa = np.random.randn(16000).astype(np.float32)
-        assert mono_librosa.shape == (16000,)
+        # Simulate pyav output: already mono (time,) format
+        mono_pyav = np.random.randn(16000).astype(np.float32)
+        assert mono_pyav.shape == (16000,)
 
         # Create parser with mono normalization
         parser = MultiModalDataParser(
@@ -438,7 +458,7 @@ class TestAudioPipelineE2E:
         )
 
         # Process audio through the parser
-        result = parser._parse_audio_data((mono_librosa, 16000))
+        result = parser._parse_audio_data((mono_pyav, 16000))
         audio_output = result.get(0)
 
         # Verify output is still mono 1D
@@ -446,7 +466,7 @@ class TestAudioPipelineE2E:
         assert audio_output.shape == (16000,)
 
         # Verify audio content is preserved
-        np.testing.assert_array_almost_equal(audio_output, mono_librosa)
+        np.testing.assert_array_almost_equal(audio_output, mono_pyav)
 
     def test_multichannel_5_1_surround_to_mono_e2e(self):
         """Full pipeline: 5.1 surround (6 channels) → mono output."""
@@ -739,6 +759,42 @@ class TestAudioChunking:
 
         assert chunks[0][0] == audio[0]
         assert chunks[-1][-1] == audio[-1]
+
+    def test_find_split_point_nan_input(self):
+        """find_split_point must not return 0 for all-NaN input."""
+        from vllm.multimodal.audio import find_split_point
+
+        nan_audio = np.full(32000, float("nan"), dtype=np.float32)
+        start_idx = 16000
+        end_idx = 32000
+
+        split_idx = find_split_point(
+            wav=nan_audio,
+            start_idx=start_idx,
+            end_idx=end_idx,
+            min_energy_window=1600,
+        )
+
+        # Must return start_idx (the safe fallback), not 0
+        assert split_idx == start_idx
+
+    def test_split_audio_nan_input_terminates(self):
+        """split_audio must terminate on all-NaN audio (no infinite loop)."""
+        # 31 seconds of NaN at 16kHz — longer than max_clip_duration_s
+        nan_audio = np.full(16000 * 31, float("nan"), dtype=np.float32)
+
+        chunks = split_audio(
+            audio_data=nan_audio,
+            sample_rate=16000,
+            max_clip_duration_s=30.0,
+            overlap_duration_s=1.0,
+            min_energy_window_size=1600,
+        )
+
+        # Must produce at least 2 chunks and cover all samples
+        assert len(chunks) >= 2
+        total_samples = sum(c.shape[-1] for c in chunks)
+        assert total_samples == nan_audio.shape[-1]
 
     def test_split_audio_with_different_sample_rates(self):
         """Test chunking works with different sample rates."""

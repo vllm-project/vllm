@@ -8,7 +8,7 @@ import pytest
 import torch
 
 import vllm._custom_ops as ops
-from tests.kernels.utils import opcheck
+from tests.kernels.utils import fp8_ulp_distance, opcheck
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.quantization.utils.fp8_utils import (
     per_token_group_quant_fp8,
@@ -17,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.int8_utils import (
     per_token_group_quant_int8,
 )
 from vllm.platforms import current_platform
+from vllm.utils.torch_utils import set_random_seed
 
 DTYPES = [torch.bfloat16, torch.float]
 QUANT_DTYPES = [torch.int8, current_platform.fp8_dtype()]
@@ -33,7 +34,9 @@ SCALE_UBS = [True, False]
 GROUP_SIZES = [None, [1, 64], [1, 128]]
 TMA_ALIGNMENTS = [0, 4]
 SEEDS = [0]
-CUDA_DEVICES = [f"cuda:{i}" for i in range(1 if torch.cuda.device_count() == 1 else 2)]
+CUDA_DEVICES = [
+    f"cuda:{i}" for i in range(1 if torch.accelerator.device_count() == 1 else 2)
+]
 
 EPS = 1e-6
 
@@ -162,6 +165,7 @@ def ops_impl(
 )
 @pytest.mark.parametrize("seed", SEEDS)
 @pytest.mark.parametrize("device", CUDA_DEVICES)
+@pytest.mark.parametrize("strided_input", [False, True])
 @torch.inference_mode()
 def test_rms_norm(
     default_vllm_config,
@@ -175,26 +179,25 @@ def test_rms_norm(
     tma_alignment: int,
     seed: int,
     device: str,
+    strided_input: bool,
 ) -> None:
-    torch.random.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
+    set_random_seed(seed)
     torch.set_default_device(device)
-    torch.cuda.set_device(device)
+    torch.accelerator.set_device_index(device)
 
     if group_size is not None and hidden_size % group_size[1] != 0:
         # skip
-        return
+        pytest.skip("Skip non-divisible group sizes")
 
     if group_size is not None and has_scale_ub:
         # blockwise baseline doesn't support scale_ub
-        return
+        pytest.skip("scale_ub not supported for blockwise/group quantization")
 
     if (
         group_size is None or quant_dtype != current_platform.fp8_dtype()
     ) and tma_alignment != 0:
         # TMA alignment is only supported for groupwise fp8 kernels
-        return
+        pytest.skip("tma alignment not supported for per-token or int8 quantization")
 
     if (
         group_size is not None
@@ -202,21 +205,36 @@ def test_rms_norm(
         and hidden_size // group_size[1] % tma_alignment == 0
     ):
         # Skip tests where TMA alignment doesn't create extra padding to save time
-        return
+        pytest.skip("Skip TMA alignment cases where no extra padding is added")
 
     if has_scale_ub and quant_dtype != current_platform.fp8_dtype():
         # skip
-        return
+        pytest.skip("scale_ub only supported for fp8 quantization")
 
     layer = RMSNorm(hidden_size, EPS).to(dtype=dtype)
 
     # Make weights
     layer.weight.data.normal_(mean=1.0, std=0.1)
 
-    # Make inputs
+    # Make inputs: use a wider tensor and slice to create a non-contiguous
+    # (strided) input when strided_input=True. The last dimension stride
+    # remains 1, which the kernel requires.
     scale = 1 / (hidden_size)
-    x = torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
-    residual = torch.randn_like(x) * scale if add_residual else None
+    last_dim = 2 * hidden_size if strided_input else hidden_size
+    x = torch.randn(num_tokens, last_dim, dtype=dtype) * scale
+    x = x[:, :hidden_size]
+
+    # dim 1 gets special-cased
+    x_is_strided = strided_input and num_tokens != 1
+    # check that the input is strided iff we expect it to be
+    assert x.is_contiguous() != x_is_strided
+
+    # Residual must still be contiguous
+    residual = (
+        torch.randn(num_tokens, hidden_size, dtype=dtype) * scale
+        if add_residual
+        else None
+    )
     if has_scale_ub:
         rms_x, _ = ref_rms_norm(layer, x, residual)
         scale_ub = torch.mean(rms_x).to(dtype=torch.float32, device="cuda")
@@ -232,40 +250,86 @@ def test_rms_norm(
 
     assert ref_out.dtype == quant_dtype
     assert ops_out.dtype == quant_dtype
+
+    # Per-block bf16 scales: allow a small relative tolerance for a few groups
+    # whose abs-max flips by one ULP between the fused and reference paths. The
+    # per-token and fp32 paths stay strict.
+    relax_block_rocm = (
+        group_size is not None
+        and dtype == torch.bfloat16
+        and current_platform.is_rocm()
+    )
+
+    def scales_close(rtol: float, atol: float) -> bool:
+        if torch.allclose(ref_scales, ops_scales, rtol=rtol, atol=atol):
+            return True
+        return relax_block_rocm and torch.allclose(
+            ref_scales, ops_scales, rtol=1e-2, atol=atol
+        )
+
     if quant_dtype == torch.int8:
-        assert torch.allclose(ref_scales, ops_scales, atol=1e-6)
+        assert scales_close(rtol=1e-5, atol=1e-6)
         # big atol to account for round-off errors.
         assert torch.allclose(ref_out, ops_out, atol=1)
     else:
-        assert torch.allclose(ref_scales, ops_scales)
+        assert scales_close(rtol=1e-5, atol=1e-8)
         a = ref_out.to(dtype=torch.float32)
         b = ops_out.to(dtype=torch.float32)
         ok = torch.allclose(a, b, atol=1e-6)
         if not ok:
-            # fallback: compare dequantized values with relaxed tolerance
-            if group_size is None:
-                a_deq = a * ref_scales.view(-1, 1)
-                b_deq = b * ops_scales.view(-1, 1)
+            if relax_block_rocm:
+                # ULP-flipped group scale can cross an E4M3 tie; tolerate a
+                # bounded count of isolated fp8 outliers.
+                ulp = fp8_ulp_distance(ref_out, ops_out)
+                max_outliers = ulp.numel() // 100_000 + 8
+                ok = int((ulp > 0).sum().item()) <= max_outliers
             else:
-                a_deq = a * ref_scales.repeat_interleave(group_size[1], dim=1)
-                b_deq = b * ops_scales.repeat_interleave(group_size[1], dim=1)
-            # NOTE: It is possible that some future test cases trigger this
-            # max diff due to precision issues. If such an error is
-            # encountered, it's recommended to inspect the differences between
-            # all corresponding elements from each tensor (e.g. by looping over
-            # them) and checking how many the max diff error shows up on (just
-            # a few bad elements should still be considered acceptable).
-            ok = torch.allclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
+                # CUDA (& non-bf16): compare dequantized values with relaxed tolerance.
+                if group_size is None:
+                    a_deq = a * ref_scales.view(-1, 1)
+                    b_deq = b * ops_scales.view(-1, 1)
+                else:
+                    a_deq = a * ref_scales.repeat_interleave(group_size[1], dim=1)
+                    b_deq = b * ops_scales.repeat_interleave(group_size[1], dim=1)
+                # NOTE: It is possible that some future test cases trigger this
+                # max diff due to precision issues. If such an error is
+                # encountered, it's recommended to inspect the differences between
+                # all corresponding elements from each tensor (e.g. by looping over
+                # them) and checking how many the max diff error shows up on (just
+                # a few bad elements should still be considered acceptable).
+                ok = torch.allclose(a_deq, b_deq, rtol=5e-2, atol=5e-2)
         assert ok
     if add_residual:
         assert torch.allclose(ref_residual, ops_residual)
 
-    output = torch.empty_like(x, dtype=quant_dtype)
-    scales = torch.empty(
-        (x.numel() // x.shape[-1], 1), device=x.device, dtype=torch.float32
-    )
-
-    opcheck(
-        torch.ops._C.rms_norm_dynamic_per_token_quant,
-        (output, x, layer.weight, scales, 1e-5, scale_ub, residual),
-    )
+    output = torch.empty(x.shape, dtype=quant_dtype, device=x.device)
+    if group_size is None:
+        scales = torch.empty(
+            (x.numel() // x.shape[-1], 1), device=x.device, dtype=torch.float32
+        )
+        opcheck(
+            torch.ops._C.rms_norm_dynamic_per_token_quant,
+            (output, x, layer.weight, scales, 1e-5, scale_ub, residual),
+        )
+    else:
+        assert hidden_size % group_size[1] == 0
+        num_groups = hidden_size // group_size[1]
+        scales = torch.empty(
+            (num_groups, num_tokens),
+            device=x.device,
+            dtype=torch.float32,
+        ).transpose(0, 1)
+        opcheck(
+            torch.ops._C.rms_norm_per_block_quant,
+            (
+                output,
+                x,
+                layer.weight,
+                scales,
+                1e-5,
+                scale_ub,
+                residual,
+                group_size[1],
+                True,  # is_scale_transposed
+            ),
+        )

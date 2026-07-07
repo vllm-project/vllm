@@ -13,7 +13,7 @@ import textwrap
 from collections.abc import Callable, Mapping, Sequence, Set
 from dataclasses import MISSING, field, fields, is_dataclass
 from itertools import pairwise
-from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast
+from typing import TYPE_CHECKING, Any, Protocol, TypeVar, cast, overload
 
 import torch
 from pydantic import ConfigDict
@@ -34,6 +34,18 @@ else:
 
 ConfigType = type[DataclassInstance]
 ConfigT = TypeVar("ConfigT", bound=DataclassInstance)
+
+
+@overload
+@dataclass_transform(field_specifiers=(PydanticField,))
+def config(cls: type[ConfigT]) -> type[ConfigT]: ...
+
+
+@overload
+@dataclass_transform(field_specifiers=(PydanticField,))
+def config(
+    *, config: ConfigDict | None = None, **kwargs: Any
+) -> Callable[[type[ConfigT]], type[ConfigT]]: ...
 
 
 @dataclass_transform(field_specifiers=(PydanticField,))
@@ -58,8 +70,8 @@ def config(
     if config is not None:
         merged_config.update(config)
 
-    def decorator(cls):
-        return dataclass(cls, config=merged_config, **kwargs)
+    def decorator(cls: type[ConfigT]) -> type[ConfigT]:
+        return dataclass(cls, config=merged_config, **kwargs)  # type: ignore[return-value]
 
     # Called with arguments: @config(config=...)
     if cls is None:
@@ -191,6 +203,26 @@ class SupportsHash(Protocol):
     def compute_hash(self) -> str: ...
 
 
+_config_hash_cache: dict[int, str] = {}
+
+
+def compute_hash_cached(config: SupportsHash) -> str:
+    """Cache config.compute_hash() by object identity.
+
+    Config objects (ModelConfig, etc.) are long-lived singletons that never
+    mutate after construction, but compute_hash() is expensive (JSON
+    serialization + SHA-256).  This utility avoids recomputing the hash on
+    every forward pass while keeping a single consistent key type for all
+    lookup paths.
+    """
+    key = id(config)
+    result = _config_hash_cache.get(key)
+    if result is None:
+        result = config.compute_hash()
+        _config_hash_cache[key] = result
+    return result
+
+
 class SupportsMetricsInfo(Protocol):
     def metrics_info(self) -> dict[str, str]: ...
 
@@ -267,6 +299,18 @@ def normalize_value(x):
         except Exception:
             return str(x)
 
+    # PretrainedConfig (must be before dataclass branch as these are now dataclasses)
+    if hasattr(x, "to_json_string") and callable(x.to_json_string):
+        try:
+            return x.to_json_string()
+        except (TypeError, ValueError):
+            # to_json_string() may fail for trust-remote-code configs
+            # with non-JSON-serializable nested objects. Fall back to
+            # normalizing the dict representation recursively.
+            if hasattr(x, "to_dict") and callable(x.to_dict):
+                return normalize_value(x.to_dict())
+            raise
+
     # Dataclasses: represent as (FQN, sorted(field,value) tuple) for stability.
     if is_dataclass(x):
         type_fqn = f"{x.__class__.__module__}.{x.__class__.__qualname__}"
@@ -283,10 +327,6 @@ def normalize_value(x):
         return tuple(sorted(repr(normalize_value(v)) for v in x))
     if isinstance(x, Sequence) and not isinstance(x, (str, bytes, bytearray)):
         return tuple(normalize_value(v) for v in x)
-
-    # PretrainedConfig
-    if hasattr(x, "to_json_string") and callable(x.to_json_string):
-        return x.to_json_string()
 
     # Unsupported type: e.g., modules, generators, open files, or objects
     # without a stable JSON/UUID representation. Hard-error to avoid

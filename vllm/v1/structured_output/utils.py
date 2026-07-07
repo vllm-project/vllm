@@ -6,17 +6,18 @@ import hashlib
 import importlib.metadata
 import os
 import tempfile
-from typing import TYPE_CHECKING
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
+from typing import TYPE_CHECKING, TypeVar
 
-import numpy as np
 import regex as re
 import torch
 from cachetools import LRUCache
-from diskcache import Cache
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.utils.import_utils import LazyLoader
+from vllm.utils.torch_utils import PIN_MEMORY, async_tensor_h2d
 from vllm.v1.core.sched.output import GrammarOutput, SchedulerOutput
 
 if TYPE_CHECKING:
@@ -38,7 +39,47 @@ else:
 
 logger = init_logger(__name__)
 
+_T = TypeVar("_T")
+
 CACHE = None
+
+
+def compile_regex_with_timeout(fn: Callable[[str], _T], pattern: str) -> _T:
+    """Run a regex compilation callable with a timeout.
+
+    Prevents ReDoS attacks where adversarial regex patterns (e.g. nested
+    quantifiers like ``(a+)+b``) cause exponential DFA state-space explosion,
+    hanging the inference worker indefinitely.
+
+    Args:
+        fn: Single-argument callable that takes the pattern and performs
+            the regex compilation.
+        pattern: The regex pattern string, passed to *fn* and included in
+            timeout error messages.
+
+    Raises:
+        ValueError: If compilation exceeds the configured timeout.
+    """
+    timeout = envs.VLLM_REGEX_COMPILATION_TIMEOUT_S
+    if timeout <= 0:
+        return fn(pattern)
+
+    executor = ThreadPoolExecutor(max_workers=1)
+    future = executor.submit(fn, pattern)
+    try:
+        result = future.result(timeout=timeout)
+    except TimeoutError:
+        future.cancel()
+        executor.shutdown(wait=False, cancel_futures=True)
+        raise ValueError(
+            f"Regex compilation timed out after {timeout}s. "
+            "The pattern may be too complex or contain constructs that "
+            "cause exponential state-space explosion (e.g. nested "
+            f"quantifiers). Pattern: {pattern[:200]}"
+        ) from None
+    else:
+        executor.shutdown(wait=False)
+        return result
 
 
 def apply_grammar_bitmask(
@@ -81,11 +122,13 @@ def apply_grammar_bitmask(
     out_indices = []
 
     # Reorder the bitmask to match the order of the requests in the batch.
-    sorted_bitmask = np.full(
-        shape=(logits.shape[0], grammar_bitmask.shape[1]),
-        fill_value=-1,
-        dtype=grammar_bitmask.dtype,
+    sorted_bitmask_tensor = torch.full(
+        (logits.shape[0], grammar_bitmask.shape[1]),
+        -1,
+        dtype=torch.from_numpy(grammar_bitmask[:0]).dtype,
+        pin_memory=PIN_MEMORY,
     )
+    sorted_bitmask = sorted_bitmask_tensor.numpy()
     cumulative_index = 0
     for req_id in grammar_output.structured_output_request_ids:
         num_spec_tokens = len(spec_tokens.get(req_id, ()))
@@ -96,27 +139,39 @@ def apply_grammar_bitmask(
                 out_indices.append(bitmask_index)
         cumulative_index += 1 + num_spec_tokens
 
-    # Copy async to device as tensor.
-    grammar_bitmask = torch.from_numpy(sorted_bitmask).to(
-        logits.device, non_blocking=True
-    )
+    # Copy async to device.
+    grammar_bitmask = sorted_bitmask_tensor.to(logits.device, non_blocking=True)
 
     # If the length of out indices and the logits have the same shape
     # we don't need to pass indices to the kernel,
     # since the bitmask is already aligned with the logits.
     skip_out_indices = len(out_indices) == logits.shape[0]
 
-    index_tensor = None
-    if not skip_out_indices:
-        # xgrammar expects a python list of indices but it will actually work with
-        # a tensor. If we copy the tensor ourselves here we can do it in a non_blocking
-        # manner and there should be no cpu sync within xgrammar.
-        index_tensor = torch.tensor(
-            out_indices, dtype=torch.int32, device="cpu", pin_memory=True
-        )
-        index_tensor = index_tensor.to(logits.device, non_blocking=True)
+    if not logits.is_cpu:
+        index_tensor = None
+        if not skip_out_indices:
+            # xgrammar expects a python list of indices but it will actually work with
+            # a tensor. If we copy the tensor ourselves here we can do it in a
+            # non_blocking manner and there should be no cpu sync within xgrammar.
+            index_tensor = async_tensor_h2d(
+                out_indices, dtype=torch.int32, device=logits.device
+            )
 
-    xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
+        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=index_tensor)
+        return
+
+    # CPU case, use list for indices.
+    indices = None if skip_out_indices else out_indices
+    # Handle dtype conversion for CPU (older xgrammar CPU kernels require float32)
+    # See: https://github.com/vllm-project/vllm/issues/31901
+    if logits.dtype != torch.float32:
+        # Convert to float32, apply bitmask, then convert back
+        logits_fp32 = logits.to(torch.float32)
+        xgr.apply_token_bitmask_inplace(logits_fp32, grammar_bitmask, indices=indices)
+        # Copy the modified values back to the original tensor
+        logits.copy_(logits_fp32.to(logits.dtype))
+    else:
+        xgr.apply_token_bitmask_inplace(logits, grammar_bitmask, indices=indices)
 
 
 class OutlinesVocabulary:
@@ -164,6 +219,8 @@ def get_outlines_cache():
 
     cache_dir = get_outlines_cache_path()
     if envs.VLLM_V1_USE_OUTLINES_CACHE:
+        from diskcache import Cache
+
         logger.warning(
             "Enabling outlines cache. This is an unbounded on-disk "
             "cache. It may consume a lot of disk space and should "

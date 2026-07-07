@@ -5,7 +5,7 @@
 import time
 from typing import Any, Literal
 
-from pydantic import BaseModel, field_validator, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 
 class AnthropicError(BaseModel):
@@ -34,7 +34,15 @@ class AnthropicUsage(BaseModel):
 class AnthropicContentBlock(BaseModel):
     """Content block in message"""
 
-    type: Literal["text", "image", "tool_use", "tool_result", "thinking"]
+    type: Literal[
+        "text",
+        "image",
+        "tool_use",
+        "tool_result",
+        "tool_reference",
+        "thinking",
+        "redacted_thinking",
+    ]
     text: str | None = None
     # For image content
     source: dict[str, Any] | None = None
@@ -45,15 +53,19 @@ class AnthropicContentBlock(BaseModel):
     input: dict[str, Any] | None = None
     content: str | list[dict[str, Any]] | None = None
     is_error: bool | None = None
+    # For tool_reference content
+    tool_name: str | None = None
     # For thinking content
     thinking: str | None = None
     signature: str | None = None
+    # For redacted thinking content (safety-filtered by the API)
+    data: str | None = None
 
 
 class AnthropicMessage(BaseModel):
     """Message structure"""
 
-    role: Literal["user", "assistant"]
+    role: Literal["user", "assistant", "system"]
     content: str | list[AnthropicContentBlock]
 
 
@@ -63,6 +75,8 @@ class AnthropicTool(BaseModel):
     name: str
     description: str | None = None
     input_schema: dict[str, Any]
+    strict: bool | None = None
+    defer_loading: bool | None = None
 
     @field_validator("input_schema")
     @classmethod
@@ -87,6 +101,20 @@ class AnthropicToolChoice(BaseModel):
         return self
 
 
+class AnthropicJsonOutputFormat(BaseModel):
+    """JSON output format configuration"""
+
+    json_schema: dict[str, Any] | None = Field(default=None, alias="schema")
+    type: Literal["json_schema"] = "json_schema"
+
+
+class AnthropicOutputConfig(BaseModel):
+    """Configuration options for the model's output, such as the output format."""
+
+    effort: Literal["low", "medium", "high", "xhigh", "max"] | None = None
+    format: AnthropicJsonOutputFormat | None = None
+
+
 class AnthropicMessagesRequest(BaseModel):
     """Anthropic Messages API request"""
 
@@ -94,6 +122,7 @@ class AnthropicMessagesRequest(BaseModel):
     messages: list[AnthropicMessage]
     max_tokens: int
     metadata: dict[str, Any] | None = None
+    output_config: AnthropicOutputConfig | None = None
     stop_sequences: list[str] | None = None
     stream: bool | None = False
     system: str | list[AnthropicContentBlock] | None = None
@@ -102,6 +131,19 @@ class AnthropicMessagesRequest(BaseModel):
     tools: list[AnthropicTool] | None = None
     top_k: int | None = None
     top_p: float | None = None
+
+    # vLLM-specific fields that are not in Anthropic spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None,
+        description="KVTransfer parameters used for disaggregated serving.",
+    )
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the chat template renderer. "
+            "Will be accessible by the template."
+        ),
+    )
 
     @field_validator("model")
     @classmethod
@@ -172,6 +214,11 @@ class AnthropicMessagesResponse(BaseModel):
     stop_sequence: str | None = None
     usage: AnthropicUsage | None = None
 
+    # vLLM-specific fields that are not in Anthropic spec
+    kv_transfer_params: dict[str, Any] | None = Field(
+        default=None, description="KVTransfer parameters."
+    )
+
     def model_post_init(self, __context):
         if not self.id:
             self.id = f"msg_{int(time.time() * 1000)}"
@@ -191,6 +238,15 @@ class AnthropicCountTokensRequest(BaseModel):
     system: str | list[AnthropicContentBlock] | None = None
     tool_choice: AnthropicToolChoice | None = None
     tools: list[AnthropicTool] | None = None
+
+    # vLLM-specific fields that are not in Anthropic spec
+    chat_template_kwargs: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Additional keyword args to pass to the chat template renderer. "
+            "Will be accessible by the template."
+        ),
+    )
 
     @field_validator("model")
     @classmethod

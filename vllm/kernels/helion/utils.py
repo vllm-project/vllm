@@ -2,11 +2,13 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Utility functions for Helion kernel management."""
 
-import logging
+import regex as re
+import torch
 
+from vllm.logger import init_logger
 from vllm.platforms import current_platform
 
-logger = logging.getLogger(__name__)
+logger = init_logger(__name__)
 
 # Maps known variant GPU names (after lowercase/underscore normalization)
 # to their canonical form.
@@ -49,7 +51,7 @@ _GPU_NAME_ALIASES: dict[str, str] = {
 
 def get_gpu_name(device_id: int | None = None) -> str:
     if device_id is None:
-        logger.warning(
+        logger.warning_once(
             "get_gpu_name() called without device_id, defaulting to 0. "
             "This may return the wrong device name in multi-node setups."
         )
@@ -61,7 +63,7 @@ def canonicalize_gpu_name(name: str) -> str:
     """
     Canonicalize GPU name for use as a platform identifier.
 
-    Converts to lowercase, replaces spaces and hyphens with underscores,
+    Converts to lowercase, replaces separators with underscores,
     and maps known variant names to their canonical form via _GPU_NAME_ALIASES.
     e.g., "NVIDIA H100 80GB HBM3" -> "nvidia_h100"
           "NVIDIA A100-SXM4-80GB" -> "nvidia_a100"
@@ -69,9 +71,7 @@ def canonicalize_gpu_name(name: str) -> str:
     """
     if not name or not name.strip():
         raise ValueError("GPU name cannot be empty")
-    name = name.lower()
-    name = name.replace(" ", "_")
-    name = name.replace("-", "_")
+    name = re.sub(r"[\s/-]+", "_", name.lower())
     if name in _GPU_NAME_ALIASES:
         return _GPU_NAME_ALIASES[name]
     return name
@@ -79,3 +79,16 @@ def canonicalize_gpu_name(name: str) -> str:
 
 def get_canonical_gpu_name(device_id: int | None = None) -> str:
     return canonicalize_gpu_name(get_gpu_name(device_id))
+
+
+def get_fp8_dtype() -> torch.dtype:
+    return current_platform.fp8_dtype()
+
+
+def get_int8_min_max() -> tuple[int, int]:
+    qtype_traits = torch.iinfo(torch.int8)
+    return qtype_traits.min, qtype_traits.max
+
+
+def get_int8_min_scaling_factor() -> float:
+    return torch.finfo(torch.float32).eps

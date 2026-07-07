@@ -4,25 +4,31 @@
 
 import gc
 import os
+import time
 from collections.abc import Callable
-from contextlib import AbstractContextManager, nullcontext
+from contextlib import AbstractContextManager, contextmanager, nullcontext
 from datetime import timedelta
 from types import NoneType
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
+import regex as re
 import torch
 import torch.nn as nn
 
 import vllm.envs as envs
 from vllm.config import CUDAGraphMode, VllmConfig, set_current_vllm_config
 from vllm.config.compilation import CompilationMode
+from vllm.device_allocator import get_mem_allocator_instance
 from vllm.distributed import (
     ensure_model_parallel_initialized,
     init_distributed_environment,
     set_custom_all_reduce,
 )
-from vllm.distributed.ec_transfer import ensure_ec_transfer_initialized
+from vllm.distributed.ec_transfer import (
+    ensure_ec_transfer_initialized,
+    ensure_ec_transfer_shutdown,
+)
 from vllm.distributed.eplb.eplb_utils import override_envs_for_eplb
 from vllm.distributed.kv_transfer import (
     ensure_kv_transfer_initialized,
@@ -30,20 +36,34 @@ from vllm.distributed.kv_transfer import (
     get_kv_transfer_group,
     has_kv_transfer_group,
 )
+from vllm.distributed.kv_transfer.kv_connector.v1.base import (
+    KVConnectorHandshakeMetadata,
+)
 from vllm.distributed.parallel_state import (
     Handle,
     get_pp_group,
     get_tp_group,
 )
-from vllm.distributed.weight_transfer import WeightTransferEngineFactory
+from vllm.distributed.weight_transfer import (
+    WeightTransferEngine,
+    WeightTransferEngineFactory,
+)
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.warmup.kernel_warmup import kernel_warmup
+from vllm.multimodal.video import (
+    PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES,
+    PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES,
+    PYNVVIDEOCODEC_MAX_RETAINED_DECODERS,
+    VIDEO_LOADER_REGISTRY,
+)
 from vllm.platforms import current_platform
 from vllm.profiler.wrapper import CudaProfilerWrapper, TorchProfilerWrapper
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
+from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
+from vllm.utils.gpu_sync_debug import enable_gpu_sync_check, with_gpu_sync_check
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
@@ -56,7 +76,7 @@ from vllm.v1.outputs import (
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
-from vllm.v1.worker.worker_base import WorkerBase
+from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
 
 from ...model_executor.model_loader import TensorizerLoader
@@ -66,6 +86,7 @@ from .utils import request_memory
 logger = init_logger(__name__)
 
 if TYPE_CHECKING:
+    from vllm.device_allocator.sleep_mode_backend import SleepModeBackend
     from vllm.model_executor.model_loader.tensorizer import TensorizerConfig
     from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 
@@ -130,15 +151,10 @@ class Worker(WorkerBase):
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
 
-        # Weight transfer engine (initialized on-demand)
-        self.weight_transfer_engine = (
-            WeightTransferEngineFactory.create_engine(
-                self.vllm_config.weight_transfer_config,
-                self.vllm_config.parallel_config,
-            )
-            if self.vllm_config.weight_transfer_config is not None
-            else None
-        )
+        # Weight transfer engine is created in `load_model` once the model
+        # is available, since the engine needs a reference to the model.
+        self.weight_transfer_engine: WeightTransferEngine | None = None
+        self._weight_update_active = False
 
         # Torch/CUDA profiler. Enabled and configured through profiler_config.
         # Profiler wrapper is created lazily in profile() when start is called,
@@ -150,14 +166,27 @@ class Worker(WorkerBase):
         if self.profiler_config.profiler not in ("torch", "cuda", None):
             raise ValueError(f"Unknown profiler type: {self.profiler_config.profiler}")
 
-        self.use_v2_model_runner = envs.VLLM_USE_V2_MODEL_RUNNER
+        self.use_v2_model_runner = vllm_config.use_v2_model_runner
         # pending non-blocking PP send work from the previous iteration
         self._pp_send_work: list[Handle] = []
 
-    def sleep(self, level: int = 1) -> None:
-        from vllm.device_allocator.cumem import CuMemAllocator
+        # Resolved lazily on first sleep/wake; persists worker-process state.
+        self._sleep_mode_backend: SleepModeBackend | None = None
 
-        free_bytes_before_sleep = torch.cuda.mem_get_info()[0]
+    def _get_sleep_mode_backend(self) -> "SleepModeBackend":
+        if self._sleep_mode_backend is None:
+            from vllm.device_allocator.sleep_mode_backend import (
+                SleepModeBackendFactory,
+            )
+
+            self._sleep_mode_backend = SleepModeBackendFactory.create_backend(
+                self.vllm_config.model_config
+            )
+        return self._sleep_mode_backend
+
+    def sleep(self, level: int = 1) -> None:
+        torch.accelerator.synchronize()
+        free_bytes_before_sleep = torch.accelerator.get_memory_info()[0]
 
         # Save the buffers before level 2 sleep
         if level == 2:
@@ -166,10 +195,17 @@ class Worker(WorkerBase):
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
 
-        allocator = CuMemAllocator.get_instance()
-        allocator.sleep(offload_tags=("weights",) if level == 1 else tuple())
-        free_bytes_after_sleep, total = torch.cuda.mem_get_info()
-        freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+        self._get_sleep_mode_backend().suspend(level)
+
+        torch.accelerator.synchronize()
+        deadline = time.monotonic() + (5.0 if current_platform.is_rocm() else 0)
+        while True:
+            free_bytes_after_sleep, total = torch.accelerator.get_memory_info()
+            freed_bytes = free_bytes_after_sleep - free_bytes_before_sleep
+            if freed_bytes >= 0 or time.monotonic() >= deadline:
+                break
+            time.sleep(0.1)
+
         used_bytes = total - free_bytes_after_sleep
         assert freed_bytes >= 0, "Memory usage increased after sleeping."
         logger.info(
@@ -179,10 +215,7 @@ class Worker(WorkerBase):
         )
 
     def wake_up(self, tags: list[str] | None = None) -> None:
-        from vllm.device_allocator.cumem import CuMemAllocator
-
-        allocator = CuMemAllocator.get_instance()
-        allocator.wake_up(tags)
+        self._get_sleep_mode_backend().resume(tags)
 
         # Restore the buffers after level 2 sleep
         if len(self._sleep_saved_buffers):
@@ -192,28 +225,55 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        # If the KV cache has just been woken up,
-        # the internal state of cache_engine must be reset,
-        # especially the FP8 scaling factor.
-        if (
-            (tags is None or "kv_cache" in tags)
-            and self.cache_config.cache_dtype.startswith("fp8")
-            and hasattr(self.model_runner, "init_fp8_kv_scales")
-        ):
-            self.model_runner.init_fp8_kv_scales()
+        if tags is None or "kv_cache" in tags:
+            self.model_runner.post_kv_cache_wake_up()
 
     def _maybe_get_memory_pool_context(self, tag: str) -> AbstractContextManager:
-        if not self.vllm_config.model_config.enable_sleep_mode:
+        if (
+            current_platform.is_cuda_alike()
+            and not self.vllm_config.model_config.enable_cumem_allocator
+        ):
             return nullcontext()
 
-        from vllm.device_allocator.cumem import CuMemAllocator
+        if (
+            current_platform.is_xpu()
+            and not self.vllm_config.model_config.enable_sleep_mode
+        ):
+            return nullcontext()
 
-        allocator = CuMemAllocator.get_instance()
+        if current_platform.is_cpu():
+            return nullcontext()
+
+        allocator = get_mem_allocator_instance()
         if tag == "weights":
             assert allocator.get_current_usage() == 0, (
-                "Sleep mode can only be used for one instance per process."
+                "CuMem allocator can only be used for one instance per process."
             )
         return allocator.use_memory_pool(tag=tag)
+
+    @contextmanager
+    def _scoped_allocator_max_split(self, max_split_size_mb: int):
+        """Temporarily set max_split_size_mb to reduce allocator fragmentation at the
+        cost of more cudaMalloc calls (negligible in practice). Restores the original
+        value on exit."""
+        if not current_platform.is_cuda():
+            yield
+            return
+
+        conf = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "")
+        match = re.search(r"max_split_size_mb:(\d+)", conf)
+        original_value = match.group(1) if match else None
+
+        torch._C._accelerator_setAllocatorSettings(
+            f"max_split_size_mb:{max_split_size_mb}"
+        )
+        try:
+            yield
+        finally:
+            # PyTorch defaults to SIZE_MAX (no limit).
+            _SIZE_MAX_MB = (2**64 - 1) // (1024 * 1024)
+            restore = original_value if original_value else str(_SIZE_MAX_MB)
+            torch._C._accelerator_setAllocatorSettings(f"max_split_size_mb:{restore}")
 
     @instrument(span_name="Init device")
     def init_device(self):
@@ -239,20 +299,48 @@ class Worker(WorkerBase):
 
                 # DP_LOCAL_RANK * TP_PP_WORLD_SIZE + TP_LOCAL_RANK
                 self.local_rank += dp_local_rank * tp_pp_world_size
-                assert self.local_rank < torch.cuda.device_count(), (
-                    f"DP adjusted local rank {self.local_rank} is out of bounds. "
+
+            # Publish the logical-to-physical mapping for topology queries
+            # such as NIC affinity and P2P checks.
+            assigned_physical_gpu_ids = parallel_config.assigned_physical_gpu_ids
+            if assigned_physical_gpu_ids is not None:
+                from vllm.platforms.interface import set_assigned_physical_gpu_ids
+
+                set_assigned_physical_gpu_ids(assigned_physical_gpu_ids)
+                assert self.local_rank < len(assigned_physical_gpu_ids), (
+                    f"local_rank {self.local_rank} is out of bounds for "
+                    f"assigned_physical_gpu_ids {assigned_physical_gpu_ids}"
                 )
-                visible_device_count = (
-                    torch.cuda.device_count() if torch.cuda.is_available() else 0
-                )
-                assert self.parallel_config.local_world_size <= visible_device_count, (
-                    f"local_world_size ({self.parallel_config.local_world_size}) must "
-                    f"be less than or equal to the number of visible devices "
-                    f"({visible_device_count})."
+                # NOTE(patch pr45026): local_world_size is derived from
+                # parallel_config.nnodes, which is only set for the "mp"
+                # multi-node backend. With the "ray"/"external_launcher"
+                # backends nnodes stays 1, so local_world_size collapses to
+                # the full world_size and this check wrongly fires on
+                # cross-node deployments. assigned_physical_gpu_ids is already
+                # per-node and the local_rank bound above fully validates the
+                # mapping for these backends, so skip the check for them.
+                if parallel_config.distributed_executor_backend not in (
+                    "ray",
+                    "external_launcher",
+                ):
+                    assert self.parallel_config.local_world_size <= len(
+                        assigned_physical_gpu_ids
+                    ), (
+                        f"local_world_size ({self.parallel_config.local_world_size})"
+                        " exceeds assigned_physical_gpu_ids count "
+                        f"({len(assigned_physical_gpu_ids)})"
+                    )
+            else:
+                assert self.local_rank < torch.accelerator.device_count(), (
+                    f"DP adjusted local rank {self.local_rank} is out of "
+                    f"bounds for {torch.accelerator.device_count()} devices."
                 )
 
-            self.device = torch.device(f"cuda:{self.local_rank}")
-            current_platform.set_device(self.device)
+            visible_device_index = (
+                current_platform.logical_device_id_to_visible_device_id(self.local_rank)
+            )
+            self.device = torch.device(f"cuda:{visible_device_index}")
+            torch.accelerator.set_device_index(self.device)
 
             current_platform.check_if_supports_dtype(self.model_config.dtype)
 
@@ -269,7 +357,7 @@ class Worker(WorkerBase):
             )
 
             if self.use_v2_model_runner:
-                logger.info_once("Using V2 Model Runner", scope="local")
+                logger.info_once("Using V2 Model Runner")
 
             # Set random seed.
             set_random_seed(self.model_config.seed)
@@ -315,30 +403,22 @@ class Worker(WorkerBase):
 
     # FIXME(youkaichao & ywang96): Use TorchDispatchMode instead of memory pool
     # to hijack tensor allocation.
-    def load_model(self) -> None:
-        dummy_weights = os.environ.get("VLLM_ELASTIC_EP_SCALE_UP_LAUNCH") == "1"
-        if dummy_weights:
-            (
-                expanded_physical_to_logical,
-                num_logical_experts,
-                old_num_physical_experts,
-            ) = self.elastic_ep_executor.receive_expert_mapping()
-            num_physical_experts = expanded_physical_to_logical.shape[1]
-            self.parallel_config.eplb_config.num_redundant_experts = (
-                num_physical_experts - num_logical_experts
-            )
-
+    def load_model(self, *, load_dummy_weights: bool = False) -> None:
         with (
             self._maybe_get_memory_pool_context(tag="weights"),
             set_current_vllm_config(self.vllm_config),
+            # 20 MiB is the minimum PyTorch allows for max_split_size_mb.
+            self._scoped_allocator_max_split(max_split_size_mb=20),
         ):
-            self.model_runner.load_model(load_dummy_weights=dummy_weights)
+            self.model_runner.load_model(load_dummy_weights=load_dummy_weights)
 
-        if dummy_weights:
-            self.model_runner.setup_eplb_from_mapping(
-                expanded_physical_to_logical, old_num_physical_experts
+        if self.vllm_config.weight_transfer_config is not None:
+            self.weight_transfer_engine = WeightTransferEngineFactory.create_engine(
+                self.vllm_config.weight_transfer_config,
+                self.vllm_config,
+                self.device,
+                self.model_runner.get_model(),
             )
-            self.model_runner.eep_eplb_suppressed = True
 
     def update_config(self, overrides: dict[str, Any]) -> None:
         self.model_runner.update_config(overrides)
@@ -377,7 +457,7 @@ class Worker(WorkerBase):
                 "correspondingly."
             )
             logger.info(msg)
-            return kv_cache_memory_bytes
+            return self._reserve_mm_ipc_gpu_memory(kv_cache_memory_bytes)
 
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
@@ -387,13 +467,19 @@ class Worker(WorkerBase):
         ) as profile_result:
             self.model_runner.profile_run()
 
-            profile_torch_peak = current_platform.memory_stats(self.device).get(
+            profile_torch_peak = torch.accelerator.memory_stats(self.device).get(
                 "allocated_bytes.all.peak", 0
             )
 
             # Profile CUDA graph memory if graphs will be captured.
+            # Skip on ROCm/HIP/XPU as graph pool handles and get_memory_info
+            # behave differently and can produce incorrect/negative estimates.
             cudagraph_memory_estimate = 0
-            if not self.model_config.enforce_eager:
+            if (
+                current_platform.is_cuda()
+                and self.vllm_config.compilation_config.cudagraph_mode
+                != CUDAGraphMode.NONE
+            ):
                 cudagraph_memory_estimate = self.model_runner.profile_cudagraph_memory()
 
         # Use the pre-cudagraph torch peak to avoid double-counting.
@@ -406,6 +492,8 @@ class Worker(WorkerBase):
             + profile_result.weights_memory
         )
 
+        # On ROCm, cudagraph_memory_estimate is always 0 so this is a no-op.
+        # On CUDA, respect the opt-in flag as originally designed.
         cudagraph_memory_estimate_applied = (
             cudagraph_memory_estimate
             if envs.VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS
@@ -413,9 +501,7 @@ class Worker(WorkerBase):
         )
 
         self.non_torch_memory = profile_result.non_torch_increase
-        self.peak_activation_memory = (
-            profile_result.torch_peak_increase + cudagraph_memory_estimate_applied
-        )
+        self.peak_activation_memory = profile_result.torch_peak_increase
         self.cudagraph_memory_estimate = cudagraph_memory_estimate
 
         free_gpu_memory = profile_result.after_profile.free_memory
@@ -452,7 +538,6 @@ class Worker(WorkerBase):
         logger.info_once(
             "Available KV cache memory: %s GiB",
             format_gib(self.available_kv_cache_memory_bytes),
-            scope="local",
         )
 
         if cudagraph_memory_estimate > 0:
@@ -466,14 +551,13 @@ class Worker(WorkerBase):
                     1.0,
                 )
                 logger.info(
-                    "CUDA graph memory profiling is enabled "
-                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1). "
-                    "This will become the default in v0.19. "
-                    "The current --gpu-memory-utilization=%.4f is equivalent "
-                    "to --gpu-memory-utilization=%.4f without CUDA graph "
-                    "memory profiling. To maintain the same effective KV "
-                    "cache size as before, increase "
-                    "--gpu-memory-utilization to %.4f.",
+                    "CUDA graph memory profiling is enabled (default since "
+                    "v0.21.0). The current --gpu-memory-utilization=%.4f is "
+                    "equivalent to --gpu-memory-utilization=%.4f without "
+                    "CUDA graph memory profiling. To maintain the same "
+                    "effective KV cache size as before, increase "
+                    "--gpu-memory-utilization to %.4f. To disable, set "
+                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0.",
                     current_util,
                     equiv_util,
                     suggested_util,
@@ -483,22 +567,101 @@ class Worker(WorkerBase):
                     round(current_util + cg_util_delta, 4),
                     1.0,
                 )
-                logger.info(
-                    "In v0.19, CUDA graph memory profiling will be enabled "
-                    "by default (VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1), "
-                    "which more accurately accounts for CUDA graph memory "
-                    "during KV cache allocation. To try it now, set "
-                    "VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=1 and increase "
-                    "--gpu-memory-utilization from %.4f to %.4f to maintain "
-                    "the same effective KV cache size.",
+                logger.warning(
+                    "CUDA graph memory profiling is disabled "
+                    "(VLLM_MEMORY_PROFILER_ESTIMATE_CUDAGRAPHS=0). "
+                    "Without it, CUDA graph memory is not accounted for "
+                    "during KV cache allocation, which may require lowering "
+                    "--gpu-memory-utilization to avoid OOM. Consider "
+                    "re-enabling it (the default as of v0.21.0) and increasing "
+                    "--gpu-memory-utilization from %.4f to %.4f.",
                     current_util,
                     suggested_util,
                 )
 
-        return int(self.available_kv_cache_memory_bytes)
+        return self._reserve_mm_ipc_gpu_memory(
+            int(self.available_kv_cache_memory_bytes)
+        )
 
-    def get_kv_connector_handshake_metadata(self) -> dict | None:
-        """Get KV connector metadata from this worker if available."""
+    @staticmethod
+    def _uses_gpu_video_backend(mm_config) -> bool:
+        video_kwargs = mm_config.media_io_kwargs.get("video", {})
+        video_loader_backend = (
+            video_kwargs.get("video_backend") or envs.VLLM_VIDEO_LOADER_BACKEND
+        )
+        codec_backend = video_kwargs.get("backend")
+        return VIDEO_LOADER_REGISTRY.backend_requires_gpu(video_loader_backend) or (
+            codec_backend is not None
+            and VIDEO_LOADER_REGISTRY.backend_requires_gpu(codec_backend)
+        )
+
+    def _reserve_mm_ipc_gpu_memory(self, available_kv_cache_memory_bytes: int) -> int:
+        """Carve frontend multimodal GPU memory out of the KV cache.
+
+        The frontend (API-server) process allocates GPU memory for hardware
+        multimodal decoding. Raw decoded frames are bounded by
+        ``mm_ipc_gpu_memory_gb`` and acquired by the frontend semaphore. Some
+        decoders also keep persistent surfaces around; reserve a fixed upper
+        bound for those when the corresponding backend is configured.
+        """
+        mm_config = self.model_config.multimodal_config
+        if mm_config is None:
+            return available_kv_cache_memory_bytes
+
+        raw_frame_reserved_bytes = int(mm_config.mm_ipc_gpu_memory_gb * GiB_bytes)
+        # Each api_server_count process runs its OWN decoder surfaces + NVDEC/CUVID
+        # CUDA context on the GPU, outside this (worker) memory pool. Reserve that
+        # per-server footprint x api_server_count so gpu_memory_utilization bounds
+        # TOTAL GPU usage across all API-server processes. Without the multiply,
+        # HW decode overshoots the budget by ~(api_server_count-1) x per-server and
+        # OOMs at high gmu, while SW decode (no per-server GPU allocation) does not.
+        num_api_servers = max(1, getattr(self.parallel_config, "_api_process_count", 1))
+        per_server_decoder_bytes = (
+            PYNVVIDEOCODEC_DECODER_GPU_MEMORY_BYTES
+            * PYNVVIDEOCODEC_MAX_RETAINED_DECODERS
+            + PYNVVIDEOCODEC_CUDA_CONTEXT_BYTES
+        )
+        decoder_reserved_bytes = (
+            num_api_servers * per_server_decoder_bytes
+            if self._uses_gpu_video_backend(mm_config)
+            else 0
+        )
+        reserved_bytes = raw_frame_reserved_bytes + decoder_reserved_bytes
+        if reserved_bytes <= 0:
+            return available_kv_cache_memory_bytes
+
+        remaining = available_kv_cache_memory_bytes - reserved_bytes
+        if remaining <= 0:
+            raise ValueError(
+                f"frontend multimodal GPU decoding reserves "
+                f"{format_gib(reserved_bytes)} GiB "
+                f"({format_gib(raw_frame_reserved_bytes)} GiB raw-frame budget, "
+                f"{format_gib(decoder_reserved_bytes)} GiB decoder cache budget), "
+                f"but only {format_gib(available_kv_cache_memory_bytes)} GiB is "
+                "available for the KV cache. Reduce mm_ipc_gpu_memory_gb, use a "
+                "different video backend, or increase gpu_memory_utilization."
+            )
+        logger.info_once(
+            "Reserving %s GiB of GPU memory for frontend multimodal decoding "
+            "(%s GiB raw-frame semaphore budget, %s GiB decoder+CUDA-context "
+            "across %d API server(s) @ %s GiB/server); "
+            "KV cache memory reduced to %s GiB.",
+            format_gib(reserved_bytes),
+            format_gib(raw_frame_reserved_bytes),
+            format_gib(decoder_reserved_bytes),
+            num_api_servers,
+            format_gib(per_server_decoder_bytes),
+            format_gib(remaining),
+        )
+        return remaining
+
+    def get_kv_connector_handshake_metadata(
+        self,
+    ) -> dict[tuple[int, int], KVConnectorHandshakeMetadata] | None:
+        """Get KV connector metadata from this worker if available.
+
+        Returned dict is keyed by `(pp_rank, tp_rank)`.
+        """
 
         if not has_kv_transfer_group():
             return None
@@ -509,15 +672,15 @@ class Worker(WorkerBase):
         if (metadata := connector.get_handshake_metadata()) is None:
             return None
 
+        pp_rank = get_pp_group().rank_in_group
         tp_rank = get_tp_group().rank_in_group
-        return {tp_rank: metadata}
+        return {(pp_rank, tp_rank): metadata}
 
     def get_kv_cache_spec(self) -> dict[str, KVCacheSpec]:
         return self.model_runner.get_kv_cache_spec()
 
     def update_max_model_len(self, max_model_len: int) -> None:
         """Update max_model_len after auto-fit to GPU memory.
-
         This is called when max_model_len=-1 is used and the engine
         automatically determines the maximum context length that fits
         in GPU memory. Workers need to update their cached max_model_len
@@ -543,13 +706,7 @@ class Worker(WorkerBase):
         # related to kv cache connector (e.g. kv cache sharing layers).
         ensure_kv_transfer_initialized(self.vllm_config, kv_cache_config)
 
-        if self.vllm_config.model_config.enable_sleep_mode:
-            from vllm.device_allocator.cumem import CuMemAllocator
-
-            allocator = CuMemAllocator.get_instance()
-            with allocator.use_memory_pool(tag="kv_cache"):
-                self.model_runner.initialize_kv_cache(kv_cache_config)
-        else:
+        with self._maybe_get_memory_pool_context(tag="kv_cache"):
             self.model_runner.initialize_kv_cache(kv_cache_config)
 
         if self.model_config.enable_return_routed_experts:
@@ -564,7 +721,7 @@ class Worker(WorkerBase):
             self.model_runner._init_kv_zero_meta()
 
     @instrument(span_name="Warmup (GPU)")
-    def compile_or_warm_up_model(self) -> float:
+    def compile_or_warm_up_model(self) -> CompilationTimes:
         warmup_sizes: list[int] = []
 
         if self.vllm_config.compilation_config.mode == CompilationMode.VLLM_COMPILE:
@@ -635,6 +792,7 @@ class Worker(WorkerBase):
             # slightly underestimate the memory consumption.
             # So leave a small buffer (=150MiB) to avoid OOM.
             redundancy_buffer_memory = 150 * (1 << 20)
+
             non_kv_cache_memory = (
                 self.model_runner.model_memory_usage
                 + self.peak_activation_memory
@@ -705,7 +863,38 @@ class Worker(WorkerBase):
         # the model initialization and profiling.
         set_random_seed(self.model_config.seed)
 
-        return self.compilation_config.compilation_time
+        # Eagerly trigger inductor's once-per-process lazy inits during
+        # warmup (rather than on a later compile cache-miss at runtime).
+        c_config = self.compilation_config
+        if c_config.mode != CompilationMode.NONE and c_config.backend == "inductor":
+            from vllm.compilation.compiler_interface import (
+                trigger_inductor_lazy_init,
+            )
+
+            trigger_inductor_lazy_init(self.device)
+
+        # All warmup is done — start monitoring for unexpected JIT
+        # compilations that would cause latency spikes during inference.
+        from vllm.utils.jit_monitor import activate as activate_jit_monitor
+
+        activate_jit_monitor(
+            mode=self.observability_config.jit_monitor_mode,
+            verbose=self.observability_config.jit_monitor_verbose,
+        )
+
+        # Freeze the worker heap so the GC won't scan static objects
+        # (model weights, KV caches, CUDA graphs) during inference.
+        freeze_gc_heap()
+        maybe_attach_gc_debug_callback()
+
+        # Warmup / first-compile is done — activate the `VLLM_GPU_SYNC_CHECK`
+        # gate so subsequent `execute_model` / `sample_tokens` calls enforce it.
+        enable_gpu_sync_check()
+
+        return CompilationTimes(
+            language_model=self.compilation_config.compilation_time,
+            encoder=self.compilation_config.encoder_compilation_time,
+        )
 
     def reset_mm_cache(self) -> None:
         self.model_runner.reset_mm_cache()
@@ -718,6 +907,11 @@ class Worker(WorkerBase):
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
+
+    def get_compilation_match_table(self) -> dict[str, int]:
+        from vllm.compilation.passes.vllm_inductor_pass import get_match_table
+
+        return get_match_table()
 
     def get_encoder_timing_stats(self) -> dict[str, dict[str, float | int]]:
         """Get encoder timing stats from model runner."""
@@ -750,12 +944,14 @@ class Worker(WorkerBase):
         return self.profiler.annotate_context_manager(annotation)
 
     @torch.inference_mode()
+    @with_gpu_sync_check
     def sample_tokens(
         self, grammar_output: "GrammarOutput | None"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput:
         return self.model_runner.sample_tokens(grammar_output)
 
     @torch.inference_mode()
+    @with_gpu_sync_check
     def execute_model(
         self, scheduler_output: "SchedulerOutput"
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | None:
@@ -903,7 +1099,8 @@ class Worker(WorkerBase):
             self.profiler.stop()
 
     def execute_dummy_batch(self) -> None:
-        self.model_runner._dummy_run(1, uniform_decode=True)
+        num_tokens = getattr(self.model_runner, "uniform_decode_query_len", 1)
+        self.model_runner._dummy_run(num_tokens, uniform_decode=True)
 
     def add_lora(self, lora_request: LoRARequest) -> bool:
         return self.model_runner.add_lora(lora_request)
@@ -943,6 +1140,13 @@ class Worker(WorkerBase):
             model_config=self.model_config,
         )
 
+    def _check_weight_transfer_engine(self) -> None:
+        if self.weight_transfer_engine is None:
+            raise RuntimeError(
+                "Weight transfer not configured. "
+                "Please set weight_transfer_config to enable weight transfer."
+            )
+
     def init_weight_transfer_engine(self, init_info: dict) -> None:
         """
         Initialize weight transfer mechanism.
@@ -951,70 +1155,96 @@ class Worker(WorkerBase):
         Args:
             init_info: Dictionary containing backend-specific initialization info
         """
-        if self.weight_transfer_engine is None:
-            raise RuntimeError(
-                "Weight transfer not configured. "
-                "Please set weight_transfer_config to enable weight transfer."
-            )
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
         # Parse dict into backend-specific typed dataclass
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
+    def start_weight_update(self) -> None:
+        """
+        Start a new weight update session.
+
+        Delegates engine-specific preparation (e.g. layerwise reload setup) to
+        the configured weight transfer engine. The worker only tracks that a
+        session is active.
+        """
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
+
+        if self._weight_update_active:
+            raise RuntimeError(
+                "start_weight_update called while a weight update is already "
+                "active. Call finish_weight_update first."
+            )
+
+        self.weight_transfer_engine.start_weight_update()
+        self._weight_update_active = True
+
     def update_weights(self, update_info: dict) -> None:
         """
-        Batched weight update from the trainer.
+        Receive one weight update chunk from the trainer.
+
+        start_weight_update must be called before update_weights and
+        finish_weight_update must be called after all chunks have been sent.
 
         Args:
             update_info: Dictionary containing backend-specific update info
         """
-        if self.weight_transfer_engine is None:
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
+
+        if not self._weight_update_active:
             raise RuntimeError(
-                "Weight transfer not configured. "
-                "Please set weight_transfer_config to enable weight transfer."
+                "start_weight_update must be called before update_weights."
             )
 
-        # Parse dict into backend-specific typed dataclass
-        typed_update_info = self.weight_transfer_engine.parse_update_info(update_info)
+        try:
+            self.weight_transfer_engine.update_weights(update_info)
+        except BaseException:
+            self._weight_update_active = False
+            raise
 
-        model = self.model_runner.model
+    def finish_weight_update(self) -> None:
+        """Finish the current weight update session."""
+        self._check_weight_transfer_engine()
+        assert self.weight_transfer_engine is not None
 
-        if typed_update_info.is_checkpoint_format:
-            from vllm.model_executor.model_loader.reload import (
-                finalize_layerwise_reload,
-                initialize_layerwise_reload,
+        if not self._weight_update_active:
+            raise RuntimeError(
+                "finish_weight_update called without a matching start_weight_update."
             )
 
-            # Use layerwise reload pattern for checkpoint format weights
-            with torch.device(self.device):
-                initialize_layerwise_reload(model)
-                self.weight_transfer_engine.receive_weights(
-                    typed_update_info,
-                    load_weights=model.load_weights,
-                )
-                finalize_layerwise_reload(model, self.model_config)
-        else:
-            # Weights are already in kernel format, copy directly
-            def load_weights_direct(
-                weights: list[tuple[str, torch.Tensor]],
-            ) -> None:
-                for name, weight in weights:
-                    param = model.get_parameter(name)
-                    param.copy_(weight)
-
-            self.weight_transfer_engine.receive_weights(
-                typed_update_info,
-                load_weights=load_weights_direct,
-            )
+        self.weight_transfer_engine.finish_weight_update()
+        self._weight_update_active = False
 
     def shutdown(self) -> None:
+        gc.unfreeze()
+
         # has_kv_transfer_group can be None during interpreter shutdown.
         if ensure_kv_transfer_shutdown is not None:
             ensure_kv_transfer_shutdown()
+        if ensure_ec_transfer_shutdown is not None:
+            ensure_ec_transfer_shutdown()
         if self.profiler is not None:
             self.profiler.shutdown()
 
         if weight_transfer_engine := getattr(self, "weight_transfer_engine", None):
             weight_transfer_engine.shutdown()
+
+        # Release GPU resources held by the model runner so that memory
+        # can be reclaimed when running in-process
+        if model_runner := getattr(self, "model_runner", None):
+            model_runner.shutdown()
+
+        # Release kept-alive cumem pools while the pluggable allocator wrappers
+        # and callbacks are still alive, so MemPool teardown is not deferred to
+        # interpreter finalization (pytorch/pytorch#145168).
+        if current_platform.is_cuda_alike():
+            from vllm.device_allocator.cumem import CuMemAllocator
+
+            if CuMemAllocator.instance is not None:
+                CuMemAllocator.instance.release_pools()
 
     def elastic_ep_execute(self, execute_method: str, *args, **kwargs):
         return self.elastic_ep_executor.execute(execute_method, *args, **kwargs)
@@ -1028,12 +1258,14 @@ def init_worker_distributed_environment(
     backend: str = "nccl",
 ) -> None:
     """Initialize the distributed environment."""
-    attention_config = vllm_config.attention_config
     parallel_config = vllm_config.parallel_config
     from vllm.model_executor.layers.batch_invariant import init_batch_invariance
 
-    init_batch_invariance(attention_config.backend)
-    override_envs_for_eplb(parallel_config)
+    init_batch_invariance()
+    override_envs_for_eplb(
+        parallel_config,
+        moe_backend=getattr(vllm_config.kernel_config, "moe_backend", None),
+    )
     set_custom_all_reduce(not parallel_config.disable_custom_all_reduce)
 
     init_method = distributed_init_method or "env://"

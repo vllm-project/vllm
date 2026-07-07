@@ -4,7 +4,7 @@
 import itertools
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 import torch
 import torch.nn as nn
@@ -21,6 +21,7 @@ from transformers.models.lfm2_vl.image_processing_lfm2_vl_fast import (
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.forward_context import set_forward_context
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.mamba.mamba_utils import (
     MambaStateCopyFunc,
     MambaStateCopyFuncCalculator,
@@ -30,7 +31,6 @@ from vllm.model_executor.layers.mamba.mamba_utils import (
 from vllm.model_executor.models.module_mapping import MultiModelKeys
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -49,6 +49,7 @@ from vllm.utils.tensor_schema import TensorSchema, TensorShape
 from .interfaces import (
     IsHybrid,
     MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
     SupportsLoRA,
     SupportsMultiModal,
     SupportsPP,
@@ -61,6 +62,17 @@ from .utils import (
     maybe_prefix,
 )
 from .vision import is_vit_use_data_parallel
+
+
+def _pad_cumulative_seqlens_buffer(
+    dst: torch.Tensor,
+    src: torch.Tensor,
+) -> None:
+    n = src.shape[0]
+    dst.zero_()
+    dst[:n].copy_(src)
+    if n < dst.shape[0]:
+        dst[n:] = src[-1]
 
 
 class Lfm2VLImagePixelInputs(TensorSchema):
@@ -324,7 +336,25 @@ class Lfm2VLProcessingInfo(BaseProcessingInfo):
         )
         tile_size = mm_kwargs.get("tile_size", image_processor.tile_size)
 
-        num_thumbnail_tokens = spatial_shapes[-1].prod() // (downsample_factor**2)
+        thumbnail_height_patches = int(spatial_shapes[-1][0].item())
+        thumbnail_width_patches = int(spatial_shapes[-1][1].item())
+        # HF computes thumbnail tokens as
+        # ceil(h_patches / downsample_factor) * ceil(w_patches / downsample_factor).
+        # We assert divisibility here so any processor/model drift is surfaced
+        # immediately instead of being hidden by floor division.
+        assert thumbnail_height_patches % downsample_factor == 0, (
+            "LFM2-VL thumbnail height patch grid must be divisible by "
+            f"downsample_factor, got height_patches={thumbnail_height_patches}, "
+            f"downsample_factor={downsample_factor}"
+        )
+        assert thumbnail_width_patches % downsample_factor == 0, (
+            "LFM2-VL thumbnail width patch grid must be divisible by "
+            f"downsample_factor, got width_patches={thumbnail_width_patches}, "
+            f"downsample_factor={downsample_factor}"
+        )
+        num_thumbnail_tokens = math.ceil(
+            thumbnail_height_patches / downsample_factor
+        ) * math.ceil(thumbnail_width_patches / downsample_factor)
         num_patches_tile = tile_size // encoder_patch_size
         dwn_num_patches_tile = math.ceil(num_patches_tile / downsample_factor)
         num_tiles_tokens = dwn_num_patches_tile * dwn_num_patches_tile
@@ -540,13 +570,26 @@ class Lfm2VLMultiModalProjector(nn.Module):
 
         if gather_idx_parts:
             gather_idx = torch.cat(gather_idx_parts).to(device=device)
-            gathered = vision_features_packed.index_select(0, gather_idx)
-            unshuffled = gathered.reshape(-1, factor * factor * hidden_size)
+            return self.forward_with_gather_idx(vision_features_packed, gather_idx)
         else:
             unshuffled = vision_features_packed.new_empty(
                 (0, factor * factor * hidden_size)
             )
 
+        return self.forward_from_unshuffled(unshuffled)
+
+    def forward_with_gather_idx(
+        self,
+        vision_features_packed: torch.Tensor,
+        gather_idx: torch.Tensor,
+    ) -> torch.Tensor:
+        hidden_size = vision_features_packed.shape[-1]
+        factor = self.factor
+        gathered = vision_features_packed.index_select(0, gather_idx)
+        unshuffled = gathered.reshape(-1, factor * factor * hidden_size)
+        return self.forward_from_unshuffled(unshuffled)
+
+    def forward_from_unshuffled(self, unshuffled: torch.Tensor) -> torch.Tensor:
         if self.projector_use_layernorm:
             unshuffled = self.layer_norm(unshuffled)
         hidden_states = self.linear_1(unshuffled)
@@ -561,7 +604,12 @@ class Lfm2VLMultiModalProjector(nn.Module):
     dummy_inputs=Lfm2VLDummyInputsBuilder,
 )
 class Lfm2VLForConditionalGeneration(
-    nn.Module, SupportsMultiModal, SupportsLoRA, SupportsPP, IsHybrid
+    nn.Module,
+    SupportsMultiModal,
+    SupportsEncoderCudaGraph,
+    SupportsLoRA,
+    SupportsPP,
+    IsHybrid,
 ):
     merge_by_field_config = True
 
@@ -627,6 +675,7 @@ class Lfm2VLForConditionalGeneration(
 
         self.config = config
         self.vllm_config = vllm_config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
@@ -679,7 +728,7 @@ class Lfm2VLForConditionalGeneration(
         self,
         pixel_values: torch.FloatTensor,
         spatial_shapes: torch.Tensor,
-    ) -> torch.Tensor:
+    ) -> list[torch.Tensor]:
         assert spatial_shapes.device.type == "cpu", (
             "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
             "variable-length packing."
@@ -741,22 +790,12 @@ class Lfm2VLForConditionalGeneration(
         )
         vision_features_packed = image_outputs_packed[0]
 
-        factor = self.multi_modal_projector.factor
-        projected_lengths_list: list[int] = []
-        for (height, width), length in zip(spatial_shapes_list, lengths_list):
-            if length <= 0:
-                projected_lengths_list.append(0)
-                continue
-            if height % factor != 0 or width % factor != 0:
-                raise ValueError(
-                    "spatial_shapes must be divisible by downsample_factor: "
-                    f"got ({height}, {width}) with factor={factor}."
-                )
-            projected_lengths_list.append((height // factor) * (width // factor))
-
         projected_packed = self.multi_modal_projector(
             vision_features_packed=vision_features_packed,
             spatial_shapes=spatial_shapes,
+        )
+        projected_lengths_list = self._get_lfm2vl_tile_output_lengths(
+            spatial_shapes_list
         )
 
         image_features: list[torch.Tensor] = []
@@ -800,6 +839,387 @@ class Lfm2VLForConditionalGeneration(
             return []
 
         return self._process_image_input(image_input)
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphConfig,
+        )
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=[
+                "pixel_values_packed",
+                "pos_embeds",
+                "cu_seqlens",
+                "max_seqlen",
+                "gather_idx",
+            ],
+            out_hidden_size=self.config.text_config.hidden_size,
+            padding_logics={
+                "cu_seqlens": _pad_cumulative_seqlens_buffer,
+            },
+        )
+
+    def get_max_frames_per_video(self) -> int:
+        return 0
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: VllmConfig,
+    ) -> tuple[int, int]:
+        min_budget = self._get_lfm2vl_min_image_tokens()
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
+        return min_budget, max_budget
+
+    def _get_spatial_shapes_list(
+        self,
+        spatial_shapes: torch.Tensor,
+    ) -> list[list[int]]:
+        assert spatial_shapes.device.type == "cpu", (
+            "Expected `spatial_shapes` on CPU to avoid device-to-host sync in "
+            "variable-length packing."
+        )
+        return spatial_shapes.tolist()
+
+    @staticmethod
+    def _get_lfm2vl_tile_input_lengths(
+        spatial_shapes_list: list[list[int]],
+    ) -> list[int]:
+        return [height * width for height, width in spatial_shapes_list]
+
+    def _get_lfm2vl_tile_output_lengths(
+        self,
+        spatial_shapes_list: list[list[int]],
+    ) -> list[int]:
+        factor = self.multi_modal_projector.factor
+        output_lengths: list[int] = []
+        for height, width in spatial_shapes_list:
+            if height % factor != 0 or width % factor != 0:
+                raise ValueError(
+                    "spatial_shapes must be divisible by downsample_factor: "
+                    f"got ({height}, {width}) with factor={factor}."
+                )
+            output_lengths.append((height // factor) * (width // factor))
+        return output_lengths
+
+    def _get_lfm2vl_mm_processor_kwargs(self) -> Mapping[str, object]:
+        return self.multimodal_config.mm_processor_kwargs or {}
+
+    def _get_lfm2vl_min_image_tokens(self) -> int:
+        value = self._get_lfm2vl_mm_processor_kwargs().get(
+            "min_image_tokens",
+            getattr(self.config, "min_image_tokens", None) or 64,
+        )
+        return max(1, int(value))
+
+    def _get_lfm2vl_item_tile_slices(
+        self,
+        num_patches: torch.Tensor,
+    ) -> list[tuple[int, int]]:
+        num_patches_list = [int(x) for x in num_patches.tolist()]
+        starts = [0]
+        for count in num_patches_list:
+            starts.append(starts[-1] + count)
+        return list(zip(starts[:-1], starts[1:]))
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        spatial_shapes = mm_kwargs["spatial_shapes"]
+        num_patches = mm_kwargs["num_patches"]
+        spatial_shapes_list = self._get_spatial_shapes_list(spatial_shapes)
+        input_lengths = self._get_lfm2vl_tile_input_lengths(spatial_shapes_list)
+        output_lengths = self._get_lfm2vl_tile_output_lengths(spatial_shapes_list)
+
+        return [
+            EncoderItemSpec(
+                input_size=sum(input_lengths[start:end]),
+                output_tokens=sum(output_lengths[start:end]),
+            )
+            for start, end in self._get_lfm2vl_item_tile_slices(num_patches)
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values"]
+        spatial_shapes = mm_kwargs["spatial_shapes"]
+        num_patches = mm_kwargs["num_patches"]
+
+        tile_slices = self._get_lfm2vl_item_tile_slices(num_patches)
+
+        if len(indices) == 0:
+            return {
+                "pixel_values": pixel_values[:0],
+                "spatial_shapes": spatial_shapes[:0],
+                "num_patches": num_patches[:0],
+            }
+
+        tile_indices: list[int] = []
+        for image_idx in indices:
+            start, end = tile_slices[image_idx]
+            tile_indices.extend(range(start, end))
+
+        return {
+            "pixel_values": pixel_values[tile_indices],
+            "spatial_shapes": spatial_shapes[tile_indices],
+            "num_patches": num_patches[indices],
+        }
+
+    def _pack_lfm2vl_pixel_values(
+        self,
+        pixel_values: torch.Tensor,
+        spatial_shapes_list: list[list[int]],
+    ) -> torch.Tensor:
+        input_lengths = self._get_lfm2vl_tile_input_lengths(spatial_shapes_list)
+        total_tokens = sum(input_lengths)
+        packed = pixel_values.new_empty((total_tokens, pixel_values.shape[-1]))
+
+        offset = 0
+        for i, length in enumerate(input_lengths):
+            if length <= 0:
+                continue
+            packed[offset : offset + length].copy_(pixel_values[i, :length])
+            offset += length
+        return packed
+
+    def _get_lfm2vl_pos_embeds(
+        self,
+        spatial_shapes: torch.Tensor,
+        spatial_shapes_list: list[list[int]],
+    ) -> torch.Tensor:
+        embeddings = self.vision_tower.vision_model.embeddings
+        positional_embeddings = embeddings.position_embedding.weight.reshape(
+            embeddings.position_embedding_size,
+            embeddings.position_embedding_size,
+            -1,
+        )
+        lengths_list = self._get_lfm2vl_tile_input_lengths(spatial_shapes_list)
+        return embeddings.resize_positional_embeddings_packed(
+            positional_embeddings,
+            spatial_shapes,
+            lengths_list=lengths_list,
+        )
+
+    def _get_lfm2vl_cu_seqlens(
+        self,
+        spatial_shapes_list: list[list[int]],
+        device: torch.device,
+    ) -> torch.Tensor:
+        lengths = torch.tensor(
+            self._get_lfm2vl_tile_input_lengths(spatial_shapes_list),
+            dtype=torch.int32,
+            device=device,
+        )
+        cu_seqlens = torch.zeros(
+            lengths.shape[0] + 1,
+            dtype=torch.int32,
+            device=device,
+        )
+        if lengths.numel() > 0:
+            cu_seqlens[1:] = torch.cumsum(lengths, dim=0)
+        return cu_seqlens
+
+    def _get_lfm2vl_max_seqlen(
+        self,
+        spatial_shapes_list: list[list[int]],
+    ) -> torch.Tensor:
+        input_lengths = self._get_lfm2vl_tile_input_lengths(spatial_shapes_list)
+        max_seqlen = max(input_lengths) if input_lengths else 0
+        return torch.tensor(max_seqlen, dtype=torch.int32)
+
+    def _get_lfm2vl_projector_gather_idx(
+        self,
+        spatial_shapes_list: list[list[int]],
+        device: torch.device,
+    ) -> torch.Tensor:
+        factor = self.multi_modal_projector.factor
+        dh = torch.arange(factor, dtype=torch.int64)
+        dw = torch.arange(factor, dtype=torch.int64)
+        dh_grid, dw_grid = torch.meshgrid(dh, dw, indexing="ij")
+        dh_flat = dh_grid.reshape(-1)
+        dw_flat = dw_grid.reshape(-1)
+
+        gather_idx_parts: list[torch.Tensor] = []
+        offset = 0
+        for height, width in spatial_shapes_list:
+            length = height * width
+            if length <= 0:
+                continue
+            if height % factor != 0 or width % factor != 0:
+                raise ValueError(
+                    "spatial_shapes must be divisible by downsample_factor: "
+                    f"got ({height}, {width}) with factor={factor}."
+                )
+
+            rows_out = torch.arange(height // factor, dtype=torch.int64)
+            cols_out = torch.arange(width // factor, dtype=torch.int64)
+            rr, cc = torch.meshgrid(rows_out, cols_out, indexing="ij")
+            rr = rr.reshape(-1)
+            cc = cc.reshape(-1)
+            token_idx = (rr[:, None] * factor + dh_flat[None, :]) * width + (
+                cc[:, None] * factor + dw_flat[None, :]
+            )
+            gather_idx_parts.append(token_idx.reshape(-1) + offset)
+            offset += length
+
+        if not gather_idx_parts:
+            return torch.empty(0, dtype=torch.int64, device=device)
+        return torch.cat(gather_idx_parts).to(device=device)
+
+    def _prepare_lfm2vl_cudagraph_values(
+        self,
+        pixel_values: torch.Tensor,
+        spatial_shapes: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        spatial_shapes_list = self._get_spatial_shapes_list(spatial_shapes)
+        pixel_values_packed = self._pack_lfm2vl_pixel_values(
+            pixel_values,
+            spatial_shapes_list,
+        )
+        pos_embeds = self._get_lfm2vl_pos_embeds(spatial_shapes, spatial_shapes_list)
+        device = pixel_values.device
+
+        return {
+            "pixel_values_packed": pixel_values_packed,
+            "pos_embeds": pos_embeds,
+            "cu_seqlens": self._get_lfm2vl_cu_seqlens(spatial_shapes_list, device),
+            "max_seqlen": self._get_lfm2vl_max_seqlen(spatial_shapes_list),
+            "gather_idx": self._get_lfm2vl_projector_gather_idx(
+                spatial_shapes_list,
+                device,
+            ),
+        }
+
+    def _get_lfm2vl_capture_spatial_shapes(
+        self,
+        token_budget: int,
+    ) -> torch.Tensor:
+        factor = self.multi_modal_projector.factor
+        min_image_tokens = self._get_lfm2vl_min_image_tokens()
+        remaining = token_budget
+        shapes: list[list[int]] = []
+
+        while remaining > 0:
+            out_tokens = min(remaining, min_image_tokens)
+            shapes.append([factor, out_tokens * factor])
+            remaining -= out_tokens
+
+        return torch.tensor(shapes, dtype=torch.int64)
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        spatial_shapes = self._get_lfm2vl_capture_spatial_shapes(token_budget)
+        spatial_shapes_list = self._get_spatial_shapes_list(spatial_shapes)
+        input_lengths = self._get_lfm2vl_tile_input_lengths(spatial_shapes_list)
+        total_input_tokens = sum(input_lengths)
+
+        patch_dim = (
+            self.vision_tower.vision_model.embeddings.patch_embedding.weight.shape[1]
+        )
+        dummy_pixel_values = torch.randn(
+            total_input_tokens,
+            patch_dim,
+            device=device,
+            dtype=dtype,
+        )
+        pos_embeds = self._get_lfm2vl_pos_embeds(
+            spatial_shapes,
+            spatial_shapes_list,
+        ).to(device=device, dtype=dtype)
+
+        # max_seqlen.item() is baked into the captured ViT attention graph, so
+        # capture with a budget-level upper bound that covers any replay item.
+        max_tile_input_tokens = token_budget * self.multi_modal_projector.factor**2
+        values = {
+            "pixel_values_packed": dummy_pixel_values,
+            "pos_embeds": pos_embeds,
+            "cu_seqlens": self._get_lfm2vl_cu_seqlens(spatial_shapes_list, device),
+            "max_seqlen": torch.tensor(max_tile_input_tokens, dtype=torch.int32),
+            "gather_idx": self._get_lfm2vl_projector_gather_idx(
+                spatial_shapes_list,
+                device,
+            ),
+        }
+
+        return EncoderCudaGraphCaptureInputs(values=values)
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        values = self._prepare_lfm2vl_cudagraph_values(
+            mm_kwargs["pixel_values"],
+            mm_kwargs["spatial_shapes"],
+        )
+        return EncoderCudaGraphReplayBuffers(values=values)
+
+    def encoder_cudagraph_forward(
+        self,
+        values: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        embeddings = self.vision_tower.vision_model.embeddings
+        pixel_values = values["pixel_values_packed"].to(
+            dtype=embeddings.patch_embedding.weight.dtype
+        )
+        patch_embeds = embeddings.patch_embedding(pixel_values)
+        hidden_states = (patch_embeds + values["pos_embeds"]).unsqueeze(0)
+
+        with set_forward_context(None, self.vllm_config):
+            encoder_outputs = self.vision_tower.vision_model.encoder(
+                inputs_embeds=hidden_states,
+                cu_seqlens=values["cu_seqlens"],
+                max_seqlen=values["max_seqlen"],
+            )
+
+        post_layernorm = self.vision_tower.vision_model.post_layernorm
+        if post_layernorm is not None:
+            encoder_outputs = post_layernorm(encoder_outputs)
+
+        return self.multi_modal_projector.forward_with_gather_idx(
+            vision_features_packed=encoder_outputs[0],
+            gather_idx=values["gather_idx"],
+        )
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        image_input = LFM2VLImageInputs(
+            type="pixel_values",
+            pixel_values=mm_kwargs["pixel_values"],
+            spatial_shapes=mm_kwargs["spatial_shapes"],
+            num_patches=mm_kwargs["num_patches"],
+        )
+        return torch.cat(self._process_image_input(image_input), dim=0)
 
     def forward(
         self,

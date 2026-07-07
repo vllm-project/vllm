@@ -8,6 +8,9 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+import pytest_asyncio
+
+from tests.utils import RemoteOpenAIServer
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +251,13 @@ def _validate_field_consistency(events: list) -> None:
             "response.reasoning_part.added",
         ):
             _assert_item_fields(event, etype, active_item_id, active_output_index)
-            active_content_index = getattr(event, "content_index", None)
+            content_index = getattr(event, "content_index", None)
+            if active_content_index is None:
+                assert content_index == 0, (
+                    f"{etype} for a new item must start at content_index 0, "
+                    f"got {content_index}"
+                )
+            active_content_index = content_index
             continue
 
         # --- all other item-level events --------------------------
@@ -361,3 +370,38 @@ def log_response_diagnostics(
     )
 
     return diagnostics
+
+
+@pytest.fixture(scope="module")
+def default_server_args():
+    return [
+        "--max-model-len",
+        "18192",
+        "--enforce-eager",  # For faster startup.
+        "--enable-auto-tool-choice",
+        "--structured-outputs-config.backend",
+        "xgrammar",
+        "--tool-call-parser",
+        "hermes",
+        "--reasoning-parser",
+        "qwen3",
+    ]
+
+
+@pytest.fixture(scope="module")
+def server_with_store(default_server_args):
+    with RemoteOpenAIServer(
+        "Qwen/Qwen3-1.7B",
+        default_server_args,
+        env_dict={
+            "VLLM_ENABLE_RESPONSES_API_STORE": "1",
+            "VLLM_SERVER_DEV_MODE": "1",
+        },
+    ) as remote_server:
+        yield remote_server
+
+
+@pytest_asyncio.fixture
+async def client(server_with_store):
+    async with server_with_store.get_async_client() as async_client:
+        yield async_client

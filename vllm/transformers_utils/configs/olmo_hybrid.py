@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-from transformers.configuration_utils import PretrainedConfig, layer_type_validation
+from transformers.configuration_utils import PretrainedConfig
 
 
 class OlmoHybridConfig(PretrainedConfig):
@@ -228,7 +228,8 @@ class OlmoHybridConfig(PretrainedConfig):
             if "full_attention" not in layer_types:
                 layer_types[-1] = "full_attention"
 
-        layer_type_validation(layer_types, num_hidden_layers)
+        self.layer_types = layer_types
+        self.validate_layer_type()
         if "linear_attention" not in layer_types:
             raise ValueError(
                 "OLMoHybrid expects at least one 'linear_attention' layer."

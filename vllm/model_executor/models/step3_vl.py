@@ -2,22 +2,18 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from itertools import product
-from math import ceil, sqrt
+from math import sqrt
 from typing import Annotated, Any, Literal, TypeAlias
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from PIL import Image
-from torchvision import transforms
-from torchvision.transforms.functional import InterpolationMode
-from transformers import BatchFeature, PretrainedConfig, TensorType
+from transformers import BatchFeature
 
 from vllm.config import VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.distributed import get_tensor_model_parallel_world_size
+from vllm.inputs import MultiModalDataDict
 from vllm.model_executor.layers.activation import get_act_fn
 from vllm.model_executor.layers.attention import MMEncoderAttention
 from vllm.model_executor.layers.conv import Conv2dLayer
@@ -29,7 +25,6 @@ from vllm.model_executor.layers.linear import (
 from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.multimodal import MULTIMODAL_REGISTRY
 from vllm.multimodal.inputs import (
-    MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
 )
@@ -43,11 +38,20 @@ from vllm.multimodal.processing import (
     PromptUpdateDetails,
 )
 from vllm.sequence import IntermediateTensors
-from vllm.tokenizers import TokenizerLike
-from vllm.transformers_utils.configs import Step3VisionEncoderConfig
+from vllm.transformers_utils.configs.step3_vl import Step3VisionEncoderConfig
+from vllm.transformers_utils.processors.step3_vl import (
+    MAX_IMAGE_SIZE,
+    Step3VLImageProcessor,
+    Step3VLProcessor,
+)
 from vllm.utils.tensor_schema import TensorSchema, TensorShape
 
-from .interfaces import MultiModalEmbeddings, SupportsMultiModal, SupportsPP
+from .interfaces import (
+    MultiModalEmbeddings,
+    SupportsEncoderCudaGraph,
+    SupportsMultiModal,
+    SupportsPP,
+)
 from .utils import (
     AutoWeightsLoader,
     WeightsMapper,
@@ -89,447 +93,32 @@ class Step3VLImageEmbeddingInputs(TensorSchema):
 
 Step3VLImageInputs: TypeAlias = Step3VLImagePixelInputs | Step3VLImageEmbeddingInputs
 
-ImageWithPatches = tuple[Image.Image, list[Image.Image], list[bool] | None]
-
-MAX_IMAGE_SIZE: int = 3024
-
-
-class Step3VisionProcessor:
-    def __init__(self, size, interpolation_mode="bicubic", patch_size=None):
-        mean = [0.48145466, 0.4578275, 0.40821073]
-        std = [0.26862954, 0.26130258, 0.27577711]
-        patch_size = patch_size if patch_size is not None else size
-
-        self.transform = transforms.Compose(
-            [
-                transforms.ToTensor(),
-                transforms.Normalize(mean, std),
-                transforms.Resize(
-                    (size, size),
-                    interpolation=InterpolationMode.BICUBIC
-                    if interpolation_mode == "bicubic"
-                    else InterpolationMode.BILINEAR,
-                    antialias=True,
-                ),
-            ]
-        )
-
-        self.patch_transform = (
-            transforms.Compose(
-                [
-                    transforms.ToTensor(),
-                    transforms.Normalize(mean, std),
-                    transforms.Resize(
-                        (patch_size, patch_size),
-                        interpolation=InterpolationMode.BICUBIC
-                        if interpolation_mode == "bicubic"
-                        else InterpolationMode.BILINEAR,
-                        antialias=True,
-                    ),
-                ]
-            )
-            if patch_size is not None
-            else None
-        )
-
-    def __call__(self, image, is_patch=False):
-        if is_patch:
-            return {"pixel_values": self.patch_transform(image).unsqueeze(0)}
-        else:
-            return {"pixel_values": self.transform(image).unsqueeze(0)}
-
-
-class ImagePatcher:
-    def __init__(self, enable_patch: bool = True) -> None:
-        self.enable_patch = enable_patch
-
-    def determine_window_size(self, long: int, short: int) -> int:
-        if long < 728:
-            return short if long / short > 1.5 else 0
-        return min(short, 504) if long / short > 4 else 504
-
-    def slide_window(
-        self,
-        width: int,
-        height: int,
-        sizes: list[tuple[int, int]],
-        steps: list[tuple[int, int]],
-        img_rate_thr: float = 0.6,
-    ) -> tuple[list[tuple[int, int, int, int]], tuple[int, int]]:
-        assert 1 >= img_rate_thr >= 0, "The `in_rate_thr` should lie in 0~1"
-        windows = []
-        # Sliding windows.
-        for size, step in zip(sizes, steps):
-            size_w, size_h = size
-            step_w, step_h = step
-
-            x_num = 1 if width <= size_w else ceil((width - size_w) / step_w + 1)
-            x_start = [step_w * i for i in range(x_num)]
-            if len(x_start) > 1 and x_start[-1] + size_w > width:
-                x_start[-1] = width - size_w
-
-            y_num = 1 if height <= size_h else ceil((height - size_h) / step_h + 1)
-            y_start = [step_h * i for i in range(y_num)]
-            if len(y_start) > 1 and y_start[-1] + size_h > height:
-                y_start[-1] = height - size_h
-
-            start = np.array(list(product(y_start, x_start)), dtype=int)
-            start[:, [0, 1]] = start[:, [1, 0]]
-            windows.append(np.concatenate([start, start + size], axis=1))
-        windows = np.concatenate(windows, axis=0)
-
-        return [
-            (int(box[0]), int(box[1]), int(box[2] - box[0]), int(box[3] - box[1]))
-            for box in windows
-        ], (x_num, y_num)
-
-    def square_pad(self, img: Image.Image) -> Image.Image:
-        w, h = img.size
-        if w == h:
-            return img
-        size = max(w, h)
-        padded = Image.new(img.mode, (size, size), 0)
-        padded.paste(img, (0, 0))
-        return padded
-
-    def get_image_size_for_padding(
-        self, img_width: int, img_height: int
-    ) -> tuple[int, int]:
-        ratio = img_width / img_height
-        if min(img_height, img_width) < 32 and (ratio > 4 or ratio < 1 / 4):
-            new_size = max(img_height, img_width)
-            return new_size, new_size
-        return img_width, img_height
-
-    def get_image_size_for_preprocess(
-        self, img_width: int, img_height: int
-    ) -> tuple[int, int]:
-        if max(img_height, img_width) > MAX_IMAGE_SIZE:
-            scale_factor = MAX_IMAGE_SIZE / max(img_height, img_width)
-            img_width = int(img_width * scale_factor)
-            img_height = int(img_height * scale_factor)
-        return img_width, img_height
-
-    def get_image_size_for_crop(
-        self, img_width: int, img_height: int, window_size: int
-    ):
-        w_ratio = img_width / window_size
-        h_ratio = img_height / window_size
-
-        if w_ratio < 1:
-            width_new = img_width
-        else:
-            decimal_w = w_ratio - img_width // window_size
-            w_ratio = int(w_ratio) + 1 if decimal_w > 0.2 else int(w_ratio)
-            width_new = window_size * w_ratio
-        if h_ratio < 1:
-            height_new = img_height
-        else:
-            decimal_h = h_ratio - img_height // window_size
-            h_ratio = int(h_ratio) + 1 if decimal_h > 0.2 else int(h_ratio)
-            height_new = window_size * h_ratio
-        return int(width_new), int(height_new)
-
-    def patch_crop(self, img: Image.Image, i: int, j: int, th: int, tw: int):
-        target = img.crop((j, i, j + tw, i + th))
-        return target
-
-    def get_num_patches(self, img_width: int, img_height: int) -> tuple[int, int]:
-        img_width, img_height = self.get_image_size_for_padding(img_width, img_height)
-        img_width, img_height = self.get_image_size_for_preprocess(
-            img_width, img_height
-        )
-        window_size = self.determine_window_size(
-            max(img_height, img_width), min(img_height, img_width)
-        )
-        if window_size == 0 or not self.enable_patch:
-            return 0, 0
-        else:
-            img_width, img_height = self.get_image_size_for_crop(
-                img_width, img_height, window_size
-            )
-            center_list, (x_num, y_num) = self.slide_window(
-                img_width,
-                img_height,
-                [(window_size, window_size)],
-                [(window_size, window_size)],
-            )
-            full_rows = (len(center_list) - 1) // x_num + 1
-            if len(center_list) > 0 and len(center_list) % x_num == 0:
-                full_rows -= 1
-            return len(center_list), full_rows
-
-    def __call__(
-        self, img: Image.Image
-    ) -> tuple[Image.Image, list[Image.Image], list[bool] | None]:
-        img_width, img_height = img.size
-        new_img_width, new_img_height = self.get_image_size_for_padding(
-            img_width, img_height
-        )
-        if new_img_width != img_width or new_img_height != img_height:
-            img = self.square_pad(img)
-            img_width, img_height = img.size
-
-        new_img_width, new_img_height = self.get_image_size_for_preprocess(
-            img_width, img_height
-        )
-        img = img.resize((new_img_width, new_img_height), Image.Resampling.BILINEAR)
-        window_size = self.determine_window_size(
-            max(new_img_height, new_img_width), min(new_img_height, new_img_width)
-        )
-
-        if window_size == 0 or not self.enable_patch:
-            return img, [], None
-        else:
-            new_img_width, new_img_height = self.get_image_size_for_crop(
-                new_img_width, new_img_height, window_size
-            )
-            if (new_img_width, new_img_height) != (img_width, img_height):
-                img_for_crop = img.resize(
-                    (new_img_width, new_img_height), Image.Resampling.BILINEAR
-                )
-            else:
-                img_for_crop = img
-
-            patches = []
-            newlines = []
-            center_list, (x_num, y_num) = self.slide_window(
-                new_img_width,
-                new_img_height,
-                [(window_size, window_size)],
-                [(window_size, window_size)],
-            )
-            for patch_id, center_lf_point in enumerate(center_list):
-                x, y, patch_w, patch_h = center_lf_point
-                big_patch = self.patch_crop(img_for_crop, y, x, patch_h, patch_w)
-                patches.append(big_patch)
-                if (patch_id + 1) % x_num == 0:
-                    newlines.append(patch_id)
-
-            if newlines and newlines[-1] == len(patches) - 1:
-                newlines.pop()
-
-            return (
-                img,
-                patches,
-                [i in newlines for i in range(len(patches))]
-                if len(patches) > 0
-                else None,
-            )
-
-
-class Step3VLProcessor:
-    def __init__(
-        self,
-        config: PretrainedConfig,
-        tokenizer: TokenizerLike,
-    ) -> None:
-        super().__init__()
-
-        self.config = config
-        self.tokenizer = tokenizer
-        self.image_size = 728
-        self.patch_size = 504
-        self.image_preprocessor = Step3VisionProcessor(
-            self.image_size, "bilinear", self.patch_size
-        )
-
-        self.num_image_feature_size = 169
-        self.num_patch_feature_size = 81
-        self.image_token = "<im_patch>"
-        self.image_feature_placeholder = self.image_token * self.num_image_feature_size
-        self.patch_feature_placeholder = self.image_token * self.num_patch_feature_size
-
-        # Respect vision config switch to enable/disable patch extraction.
-        # For video understanding, it's preferable to disable patch.
-        enable_patch = getattr(self.config.vision_config, "enable_patch", True)
-        self.patcher = ImagePatcher(enable_patch=enable_patch)
-
-    @property
-    def image_token_id(self) -> int:
-        return self.tokenizer.get_vocab()[self.image_token]
-
-    def get_num_image_tokens(self, img_width: int, img_height: int) -> int:
-        num_patches, num_newlines = self.patcher.get_num_patches(img_width, img_height)
-
-        return (
-            num_patches * (self.num_patch_feature_size + 2)
-            + self.num_image_feature_size
-            + 2
-            + num_newlines
-        )
-
-    def _split_images(self, images: list[Image.Image]) -> list[ImageWithPatches]:
-        result = []
-        for img in images:
-            result.append(self.patcher(img))
-        return result
-
-    def _convert_images_to_pixel_values(
-        self,
-        images: list[Image.Image],
-        is_patch: bool = False,
-    ) -> list[torch.Tensor]:
-        return [
-            self.image_preprocessor(img, is_patch=is_patch)["pixel_values"]
-            for img in images
-        ]
-
-    def _get_patch_repl(
-        self,
-        num_patches: int,
-        patch_newline_mask: list[bool] | None,
-    ) -> tuple[str, list[int]]:
-        text = ""
-        token_ids = []
-        for i in range(num_patches):
-            assert len(patch_newline_mask) == num_patches
-            text += f"<patch_start>{self.patch_feature_placeholder}<patch_end>"
-            token_ids.extend(
-                [self.tokenizer.convert_tokens_to_ids("<patch_start>")]
-                + [self.image_token_id] * self.num_patch_feature_size
-                + [self.tokenizer.convert_tokens_to_ids("<patch_end>")]
-            )
-            if patch_newline_mask and patch_newline_mask[i]:
-                text += "<patch_newline>"
-                token_ids.append(
-                    self.tokenizer.convert_tokens_to_ids("<patch_newline>")
-                )
-        return text, token_ids
-
-    def _get_image_repl(
-        self,
-        num_images: int,
-    ) -> tuple[str, list[int]]:
-        text = f"<im_start>{self.image_feature_placeholder}<im_end>"
-        token_ids = (
-            [self.tokenizer.convert_tokens_to_ids("<im_start>")]
-            + [self.image_token_id] * self.num_image_feature_size
-            + [self.tokenizer.convert_tokens_to_ids("<im_end>")]
-        )
-        return text * num_images, token_ids * num_images
-
-    def _get_image_repl_features(
-        self,
-        num_images: int,
-        num_patches: int,
-        patch_new_line_idx: list[bool] | None,
-    ) -> tuple[str, list[int]]:
-        if num_patches > 0:
-            patch_repl, patch_repl_ids = self._get_patch_repl(
-                num_patches, patch_new_line_idx
-            )
-        else:
-            patch_repl = ""
-            patch_repl_ids = []
-        image_repl, image_repl_ids = self._get_image_repl(num_images)
-        return patch_repl + image_repl, patch_repl_ids + image_repl_ids
-
-    def replace_placeholder(self, text: str, placeholder: str, repls: list[str]) -> str:
-        parts = text.split(placeholder)
-
-        if len(parts) - 1 != len(repls):
-            raise ValueError(
-                "The number of placeholders does not match the number of replacements."
-            )
-
-        result = [parts[0]]
-        for i, repl in enumerate(repls):
-            result.append(repl)
-            result.append(parts[i + 1])
-
-        return "".join(result)
-
-    def __call__(
-        self,
-        text: str | list[str] | None = None,
-        images: Image.Image | list[Image.Image] | None = None,
-        return_tensors: str | TensorType | None = None,
-    ) -> BatchFeature:
-        if text is None:
-            text = []
-        if not isinstance(text, list):
-            text = [text]
-        if images is None:
-            images = []
-        if not isinstance(images, list):
-            images = [images]
-
-        if len(images) == 0:
-            image_inputs = {}
-            text_inputs = self.tokenizer(text)
-        else:
-            split_images_data = self._split_images(images)
-            pixel_values_lst = []
-            patch_pixel_values_lst = []
-            patch_newline_mask_lst = []
-            image_repl_str_lst = []
-            image_repl_ids_lst = []
-            num_patches = []
-            for raw_img, img_patches, patch_newline_mask in split_images_data:
-                pixel_values_lst.extend(self._convert_images_to_pixel_values([raw_img]))
-
-                if len(img_patches) > 0:
-                    patch_pixel_values_lst.extend(
-                        self._convert_images_to_pixel_values(img_patches, is_patch=True)
-                    )
-                num_patches.append(len(img_patches))
-
-                image_repl_str, image_repl_ids = self._get_image_repl_features(
-                    1, len(img_patches), patch_newline_mask
-                )
-                image_repl_str_lst.append(image_repl_str)
-                image_repl_ids_lst.extend(image_repl_ids)
-
-                if patch_newline_mask is not None:
-                    patch_newline_mask_lst.extend(patch_newline_mask)
-
-            pixel_values = torch.cat(pixel_values_lst)
-            patch_size = self.patch_size
-            image_inputs = {
-                "pixel_values": pixel_values,
-                "num_patches": num_patches,
-                "patch_pixel_values": (
-                    torch.cat(patch_pixel_values_lst)
-                    if patch_pixel_values_lst
-                    else pixel_values.new_empty((0, 3, patch_size, patch_size))
-                ),
-                "patch_newline_mask": torch.tensor(
-                    patch_newline_mask_lst, dtype=torch.bool
-                ),
-            }
-
-            text = [
-                self.replace_placeholder(t, self.image_token, image_repl_str_lst)
-                for t in text
-            ]
-            text_inputs = self.tokenizer(text)
-
-        return BatchFeature(
-            {
-                **text_inputs,
-                **image_inputs,
-            },
-            tensor_type=return_tensors,
-        )
-
 
 class Step3VLProcessingInfo(BaseProcessingInfo):
+    def get_image_processor(self, **kwargs):
+        config = self.get_hf_config()
+
+        kwargs.setdefault(
+            "enable_patch",
+            getattr(config.vision_config, "enable_patch", True),
+        )
+
+        return Step3VLImageProcessor(**kwargs)
+
     def get_hf_processor(self) -> Step3VLProcessor:
         return Step3VLProcessor(
-            self.get_hf_config(),
-            self.get_tokenizer(),
+            tokenizer=self.get_tokenizer(),
+            image_processor=self.get_image_processor(),
         )
 
     def get_supported_mm_limits(self) -> Mapping[str, int | None]:
         return {"image": None}
 
     def get_max_image_tokens(self) -> int:
-        hf_processor = self.get_hf_processor()
-        return hf_processor.get_num_image_tokens(
-            self.get_image_size_with_most_features().width,
-            self.get_image_size_with_most_features().height,
-        )
+        image_processor = self.get_image_processor()
+        target_width, target_height = self.get_image_size_with_most_features()
+
+        return image_processor.get_num_image_tokens(target_width, target_height)
 
     def get_mm_max_tokens_per_item(
         self,
@@ -539,20 +128,7 @@ class Step3VLProcessingInfo(BaseProcessingInfo):
         return {"image": self.get_max_image_tokens()}
 
     def get_image_size_with_most_features(self) -> ImageSize:
-        return ImageSize(3024, 3024)
-
-    def get_num_mm_tokens(self, mm_data: MultiModalDataDict) -> int:
-        if len(mm_data) != 1 or "image" not in mm_data:
-            raise ValueError("mm_data could only contain one key 'image' for steo1o")
-
-        image_data = mm_data["image"]
-        if not isinstance(image_data, (list, tuple)):
-            image_data = [image_data]
-
-        return sum(
-            self.get_hf_processor().get_num_image_tokens(img.width, img.height)
-            for img in image_data
-        )
+        return ImageSize(MAX_IMAGE_SIZE, MAX_IMAGE_SIZE)
 
 
 class Step3VLDummyInputsBuilder(BaseDummyInputsBuilder[Step3VLProcessingInfo]):
@@ -594,13 +170,11 @@ class Step3VLMultiModalProcessor(BaseMultiModalProcessor[Step3VLProcessingInfo])
         def get_replacement_step1o(item_idx: int):
             out_item = out_mm_kwargs["image"][item_idx]
             num_patches = int(out_item["num_patches"].data)
-            if num_patches > 0:
-                patch_newline_mask = out_item["patch_newline_mask"].data
-                image_repl_ids = hf_processor._get_image_repl_features(
-                    1, num_patches, patch_newline_mask.tolist()
-                )[1]
-            else:
-                image_repl_ids = hf_processor._get_image_repl_features(1, 0, None)[1]
+            patch_newline_mask = out_item["patch_newline_mask"].data
+            image_repl_ids = hf_processor.get_image_repl_feature_ids(
+                1, num_patches, patch_newline_mask.tolist()
+            )
+
             return PromptUpdateDetails.select_token_id(
                 seq=image_repl_ids,
                 embed_token_id=image_placeholder_token_id,
@@ -918,7 +492,9 @@ class Step3VisionTransformer(nn.Module):
     info=Step3VLProcessingInfo,
     dummy_inputs=Step3VLDummyInputsBuilder,
 )
-class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP):
+class Step3VLForConditionalGeneration(
+    nn.Module, SupportsMultiModal, SupportsPP, SupportsEncoderCudaGraph
+):
     hf_to_vllm_mapper = WeightsMapper(
         orig_to_new_prefix={
             "model.": "language_model.model.",
@@ -941,6 +517,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         multimodal_config = vllm_config.model_config.multimodal_config
 
         self.config = config
+        self.model_config = vllm_config.model_config
         self.multimodal_config = multimodal_config
         self.use_data_parallel = multimodal_config.mm_encoder_tp_mode == "data"
 
@@ -1001,6 +578,42 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
     def dtype(self):
         return next(self.parameters()).dtype
 
+    @staticmethod
+    def _compute_spatial_tokens(size, patch_size, stride):
+        # Compute the number of spatial tokens after two rounds of
+        # downsampling with given patch size and stride.
+        grid = size // patch_size
+        vit_tokens = grid * grid
+        spatial = int(math.sqrt(vit_tokens))
+        h1 = (spatial - 2) // stride + 1
+        h2 = (h1 - 1) // 2 + 1
+        return h2 * h2
+
+    @property
+    def img_output_tokens(self) -> int:
+        return self._compute_spatial_tokens(
+            self.config.vision_config.image_size,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
+        )
+
+    @property
+    def patch_output_tokens(self) -> int:
+        return self._compute_spatial_tokens(
+            504,
+            self.config.vision_config.patch_size,
+            self.config.understand_projector_stride,
+        )
+
+    def _batched_encoder_forward(
+        self,
+        pixel_values: torch.Tensor,
+    ) -> torch.Tensor:
+        image_features = self._process_image_features(
+            self._get_vision_model_output(pixel_values)
+        )
+        return image_features.reshape(-1, image_features.shape[-1])
+
     def _parse_and_validate_image_input(
         self, **kwargs: object
     ) -> Step3VLImageInputs | None:
@@ -1023,7 +636,7 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         if image_embeds is not None:
             return Step3VLImageEmbeddingInputs(
                 type="image_embeds",
-                image_embeds=image_embeds.to(self.dtype),
+                data=image_embeds.to(self.dtype),
             )
 
         raise AssertionError("This line should be unreachable.")
@@ -1046,15 +659,19 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
         self, image_input: Step3VLImageInputs
     ) -> tuple[torch.Tensor, ...]:
         if image_input["type"] == "image_embeds":
-            image_features = image_input["image_embeds"]
-        else:
-            image_features = self._get_vision_model_output(image_input["pixel_values"])
-            patch_image_features = (
-                self._get_vision_model_output(image_input["patch_pixel_values"])
-                if len(image_input["patch_pixel_values"]) > 0
-                else None
-            )
-            num_patches = image_input["num_patches"]
+            image_features = image_input["data"]
+            return [
+                image_features[i].view(-1, image_features.shape[-1])
+                for i in range(image_features.shape[0])
+            ]
+
+        image_features = self._get_vision_model_output(image_input["pixel_values"])
+        patch_image_features = (
+            self._get_vision_model_output(image_input["patch_pixel_values"])
+            if len(image_input["patch_pixel_values"]) > 0
+            else None
+        )
+        num_patches = image_input["num_patches"]
 
         image_features = self._process_image_features(image_features)
         patch_image_features = (
@@ -1102,6 +719,226 @@ class Step3VLForConditionalGeneration(nn.Module, SupportsMultiModal, SupportsPP)
             multimodal_embeddings=multimodal_embeddings,
             is_multimodal=is_multimodal,
         )
+
+    # -- SupportsEncoderCudaGraph protocol methods --
+
+    def get_encoder_cudagraph_config(self):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphConfig,
+        )
+
+        return EncoderCudaGraphConfig(
+            modalities=["image"],
+            buffer_keys=[
+                "pixel_values",
+                "patch_pixel_values",
+            ],
+            out_hidden_size=self.config.hidden_size,
+            enable_dual_path_graph=True,
+            global_token_per_image=self.img_output_tokens,
+            local_token_per_patch=self.patch_output_tokens,
+        )
+
+    def get_encoder_cudagraph_budget_range(
+        self,
+        vllm_config: "VllmConfig",
+    ) -> tuple[int, int]:
+        min_budget = self.img_output_tokens
+        max_budget = min(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.model_config.max_model_len,
+        )
+        return min_budget, max_budget
+
+    def get_encoder_cudagraph_item_specs(
+        self,
+        mm_kwargs: dict[str, Any],
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import EncoderItemSpec
+
+        num_patches = mm_kwargs.get("num_patches")
+
+        img_grid = (
+            self.config.vision_config.image_size // self.config.vision_config.patch_size
+        )
+        patch_grid = 504 // self.config.vision_config.patch_size
+        total_image_pixel = img_grid * img_grid
+        total_patch_pixel = patch_grid * patch_grid
+
+        return [
+            EncoderItemSpec(
+                input_size=(total_image_pixel + num_patch * total_patch_pixel),
+                output_tokens=(
+                    self.img_output_tokens + num_patch * self.patch_output_tokens
+                ),
+                global_output_tokens=self.img_output_tokens,
+                local_output_tokens=num_patch * self.patch_output_tokens,
+            )
+            for num_patch in num_patches
+        ]
+
+    def select_encoder_cudagraph_items(
+        self,
+        mm_kwargs: dict[str, Any],
+        indices: list[int],
+    ) -> dict[str, Any]:
+        pixel_values = mm_kwargs["pixel_values"]
+        patch_pixel_values = mm_kwargs["patch_pixel_values"]
+        num_patches = mm_kwargs["num_patches"]
+
+        # calcute the accumulated patch counts
+        cum_patches = [0]
+        for p in num_patches:
+            cum_patches.append(cum_patches[-1] + p)
+
+        if len(indices) == 0:
+            return {
+                "pixel_values": pixel_values[:0],
+                "patch_pixel_values": patch_pixel_values[:0],
+                "num_patches": num_patches[:0],
+            }
+
+        selected_pv = pixel_values[indices]
+        selected_np = num_patches[indices]
+        selected_ppv = torch.cat(
+            [patch_pixel_values[cum_patches[i] : cum_patches[i + 1]] for i in indices]
+        )
+
+        return {
+            "pixel_values": selected_pv,
+            "patch_pixel_values": selected_ppv,
+            "num_patches": selected_np,
+        }
+
+    def prepare_encoder_cudagraph_capture_inputs(
+        self,
+        token_budget: int,
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        device: torch.device,
+        dtype: torch.dtype,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphCaptureInputs,
+        )
+
+        assert path in ("global", "local")
+        if path == "global":
+            max_num_images = token_budget // self.img_output_tokens
+            max_batch_size = min(max_batch_size, max_num_images)
+            dummy_pixel_values = torch.randn(
+                max_batch_size,
+                3,
+                self.config.vision_config.image_size,
+                self.config.vision_config.image_size,
+                device=device,
+                dtype=dtype,
+            )
+            values = {"pixel_values": dummy_pixel_values}
+        else:
+            max_num_patches = token_budget // self.patch_output_tokens
+            dummy_patch_pixel_values = torch.randn(
+                max_num_patches,
+                3,
+                504,
+                504,
+                device=device,
+                dtype=dtype,
+            )
+            values = {"patch_pixel_values": dummy_patch_pixel_values}
+
+        return EncoderCudaGraphCaptureInputs(
+            values=values,
+        )
+
+    def encoder_cudagraph_forward(
+        self,
+        values: dict[str, torch.Tensor],
+        path: str = "default",
+    ) -> torch.Tensor:
+        assert path in ("global", "local")
+        if path == "global":
+            return self._batched_encoder_forward(values["pixel_values"])
+        else:
+            return self._batched_encoder_forward(values["patch_pixel_values"])
+
+    def encoder_eager_forward(
+        self,
+        mm_kwargs: dict[str, Any],
+        path: str = "default",
+    ) -> torch.Tensor:
+        assert path in ("global", "local")
+        if path == "global":
+            return self._batched_encoder_forward(mm_kwargs["pixel_values"])
+        else:
+            return self._batched_encoder_forward(mm_kwargs["patch_pixel_values"])
+
+    def postprocess_encoder_output(
+        self,
+        output: torch.Tensor,
+        indices: list[int],
+        per_item_out_tokens: list[int],
+        dest: dict[int, torch.Tensor] | list[torch.Tensor | None],
+        clone: bool = False,
+        batch_mm_kwargs: dict[str, Any] | None = None,
+        local_output: torch.Tensor | None = None,
+    ):
+        """CPU-side per-item merge after dual-path graph replay.
+
+        ``output`` contains global-image features and ``local_output``
+        contains local-patch features (or ``None`` when there are no patches).
+        """
+        num_patches = batch_mm_kwargs["num_patches"]
+        hidden = output.shape[-1]
+        bsz = len(indices)
+
+        actual_np = [int(np) for np in num_patches]
+        total_patches = sum(actual_np)
+        img_tokens = bsz * self.img_output_tokens
+        patch_tokens = total_patches * self.patch_output_tokens
+
+        global_part = output[:img_tokens].reshape(bsz, self.img_output_tokens, hidden)
+        if total_patches > 0:
+            patch_part = local_output[:patch_tokens].reshape(
+                -1, self.patch_output_tokens, hidden
+            )
+        else:
+            patch_part = None
+
+        merged: dict[int, torch.Tensor] = {}
+        cur_patch = 0
+        for i, idx in enumerate(indices):
+            np = actual_np[i]
+            parts: list[torch.Tensor] = []
+            if patch_part is not None and np > 0:
+                parts.append(patch_part[cur_patch : cur_patch + np].reshape(-1, hidden))
+                cur_patch += np
+            parts.append(global_part[i].reshape(-1, hidden))
+            merged[idx] = torch.cat(parts, dim=0) if len(parts) > 1 else parts[0]
+
+        out = [merged[i] for i in indices]
+        for i, idx in enumerate(indices):
+            dest[idx] = out[i]
+
+    def prepare_encoder_cudagraph_replay_buffers(
+        self,
+        mm_kwargs: dict[str, Any],
+        max_batch_size: int,
+        max_frames_per_batch: int,
+        path: str = "default",
+    ):
+        from vllm.v1.worker.encoder_cudagraph_defs import (
+            EncoderCudaGraphReplayBuffers,
+        )
+
+        assert path in ("global", "local")
+        if path == "global":
+            values = {"pixel_values": mm_kwargs["pixel_values"]}
+        else:
+            values = {"patch_pixel_values": mm_kwargs["patch_pixel_values"]}
+
+        return EncoderCudaGraphReplayBuffers(values=values)
 
     def forward(
         self,

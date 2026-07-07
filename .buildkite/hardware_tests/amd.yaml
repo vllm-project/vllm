@@ -1,30 +1,75 @@
-group: Hardware - AMD Build 
+group: Hardware - AMD Build
 steps:
-  - label: "AMD: :docker: build image"
-    key: image-build-amd
+  # Ensure ci_base is up-to-date before building the test image.
+  # Compares a content hash of ci_base-affecting files against the remote
+  # image label. If hashes match the build is skipped (< 30 s); if they
+  # differ ci_base is rebuilt and pushed automatically.
+  - label: "AMD: :docker: ensure ci_base"
+    key: ensure-ci-base-amd
+    soft_fail: false
     depends_on: []
     device: amd_cpu
     no_plugin: true
     commands:
-    - >
-      docker build
-      --build-arg max_jobs=16
-      --build-arg REMOTE_VLLM=1
-      --build-arg ARG_PYTORCH_ROCM_ARCH='gfx942;gfx950'
-      --build-arg VLLM_BRANCH=$BUILDKITE_COMMIT
-      --tag "rocm/vllm-ci:${BUILDKITE_COMMIT}"
-      -f docker/Dockerfile.rocm
-      --target test
-      --no-cache
-      --progress plain .
-    - docker push "rocm/vllm-ci:${BUILDKITE_COMMIT}"
+      - bash .buildkite/scripts/ci-bake-rocm.sh ci-base-rocm-ci-with-deps
     env:
       DOCKER_BUILDKIT: "1"
+      VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+      PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
+      REMOTE_VLLM: "1"
+      VLLM_BRANCH: "$BUILDKITE_COMMIT"
     retry:
       automatic:
         - exit_status: -1  # Agent was lost
           limit: 1
         - exit_status: -10  # Agent was lost
           limit: 1
-        - exit_status: 1  # Machine occasionally fail
+
+  - label: "AMD: :docker: build test image and artifacts"
+    key: image-build-amd
+    soft_fail: false
+    depends_on:
+      - ensure-ci-base-amd
+    device: amd_cpu
+    no_plugin: true
+    commands:
+      - |
+        if [[ "${ROCM_CI_ARTIFACT_ONLY:-0}" == "1" ]]; then
+          echo "ROCM_CI_ARTIFACT_ONLY=1; building ROCm wheel artifact only"
+          IMAGE_TAG="" bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-artifacts
+        else
+          bash .buildkite/scripts/ci-bake-rocm.sh test-rocm-ci-with-wheel
+        fi
+      - |
+        docker run --rm --network=none --entrypoint /bin/bash "rocm/vllm-ci:${BUILDKITE_COMMIT}" -ec '
+          if [ ! -d /vllm-workspace ]; then echo Missing directory: /vllm-workspace >&2; exit 1; fi
+          if [ ! -d /vllm-workspace/tests ]; then echo Missing directory: /vllm-workspace/tests >&2; exit 1; fi
+          if [ ! -d /vllm-workspace/src/vllm ]; then echo Missing directory: /vllm-workspace/src/vllm >&2; exit 1; fi
+          if [ ! -x /vllm-workspace/src/vllm/vllm-rs ]; then echo Missing executable: /vllm-workspace/src/vllm/vllm-rs >&2; exit 1; fi
+          command -v python3
+          command -v uv
+          command -v pytest
+          if ! command -v amd-smi >/dev/null 2>&1 && ! command -v rocminfo >/dev/null 2>&1; then
+            echo No ROCm CLI found in image >&2
+            exit 1
+          fi
+          python3 - <<PY
+        import torch, vllm
+        print(torch.__version__)
+        print(vllm.__version__)
+        PY
+          echo AMD image smoke OK
+        '
+    env:
+      DOCKER_BUILDKIT: "1"
+      VLLM_BAKE_FILE: "docker/docker-bake-rocm.hcl"
+      PYTORCH_ROCM_ARCH: "gfx90a;gfx942;gfx950"
+      IMAGE_TAG: "rocm/vllm-ci:$BUILDKITE_COMMIT"
+      REMOTE_VLLM: "1"
+      VLLM_BRANCH: "$BUILDKITE_COMMIT"
+    retry:
+      automatic:
+        - exit_status: -1  # Agent was lost
+          limit: 1
+        - exit_status: -10  # Agent was lost
           limit: 1

@@ -5,6 +5,7 @@ from asyncio import Lock
 from collections import defaultdict
 from http import HTTPStatus
 
+from vllm.config import ModelConfig
 from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
@@ -17,7 +18,7 @@ from vllm.entrypoints.serve.lora.protocol import (
     LoadLoRAAdapterRequest,
     UnloadLoRAAdapterRequest,
 )
-from vllm.entrypoints.utils import create_error_response
+from vllm.entrypoints.serve.utils.error_response import create_error_response
 from vllm.exceptions import LoRAAdapterNotFoundError
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
@@ -25,6 +26,58 @@ from vllm.lora.resolver import LoRAResolver, LoRAResolverRegistry
 from vllm.utils.counter import AtomicCounter
 
 logger = init_logger(__name__)
+
+
+class OpenAIModelRegistry:
+    """Read-only view of the loaded base models with no engine dependency.
+
+    Suitable for CPU-only / render-only contexts that have no engine client
+    and no LoRA support.
+    """
+
+    def __init__(
+        self,
+        model_config: ModelConfig,
+        base_model_paths: list[BaseModelPath],
+    ) -> None:
+        self.model_config = model_config
+        self.base_model_paths = base_model_paths
+        self.lora_requests: dict[str, LoRARequest] = {}
+
+    def model_name(self, lora_request: LoRARequest | None = None) -> str:
+        return self.base_model_paths[0].name
+
+    def is_base_model(self, model_name: str) -> bool:
+        return any(model.name == model_name for model in self.base_model_paths)
+
+    async def check_model(self, model_name: str | None) -> ErrorResponse | None:
+        """Return an ErrorResponse if model_name is not served, else None."""
+        if not model_name or self.is_base_model(model_name):
+            return None
+        return create_error_response(
+            message=f"The model `{model_name}` does not exist.",
+            err_type="NotFoundError",
+            status_code=HTTPStatus.NOT_FOUND,
+            param="model",
+        )
+
+    async def show_available_models(self) -> ModelList:
+        """Show available models (base models only)."""
+        max_model_len = self.model_config.max_model_len
+        return ModelList(
+            data=[
+                ModelCard(
+                    id=base_model.name,
+                    max_model_len=max_model_len,
+                    root=base_model.model_path,
+                    permission=[ModelPermission()],
+                )
+                for base_model in self.base_model_paths
+            ]
+        )
+
+    async def resolve_lora(self, lora_name: str):
+        raise RuntimeError("The OpenAIModelRegistry has no LoRA support.")
 
 
 class OpenAIServingModels:
@@ -45,6 +98,11 @@ class OpenAIServingModels:
     ):
         super().__init__()
 
+        self.registry = OpenAIModelRegistry(
+            model_config=engine_client.model_config,
+            base_model_paths=base_model_paths,
+        )
+
         self.engine_client = engine_client
         self.base_model_paths = base_model_paths
 
@@ -61,7 +119,6 @@ class OpenAIServingModels:
 
         self.model_config = self.engine_client.model_config
         self.renderer = self.engine_client.renderer
-        self.io_processor = self.engine_client.io_processor
         self.input_processor = self.engine_client.input_processor
 
     async def init_static_loras(self):
@@ -71,7 +128,9 @@ class OpenAIServingModels:
             return
         for lora in self.static_lora_modules:
             load_request = LoadLoRAAdapterRequest(
-                lora_path=lora.path, lora_name=lora.name
+                lora_path=lora.path,
+                lora_name=lora.name,
+                is_3d_lora_weight=lora.is_3d_lora_weight,
             )
             load_result = await self.load_lora_adapter(
                 request=load_request, base_model_name=lora.base_model_name
@@ -79,34 +138,18 @@ class OpenAIServingModels:
             if isinstance(load_result, ErrorResponse):
                 raise ValueError(load_result.error.message)
 
-    def is_base_model(self, model_name) -> bool:
-        return any(model.name == model_name for model in self.base_model_paths)
+    def is_base_model(self, model_name: str) -> bool:
+        return self.registry.is_base_model(model_name)
 
     def model_name(self, lora_request: LoRARequest | None = None) -> str:
-        """Returns the appropriate model name depending on the availability
-        and support of the LoRA or base model.
-        Parameters:
-        - lora: LoRARequest that contain a base_model_name.
-        Returns:
-        - str: The name of the base model or the first available model path.
-        """
         if lora_request is not None:
             return lora_request.lora_name
         return self.base_model_paths[0].name
 
     async def show_available_models(self) -> ModelList:
-        """Show available models. This includes the base model and all adapters."""
-        max_model_len = self.model_config.max_model_len
-
-        model_cards = [
-            ModelCard(
-                id=base_model.name,
-                max_model_len=max_model_len,
-                root=base_model.model_path,
-                permission=[ModelPermission()],
-            )
-            for base_model in self.base_model_paths
-        ]
+        """Show available models. This includes the base model and all
+        adapters."""
+        model_list = await self.registry.show_available_models()
         lora_cards = [
             ModelCard(
                 id=lora.lora_name,
@@ -118,8 +161,8 @@ class OpenAIServingModels:
             )
             for lora in self.lora_requests.values()
         ]
-        model_cards.extend(lora_cards)
-        return ModelList(data=model_cards)
+        model_list.data.extend(lora_cards)
+        return model_list
 
     async def load_lora_adapter(
         self, request: LoadLoRAAdapterRequest, base_model_name: str | None = None
@@ -143,6 +186,7 @@ class OpenAIServingModels:
                 lora_int_id=lora_int_id,
                 lora_path=lora_path,
                 load_inplace=request.load_inplace,
+                is_3d_lora_weight=request.is_3d_lora_weight,
             )
             if base_model_name is not None and self.is_base_model(base_model_name):
                 lora_request.base_model_name = base_model_name
@@ -157,10 +201,16 @@ class OpenAIServingModels:
                         lora_request.lora_name, lora_request.lora_path
                     )
                 ) in str(e):
-                    raise LoRAAdapterNotFoundError(
-                        lora_request.lora_name, lora_request.lora_path
-                    ) from e
-                raise
+                    return create_error_response(
+                        LoRAAdapterNotFoundError(
+                            lora_request.lora_name, lora_request.lora_path
+                        )
+                    )
+                return create_error_response(
+                    message=str(e),
+                    err_type="InternalServerError",
+                    status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
+                )
 
             self.lora_requests[lora_name] = lora_request
             logger.info(

@@ -33,7 +33,7 @@ TRUTH = [
 
 TOKENIZERS = [
     "facebook/opt-125m",
-    "gpt2",
+    "openai-community/gpt2",
     "bigcode/tiny_starcoder_py",
     "EleutherAI/gpt-j-6b",
     "EleutherAI/pythia-70m",

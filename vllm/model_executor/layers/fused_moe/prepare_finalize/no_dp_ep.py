@@ -30,7 +30,8 @@ def _quantize_input(
         quant_dtype=quant_config.quant_dtype,
         per_act_token_quant=quant_config.per_act_token_quant,
         block_shape=quant_config.block_shape,
-        is_fp4_scale_swizzled=quant_config.is_nvfp4_scale_swizzled,
+        is_scale_swizzled=quant_config.is_scale_swizzled,
+        mx_alignment=quant_config.mx_alignment,
     )
 
     return a1q, a1q_scale
@@ -70,7 +71,6 @@ class MoEPrepareAndFinalizeNoDPEPModular(mk.FusedMoEPrepareAndFinalizeModular):
             assert topk == 1, (
                 "apply_router_weight_on_input is only implemented for topk=1"
             )
-            # Note: do not use inplace for shared experts overlap
             a1 = a1 * topk_weights.to(a1.dtype)
 
         a1q, a1q_scale = _quantize_input(a1, quant_config, defer_input_quant)

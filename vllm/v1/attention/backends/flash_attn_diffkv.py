@@ -4,15 +4,23 @@
 
 import torch
 
+from vllm.logger import init_logger
+from vllm.platforms import current_platform
+from vllm.utils.torch_utils import (
+    canonicalize_singleton_dim_strides,
+    is_quantized_kv_cache,
+)
 from vllm.v1.attention.backend import AttentionType
-from vllm.v1.attention.backends.fa_utils import is_flash_attn_varlen_func_available
+from vllm.v1.attention.backends.fa_utils import (
+    get_flash_attn_version,
+    is_flash_attn_varlen_func_available,
+)
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
     triton_reshape_and_cache_flash_diffkv,
 )
 
 if is_flash_attn_varlen_func_available():
     from vllm.v1.attention.backends.fa_utils import flash_attn_varlen_func
-from vllm.logger import init_logger
 from vllm.v1.attention.backends.utils import get_kv_cache_layout
 
 from .flash_attn import (
@@ -33,6 +41,30 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
     def set_head_size_v(cls, head_size_v: int) -> None:
         cls.head_size_v = head_size_v
 
+    @classmethod
+    def is_supported_on_current_device(
+        cls,
+        head_size: int,
+        head_size_v: int,
+        has_sinks: bool,
+    ) -> bool:
+        """Check whether FA3/4 with this DiffKV config is usable here.
+
+        DiffKV (hdim_qk != hdim_v) requires FA3 or FA4
+        """
+        if not is_flash_attn_varlen_func_available():
+            return False
+        try:
+            version = get_flash_attn_version(
+                requires_alibi=False,
+                head_size=head_size,
+                head_size_v=head_size_v,
+                has_sinks=has_sinks,
+            )
+        except Exception:
+            return False
+        return version in (3, 4)
+
     @staticmethod
     def get_name() -> str:
         return "FLASH_ATTN_DIFFKV"
@@ -41,8 +73,6 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
     def get_impl_cls() -> type["FlashAttentionImpl"]:
         return FlashAttentionDiffKVImpl
 
-    # Do not modify the interface of get_kv_cache_shape,
-    # but consider head_size_v when returning result.
     @staticmethod
     def get_kv_cache_shape(
         num_blocks: int,
@@ -85,6 +115,54 @@ class FlashAttentionDiffKVBackend(FlashAttentionBackend):
 
 
 class FlashAttentionDiffKVImpl(FlashAttentionImpl):
+    vllm_flash_attn_version: int | None
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        # Re-derive the FA version with diff-kv context so that
+        # get_flash_attn_version can apply the FA3 -> FA4 upgrade rule
+        # for sinks + hdim != hdim_v.
+        self.vllm_flash_attn_version = get_flash_attn_version(
+            requires_alibi=self.alibi_slopes is not None,
+            head_size=self.head_size,
+            head_size_v=FlashAttentionDiffKVBackend.head_size_v,
+            has_sinks=self.sinks is not None,
+        )
+
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
+        key: torch.Tensor,
+        value: torch.Tensor,
+        kv_cache: torch.Tensor,
+        slot_mapping: torch.Tensor,
+    ) -> None:
+        if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
+            # For encoder attention,
+            # we use direct Q, K, V tensors without caching
+            return
+
+        # Unlike standard FlashAttn which splits kv_cache via unbind(0),
+        # DiffKV packs K and V into a single tensor along the last dim:
+        #   kv_cache shape: [num_blocks, block_size, num_kv_heads,
+        #                    head_size_k + head_size_v]
+        # The triton kernel handles this combined layout directly.
+        #
+        # NOTE(woosuk): key and value are padded while slot_mapping is
+        # not padded. However, we don't need to do key[:num_actual_tokens]
+        # and value[:num_actual_tokens] because the reshape_and_cache_flash
+        # op uses the slot_mapping's shape to determine the number of
+        # actual tokens.
+        triton_reshape_and_cache_flash_diffkv(
+            key,
+            value,
+            kv_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
+        )
+
     def forward(
         self,
         layer: torch.nn.Module,
@@ -93,7 +171,7 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
         value: torch.Tensor,
         kv_cache: torch.Tensor,
         attn_metadata: FlashAttentionMetadata,
-        output: torch.Tensor | None = None,
+        output: torch.Tensor,
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
@@ -112,7 +190,6 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
               {q,k,v}_descale to be (num_sequences, num_kv_heads).
               We use torch's .expand() to avoid duplicating values
         """
-        assert output is not None, "Output tensor must be provided."
         assert self.vllm_flash_attn_version is not None, (
             "FlashAttention version not detected."
         )
@@ -156,41 +233,28 @@ class FlashAttentionDiffKVImpl(FlashAttentionImpl):
         # Different head_size for K and V
         key_cache = kv_cache[..., : self.head_size]
         value_cache = kv_cache[..., self.head_size :]
-
-        # key and value may be None in the case of cross attention. They are
-        # calculated once based on the output from the encoder and then cached
-        # in KV cache.
-        if (
-            self.kv_sharing_target_layer_name is None
-            and key is not None
-            and value is not None
-        ):
-            # Reshape the input keys and values and store them in the cache.
-            # Skip this if sharing KV cache with an earlier attention layer.
-            # NOTE(woosuk): Here, key and value are padded while slot_mapping is
-            # not padded. However, we don't need to do key[:num_actual_tokens]
-            # and value[:num_actual_tokens] because the reshape_and_cache_flash
-            # op uses the slot_mapping's shape to determine the number of
-            # actual tokens.
-
-            # kv_cache update for different head_size K and V
-            triton_reshape_and_cache_flash_diffkv(
-                key,
-                value,
-                kv_cache,
-                attn_metadata.slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
+        # Fix degenerate strides on size-1 dims (e.g. num_kv_heads=1 with TP).
+        # FA3/4 on H100+ uses TMA, which requires ≥16-byte stride alignment.
+        # See vllm.utils.torch_utils.canonicalize_singleton_dim_strides.
+        fixed_k = canonicalize_singleton_dim_strides(key_cache)
+        fixed_v = canonicalize_singleton_dim_strides(value_cache)
+        if fixed_k is not key_cache or fixed_v is not value_cache:
+            logger.debug(
+                "Canonicalized degenerate KV cache strides (FlashAttentionDiffKV): "
+                "shape=%s, key strides before=%s after=%s, "
+                "value strides before=%s after=%s",
+                key_cache.shape,
+                key_cache.stride(),
+                fixed_k.stride(),
+                value_cache.stride(),
+                fixed_v.stride(),
             )
+        key_cache, value_cache = fixed_k, fixed_v
 
-        if self.kv_cache_dtype.startswith("fp8"):
+        if is_quantized_kv_cache(self.kv_cache_dtype):
             # queries are quantized in the attention layer
-            dtype = FlashAttentionBackend.get_fp8_dtype_for_flashattn(
-                self.kv_cache_dtype
-            )
-            key_cache = key_cache.view(dtype)
-            value_cache = value_cache.view(dtype)
+            key_cache = key_cache.view(current_platform.fp8_dtype())
+            value_cache = value_cache.view(current_platform.fp8_dtype())
 
         if not attn_metadata.use_cascade:
             cu_seqlens_q = attn_metadata.query_start_loc

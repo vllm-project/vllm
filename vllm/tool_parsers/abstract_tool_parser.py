@@ -2,31 +2,40 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import importlib
+import json
 import os
 from collections.abc import Callable, Sequence
 from functools import cached_property
+from typing import Any
 
-from openai.types.responses.response_format_text_json_schema_config import (
+from openai.types.responses import (
     ResponseFormatTextJSONSchemaConfig,
+    ResponseTextConfig,
 )
+from openai.types.responses.function_tool import FunctionTool
 
-from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
+import vllm.envs as envs
+from vllm.entrypoints.openai.chat_completion.protocol import (
+    ChatCompletionRequest,
+    ChatCompletionToolsParam,
+)
 from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ExtractedToolCallInformation,
 )
 from vllm.entrypoints.openai.responses.protocol import (
     ResponsesRequest,
-    ResponseTextConfig,
 )
 from vllm.logger import init_logger
 from vllm.sampling_params import (
     StructuredOutputsParams,
 )
 from vllm.tokenizers import TokenizerLike
-from vllm.tool_parsers.utils import get_json_schema_from_tools
+from vllm.tool_parsers.utils import Tool, get_json_schema_from_tools
 from vllm.utils.collection_utils import is_list_of
 from vllm.utils.import_utils import import_from_path
+
+__all__ = ["Tool"]
 
 logger = init_logger(__name__)
 
@@ -38,7 +47,34 @@ class ToolParser:
     derived classes.
     """
 
-    def __init__(self, tokenizer: TokenizerLike):
+    # When True (default), the serving layer uses the standard JSON-based
+    # parsing for tool_choice="required" and named function tool_choice,
+    # which works for models where guided decoding produces well-formed
+    # JSON output (e.g. Hermes).
+    # Subclasses set False when the standard parsing does not work for
+    # their model's output format (e.g. GLM models that use XML).  When
+    # False, the serving layer falls back to the tool_parser's
+    # extract_tool_calls / extract_tool_calls_streaming methods for
+    # required/named tool_choice, treating them the same as "auto".
+    supports_required_and_named: bool = True
+    # xgrammar builtin structural tag model key. Subclasses set this when
+    # their parsed tool-call syntax matches a builtin xgrammar format.
+    structural_tag_model: str | None = None
+    engine_based_streaming: bool = False
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        if (
+            cls.structural_tag_model is not None
+            and envs.VLLM_ENFORCE_STRICT_TOOL_CALLING
+        ):
+            cls.supports_required_and_named = False
+
+    def __init__(
+        self,
+        tokenizer: TokenizerLike,
+        tools: list[Tool] | None = None,
+    ):
         self.prev_tool_call_arr: list[dict] = []
         # the index of the tool call that is currently being parsed
         self.current_tool_id: int = -1
@@ -46,6 +82,33 @@ class ToolParser:
         self.streamed_args_for_tool: list[str] = []
 
         self.model_tokenizer = tokenizer
+        if tools:
+            self.tools: list[ChatCompletionToolsParam | FunctionTool] = [
+                tool
+                for tool in tools
+                if isinstance(tool, (ChatCompletionToolsParam, FunctionTool))
+            ]
+        else:
+            self.tools = []
+
+    def get_remaining_unstreamed_args(self) -> str:
+        """Return tool call arguments parsed but not yet streamed."""
+        if not self.prev_tool_call_arr:
+            return ""
+        index = len(self.prev_tool_call_arr) - 1
+        args = self.prev_tool_call_arr[index].get("arguments", {})
+        if isinstance(args, str):
+            expected = args
+        else:
+            expected = json.dumps(args, ensure_ascii=False)
+        actual = (
+            self.streamed_args_for_tool[index]
+            if index < len(self.streamed_args_for_tool)
+            else ""
+        )
+        if expected.startswith(actual):
+            return expected[len(actual) :]
+        return ""
 
     @cached_property
     def vocab(self) -> dict[str, int]:
@@ -53,12 +116,24 @@ class ToolParser:
         # whereas all tokenizers have .get_vocab()
         return self.model_tokenizer.get_vocab()
 
-    def adjust_request(self, request: ChatCompletionRequest) -> ChatCompletionRequest:
-        """
-        Static method that used to adjust the request parameters.
-        """
+    def adjust_request(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+    ) -> ChatCompletionRequest | ResponsesRequest:
+        # If there are no tools, return the request as is.
         if not request.tools:
             return request
+
+        # Set structured output params when tool constraints are derived from
+        # the tool schema. Unified parsers handle model-specific structural
+        # tags before calling into the tool parser.
+        structured_outputs = getattr(request, "structured_outputs", None)
+        if (
+            structured_outputs is not None
+            and structured_outputs.structural_tag is not None
+        ):
+            return request
+
         json_schema_from_tool = get_json_schema_from_tools(
             tool_choice=request.tool_choice, tools=request.tools
         )
@@ -68,20 +143,46 @@ class ToolParser:
                 # tool_choice: "Forced Function" or "required" will override
                 # structured output json settings to make tool calling work correctly
                 request.structured_outputs = StructuredOutputsParams(
-                    json=json_schema_from_tool
+                    json=json_schema_from_tool  # type: ignore[call-arg]
                 )
                 request.response_format = None
             if isinstance(request, ResponsesRequest):
-                request.text = ResponseTextConfig()
-                request.text.format = ResponseFormatTextJSONSchemaConfig(
-                    name="tool_calling_response",
-                    schema=json_schema_from_tool,
-                    type="json_schema",
-                    description="Response format for tool calling",
-                    strict=True,
+                # Single-shot construction so Pydantic v2 tracks `format`
+                # in __fields_set__ — assigning to `.format` after the bare
+                # `ResponseTextConfig()` constructor does not, which can
+                # drop the nested config from `model_dump`. Also drop the
+                # `description` kwarg: it is not a field on
+                # ResponseFormatTextJSONSchemaConfig and was being silently
+                # passed through as extra.
+                request.text = ResponseTextConfig(
+                    format=ResponseFormatTextJSONSchemaConfig(
+                        type="json_schema",
+                        name="tool_calling_response",
+                        schema=json_schema_from_tool,
+                        strict=True,
+                    )
                 )
 
         return request
+
+    def get_structural_tag(
+        self,
+        request: ChatCompletionRequest | ResponsesRequest,
+        *,
+        reasoning: bool = False,
+    ):
+        if self.structural_tag_model is None:
+            return None
+        if not envs.VLLM_ENFORCE_STRICT_TOOL_CALLING:
+            return None
+        from vllm.tool_parsers.structural_tag_registry import get_model_structural_tag
+
+        return get_model_structural_tag(
+            model=self.structural_tag_model,
+            tools=request.tools,
+            tool_choice=request.tool_choice,
+            reasoning=reasoning,
+        )
 
     def extract_tool_calls(
         self, model_output: str, request: ChatCompletionRequest
