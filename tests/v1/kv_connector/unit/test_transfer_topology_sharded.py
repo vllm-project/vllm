@@ -22,6 +22,17 @@ class _FakeAttentionBackend:
         return (2, num_blocks, num_kv_heads, block_size, head_size)
 
 
+class _FakeCPUAttentionBackend:
+    @staticmethod
+    def get_kv_cache_shape(
+        num_blocks: int,
+        block_size: int,
+        num_kv_heads: int,
+        head_size: int,
+    ) -> tuple[int, int, int, int]:
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
+
+
 def _make_topology(
     *,
     tp_rank: int = 1,
@@ -38,6 +49,23 @@ def _make_topology(
         total_num_kv_heads=total_num_kv_heads,
         attn_backends=[_FakeAttentionBackend],
     )
+
+
+def test_cpu_four_dimensional_cache_is_virtually_split_by_block() -> None:
+    topology = TransferTopology(
+        tp_rank=0,
+        tp_size=1,
+        block_size=16,
+        engine_id="local-engine",
+        is_mla=False,
+        is_mamba=False,
+        total_num_kv_heads=8,
+        attn_backends=[_FakeCPUAttentionBackend],
+    )
+
+    assert topology.is_kv_layout_blocks_first
+    assert topology.virtually_split_kv_in_blocks
+    assert not topology.split_k_and_v
 
 
 def test_legacy_register_remote_engine_uses_pp_rank_zero() -> None:

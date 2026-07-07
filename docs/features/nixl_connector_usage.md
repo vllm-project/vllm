@@ -112,6 +112,16 @@ python tests/v1/kv_connector/nixl_integration/toy_proxy_server.py \
   --decoder-ports 8200
 ```
 
+## CPU backend
+
+For CPU backend P/D, use a NIXL build with CPU/UCX support, set
+`VLLM_CPU_KVCACHE_SPACE`, and include `kv_buffer_device="cpu"` in the
+producer and consumer `--kv-transfer-config` values. Do not set
+`CUDA_VISIBLE_DEVICES` or GPU-only flags such as `--gpu-memory-utilization`.
+
+CPU P/D with `NixlConnector` still uses NIXL transport and
+`kv_transfer_params`; `shared_storage_path` is not a `NixlConnector` option.
+
 ## Environment Variables
 
 - `VLLM_NIXL_SIDE_CHANNEL_PORT`: Port for NIXL handshake communication
