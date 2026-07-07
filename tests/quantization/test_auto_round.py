@@ -400,7 +400,7 @@ def test_wna16_xpu_int2_prefers_ark_when_available(monkeypatch) -> None:
     monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear.get_ark_state",
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_ark_ops.get_ark_state",
         lambda: (True, None, object(), DummyQuantLinear),
     )
 
@@ -419,7 +419,7 @@ def test_wna16_xpu_int2_requires_ark_when_unavailable(monkeypatch) -> None:
     monkeypatch.setattr(current_platform, "is_xpu", lambda: True)
     monkeypatch.setattr(current_platform, "is_cpu", lambda: False)
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear.get_ark_state",
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_ark_ops.get_ark_state",
         lambda: (False, "missing", None, None),
     )
 
@@ -441,7 +441,7 @@ def test_wna16_xpu_int2_unsupported_config_still_raises(monkeypatch) -> None:
 
     with pytest.raises(NotImplementedError, match="unsupported config"):
         INCWna16Scheme().get_linear_method(
-            make_config(bits=2, sym=False),
+            make_config(weight_bits=2, sym=False),
             object(),
             "layer",
             make_layer_config(bits=2, sym=False),
@@ -465,7 +465,7 @@ def test_inc_ark_linear_method_xpu_int2_create_weights(monkeypatch) -> None:
         pass
 
     monkeypatch.setattr(
-        "vllm.model_executor.layers.quantization.inc.schemes.inc_wna16_linear.get_ark_state",
+        "vllm.model_executor.layers.quantization.inc.schemes.inc_ark_ops.get_ark_state",
         lambda: (True, None, object(), DummyQuantLinear),
     )
 
