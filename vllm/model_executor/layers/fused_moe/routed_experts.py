@@ -888,7 +888,7 @@ class RoutedExperts(PluggableLayer):
                 if is_fused:
                     # w1 and w3 share one fused tensor; use a local copy so the
                     # transpose below doesn't mutate loaded_weight across
-                    # iterations (else w3 gets transposed twice and mis-chunked).
+                    # iterations (else w3 is transposed twice and wrongly chunked)
                     fused_weight = loaded_weight
                     if shard_id in {"w1", "w3"}:
                         if fused_weight.shape[-1] != unpadded_hidden:
