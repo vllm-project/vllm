@@ -8,6 +8,7 @@ purposes.
 
 import argparse
 import json
+import os
 import ssl
 from collections.abc import Sequence
 from dataclasses import field
@@ -378,6 +379,34 @@ def make_arg_parser(parser: FlexibleArgumentParser) -> FlexibleArgumentParser:
         "server. Requires: pip install vllm[grpc].",
     )
     parser = FrontendArgs.add_cli_args(parser)
+
+    parser.add_argument(
+        "--enable-batch-api",
+        action="store_true",
+        default=False,
+        help="Enable the OpenAI-compatible Files and Batches API endpoints "
+        "(/v1/files and /v1/batches). Disabled by default; when disabled "
+        "those endpoints return 501. Enabling activates on-disk batch "
+        "storage under --batch-storage-dir.")
+    parser.add_argument(
+        "--batch-storage-dir",
+        type=str,
+        default=os.path.expanduser("~/.vllm/batches"),
+        help="Directory for storing batch files and metadata. "
+        "Default: ~/.vllm/batches")
+    parser.add_argument(
+        "--batch-retention-hours",
+        type=int,
+        default=24,
+        help="Hours to retain completed batches before cleanup. "
+        "Set to 0 to disable automatic cleanup. Default: 24")
+    parser.add_argument(
+        "--batch-priority",
+        type=int,
+        default=0,
+        help="Priority value for batch requests. Higher values = lower "
+        "priority. Online requests use 0. Set to >0 only if the model "
+        "is served with priority scheduling enabled. Default: 0")
     parser = AsyncEngineArgs.add_cli_args(parser)
 
     return parser
