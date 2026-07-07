@@ -939,7 +939,7 @@ class OpenAIServingResponses(GenerateBaseServing):
         # breakdown reflects only the final turn. Total wall-clock time
         # is still correct.
         if hasattr(context, "last_output") and context.last_output is not None:
-            request_metadata.finished_stats = context.last_output.finished_stats
+            request_metadata._finished_stats = context.last_output.finished_stats
 
         if request.store:
             async with self.response_store_lock:

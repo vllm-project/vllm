@@ -1024,7 +1024,7 @@ class OpenAIServingChat(GenerateBaseServing):
         )
 
         request_metadata.final_usage_info = usage
-        request_metadata.finished_stats = final_res.finished_stats
+        request_metadata._finished_stats = final_res.finished_stats
 
         per_request_metrics: PerRequestTimingMetrics | None = None
         if (

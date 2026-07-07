@@ -5,13 +5,14 @@
 # https://github.com/lm-sys/FastChat/blob/168ccc29d3f7edc50823016105c024fe2282732a/fastchat/protocol/openai_api_protocol.py
 import time
 from http import HTTPStatus
-from typing import Any, ClassVar, Literal, TypeAlias
+from typing import TYPE_CHECKING, Any, ClassVar, Literal, TypeAlias
 
 import regex as re
 from pydantic import (
     BaseModel,
     ConfigDict,
     Field,
+    PrivateAttr,
     model_serializer,
     model_validator,
 )
@@ -21,7 +22,9 @@ from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.utils import random_uuid
 from vllm.utils.import_utils import resolve_obj_by_qualname
-from vllm.v1.metrics.stats import FinishedRequestStats
+
+if TYPE_CHECKING:
+    from vllm.v1.metrics.stats import FinishedRequestStats
 
 logger = init_logger(__name__)
 
@@ -125,11 +128,12 @@ class PerRequestTimingMetrics(OpenAIBaseModel):
 
 
 class RequestResponseMetadata(BaseModel):
-    model_config = ConfigDict(arbitrary_types_allowed=True)
-
     request_id: str
     final_usage_info: UsageInfo | None = None
-    finished_stats: FinishedRequestStats | None = None
+    # Opaque carrier for the x-vllm-* response headers, read by
+    # request_stats_headers_middleware. A PrivateAttr (not a validated field)
+    # so pydantic never introspects FinishedRequestStats.
+    _finished_stats: "FinishedRequestStats | None" = PrivateAttr(default=None)
 
 
 class JsonSchemaResponseFormat(OpenAIBaseModel):

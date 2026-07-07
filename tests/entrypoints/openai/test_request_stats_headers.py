@@ -70,7 +70,7 @@ def _create_test_app() -> FastAPI:
     @app.get("/with-stats")
     async def with_stats(request: Request) -> JSONResponse:
         meta = RequestResponseMetadata(request_id="r")
-        meta.finished_stats = _stats()
+        meta._finished_stats = _stats()
         request.state.request_metadata = meta
         return JSONResponse({"ok": True})
 
@@ -113,3 +113,17 @@ async def test_middleware_passes_through_when_metadata_missing():
         resp = await c.get("/no-metadata")
     assert resp.status_code == 200
     assert "x-vllm-decode-time" not in resp.headers
+
+
+def test_finished_stats_is_private_not_a_schema_field():
+    # The stats carrier must not be a validated/serialized pydantic field:
+    # that is what dragged FinishedRequestStats into pydantic introspection.
+    assert "finished_stats" not in RequestResponseMetadata.model_fields
+    assert "_finished_stats" in RequestResponseMetadata.__private_attributes__
+
+    meta = RequestResponseMetadata(request_id="r")
+    assert meta._finished_stats is None
+    assert "finished_stats" not in meta.model_dump()
+
+    meta._finished_stats = _stats()
+    assert meta._finished_stats.request_id == "req-1"

@@ -624,7 +624,7 @@ class OpenAIServingCompletion(GenerateBaseServing):
             and len(final_res_batch) == 1
             and (request.n or 1) == 1
         ):
-            request_metadata.finished_stats = last_final_res.finished_stats
+            request_metadata._finished_stats = last_final_res.finished_stats
 
         per_request_metrics: PerRequestTimingMetrics | None = None
         if (

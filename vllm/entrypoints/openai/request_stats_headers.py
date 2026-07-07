@@ -47,8 +47,9 @@ async def request_stats_headers_middleware(
     """
     response = await call_next(request)
     metadata = getattr(request.state, "request_metadata", None)
-    if metadata is None or metadata.finished_stats is None:
+    if metadata is None or metadata._finished_stats is None:
         return response
-    for key, value in build_request_stats_headers(metadata.finished_stats).items():
+    headers = build_request_stats_headers(metadata._finished_stats)
+    for key, value in headers.items():
         response.headers[key] = value
     return response
