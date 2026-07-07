@@ -933,12 +933,11 @@ class OpenAIServingChat(GenerateBaseServing):
             # In OpenAI's API, when a tool is called, the finish_reason is:
             # "tool_calls" for "auto" or "required" tool calls,
             # and "stop" for named tool calls.
-            required_tools_called = (
-                request.tool_choice == "required"
+            is_finish_reason_tool_calls = auto_tools_called or (
+                request.tool_choice
+                and request.tool_choice == "required"
                 and output.finish_reason == "stop"
-                and bool(tool_calls)
             )
-            is_finish_reason_tool_calls = auto_tools_called or required_tools_called
 
             # Encode routed_experts for transport. JSON can't carry raw
             # bytes, so we write the ndarray as a ``.npy`` byte stream
