@@ -1326,9 +1326,7 @@ def _get_kv_cache_config_unpacked(
     kv_cache_tensors: list[KVCacheTensor] = []
     for ps, slots in buckets.items():
         for slot in slots:
-            kv_cache_tensors.append(
-                KVCacheTensor(size=ps * num_blocks, shared_by=slot)
-            )
+            kv_cache_tensors.append(KVCacheTensor(size=ps * num_blocks, shared_by=slot))
 
     return num_blocks, kv_cache_tensors
 
@@ -1360,9 +1358,7 @@ def _get_kv_cache_config_deepseek_v4(
         return _get_kv_cache_config_unpacked(
             vllm_config, kv_cache_groups, available_memory
         )
-    return _get_kv_cache_config_packed(
-        vllm_config, kv_cache_groups, available_memory
-    )
+    return _get_kv_cache_config_packed(vllm_config, kv_cache_groups, available_memory)
 
 
 def get_kv_cache_config_from_groups(
