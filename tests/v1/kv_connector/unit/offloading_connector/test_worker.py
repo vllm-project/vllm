@@ -6,6 +6,10 @@ from unittest.mock import MagicMock
 import pytest
 import torch
 
+from vllm.distributed.kv_transfer.kv_connector.v1.offloading.common import (
+    OffloadingConnectorMetadata,
+    TransferJob,
+)
 from vllm.platforms import current_platform
 from vllm.utils.torch_utils import get_dtype_size
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
@@ -104,6 +108,94 @@ def _make_worker(kv_cache_config: KVCacheConfig):
     worker.worker = MagicMock()
 
     return worker, spec
+
+
+def test_register_kv_caches_shared_layers_with_different_offsets():
+    layer_a = "model.layers.0.self_attn"
+    layer_b = "model.layers.1.self_attn"
+    kv_cache_spec = FullAttentionSpec(
+        block_size=BLOCK_SIZE,
+        num_kv_heads=NUM_KV_HEADS,
+        head_size=HEAD_SIZE,
+        dtype=DTYPE,
+    )
+    page_size = kv_cache_spec.page_size_bytes
+
+    base = torch.empty(2 * NUM_BLOCKS * page_size, dtype=torch.uint8)
+    kv_caches = {
+        layer_a: base.as_strided((NUM_BLOCKS, page_size), (page_size, 1)),
+        layer_b: base.as_strided(
+            (NUM_BLOCKS, page_size),
+            (page_size, 1),
+            storage_offset=NUM_BLOCKS * page_size,
+        ),
+    }
+
+    kv_cache_config = KVCacheConfig(
+        num_blocks=NUM_BLOCKS,
+        kv_cache_tensors=[
+            KVCacheTensor(
+                size=2 * page_size * NUM_BLOCKS,
+                shared_by=[layer_a, layer_b],
+            ),
+        ],
+        kv_cache_groups=[
+            KVCacheGroupSpec(
+                layer_names=[layer_a, layer_b],
+                kv_cache_spec=kv_cache_spec,
+            )
+        ],
+    )
+
+    worker, spec = _make_worker(kv_cache_config)
+    worker.register_kv_caches(kv_caches)
+
+    canonical = spec.get_worker.call_args[0][0]
+    assert isinstance(canonical, CanonicalKVCaches)
+    assert len(canonical.tensors) == 2
+    assert canonical.tensors[0].tensor.stride() == (page_size, 1)
+    assert canonical.tensors[1].tensor.stride() == (page_size, 1)
+    assert canonical.tensors[0].tensor.storage_offset() == 0
+    assert canonical.tensors[1].tensor.storage_offset() == NUM_BLOCKS * page_size
+    assert canonical.group_data_refs == [
+        [
+            CanonicalKVCacheRef(tensor_idx=0, page_size_bytes=page_size),
+            CanonicalKVCacheRef(tensor_idx=1, page_size_bytes=page_size),
+        ]
+    ]
+
+
+def test_worker_transfer_submit_failure_reports_failed_metadata():
+    from vllm.distributed.kv_transfer.kv_connector.v1.offloading.worker import (
+        OffloadingConnectorWorker,
+    )
+
+    spec = MagicMock(spec=OffloadingSpec)
+    worker = OffloadingConnectorWorker(spec=spec)
+    worker.worker = MagicMock()
+    worker.worker.submit_transfer.return_value = False
+
+    src_spec = MagicMock()
+    dst_spec = MagicMock()
+    metadata = OffloadingConnectorMetadata(
+        load_jobs={},
+        store_jobs={},
+        worker_transfer_jobs={
+            42: TransferJob(
+                req_id="req",
+                src_spec=src_spec,
+                dst_spec=dst_spec,
+            )
+        },
+    )
+
+    worker.start_kv_transfers(metadata)
+
+    worker.worker.submit_transfer.assert_called_once_with(42, src_spec, dst_spec)
+    result = worker.build_connector_worker_meta()
+    assert result is not None
+    assert result.completed_jobs == {42: 1}
+    assert result.failed_jobs == {42: 1}
 
 
 # ---------------------------------------------------------------------------

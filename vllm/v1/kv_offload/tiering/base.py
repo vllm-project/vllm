@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 
 from vllm.v1.kv_offload.base import (
+    LoadStoreSpec,
     LookupResult,
     OffloadingMetricMetadata,
     OffloadKey,
@@ -47,6 +48,19 @@ class JobResult:
 
     job_id: JobId
     success: bool
+
+
+@dataclass
+class WorkerTransferSpec:
+    """A worker-executed secondary-tier transfer.
+
+    The scheduler still owns policy and lifetime decisions. This object only
+    describes the concrete source and destination a worker should copy between.
+    """
+
+    req_id: str
+    src_spec: LoadStoreSpec
+    dst_spec: LoadStoreSpec
 
 
 class SecondaryTierManager(ABC):
@@ -123,6 +137,41 @@ class SecondaryTierManager(ABC):
                           identifying the primary-tier slots to read from.
         """
         pass
+
+    def uses_worker_transfers(self) -> bool:
+        """Whether this tier wants primary<->secondary copies run by workers.
+
+        Scheduler-side tiers should keep the default and implement submit_*().
+        Multi-node tiers can return True so the scheduler only orchestrates the
+        transfer while workers perform the data copy from their local CPU shard.
+        """
+        return False
+
+    def build_worker_store_transfer(
+        self, job_metadata: JobMetadata
+    ) -> tuple[LoadStoreSpec, LoadStoreSpec]:
+        """Build worker source/destination specs for primary -> secondary."""
+        raise NotImplementedError
+
+    def build_worker_load_transfer(
+        self, job_metadata: JobMetadata
+    ) -> tuple[LoadStoreSpec, LoadStoreSpec]:
+        """Build worker source/destination specs for secondary -> primary."""
+        raise NotImplementedError
+
+    def complete_worker_store(
+        self, job_metadata: JobMetadata, success: bool
+    ) -> None:
+        """Finalize a worker-executed primary -> secondary transfer."""
+        return
+
+    def complete_worker_load(self, job_metadata: JobMetadata, success: bool) -> None:
+        """Finalize a worker-executed secondary -> primary transfer."""
+        return
+
+    def abort_worker_transfers(self) -> None:
+        """Drop tier-side bookkeeping for worker-executed transfers."""
+        return
 
     @abstractmethod
     def submit_load(self, job_metadata: JobMetadata) -> None:

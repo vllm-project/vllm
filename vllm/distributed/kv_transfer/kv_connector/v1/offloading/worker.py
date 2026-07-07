@@ -165,7 +165,35 @@ class OffloadingConnectorWorker:
             return
 
         block_tensors: list[CanonicalKVCacheTensor] = []
+        block_tensor_indices: dict[tuple, int] = {}
         block_data_refs: dict[str, list[CanonicalKVCacheRef]] = defaultdict(list)
+
+        def get_canonical_tensor_idx(
+            tensor: torch.Tensor, page_size: int
+        ) -> int:
+            tensor_key = (
+                tensor.untyped_storage().data_ptr(),
+                tensor.storage_offset(),
+                tuple(tensor.shape),
+                tuple(tensor.stride()),
+                tensor.dtype,
+                tensor.device,
+                page_size,
+            )
+            tensor_idx = block_tensor_indices.get(tensor_key)
+            if tensor_idx is not None:
+                return tensor_idx
+
+            block_tensors.append(
+                CanonicalKVCacheTensor(
+                    tensor=tensor,
+                    page_size_bytes=page_size,
+                )
+            )
+            tensor_idx = len(block_tensors) - 1
+            block_tensor_indices[tensor_key] = tensor_idx
+            return tensor_idx
+
         for kv_cache_tensor in kv_cache_config.kv_cache_tensors:
             # Filter to layers that were actually processed above.
             # Packed KV allocation emits KVCacheTensor entries for
@@ -178,31 +206,14 @@ class OffloadingConnectorWorker:
             if not tensor_layer_names:
                 continue
 
-            # verify all layers in the group reference the exact same tensors
-            assert len({len(tensors_per_block[n]) for n in tensor_layer_names}) == 1
-            assert (
-                len({tensors_per_block[n][0].data_ptr() for n in tensor_layer_names})
-                == 1
-            )
-            assert (
-                len({tensors_per_block[n][0].stride() for n in tensor_layer_names}) == 1
-            )
-
-            # pick the first layer to represent the group
-            first_layer_name = tensor_layer_names[0]
-            for tensor in tensors_per_block[first_layer_name]:
-                block_tensors.append(
-                    CanonicalKVCacheTensor(
-                        tensor=tensor,
-                        page_size_bytes=page_size_bytes[first_layer_name],
+            for layer_name in tensor_layer_names:
+                for tensor in tensors_per_block[layer_name]:
+                    tensor_idx = get_canonical_tensor_idx(
+                        tensor, page_size_bytes[layer_name]
                     )
-                )
-
-                curr_tensor_idx = len(block_tensors) - 1
-                for layer_name in tensor_layer_names:
                     block_data_refs[layer_name].append(
                         CanonicalKVCacheRef(
-                            tensor_idx=curr_tensor_idx,
+                            tensor_idx=tensor_idx,
                             page_size_bytes=(unpadded_page_size_bytes[layer_name]),
                         )
                     )
@@ -291,6 +302,20 @@ class OffloadingConnectorWorker:
             success = self.worker.submit_load(job_id, entry.src_spec, entry.dst_spec)
             assert success
 
+        for job_id, entry in metadata.worker_transfer_jobs.items():
+            logger.debug(
+                "Submitting worker transfer job %d for req %s: %s -> %s",
+                job_id,
+                entry.req_id,
+                entry.src_spec.medium(),
+                entry.dst_spec.medium(),
+            )
+            success = self.worker.submit_transfer(
+                job_id, entry.src_spec, entry.dst_spec
+            )
+            if not success:
+                self._connector_worker_meta.mark_completed(job_id, success=False)
+
     def prepare_store_kv(self, metadata: OffloadingConnectorMetadata):
         for job_id, entry in metadata.store_jobs.items():
             # NOTE(orozery): defer the store to the beginning of the next
@@ -314,9 +339,7 @@ class OffloadingConnectorWorker:
         assert self.worker is not None
         finished_recving: set[str] = set()
         for transfer_result in self.worker.get_finished():
-            # we currently do not support job failures
             job_id = transfer_result.job_id
-            assert transfer_result.success
             is_load = job_id in self._load_jobs
             if (
                 transfer_result.transfer_time is not None
@@ -331,9 +354,11 @@ class OffloadingConnectorWorker:
                     transfer_result.transfer_time,
                 )
 
-            self._connector_worker_meta.mark_completed(job_id)
+            self._connector_worker_meta.mark_completed(
+                job_id, transfer_result.success
+            )
             req_id = self._load_jobs.pop(job_id, None)
-            if req_id is not None:
+            if req_id is not None and transfer_result.success:
                 finished_recving.add(req_id)
 
         return set(), finished_recving

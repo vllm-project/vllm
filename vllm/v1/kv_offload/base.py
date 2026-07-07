@@ -473,6 +473,23 @@ class OffloadingWorker(ABC):
     ) -> bool:
         """Async offloaded medium -> GPU."""
 
+    def submit_transfer(
+        self, job_id: int, src_spec: LoadStoreSpec, dst_spec: LoadStoreSpec
+    ) -> bool:
+        """Async transfer between two non-GPU offloaded media.
+
+        Implementations can override this for worker-executed secondary-tier
+        copies. The default keeps the historical GPU-facing API behavior.
+        """
+        if isinstance(src_spec, GPULoadStoreSpec):
+            return self.submit_store(job_id, src_spec, dst_spec)
+        if isinstance(dst_spec, GPULoadStoreSpec):
+            return self.submit_load(job_id, src_spec, dst_spec)
+        raise NotImplementedError(
+            f"Unsupported worker transfer {src_spec.medium()} -> "
+            f"{dst_spec.medium()}"
+        )
+
     @abstractmethod
     def get_finished(self) -> list[TransferResult]: ...
 

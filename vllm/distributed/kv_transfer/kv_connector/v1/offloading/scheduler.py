@@ -62,12 +62,16 @@ class TransferJobStatus:
     # Offload keys this job covers; passed to manager.complete_*().
     keys: set[OffloadKey]
     is_store: bool
+    failed_count: int = 0
     # Store src block IDs whose ref_cnt protects them while the request
     # runs. Only registered in _block_id_to_pending_jobs on request_finished.
     non_sliding_window_block_ids: list[int] | None = None
     # Store src block IDs that may be freed before the request finishes.
     # Registered in _block_id_to_pending_jobs at store creation time.
     sliding_window_block_ids: list[int] | None = None
+    # True for scheduler-orchestrated secondary-tier transfers executed by
+    # workers. These jobs are not request-blocking GPU transfers.
+    is_worker_transfer: bool = False
 
 
 class GroupOffloadConfig(NamedTuple):
@@ -1057,9 +1061,31 @@ class OffloadingConnectorScheduler:
                 for jid in self._block_id_to_pending_jobs[bid]
             )
 
+        worker_transfer_jobs: dict[int, TransferJob] = {}
+        pop_worker_transfer_jobs = getattr(
+            self.manager, "pop_worker_transfer_jobs", None
+        )
+        if pop_worker_transfer_jobs is not None:
+            for job_id, job in pop_worker_transfer_jobs(
+                self._generate_job_id
+            ).items():
+                worker_transfer_jobs[job_id] = TransferJob(
+                    req_id=job.req_id,
+                    src_spec=job.src_spec,
+                    dst_spec=job.dst_spec,
+                )
+                self._jobs[job_id] = TransferJobStatus(
+                    req_id=job.req_id,
+                    pending_count=self.config.num_workers,
+                    keys=set(),
+                    is_store=False,
+                    is_worker_transfer=True,
+                )
+
         meta = OffloadingConnectorMetadata(
             load_jobs=self._current_batch_load_jobs,
             store_jobs=self._build_store_jobs(scheduler_output),
+            worker_transfer_jobs=worker_transfer_jobs,
             jobs_to_flush=self._current_batch_jobs_to_flush,
         )
         self._current_batch_load_jobs = {}
@@ -1131,14 +1157,28 @@ class OffloadingConnectorScheduler:
                 continue
             job_status = self._jobs[job_id]
             job_status.pending_count -= count
+            job_status.failed_count += meta.failed_jobs.get(job_id, 0)
             if job_status.pending_count > 0:
                 continue
             assert job_status.pending_count == 0
 
+            if job_status.is_worker_transfer:
+                complete_worker_transfer = getattr(
+                    self.manager, "complete_worker_transfer"
+                )
+                complete_worker_transfer(job_id, job_status.failed_count == 0)
+                del self._jobs[job_id]
+                continue
+
             req_status = self._req_status[job_status.req_id]
             if job_status.is_store:
-                self.manager.complete_store(job_status.keys, req_status.req_context)
+                self.manager.complete_store(
+                    job_status.keys,
+                    req_status.req_context,
+                    success=job_status.failed_count == 0,
+                )
             else:
+                assert job_status.failed_count == 0
                 self.manager.complete_load(job_status.keys, req_status.req_context)
                 if self._blocks_being_loaded:
                     self._blocks_being_loaded.difference_update(job_status.keys)
