@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import math
 from contextlib import contextmanager
 from types import SimpleNamespace
 
@@ -54,20 +53,27 @@ def _proxy_page_bytes(vllm_config) -> int:
     ratios, _dense, _csa, _hca = _layer_counts(hf)
     head_dim = int(getattr(hf, "head_dim", 512))
     win = int(getattr(hf, "sliding_window", 128))
-    max_num_seqs = int(getattr(vllm_config.scheduler_config, "max_num_seqs", 1))
     max_model_len = int(vllm_config.model_config.max_model_len)
     min_blocks = max(
         1,
         (max_model_len + ATOM_DEEPSEEK_V4_BLOCK_SIZE - 1)
         // ATOM_DEEPSEEK_V4_BLOCK_SIZE,
     )
-    swa_bytes = len(ratios) * max_num_seqs * win * head_dim * 2
-    # Amortize fixed SWA state into every vLLM page so total proxy storage can
-    # hold both SWA prefix and classical paged KV while remaining a vLLM KV cache.
-    # NOTE: this scales the per-page KV reservation with max_num_seqs, so an
-    # oversized max_num_seqs (e.g. vLLM's default 1024) crushes KV capacity.
-    # Callers should set --max-num-seqs to the real target concurrency.
-    return _classical_block_bytes(hf) + ((swa_bytes + min_blocks - 1) // min_blocks)
+    # The SWA ring is carved ONCE in the proxy tensor (slice_*): the full ring
+    # is `max_num_seqs` per-seq rings, but it lives once at the head, not per
+    # page. So amortize it over the *expected* pool size, not over one seq's
+    # blocks. A pool serving `max_num_seqs` concurrent max-len seqs holds
+    # ~`max_num_seqs * min_blocks` blocks, so amortizing the once-carved ring
+    # over that makes `max_num_seqs` cancel -> page_bytes is independent of it.
+    #
+    # The previous divisor `min_blocks` (one seq) over-reserved the SWA by
+    # `num_blocks / min_blocks` (= achievable concurrency), wasting ~87% of the
+    # proxy KV (see STEP2_KV_DECOUPLE.md). This form reserves ~one ring's worth,
+    # lifting classical-KV capacity ~num_blocks/min_blocks x. It requires
+    # `max_num_seqs <= achievable concurrency` (the slice would otherwise not fit
+    # the ring); bind() checks this and fails fast with a suggested value.
+    swa_per_seq = len(ratios) * win * head_dim * 2
+    return _classical_block_bytes(hf) + ((swa_per_seq + min_blocks - 1) // min_blocks)
 
 
 def slice_deepseek_v4_proxy_cache_views(
@@ -510,19 +516,19 @@ class _V4DecodeMetaBuffers:
         return buf.copy_to_gpu(n)
 
 
-def _warn_if_max_num_seqs_crowds_kv(model, vllm_config, kv_cache, ratios, num_slots):
-    """Warn (once) when ``max_num_seqs`` is set so high that the per-seq SWA-ring
-    reservation crowds out classical KV, and suggest a balanced value.
+def _check_max_num_seqs_fits_kv(model, vllm_config, kv_cache, num_slots):
+    """Fail fast (once) when ``max_num_seqs`` exceeds the decode concurrency the
+    proxy KV can hold, with a concrete suggested value.
 
-    Unlike ATOM's native engine (which reserves the SWA/state ring in a separate
-    one-time tensor), the proxy bridge amortizes it into every vLLM KV page
-    (see ``_proxy_page_bytes``). An oversized ``max_num_seqs`` therefore inflates
-    the page size, collapses ``num_blocks``, and silently starves prefill (slow
-    TTFT) — with no hard error. This surfaces that cliff instead.
+    ``_proxy_page_bytes`` reserves ~one SWA ring, sizing the pool to serve up to
+    ``achievable = num_blocks // min_blocks`` concurrent max-len sequences. If
+    ``max_num_seqs`` exceeds that, the SWA ring for ``max_num_seqs`` slots does
+    not fit and the slice would fail with an opaque "cache too small" error;
+    surface it clearly (and loudly, per the no-silent-cap requirement) instead.
     """
-    if getattr(model, "_atom_v4_warned_conc", False):
+    if getattr(model, "_atom_v4_kv_checked", False):
         return
-    hf = vllm_config.model_config.hf_config
+    model._atom_v4_kv_checked = True
     max_model_len = int(vllm_config.model_config.max_model_len)
     num_blocks = int(kv_cache.shape[1])
     min_blocks = max(
@@ -532,37 +538,24 @@ def _warn_if_max_num_seqs_crowds_kv(model, vllm_config, kv_cache, ratios, num_sl
     )
     achievable = num_blocks // min_blocks
     if num_slots <= achievable:
-        return
-    model._atom_v4_warned_conc = True
-    # Balanced max_num_seqs: fixed point of concurrency(m) == m. With
-    # page_bytes(m) = classical + per_slot_swa*m/min_blocks and a ~constant KV
-    # budget M = num_blocks*page_bytes, solve per_slot_swa*m^2 +
-    # classical*min_blocks*m - M = 0 for the positive root.
-    total_bytes = int(kv_cache.numel()) * int(kv_cache.element_size())
-    classical = _classical_block_bytes(hf)
-    per_slot_swa = (
-        len(ratios) * int(model.args.window_size) * int(model.args.head_dim) * 2
-    )
-    balanced = achievable
-    if per_slot_swa > 0:
-        c = classical * min_blocks
-        root = (-c + math.sqrt(c * c + 4 * per_slot_swa * total_bytes)) / (
-            2 * per_slot_swa
+        logger.info(
+            "ATOM DeepSeek-V4 proxy KV: max_num_seqs=%d, ~%d concurrent seqs "
+            "supported at max_model_len=%d (%d blocks).",
+            num_slots,
+            achievable,
+            max_model_len,
+            num_blocks,
         )
-        # Leave ~10% KV headroom so the suggested value won't itself re-trigger
-        # this warning and prefill keeps room to interleave with decode.
-        balanced = max(1, int(root * 0.9))
-    logger.warning(
-        "ATOM DeepSeek-V4: --max-num-seqs=%d, but the proxy KV cache can serve "
-        "only ~%d concurrent sequences at max_model_len=%d. The per-seq SWA-ring "
-        "reservation for %d slots crowds out classical KV, which starves prefill "
-        "and inflates TTFT. Set --max-num-seqs ~%d for balanced capacity "
-        "(or lower --max-model-len).",
-        num_slots,
-        achievable,
-        max_model_len,
-        num_slots,
-        balanced,
+        return
+    suggested = max(1, int(achievable * 0.95))
+    raise RuntimeError(
+        f"ATOM DeepSeek-V4: --max-num-seqs={num_slots} exceeds the ~{achievable} "
+        f"concurrent sequences the proxy KV can hold at "
+        f"max_model_len={max_model_len} (gpu_memory_utilization="
+        f"{vllm_config.cache_config.gpu_memory_utilization}); the per-seq SWA "
+        f"ring for {num_slots} slots does not fit. Set --max-num-seqs "
+        f"<= {suggested} (or raise --gpu-memory-utilization / lower "
+        f"--max-model-len)."
     )
 
 
@@ -578,9 +571,7 @@ def bind_deepseek_v4_proxy_cache_views(model, vllm_config) -> bool:
         return True
     ratios = [int(r) for r in model.args.compress_ratios]
     num_slots = max(1, int(vllm_config.scheduler_config.max_num_seqs))
-    _warn_if_max_num_seqs_crowds_kv(
-        model, vllm_config, proxy.kv_cache, ratios, num_slots
-    )
+    _check_max_num_seqs_fits_kv(model, vllm_config, proxy.kv_cache, num_slots)
     # Stash the per-request state-slot allocator + the metadata params the
     # bridge needs but cannot read from common_attn_metadata (the SWA ring pool
     # size, window, ring stride, and indexer topk). `num_slots == max_num_seqs`
