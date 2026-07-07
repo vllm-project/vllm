@@ -605,6 +605,8 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
     # If not, set this to None. Otherwise set it to the query
     # length that will be pulled into the front of the batch.
     reorder_batch_threshold: int | None = None
+    # Effective DCP world size for this builder (1 for SWA groups).
+    dcp_world_size: int = 1
     # Does this backend/builder support updating the block table in existing
     # metadata
     supports_update_block_table: bool = False
@@ -657,10 +659,7 @@ class AttentionMetadataBuilder(ABC, Generic[M]):
                     max_num_queries_for_spec,
                 )
 
-        if (
-            self.vllm_config.parallel_config.decode_context_parallel_size > 1
-            and not supports_dcp_with_varlen
-        ):
+        if self.dcp_world_size > 1 and not supports_dcp_with_varlen:
             self.reorder_batch_threshold = 1
 
     @abstractmethod

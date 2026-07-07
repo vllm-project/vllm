@@ -631,14 +631,19 @@ def resolve_kv_cache_block_sizes(
         bs = cache_config.block_size * dcp * pcp
         return bs, bs
 
-    if dcp != 1 or pcp != 1:
-        raise ValueError(
-            "Hybrid KV cache groups with multiple block sizes do not "
-            "support context parallelism (dcp_world_size/pcp_world_size > 1)."
-        )
-
     group_block_sizes = [g.kv_cache_spec.block_size for g in groups]
-    scheduler_block_size = math.lcm(*group_block_sizes)
+
+    if dcp != 1 or pcp != 1:
+        from vllm.v1.kv_cache_interface import SlidingWindowSpec
+
+        group_effective_block_sizes = [
+            g.kv_cache_spec.block_size
+            * (1 if isinstance(g.kv_cache_spec, SlidingWindowSpec) else dcp * pcp)
+            for g in groups
+        ]
+        scheduler_block_size = math.lcm(*group_effective_block_sizes)
+    else:
+        scheduler_block_size = math.lcm(*group_block_sizes)
 
     # Block hashes are only consumed by prefix caching and KV connectors
     # (P/D, offloading); when neither is active, keep hash_block_size equal

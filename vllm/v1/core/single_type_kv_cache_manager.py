@@ -600,9 +600,12 @@ class FullAttentionManager(SingleTypeKVCacheManager):
             else:
                 break
         if drop_eagle_block and computed_blocks[0]:
-            # Need to drop the last matched block if eagle is enabled.
+            # Need to drop the last matched block(s) if eagle is enabled.
+            # When DCP is active, alignment_tokens > block_size, so we may
+            # need to drop more than one block to maintain alignment.
+            num_blocks_to_drop = max(1, alignment_tokens // block_size)
             for computed in computed_blocks:
-                computed.pop()
+                del computed[len(computed) - num_blocks_to_drop :]
         while (
             block_size != alignment_tokens  # Faster for common case.
             and len(computed_blocks[0]) * block_size % alignment_tokens != 0
@@ -700,8 +703,6 @@ class SlidingWindowManager(SingleTypeKVCacheManager):
         assert isinstance(kv_cache_spec, SlidingWindowSpec), (
             "SlidingWindowManager can only be used for sliding window groups"
         )
-        assert dcp_world_size == 1, "DCP not support sliding window attn now."
-        assert pcp_world_size == 1, "PCP not support sliding window attn now."
 
         # The number of contiguous blocks needed for a prefix cache hit.
         sliding_window_contiguous_blocks = cls._contiguous_blocks_for_hit(
