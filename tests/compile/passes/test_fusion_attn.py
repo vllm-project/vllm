@@ -309,11 +309,6 @@ def test_attention_quant_pattern(
     torch.manual_seed(42)
 
     backend_cls = backend.get_class()
-
-    # TODO: drop once AITER reenables fp16 unified attention.
-    if dtype not in backend_cls.supported_dtypes:
-        pytest.skip(f"{backend.name} does not support dtype {dtype}")
-
     block_size = backend_cls.get_preferred_block_size(16)
 
     model_config = ModelConfig(
