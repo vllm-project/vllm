@@ -2246,15 +2246,27 @@ def topk_sigmoid(
     e_score_correction_bias: torch.Tensor | None = None,
     routed_scaling_factor: float = 1.0,
 ) -> None:
-    torch.ops._moe_C.topk_sigmoid(
-        topk_weights,
-        topk_ids,
-        token_expert_indices,
-        gating_output,
-        renormalize,
-        e_score_correction_bias,
-        routed_scaling_factor,
-    )
+    try:
+        torch.ops._moe_C.topk_sigmoid(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+            routed_scaling_factor,
+        )
+    except RuntimeError:
+        # Some backends (e.g. XPU) register a topk_sigmoid op that does not
+        # accept routed_scaling_factor. Fall back to the 6-arg signature.
+        torch.ops._moe_C.topk_sigmoid(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+        )
 
 
 def topk_hash_softplus_sqrt(
