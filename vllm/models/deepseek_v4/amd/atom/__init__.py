@@ -24,15 +24,13 @@ NOT rewritten to vLLM conventions. It bundles the four pieces the port targets:
   state writes, index builders) plus the bridge-local decode-index ops in
   ``plugin.vllm.deepseek_v4_ops`` and the ragged sparse-attn reference in
   ``model_ops.sparse_attn_v4``.
-  The compressors run synchronously on the current stream; ATOM's
-  multi-stream compressor overlap is intentionally not wired here (it is a
-  separate, follow-up optimization).
+  The compressors run synchronously on the current stream.
 
-Scope / single-node: this is a single-node port. Distributed features (Prefill
-Context Parallel, tensor-parallel all-reduce) are stubbed to single-rank — the
-PCP helpers report world size 1 and their code paths are never taken. ATOM's
-engine-side pieces (ModelRunner, scheduler, config/quant parsers, weight loader)
-are shimmed to the minimal surface the attention module imports; the ATOM-native
-metadata builder is ModelRunner-coupled and is included as ported source, while
-the vLLM-runnable adapter is the bridge.
+Scope / single-node: this is a single-node port targeting TP=8, EP=1 with
+DP-attention. Prefill Context Parallel (PCP) and multi-stream (dual-stream MoE /
+compressor overlap) are not supported and their code has been removed. ATOM's
+engine-side pieces (ModelRunner, scheduler, config/quant
+parsers, weight loader) are shimmed to the minimal surface the attention module
+imports; the ATOM-native metadata builder is ModelRunner-coupled and is included
+as ported source, while the vLLM-runnable adapter is the bridge.
 """

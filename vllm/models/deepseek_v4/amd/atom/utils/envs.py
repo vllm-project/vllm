@@ -126,10 +126,6 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "ATOM_USE_FLYDSL_GDR": lambda: os.getenv("ATOM_USE_FLYDSL_GDR", "0").lower() == "1",
     # --- MoE (DeepSeek-style shared experts) ---
-    # Dual-stream MoE only when num_tokens <= threshold; 0 disables dual-stream registration.
-    "ATOM_DUAL_STREAM_MOE_TOKEN_THRESHOLD": lambda: int(
-        os.getenv("ATOM_DUAL_STREAM_MOE_TOKEN_THRESHOLD", "1024")
-    ),
     # Gate/Up interleave mode for MoE weight preshuffle and kernel gate_mode.
     # "0" (default) = SEPARATED layout; "1" = INTERLEAVE layout.
     "ATOM_MOE_GU_ITLV": lambda: os.getenv("ATOM_MOE_GU_ITLV", "0") == "1",

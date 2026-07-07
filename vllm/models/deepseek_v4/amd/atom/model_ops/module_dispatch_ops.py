@@ -19,61 +19,15 @@ Caller contract (per op): the module registered at `layer_name` must expose
 the methods listed in each op's docstring.
 
 Currently registered:
-  - torch.ops.aiter.maybe_dual_stream_forward — V2/V3.2/V4 MoE
   - torch.ops.aiter.indexer_score_topk       — V4 sparse indexer
 """
 
 import torch
 
 from vllm.models.deepseek_v4.amd.atom.config import get_current_atom_config
-from vllm.models.deepseek_v4.amd.atom.utils import envs
-from vllm.models.deepseek_v4.amd.atom.utils.custom_register import direct_register_custom_op
-
-# ---------------------------------------------------------------------------
-# Dual-stream MoE dispatch (V2 / V3.2 / V4)
-# ---------------------------------------------------------------------------
-#
-# Caller contract (the MoE module looked up by `layer_name`):
-#   - `_use_dual_stream: bool`
-#   - `single_stream_moe_forward(hidden_states) -> Tensor`
-#   - `dual_stream_moe_forward(hidden_states) -> Tensor`
-#
-# Per-token gating: decode benefits from dual-stream, prefill doesn't —
-# threshold from `envs.ATOM_DUAL_STREAM_MOE_TOKEN_THRESHOLD`.
-
-
-def maybe_dual_stream_forward(
-    hidden_states: torch.Tensor,
-    layer_name: str,
-) -> torch.Tensor:
-    self = get_current_atom_config().compilation_config.static_forward_context[
-        layer_name
-    ]
-    threshold = envs.ATOM_DUAL_STREAM_MOE_TOKEN_THRESHOLD
-    num_tokens = hidden_states.shape[0]
-    if self._use_dual_stream and 0 < num_tokens <= threshold:
-        return self.dual_stream_moe_forward(hidden_states)
-    return self.single_stream_moe_forward(hidden_states)
-
-
-def _maybe_dual_stream_forward_fake(
-    hidden_states: torch.Tensor,
-    layer_name: str,
-) -> torch.Tensor:
-    return torch.empty_like(hidden_states)
-
-
-direct_register_custom_op(
-    op_name="maybe_dual_stream_forward",
-    op_func=maybe_dual_stream_forward,
-    # Op returns a fresh tensor; never writes into `hidden_states`. Declaring
-    # `mutates_args=["hidden_states"]` (the V2 original) misleads the
-    # functionalization pass into inserting defensive input clones.
-    mutates_args=(),
-    fake_impl=_maybe_dual_stream_forward_fake,
-    tags=(torch.Tag.needs_fixed_stride_order,),
+from vllm.models.deepseek_v4.amd.atom.utils.custom_register import (
+    direct_register_custom_op,
 )
-
 
 # ---------------------------------------------------------------------------
 # Sparse indexer score + top-k (V2/V3.2/V4)

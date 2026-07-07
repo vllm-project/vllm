@@ -53,18 +53,10 @@ from vllm.models.deepseek_v4.amd.atom.config import (
     QuantType,
     get_current_atom_config,
 )
-from vllm.models.deepseek_v4.amd.atom.distributed.pcp_utils import (
-    get_pcp_world_size,
-    pcp_allgather_rerange,
-    pcp_pad_len,
-    pcp_round_robin_split,
-)
 
-# Side-effect import: registers `torch.ops.aiter.maybe_dual_stream_forward`
-# (shared with deepseek_v2) and `torch.ops.aiter.indexer_score_topk` (V4-only).
-# MoE.forward dispatches via the former so torch.compile/Dynamo treats stream
-# code as opaque; Indexer.forward_batched dispatches via the latter to hide
-# its dynamic-shape internals from Dynamo / fake-tensor mode.
+# Side-effect import: registers `torch.ops.aiter.indexer_score_topk` (V4-only).
+# Indexer.forward_batched dispatches via it to hide its dynamic-shape internals
+# from Dynamo / fake-tensor mode.
 from vllm.models.deepseek_v4.amd.atom.model_ops import module_dispatch_ops as _module_dispatch_ops  # noqa: F401
 from vllm.models.deepseek_v4.amd.atom.model_ops.layernorm import RMSNorm, rmsnorm2d_fwd_
 from vllm.models.deepseek_v4.amd.atom.model_ops.linear import (
@@ -991,18 +983,6 @@ class Compressor(nn.Module):
         # stride must be 1).
         coff_d = (1 + overlap) * d
         combined = self.wkv_gate(x)
-        # ===== PCP (full-KV) =====
-        # `x` here is this rank's 1/W round-robin shard (model.forward entry split).
-        # The wkv_gate projection above is per-token (parallelizable), but the
-        # downstream fused_compress_attn compresses `ratio` CONSECUTIVE tokens
-        # into one entry — which round-robin split breaks. So all-gather the
-        # projected `combined` back to full sequence order before compression,
-        # mirroring SGLang's compute_kv_score (all-gather kv_score after the
-        # projection, before the cross-token compress). The plan /
-        # state_slot_mapping passed to fused_compress_attn are full-sequence
-        # (never split in the builder), so they match the gathered `combined`.
-        if _pcp_active():
-            combined = pcp_allgather_rerange(combined, get_pcp_world_size())
         kv, score = torch.split(combined, [coff_d, coff_d], dim=-1)
 
         # ====== Unified fused kernel path (CSA + Indexer) ======
@@ -1853,37 +1833,6 @@ class DeepseekV4Attention(nn.Module):
             # Two-source paged prefill: prefix from `unified_kv` (per-ratio
             # buffer with SWA history + compress section), extend from per-fwd
             # `kv` tensor (in-chunk SWA tail; extend buffer is layer-invariant).
-            #
-            # ===== PCP (full-KV) =====
-            # Under PCP the model.forward entry round-robin-split x/positions to 1/W,
-            # so `q_sa` and `kv` here are this rank's 1/W shard. The per-query
-            # metadata (kv_indptr/indices_*, indexer_meta) was already reduced
-            # to this rank's owned queries in the builder (_apply_pcp_reindex),
-            # so `q_sa` + those indices are aligned and used as-is. The only
-            # runtime fixups here are on the actual K/V data:
-            #   - swa_write must write the FULL sequence SWA ring (every PCP
-            #     rank keeps full KV), and
-            #   - sparse_attn's extend source must be the FULL `kv` so each 1/W
-            #     query can attend the whole in-chunk SWA window.
-            # So all-gather `kv` back to full order; positions/cu_seqlens_q/
-            # state_slot_mapping for the SWA write stay full (cu_seqlens_q /
-            # state_slot_mapping are per-seq, never split; positions_full comes
-            # from the forward context which holds the pre-split copy).
-            pcp_on = _pcp_active()
-            if pcp_on:
-                pcp_ws = get_pcp_world_size()
-                kv_full = pcp_allgather_rerange(kv, pcp_ws)
-                # positions must match kv_full's full-sequence coords for the
-                # swa_write ring addressing (`positions[src] % cache_size`).
-                # `positions` here is this rank's 1/W shard (split in
-                # ForCausalLM.forward); all-gather it back to full order with
-                # the same rerange used for kv (NOT fc.context.positions, which
-                # the builder reindexed to 1/W).
-                positions_full = pcp_allgather_rerange(positions, pcp_ws)
-            else:
-                kv_full = kv
-                positions_full = positions
-
             if ratio == 0:
                 kv_indices_prefix = attn_md.kv_indices_prefix_swa
                 kv_indptr_prefix = attn_md.kv_indptr_prefix_swa
@@ -1900,7 +1849,7 @@ class DeepseekV4Attention(nn.Module):
                 self.unified_kv,
                 kv_indices_prefix,
                 kv_indptr_prefix,
-                kv_full,
+                kv,
                 attn_md.kv_indices_extend,
                 attn_md.kv_indptr_extend,
                 self.attn_sink,
@@ -1909,11 +1858,9 @@ class DeepseekV4Attention(nn.Module):
             # swa_write AFTER attn so chunked-prefill prefix SWA reads see
             # prior-chunk's ring contents (current swa_write would overwrite
             # ring slots `pos % cache_size` for positions in this chunk's tail).
-            # PCP: write the FULL sequence SWA ring from the gathered kv_full +
-            # full positions/cu_seqlens_q (full-KV scheme — every rank holds it).
             swa_write(
-                kv_full,
-                positions_full,
+                kv,
+                positions,
                 attn_md.cu_seqlens_q,
                 state_slot_mapping,
                 self.swa_kv,
@@ -2013,20 +1960,3 @@ class DeepseekV4Attention(nn.Module):
             csa_block_capacity=csa_block_capacity,
             window_size=window_size,
         )
-
-
-
-def _pcp_active() -> bool:
-    """Whether to apply PCP round-robin-split in this forward.
-
-    True only when pcp_size > 1 AND this is a real prefill forward (not decode,
-    not dummy/warmup run). Single-node port: ``get_pcp_world_size()`` is 1, so
-    this is always False and the PCP branches in ``Compressor`` /
-    ``DeepseekV4Attention`` are never taken. (Verbatim from
-    ``atom.models.deepseek_v4._pcp_active``; kept so the attention slice — which
-    references it above — is self-contained after extraction.)
-    """
-    if get_pcp_world_size() <= 1:
-        return False
-    fc = get_forward_context()
-    return fc.context.is_prefill and not fc.context.is_dummy_run
