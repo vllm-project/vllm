@@ -79,7 +79,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 config=config,
                 parallel_config=parallel_config,
                 quant_config=quant_config,
-                skip_final_all_reduce=True,
+                reduce_results=False,
                 prefix=f"{prefix}.mlp",
                 apply_routed_scale_to_output=False,
             )

@@ -196,7 +196,7 @@ class MiniMaxM3MoE(nn.Module):
         config: PretrainedConfig,
         layer_id: int,
         quant_config: QuantizationConfig | None = None,
-        skip_final_all_reduce: bool = False,
+        reduce_results: bool = True,
         prefix: str = "",
     ) -> None:
         super().__init__()
@@ -262,7 +262,7 @@ class MiniMaxM3MoE(nn.Module):
             router_logits_dtype=self.gate.out_dtype,
             shared_experts=self.shared_experts,
             quant_config=quant_config,
-            skip_final_all_reduce=skip_final_all_reduce,
+            reduce_results=reduce_results,
             prefix=f"{prefix}.experts",
         )
 
@@ -692,8 +692,8 @@ class MiniMaxM3DecoderLayer(nn.Module):
         # Leave the FFN output un-reduced so its all-reduce fuses into the
         # next RMSNorm. MTP blocks add the residual directly and PP sends
         # hidden states across stages, so both must reduce.
-        skip_ffn_all_reduce = (
-            not is_mtp_block and vllm_config.parallel_config.pipeline_parallel_size == 1
+        reduce_results = (
+            is_mtp_block or vllm_config.parallel_config.pipeline_parallel_size > 1
         )
         self.is_moe_layer = force_moe or _is_moe_layer(config, layer_id)
         if self.is_moe_layer:
@@ -701,7 +701,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 config=config,
                 layer_id=layer_id,
                 quant_config=quant_config,
-                skip_final_all_reduce=skip_ffn_all_reduce,
+                reduce_results=reduce_results,
                 prefix=f"{prefix}.block_sparse_moe",
             )
         else:
@@ -710,7 +710,7 @@ class MiniMaxM3DecoderLayer(nn.Module):
                 intermediate_size=config.dense_intermediate_size,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
-                reduce_results=not skip_ffn_all_reduce,
+                reduce_results=reduce_results,
             )
 
         # config.use_gemma_norm is True for M3 -> Gemma-style RMSNorm.

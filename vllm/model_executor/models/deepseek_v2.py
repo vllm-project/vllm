@@ -279,7 +279,7 @@ class DeepseekV2MoE(nn.Module):
         config: DeepseekV2Config | DeepseekV3Config,
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
-        skip_final_all_reduce: bool = False,
+        reduce_results: bool = True,
         prefix: str = "",
         apply_routed_scale_to_output: bool = False,
     ):
@@ -380,7 +380,7 @@ class DeepseekV2MoE(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
-            skip_final_all_reduce=skip_final_all_reduce,
+            reduce_results=reduce_results,
             n_shared_experts=config.n_shared_experts
             if self.is_fusion_moe_shared_experts_enabled
             else None,
