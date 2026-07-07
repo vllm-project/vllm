@@ -1024,6 +1024,47 @@ def test_prefill_hybrid_model_mamba_align():
     manager.free(req0)
 
 
+def test_hybrid_mamba_eagle_does_not_reuse_lookahead_state():
+    block_size = 16
+    manager = make_kv_cache_manager(
+        _make_hybrid_kv_cache_config(block_size, 100, ["full", "mamba_align"]),
+        max_model_len=8192,
+        enable_caching=True,
+        hash_block_size=block_size,
+        use_eagle=True,
+    )
+
+    token_ids = [i for i in range(4) for _ in range(block_size)] + [4] * 7
+
+    req0 = make_request("0", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    assert num_computed_tokens == 0
+    blocks = manager.allocate_slots(
+        req0, len(token_ids), num_computed_tokens, computed_blocks
+    )
+    assert blocks is not None
+    manager.free(req0)
+
+    req1 = make_request("1", token_ids, block_size, sha256)
+    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+
+    assert num_computed_tokens == 3 * block_size
+    assert [len(blocks) for blocks in computed_blocks.blocks] == [3, 3]
+
+
+def test_mamba_align_prefill_split_keeps_intermediate_chunks_aligned():
+    block_size = 16
+    request = make_request("0", [0] * (block_size + 7), block_size, sha256)
+    stub = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        use_eagle=True,
+    )
+
+    assert Scheduler._mamba_block_aligned_split(stub, request, 5) == 0
+    assert Scheduler._mamba_block_aligned_split(stub, request, block_size + 3) == 1
+    assert Scheduler._mamba_block_aligned_split(stub, request, block_size + 7) == 2
+
+
 def test_hybrid_cache_mamba_align_shared_prefix_detection():
     """Test shared prefix detection heuristic for mamba align cache mode
 

@@ -322,6 +322,10 @@ class FullAttentionSpec(AttentionSpec):
         return (
             self.block_size * self.num_kv_heads * last_dim * get_dtype_size(self.dtype)
         )
+    
+    @property
+    def supports_eagle_cache_peek(self) -> bool:
+        return True
 
 
 def _apply_alignment_padding(spec: MLAAttentionSpec | SlidingWindowMLASpec):
@@ -375,6 +379,10 @@ class MLAAttentionSpec(FullAttentionSpec):
     @property
     def storage_block_size(self) -> int:
         return self.block_size // self.compress_ratio
+    
+    @property
+    def supports_eagle_cache_peek(self) -> bool:
+        return False
 
     @property
     def real_page_size_bytes(self) -> int:
@@ -522,6 +530,10 @@ class SlidingWindowSpec(AttentionSpec):
     def __post_init__(self):
         if self.head_size_v is None:
             object.__setattr__(self, "head_size_v", self.head_size)
+
+    @property
+    def supports_eagle_cache_peek(self) -> bool:
+        return True
 
     @property
     def real_page_size_bytes(self) -> int:
