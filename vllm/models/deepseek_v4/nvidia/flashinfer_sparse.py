@@ -368,6 +368,9 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         )
         cached_sparse = swa_metadata.flashinfer_sparse_index_cache.get(cache_key, None)
         if cached_sparse is None:
+            page_stride_token_stride_ratio = swa_k_cache.stride(
+                0
+            ) // swa_k_cache.stride(1)
             sparse_indices, sparse_topk_lens = build_flashinfer_mixed_sparse_indices(
                 decode_swa_indices,
                 decode_compressed_indices,
@@ -380,6 +383,7 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
                 swa_metadata.block_size,
                 compressed_block_table,
                 compressed_block_size,
+                page_stride_token_stride_ratio,
                 self.window_size,
                 self.compress_ratio,
                 top_k,

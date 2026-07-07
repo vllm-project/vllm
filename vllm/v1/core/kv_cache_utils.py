@@ -1274,6 +1274,25 @@ def _use_packed_kv_cache_config(
     return is_dsv4 or (enable_cross_layers and len(kv_cache_groups) > 1)
 
 
+# TODO: remove this workaround once flashinfer-ai/flashinfer#3856 is fixed.
+# DSv4 FlashInfer SM100 token stride: 512B fp8 or 1024B bf16.
+def _align_packed_block_stride_for_flashinfer_dsv4(
+    vllm_config: VllmConfig,
+    block_stride: int,
+) -> int:
+    from vllm.platforms import current_platform
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    capability = current_platform.get_device_capability()
+    if getattr(
+        getattr(vllm_config, "attention_config", None), "backend", None
+    ) == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4 and (
+        capability is None or capability.major != 12
+    ):
+        return round_up(block_stride, 1024)
+    return block_stride
+
+
 def _get_kv_cache_config_packed(
     vllm_config: VllmConfig,
     kv_cache_groups: list[KVCacheGroupSpec],
@@ -1289,6 +1308,9 @@ def _get_kv_cache_config_packed(
     # buckets = {page_size: [[layer_names], [layer_names], ...]}
     buckets = _bucket_layers_by_page_size(kv_cache_groups)
     total_num_bytes_per_block = sum(ps * len(slots) for ps, slots in buckets.items())
+    total_num_bytes_per_block = _align_packed_block_stride_for_flashinfer_dsv4(
+        vllm_config, total_num_bytes_per_block
+    )
 
     num_blocks = available_memory // total_num_bytes_per_block
     num_blocks = may_override_num_blocks(vllm_config, num_blocks)
