@@ -948,8 +948,8 @@ class VideoBackend(
     Samples ``num_frames`` uniformly across the video (or one frame every
     ``1/fps`` seconds, whichever produces fewer frames). The decoding codec
     is selected via the ``backend`` kwarg (``"opencv"``, ``"pyav"``,
-    ``"torchcodec"``, ``"pynvvideocodec"``, or ``"deepstream"``), which can be passed through
-    ``--media-io-kwargs``. Defaults to ``"opencv"``.
+    ``"torchcodec"``, ``"pynvvideocodec"``, or ``"deepstream"``),
+    which can be passed through ``--media-io-kwargs``. Defaults to ``"opencv"``.
     """
 
     _sampling_suffix: ClassVar[str] = ""
