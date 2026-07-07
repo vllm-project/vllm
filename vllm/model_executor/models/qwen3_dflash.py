@@ -766,7 +766,7 @@ class DFlashQwen3ForCausalLM(Qwen3ForCausalLM):
             if "d2t" in name:
                 name = name.replace("d2t", "draft_id_to_target_id")
                 includes_draft_id_mapping = True
-            elif "lm_head" not in name:
+            elif "lm_head" not in name and not name.startswith("model."):
                 name = "model." + name
             if "embed_tokens" in name:
                 includes_embed_tokens = True

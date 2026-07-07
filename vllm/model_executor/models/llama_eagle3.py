@@ -401,7 +401,7 @@ class Eagle3LlamaForCausalLM(LlamaForCausalLM):
                 self.mask_hidden.copy_(loaded_weight.view(1, -1))
                 includes_mask_hidden = True
                 continue
-            elif "lm_head" not in name:
+            elif "lm_head" not in name and not name.startswith("model."):
                 name = "model." + name
             if "embed_tokens" in name:
                 includes_embed_tokens = True

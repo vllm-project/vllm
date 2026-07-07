@@ -154,14 +154,12 @@ class Worker(WorkerBase):
 
         # Buffers saved before sleep
         self._sleep_saved_buffers: dict[str, torch.Tensor] = {}
-        self._sleep_saved_draft_params: dict[str, torch.Tensor] = {}
-        self._sleep_saved_draft_buffers: dict[str, torch.Tensor] = {}
+        self._sleep_rebuild_draft_metadata_buffers = False
 
         # Weight transfer engine is created in `load_model` once the model
         # is available, since the engine needs a reference to the model.
         self.weight_transfer_engine: WeightTransferEngine | None = None
         self._weight_update_active = False
-        self._draft_weight_update_active = False
 
         # Torch/CUDA profiler. Enabled and configured through profiler_config.
         # Profiler wrapper is created lazily in profile() when start is called,
@@ -201,24 +199,11 @@ class Worker(WorkerBase):
             self._sleep_saved_buffers = {
                 name: buffer.cpu().clone() for name, buffer in model.named_buffers()
             }
-            # Save draft model parameters: level-2 sleep discards all cumem
-            # allocations (offload_tags=tuple()), so drafter GPU memory is lost
-            # and must be restored on wake_up.
             draft = self.get_draft_model()
-            if draft is not None:
-                self._sleep_saved_draft_params = {
-                    name: param.cpu().clone()
-                    for name, param in draft.named_parameters()
-                    if not param.is_meta
-                }
-                self._sleep_saved_draft_buffers = {
-                    name: buf.cpu().clone()
-                    for name, buf in draft.named_buffers()
-                    if not buf.is_meta
-                }
-            else:
-                self._sleep_saved_draft_params = {}
-                self._sleep_saved_draft_buffers = {}
+            inner = getattr(draft, "model", None) if draft is not None else None
+            self._sleep_rebuild_draft_metadata_buffers = (
+                inner is not None and hasattr(inner, "_build_fused_kv_buffers")
+            )
 
         self._get_sleep_mode_backend().suspend(level)
 
@@ -250,33 +235,13 @@ class Worker(WorkerBase):
                     buffer.data.copy_(self._sleep_saved_buffers[name].data)
             self._sleep_saved_buffers = {}
 
-        # Restore draft model parameters and buffers saved during level-2 sleep.
-        # Use direct copy_ instead of load_weights: the saved names are vLLM's
-        # internal fused-param names (e.g. qkv_proj.weight), which load_weights
-        # does not recognise (it expects checkpoint-side unfused names).
-        if self._sleep_saved_draft_params or self._sleep_saved_draft_buffers:
+        if self._sleep_rebuild_draft_metadata_buffers:
             draft = self.get_draft_model()
             if draft is not None:
-                if self._sleep_saved_draft_params:
-                    named_params = dict(draft.named_parameters())
-                    for name, saved in self._sleep_saved_draft_params.items():
-                        param = named_params.get(name)
-                        if param is not None:
-                            param.data.copy_(saved)
-                if self._sleep_saved_draft_buffers:
-                    named_bufs = dict(draft.named_buffers())
-                    for name, saved in self._sleep_saved_draft_buffers.items():
-                        buf = named_bufs.get(name)
-                        if buf is not None:
-                            buf.data.copy_(saved)
-                # Rebuild derived tensor caches (e.g. DFlash fused KV buffers)
-                # that are not registered as parameters or buffers but live in
-                # cumem and become stale after level-2 sleep.
                 inner = getattr(draft, "model", None)
                 if inner is not None and hasattr(inner, "_build_fused_kv_buffers"):
                     inner._build_fused_kv_buffers()
-            self._sleep_saved_draft_params = {}
-            self._sleep_saved_draft_buffers = {}
+            self._sleep_rebuild_draft_metadata_buffers = False
 
         if tags is None or "kv_cache" in tags:
             self.model_runner.post_kv_cache_wake_up()
@@ -978,13 +943,12 @@ class Worker(WorkerBase):
         return getattr(drafter, "model", None)
 
     @staticmethod
-    def _get_weight_update_target(include_draft: bool) -> str:
+    def _validate_weight_update_target(include_draft: bool) -> None:
         if not isinstance(include_draft, bool):
             raise TypeError(
                 "Weight update include_draft must be a boolean, "
                 f"got {type(include_draft)}."
             )
-        return "draft" if include_draft else "model"
 
     def _get_draft_weight_update_target(self) -> tuple[nn.Module, Any]:
         draft_model = self.get_draft_model()
@@ -1002,19 +966,13 @@ class Worker(WorkerBase):
 
         return draft_model, speculative_config.draft_model_config
 
-    def _start_draft_weight_update(self) -> None:
+    def _set_draft_weight_update_target(self) -> None:
         assert self.weight_transfer_engine is not None
 
-        if getattr(self, "_draft_weight_update_active", False):
-            return
-
         draft_model, draft_model_config = self._get_draft_weight_update_target()
-        self.weight_transfer_engine.finish_weight_update()
         self.weight_transfer_engine.set_weight_update_target(
             draft_model, draft_model_config
         )
-        self.weight_transfer_engine.start_weight_update()
-        self._draft_weight_update_active = True
 
     def get_supported_tasks(self) -> tuple[SupportedTask, ...]:
         return self.model_runner.get_supported_tasks()
@@ -1272,16 +1230,21 @@ class Worker(WorkerBase):
         typed_init_info = self.weight_transfer_engine.parse_init_info(init_info)
         self.weight_transfer_engine.init_transfer_engine(typed_init_info)
 
-    def start_weight_update(self) -> None:
+    def start_weight_update(self, include_draft: bool = False) -> None:
         """
         Start a new weight update session.
 
         Delegates engine-specific preparation (e.g. layerwise reload setup) to
         the configured weight transfer engine. The worker only tracks that a
         session is active.
+
+        Args:
+            include_draft: If True, load this session's chunks into the
+                speculative draft model instead of the target model.
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
+        self._validate_weight_update_target(include_draft)
 
         if self._weight_update_active:
             raise RuntimeError(
@@ -1289,21 +1252,26 @@ class Worker(WorkerBase):
                 "active. Call finish_weight_update first."
             )
 
-        self.weight_transfer_engine.start_weight_update()
+        try:
+            if include_draft:
+                self._set_draft_weight_update_target()
+            self.weight_transfer_engine.start_weight_update()
+        except BaseException:
+            self.weight_transfer_engine.reset_weight_update_target()
+            raise
         self._weight_update_active = True
-        self._draft_weight_update_active = False
 
-    def update_weights(self, update_info: dict, include_draft: bool = False) -> None:
+    def update_weights(self, update_info: dict) -> None:
         """
         Receive one weight update chunk from the trainer.
 
         start_weight_update must be called before update_weights and
         finish_weight_update must be called after all chunks have been sent.
+        Whether chunks load into the target or draft model is decided once by
+        start_weight_update(include_draft=...).
 
         Args:
             update_info: Dictionary containing backend-specific update info
-            include_draft: If True, load the received weights into the
-                speculative draft model instead of the target model.
         """
         self._check_weight_transfer_engine()
         assert self.weight_transfer_engine is not None
@@ -1314,20 +1282,9 @@ class Worker(WorkerBase):
             )
 
         try:
-            target_model = self._get_weight_update_target(include_draft)
-            if target_model == "model":
-                if self._draft_weight_update_active:
-                    raise RuntimeError(
-                        "Cannot update the target model after starting a draft "
-                        "model weight update in the same session."
-                    )
-                self.weight_transfer_engine.update_weights(update_info)
-            else:
-                self._start_draft_weight_update()
-                self.weight_transfer_engine.update_weights(update_info)
+            self.weight_transfer_engine.update_weights(update_info)
         except BaseException:
             self._weight_update_active = False
-            self._draft_weight_update_active = False
             self.weight_transfer_engine.reset_weight_update_target()
             raise
 
@@ -1344,7 +1301,6 @@ class Worker(WorkerBase):
         self.weight_transfer_engine.finish_weight_update()
         self.weight_transfer_engine.reset_weight_update_target()
         self._weight_update_active = False
-        self._draft_weight_update_active = False
 
     def shutdown(self) -> None:
         gc.unfreeze()

@@ -49,8 +49,9 @@ update_request = WeightTransferUpdateRequest(
 )
 ```
 
-Set `include_draft=True` to load the update into the speculative draft model
-instead of the target model.
+At the LLM/API layer, set `include_draft=True` on `start_weight_update()`
+to load that update session into the speculative draft model instead of the
+target model.
 
 ### WeightTransferUpdateInfo
 

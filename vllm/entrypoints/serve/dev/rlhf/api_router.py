@@ -129,7 +129,17 @@ async def init_weight_transfer_engine(raw_request: Request):
 
 @router.post("/start_weight_update")
 async def start_weight_update(raw_request: Request):
-    await engine_client(raw_request).start_weight_update()
+    include_draft = False
+    raw_body = await raw_request.body()
+    if raw_body:
+        try:
+            body = json.loads(raw_body)
+        except json.JSONDecodeError as e:
+            raise HTTPException(
+                status_code=400, detail="Invalid JSON format"
+            ) from e
+        include_draft = body.get("include_draft", False)
+    await engine_client(raw_request).start_weight_update(include_draft=include_draft)
     return JSONResponse(content={"message": "Weight update started"})
 
 
@@ -138,18 +148,15 @@ async def update_weights(raw_request: Request):
     try:
         body = await raw_request.json()
     except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail="Invalid JSON format") from e  # noqa: B904
+        raise HTTPException(status_code=400, detail="Invalid JSON format") from e
     update_info = body.get("update_info")
     if update_info is None:
         raise HTTPException(
             status_code=HTTPStatus.BAD_REQUEST.value,
             detail="Missing 'update_info' in request body",
         )
-    include_draft = body.get("include_draft", False)
     await engine_client(raw_request).update_weights(
-        request=WeightTransferUpdateRequest(
-            update_info=update_info, include_draft=include_draft
-        )
+        request=WeightTransferUpdateRequest(update_info=update_info)
     )
     return JSONResponse(content={"message": "Weights updated"})
 

@@ -873,9 +873,11 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    def start_weight_update(self) -> None:
+    def start_weight_update(self, include_draft: bool = False) -> None:
         """Start a new weight update."""
-        self.llm_engine.collective_rpc("start_weight_update")
+        self.llm_engine.collective_rpc(
+            "start_weight_update", kwargs={"include_draft": include_draft}
+        )
 
     def update_weights(self, request: WeightTransferUpdateRequest | dict) -> None:
         """
@@ -887,15 +889,9 @@ class LLM(BeamSearchOfflineMixin, PoolingOfflineMixin, OfflineInferenceMixin):
         update_info_dict = (
             request["update_info"] if isinstance(request, dict) else request.update_info
         )
-        include_draft = (
-            request.get("include_draft", False)
-            if isinstance(request, dict)
-            else request.include_draft
-        )
 
         self.llm_engine.collective_rpc(
-            "update_weights",
-            kwargs={"update_info": update_info_dict, "include_draft": include_draft},
+            "update_weights", kwargs={"update_info": update_info_dict}
         )
 
     def finish_weight_update(self) -> None:

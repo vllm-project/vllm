@@ -1080,9 +1080,11 @@ class AsyncLLM(EngineClient):
             "init_weight_transfer_engine", kwargs={"init_info": init_info_dict}
         )
 
-    async def start_weight_update(self) -> None:
+    async def start_weight_update(self, include_draft: bool = False) -> None:
         """Start a new weight update."""
-        await self.collective_rpc("start_weight_update")
+        await self.collective_rpc(
+            "start_weight_update", kwargs={"include_draft": include_draft}
+        )
 
     async def update_weights(self, request: WeightTransferUpdateRequest) -> None:
         """
@@ -1094,15 +1096,13 @@ class AsyncLLM(EngineClient):
 
         if isinstance(request, WeightTransferUpdateRequest):
             update_info_dict = request.update_info
-            include_draft = request.include_draft
         else:
             raise TypeError(
                 f"Expected WeightTransferUpdateRequest, got {type(request)}"
             )
 
         await self.collective_rpc(
-            "update_weights",
-            kwargs={"update_info": update_info_dict, "include_draft": include_draft},
+            "update_weights", kwargs={"update_info": update_info_dict}
         )
 
     async def finish_weight_update(self) -> None:
