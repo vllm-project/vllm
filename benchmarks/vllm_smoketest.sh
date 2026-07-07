@@ -11,21 +11,23 @@ declare -A MODEL_SERVE_ARGS=(
   [DeepSeek-R1-0528-MXFP4]="--tensor-parallel-size 1 --gpu_memory_utilization 0.9 --dtype auto --no-enable-prefix-caching --disable-uvicorn-access-log --trust-remote-code"
 )
 declare -A MODEL_ENV=(
-  [gpt-oss-120b-mxfp4]="HSA_ENABLE_SDMA=0 USE_SVM=0 HSA_XNACK=0 VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=0 VLLM_ROCM_USE_SKINNY_GEMM=0 VLLM_ROCM_USE_AITER_RMSNORM=0"
+  [gpt-oss-120b-mxfp4]="HSA_OVERRIDE_GFX_VERSION=12.5.0 HSA_ENABLE_SDMA=0 VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_SKINNY_GEMM=0 VLLM_ROCM_USE_AITER_RMSNORM=0 "
   [DeepSeek-R1-0528-MXFP4]="HSA_ENABLE_SDMA=0 USE_SVM=0 HSA_XNACK=0 VLLM_ROCM_AITER_FUSED_MOE_TRITON_GEMM_A4W4=1 VLLM_ROCM_USE_AITER=1 VLLM_ROCM_USE_AITER_UNIFIED_ATTENTION=1 VLLM_ROCM_USE_SKINNY_GEMM=0 VLLM_ROCM_USE_AITER_RMSNORM=0"
 )
 
 MODEL_NAME="gpt-oss-120b-mxfp4" # default
-MODEL_PATH_OVERRIDE=""         # overrided path
+MODEL_PATH_OVERRIDE=""
+MODEL_ENV_OVERRIDE=""
 MODEL_SET=0                    # whether --model was explicitly passed
 RUN_LM_EVAL=0
 PORT=8000
 
 usage() {
   cat <<'EOF'
-Usage: ./vllm_smoketest.sh [--model NAME] [--model-path PATH] [--lm-eval] [--port PORT] [--list]
+Usage: ./vllm_smoketest.sh [--model NAME] [--model-path PATH] [--env ENV_VARS] [--lm-eval] [--port PORT] [--list]
   --model NAME       Registry key to run (default: gpt-oss-120b-mxfp4)
   --model-path PATH  Override model path for this run
+  --env ENV_VARS     Override environment variables (e.g., "VAR1=val1 VAR2=val2")
   --lm-eval          Run lm_eval after curl check
   --port PORT        Server port (default: 8000)
   --list             List available models
@@ -36,6 +38,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --model)      MODEL_NAME="$2"; MODEL_SET=1; shift 2 ;;
     --model-path) MODEL_PATH_OVERRIDE="$2"; shift 2 ;;
+    --env)        MODEL_ENV_OVERRIDE="$2"; shift 2 ;;
     --lm-eval)    RUN_LM_EVAL=1; shift ;;
     --port)       PORT="$2"; shift 2 ;;
     --list)       for n in "${!MODEL_PATHS[@]}"; do echo "$n -> ${MODEL_PATHS[$n]}"; done; exit 0 ;;
@@ -53,10 +56,8 @@ MODEL="${MODEL_PATHS[$MODEL_NAME]:-$MODEL_NAME}"
 [[ -n "$MODEL_PATH_OVERRIDE" ]] && MODEL="$MODEL_PATH_OVERRIDE"
 SERVE_ARGS="${MODEL_SERVE_ARGS[$MODEL_NAME]:-}"
 MODEL_ENV_ARGS="${MODEL_ENV[$MODEL_NAME]:-}"
+[[ -n "$MODEL_ENV_OVERRIDE" ]] && MODEL_ENV_ARGS="$MODEL_ENV_OVERRIDE"
 echo "Model: $MODEL | Port: $PORT | lm_eval: $RUN_LM_EVAL"
-
-# temp
-pip3 install "fastapi<0.137"
 
 LOG_DIR="$(pwd)/vllm_smoke_test_logs"
 mkdir -p "$LOG_DIR"
@@ -84,11 +85,12 @@ echo "=== Curl completion check ==="
 http_code=$(curl -s -o "$LOG_DIR/curl_completion.log" -w '%{http_code}' \
   "http://localhost:$PORT/v1/completions" \
   -H "Content-Type: application/json" \
-  -d "{\"model\":\"$MODEL\",\"prompt\":\"San Francisco is a\",\"max_tokens\":32,\"temperature\":0}")
+  -d "{\"model\":\"$MODEL\",\"prompt\":\"The capital of France is  \",\"max_tokens\":32,\"temperature\":0}")
 cat "$LOG_DIR/curl_completion.log"; echo
 [[ "$http_code" == "200" ]] || { echo "FAIL: HTTP $http_code" >&2; exit 1; }
 grep -q '"text"' "$LOG_DIR/curl_completion.log" || { echo "FAIL: no text in response" >&2; exit 1; }
-echo "PASS"
+grep -qi "Paris" "$LOG_DIR/curl_completion.log" || { echo "FAIL: 'Paris' not found in response" >&2; exit 1; }
+CURL_CHECK_PASSED=1
 
 # --- lm_eval ---
 if [[ $RUN_LM_EVAL -eq 1 ]]; then
@@ -98,5 +100,11 @@ if [[ $RUN_LM_EVAL -eq 1 ]]; then
     --model_args "model=$MODEL,base_url=http://localhost:$PORT/v1/completions,num_concurrent=64,max_retries=3,tokenized_requests=False" \
     --tasks gsm8k --num_fewshot 3 --limit 100 2>&1 | tee "$LOG_DIR/lm_eval.log"
 fi
+
+# Shutdown server
+cleanup
+
+# Print PASS only if curl check succeeded
+[[ ${CURL_CHECK_PASSED:-0} -eq 1 ]] && echo "PASS"
 
 echo "Done."
