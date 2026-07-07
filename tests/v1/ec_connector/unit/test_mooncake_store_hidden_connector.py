@@ -41,6 +41,12 @@ class FakeWorker:
     def enqueue_save(self, request):
         self.requests.append(request)
 
+    def get_finished_sending(self):
+        return set()
+
+    def get_failed_sending(self):
+        return {}
+
 
 def make_connector(*, soft_pin_video_hidden: bool = False):
     connector = MooncakeStoreECConnector.__new__(MooncakeStoreECConnector)
@@ -391,3 +397,23 @@ def test_save_caches_does_not_soft_pin_image_hidden():
 
     assert len(connector.worker.requests) == 1
     assert not connector.worker.requests[0].with_soft_pin
+
+
+def test_get_finished_logs_failed_hidden_saves(caplog):
+    class FailedWorker(FakeWorker):
+        def get_finished_sending(self):
+            return {"image-ok"}
+
+        def get_failed_sending(self):
+            return {"image-failed": "batch put failed"}
+
+    connector = make_connector()
+    connector.worker = FailedWorker()
+
+    finished_sending, finished_recving = connector.get_finished({"req-1"})
+
+    assert finished_sending == {"image-ok"}
+    assert finished_recving is None
+    assert "hidden_store_save_failed" in caplog.text
+    assert "image-failed" in caplog.text
+    assert "batch put failed" in caplog.text

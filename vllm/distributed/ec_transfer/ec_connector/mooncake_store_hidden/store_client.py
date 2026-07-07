@@ -202,6 +202,22 @@ class MooncakeHiddenStoreClient:
         self.store = store
         self.replicate_config = replicate_config
 
+    def close(self) -> None:
+        """Best-effort shutdown for Mooncake store implementations."""
+        for method_name in ("close", "teardown", "disconnect", "finalize"):
+            close_fn = getattr(self.store, method_name, None)
+            if close_fn is None:
+                continue
+            try:
+                close_fn()
+            except Exception:
+                logger.warning(
+                    "failed to close hidden Mooncake store with %s()",
+                    method_name,
+                    exc_info=True,
+                )
+            return
+
     def exists(self, pool_key: HiddenPoolKey) -> bool:
         data_key = make_hidden_data_key(pool_key)
         states = self.store.batch_is_exist([data_key])

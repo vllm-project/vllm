@@ -44,6 +44,7 @@ RESP_BATCH = b"BATCH"
 RESP_HIT = b"HIT"
 RESP_MISS = b"MISS"
 RESP_ERR = b"ERR"
+THREAD_JOIN_TIMEOUT_SECONDS = 5.0
 
 
 class HiddenStoreWorker:
@@ -90,6 +91,11 @@ class HiddenStoreWorker:
             return set()
         return self.sending_thread.get_and_clear_finished_identifiers()
 
+    def get_failed_sending(self) -> dict[str, str]:
+        if self.sending_thread is None:
+            return {}
+        return self.sending_thread.get_and_clear_failure_reasons()
+
     def get_operation_stats(self) -> HiddenStoreOperationStats | None:
         with self._operation_stats_lock:
             if self._operation_stats.is_empty():
@@ -122,6 +128,9 @@ class HiddenStoreWorker:
         if self.sending_thread is not None:
             self.sending_thread.close()
             self.sending_thread = None
+        close_fn = getattr(self.store_client, "close", None)
+        if close_fn is not None:
+            close_fn()
 
     def lookup(self, identifier: str) -> bool:
         """Return whether the hidden object exists in Mooncake Store."""
@@ -261,6 +270,7 @@ class HiddenStoreWorker:
             started = time.perf_counter()
             pool_key = self.make_pool_key(item.identifier)
             tensor_meta = None
+            load_stage = "metadata"
             try:
                 tensor_meta = self.store_client.get_tensor_meta(pool_key)
                 if tensor_meta is None:
@@ -269,6 +279,7 @@ class HiddenStoreWorker:
                         f"{pool_key.to_string()}"
                     )
 
+                load_stage = "allocate"
                 target_device = device
                 if target_device is None:
                     target_device = "cuda" if torch.cuda.is_available() else None
@@ -281,14 +292,16 @@ class HiddenStoreWorker:
                     pool_key,
                     target,
                 )
+                load_stage = "payload"
                 self.store_client.get_tensor_payload(
                     pool_key,
                     addrs[0],
                     sizes[0],
                     tensor_meta.data_offset,
                 )
+                load_stage = "validate"
                 validate_loaded_tensor(target, tensor_meta)
-            except Exception:
+            except Exception as e:
                 self._record_operation(
                     "load_get",
                     time.perf_counter() - started,
@@ -296,6 +309,17 @@ class HiddenStoreWorker:
                     num_bytes=tensor_meta.nbytes if tensor_meta is not None else 0,
                     status="error",
                     num_failed_keys=1,
+                )
+                logger.exception(
+                    "hidden_store_load_failed identifier=%s hidden_pool_key=%s "
+                    "stage=%s shape=%s dtype=%s nbytes=%s error=%s",
+                    item.identifier,
+                    pool_key.to_string(),
+                    load_stage,
+                    tensor_meta.shape if tensor_meta is not None else None,
+                    tensor_meta.dtype if tensor_meta is not None else None,
+                    tensor_meta.nbytes if tensor_meta is not None else 0,
+                    e,
                 )
                 raise
             encoder_cache[item.identifier] = target
@@ -354,6 +378,17 @@ class HiddenStoreSendingThread(threading.Thread):
             self.failed_identifiers.clear()
         return failed
 
+    def get_and_clear_failure_reasons(self) -> dict[str, str]:
+        with self.done_task_lock:
+            failures = {
+                identifier: self.failure_reasons.get(identifier, "")
+                for identifier in self.failed_identifiers
+            }
+            for identifier in self.failed_identifiers:
+                self.failure_reasons.pop(identifier, None)
+            self.failed_identifiers.clear()
+        return failures
+
     def set_finished_identifier(self, identifier: str) -> None:
         with self.done_task_lock:
             self.finished_identifiers.add(identifier)
@@ -387,6 +422,14 @@ class HiddenStoreSendingThread(threading.Thread):
             return
         self._closed.set()
         self.request_queue.put(None)
+        if threading.current_thread() is not self:
+            self.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
+            if self.is_alive():
+                logger.warning(
+                    "%s did not exit within %.1f seconds",
+                    self.name,
+                    THREAD_JOIN_TIMEOUT_SECONDS,
+                )
 
 
 class HiddenLookupServer:
@@ -414,7 +457,13 @@ class HiddenLookupServer:
 
         def process_request():
             while self.running:
-                all_frames = self.socket.recv_multipart(copy=False)
+                try:
+                    all_frames = self.socket.recv_multipart(copy=False)
+                except zmq.error.ZMQError:
+                    if not self.running:
+                        return
+                    logger.exception("HiddenLookupServer recv failed")
+                    continue
                 msg_type = bytes(all_frames[0])
 
                 if msg_type == LOOKUP_MSG:
@@ -455,6 +504,13 @@ class HiddenLookupServer:
     def close(self):
         self.running = False
         self.socket.close(linger=0)
+        self.thread.join(timeout=THREAD_JOIN_TIMEOUT_SECONDS)
+        if self.thread.is_alive():
+            logger.warning(
+                "HiddenLookupServer thread did not exit within %.1f seconds",
+                THREAD_JOIN_TIMEOUT_SECONDS,
+            )
+        _close_zmq_context(self.ctx)
         if os.path.exists(self._ipc_path):
             os.unlink(self._ipc_path)
 
@@ -553,6 +609,7 @@ class HiddenLookupClient:
         self.executor.shutdown(wait=False, cancel_futures=True)
         self.futures.clear()
         self.socket.close(linger=0)
+        _close_zmq_context(self.ctx)
 
 
 def get_zmq_rpc_path_hidden_lookup(vllm_config: VllmConfig) -> str:
@@ -571,3 +628,16 @@ def get_zmq_rpc_path_hidden_lookup(vllm_config: VllmConfig) -> str:
         f"ipc://{base_url}/hidden_lookup_rpc_port_{rpc_port}_host_{hostname}"
         f"_dp_rank{dp_rank}"
     )
+
+
+def _close_zmq_context(ctx) -> None:
+    try:
+        destroy = getattr(ctx, "destroy", None)
+        if destroy is not None:
+            destroy(linger=0)
+            return
+        term = getattr(ctx, "term", None)
+        if term is not None:
+            term()
+    except Exception:
+        logger.warning("failed to close hidden lookup ZMQ context", exc_info=True)

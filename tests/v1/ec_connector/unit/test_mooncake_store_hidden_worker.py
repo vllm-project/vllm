@@ -30,6 +30,7 @@ from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.store_clien
 )
 from vllm.distributed.ec_transfer.ec_connector.mooncake_store_hidden.worker import (
     HiddenLookupClient,
+    HiddenLookupServer,
     HiddenStoreSendingThread,
     HiddenStoreWorker,
 )
@@ -126,6 +127,59 @@ class FakeStore:
                 key_results.append(fragment_results)
             results.append(key_results)
         return results
+
+
+class FakeClosableStore(FakeStore):
+    def __init__(self):
+        super().__init__()
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+
+
+class FakeStoreWithTeardown(FakeStore):
+    def __init__(self):
+        super().__init__()
+        self.teardown_called = False
+
+    def teardown(self):
+        self.teardown_called = True
+
+
+class FakeSocket:
+    def __init__(self):
+        self.closed = False
+        self.linger = None
+
+    def close(self, linger=0):
+        self.closed = True
+        self.linger = linger
+
+
+class FakeContext:
+    def __init__(self):
+        self.destroy_called = False
+        self.term_called = False
+
+    def destroy(self, linger=0):
+        self.destroy_called = True
+
+    def term(self):
+        self.term_called = True
+
+
+class FakeThread:
+    def __init__(self):
+        self.join_called = False
+        self.timeout = None
+
+    def join(self, timeout=None):
+        self.join_called = True
+        self.timeout = timeout
+
+    def is_alive(self):
+        return False
 
 
 class FakeBufferStore(FakeStore):
@@ -552,6 +606,115 @@ def test_sending_thread_records_failed_identifier_without_finishing():
     assert pool_key.identifier in sending_thread.failure_reasons
     assert worker.get_operation_stats().data["save_put"][0]["status"] == "error"
     sending_thread.close()
+
+
+def test_worker_drains_failed_sending_reasons():
+    pool_key = make_pool_key()
+    tensor = torch.zeros((2, 4), dtype=torch.float16)
+    store = FakeBufferStore()
+    store.raise_on_batch_put = True
+    worker = HiddenStoreWorker(
+        store_client=MooncakeHiddenStoreClient(store),
+        tensor_database=HiddenTensorDatabase(),
+    )
+    worker.start_sending_thread()
+
+    assert worker.sending_thread is not None
+    worker.enqueue_save(HiddenSaveRequest(pool_key=pool_key, tensor=tensor))
+    worker.sending_thread.request_queue.join()
+
+    failed = worker.get_failed_sending()
+
+    assert set(failed) == {pool_key.identifier}
+    assert "batch put failed" in failed[pool_key.identifier]
+    assert worker.get_failed_sending() == {}
+    worker.shutdown()
+
+
+def test_sending_thread_close_joins_worker_thread():
+    pool_key = make_pool_key()
+    tensor = torch.zeros((2, 4), dtype=torch.float16)
+    store = FakeStore()
+    worker = HiddenStoreWorker(
+        store_client=MooncakeHiddenStoreClient(store),
+        tensor_database=HiddenTensorDatabase(),
+    )
+    sending_thread = HiddenStoreSendingThread(worker)
+    sending_thread.start()
+    sending_thread.add_request(HiddenSaveRequest(pool_key=pool_key, tensor=tensor))
+    sending_thread.request_queue.join()
+
+    sending_thread.close()
+
+    assert not sending_thread.is_alive()
+
+
+def test_worker_shutdown_closes_store_client():
+    store = FakeClosableStore()
+    worker = HiddenStoreWorker(
+        store_client=MooncakeHiddenStoreClient(store),
+        tensor_database=HiddenTensorDatabase(),
+    )
+
+    worker.shutdown()
+
+    assert store.closed
+
+
+def test_store_client_close_uses_fallback_close_method():
+    store = FakeStoreWithTeardown()
+    client = MooncakeHiddenStoreClient(store)
+
+    client.close()
+
+    assert store.teardown_called
+
+
+def test_lookup_server_close_joins_thread_and_closes_context(tmp_path):
+    socket = FakeSocket()
+    ctx = FakeContext()
+    thread = FakeThread()
+    ipc_path = tmp_path / "hidden_lookup.ipc"
+    ipc_path.write_text("socket")
+    server = HiddenLookupServer.__new__(HiddenLookupServer)
+    server.running = True
+    server.socket = socket
+    server.ctx = ctx
+    server.thread = thread
+    server._ipc_path = str(ipc_path)
+
+    server.close()
+
+    assert not server.running
+    assert socket.closed
+    assert socket.linger == 0
+    assert thread.join_called
+    assert ctx.destroy_called or ctx.term_called
+    assert not ipc_path.exists()
+
+
+def test_lookup_client_close_shuts_down_executor_socket_and_context():
+    socket = FakeSocket()
+    ctx = FakeContext()
+    executor = types.SimpleNamespace(
+        shutdown_called=False,
+        shutdown=lambda wait=False, cancel_futures=True: setattr(
+            executor, "shutdown_called", True
+        ),
+    )
+    client = HiddenLookupClient.__new__(HiddenLookupClient)
+    client.executor = executor
+    client.futures = {"image-hash": Future()}
+    client.socket = socket
+    client.ctx = ctx
+
+    client.close()
+
+    assert executor.shutdown_called
+    assert client.futures == {}
+    assert socket.closed
+    assert socket.linger == 0
+    assert ctx.destroy_called or ctx.term_called
 
 
 def test_worker_load_gets_tensor_data_into_encoder_cache_before_returning():
