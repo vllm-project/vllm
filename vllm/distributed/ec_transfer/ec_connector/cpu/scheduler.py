@@ -162,7 +162,7 @@ class ECCPUScheduler:
         for mm_hash in pending:
             if mm_hash in self._local_encodings:
                 loads[mm_hash] = self._blocks[mm_hash]
-                logger.debug("EC: local mmap re-serve mm_hash=%s", mm_hash)
+                logger.debug("EC: CPU->GPU load mm_hash=%s", mm_hash)
         self._drop_reload_pins()
         return loads
 

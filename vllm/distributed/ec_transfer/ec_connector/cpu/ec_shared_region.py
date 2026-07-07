@@ -218,6 +218,22 @@ class ECSharedRegion:
 
     def cleanup(self) -> None:
         """Tear down the region. Lifecycle method; no concurrent access."""
+        logger.info("Starting ECSharedRegion cleanup...")
+        # Unlink the path before the slower cudaHostUnregister / mmap teardown
+        # below. Removing the name only drops the directory entry; the open fd
+        # and existing MAP_SHARED mappings keep the pages alive until every
+        # mapper unmaps, so this is safe here. Doing it first means the file is
+        # gone as soon as cleanup runs, even if engine shutdown tears the
+        # process down before the rest of this method completes.
+        if self._is_creator and getattr(self, "mmap_path", None):
+            try:
+                os.unlink(self.mmap_path)
+                logger.info("Removed EC mmap file %s", self.mmap_path)
+            except Exception:
+                logger.warning(
+                    "Failed to unlink path %s", self.mmap_path, exc_info=True
+                )
+            self._is_creator = False
         if self.is_pinned and self._base is not None:
             result = torch.cuda.cudart().cudaHostUnregister(self.base_ptr)
             if result.value != 0:
@@ -237,12 +253,3 @@ class ECSharedRegion:
             except Exception:
                 logger.warning("Failed to close fd %s", self.fd, exc_info=True)
             self.fd = None
-        if self._is_creator and getattr(self, "mmap_path", None):
-            try:
-                os.unlink(self.mmap_path)
-                logger.info("Removed EC mmap file %s", self.mmap_path)
-            except Exception:
-                logger.warning(
-                    "Failed to unlink path %s", self.mmap_path, exc_info=True
-                )
-            self._is_creator = False
