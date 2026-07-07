@@ -230,6 +230,9 @@ class MooncakeStoreCoordinator:
             manager_cls = KVCacheSpecRegistry.get_manager_class(spec)
             assert manager_cls is not None
             use_eagle = g_idx in self.eagle_group_ids
+            reachable_boundaries = (
+                () if num_prompt_tokens is None else (num_prompt_tokens - 1,)
+            )
             mask = manager_cls.reachable_block_mask(
                 start_block=start_chunk,
                 end_block=end_chunk,
@@ -237,7 +240,7 @@ class MooncakeStoreCoordinator:
                 kv_cache_spec=spec,
                 use_eagle=use_eagle,
                 retention_interval=retention_interval,
-                num_prompt_tokens=num_prompt_tokens,
+                reachable_boundaries=reachable_boundaries,
             )
             if mask is not None:
                 assert len(mask) == end_chunk - start_chunk

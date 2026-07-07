@@ -294,13 +294,6 @@ class Scheduler(SchedulerInterface):
 
         self.has_mamba_layers = kv_cache_config.has_mamba_layers
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
-        # Groups whose prefix cache is sparsified under
-        # VLLM_PREFIX_CACHE_RETENTION_INTERVAL (Mamba / sliding window).
-        # For these, a detected shared prefix must be pinned so retention doesn't
-        # drop the junction and defeat cross-request reuse.
-        self.has_retention_maskable_groups = (
-            kv_cache_config.has_mamba_layers or kv_cache_config.has_sliding_window
-        )
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
         )
@@ -703,8 +696,7 @@ class Scheduler(SchedulerInterface):
                     ):
                         computed, per_group_hits = (
                             self.kv_cache_manager.coordinator.find_longest_cache_hit_per_group(
-                                request.block_hashes,
-                                request.num_tokens - 1,
+                                request.block_hashes, request.num_tokens - 1
                             )
                         )
                         new_computed_blocks = (
@@ -728,26 +720,27 @@ class Scheduler(SchedulerInterface):
                                 preempted=request.num_preemptions > 0,
                             )
                     else:
-                        new_computed_blocks, num_new_local_computed_tokens = (
-                            self.kv_cache_manager.get_computed_blocks(request)
-                        )
+                        (
+                            new_computed_blocks,
+                            num_new_local_computed_tokens,
+                            # Shared-prefix hint (Marconi-style APC): a shared
+                            # prefix a sparse-retention group (Mamba / sliding
+                            # window) has not cached yet. The connector path above
+                            # uses a per-group lookup that does not compute it, so
+                            # it stays 0 there.
+                            num_uncached_common_prefix_tokens,
+                        ) = self.kv_cache_manager.get_computed_blocks(request)
 
-                    # Hybrid models: obtain the shared-prefix hint (Marconi-style
-                    # APC) and pin the detected junction so its sparse-retention
-                    # state (Mamba block / sliding-window tail) survives.
-                    if self.has_retention_maskable_groups:
-                        num_uncached_common_prefix_tokens = getattr(
-                            self.kv_cache_manager.coordinator,
-                            "num_uncached_common_prefix_tokens",
-                            0,
-                        )
-                        request.shared_prefix_boundary = (
-                            num_new_local_computed_tokens
-                            + num_uncached_common_prefix_tokens
-                            if num_uncached_common_prefix_tokens
-                            >= self.cache_config.block_size
-                            else 0
-                        )
+                    # Pin the detected junction so its sparse-retention state
+                    # (Mamba block / sliding-window tail) survives and can serve a
+                    # cross-request hit.
+                    request.shared_prefix_boundary = (
+                        num_new_local_computed_tokens
+                        + num_uncached_common_prefix_tokens
+                        if num_uncached_common_prefix_tokens
+                        >= self.cache_config.block_size
+                        else 0
+                    )
 
                     # Get externally-cached tokens if using a KVConnector.
                     if self.connector is not None:

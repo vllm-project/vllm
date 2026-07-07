@@ -239,7 +239,7 @@ def test_prefill(hash_fn):
     unique_token_ids = [3] * 7
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert len(req0.block_hashes) == 3
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
@@ -269,7 +269,7 @@ def test_prefill(hash_fn):
     # Incomplete 1 block (5 tokens)
     unique_token_ids = [3] * 5
     req1 = make_request("1", common_token_ids + unique_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert len(req1.block_hashes) == 3
     assert computed_blocks.get_block_ids() == ([1, 2, 3],)
     assert num_computed_tokens == 3 * 16
@@ -302,7 +302,7 @@ def test_prefill(hash_fn):
     # Incomplete 1 block (6 tokens)
     unique_token_ids = [3] * 6
     req2 = make_request("2", common_token_ids + unique_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req2)
     assert len(req2.block_hashes) == 3
     assert computed_blocks.get_block_ids() == ([1, 2, 3],)
     assert num_computed_tokens == 3 * 16
@@ -322,7 +322,7 @@ def test_prefill(hash_fn):
 
     # Cache miss and eviction.
     req3 = make_request("3", [99] * (16 * 10), block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req3)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req3)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(
@@ -364,7 +364,7 @@ def test_prefill_hybrid_model():
     unique_token_ids = [3] * 7
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert len(req0.block_hashes) == 3
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
@@ -400,7 +400,7 @@ def test_prefill_hybrid_model():
     unique_token_ids = [3] * 5
     all_token_ids = common_token_ids + unique_token_ids
     req1 = make_request("1", common_token_ids + unique_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert len(req1.block_hashes) == 3
     assert computed_blocks.get_block_ids() == ([1, 2, 3], [0, 6, 7], [0, 10, 11])
     assert num_computed_tokens == 3 * 16
@@ -534,7 +534,7 @@ def test_prefill_hybrid_model_eagle():
     unique_token_ids = [6] * 7
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert len(req0.block_hashes) == len(all_token_ids) // block_size
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
@@ -571,7 +571,7 @@ def test_prefill_hybrid_model_eagle():
     unique_token_ids = [6] * 5
     all_token_ids = common_token_ids + unique_token_ids
     req1 = make_request("1", all_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert len(req1.block_hashes) == num_full_blocks
     assert computed_blocks.get_block_ids() == (
         [1, 2, 3, 4, 5],
@@ -707,7 +707,7 @@ def _test_partial_request_hit(
     req = make_request(request_id, prompt_token_ids, block_size, sha256)
     for hash_with_group_id in hash_to_evict:
         manager.block_pool.cached_block_hash_to_block._cache.pop(hash_with_group_id)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req)
     assert len(req.block_hashes) == num_full_blocks
     assert num_computed_tokens == expect_hit_length * block_size
     for block_per_group in computed_blocks.blocks:
@@ -868,7 +868,7 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
 
     # First request: no cache hit initially
     req0 = make_request("0", all_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
 
     assert len(req0.block_hashes) == 3
     assert not computed_blocks.blocks[0]  # No cache hit initially
@@ -885,7 +885,7 @@ def test_prefill_hybrid_model_combinations(spec_types: list[str]):
 
     # Second request: should hit cached blocks for common prefix
     req1 = make_request("1", common_token_ids + [4] * 5, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
 
     # Should hit cached blocks for all groups
     assert num_computed_tokens == 3 * block_size
@@ -945,7 +945,7 @@ def test_prefill_hybrid_model_combinations_eagle(
 
     # First request: no cache hit initially
     req0 = make_request("0", all_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
 
     assert len(req0.block_hashes) == num_full_blocks
     assert not computed_blocks.blocks[0]  # No cache hit initially
@@ -961,7 +961,7 @@ def test_prefill_hybrid_model_combinations_eagle(
     # Second request: should hit cached blocks for common prefix
     all_token_ids = common_token_ids + [6] * 5
     req1 = make_request("1", all_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
 
     # Should hit cached blocks for all groups
     assert num_computed_tokens == expect_hit_length * block_size
@@ -1014,7 +1014,7 @@ def test_prefill_hybrid_model_mamba_align():
     # First request: allocate_slots should not crash with the assertion error
     # in MambaManager.cache_blocks() when null blocks are present.
     req0 = make_request("0", all_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert num_computed_tokens == 0
 
     blocks = manager.allocate_slots(req0, 55, num_computed_tokens, computed_blocks)
@@ -1043,24 +1043,27 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     # Request: 3 blocks
     prefix = [i for i in range(3) for _ in range(block_size)]
     req_0 = make_request("0", prefix, block_size, hash_fn)
-    computed_blocks, num_computed = manager.get_computed_blocks(req_0)
-    num_uncached_common = manager.coordinator.num_uncached_common_prefix_tokens
+    computed_blocks, num_computed, num_uncached_common = manager.get_computed_blocks(
+        req_0
+    )
     assert num_computed == 0  # nothing cached yet
     assert num_uncached_common == 0
     manager.allocate_slots(req_0, 3 * block_size, 0, computed_blocks)
 
     # Request: 3 blocks (shared with above) + 7 different tokens
     req_1 = make_request("1", prefix + [100] * 7, block_size, hash_fn)
-    computed_blocks, num_computed = manager.get_computed_blocks(req_1)
-    num_uncached_common = manager.coordinator.num_uncached_common_prefix_tokens
+    computed_blocks, num_computed, num_uncached_common = manager.get_computed_blocks(
+        req_1
+    )
     assert num_computed == 3 * block_size  # we should observe a 3-block cache hit
     assert num_uncached_common == 0
     manager.allocate_slots(req_1, 7, 3 * block_size, computed_blocks)
 
     # Request: 3 blocks, but only 2 blocks shared (replace the last token in 3rd block):
     req_2 = make_request("2", prefix[:-1] + [101], block_size, hash_fn)
-    computed_blocks, num_computed = manager.get_computed_blocks(req_2)
-    num_uncached_common = manager.coordinator.num_uncached_common_prefix_tokens
+    computed_blocks, num_computed, num_uncached_common = manager.get_computed_blocks(
+        req_2
+    )
     assert num_computed == 0  # mamba_align doesn't cache intermediate blocks
     assert num_uncached_common == 2 * block_size  # heuristic detects a shared prefix
 
@@ -1110,7 +1113,7 @@ def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():
 
     all_token_ids = [i for i in range(3) for _ in range(block_size)] + [3] * 7
     req0 = make_request("0", all_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(
         req0, len(all_token_ids), num_computed_tokens, computed_blocks
@@ -1162,7 +1165,7 @@ def test_prefill_plp():
     unique_token_ids = [3] * 7
     all_token_ids = common_token_ids + unique_token_ids
     req0 = make_request("0", all_token_ids, block_size, hash_fn, prompt_logprobs=5)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert len(req0.block_hashes) == 3
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
@@ -1194,7 +1197,7 @@ def test_prefill_plp():
     # Incomplete 1 block (5 tokens)
     unique_token_ids = [3] * 5
     req1 = make_request("1", common_token_ids + unique_token_ids, block_size, hash_fn)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert len(req1.block_hashes) == 3
     assert computed_blocks.get_block_ids() == ([1, 2, 3],)
     assert num_computed_tokens == 3 * 16
@@ -1228,7 +1231,7 @@ def test_prefill_plp():
     req2 = make_request(
         "2", common_token_ids + unique_token_ids, block_size, hash_fn, prompt_logprobs=5
     )
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req2)
     assert len(req2.block_hashes) == 3
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
@@ -1265,7 +1268,7 @@ def test_decode():
     # Incomplete 1 block (7 tokens)
     unique_token_ids = [3] * 7
     req0 = make_request("0", common_token_ids + unique_token_ids, block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(
@@ -1323,7 +1326,7 @@ def test_evict():
 
     last_token_id = 5 * 16 + 7
     req0 = make_request("0", list(range(last_token_id)), block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(
@@ -1336,7 +1339,7 @@ def test_evict():
     req1 = make_request(
         "1", list(range(last_token_id, last_token_id + 3 * 16)), block_size, sha256
     )
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(
@@ -1361,7 +1364,7 @@ def test_evict():
 
     # Touch the first 2 blocks.
     req2 = make_request("2", list(range(2 * 16 + 3)), block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req2)
     assert computed_blocks.get_block_ids() == ([1, 2],)
     assert num_computed_tokens == 2 * 16
     blocks = manager.allocate_slots(
@@ -1387,7 +1390,7 @@ def test_hash_block_correct_reuse():
     # Allocate 1 block and cache it.
     num_tokens = block_size * 1
     req = make_request("0", list(range(num_tokens)), block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(
@@ -1401,7 +1404,7 @@ def test_hash_block_correct_reuse():
     # Allocate a new block that's not full, make sure hash info on the
     # block is cleared.
     req = make_request("1", list(range(num_tokens - 1)), block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(
@@ -1428,7 +1431,7 @@ def test_computed_blocks_not_evicted():
     # Allocate a block and cache it.
     num_tokens = block_size * 1
     req0 = make_request("0", list(range(num_tokens)), block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(
@@ -1441,7 +1444,7 @@ def test_computed_blocks_not_evicted():
     req1 = make_request(
         "1", list(range(num_tokens, num_tokens * 2)), block_size, sha256
     )
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(
@@ -1457,7 +1460,7 @@ def test_computed_blocks_not_evicted():
     # Now if we have a cache hit on the first block, we should evict the second
     # cached block rather than the first one.
     req2 = make_request("2", list(range(num_tokens * 2)), block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req2)
     assert len(computed_blocks.blocks[0]) == 1
     assert computed_blocks.blocks[0][0].block_id == 1
     assert num_computed_tokens == block_size
@@ -1488,7 +1491,7 @@ def test_basic_prefix_caching_disabled():
         "1", list(range(10)), block_size, sha256
     )  # 2 blocks and some more
 
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(
@@ -1501,7 +1504,7 @@ def test_basic_prefix_caching_disabled():
 
     # No caching.
     req2 = make_request("2", list(range(16)), block_size, sha256)  # shared prefix
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req2)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(
@@ -1511,7 +1514,7 @@ def test_basic_prefix_caching_disabled():
 
     # New requests should not have any blocks.
     req3 = make_request("3", list(range(4)), block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req3)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req3)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(
@@ -1693,7 +1696,7 @@ def test_mm_prefix_caching():
         mm_positions=mm_positions,
         mm_hashes=mm_hashes,
     )
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
 
     # Completed block should have hashes
     assert not computed_blocks.blocks[0]
@@ -1758,7 +1761,7 @@ def test_mm_prefix_caching():
         mm_positions=mm_positions,
         mm_hashes=mm_hashes,
     )
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert len(computed_blocks.blocks[0]) == 3
     assert num_computed_tokens == 3 * 16
 
@@ -1780,7 +1783,7 @@ def test_cache_key_salting():
     common_token_ids = [i for i in range(3) for _ in range(block_size)]
     token_ids = common_token_ids + [3] * 11
     req0 = make_request("0", token_ids, block_size, sha256, cache_salt="salt1")
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
 
     # Completed block should have hashes
     assert not computed_blocks.blocks[0]
@@ -1819,7 +1822,7 @@ def test_cache_key_salting():
     # Test cache hit with a new request that has the same salt.
     token_ids = common_token_ids + [4] * 11
     req1 = make_request("1", token_ids, block_size, sha256, cache_salt="salt1")
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     # Should match only a prefix of 3 blocks.
     assert len(computed_blocks.blocks[0]) == 3
     assert num_computed_tokens == 3 * block_size
@@ -1827,7 +1830,7 @@ def test_cache_key_salting():
     # Test cache miss with same content but different salt.
     token_ids = common_token_ids + [4] * 11
     req2 = make_request("2", token_ids, block_size, sha256, cache_salt="salt2")
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req2)
     assert len(computed_blocks.blocks[0]) == 0
     assert num_computed_tokens == 0
     block_hashes = req2.block_hashes
@@ -1861,7 +1864,7 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     # | Common-0 | Common-1 | Common-2 | ... |
     common_token_ids = [i for i in range(3) for _ in range(16)]
     req0 = make_request("0", common_token_ids, block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     manager.allocate_slots(
@@ -1873,7 +1876,7 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
 
     # | Common-0 | Common-1 | Common-2 | Req1-3 | Req1-4 | Req1-5 | ... |
     req1 = make_request("1", common_token_ids * 2, block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert computed_blocks.blocks[0] == block_part0
     assert num_computed_tokens == 3 * 16
     manager.allocate_slots(
@@ -1891,7 +1894,7 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     # | Common-0 | Common-1 | Common-2 | Req1-3 (F) | Req1-4 (F) |
     # | Req1-5(F)| Req2-0   | Req2-1   | ... |
     req2 = make_request("2", [7] * block_size * 2, block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req2)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     manager.allocate_slots(
@@ -1906,7 +1909,7 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     # In this case, the ref_cnt of the computed blocks should not be changed.
     assert manager.block_pool.free_block_queue.num_free_blocks == 5
     req3 = make_request("3", common_token_ids * 3, block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req3)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req3)
     assert computed_blocks.blocks[0] == block_part1
     assert num_computed_tokens == 6 * 16
     # Req3 cannot be allocated.
@@ -1941,7 +1944,7 @@ def test_reset_prefix_cache():
     unique_token_ids = [4] * 7
     all_token_ids = full_block_token_ids + unique_token_ids
     req1 = make_request("1", all_token_ids, block_size, sha256)
-    computed_blocks, _ = manager.get_computed_blocks(req1)
+    computed_blocks, _, _ = manager.get_computed_blocks(req1)
     assert len(req1.block_hashes) == 3
     assert len(computed_blocks.blocks[0]) == 3
     blocks = manager.allocate_slots(
@@ -1976,7 +1979,7 @@ def test_prefix_cache_stats_disabled():
 
     # Call all functions that check whether log_stats is disabled.
     req = make_request("0", list(range(16)), block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req)
     assert not computed_blocks.blocks[0]
     assert num_computed_tokens == 0
     manager.allocate_slots(
@@ -2471,7 +2474,7 @@ def test_eagle_enabled_removes_last_block():
     req = make_request("divisible_request", token_ids, block_size, sha256)
 
     # Prime the cache
-    computed_blocks, _ = manager.get_computed_blocks(req)
+    computed_blocks, _, _ = manager.get_computed_blocks(req)
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
@@ -2479,7 +2482,7 @@ def test_eagle_enabled_removes_last_block():
 
     # New request with same tokens + Eagle enabled
     req_eagle = make_request("eagle_divisible", token_ids, block_size, sha256)
-    computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
+    computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_eagle)
 
     # Should retain 1 block:
     # 1. Original 3 blocks → pop last hash → 2 matched blocks
@@ -2503,7 +2506,7 @@ def test_eagle_with_partial_blocks():
     req = make_request("partial_block_test", token_ids, block_size, sha256)
 
     # Prime the cache
-    computed_blocks, _ = manager.get_computed_blocks(req)
+    computed_blocks, _, _ = manager.get_computed_blocks(req)
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
@@ -2511,7 +2514,7 @@ def test_eagle_with_partial_blocks():
 
     # New request with Eagle enabled
     req_eagle = make_request("partial_eagle", token_ids, block_size, sha256)
-    computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
+    computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_eagle)
     # Original match: 2 full blocks → Eagle removes 1 → 1 remaining
     assert len(computed_blocks.blocks[0]) == 1
     assert num_tokens == 1 * block_size
@@ -2544,7 +2547,7 @@ def test_eagle_with_sliding_window():
     req = make_request("partial_block_test", token_ids, block_size, sha256)
 
     # Prime the cache
-    computed_blocks, _ = manager.get_computed_blocks(req)
+    computed_blocks, _, _ = manager.get_computed_blocks(req)
     manager.allocate_slots(
         req, len(token_ids), len(computed_blocks.blocks[0]) * 16, computed_blocks
     )
@@ -2555,7 +2558,7 @@ def test_eagle_with_sliding_window():
 
     # New request with Eagle enabled
     req_eagle = make_request("partial_eagle", token_ids, block_size, sha256)
-    computed_blocks, num_tokens = manager.get_computed_blocks(req_eagle)
+    computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_eagle)
     # Original match: 2 full blocks → Eagle removes 1 → 1 remaining
     assert len(computed_blocks.blocks[0]) == 1
     assert num_tokens == 1 * block_size
@@ -2575,7 +2578,7 @@ def test_eagle_with_sliding_window():
     req_after_evict = make_request(
         "partial_eagle_after_evict", token_ids, block_size, sha256
     )
-    computed_blocks, num_tokens = manager.get_computed_blocks(req_after_evict)
+    computed_blocks, num_tokens, _ = manager.get_computed_blocks(req_after_evict)
     # Cache miss. The only hit prefix is [NULL_BLOCK, BLOCK_2] if eagle is
     # not considered. But after dropping the last matched block due to eagle,
     # there will be no matched prefix.
@@ -2634,7 +2637,7 @@ def test_eagle_swa_alignment_caches_extra_block():
     # Prime the cache with a long prompt (16 swa blocks = 4 aligned segments).
     token_ids = [i for i in range(16) for _ in range(block_size)]
     req0 = make_request("0", token_ids, block_size, sha256)
-    computed_blocks, _ = manager.get_computed_blocks(req0)
+    computed_blocks, _, _ = manager.get_computed_blocks(req0)
     blocks = manager.allocate_slots(
         req0,
         len(token_ids),
@@ -2648,7 +2651,7 @@ def test_eagle_swa_alignment_caches_extra_block():
     # Without the fix, ``num_computed_tokens`` is 0; with the fix, it lands at
     # an alignment boundary (multiple of 32 tokens, minus the EAGLE drop).
     req1 = make_request("1", token_ids, block_size, sha256)
-    _, num_computed_tokens = manager.get_computed_blocks(req1)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert num_computed_tokens > 0, (
         "EAGLE + SWA with sliding_window <= alignment failed to find any "
         "cache hit; the +1 block past each segment boundary must be cached."
@@ -2703,7 +2706,7 @@ def test_eagle_swa_boundary_caches_post_boundary_block():
 
     token_ids = [i for i in range(5) for _ in range(block_size)]
     req0 = make_request("0", token_ids, block_size, sha256)
-    computed_blocks, _ = manager.get_computed_blocks(req0)
+    computed_blocks, _, _ = manager.get_computed_blocks(req0)
     blocks = manager.allocate_slots(
         req0,
         len(token_ids),
@@ -2718,7 +2721,7 @@ def test_eagle_swa_boundary_caches_post_boundary_block():
     manager.free(req0)
 
     req1 = make_request("1", token_ids + [999], block_size, sha256)
-    _, num_computed_tokens = manager.get_computed_blocks(req1)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert num_computed_tokens == 4 * block_size
 
 
@@ -2759,7 +2762,7 @@ def test_eagle_grouped_swa_siblings_use_same_cache_mask():
 
     token_ids = [i for i in range(9) for _ in range(block_size)]
     req0 = make_request("0", token_ids, block_size, sha256)
-    computed_blocks, _ = manager.get_computed_blocks(req0)
+    computed_blocks, _, _ = manager.get_computed_blocks(req0)
     blocks = manager.allocate_slots(
         req0,
         len(token_ids),
@@ -2774,7 +2777,7 @@ def test_eagle_grouped_swa_siblings_use_same_cache_mask():
     manager.free(req0)
 
     req1 = make_request("1", token_ids + [999], block_size, sha256)
-    _, num_computed_tokens = manager.get_computed_blocks(req1)
+    _, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert num_computed_tokens == 8 * block_size
 
 
@@ -2818,7 +2821,7 @@ def test_different_block_size():
     common_token_ids = [i for i in range(10) for _ in range(block_size)]
 
     req0 = make_request("0", common_token_ids, block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert not computed_blocks.blocks[0]
     assert not computed_blocks.blocks[1]
     assert num_computed_tokens == 0
@@ -2827,13 +2830,13 @@ def test_different_block_size():
     )
     assert blocks.get_block_ids() == ([1, 2, 3, 4], [5, 6, 7, 8, 9, 10, 11])
     req1 = make_request("1", common_token_ids[: 7 * block_size + 1], block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert len(computed_blocks.blocks[0]) == 3
     assert len(computed_blocks.blocks[1]) == 6
     assert num_computed_tokens == 6 * 16
 
     req2 = make_request("2", common_token_ids[: 6 * block_size + 1], block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req2)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req2)
     assert len(computed_blocks.blocks[0]) == 3
     assert len(computed_blocks.blocks[1]) == 6
     assert num_computed_tokens == 6 * 16
@@ -2847,7 +2850,7 @@ def test_different_block_size():
     manager.block_pool.cached_block_hash_to_block.pop(
         make_block_hash_with_group_id(req1.block_hashes[5], 1), 10
     )
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert len(computed_blocks.blocks[0]) == 2
     assert len(computed_blocks.blocks[1]) == 4
     assert num_computed_tokens == 4 * 16
@@ -2900,7 +2903,7 @@ def test_hybrid_cache_blocks_swa_tail_window_only():
     # 8 hash-blocks of 8 tokens (64 tokens, two lcm-aligned segments).
     token_ids = [i for i in range(8) for _ in range(block_size)]
     req = make_request("0", token_ids, block_size, sha256)
-    computed_blocks, _ = manager.get_computed_blocks(req)
+    computed_blocks, _, _ = manager.get_computed_blocks(req)
     blocks = manager.allocate_slots(
         req,
         8 * block_size,
@@ -2969,7 +2972,7 @@ def test_hybrid_cache_blocks_clamped_to_lcm():
     # to 96 tokens — SWA caches 6 hashes, full-attn caches 3.
     token_ids = [i for i in range(7) for _ in range(block_size)]
     req = make_request("0", token_ids, block_size, sha256)
-    computed_blocks, _ = manager.get_computed_blocks(req)
+    computed_blocks, _, _ = manager.get_computed_blocks(req)
     blocks = manager.allocate_slots(
         req,
         7 * block_size,
@@ -3034,7 +3037,7 @@ def test_hybrid_local_kv_retention_interval_aligns_in_manager(monkeypatch):
     # 96-token replay boundary, and the 128-token interval boundary.
     token_ids = [i for i in range(16) for _ in range(block_size)]
     req = make_request("0", token_ids, block_size, sha256)
-    computed_blocks, _ = manager.get_computed_blocks(req)
+    computed_blocks, _, _ = manager.get_computed_blocks(req)
     blocks = manager.allocate_slots(
         req,
         len(token_ids),
@@ -3176,13 +3179,13 @@ def test_hybrid_local_kv_retention_interval_survives_recycling(monkeypatch):
 
     token_ids = fill_request("fill_0", 0)
     replay_req = make_request("replay", token_ids[:1800], hash_block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(replay_req)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(replay_req)
     assert num_computed_tokens == 1024
     assert [len(blocks) for blocks in computed_blocks.blocks] == [4, 16, 128, 256]
 
     fill_request("fill_1", 100_000)
     replay_req = make_request("replay_again", token_ids[:1800], hash_block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(replay_req)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(replay_req)
     assert num_computed_tokens == 1024
     assert [len(blocks) for blocks in computed_blocks.blocks] == [4, 16, 128, 256]
 
@@ -3225,7 +3228,7 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary(monkeypatc
 
     token_ids = [i for i in range(16) for _ in range(block_size)]
     req0 = make_request("0", token_ids, block_size, sha256)
-    computed_blocks, _ = manager.get_computed_blocks(req0)
+    computed_blocks, _, _ = manager.get_computed_blocks(req0)
     blocks = manager.allocate_slots(
         req0,
         len(token_ids),
@@ -3249,14 +3252,14 @@ def test_hybrid_local_kv_retention_latest_only_reuses_replay_boundary(monkeypatc
     assert retained_swa_block[0].ref_cnt == 0
 
     req1 = make_request("1", token_ids, block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     # Full prompt hits intentionally recompute the final block for logits, so
     # the longest usable hit is the previous LCM boundary: 96 tokens.
     assert num_computed_tokens == 12 * block_size
     assert len(computed_blocks.blocks[1]) == 12
 
     shorter_req = make_request("2", token_ids[: 12 * block_size], block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(shorter_req)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(shorter_req)
     assert num_computed_tokens == 0
     assert len(computed_blocks.blocks[1]) == 0
 
@@ -3309,7 +3312,7 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary(monkeypatch):
     # 104 tokens, and that tail is two 8-token blocks wide: hashes 11 and 12.
     token_ids = [i for i in range(15) for _ in range(block_size)] + [15] * 7
     req0 = make_request("0", token_ids, block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req0)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req0)
     assert num_computed_tokens == 0
     blocks = manager.allocate_slots(
         req0,
@@ -3331,7 +3334,7 @@ def test_hybrid_local_kv_retention_mtp_reuses_latest_boundary(monkeypatch):
     manager.free(req0)
 
     req1 = make_request("1", token_ids, block_size, sha256)
-    computed_blocks, num_computed_tokens = manager.get_computed_blocks(req1)
+    computed_blocks, num_computed_tokens, _ = manager.get_computed_blocks(req1)
     assert num_computed_tokens == 12 * block_size
     assert [len(blocks) for blocks in computed_blocks.blocks] == [3, 12]
 
@@ -3736,7 +3739,7 @@ def test_swa_free_split_keeps_cached_tail_ahead_of_scratch(monkeypatch):
 
     token_ids = [i for i in range(16) for _ in range(block_size)]
     req = make_request("0", token_ids, block_size, sha256)
-    computed_blocks, _ = manager.get_computed_blocks(req)
+    computed_blocks, _, _ = manager.get_computed_blocks(req)
     blocks = manager.allocate_slots(
         req,
         len(token_ids),
@@ -3819,7 +3822,7 @@ def test_pure_swa_retention_interval_caches_sparse_tails(monkeypatch):
 
     token_ids = [i for i in range(16) for _ in range(block_size)]
     req = make_request("0", token_ids, block_size, sha256)
-    computed_blocks, _ = manager.get_computed_blocks(req)
+    computed_blocks, _, _ = manager.get_computed_blocks(req)
     blocks = manager.allocate_slots(
         req,
         len(token_ids),
@@ -3843,7 +3846,7 @@ def test_pure_swa_retention_interval_caches_sparse_tails(monkeypatch):
 
     # A replay of the same prompt hits the latest replayable boundary (240).
     replay = make_request("1", token_ids, block_size, sha256)
-    _, num_computed = manager.get_computed_blocks(replay)
+    _, num_computed, _ = manager.get_computed_blocks(replay)
     assert num_computed == 240
 
 
@@ -3855,7 +3858,7 @@ def test_pure_swa_retention_latest_only(monkeypatch):
 
     token_ids = [i for i in range(16) for _ in range(block_size)]
     req = make_request("0", token_ids, block_size, sha256)
-    computed_blocks, _ = manager.get_computed_blocks(req)
+    computed_blocks, _, _ = manager.get_computed_blocks(req)
     blocks = manager.allocate_slots(
         req,
         len(token_ids),
@@ -3875,7 +3878,7 @@ def test_pure_swa_retention_latest_only(monkeypatch):
     assert cached == {14}
 
     replay = make_request("1", token_ids, block_size, sha256)
-    _, num_computed = manager.get_computed_blocks(replay)
+    _, num_computed, _ = manager.get_computed_blocks(replay)
     assert num_computed == 240
 
 
@@ -3888,7 +3891,7 @@ def test_pure_swa_retention_dense_default_caches_all(monkeypatch):
 
     token_ids = [i for i in range(16) for _ in range(block_size)]
     req = make_request("0", token_ids, block_size, sha256)
-    computed_blocks, _ = manager.get_computed_blocks(req)
+    computed_blocks, _, _ = manager.get_computed_blocks(req)
     blocks = manager.allocate_slots(
         req,
         len(token_ids),
@@ -3930,7 +3933,7 @@ def test_mamba_reachable_block_mask_sparsifies_retention():
             kv_cache_spec=spec,
             use_eagle=False,
             retention_interval=retention_interval,
-            num_prompt_tokens=num_prompt_tokens,
+            reachable_boundaries=(num_prompt_tokens - 1,),
         )
         return None if m is None else {i for i, v in enumerate(m) if v}
 
@@ -3961,6 +3964,9 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
     )
 
     def retained(retention_interval, shared_prefix_boundary, end_block=16):
+        boundaries = [255]  # replay boundary (num_prompt 256 - 1)
+        if shared_prefix_boundary:
+            boundaries.append(shared_prefix_boundary)
         m = MambaManager.reachable_block_mask(
             start_block=0,
             end_block=end_block,
@@ -3968,8 +3974,7 @@ def test_mamba_reachable_block_mask_pins_shared_prefix():
             kv_cache_spec=spec,
             use_eagle=False,
             retention_interval=retention_interval,
-            num_prompt_tokens=256,
-            shared_prefix_boundary=shared_prefix_boundary,
+            reachable_boundaries=boundaries,
         )
         return None if m is None else {i for i, v in enumerate(m) if v}
 
@@ -4012,7 +4017,7 @@ def test_mamba_shared_prefix_survives_zero_retention(monkeypatch):
         )
         req = make_request("r", token_ids, block_size, sha256)
         req.shared_prefix_boundary = shared_prefix_boundary
-        computed_blocks, num_computed = manager.get_computed_blocks(req)
+        computed_blocks, num_computed, _ = manager.get_computed_blocks(req)
         blocks = manager.allocate_slots(
             req, len(token_ids), num_computed, computed_blocks
         )
@@ -4059,14 +4064,13 @@ def test_mamba_shared_prefix_reuse_under_zero_retention(monkeypatch):
         # req0 primes the shared prefix's (dense) attention cache; align-mode
         # Mamba keeps only its own tail, not the shared-prefix junction.
         req0 = make_request("0", shared + distinct(50), block_size, sha256)
-        cb, nc = manager.get_computed_blocks(req0)
+        cb, nc, _ = manager.get_computed_blocks(req0)
         manager.allocate_slots(req0, len(req0.all_token_ids), nc, cb)
 
         # req1 detects the shared prefix (attn hit, Mamba lag) and, via the
         # Marconi chunk, caches the junction's Mamba state.
         req1 = make_request("1", shared + distinct(60), block_size, sha256)
-        cb, nc = manager.get_computed_blocks(req1)
-        ucc = manager.coordinator.num_uncached_common_prefix_tokens
+        cb, nc, ucc = manager.get_computed_blocks(req1)
         assert ucc == 2 * block_size  # shared prefix detected
         if pin:
             req1.shared_prefix_boundary = nc + ucc
@@ -4074,7 +4078,7 @@ def test_mamba_shared_prefix_reuse_under_zero_retention(monkeypatch):
 
         # req2 shares the same prefix: does it reuse the cached junction?
         req2 = make_request("2", shared + distinct(70), block_size, sha256)
-        _, nc2 = manager.get_computed_blocks(req2)
+        _, nc2, _ = manager.get_computed_blocks(req2)
         return nc2
 
     # Dense retains the junction -> reuse works (baseline ceiling).
@@ -4101,6 +4105,9 @@ def test_swa_reachable_block_mask_pins_shared_prefix():
             dtype=torch.float32,
             sliding_window=window,
         )
+        boundaries = [255]  # replay boundary (num_prompt 256 - 1)
+        if boundary:
+            boundaries.append(boundary)
         m = SlidingWindowManager.reachable_block_mask(
             start_block=0,
             end_block=end_block,
@@ -4108,8 +4115,7 @@ def test_swa_reachable_block_mask_pins_shared_prefix():
             kv_cache_spec=spec,
             use_eagle=False,
             retention_interval=retention,
-            num_prompt_tokens=256,
-            shared_prefix_boundary=boundary,
+            reachable_boundaries=boundaries,
         )
         return None if m is None else {i for i, v in enumerate(m) if v}
 
@@ -4154,14 +4160,13 @@ def test_swa_shared_prefix_reuse_under_zero_retention(monkeypatch):
         # req0 primes the (dense) full-attention cache; SWA under RET=0 keeps
         # only its own replay window, not the shared-prefix boundary.
         req0 = make_request("0", shared + distinct(50), block_size, sha256)
-        cb, nc = manager.get_computed_blocks(req0)
+        cb, nc, _ = manager.get_computed_blocks(req0)
         manager.allocate_slots(req0, len(req0.all_token_ids), nc, cb)
 
         # req1 detects the shared prefix (full-attn hit, SWA lag). No chunk for
         # SWA -- the pin fires during normal prefill.
         req1 = make_request("1", shared + distinct(60), block_size, sha256)
-        cb, nc = manager.get_computed_blocks(req1)
-        ucc = manager.coordinator.num_uncached_common_prefix_tokens
+        cb, nc, ucc = manager.get_computed_blocks(req1)
         if retention == 0:
             assert ucc == 4 * block_size  # detection fires when SWA lags
         if pin and ucc >= block_size:
@@ -4170,7 +4175,7 @@ def test_swa_shared_prefix_reuse_under_zero_retention(monkeypatch):
 
         # req2 shares the same prefix: does its SWA window reuse the junction?
         req2 = make_request("2", shared + distinct(70), block_size, sha256)
-        _, nc2 = manager.get_computed_blocks(req2)
+        _, nc2, _ = manager.get_computed_blocks(req2)
         return nc2
 
     # Dense keeps every SWA tail -> reuse works (ceiling).
