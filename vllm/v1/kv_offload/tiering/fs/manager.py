@@ -107,7 +107,7 @@ class FileSystemTierManager(SecondaryTierManager):
         root_dir: str,
         n_read_threads: int = 16,
         n_write_threads: int = 16,
-        enable_kv_events: bool = False,
+        enable_kv_cache_events: bool = False,
     ):
         """
         Args:
@@ -118,7 +118,7 @@ class FileSystemTierManager(SecondaryTierManager):
             root_dir: Root directory for block files.
             n_read_threads: Number of read-priority I/O threads.
             n_write_threads: Number of write-priority I/O threads.
-            enable_kv_events: Emit BlockStored KV events for blocks
+            enable_kv_cache_events: Emit BlockStored KV events for blocks
                 successfully stored to this tier. Effective only when KV
                 cache events are enabled globally (kv_events_config).
         """
@@ -126,12 +126,12 @@ class FileSystemTierManager(SecondaryTierManager):
 
         self.medium: str = MEDIUM_FS
         self.events: list[OffloadingEvent] | None = None
-        if enable_kv_events:
+        if enable_kv_cache_events:
             if offloading_spec.kv_events_config.enable_kv_cache_events:
                 self.events = []
             else:
                 logger.warning(
-                    "enable_kv_events is set on secondary tier '%s' but KV "
+                    "enable_kv_cache_events is set on secondary tier '%s' but KV "
                     "cache events are disabled globally; the tier will not "
                     "emit events.",
                     tier_type,
