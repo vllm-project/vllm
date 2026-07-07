@@ -64,23 +64,24 @@ def _make_fa_backend(version: int | None, is_vllm_fa: bool):
 @pytest.mark.parametrize(
     ("version", "is_vllm_fa", "dc_major", "quant_key", "expected"),
     [
-        # FA4 + vLLM-FA + Blackwell SM100/SM110 + static / per-group FP8 -> fused.
+        # FA4 + vLLM-FA + Blackwell SM100/SM110 + static/per-group FP8/NVFP4 -> fused.
         (4, True, 10, kFp8StaticTensorSym, True),
         (4, True, 11, kFp8StaticTensorSym, True),
         (4, True, 10, kFp8Dynamic128Sym, True),
         (4, True, 11, kFp8Dynamic64Sym, True),
+        (4, True, 10, kNvfp4Dynamic, True),
+        (4, True, 11, kNvfp4Dynamic, True),
         # Wrong compute capability (SM90 / SM120) -> not supported (#135).
         (4, True, 9, kFp8StaticTensorSym, False),
         (4, True, 12, kFp8StaticTensorSym, False),
         (4, True, 9, kFp8Dynamic128Sym, False),
+        (4, True, 9, kNvfp4Dynamic, False),
         # Not FA4.
         (3, True, 10, kFp8StaticTensorSym, False),
         (2, True, 10, kFp8StaticTensorSym, False),
         (None, True, 10, kFp8StaticTensorSym, False),
         # Upstream (ROCm) flash-attn, not vLLM-FA.
         (4, False, 10, kFp8StaticTensorSym, False),
-        # NVFP4 not wired through FA4.
-        (4, True, 10, kNvfp4Dynamic, False),
     ],
 )
 def test_flash_attn_supports_quant_output(

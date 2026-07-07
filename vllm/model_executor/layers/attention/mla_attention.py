@@ -688,6 +688,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
         is_pergroup = quant_key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym)
+        # NVFP4 fused output writes the whole 128x4-swizzled scale buffer; its 128-row
+        # tiles can't be split between FA (prefill tokens) and the separate decode-token
+        # quant, so only fuse when the batch is pure prefill.
+        nvfp4_ok = quant_key != kNvfp4Dynamic or num_mqa_tokens == 0
         # FA derives UE8M0 from the column-major scale layout, so it can only write the
         # two self-consistent layouts: DeepGEMM (col-major + ue8m0 + tma-aligned) or
         # plain row-major fp32.
@@ -702,6 +706,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and attn_metadata.prefill.chunked_context is None
             and self.impl.dcp_world_size <= 1
             and (not is_pergroup or pergroup_layout_ok)
+            and nvfp4_ok
         )
 
         if num_mha_tokens > 0:
@@ -724,7 +729,9 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 output=mha_output[num_mqa_tokens:num_actual_toks],
                 output_scale=mha_output_scale,
                 output_scales=(
-                    mha_output_scales[num_mqa_tokens:num_actual_toks]
+                    mha_output_scales
+                    if quant_key == kNvfp4Dynamic
+                    else mha_output_scales[num_mqa_tokens:num_actual_toks]
                     if mha_output_scales is not None
                     else None
                 ),
@@ -2304,6 +2311,9 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
 
         has_context = prefill_metadata.chunked_context is not None
         fused_output = output_scale is not None or output_scales is not None
+        is_nvfp4 = (
+            output_scales is not None and output_scales.dtype == torch.float8_e4m3fn
+        )
         assert not fused_output or not has_context, (
             "Fused FP8 output is only wired for the non-chunked-context path"
         )
@@ -2324,15 +2334,25 @@ class MLACommonImpl(MLAAttentionImpl[M], Generic[M]):
             v=v,
             return_softmax_lse=has_context,
             out=(
-                output.view(-1, self.num_heads, self.v_head_dim)
+                (
+                    # NVFP4: packed e2m1 codes, two per byte.
+                    output.view(torch.float4_e2m1fn_x2).view(
+                        -1, self.num_heads, self.v_head_dim // 2
+                    )
+                    if is_nvfp4
+                    else output.view(-1, self.num_heads, self.v_head_dim)
+                )
                 if fused_output
                 else None
             ),
             output_scale=output_scale,
+            # NVFP4 scales stay 2D (128x4-swizzled buffer). Per-group FP8:
             # (tokens, heads*groups) -> (tokens, heads, groups); unflatten (not view)
             # preserves the column-major / TMA-aligned DeepGEMM scale strides.
             output_scales=(
-                output_scales.unflatten(
+                output_scales
+                if is_nvfp4
+                else output_scales.unflatten(
                     -1, (self.num_heads, output_scales.shape[-1] // self.num_heads)
                 )
                 if output_scales is not None

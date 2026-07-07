@@ -1,0 +1,46 @@
+# MLA prefill NVFP4-output microbenchmark (FA4).
+# Compares the fused NVFP4 write (packed e2m1 + swizzled e4m3 block scales)
+# against bf16 attention + a standalone scaled_fp4_quant; the delta is the
+# post-quant kernel the fused path removes. DeepSeek-V2-Lite dims; SM100/110.
+#
+# Usage:
+#   python benchmark.py --config configs/mla_fa4_nvfp4_output.yaml
+
+description: "MLA prefill FA4 fused NVFP4 output vs post-quant"
+
+model:
+  name: "deepseek-v2-lite"
+  num_layers: 27
+  num_q_heads: 16
+  num_kv_heads: 1
+  head_dim: 576
+  kv_lora_rank: 512
+  qk_nope_head_dim: 128
+  qk_rope_head_dim: 64
+  v_head_dim: 128
+  block_size: 128
+
+# Pure prefill (q_len == kv_len) so every token goes through forward_mha.
+batch_specs:
+  - "q512"
+  - "q1k"
+  - "q2k"
+  - "q4k"
+  - "q8k"
+  - "2q4k"
+  - "4q4k"
+  - "8q4k"
+
+# Only used to construct the MLA impl; the pure-prefill specs skip decode.
+decode_backends:
+  - CUTLASS_MLA
+
+# Sweep the two NVFP4 write paths (prefill backend fixed to fa4); fp8_output_scale is
+# the NVFP4 global scale.
+fp8_output_scale: 500.0
+fuse_quant_op: [false, true]
+fp8_output_nvfp4: true
+
+device: "cuda:0"
+repeats: 50
+warmup_iters: 10

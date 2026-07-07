@@ -12,6 +12,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8Dynamic64Sym,
     kFp8Dynamic128Sym,
     kFp8StaticTensorSym,
+    kNvfp4Dynamic,
 )
 from vllm.platforms import current_platform
 from vllm.v1.attention.backends.fa_utils import (
@@ -100,7 +101,8 @@ class FlashAttnPrefillBackend(MLAPrefillBackend):
             and self._is_vllm_fa
             and device_capability is not None
             and device_capability[0] in (10, 11)
-            and quant_key in (kFp8StaticTensorSym, kFp8Dynamic128Sym, kFp8Dynamic64Sym)
+            and quant_key
+            in (kFp8StaticTensorSym, kFp8Dynamic128Sym, kFp8Dynamic64Sym, kNvfp4Dynamic)
         )
 
     def _flash_attn_varlen_diff_headdims(

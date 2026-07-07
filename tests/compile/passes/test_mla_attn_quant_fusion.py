@@ -729,3 +729,133 @@ def test_mla_prefill_pergroup_fused_output(
         f"fused per-group fp8 output diverges from bf16 attention: "
         f"max_abs={fa_err['abs']:.3f} vs amax={fa_err['amax']:.3f}"
     )
+
+
+@pytest.mark.skipif(
+    not current_platform.is_cuda() or not current_platform.has_device_capability(100),
+    reason="FA4 fused NVFP4 output requires Blackwell (SM100/SM110).",
+)
+@pytest.mark.parametrize("batch_size", [4])
+@pytest.mark.parametrize("query_len", [32])
+def test_mla_prefill_nvfp4_fused_output(
+    batch_size: int,
+    query_len: int,
+    dist_init,
+    monkeypatch,
+    use_fresh_inductor_cache,
+):
+    """Exercise the FA4 *prefill* NVFP4 fused-output path (forward_mha).
+
+    Mirrors ``test_mla_prefill_pergroup_fused_output`` for NVFP4: a pure-prefill
+    batch routes through ``forward_mha`` and FA4 writes packed e2m1 codes plus the
+    128x4-swizzled e4m3 block scales directly. Asserts (a) the fused path ran — the
+    FA prefill call received ``output_scales`` — and (b) dequantizing the fused
+    NVFP4 output matches a bf16 reference attention within fp4 tolerance.
+    """
+    from tests.kernels.quantization.nvfp4_utils import dequantize_nvfp4_to_dtype
+
+    monkeypatch.setenv("VLLM_DISABLE_COMPILE_CACHE", "1")
+
+    num_heads, qk_nope, qk_rope, v_head_dim, kv_lora = 16, 128, 64, 128, 512
+    qk_head_dim = qk_nope + qk_rope
+    num_tokens = batch_size * query_len
+    dtype = torch.bfloat16
+    device = torch.device(f"{DEVICE_TYPE}:0")
+    torch.set_default_dtype(dtype)
+    torch.manual_seed(42)
+
+    model_config = ModelConfig(
+        model="deepseek-ai/DeepSeek-V3", max_model_len=2048, dtype=dtype
+    )
+    vllm_config = VllmConfig(
+        model_config=model_config,
+        scheduler_config=SchedulerConfig(
+            max_num_seqs=1024,
+            max_model_len=model_config.max_model_len,
+            is_encoder_decoder=model_config.is_encoder_decoder,
+        ),
+        compilation_config=CompilationConfig(
+            mode=CompilationMode.VLLM_COMPILE, custom_ops=["+quant_fp8"]
+        ),
+        cache_config=CacheConfig(cache_dtype="auto"),
+        attention_config=AttentionConfig(backend=AttentionBackendEnum.TRITON_MLA),
+    )
+    vllm_config.compilation_config.pass_config = PassConfig(
+        fuse_attn_quant=True, eliminate_noops=True
+    )
+
+    q = torch.randn(num_tokens, num_heads, qk_head_dim, dtype=dtype, device=device)
+    kv_c_normed = torch.randn(num_tokens, kv_lora, dtype=dtype, device=device)
+    k_pe = torch.randn(num_tokens, 1, qk_rope, dtype=dtype, device=device)
+    torch._dynamo.mark_dynamic(q, 0)
+    torch._dynamo.mark_dynamic(kv_c_normed, 0)
+    torch._dynamo.mark_dynamic(k_pe, 0)
+
+    orig_run = FlashAttnPrefillBackend.run_prefill_new_tokens
+    fused_ran = False
+    fa_err: dict = {}
+
+    def spy_run(self, *args, out=None, output_scale=None, output_scales=None, **kwargs):
+        nonlocal fused_ran
+        if output_scales is None:
+            return orig_run(self, *args, out=out, output_scale=output_scale, **kwargs)
+        fused_ran = True
+        bf16_ref = orig_run(self, *args, out=None, output_scale=None, **kwargs)
+        ret = orig_run(
+            self,
+            *args,
+            out=out,
+            output_scale=output_scale,
+            output_scales=output_scales,
+            **kwargs,
+        )
+        deq = dequantize_nvfp4_to_dtype(
+            out.view(torch.uint8).flatten(start_dim=-2),
+            output_scales,
+            output_scale,
+            torch.float32,
+            out.device,
+        )
+        ref = bf16_ref.float().flatten(start_dim=-2)
+        fa_err["abs"] = (deq - ref).abs().max().item()
+        fa_err["amax"] = ref.abs().max().item()
+        return ret
+
+    monkeypatch.setattr(FlashAttnPrefillBackend, "run_prefill_new_tokens", spy_run)
+
+    with (
+        set_current_vllm_config(vllm_config),
+        set_forward_context(attn_metadata=None, vllm_config=vllm_config),
+    ):
+        model = TestMLAAttentionNvfp4QuantPatternModel(
+            num_heads=num_heads,
+            qk_nope_head_dim=qk_nope,
+            qk_rope_head_dim=qk_rope,
+            v_head_dim=v_head_dim,
+            kv_lora_rank=kv_lora,
+            kv_cache_dtype=dtype,
+            device=device,
+            vllm_config=vllm_config,
+        ).to(device)
+        model(q, kv_c_normed, k_pe)  # HACK: warmup, see #131044
+        get_forward_context().attn_metadata = model.build_attn_metadata(
+            batch_size, query_len
+        )
+        test_backend = TestBackend(
+            NoOpEliminationPass(vllm_config),
+            LazyInitPass(MLAAttnQuantFusionPass, vllm_config),
+            PostCleanupPass(vllm_config),
+        )
+        # forward_impl -> forward_mha (prefill) -> FA fused NVFP4 output -> o_proj GEMM.
+        torch.compile(model, backend=test_backend, fullgraph=True)(q, kv_c_normed, k_pe)
+
+    assert fused_ran, (
+        "fused NVFP4 prefill path was not exercised: the FA prefill call never "
+        "received output_scales (forward_mha fell back to the post-quant path)"
+    )
+    # e2m1 has a 1-bit mantissa: per-element quant error is bounded by half the gap
+    # to the next grid point (<= block_amax / 6), plus e4m3 scale rounding.
+    assert fa_err["abs"] <= 0.25 * fa_err["amax"], (
+        f"fused NVFP4 output diverges from bf16 attention: "
+        f"max_abs={fa_err['abs']:.3f} vs amax={fa_err['amax']:.3f}"
+    )

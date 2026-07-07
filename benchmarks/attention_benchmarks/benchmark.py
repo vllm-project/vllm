@@ -515,6 +515,12 @@ def main():
         help="Use per-group (block, 1x128) dynamic FP8 for the FP8-output "
         "comparison instead of per-tensor static.",
     )
+    parser.add_argument(
+        "--fp8-output-nvfp4",
+        action="store_true",
+        help="Use NVFP4 (packed e2m1 + swizzled e4m3 block scales) for the "
+        "quant-output comparison; --fp8-output-scale is the global scale.",
+    )
 
     # Batch specifications
     parser.add_argument(
@@ -655,6 +661,8 @@ def main():
             args.fuse_quant_op = yaml_config.get("fuse_quant_op", None)
         if not args.fp8_output_pergroup:
             args.fp8_output_pergroup = yaml_config.get("fp8_output_pergroup", False)
+        if not args.fp8_output_nvfp4:
+            args.fp8_output_nvfp4 = yaml_config.get("fp8_output_nvfp4", False)
 
         # Check for special modes
         args.mode = yaml_config.get("mode", None)
@@ -832,10 +840,12 @@ def main():
         decode_backend = backends[0]
         fuse_variants = args.fuse_quant_op or [False, True]
         pergroup = getattr(args, "fp8_output_pergroup", False)
+        nvfp4 = getattr(args, "fp8_output_nvfp4", False)
         label_of = {False: "post_quant", True: "fused"}
+        quant_label = "nvfp4" if nvfp4 else "per-group" if pergroup else "static"
         console.print(
-            f"[yellow]FP8 output comparison @ scale={fp8_output_scale} "
-            f"({'per-group' if pergroup else 'static'}, prefill=fa4, "
+            f"[yellow]Quant output comparison @ scale={fp8_output_scale} "
+            f"({quant_label}, prefill=fa4, "
             f"decode impl={decode_backend})[/]"
         )
         fp8_results = []
@@ -864,6 +874,7 @@ def main():
                         output_scale=fp8_output_scale,
                         fuse_quant_op=fuse,
                         output_pergroup=pergroup,
+                        output_nvfp4=nvfp4,
                     )
                     label = label_of[fuse]
                     labeled_config = replace(result.config, backend=label)
