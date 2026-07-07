@@ -44,7 +44,7 @@ def _select_experts_cls():
     Imported lazily so the module-level ``triton_kernels`` monkey-patches
     inside the experts file only run once an MXFP4 layer is actually built.
     """
-    from vllm.model_executor.hw_agnostic.layers.fused_moe.experts.oai_triton_mxfp4 import (  # noqa: E501
+    from vllm.model_executor.hw_agnostic.layers.fused_moe.experts.triton_mxfp4 import (  # noqa: E501
         OAITritonMxfp4Experts,
     )
 
@@ -123,8 +123,8 @@ class Mxfp4MoEMethod(FusedMoEMethodBase):
         # The swizzled scales live in ``PrecisionConfig`` objects on ``self``
         # because the wrapped tensors returned by ``triton_kernels`` cannot
         # round-trip through ``nn.Parameter`` (no ``.detach()`` support).
-        self.w13_precision_config = None
-        self.w2_precision_config = None
+        self.w13_precision_config: object | None = None
+        self.w2_precision_config: object | None = None
 
     @property
     def supports_eplb(self) -> bool:

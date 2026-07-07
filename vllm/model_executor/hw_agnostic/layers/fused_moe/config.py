@@ -270,6 +270,14 @@ class FusedMoEQuantConfig:
         return self._a2.scale
 
     @property
+    def a1_gscale(self) -> torch.Tensor | None:
+        return self._a1.alpha_or_gscale
+
+    @property
+    def a2_gscale(self) -> torch.Tensor | None:
+        return self._a2.alpha_or_gscale
+
+    @property
     def w1_scale(self) -> torch.Tensor | None:
         assert self._w1.scale is None or isinstance(self._w1.scale, torch.Tensor)
         return self._w1.scale

@@ -14,6 +14,9 @@ from vllm.model_executor.layers.quantization.base_config import (
 )
 
 if TYPE_CHECKING:
+    from vllm.model_executor.layers.quantization.base_config import (
+        QuantizationMethods,
+    )
     from vllm.model_executor.models.utils import WeightsMapper
 
 ACTIVATION_SCHEMES = ["static", "dynamic"]
@@ -57,7 +60,7 @@ class Fp8Config(QuantizationConfig):
         self.weight_block_size = weight_block_size
 
     @classmethod
-    def get_name(cls) -> str:
+    def get_name(cls) -> QuantizationMethods:
         return "fp8"
 
     @classmethod

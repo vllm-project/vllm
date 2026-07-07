@@ -10,7 +10,6 @@ import torch.nn.functional as F
 from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.config.parallel import ExpertPlacementStrategy
 from vllm.distributed import (
-    get_ep_group,
     get_pcp_group,
     tensor_model_parallel_all_reduce,
 )
@@ -663,29 +662,13 @@ class MoERunner(MoERunnerInterface):
 
         return self._maybe_reduce_final_output(result, og_hidden_dim_post_xform)
 
-    @property
-    def do_naive_dispatch_combine(self) -> bool:
-        return (
-            self.moe_config.dp_size > 1 and not self._quant_method.supports_internal_mk
-        )
-
     def _maybe_dispatch(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        # For naive DP/EP, dispatch hidden states and router logits to all
-        # experts.
-        if self.do_naive_dispatch_combine:
-            result = get_ep_group().dispatch_router_logits(
-                hidden_states,
-                router_logits,
-                self.moe_config.is_sequence_parallel,
-            )
-            assert len(result) == 2
-            hidden_states, router_logits = result
-
-        # PCP also needs dispatch / combine; we use AgRsAll2All here.
+        # DP/EP dispatch is handled inside the modular prepare/finalize
+        # (``naive_dp_ep``); the runner only drives PCP dispatch here.
         if self.moe_config.pcp_size > 1:
             hidden_states = get_pcp_group().all_gather(
                 hidden_states,
@@ -703,11 +686,8 @@ class MoERunner(MoERunnerInterface):
         shared_output: torch.Tensor | None,
         hidden_states: torch.Tensor,
     ) -> torch.Tensor | tuple[torch.Tensor | None, torch.Tensor]:
-        if self.do_naive_dispatch_combine:
-            hidden_states = get_ep_group().combine(
-                hidden_states, self.moe_config.is_sequence_parallel
-            )
-
+        # DP/EP combine is handled inside the modular prepare/finalize
+        # (``naive_dp_ep``); the runner only drives PCP combine here.
         if self.moe_config.pcp_size > 1:
             hidden_states = get_pcp_group().reduce_scatter(
                 hidden_states,

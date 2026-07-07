@@ -43,11 +43,6 @@ class FusedMoEMethodBase(QuantizeMethodBase):
         self.moe_quant_config: FusedMoEQuantConfig | None = None
         self.moe_kernel: mk.FusedMoEKernel | None = None
 
-    @property
-    def supports_internal_mk(self) -> bool:
-        # Quant methods on this path own their MK; True once it is built.
-        return self.moe_kernel is not None
-
     @abstractmethod
     def create_weights(
         self,

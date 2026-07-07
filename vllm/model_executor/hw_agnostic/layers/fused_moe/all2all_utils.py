@@ -43,7 +43,9 @@ def maybe_make_prepare_finalize(
       without DP; ``expert_map`` masks remote experts inside the kernel).
     """
     if moe.moe_parallel_config.dp_size > 1:
-        all2all_manager = get_ep_group().device_communicator.all2all_manager
+        device_communicator = get_ep_group().device_communicator
+        assert device_communicator is not None
+        all2all_manager = device_communicator.all2all_manager
         assert all2all_manager is not None
         return make_moe_prepare_and_finalize_naive_dp_ep(
             is_sequence_parallel=moe.moe_parallel_config.is_sequence_parallel,
