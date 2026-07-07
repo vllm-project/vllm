@@ -1294,8 +1294,8 @@ class VllmConfig:
 
                 if pass_config.sp_min_token_num is None:
                     logger.warning(
-                        "Model hidden_size too small for the SP "
-                        "threshold heuristic, disabling. To force SP, "
+                        "No SP threshold heuristic for this device "
+                        "capability / hidden_size, disabling. To force SP, "
                         "set pass_config.sp_min_token_num manually."
                     )
                     pass_config.enable_sp = False
@@ -1649,10 +1649,18 @@ class VllmConfig:
     def update_sizes_for_sequence_parallelism(self, possible_sizes: list) -> list:
         # remove the sizes that not multiple of tp_size when
         # enable sequence parallelism
+        tp_size = self.parallel_config.tensor_parallel_size
+        sp_min_token_num = self.compilation_config.pass_config.sp_min_token_num
+
+        def needs_sp_shape(size: int) -> bool:
+            # SP only applies to compile ranges at or above sp_min_token_num;
+            # smaller captured sizes run non-SP graphs and keep their shapes.
+            return sp_min_token_num is None or size >= sp_min_token_num
+
         removed_sizes = [
             size
             for size in possible_sizes
-            if size % self.parallel_config.tensor_parallel_size != 0
+            if needs_sp_shape(size) and size % tp_size != 0
         ]
         if removed_sizes:
             logger.warning(
@@ -1660,13 +1668,13 @@ class VllmConfig:
                 "multiple of tp_size %d when "
                 "sequence parallelism is enabled",
                 removed_sizes,
-                self.parallel_config.tensor_parallel_size,
+                tp_size,
             )
 
         return [
             size
             for size in possible_sizes
-            if size % self.parallel_config.tensor_parallel_size == 0
+            if not needs_sp_shape(size) or size % tp_size == 0
         ]
 
     def _set_max_num_scheduled_tokens(self):

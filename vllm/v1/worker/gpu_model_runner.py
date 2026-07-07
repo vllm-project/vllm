@@ -3461,7 +3461,11 @@ class GPUModelRunner(
         # enabled collective fusion for SP
         tp_size = self.vllm_config.parallel_config.tensor_parallel_size
         if self.compilation_config.pass_config.enable_sp and tp_size > 1:
-            return round_up(num_scheduled_tokens, tp_size)
+            sp_min_token_num = self.compilation_config.pass_config.sp_min_token_num
+            # Below sp_min_token_num the compile range is not SP-rewritten
+            # and needs no tp divisibility.
+            if sp_min_token_num is None or num_scheduled_tokens >= sp_min_token_num:
+                return round_up(num_scheduled_tokens, tp_size)
         return num_scheduled_tokens
 
     def _prepare_mm_inputs(
@@ -3921,7 +3925,11 @@ class GPUModelRunner(
             num_tokens_padded, disable_full=use_cascade_attn or has_encoder_output
         )
         num_tokens_padded = batch_descriptor.num_tokens
-        if self.compilation_config.pass_config.enable_sp:
+        pass_config = self.compilation_config.pass_config
+        if pass_config.enable_sp and (
+            pass_config.sp_min_token_num is None
+            or batch_descriptor.num_tokens >= pass_config.sp_min_token_num
+        ):
             assert (
                 batch_descriptor.num_tokens
                 % self.vllm_config.parallel_config.tensor_parallel_size
