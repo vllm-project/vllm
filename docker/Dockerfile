@@ -921,6 +921,13 @@ RUN --mount=type=cache,target=/opt/uv/cache \
         fi; \
     fi
 
+# Optionally install fastokens for faster BPE tokenization (VLLM_USE_FASTOKENS=1)
+ARG INCLUDE_FASTOKENS=0
+RUN --mount=type=cache,target=/opt/uv/cache \
+    if [ "${INCLUDE_FASTOKENS}" = "1" ]; then \
+        uv pip install --system "fastokens>=0.2.0"; \
+    fi
+
 # CUDA image changed from /usr/local/nvidia to /usr/local/cuda in 12.8 but will
 # return to /usr/local/nvidia in 13.0 to allow container providers to mount drivers
 # consistently from the host (see https://github.com/vllm-project/vllm/issues/18859).

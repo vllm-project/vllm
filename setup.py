@@ -1274,6 +1274,8 @@ setup(
         ],
         # extra quantization plugin
         "extra-quant": ["vllm-gguf-plugin>=0.0.2"],
+        # Optional faster Rust BPE tokenizer backend (requires VLLM_USE_FASTOKENS=1)
+        "fastokens": ["fastokens>=0.2.0"],
     },
     cmdclass=cmdclass,
     package_data=package_data,
