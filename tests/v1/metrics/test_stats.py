@@ -386,3 +386,16 @@ def test_compute_timing_intervals_mean_itl_needs_two_tokens():
     )
     iv = compute_timing_intervals(stats, num_generation_tokens=1)
     assert iv.mean_per_output_token is None  # n-1 == 0
+
+
+def test_finish_reason_importable_without_leaf_module():
+    import importlib
+
+    import vllm.v1.engine as engine
+    import vllm.v1.metrics.stats as stats  # must import w/o circular error
+
+    assert engine.FinishReason.ABORT == 2
+    assert str(engine.FinishReason.STOP) == "stop"
+    assert stats.FinishedRequestStats  # dataclass importable
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("vllm.v1.finish_reason")

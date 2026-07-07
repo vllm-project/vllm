@@ -8,12 +8,11 @@ from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
 from vllm.compilation.cuda_graph import CUDAGraphStat
-from vllm.v1.finish_reason import FinishReason
 from vllm.v1.metrics.perf import PerfStats
 from vllm.v1.spec_decode.metrics import SpecDecodingStats
 
 if TYPE_CHECKING:
-    from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput
+    from vllm.v1.engine import EngineCoreEvent, EngineCoreOutput, FinishReason
 
 
 @dataclass
@@ -299,7 +298,7 @@ def compute_timing_intervals(
 class FinishedRequestStats:
     """Stats associated with a finished request."""
 
-    finish_reason: FinishReason
+    finish_reason: "FinishReason"
     request_id: str | None = None
     e2e_latency: float = 0.0
     num_prompt_tokens: int = 0
@@ -502,7 +501,7 @@ class IterationStats:
 
     def update_from_finished_request(
         self,
-        finish_reason: FinishReason,
+        finish_reason: "FinishReason",
         request_id: str,
         num_prompt_tokens: int,
         max_tokens_param: int | None,

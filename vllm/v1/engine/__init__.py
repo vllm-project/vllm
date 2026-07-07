@@ -15,11 +15,6 @@ from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
-
-# FinishReason is re-exported for backwards compatibility. The canonical home
-# is vllm.v1.finish_reason - a leaf module that vllm.v1.metrics can import at
-# runtime without circularity.
-from vllm.v1.finish_reason import FINISH_REASON_STRINGS, FinishReason  # noqa: F401
 from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
 from vllm.v1.outputs import LogprobsLists, LogprobsTensors
 from vllm.v1.serial_utils import UtilityResult
@@ -30,6 +25,10 @@ from vllm.v1.serial_utils import UtilityResult
 # - "keep": Freeze requests in queue; they resume on resume_generation().
 PauseMode = Literal["abort", "wait", "keep"]
 
+# These are possible values of RequestOutput.finish_reason,
+# so form part of the external API.
+FINISH_REASON_STRINGS = ("stop", "length", "abort", "error", "repetition")
+
 EEP_NOTIFICATION_CALL_ID = -1
 
 
@@ -38,6 +37,31 @@ class EEPNotificationType(enum.Enum):
     NEW_CORE_ENGINES_WEIGHTS_INIT_READY = "NEW_CORE_ENGINES_WEIGHTS_INIT_READY"
     RECONFIGURE_FINISHED = "RECONFIGURE_FINISHED"
     SHUTDOWN_COMPLETE = "SHUTDOWN_COMPLETE"
+
+
+class FinishReason(enum.IntEnum):
+    """
+    Reason a request finished - stop, length, abort, error, or repetition.
+
+    Int rather than Str for more compact serialization.
+
+    stop - a stop string was emitted
+    length - max_tokens was consumed, or max_model_len was reached
+    abort - aborted by client
+    error - retryable request-level internal error (e.g., KV load failure).
+            Invariant: always converted to 500 Internal Server Error.
+    repetition - repetitive token pattern detected (hallucination)
+
+    """
+
+    STOP = 0
+    LENGTH = 1
+    ABORT = 2
+    ERROR = 3
+    REPETITION = 4
+
+    def __str__(self):
+        return FINISH_REASON_STRINGS[self.value]
 
 
 @dataclass
