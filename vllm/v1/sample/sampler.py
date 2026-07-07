@@ -16,93 +16,6 @@ from vllm.v1.sample.ops.topk_topp_sampler import TopKTopPSampler
 
 _SAMPLING_EPS = 1e-5
 
-import os as _os  # PATCH6_AITER_RAW_SAMPLE
-
-from vllm.logger import init_logger as _p6_init_logger
-
-_p6log = _p6_init_logger("vllm.v1.sample.patch6")
-_PATCH6_ON = _os.environ.get("VLLM_AITER_TEMP_SAMPLE", "0") == "1"
-_PATCH6_DEBUG = _os.environ.get("VLLM_PATCH6_DEBUG", "0") == "1"
-_PATCH6_DBG = False
-_PATCH6_ELIG_DBG = False
-
-
-def _patch6_eligible(sm, predict_bonus_token):
-    global _PATCH6_ELIG_DBG
-    if not _PATCH6_ON:
-        return False
-    if _PATCH6_DEBUG and not _PATCH6_ELIG_DBG:
-        try:
-            lp = sm.logitsprocs
-            h = sm.thinking_budget_state_holder
-            _p6log.info(
-                "PATCH6 ELIG: all_random=%r top_k=%r top_p=%r logprobs=%r lpids=%r "
-                "nopen=%r allow_None=%r bad=%r argmax=%r nonarg=%r think=%r bonus=%r",
-                sm.all_random,
-                sm.top_k,
-                sm.top_p,
-                sm.max_num_logprobs,
-                bool(sm.logprob_token_ids),
-                sm.no_penalties,
-                sm.allowed_token_ids_mask is None,
-                bool(sm.bad_words_token_ids),
-                list(lp.argmax_invariant),
-                list(lp.non_argmax_invariant),
-                (h.has_tracked_requests() if h is not None else None),
-                predict_bonus_token,
-            )
-        except Exception as e:
-            _p6log.info("PATCH6 ELIG dbg err: %r", e)
-        _PATCH6_ELIG_DBG = True
-    if predict_bonus_token:
-        return False
-    if not sm.all_random or sm.temperature is None:
-        return False
-    if sm.top_k is not None or sm.top_p is not None:
-        return False
-    if sm.max_num_logprobs is not None or sm.logprob_token_ids:
-        return False
-    if (
-        not sm.no_penalties
-        or sm.allowed_token_ids_mask is not None
-        or sm.bad_words_token_ids
-    ):
-        return False
-    lp = sm.logitsprocs
-    if lp.argmax_invariant or lp.non_argmax_invariant:
-        return False
-    h = sm.thinking_budget_state_holder
-    if h is not None and h.has_tracked_requests():
-        return False
-    return True
-
-
-def _aiter_raw_fused_sample(logits, sm):
-    """Sample token ids directly from RAW (bf16) logits via fused aiter kernel. int32 [n,1]."""
-    global _PATCH6_DBG
-    import torch as _t
-    from aiter import mixed_sample_outer_exponential
-
-    n, vocab = logits.shape
-    out = _t.empty(n, dtype=_t.int32, device=logits.device)
-    gens = sm.generators
-    if not gens:
-        exp = (
-            _t.empty((1, vocab), dtype=_t.float32, device=logits.device)
-            .exponential_()
-            .expand(n, vocab)
-        )
-    else:
-        exp = _t.empty((n, vocab), dtype=_t.float32, device=logits.device)
-        exp.exponential_()
-        for i, g in gens.items():
-            exp[i].exponential_(generator=g)
-    mixed_sample_outer_exponential(out, logits, exp, sm.temperature, eps=1e-10)
-    if not _PATCH6_DBG:
-        _p6log.info("PATCH6 raw-logits fused sampler ACTIVE (n=%d vocab=%d)", n, vocab)
-        _PATCH6_DBG = True
-    return out.unsqueeze(-1)
-
 
 class Sampler(nn.Module):
     """
@@ -163,12 +76,6 @@ class Sampler(nn.Module):
         predict_bonus_token: bool = False,
         logprobs_mode_override: LogprobsMode | None = None,
     ) -> SamplerOutput:
-        # PATCH6_AITER_RAW_SAMPLE: unconstrained all-random batch -> fused raw-logits sampler
-        if _patch6_eligible(sampling_metadata, predict_bonus_token):
-            return SamplerOutput(
-                sampled_token_ids=_aiter_raw_fused_sample(logits, sampling_metadata),
-                logprobs_tensors=None,
-            )
         logprobs_mode = logprobs_mode_override or self.logprobs_mode
         # NOTE(woosuk): Use the original logits (before any penalties or
         # temperature scaling) for the top-k logprobs.

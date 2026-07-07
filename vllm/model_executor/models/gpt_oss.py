@@ -36,59 +36,6 @@ from vllm.model_executor.layers.quantization import QuantizationConfig
 from vllm.model_executor.layers.quantization.utils.ocp_mx_utils import OCP_MX_BLOCK_SIZE
 from vllm.model_executor.layers.rotary_embedding import get_rope
 from vllm.model_executor.layers.utils import rocm_unquantized_gemm
-from vllm.utils.torch_utils import direct_register_custom_op
-
-_GPT_OSS_NORMPAD_LOGGED = False
-
-
-def _gpt_oss_rmsnorm_pad_add(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-    pad_to: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # ATOM-equivalent: add + rmsnorm (over the original N) + zero-pad to `pad_to`.
-    from aiter.ops.triton.normalization.fused_add_rmsnorm_pad import (
-        fused_add_rmsnorm_pad,
-    )
-
-    out, res_out = fused_add_rmsnorm_pad(x, weight, eps, residual, pad_to)
-    global _GPT_OSS_NORMPAD_LOGGED
-    if not _GPT_OSS_NORMPAD_LOGGED:
-        import sys
-
-        print(
-            f"[normpad] x={tuple(x.shape)} pad_to={pad_to} out={tuple(out.shape)} "
-            f"res_out={tuple(res_out.shape)}",
-            file=sys.stderr,
-            flush=True,
-        )
-        _GPT_OSS_NORMPAD_LOGGED = True
-    return out, res_out
-
-
-def _gpt_oss_rmsnorm_pad_add_fake(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    weight: torch.Tensor,
-    eps: float,
-    pad_to: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    M, N = x.shape
-    n_out = ((N + pad_to - 1) // pad_to) * pad_to if pad_to > 0 else N
-    return (
-        torch.empty((M, n_out), dtype=x.dtype, device=x.device),
-        torch.empty_like(residual),
-    )
-
-
-direct_register_custom_op(
-    op_name="gpt_oss_rmsnorm_pad_add",
-    op_func=_gpt_oss_rmsnorm_pad_add,
-    mutates_args=[],
-    fake_impl=_gpt_oss_rmsnorm_pad_add_fake,
-)
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
@@ -339,19 +286,7 @@ class TransformerBlock(torch.nn.Module):
         hidden_states = self.attn(hidden_states, positions)
 
         # Fully Connected
-        _pad_to = self.mlp.experts.moe_config.hidden_dim
-        if residual is not None and _pad_to > hidden_states.shape[-1]:
-            hidden_states, residual = torch.ops.vllm.gpt_oss_rmsnorm_pad_add(
-                hidden_states,
-                residual,
-                self.post_attention_layernorm.weight,
-                self.post_attention_layernorm.variance_epsilon,
-                _pad_to,
-            )
-        else:
-            hidden_states, residual = self.post_attention_layernorm(
-                hidden_states, residual
-            )
+        hidden_states, residual = self.post_attention_layernorm(hidden_states, residual)
         output = self.mlp(hidden_states)
         return output, residual
 

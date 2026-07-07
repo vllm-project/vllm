@@ -18,48 +18,6 @@ if HAS_TRITON:
 
 logger = init_logger(__name__)
 
-import os as _os  # PATCH5_AITER_TEMP_SAMPLE
-
-_PATCH5_ON = _os.environ.get("VLLM_AITER_TEMP_SAMPLE", "0") == "1"
-_PATCH5_DEBUG_DONE = False
-
-
-def _aiter_temp_gumbel_sample(logits, generators, use_fp64_gumbel):
-    """Fused temperature Gumbel-max sampling via aiter (ATOM parity).
-    logits are ALREADY temperature-scaled by the parent Sampler, so temps=1.
-    Returns int64 token ids (num_tokens,)."""
-    global _PATCH5_DEBUG_DONE
-    import torch as _torch
-    from aiter import mixed_sample_outer_exponential
-
-    n, vocab = logits.shape
-    out = _torch.empty(n, dtype=_torch.int32, device=logits.device)
-    nseed = len(generators)
-    if nseed == 0:
-        # common case: ATOM-style shared (1,vocab) exponential noise (cheap RNG)
-        exp = (
-            _torch.empty((1, vocab), dtype=_torch.float32, device=logits.device)
-            .exponential_()
-            .expand(n, vocab)
-        )
-    else:
-        exp = _torch.empty((n, vocab), dtype=_torch.float32, device=logits.device)
-        if nseed != n:
-            exp.exponential_()
-        for i, g in generators.items():
-            exp[i].exponential_(generator=g)
-    temps = _torch.ones(n, dtype=_torch.float32, device=logits.device)
-    mixed_sample_outer_exponential(out, logits, exp, temps, eps=1e-10)
-    if not _PATCH5_DEBUG_DONE:
-        logger.info(
-            "PATCH5 aiter fused temp-sample ACTIVE (n=%d vocab=%d seeded=%d)",
-            n,
-            vocab,
-            nseed,
-        )
-        _PATCH5_DEBUG_DONE = True
-    return out.to(_torch.int64)
-
 
 def flashinfer_sampler_supported() -> bool:
     """Decide whether FlashInfer's top-p/top-k sampler can be used.
@@ -176,17 +134,6 @@ class TopKTopPSampler(nn.Module):
 
         The logits tensor may be updated in-place.
         """
-        # PATCH5_AITER_TEMP_SAMPLE: fused no-filter temperature sampling (ATOM parity)
-        if (
-            _PATCH5_ON
-            and k is None
-            and p is None
-            and not self.use_fp64_gumbel
-            and self.logprobs_mode not in ("processed_logits", "processed_logprobs")
-        ):
-            return _aiter_temp_gumbel_sample(
-                logits, generators, self.use_fp64_gumbel
-            ), None
         logits = apply_top_k_top_p(logits, k, p)
         logits_to_return = None
         if self.logprobs_mode == "processed_logits":

@@ -108,26 +108,6 @@ def _swizzle_mxfp4(quant_tensor, scale, num_warps=8):
     # transpose the tensor so that the quantization axis is on dim1
     quant_tensor = quant_tensor.transpose(-2, -1)
     scale = scale.transpose(-2, -1)
-    # GFX1250: apply ATOM's gfx1250 MX-scale swizzle so the in-kernel gather and
-    # moe_gemm_a8w4 read the scale correctly (paired with swizzle_mx_scale=
-    # "GFX1250_SCALE" in aiter_mxfp4_w4a8_moe). scale is (E, K_SCALE, N) here.
-    try:
-        from vllm.platforms.rocm import on_gfx1250 as _on_gfx1250
-    except Exception:
-        _on_gfx1250 = lambda: False
-    if current_platform.is_rocm() and _on_gfx1250():
-        from aiter.ops.triton.moe.moe_op_gemm_a8w4 import (
-            swizzle_scales_gfx1250 as _swz_gfx1250,
-        )
-
-        assert (
-            scale.dim() == 3 and scale.shape[-1] % 32 == 0 and scale.shape[-2] % 8 == 0
-        ), f"GFX1250 scale swizzle needs (E,K_SCALE%8,N%32); got {tuple(scale.shape)}"
-        # ATOM passes the raw swizzle_scales_gfx1250 output directly (no
-        # .contiguous(), no re-layout) -- the kernel's GFX1250_SCALE TMA
-        # descriptor expects exactly these strides. Adding .contiguous()
-        # changes the strides and breaks tt.make_tensor_descriptor.
-        scale = _swz_gfx1250(scale)
     quant_tensor = convert_layout(
         wrap_torch_tensor(quant_tensor, dtype=FP4), value_layout, **value_layout_opts
     )
