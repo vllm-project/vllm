@@ -62,6 +62,14 @@ def _mamba2_spec_flush(dstate, base_block, max_spec_len, is_blackwell):
     return 32, 1, _dstate_tile(dstate, 128), 2
 
 
+def _mamba2_output_only(dstate, L, is_blackwell):
+    # (block_size_m, num_warps, nf_dstate_tile, fl_dstate_tile, num_stages);
+    # decoupled dstate tiling, serving-batch optimum, dtype-independent per device.
+    if is_blackwell:
+        return 64, 1, _dstate_tile(dstate, 32), _dstate_tile(dstate, 64), 2
+    return 16, 1, _dstate_tile(dstate, 64), _dstate_tile(dstate, 128), 2
+
+
 def _gdn_spec(max_spec_len, is_blackwell):
     # (block_v, num_warps, nk, num_stages); verify and flush share a config.
     return 64, 1, (4 if max_spec_len >= 6 else 2), 2
@@ -77,12 +85,8 @@ def _l_bucket(cache_len: int) -> int:
     return 32
 
 
-# Standard-decode launch configs keyed by L bucket, tuned for the FP32 production
-# state (mamba_ssm_dtype=float32). bsm=64 is intentionally avoided here: it is the
-# bf16/B300 optimum but catastrophic (register spill, ~0.3x) at fp32. These seed
-# values preserve the previously shipped per-kernel constants; the config sweep
-# (profiling_pr/config_sweep) refines them per bucket.
-_OUTPUT_ONLY_BY_L = {8: (16, 1), 16: (16, 1), 32: (16, 1)}  # (block_size_m, num_warps)
+# state_and_output stays un-tiled (retained only for precision experiments); the
+# output_only route uses the decoupled dstate-tiled config in _mamba2_output_only.
 _STATE_AND_OUTPUT_BY_L = {8: (32, 1), 16: (32, 1), 32: (32, 1)}
 # GDN standard decode: (block_v, num_warps, num_stages, nk). L-flat in the sweep.
 _GDN_DECODE_BY_L = {8: (64, 1, 3, 2), 16: (64, 1, 3, 2), 32: (64, 1, 3, 2)}
@@ -109,7 +113,7 @@ def get_replayssm_config(kernel: str, **shape) -> tuple:
             shape["dstate"], shape["base_block"], shape["max_spec_len"], bw
         )
     if kernel == "mamba2_output_only":
-        return _OUTPUT_ONLY_BY_L[_l_bucket(shape.get("L", 16))]
+        return _mamba2_output_only(shape["dstate"], shape.get("L", 16), bw)
     if kernel == "mamba2_state_and_output":
         return _STATE_AND_OUTPUT_BY_L[_l_bucket(shape.get("L", 16))]
     if kernel == "gdn_decode":

@@ -207,6 +207,10 @@ def _replayssm_output_only_kernel(
     BLOCK_SIZE_M: tl.constexpr,
     BLOCK_SIZE_K_CACHE: tl.constexpr,
     BLOCK_SIZE_K_DOT: tl.constexpr,
+    NF_DSTATE_TILE: tl.constexpr,
+    NF_NDS: tl.constexpr,
+    FL_DSTATE_TILE: tl.constexpr,
+    FL_NDS: tl.constexpr,
     # heuristic-computed
     BLOCK_SIZE_DSTATE: tl.constexpr,
     HAS_DT_BIAS: tl.constexpr,
@@ -227,7 +231,7 @@ def _replayssm_output_only_kernel(
         state_batch_idx = pid_b
 
     offs_m = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_n = tl.arange(0, BLOCK_SIZE_DSTATE)
+    offs_n_full = tl.arange(0, BLOCK_SIZE_DSTATE)
 
     # Buffer cursor (number of cached tokens so far) and the flush flag.
     write_pos = tl.load(write_pos_ptr + pid_b).to(tl.int64)
@@ -245,8 +249,8 @@ def _replayssm_output_only_kernel(
     B_cache_ptr += state_batch_idx * stride_B_cache_batch + (pid_h // nheads_ngroups_ratio) * stride_B_cache_group
     bc_pre_ptr += pid_b * stride_bc_pre_batch + (pid_h // nheads_ngroups_ratio) * stride_bc_pre_group
 
-    # Current-token dt (+ bias, softplus), scalar A, current x / C, checkpoint
-    # state S_0, and current-token B (shared by both routes below).
+    # Current-token dt (+ bias, softplus), scalar A, and current x. C, the
+    # checkpoint state S_0, and current-token B are read per dstate tile below.
     dt_cur = tl.load(dt_ptr).to(tl.float32)
     if HAS_DT_BIAS:
         dt_cur += tl.load(dt_bias_ptr + pid_h * stride_dt_bias_head).to(tl.float32)
@@ -254,10 +258,6 @@ def _replayssm_output_only_kernel(
         dt_cur = tl.where(dt_cur <= 20.0, softplus(dt_cur), dt_cur)
     A = tl.load(A_ptr + pid_h * stride_A_head).to(tl.float32)
     x_cur = tl.load(x_ptr + offs_m * stride_x_dim, mask=offs_m < dim, other=0.0)
-    C = tl.load(C_ptr + offs_n * stride_C_dstate, mask=offs_n < dstate, other=0.0).to(tl.float32)
-    state_ptrs = state_ptr + offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate
-    state = tl.load(state_ptrs, mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate), other=0.0)
-    B_cur = tl.load(B_ptr + offs_n * stride_B_dstate, mask=offs_n < dstate, other=0.0)
 
     if not is_flush:
         # Output-only route: read y without materializing the state, using the
@@ -279,8 +279,20 @@ def _replayssm_output_only_kernel(
         x_all_cache = tl.load(x_all_cache_ptrs, mask=(offs_m[:, None] < dim) & (offs_k_cache[None, :] < write_pos), other=0.0)
         x_all_cache = tl.where(offs_k_cache[None, :] == write_pos, x_cur[:, None], x_all_cache)
 
-        # Decayed checkpoint readout plus the weighted sum of cached values.
-        checkpoint_out = tl.sum(state.to(tl.float32) * C[None, :], axis=1) * total_decay_cache
+        # Decayed checkpoint readout sum_n S_0(m,n) q(n), streamed over NF dstate
+        # tiles so the (M, N) state slice is never held whole.
+        offs_nt = tl.arange(0, NF_DSTATE_TILE)
+        ck_acc = tl.zeros([BLOCK_SIZE_M], dtype=tl.float32)
+        for i in tl.static_range(NF_NDS):
+            offs_n = i * NF_DSTATE_TILE + offs_nt
+            nmask = offs_n < dstate
+            st = tl.load(
+                state_ptr + offs_m[:, None] * stride_state_dim + offs_n[None, :] * stride_state_dstate,
+                mask=(offs_m[:, None] < dim) & nmask[None, :], other=0.0,
+            )
+            c_chunk = tl.load(C_ptr + offs_n * stride_C_dstate, mask=nmask, other=0.0).to(tl.float32)
+            ck_acc += tl.sum(st.to(tl.float32) * c_chunk[None, :], axis=1)
+        checkpoint_out = ck_acc * total_decay_cache
         bc_cache = tl.load(bc_pre_ptr + offs_k_cache * stride_bc_pre_pos, mask=offs_k_cache <= write_pos, other=0.0)
         cache_out = tl.sum(x_all_cache.to(tl.float32) * (scale_cache * bc_cache)[None, :], axis=1)
         out = checkpoint_out + cache_out
@@ -288,12 +300,13 @@ def _replayssm_output_only_kernel(
         # Append the current token (x, dt, B) into the buffer at write_pos.
         tl.store(x_cache_ptr + offs_m * stride_x_cache_dim + write_pos * stride_x_cache_pos, x_cur, mask=offs_m < dim)
         if pid_m == 0:
+            B_cur = tl.load(B_ptr + offs_n_full * stride_B_dstate, mask=offs_n_full < dstate, other=0.0)
             tl.store(dt_cache_ptr + write_pos * stride_dt_cache_pos, dt_cur)
-            tl.store(B_cache_ptr + write_pos * stride_B_cache_pos + offs_n * stride_B_cache_dstate, B_cur, mask=offs_n < dstate)
+            tl.store(B_cache_ptr + write_pos * stride_B_cache_pos + offs_n_full * stride_B_cache_dstate, B_cur, mask=offs_n_full < dstate)
     else:
         # Flush step: state route. Reconstruct the state from cached inputs,
         # S_t = total_decay * S_0 + sum_j s_j (v_j k_j^T), persist it as the new
-        # checkpoint, then read y = S_t q.
+        # checkpoint, then read y = S_t q -- streamed over FL dstate tiles.
         offs_k_dot = tl.arange(0, BLOCK_SIZE_K_DOT)
         dt_all_dot = tl.load(dt_cache_ptr + offs_k_dot * stride_dt_cache_pos, mask=offs_k_dot < write_pos, other=0.0).to(tl.float32)
         dt_all_dot = tl.where(offs_k_dot == write_pos, dt_cur, dt_all_dot)
@@ -303,24 +316,37 @@ def _replayssm_output_only_kernel(
         scale_dot = dt_all_dot * tl.exp(dA_total_dot - dA_cumsum_dot)
         scale_dot = tl.where(offs_k_dot <= write_pos, scale_dot, 0.0)
 
-        # Gather buffered x and B over the window (history + current token).
+        # Gather buffered x over the window (history + current token).
         x_all_dot_ptrs = x_cache_ptr + offs_m[:, None] * stride_x_cache_dim + offs_k_dot[None, :] * stride_x_cache_pos
         x_all_dot = tl.load(x_all_dot_ptrs, mask=(offs_m[:, None] < dim) & (offs_k_dot[None, :] < write_pos), other=0.0)
         x_all_dot = tl.where(offs_k_dot[None, :] == write_pos, x_cur[:, None], x_all_dot)
-        B_all_dot_ptrs = B_cache_ptr + offs_k_dot[:, None] * stride_B_cache_pos + offs_n[None, :] * stride_B_cache_dstate
-        B_all_dot = tl.load(B_all_dot_ptrs, mask=(offs_k_dot[:, None] < write_pos) & (offs_n[None, :] < dstate), other=0.0)
-        B_all_dot = tl.where(offs_k_dot[:, None] == write_pos, B_cur[None, :], B_all_dot)
+        x_all_ty = x_all_dot.to(x_ptr.dtype.element_ty)
 
-        # Reconstruct the state from cached inputs and store it as the checkpoint.
-        B_scaled = (B_all_dot.to(tl.float32) * scale_dot[:, None]).to(x_ptr.dtype.element_ty)
-        # tf32x3 keeps fp32 parity with the elementwise baseline (plain tf32 on
-        # fp32 inputs drifts ~1e-2); bf16/fp16 inputs are unaffected by this flag.
-        delta_state = tl.dot(
-            x_all_dot.to(x_ptr.dtype.element_ty), B_scaled, input_precision="tf32x3"
-        )
-        state_new = state.to(tl.float32) * total_decay_dot + delta_state.to(tl.float32)
-        tl.store(state_ptrs, state_new.to(state.dtype), mask=(offs_m[:, None] < dim) & (offs_n[None, :] < dstate))
-        out = tl.sum(state_new * C[None, :], axis=1)
+        # Distinct tile locals (_f) from the nf branch: differing tile widths
+        # would force a shape-mismatched merge at the if/else exit.
+        offs_nt_f = tl.arange(0, FL_DSTATE_TILE)
+        out = tl.zeros([BLOCK_SIZE_M], dtype=tl.float32)
+        for i in tl.static_range(FL_NDS):
+            offs_n_f = i * FL_DSTATE_TILE + offs_nt_f
+            nmask_f = offs_n_f < dstate
+            # Gather buffered B over the window (history + current token).
+            B_all_dot = tl.load(
+                B_cache_ptr + offs_k_dot[:, None] * stride_B_cache_pos + offs_n_f[None, :] * stride_B_cache_dstate,
+                mask=(offs_k_dot[:, None] < write_pos) & nmask_f[None, :], other=0.0,
+            )
+            B_cur_tile = tl.load(B_ptr + offs_n_f * stride_B_dstate, mask=nmask_f, other=0.0)
+            B_all_dot = tl.where(offs_k_dot[:, None] == write_pos, B_cur_tile[None, :], B_all_dot)
+            # tf32x3 keeps fp32 parity with the elementwise baseline (plain tf32 on
+            # fp32 inputs drifts ~1e-2); bf16/fp16 inputs are unaffected by this flag.
+            B_scaled = (B_all_dot.to(tl.float32) * scale_dot[:, None]).to(x_ptr.dtype.element_ty)
+            delta_state = tl.dot(x_all_ty, B_scaled, input_precision="tf32x3")
+            state_ptrs = state_ptr + offs_m[:, None] * stride_state_dim + offs_n_f[None, :] * stride_state_dstate
+            state_mask = (offs_m[:, None] < dim) & nmask_f[None, :]
+            st_f = tl.load(state_ptrs, mask=state_mask, other=0.0)
+            state_new = st_f.to(tl.float32) * total_decay_dot + delta_state.to(tl.float32)
+            tl.store(state_ptrs, state_new.to(st_f.dtype), mask=state_mask)
+            c_chunk_f = tl.load(C_ptr + offs_n_f * stride_C_dstate, mask=nmask_f, other=0.0).to(tl.float32)
+            out += tl.sum(state_new * c_chunk_f[None, :], axis=1)
 
     # Skip connection (D) and output gate (z).
     if HAS_D:
@@ -428,9 +454,14 @@ def selective_state_update_replayssm_output_only(
 
     block_size_k_cache = max(1, triton.next_power_of_2(max_cache_len))
     block_size_k_dot = max(16, block_size_k_cache)
-    block_size_m, num_warps = get_replayssm_config(
+    block_size_m, num_warps, nf_tile, fl_tile, num_stages = get_replayssm_config(
         "mamba2_output_only", dstate=dstate, L=max_cache_len
     )
+    bs_dstate = triton.next_power_of_2(dstate)
+    nf_dstate_tile = max(16, min(nf_tile, bs_dstate))
+    nf_nds = triton.cdiv(bs_dstate, nf_dstate_tile)
+    fl_dstate_tile = max(16, min(fl_tile, bs_dstate))
+    fl_nds = triton.cdiv(bs_dstate, fl_dstate_tile)
 
     grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE_M"]), batch, nheads)
     z_strides = (z.stride(0), z.stride(1), z.stride(2)) if z is not None else (0, 0, 0)
@@ -542,7 +573,12 @@ def selective_state_update_replayssm_output_only(
             block_size_m,
             block_size_k_cache,
             block_size_k_dot,
+            nf_dstate_tile,
+            nf_nds,
+            fl_dstate_tile,
+            fl_nds,
             num_warps=num_warps,
+            num_stages=num_stages,
         )
 
     if not has_heads:
