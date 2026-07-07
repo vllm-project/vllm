@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import dataclasses
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pytest
 import torch
@@ -1301,6 +1301,48 @@ def test_no_spec_tokens_scheduled_for_prefill_chunks():
     assert output.num_scheduled_tokens[req.request_id] == 4
     assert req.request_id in output.scheduled_spec_decode_tokens
     assert len(output.scheduled_spec_decode_tokens[req.request_id]) == num_spec_tokens
+
+
+def test_running_chunked_prefill_uses_zero_lookahead_tokens():
+    scheduler = create_scheduler(
+        num_speculative_tokens=3,
+        max_num_batched_tokens=50,
+        enable_chunked_prefill=True,
+    )
+    request = create_requests(num_requests=1, num_tokens=80)[0]
+    scheduler.add_request(request)
+
+    output = scheduler.schedule()
+    assert output.num_scheduled_tokens[request.request_id] == 50
+
+    scheduler.update_from_output(
+        output,
+        ModelRunnerOutput(
+            req_ids=[request.request_id],
+            req_id_to_index={request.request_id: 0},
+            sampled_token_ids=[[]],
+            logprobs=None,
+            prompt_logprobs_dict={},
+            pooler_output=[],
+        ),
+    )
+
+    observed_lookahead_tokens: list[int] = []
+    allocate_slots = scheduler.kv_cache_manager.allocate_slots
+
+    def recording_allocate_slots(*args, **kwargs):
+        observed_lookahead_tokens.append(kwargs["num_lookahead_tokens"])
+        return allocate_slots(*args, **kwargs)
+
+    with patch.object(
+        scheduler.kv_cache_manager,
+        "allocate_slots",
+        side_effect=recording_allocate_slots,
+    ):
+        scheduler.schedule()
+
+    assert observed_lookahead_tokens
+    assert observed_lookahead_tokens[0] == 0
 
 
 def _model_output(scheduler, output, sampled):

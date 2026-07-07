@@ -531,11 +531,14 @@ class Scheduler(SchedulerInterface):
 
             # Schedule newly needed KV blocks for the request.
             with record_function_or_nullcontext("schedule: allocate_slots"):
+                effective_lookahead_tokens = (
+                    0 if request.is_prefill_chunk else self.num_lookahead_tokens
+                )
                 while True:
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
                         num_new_tokens,
-                        num_lookahead_tokens=self.num_lookahead_tokens,
+                        num_lookahead_tokens=effective_lookahead_tokens,
                     )
 
                     if new_blocks is not None:
