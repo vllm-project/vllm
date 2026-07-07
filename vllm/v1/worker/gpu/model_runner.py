@@ -1111,6 +1111,41 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         )
 
     @torch.inference_mode()
+    def predispatch_cudagraph_mode(self, scheduler_output: SchedulerOutput) -> int:
+        """Compute this PP rank's *local* V2 cudagraph mode for the upcoming
+        step, WITHOUT issuing any collective.
+
+        Extracted from the mode-resolution prefix of ``execute_model`` /
+        ``dispatch_cg_and_sync_dp`` so the PP cudagraph-mode consensus all-reduce
+        can be driven from ``Worker.execute_model`` *before* the inter-stage
+        ``irecv_tensor_dict``. Running the consensus before the recv is mandatory:
+        the all-reduce and the point-to-point recv form a deadlock cycle
+        otherwise (vllm-project/vllm#45094 / #45610; root-caused via py-spy).
+
+        The dispatch decision is a pure function of the per-step batch shape
+        (broadcast to every PP rank in lockstep via ``scheduler_output``) plus
+        per-rank-local eager forces (encoder-decoder ``skip_compiled``, a
+        partially-failed capture). Inter-stage activation tensors are NOT an
+        input to it, so it is safe to resolve here, ahead of the recv.
+
+        Returns the ``CUDAGraphMode`` ``.value`` int for this rank.
+        """
+        num_reqs = len(scheduler_output.num_scheduled_tokens)
+        num_toks = scheduler_output.total_num_scheduled_tokens
+        max_query_len = max(scheduler_output.num_scheduled_tokens.values())
+        uniform_tok_count = get_uniform_token_count(num_reqs, num_toks, max_query_len)
+
+        skip_compiled = (
+            self.is_encoder_decoder and bool(scheduler_output.scheduled_encoder_inputs)
+        )
+        if skip_compiled or self.cudagraph_manager is None:
+            return CUDAGraphMode.NONE.value
+        batch_desc = self.cudagraph_manager.dispatch(
+            num_reqs, num_toks, uniform_tok_count
+        )
+        return batch_desc.cg_mode.value
+
+    @torch.inference_mode()
     def execute_model(
         self,
         scheduler_output: SchedulerOutput,
@@ -1118,6 +1153,7 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         dummy_run: bool = False,
         skip_attn_for_dummy_run: bool = False,
         is_profile: bool = False,
+        pp_synced_cudagraph_mode: int | None = None,
     ) -> ModelRunnerOutput | IntermediateTensors | None:
         if not dummy_run:
             # Update the request states.
@@ -1161,6 +1197,13 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             self.dp_rank,
             need_eager=is_profile or skip_compiled,
             num_active_loras=num_active_loras,
+            # PP cudagraph-mode consensus. The MIN all-reduce that produces this
+            # value is issued by Worker.execute_model BEFORE the inter-stage
+            # recv (it must precede the recv or the collective and the recv
+            # deadlock — #45094/#45610). Here we only reconcile to the agreed
+            # value. None (the dummy/profile/capture path default) skips
+            # reconciliation, so no collective is ever tied to that path.
+            pp_synced_cudagraph_mode=pp_synced_cudagraph_mode,
         )
 
         if batch_desc.num_tokens == 0:

@@ -3833,6 +3833,80 @@ class GPUModelRunner(
             else force_uniform_decode
         )
 
+    def predispatch_cudagraph_mode(
+        self, scheduler_output: "SchedulerOutput"
+    ) -> int:
+        """Compute this PP rank's *local* cudagraph mode for the upcoming step,
+        WITHOUT issuing any collective.
+
+        This is the dispatch-only prefix of ``_determine_batch_execution_and_padding``
+        (mode resolution + the per-rank-local eager forces), extracted so the PP
+        cudagraph-mode consensus all-reduce can be driven from
+        ``Worker.execute_model`` *before* the inter-stage ``irecv_tensor_dict``.
+        Running the consensus before the recv is mandatory: the all-reduce and
+        the point-to-point recv form a deadlock cycle otherwise — stage 0 parks
+        in the all-reduce waiting for stage 1, while stage 1 parks in the recv
+        waiting for stage 0's activation send, which is gated behind stage 0's
+        all-reduce (vllm-project/vllm#45094 / #45610, root-caused via py-spy:
+        PP0 ranks in ``coordinate_cudagraph_mode_across_pp`` -> ``all_reduce``;
+        PP1 ranks in ``irecv_tensor_dict`` gloo ``waitRecv``).
+
+        The dispatch decision is a pure function of the per-step batch shape
+        (broadcast to every PP rank in lockstep via ``scheduler_output``) plus
+        per-rank-local eager forces (``calculate_kv_scales`` on the first pass, a
+        partially-failed capture). Inter-stage activation tensors are NOT an
+        input to it, so it is safe — and correct — to resolve here, ahead of the
+        recv. Cascade-attention's ``disable_full`` is intentionally NOT applied
+        here (mirrors the SP precedent in ``Worker.execute_model`` which calls
+        ``_determine_batch_execution_and_padding`` pre-recv with
+        ``use_cascade_attn=False``): cascade detection is uniform across PP
+        stages (it reads the scheduler-broadcast ``num_common_prefix_blocks`` and
+        replicated per-request computed-token counts), so any FULL->lower
+        adjustment it would make happens identically on every stage and the
+        agreed MIN stays consistent; ``execute_model``'s own re-dispatch then
+        honors the agreed mode with the real cascade flag.
+
+        Returns the ``CUDAGraphMode`` ``.value`` int for this rank.
+        """
+        num_scheduled_tokens_np = np.array(
+            list(scheduler_output.num_scheduled_tokens.values()),
+            dtype=np.int32,
+        )
+        num_tokens = scheduler_output.total_num_scheduled_tokens
+        num_reqs = len(num_scheduled_tokens_np)
+        max_num_scheduled_tokens = int(num_scheduled_tokens_np.max())
+
+        uniform_decode = self._is_uniform_decode(
+            max_num_scheduled_tokens=max_num_scheduled_tokens,
+            uniform_decode_query_len=self.uniform_decode_query_len,
+            num_tokens=num_tokens,
+            num_reqs=num_reqs,
+        )
+        has_encoder_output = (
+            self.model_config.is_encoder_decoder
+            and len(scheduler_output.scheduled_encoder_inputs) > 0
+        )
+        num_active_loras = len(self.input_batch.lora_id_to_lora_request)
+        has_lora = num_active_loras > 0
+
+        # Fold the per-rank-local eager force in BEFORE resolving the mode, so
+        # the value contributed to the PP MIN consensus already reflects it
+        # (calculate_kv_scales is the canonical #45094 trigger). This mirrors the
+        # `force_eager = force_eager or force_eager_kv_scales` fold in
+        # _determine_batch_execution_and_padding.
+        force_eager = self.calculate_kv_scales
+
+        num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
+        cudagraph_mode, _ = self.cudagraph_dispatcher.dispatch(
+            num_tokens=num_tokens_padded,
+            has_lora=has_lora,
+            uniform_decode=uniform_decode,
+            num_active_loras=num_active_loras,
+            valid_modes={CUDAGraphMode.NONE} if force_eager else None,
+            invalid_modes={CUDAGraphMode.FULL} if has_encoder_output else None,
+        )
+        return cudagraph_mode.value
+
     def _determine_batch_execution_and_padding(
         self,
         num_tokens: int,
@@ -3842,6 +3916,23 @@ class GPUModelRunner(
         use_cascade_attn: bool,
         allow_microbatching: bool = True,
         force_eager: bool = False,
+        # Per-step local state that independently forces eager on *this* rank
+        # (KV-scale calibration on the first forward pass). It MUST be folded
+        # into the dispatch decision *before* the PP all-reduce below, otherwise
+        # a rank forced eager here would diverge from peers that captured a
+        # graph -> the #45094 split-brain. See execute_model's call site.
+        force_eager_kv_scales: bool = False,
+        # Pre-agreed pipeline-parallel cudagraph mode (a CUDAGraphMode ``.value``
+        # int), or ``None`` to skip PP reconciliation. The PP consensus MIN
+        # all-reduce is NO LONGER issued here: it must run in
+        # ``Worker.execute_model`` *before* the inter-stage ``irecv_tensor_dict``
+        # (see ``predispatch_cudagraph_mode`` + the worker call site), otherwise
+        # the collective deadlocks against the recv (#45094/#45610: stage 0
+        # blocks in the all-reduce waiting for stage 1, while stage 1 is blocked
+        # in the recv waiting for stage 0's activation send, which only happens
+        # after stage 0's all-reduce). Here we simply *consume* the agreed value
+        # and re-dispatch to it when it is lower than this rank's local mode.
+        pp_synced_cudagraph_mode: int | None = None,
         # For cudagraph capture TODO(lucas): Refactor how we capture cudagraphs (will
         # be improved in model runner v2)
         force_uniform_decode: bool | None = None,
@@ -3878,6 +3969,16 @@ class GPUModelRunner(
 
         num_tokens_padded = self._pad_for_sequence_parallelism(num_tokens)
 
+        # Fold per-rank-local eager forces into the dispatch decision *before*
+        # the DP/PP consensus reductions so the synced mode is final. KV-scale
+        # calibration (calculate_kv_scales) is the canonical #45094 trigger:
+        # historically it forced cudagraph_mode = NONE in execute_model *after*
+        # this method returned and after the PP all-reduce, so the rank ran
+        # eager while peers replayed a captured graph -> inter-stage P2P
+        # split-brain wedge. Forcing eager here, ahead of the all-reduce, lets
+        # the consensus see (and propagate) the NONE.
+        force_eager = force_eager or force_eager_kv_scales
+
         def dispatch_cudagraph(num_tokens, disable_full=False, valid_modes=None):
             return self.cudagraph_dispatcher.dispatch(
                 num_tokens=num_tokens,
@@ -3906,6 +4007,22 @@ class GPUModelRunner(
         # across ranks
         should_ubatch, num_tokens_across_dp = False, None
         if self.vllm_config.parallel_config.data_parallel_size > 1:
+            # Fold the PP-agreed mode INTO the value contributed to the DP MIN
+            # all-reduce so the DP consensus subsumes the PP consensus globally.
+            # The DP MIN is taken over DP replicas of THIS PP stage; the PP MIN
+            # (pp_synced_cudagraph_mode) is taken over PP stages of THIS replica —
+            # orthogonal slices of the (DP replica x PP stage) grid. If we fed the
+            # DP reduce only the bare local mode and applied the PP drop *after*
+            # it (below), two replicas of the same stage could end on different
+            # modes post-collective (one stayed graph, one dropped to NONE) — a DP
+            # lockstep violation that re-wedges the pipeline (#45094 MED-2).
+            # Contributing min(local, pp_synced) makes synced_cudagraph_mode the
+            # global (DP x PP) MIN: identical on every replica and stage.
+            dp_contributed_mode = cudagraph_mode.value
+            if pp_synced_cudagraph_mode is not None:
+                dp_contributed_mode = min(
+                    dp_contributed_mode, pp_synced_cudagraph_mode
+                )
             should_ubatch, num_tokens_across_dp, synced_cudagraph_mode = (
                 coordinate_batch_across_dp(
                     num_tokens_unpadded=num_tokens,
@@ -3913,7 +4030,7 @@ class GPUModelRunner(
                     allow_microbatching=allow_microbatching,
                     num_tokens_padded=num_tokens_padded,
                     uniform_decode=uniform_decode,
-                    cudagraph_mode=cudagraph_mode.value,
+                    cudagraph_mode=dp_contributed_mode,
                 )
             )
 
@@ -3929,6 +4046,59 @@ class GPUModelRunner(
                 # Assert to make sure the agreed upon token count is correct otherwise
                 # num_tokens_across_dp will no-longer be valid
                 assert batch_descriptor.num_tokens == num_tokens_padded
+
+        # Pipeline-parallel cudagraph-mode consensus (vllm-project/vllm#45094).
+        # Each PP rank dispatched independently above; per-rank-local state
+        # (calculate_kv_scales, cascade-attn detection, LoRA bookkeeping, a
+        # partially-failed capture) can make one stage pick PIECEWISE/FULL
+        # (replay a graph with baked-in inter-stage P2P send/recv shapes) while
+        # another picks NONE (eager). The stages then disagree on the P2P
+        # schedule and the pipeline wedges. The MIN consensus (NONE wins) is
+        # reached by the cheap CPU all-reduce in
+        # ``coordinate_cudagraph_mode_across_pp`` — but that all-reduce is issued
+        # by ``Worker.execute_model`` *before* the inter-stage recv, NOT here
+        # (#45094/#45610: issuing it here, after the worker's
+        # ``irecv_tensor_dict``, structurally deadlocks the pipeline — the recv
+        # waits on a peer's activation send that is gated behind that peer's own
+        # all-reduce). The agreed value arrives as ``pp_synced_cudagraph_mode``;
+        # we only re-dispatch to honor it when a peer chose a lower mode.
+        #
+        # When data-parallel is also on, the PP-agreed mode was already FOLDED
+        # INTO the DP all-reduce above (dp_contributed_mode = min(local,
+        # pp_synced)), so synced_cudagraph_mode — and hence cudagraph_mode here —
+        # is the global (DP x PP) MIN, identical on every replica of this stage.
+        # This re-dispatch is then a no-op for DP>1 *provided every DP replica of
+        # this stage contributed the same pp_synced value* — i.e. the replicas
+        # are homogeneous in their PP consensus. That holds for the common case
+        # (all replicas run the identical PP topology / compile config), but is
+        # NOT guaranteed under heterogeneous replicas (e.g. per-replica LoRA or
+        # partial-capture divergence that makes one replica's pp_synced lower
+        # than another's): there the post-fold cudagraph_mode can still differ
+        # from pp_synced on some replica and this re-dispatch becomes live. It is
+        # therefore kept (not skipped) for DP>1 as a real correctness guard, not
+        # merely a defensive one. Folding into the DP reduce — rather than
+        # dropping to NONE *after* it — is what prevents the #45094 MED-2
+        # DP-lockstep split (orthogonal MIN slices diverging the replicas of a
+        # stage post-collective).
+        if (
+            pp_synced_cudagraph_mode is not None
+            and pp_synced_cudagraph_mode != cudagraph_mode.value
+        ):
+            # A peer stage chose a lower mode; re-dispatch so the batch
+            # descriptor / padding match the agreed-upon mode. Always keep
+            # NONE in valid_modes: a rank may not hold a capture key for the
+            # agreed mode (e.g. a FULL_DECODE_ONLY compile build has no
+            # PIECEWISE key), and the dispatcher asserts NONE is always an
+            # allowed fallback (`assert CUDAGraphMode.NONE in allowed_modes`)
+            # — pinning to {synced_mode} alone would assert-crash that rank.
+            cudagraph_mode, batch_descriptor = dispatch_cudagraph(
+                num_tokens_padded,
+                valid_modes={
+                    CUDAGraphMode.NONE,
+                    CUDAGraphMode(pp_synced_cudagraph_mode),
+                },
+            )
+            num_tokens_padded = batch_descriptor.num_tokens
 
         cudagraph_stats = None
         if self.vllm_config.observability_config.cudagraph_metrics:
@@ -4071,6 +4241,7 @@ class GPUModelRunner(
         self,
         scheduler_output: "SchedulerOutput",
         intermediate_tensors: IntermediateTensors | None = None,
+        pp_synced_cudagraph_mode: int | None = None,
     ) -> ModelRunnerOutput | AsyncModelRunnerOutput | IntermediateTensors | None:
         if self.execute_model_state is not None:
             raise RuntimeError(
@@ -4179,6 +4350,17 @@ class GPUModelRunner(
                 max_num_scheduled_tokens=max_num_scheduled_tokens,
                 use_cascade_attn=cascade_attn_prefix_lens is not None,
                 num_encoder_reqs=len(scheduler_output.scheduled_encoder_inputs),
+                # KV-scale calibration forces eager on the *first* forward pass.
+                # Thread it in here so it is folded into the PP/DP consensus
+                # *before* the all-reduce (was previously applied after this
+                # returned -> #45094 split-brain). Consumed (cleared) below.
+                force_eager_kv_scales=self.calculate_kv_scales,
+                # PP cudagraph-mode consensus. The MIN all-reduce that produces
+                # this value is issued by Worker.execute_model BEFORE the
+                # inter-stage recv (it must precede the recv or the collective
+                # and the recv deadlock — #45094/#45610). Here we only consume
+                # the agreed value and re-dispatch to it if a peer chose lower.
+                pp_synced_cudagraph_mode=pp_synced_cudagraph_mode,
             )
 
             logger.debug(
@@ -4305,12 +4487,20 @@ class GPUModelRunner(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
 
-        # Set cudagraph mode to none if calc_kv_scales is true.
-        # KV scales calculation involves dynamic operations that are incompatible
-        # with CUDA graph capture.
+        # KV-scale calibration involves dynamic ops incompatible with CUDA graph
+        # capture, so it forces eager. That force is now threaded into
+        # _determine_batch_execution_and_padding (via force_eager_kv_scales)
+        # ahead of the PP/DP consensus all-reduce, so cudagraph_mode is already
+        # NONE here and every PP stage agreed on it (fixes #45094: forcing NONE
+        # *after* the consensus made this rank diverge from graph-replaying
+        # peers). All we do now is consume the one-shot flag.
         if self.calculate_kv_scales:
-            cudagraph_mode = CUDAGraphMode.NONE
-            # Mark KV scales as calculated after the first forward pass
+            assert cudagraph_mode == CUDAGraphMode.NONE, (
+                "calculate_kv_scales must have forced eager before PP/DP "
+                f"consensus, but cudagraph_mode={cudagraph_mode}. The "
+                "force_eager_kv_scales threading regressed -> #45094 risk."
+            )
+            # Mark KV scales as calculated after the first forward pass.
             self.calculate_kv_scales = False
 
         # Encoder-decoder models can only compile the pure decode steps where no

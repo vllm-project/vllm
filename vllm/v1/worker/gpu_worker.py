@@ -75,6 +75,7 @@ from vllm.v1.outputs import (
     ModelRunnerOutput,
 )
 from vllm.v1.utils import compute_iteration_details, report_usage_stats
+from vllm.v1.worker.pp_utils import coordinate_cudagraph_mode_across_pp
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.worker_base import CompilationTimes, WorkerBase
 from vllm.v1.worker.workspace import init_workspace_manager
@@ -997,6 +998,35 @@ class Worker(WorkerBase):
                 )
             }
 
+        # Pipeline-parallel cudagraph-mode consensus MUST happen here, BEFORE the
+        # inter-stage recv below (#45094/#45610). The consensus is a group-wide
+        # MIN all-reduce over the PP CPU (gloo) group; the recv is a
+        # point-to-point gloo recv from the previous stage. If the all-reduce is
+        # issued *after* the recv (as it was when it lived inside the model
+        # runner's execute_model), the two form a structural deadlock cycle:
+        #   stage0.all_reduce  waits-for  stage1.all_reduce
+        #   stage1.recv        waits-for  stage0.activation_send (below, after
+        #                                 stage0's runner -> after stage0's
+        #                                 all_reduce)
+        # so stage 0 parks in the all-reduce while stage 1 parks in the recv,
+        # forever (root-caused via py-spy: PP0 ranks in
+        # coordinate_cudagraph_mode_across_pp -> all_reduce at pp_utils.py;
+        # PP1 ranks in irecv_tensor_dict gloo waitRecv). Hoisting the all-reduce
+        # ahead of the recv makes every PP rank enter the collective
+        # symmetrically at step start, with no point-to-point recv between any
+        # rank and the collective. The dispatch decision is a pure function of
+        # the batch shape (broadcast in lockstep to every PP rank via
+        # scheduler_output) plus per-rank-local eager forces — all available
+        # pre-recv; inter-stage activation tensors are NOT one of its inputs.
+        pp_synced_cudagraph_mode: int | None = None
+        if forward_pass and get_pp_group().world_size > 1:
+            local_cudagraph_mode = self.model_runner.predispatch_cudagraph_mode(
+                scheduler_output
+            )
+            pp_synced_cudagraph_mode = coordinate_cudagraph_mode_across_pp(
+                local_cudagraph_mode
+            )
+
         if forward_pass and not get_pp_group().is_first_rank:
             tensor_dict, comm_handles, comm_postprocess = (
                 get_pp_group().irecv_tensor_dict(
@@ -1013,7 +1043,9 @@ class Worker(WorkerBase):
 
         with self.annotate_profile(scheduler_output):
             output = self.model_runner.execute_model(
-                scheduler_output, intermediate_tensors
+                scheduler_output,
+                intermediate_tensors,
+                pp_synced_cudagraph_mode=pp_synced_cudagraph_mode,
             )
             if (
                 self.use_v2_model_runner
