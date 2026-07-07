@@ -4,7 +4,7 @@
 
 import pytest
 
-from vllm.renderers.paged_shm.manager import Item, PagedSHMManager
+from vllm.renderers.paged_shm.manager import Item, PagedShmManager
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -14,7 +14,7 @@ from vllm.renderers.paged_shm.manager import Item, PagedSHMManager
 @pytest.fixture
 def manager():
     """Create a small pool: 4 blocks of 256 bytes each (total 1024 bytes)."""
-    return PagedSHMManager(size=1024, block_size=256)
+    return PagedShmManager(size=1024, block_size=256)
 
 
 @pytest.fixture

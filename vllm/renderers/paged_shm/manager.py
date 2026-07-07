@@ -40,7 +40,7 @@ class AllocatedItem(Item):
         return len(self.blocks)
 
 
-class PagedSHMManager:
+class PagedShmManager:
     """Manages a fixed-size, paged shm pool with LRU eviction."""
 
     def __init__(self, size: int, block_size: int):
@@ -222,6 +222,13 @@ class PagedSHMManager:
         self._pinned_items.discard(uuid)
         self._all_items.pop(uuid)
         self._free_blocks.extend(item.blocks)
+
+    def info(self, uuid: str) -> AllocatedItem:
+        item = self._all_items.get(uuid, None)
+        if item is None:
+            raise ValueError(f"UUID {uuid} not found")
+
+        return item
 
     def _evict(self, needed: int) -> None:
         while len(self._free_blocks) < needed:
