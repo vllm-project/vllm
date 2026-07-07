@@ -88,6 +88,39 @@ FP4_DTYPE = torch.uint8
 
 logger = init_logger(__name__)
 
+_UNSUPPORTED_BF16_Q_SPEC_SWA_MSG = (
+    "This FlashInfer configuration is not supported on SM100 due to an "
+    "upstream kernel issue (https://github.com/flashinfer-ai/flashinfer/"
+    "issues/3864): disable_flashinfer_q_quantization=True with quantized "
+    "KV cache, speculative decoding, and sliding-window attention. "
+    "Remove disable_flashinfer_q_quantization, disable speculative "
+    "decoding, or set --attention-config.use_trtllm_attention=0."
+)
+
+
+def _is_unsupported_bf16_q_spec_swa_config(
+    *,
+    can_use_trtllm: bool,
+    disable_flashinfer_q_quantization: bool,
+    kv_cache_dtype: str,
+    reorder_batch_threshold: int,
+    has_sliding_window_layer: bool,
+) -> bool:
+    """Return True when config hits the broken trtllm-gen spec-as-decode path.
+
+    Args:
+        kv_cache_dtype: Config string (e.g. ``"fp8_e4m3"``), not the FlashInfer
+            op dtype (e.g. ``torch.float8_e4m3fn``).
+    """
+    return (
+        can_use_trtllm
+        and disable_flashinfer_q_quantization
+        and is_quantized_kv_cache(kv_cache_dtype)
+        and reorder_batch_threshold > 1
+        and has_sliding_window_layer
+    )
+
+
 trtllm_workspace_buffer = None
 
 
@@ -764,6 +797,20 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         self.window_left = self.global_hyperparameters.window_left
         self.logits_soft_cap = self.global_hyperparameters.logits_soft_cap
         self.has_sinks = self.global_hyperparameters.has_sinks
+        if _is_unsupported_bf16_q_spec_swa_config(
+            can_use_trtllm=supports_spec_as_decode,
+            disable_flashinfer_q_quantization=(
+                vllm_config.attention_config.disable_flashinfer_q_quantization
+            ),
+            # Use cache_dtype (config string), not kv_cache_dtype (FlashInfer
+            # op dtype, e.g. torch.float8_e4m3fn for fp8_e4m3).
+            kv_cache_dtype=self.cache_dtype,
+            reorder_batch_threshold=self.reorder_batch_threshold,
+            has_sliding_window_layer=any(
+                p.window_left >= 0 for p in per_layer_parameters.values()
+            ),
+        ):
+            raise ValueError(_UNSUPPORTED_BF16_Q_SPEC_SWA_MSG)
         if self.has_sinks and not FlashInferBackend.supports_sink():
             raise NotImplementedError(
                 "FlashInfer backend currently does not support attention "
