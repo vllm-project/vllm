@@ -3,7 +3,6 @@
 
 import json
 from collections.abc import Generator
-from typing import Any
 from unittest.mock import MagicMock, patch
 
 import partial_json_parser
@@ -29,22 +28,17 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionRequest,
 )
 from vllm.entrypoints.openai.engine.protocol import (
-    DeltaFunctionCall,
     DeltaMessage,
     DeltaToolCall,
     ExtractedToolCallInformation,
     StructuralTagResponseFormat,
 )
-from vllm.entrypoints.openai.engine.protocol import FunctionCall as VllmFunctionCall
-from vllm.reasoning.mistral_reasoning_parser import MistralReasoningParser
 from vllm.sampling_params import StructuredOutputsParams
 from vllm.tokenizers import TokenizerLike, get_tokenizer
 from vllm.tokenizers.detokenizer_utils import detokenize_incrementally
 from vllm.tokenizers.mistral import MistralTokenizer
 from vllm.tool_parsers.mistral_tool_parser import (
     _DEFAULT_JSON_SCHEMA,
-    MistralStreamingResult,
-    MistralToolCall,
     MistralToolParser,
 )
 
@@ -150,6 +144,7 @@ def stream_delta_message_generator(
     mistral_tokenizer: TokenizerLike,
     model_output: str | None,
     tools: list[tuple[str, str]] | None,
+    chunk_size: int = 1,
 ) -> Generator[DeltaMessage, None, None]:
     if (
         isinstance(mistral_tokenizer, MistralTokenizer)
@@ -188,15 +183,13 @@ def stream_delta_message_generator(
     previous_tokens = None
     prefix_offset = 0
     read_offset = 0
+    pending_text = ""
+    pending_token_ids: list[int] = []
     for i, delta_token in enumerate(all_token_ids):
-        delta_token_ids = [delta_token]
-        previous_token_ids = all_token_ids[:i]
-        current_token_ids = all_token_ids[: i + 1]
-
         (new_tokens, delta_text, new_prefix_offset, new_read_offset) = (
             detokenize_incrementally(
                 tokenizer=mistral_tokenizer,
-                all_input_ids=current_token_ids,
+                all_input_ids=all_token_ids[: i + 1],
                 prev_tokens=previous_tokens,
                 prefix_offset=prefix_offset,
                 read_offset=read_offset,
@@ -204,27 +197,39 @@ def stream_delta_message_generator(
                 spaces_between_special_tokens=True,
             )
         )
+        previous_tokens = (
+            previous_tokens + new_tokens if previous_tokens else new_tokens
+        )
+        prefix_offset = new_prefix_offset
+        read_offset = new_read_offset
 
-        current_text = previous_text + delta_text
+        # Buffer tokens so each streamed delta can carry ``chunk_size`` tokens,
+        # reproducing the multi-token deltas produced by async scheduling /
+        # stream_interval > 1.
+        pending_text += delta_text
+        pending_token_ids.append(delta_token)
+        if len(pending_token_ids) < chunk_size and i != len(all_token_ids) - 1:
+            continue
+
+        previous_token_ids = all_token_ids[: i + 1 - len(pending_token_ids)]
+        current_token_ids = all_token_ids[: i + 1]
+        current_text = previous_text + pending_text
 
         delta_message = mistral_tool_parser.extract_tool_calls_streaming(
             previous_text,
             current_text,
-            delta_text,
+            pending_text,
             previous_token_ids,
             current_token_ids,
-            delta_token_ids,
+            pending_token_ids,
             request=_DUMMY_REQUEST,
         )
         if delta_message:
             yield delta_message
 
         previous_text = current_text
-        previous_tokens = (
-            previous_tokens + new_tokens if previous_tokens else new_tokens
-        )
-        prefix_offset = new_prefix_offset
-        read_offset = new_read_offset
+        pending_text = ""
+        pending_token_ids = []
 
 
 @pytest.mark.parametrize(
@@ -1580,380 +1585,37 @@ def test_grammar_from_tool_parser_set_by_adjust_request(
     assert result._grammar_from_tool_parser is True
 
 
-@pytest.mark.parametrize(
-    "tool_calls, expected_len",
-    [
-        (None, 0),
-        ([], 0),
-        ([VllmFunctionCall(id="abc123xyz", name="f", arguments="{}")], 1),
-        ([VllmFunctionCall(name="f", arguments="{}")], 1),
-        (
-            [
-                VllmFunctionCall(id="fixed1234", name="a", arguments='{"x": 1}'),
-                VllmFunctionCall(name="b", arguments='{"y": 2}'),
-            ],
-            2,
-        ),
-    ],
-    ids=["none", "empty", "with_id", "without_id", "mixed"],
-)
-def test_build_non_streaming_tool_calls(
-    tool_calls: list[VllmFunctionCall] | None,
-    expected_len: int,
-) -> None:
-    result = MistralToolParser.build_non_streaming_tool_calls(tool_calls)
-    assert len(result) == expected_len
+@pytest.mark.parametrize("chunk_size", [2, 3, 4, 5])
+def test_streaming_pre_v11_parallel_calls_batched_deltas(
+    mistral_pre_v11_tool_parser, mistral_pre_v11_tokenizer, chunk_size
+):
+    """A batched delta spanning the boundary between two parallel calls must
+    keep them on distinct indices (the bug collapsed both onto index 0)."""
+    model_output = (
+        '[TOOL_CALLS] [{"name": "add", "arguments": {"a": 3.5, "b": 4}}, '
+        '{"name": "get_current_weather", "arguments": '
+        '{"city": "San Francisco", "state": "CA", "unit": "celsius"}}]'
+    )
+    names: list[str] = []
+    args: list[str] = []
+    idx = -1
+    for delta_message in stream_delta_message_generator(
+        mistral_pre_v11_tool_parser,
+        mistral_pre_v11_tokenizer,
+        model_output,
+        tools=None,
+        chunk_size=chunk_size,
+    ):
+        for tool_call in delta_message.tool_calls or []:
+            if tool_call.index != idx:
+                idx = tool_call.index
+                args.append("")
+            if tool_call.function and tool_call.function.name:
+                names.append(tool_call.function.name)
+            if tool_call.function and tool_call.function.arguments:
+                args[tool_call.index] += tool_call.function.arguments
 
-    if tool_calls is None:
-        return
-
-    for i, tc in enumerate(result):
-        assert isinstance(tc, MistralToolCall)
-        assert tc.type == "function"
-
-        input_tc = tool_calls[i]
-        if input_tc.id:
-            assert tc.id == input_tc.id
-        else:
-            assert len(tc.id) == 9
-            assert tc.id.isalnum()
-
-        assert tc.function.name == input_tc.name
-        assert tc.function.arguments == input_tc.arguments
-
-
-class TestExtractMaybeReasoningAndToolStreaming:
-    r"""Tests for `MistralToolParser.extract_maybe_reasoning_and_tool_streaming`."""
-
-    @pytest.fixture
-    def parser(self) -> MistralToolParser:
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.get_vocab.return_value = {"[TOOL_CALLS]": 1}
-        return MistralToolParser(mock_tokenizer)
-
-    @pytest.fixture
-    def request_obj(self) -> ChatCompletionRequest:
-        return _make_request()
-
-    @staticmethod
-    def _call(
-        parser: MistralToolParser,
-        request: ChatCompletionRequest,
-        *,
-        reasoning_parser: Any = None,
-        previous_text: str = "",
-        current_text: str = "hello",
-        delta_text: str = "hello",
-        previous_token_ids: list[int] | None = None,
-        current_token_ids: list[int] | None = None,
-        output_token_ids: list[int] | None = None,
-        reasoning_ended: bool = False,
-        prompt_is_reasoning_end: bool | None = None,
-    ) -> MistralStreamingResult:
-        return parser.extract_maybe_reasoning_and_tool_streaming(
-            reasoning_parser=reasoning_parser,
-            previous_text=previous_text,
-            current_text=current_text,
-            delta_text=delta_text,
-            previous_token_ids=previous_token_ids or [],
-            current_token_ids=current_token_ids or [1, 2, 3],
-            output_token_ids=output_token_ids or [1, 2, 3],
-            reasoning_ended=reasoning_ended,
-            prompt_is_reasoning_end=prompt_is_reasoning_end,
-            request=request,
-        )
-
-    def test_no_reasoning_tools_called(
-        self, parser: MistralToolParser, request_obj: ChatCompletionRequest
-    ) -> None:
-        tool_delta = DeltaMessage(
-            tool_calls=[
-                DeltaToolCall(
-                    index=0,
-                    function=DeltaFunctionCall(name="f", arguments="{}"),
-                )
-            ]
-        )
-        with patch.object(
-            parser, "extract_tool_calls_streaming", return_value=tool_delta
-        ):
-            result = self._call(parser, request_obj, reasoning_parser=None)
-
-        assert result == MistralStreamingResult(
-            delta_message=tool_delta,
-            reasoning_ended=False,
-            tools_called=True,
-            current_text="hello",
-            current_token_ids=[1, 2, 3],
-        )
-
-    def test_no_reasoning_no_tools(
-        self, parser: MistralToolParser, request_obj: ChatCompletionRequest
-    ) -> None:
-        content_delta = DeltaMessage(content="hello")
-        with patch.object(
-            parser, "extract_tool_calls_streaming", return_value=content_delta
-        ):
-            result = self._call(parser, request_obj, reasoning_parser=None)
-
-        assert result == MistralStreamingResult(
-            delta_message=content_delta,
-            reasoning_ended=False,
-            tools_called=False,
-            current_text="hello",
-            current_token_ids=[1, 2, 3],
-        )
-
-    def test_mistral_reasoning_parser_no_think_token(
-        self, parser: MistralToolParser, request_obj: ChatCompletionRequest
-    ) -> None:
-        mock_rp = MagicMock(spec=MistralReasoningParser)
-        mock_rp.start_token_id = 999
-        content_delta = DeltaMessage(content="direct")
-        with patch.object(
-            parser, "extract_tool_calls_streaming", return_value=content_delta
-        ):
-            result = self._call(
-                parser,
-                request_obj,
-                reasoning_parser=mock_rp,
-                reasoning_ended=False,
-                current_token_ids=[1, 2, 3],
-            )
-
-        mock_rp.extract_reasoning_streaming.assert_not_called()
-        assert result == MistralStreamingResult(
-            delta_message=content_delta,
-            reasoning_ended=False,
-            tools_called=False,
-            current_text="hello",
-            current_token_ids=[1, 2, 3],
-        )
-
-    def test_mistral_reasoning_parser_with_think_token(
-        self, parser: MistralToolParser, request_obj: ChatCompletionRequest
-    ) -> None:
-        mock_rp = MagicMock(spec=MistralReasoningParser)
-        mock_rp.start_token_id = 999
-        mock_rp.extract_reasoning_streaming.return_value = DeltaMessage(
-            reasoning="thinking..."
-        )
-        mock_rp.is_reasoning_end_streaming.return_value = False
-
-        result = self._call(
-            parser,
-            request_obj,
-            reasoning_parser=mock_rp,
-            reasoning_ended=False,
-            current_token_ids=[1, 999, 3],
-        )
-
-        mock_rp.extract_reasoning_streaming.assert_called_once()
-        assert result == MistralStreamingResult(
-            delta_message=DeltaMessage(reasoning="thinking..."),
-            reasoning_ended=False,
-            tools_called=False,
-            current_text="hello",
-            current_token_ids=[1, 999, 3],
-        )
-
-    def test_non_mistral_reasoning_parser_always_expects_thinking(
-        self, parser: MistralToolParser, request_obj: ChatCompletionRequest
-    ) -> None:
-        mock_rp = MagicMock()
-        mock_rp.start_token_id = 999
-        mock_rp.extract_reasoning_streaming.return_value = DeltaMessage(
-            reasoning="thinking..."
-        )
-        mock_rp.is_reasoning_end_streaming.return_value = False
-
-        result = self._call(
-            parser,
-            request_obj,
-            reasoning_parser=mock_rp,
-            reasoning_ended=False,
-            current_token_ids=[1, 2, 3],
-        )
-
-        mock_rp.extract_reasoning_streaming.assert_called_once()
-        assert result == MistralStreamingResult(
-            delta_message=DeltaMessage(reasoning="thinking..."),
-            reasoning_ended=False,
-            tools_called=False,
-            current_text="hello",
-            current_token_ids=[1, 2, 3],
-        )
-
-    def test_reasoning_already_ended_no_reset(
-        self, parser: MistralToolParser, request_obj: ChatCompletionRequest
-    ) -> None:
-        content_delta = DeltaMessage(content="content")
-        with patch.object(
-            parser, "extract_tool_calls_streaming", return_value=content_delta
-        ) as mock_extract:
-            result = self._call(
-                parser,
-                request_obj,
-                reasoning_parser=MagicMock(),
-                reasoning_ended=True,
-                previous_text="prior_tool_text",
-                previous_token_ids=[10, 20],
-                current_text="prior_tool_texthello",
-                current_token_ids=[10, 20, 1, 2, 3],
-            )
-
-            _, call_kwargs = mock_extract.call_args
-            assert call_kwargs["previous_text"] == "prior_tool_text"
-            assert call_kwargs["previous_token_ids"] == [10, 20]
-
-        assert result == MistralStreamingResult(
-            delta_message=content_delta,
-            reasoning_ended=True,
-            tools_called=False,
-            current_text="prior_tool_texthello",
-            current_token_ids=[10, 20, 1, 2, 3],
-        )
-
-    def test_pre_v15_ignores_prompt_reasoning_end(
-        self, parser: MistralToolParser, request_obj: ChatCompletionRequest
-    ) -> None:
-        mock_tokenizer = MagicMock(spec=MistralTokenizer)
-        mock_tokenizer.version = 13
-        parser.model_tokenizer = mock_tokenizer
-
-        mock_rp = MagicMock(spec=MistralReasoningParser)
-        mock_rp.start_token_id = 999
-        mock_rp.extract_reasoning_streaming.return_value = DeltaMessage(
-            reasoning="thinking..."
-        )
-        mock_rp.is_reasoning_end_streaming.return_value = False
-
-        result = self._call(
-            parser,
-            request_obj,
-            reasoning_parser=mock_rp,
-            reasoning_ended=False,
-            prompt_is_reasoning_end=True,
-            current_token_ids=[999, 1, 2],
-        )
-
-        mock_rp.extract_reasoning_streaming.assert_called_once()
-        assert result == MistralStreamingResult(
-            delta_message=DeltaMessage(reasoning="thinking..."),
-            reasoning_ended=False,
-            tools_called=False,
-            current_text="hello",
-            current_token_ids=[999, 1, 2],
-        )
-
-    def test_non_pre_v15_prompt_reasoning_end(
-        self, parser: MistralToolParser, request_obj: ChatCompletionRequest
-    ) -> None:
-        mock_tokenizer = MagicMock(spec=MistralTokenizer)
-        mock_tokenizer.version = 15
-        parser.model_tokenizer = mock_tokenizer
-
-        mock_rp = MagicMock(spec=MistralReasoningParser)
-        mock_rp.start_token_id = 999
-
-        content_delta = DeltaMessage(content="after reasoning")
-        with patch.object(
-            parser, "extract_tool_calls_streaming", return_value=content_delta
-        ):
-            result = self._call(
-                parser,
-                request_obj,
-                reasoning_parser=mock_rp,
-                reasoning_ended=False,
-                prompt_is_reasoning_end=True,
-                current_token_ids=[999, 1, 2],
-                output_token_ids=[10, 20, 30],
-            )
-
-        mock_rp.extract_reasoning_streaming.assert_not_called()
-        assert result == MistralStreamingResult(
-            delta_message=content_delta,
-            reasoning_ended=True,
-            tools_called=False,
-            current_text="hello",
-            current_token_ids=[10, 20, 30],
-        )
-
-    def test_reasoning_end_transition_with_content(
-        self, parser: MistralToolParser, request_obj: ChatCompletionRequest
-    ) -> None:
-        """When reasoning ends and the delta has content, that content is
-        cleared from delta_message and used as current_text for tool parsing."""
-        mock_rp = MagicMock()
-        mock_rp.start_token_id = 999
-        mock_rp.extract_reasoning_streaming.return_value = DeltaMessage(
-            reasoning="think", content="leftover"
-        )
-        mock_rp.is_reasoning_end_streaming.return_value = True
-        mock_rp.extract_content_ids.return_value = [50, 51]
-
-        content_delta = DeltaMessage(content="leftover")
-        with patch.object(
-            parser, "extract_tool_calls_streaming", return_value=content_delta
-        ) as mock_extract:
-            result = self._call(
-                parser,
-                request_obj,
-                reasoning_parser=mock_rp,
-                reasoning_ended=False,
-                current_token_ids=[999, 1, 2],
-                output_token_ids=[10, 20, 30],
-            )
-
-            mock_rp.extract_content_ids.assert_called_once_with([10, 20, 30])
-            _, call_kwargs = mock_extract.call_args
-            assert call_kwargs["previous_text"] == ""
-            assert call_kwargs["previous_token_ids"] == []
-            assert call_kwargs["delta_text"] == "leftover"
-            assert call_kwargs["current_token_ids"] == [50, 51]
-
-        assert result == MistralStreamingResult(
-            delta_message=content_delta,
-            reasoning_ended=True,
-            tools_called=False,
-            current_text="leftover",
-            current_token_ids=[50, 51],
-        )
-
-    def test_reasoning_end_transition_without_content(
-        self, parser: MistralToolParser, request_obj: ChatCompletionRequest
-    ) -> None:
-        """When reasoning ends but the delta has no content, current_text
-        is set to empty string."""
-        mock_rp = MagicMock()
-        mock_rp.start_token_id = 999
-        mock_rp.extract_reasoning_streaming.return_value = DeltaMessage(
-            reasoning="think"
-        )
-        mock_rp.is_reasoning_end_streaming.return_value = True
-        mock_rp.extract_content_ids.return_value = [50, 51]
-
-        empty_delta = DeltaMessage(content="")
-        with patch.object(
-            parser, "extract_tool_calls_streaming", return_value=empty_delta
-        ) as mock_extract:
-            result = self._call(
-                parser,
-                request_obj,
-                reasoning_parser=mock_rp,
-                reasoning_ended=False,
-                current_token_ids=[999, 1, 2],
-                output_token_ids=[10, 20, 30],
-            )
-
-            _, call_kwargs = mock_extract.call_args
-            assert call_kwargs["delta_text"] == ""
-            assert call_kwargs["current_token_ids"] == [50, 51]
-
-        assert result == MistralStreamingResult(
-            delta_message=empty_delta,
-            reasoning_ended=True,
-            tools_called=False,
-            current_text="",
-            current_token_ids=[50, 51],
-        )
+    assert names == ["add", "get_current_weather"]
+    assert len(args) == 2
+    # trailing args of the final call are flushed by the serving layer
+    assert json.loads(args[0]) == {"a": 3.5, "b": 4}

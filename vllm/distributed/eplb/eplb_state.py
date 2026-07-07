@@ -27,6 +27,7 @@ physical experts.
 """
 
 import threading
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 
@@ -34,6 +35,7 @@ import torch
 from torch.distributed import ProcessGroup, all_reduce
 
 from vllm.config import ModelConfig, ParallelConfig
+from vllm.config.utils import compute_hash_cached
 from vllm.distributed.parallel_state import (
     get_ep_group,
     get_eplb_group,
@@ -205,6 +207,13 @@ class EplbModelState:
     pending_result relies on the GIL to synchronize access between the main thread and
     the async worker.
     """
+    num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
+    """
+    Per-ubatch scalar int32 tensors holding the number of real (non-padding)
+    tokens.  Allocated once in :meth:`EplbState.add_model` so that device
+    pointers remain stable across CUDA-graph replays.  The router kernel
+    indexes this list with ``dbo_current_ubatch_id()``.
+    """
 
 
 class EplbState:
@@ -252,7 +261,7 @@ class EplbState:
         Shared scalar bool tensor for all layers.  Every
         :class:`EplbLayerState` holds a reference to the **same** object so
         a single ``.fill_()`` updates all layers at once.  Allocated on the
-        first call to :meth:`_init_should_record_tensor`.
+        first call to :meth:`_propagate_shared_tensors`.
         """
         self.is_async: bool = False
         """
@@ -439,14 +448,24 @@ class EplbState:
         self.policy = EPLB_POLICIES[policy_type]
         logger.debug("Selected EPLB policy: %s", policy_type)
 
+        # num_ubatches is 0 when DBO is disabled.
+        num_ubatches = max(1, self.parallel_config.num_ubatches)
+        num_unpadded_tokens_tensors = [
+            torch.tensor(0, dtype=torch.int32, device=self.device)
+            for _ in range(num_ubatches)
+        ]
+
         model.set_eplb_state(
             expert_load_pass,
             logical_to_physical_map,
             logical_replica_count,
         )
-        self._init_should_record_tensor(model)
+        self._propagate_shared_tensors(model, num_unpadded_tokens_tensors)
         expert_buffer = [torch.empty_like(w) for w in model.expert_weights[0]]
 
+        assert self.parallel_config.eplb_config.communicator is not None, (
+            "EPLB communicator backend must be set by ParallelConfig"
+        )
         communicator = create_eplb_communicator(
             group_coordinator=get_eplb_group(),
             backend=self.parallel_config.eplb_config.communicator,
@@ -467,9 +486,42 @@ class EplbState:
             eplb_stats=None,
             cuda_device_index=self.cuda_device_index,
             communicator=communicator,
+            num_unpadded_tokens_tensors=num_unpadded_tokens_tensors,
         )
         self.model_states[model_config.compute_hash()] = model_state
         self.num_valid_physical_experts = model.num_physical_experts
+
+    def prepare_forward(
+        self,
+        model_config: ModelConfig,
+        num_unpadded_tokens: int,
+        ubatch_slices: list | None = None,
+    ) -> None:
+        """Fill the per-[u]batch ``num_unpadded_tokens`` tensors before a
+        forward pass.
+
+        Args:
+            model_config: Identifies which ``EplbModelState`` to update.
+            num_unpadded_tokens: Total number of real (non-padding) tokens
+                in the batch.
+            ubatch_slices: When DBO is active, a list of
+                ``UBatchSlice`` objects describing each micro-batch's
+                token range.  When ``None``, only ``tensors[0]`` is filled.
+        """
+        model_state = self.model_states.get(compute_hash_cached(model_config))
+        if model_state is None or model_state.num_unpadded_tokens_tensors is None:
+            return
+        tensors = model_state.num_unpadded_tokens_tensors
+        if ubatch_slices is None:
+            tensors[0].fill_(num_unpadded_tokens)
+        else:
+            for i, ubatch_slice in enumerate(ubatch_slices):
+                ts = ubatch_slice.token_slice
+                # Real tokens in this ubatch: clamp the global count into
+                # the slice range so partially-filled ubatches get the
+                # correct count.
+                val = max(0, min(num_unpadded_tokens, ts.stop) - ts.start)
+                tensors[i].fill_(val)
 
     def step(
         self,
@@ -634,11 +686,20 @@ class EplbState:
                 self._should_record_current_step(log_stats=log_stats)
             )
 
-    def _init_should_record_tensor(self, model: "MixtureOfExperts") -> None:  # type: ignore[name-defined]
-        """Allocate (once) and propagate the shared ``should_record_tensor``.
+    def _propagate_shared_tensors(
+        self,
+        model: "MixtureOfExperts",  # type: ignore[name-defined]
+        num_unpadded_tokens_tensors: list[torch.Tensor],
+    ) -> None:
+        """Propagate shared tensors to every :class:`EplbLayerState`.
+
+        Allocates ``should_record_tensor`` on the first call and then
+        assigns both it and ``num_unpadded_tokens_tensors`` to every
+        MoE layer's :class:`EplbLayerState`.  All layers reference the
+        **same** objects so a single update is visible everywhere.
 
         Must be called after :meth:`model.set_eplb_state` so that each
-        layer's ``eplb_state`` is already populated with the tensor views.
+        layer's ``eplb_state`` is already populated.
         """
         layer_states = [
             layer.eplb_state
@@ -655,6 +716,7 @@ class EplbState:
         for ls in layer_states:
             if ls is not None:
                 ls.should_record_tensor = self.should_record_tensor
+                ls.num_unpadded_tokens_tensors = num_unpadded_tokens_tensors
 
     def rearrange(
         self,
@@ -822,6 +884,45 @@ class EplbState:
                 is_profile=is_profile,
             )
 
+    def drain_async(self) -> None:
+        """Drain in-flight async EPLB by consuming all remaining layer results.
+
+        Each pending result is acknowledged (consumed_event recorded) so the
+        async worker can proceed, but the transferred weights are intentionally
+        NOT applied — a full synchronous rearrange is expected to follow.
+
+        Ranks are kept in lockstep via _all_ranks_result_ready (all_reduce
+        on the EP CPU group).  The async worker's coordinated-stop collectives
+        use the separate EPLB group, so the two sets of collectives do not
+        interfere.
+
+        No-op when no async cycle is in progress (rebalanced=False).
+        """
+        if not self.is_async:
+            return
+        for model_key, ms in self.model_states.items():
+            needs_drain = ms.rebalanced
+            if needs_drain:
+                logger.info(
+                    "Draining async EPLB worker for model %s",
+                    model_key,
+                )
+            while ms.rebalanced:
+                if self._all_ranks_result_ready(ms):
+                    result = ms.pending_result
+                    assert result is not None
+                    if result.layer_idx == ms.model.num_moe_layers - 1:
+                        ms.rebalanced = False
+                    ms.pending_result = None
+                    result.consumed_event.record()
+                else:
+                    time.sleep(0.001)
+            if needs_drain:
+                logger.info(
+                    "Async EPLB worker drained for model %s",
+                    model_key,
+                )
+
     def _all_ranks_result_ready(self, model_state: EplbModelState) -> bool:
         parallel_state = get_ep_group()
         has_result = int(model_state.pending_result is not None)
@@ -847,8 +948,9 @@ class EplbState:
         """
         All-reduce a list of tensors.
         """
+        ep_group = get_ep_group().device_group
         if len(tensor_list) == 1:
-            all_reduce(tensor_list[0], group=get_ep_group().device_group)
+            all_reduce(tensor_list[0], group=ep_group)
             return tensor_list
         assert all(t.dim() == 2 for t in tensor_list), "All tensors must be 2D."
         assert all(t.shape[1] == tensor_list[0].shape[1] for t in tensor_list), (
@@ -860,7 +962,6 @@ class EplbState:
         shapes = [t.shape for t in tensor_list]
         concat_tensor = torch.cat(tensor_list, dim=0)
 
-        ep_group = get_ep_group().device_group
         all_reduce(concat_tensor, group=ep_group)
 
         all_reduce_list = []
@@ -941,6 +1042,11 @@ class EplbLayerState:
     each rearrangement period: those steps would be overwritten in the
     sliding window before the next rearrangement, so recording them wastes
     GPU work.
+    """
+    num_unpadded_tokens_tensors: list[torch.Tensor] | None = None
+    """
+    Reference to the parent :class:`EplbModelState`'s tensor list so the
+    router can read the correct per-[u]batch unpadded token count.
     """
 
     def set_layer_state(

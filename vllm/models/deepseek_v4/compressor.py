@@ -104,12 +104,9 @@ class CompressorMetadataBuilder(AttentionMetadataBuilder):
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> CompressorMetadata:
-        query_start_loc_cpu = common_attn_metadata.query_start_loc_cpu
-        num_reqs = common_attn_metadata.num_reqs
-        query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        x = torch.repeat_interleave(torch.arange(num_reqs), query_lens).pin_memory()
-        token_to_req_indices = self.token_to_req_indices[: x.shape[0]]
-        token_to_req_indices.copy_(x, non_blocking=True)
+        token_to_req_indices = common_attn_metadata.token_to_req_indices(
+            self.token_to_req_indices
+        )
         return CompressorMetadata(
             block_table=common_attn_metadata.block_table_tensor.clamp_(min=0),
             slot_mapping=common_attn_metadata.slot_mapping,
@@ -155,17 +152,17 @@ class CompressorStateCache(torch.nn.Module, AttentionLayerBase):
             raise ValueError(f"Invalid compress ratio: {compress_ratio}")
 
     def get_kv_cache_spec(self, vllm_config: VllmConfig) -> KVCacheSpec:
-        # FlashMLA's UE8M0 paged layout needs 576B alignment; the FlashInfer
-        # full-cache path shares state pages with contiguous KV pages, so
-        # padding would break page matching.
-        is_flashmla = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
+        # fp8_ds_mla is the UE8M0 paged layout and needs 576B alignment. Plain
+        # full-cache rows share state pages with contiguous KV pages, so padding
+        # would break page matching.
+        uses_fp8_ds_mla_layout = vllm_config.cache_config.cache_dtype == "fp8_ds_mla"
         return SlidingWindowMLASpec(  # only has one vector instead of K + V
             block_size=self.block_size,
             num_kv_heads=1,
             head_size=self.state_dim,
             dtype=self.dtype,
             sliding_window=self.sliding_window,
-            alignment=576 if is_flashmla else None,
+            alignment=576 if uses_fp8_ds_mla_layout else None,
         )
 
     def forward(self): ...
@@ -340,8 +337,8 @@ class DeepseekCompressor(nn.Module):
         k_cache_layer = self._static_forward_context[self.k_cache_prefix]
         kv_cache = k_cache_layer.kv_cache
 
-        # FlashInfer V4 reads a contiguous bf16 / per-tensor fp8 cache row; the
-        # legacy FlashMLA path uses the UE8M0 paged uint8 layout.
+        # Plain-row V4 reads a contiguous bf16 / per-tensor fp8 cache row; the
+        # fp8_ds_mla path uses the UE8M0 paged uint8 layout.
         store_full_kv = self.head_dim == 512 and kv_cache.dtype != torch.uint8
         store_full_fp8 = kv_cache.dtype == torch.float8_e4m3fn
         fp8_scale = (
@@ -358,8 +355,8 @@ class DeepseekCompressor(nn.Module):
                 compress_norm_rope_store_cutedsl,
             )
 
-            # head=512 on CUDA always uses cutedsl, for both the legacy UE8M0
-            # layout and the FlashInfer full-cache layout. The full-cache flags
+            # head=512 on CUDA always uses cutedsl, for both the fp8_ds_mla
+            # layout and the plain full-cache layout. The full-cache flags
             # are consumed only here.
             compress_norm_rope_store_fn = compress_norm_rope_store_cutedsl
             extra_kwargs: dict[str, Any] = dict(

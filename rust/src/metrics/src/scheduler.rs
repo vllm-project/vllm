@@ -1,4 +1,8 @@
-use prometheus_client::encoding::EncodeLabelSet;
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
+
+use itertools::Itertools as _;
+use prometheus_client::encoding::{EncodeLabelSet, EncodeLabelValue, LabelValueEncoder};
 use prometheus_client::metrics::family::Family;
 use prometheus_client::metrics::histogram::Histogram;
 use prometheus_client::registry::Registry;
@@ -42,6 +46,107 @@ pub struct WaitingReasonLabels {
     pub reason: &'static str,
 }
 
+/// Adapter names encoded as a deterministic comma-joined Prometheus label value.
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+pub struct LoraAdapterNames(pub BTreeSet<String>);
+
+impl EncodeLabelValue for LoraAdapterNames {
+    fn encode(&self, encoder: &mut LabelValueEncoder) -> Result<(), std::fmt::Error> {
+        EncodeLabelValue::encode(&self.0.iter().join(","), encoder)
+    }
+}
+
+/// Labels for `vllm:lora_requests_info`.
+#[derive(Clone, Debug, Hash, PartialEq, Eq, EncodeLabelSet)]
+pub struct LoraInfoLabels {
+    pub running_lora_adapters: LoraAdapterNames,
+    pub waiting_lora_adapters: LoraAdapterNames,
+}
+
+/// CUDA graph sample key used for periodic text-log aggregation.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct CudagraphLogKey {
+    pub num_unpadded_tokens: u64,
+    pub num_padded_tokens: u64,
+    pub num_paddings: u64,
+    pub runtime_mode: String,
+}
+
+/// Raw scheduler stats accumulated for one periodic text-log interval.
+#[derive(Default)]
+pub struct SchedulerLogStatsInterval {
+    pub spec_num_drafts: u64,
+    pub spec_accepted_tokens_per_pos: Vec<u64>,
+    pub cudagraph_counts: BTreeMap<CudagraphLogKey, u64>,
+}
+
+impl SchedulerLogStatsInterval {
+    /// Merge another drained interval into this one.
+    pub fn merge(&mut self, other: Self) {
+        self.spec_num_drafts += other.spec_num_drafts;
+
+        if self.spec_accepted_tokens_per_pos.len() < other.spec_accepted_tokens_per_pos.len() {
+            self.spec_accepted_tokens_per_pos
+                .resize(other.spec_accepted_tokens_per_pos.len(), 0);
+        }
+        for (position, accepted_tokens) in
+            other.spec_accepted_tokens_per_pos.into_iter().enumerate()
+        {
+            self.spec_accepted_tokens_per_pos[position] += accepted_tokens;
+        }
+
+        for (key, count) in other.cudagraph_counts {
+            *self.cudagraph_counts.entry(key).or_default() += count;
+        }
+    }
+}
+
+/// Internal, non-Prometheus accumulator for periodic text logs that need raw
+/// scheduler DTOs.
+#[derive(Clone, Default)]
+pub struct SchedulerLogStatsAccumulator {
+    inner: Arc<Mutex<SchedulerLogStatsInterval>>,
+}
+
+impl SchedulerLogStatsAccumulator {
+    /// Observe spec-decoding fields needed for per-position text-log rates.
+    pub fn observe_spec_decode(&self, num_drafts: u64, accepted_tokens_per_pos: &[u64]) {
+        let mut inner = self.inner.lock().expect("scheduler log stats accumulator poisoned");
+        inner.spec_num_drafts += num_drafts;
+
+        if inner.spec_accepted_tokens_per_pos.len() < accepted_tokens_per_pos.len() {
+            inner.spec_accepted_tokens_per_pos.resize(accepted_tokens_per_pos.len(), 0);
+        }
+        for (position, accepted_tokens) in accepted_tokens_per_pos.iter().copied().enumerate() {
+            inner.spec_accepted_tokens_per_pos[position] += accepted_tokens;
+        }
+    }
+
+    /// Observe one CUDA graph runtime sample for the interval table.
+    pub fn observe_cudagraph(
+        &self,
+        num_unpadded_tokens: u64,
+        num_padded_tokens: u64,
+        num_paddings: u64,
+        runtime_mode: &str,
+    ) {
+        let mut inner = self.inner.lock().expect("scheduler log stats accumulator poisoned");
+        let key = CudagraphLogKey {
+            num_unpadded_tokens,
+            num_padded_tokens,
+            num_paddings,
+            runtime_mode: runtime_mode.to_string(),
+        };
+        *inner.cudagraph_counts.entry(key).or_default() += 1;
+    }
+
+    /// Drain and reset the current text-log interval.
+    pub fn drain(&self) -> SchedulerLogStatsInterval {
+        let mut inner = self.inner.lock().expect("scheduler log stats accumulator poisoned");
+        std::mem::take(&mut *inner)
+    }
+}
+
 /// Scheduler/batch-scoped Prometheus families exported from `SchedulerStats`.
 pub struct SchedulerMetrics {
     // Scheduler state gauges.
@@ -49,6 +154,10 @@ pub struct SchedulerMetrics {
     pub scheduler_waiting: Family<EngineLabels, U64Gauge>,
     pub scheduler_waiting_by_reason: Family<WaitingReasonLabels, U64Gauge>,
     pub kv_cache_usage: Family<EngineLabels, F64Gauge>,
+
+    /// `vllm:lora_requests_info`. Value is the emit-time unix timestamp in
+    /// seconds.
+    pub lora_info: Family<LoraInfoLabels, F64Gauge>,
 
     // Prefix-cache counters, including the connector-backed external cache path.
     pub prefix_cache_queries: Family<EngineLabels, U64Counter>,
@@ -71,6 +180,9 @@ pub struct SchedulerMetrics {
     pub kv_block_lifetime_seconds: HistogramFamily,
     pub kv_block_idle_before_evict_seconds: HistogramFamily,
     pub kv_block_reuse_gap_seconds: HistogramFamily,
+
+    /// Non-Prometheus interval accumulators for periodic text-log helpers.
+    pub log_stats: Family<EngineLabels, SchedulerLogStatsAccumulator>,
 }
 
 impl SchedulerMetrics {
@@ -107,6 +219,13 @@ impl SchedulerMetrics {
             "vllm:kv_cache_usage_perc",
             "KV-cache usage. 1 means 100 percent usage",
             kv_cache_usage.clone(),
+        );
+
+        let lora_info = Family::default();
+        registry.register(
+            "vllm:lora_requests_info",
+            "Running stats on lora requests.",
+            lora_info.clone(),
         );
 
         // Prefix-cache counters, including the connector-backed external cache path.
@@ -219,6 +338,7 @@ impl SchedulerMetrics {
             scheduler_waiting,
             scheduler_waiting_by_reason,
             kv_cache_usage,
+            lora_info,
             prefix_cache_queries,
             prefix_cache_hits,
             external_prefix_cache_queries,
@@ -233,13 +353,14 @@ impl SchedulerMetrics {
             kv_block_lifetime_seconds,
             kv_block_idle_before_evict_seconds,
             kv_block_reuse_gap_seconds,
+            log_stats: Family::default(),
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use crate::{EngineLabels, Metrics};
+    use crate::{CudagraphLogKey, EngineLabels, Metrics, SchedulerLogStatsAccumulator};
 
     #[test]
     fn perf_counters_render_with_a_single_total_suffix() {
@@ -268,5 +389,33 @@ mod tests {
         assert!(!rendered.contains("vllm:estimated_flops_per_gpu_total_total"));
         assert!(!rendered.contains("vllm:estimated_read_bytes_per_gpu_total_total"));
         assert!(!rendered.contains("vllm:estimated_write_bytes_per_gpu_total_total"));
+    }
+
+    #[test]
+    fn log_stats_accumulator_drains_interval_data() {
+        let accumulator = SchedulerLogStatsAccumulator::default();
+
+        accumulator.observe_spec_decode(2, &[1, 2]);
+        accumulator.observe_spec_decode(3, &[3, 4, 5]);
+        accumulator.observe_cudagraph(8, 16, 8, "FULL");
+        accumulator.observe_cudagraph(8, 16, 8, "FULL");
+
+        let interval = accumulator.drain();
+
+        assert_eq!(interval.spec_num_drafts, 5);
+        assert_eq!(interval.spec_accepted_tokens_per_pos, vec![4, 6, 5]);
+        assert_eq!(
+            interval
+                .cudagraph_counts
+                .get(&CudagraphLogKey {
+                    num_unpadded_tokens: 8,
+                    num_padded_tokens: 16,
+                    num_paddings: 8,
+                    runtime_mode: "FULL".to_string(),
+                })
+                .copied(),
+            Some(2)
+        );
+        assert_eq!(accumulator.drain().spec_num_drafts, 0);
     }
 }
