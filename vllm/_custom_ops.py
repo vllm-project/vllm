@@ -2227,14 +2227,41 @@ def topk_softmax(
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
 ) -> None:
-    torch.ops._moe_C.topk_softmax(
-        topk_weights,
-        topk_ids,
-        token_expert_indices,
-        gating_output,
-        renormalize,
-        e_score_correction_bias,
-    )
+    if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "topk_softmax"):
+        torch.ops._moe_C.topk_softmax(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+        )
+        return
+    
+    # Pure PyTorch fallback
+    logits = gating_output.float()
+    probs = torch.softmax(logits, dim=-1)
+    k = topk_weights.shape[-1]
+    
+    if e_score_correction_bias is not None:
+        biased_probs = probs + e_score_correction_bias
+        values, indices = torch.topk(biased_probs, k=k, dim=-1, largest=True, sorted=True)
+        # Extract the unbiased probabilities for topk_weights
+        values = torch.gather(probs, -1, indices)
+    else:
+        values, indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        
+    if renormalize:
+        denom = values.sum(dim=-1, keepdim=True)
+        denom = torch.where(denom > 0.0, denom, torch.ones_like(denom))
+        values = values / denom
+        
+    topk_weights.copy_(values.to(topk_weights.dtype))
+    topk_ids.copy_(indices.to(topk_ids.dtype))
+    
+    M = gating_output.shape[0]
+    for k_idx in range(k):
+        token_expert_indices[:, k_idx] = k_idx * M + torch.arange(M, device=gating_output.device, dtype=torch.int32)
 
 
 def topk_sigmoid(
@@ -2245,14 +2272,41 @@ def topk_sigmoid(
     renormalize: bool = False,
     e_score_correction_bias: torch.Tensor | None = None,
 ) -> None:
-    torch.ops._moe_C.topk_sigmoid(
-        topk_weights,
-        topk_ids,
-        token_expert_indices,
-        gating_output,
-        renormalize,
-        e_score_correction_bias,
-    )
+    if hasattr(torch.ops, "_moe_C") and hasattr(torch.ops._moe_C, "topk_sigmoid"):
+        torch.ops._moe_C.topk_sigmoid(
+            topk_weights,
+            topk_ids,
+            token_expert_indices,
+            gating_output,
+            renormalize,
+            e_score_correction_bias,
+        )
+        return
+
+    # Pure PyTorch fallback
+    logits = gating_output.float()
+    probs = torch.sigmoid(logits)
+    k = topk_weights.shape[-1]
+    
+    if e_score_correction_bias is not None:
+        biased_probs = probs + e_score_correction_bias
+        values, indices = torch.topk(biased_probs, k=k, dim=-1, largest=True, sorted=True)
+        # Extract the unbiased probabilities for topk_weights
+        values = torch.gather(probs, -1, indices)
+    else:
+        values, indices = torch.topk(probs, k=k, dim=-1, largest=True, sorted=True)
+        
+    if renormalize:
+        denom = values.sum(dim=-1, keepdim=True)
+        denom = torch.where(denom > 0.0, denom, torch.ones_like(denom))
+        values = values / denom
+        
+    topk_weights.copy_(values.to(topk_weights.dtype))
+    topk_ids.copy_(indices.to(topk_ids.dtype))
+    
+    M = gating_output.shape[0]
+    for k_idx in range(k):
+        token_expert_indices[:, k_idx] = k_idx * M + torch.arange(M, device=gating_output.device, dtype=torch.int32)
 
 
 def topk_hash_softplus_sqrt(
