@@ -688,10 +688,6 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             num_mha_tokens = q.size(0) - num_mqa_tokens
 
         is_pergroup = quant_key in (kFp8Dynamic128Sym, kFp8Dynamic64Sym)
-        # NVFP4 fused output writes the whole 128x4-swizzled scale buffer; its 128-row
-        # tiles can't be split between FA (prefill tokens) and the separate decode-token
-        # quant, so only fuse when the batch is pure prefill.
-        nvfp4_ok = quant_key != kNvfp4Dynamic or num_mqa_tokens == 0
         # FA derives UE8M0 from the column-major scale layout, so it can only write the
         # two self-consistent layouts: DeepGEMM (col-major + ue8m0 + tma-aligned) or
         # plain row-major fp32.
@@ -706,7 +702,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
             and attn_metadata.prefill.chunked_context is None
             and self.impl.dcp_world_size <= 1
             and (not is_pergroup or pergroup_layout_ok)
-            and nvfp4_ok
+            # NVFP4 writes the whole 128x4-swizzled scale buffer; its 128-row tiles
+            # can't be split between FA (prefill tokens) and the separate decode-token
+            # quant, so only fuse when the batch is pure prefill.
+            and (quant_key != kNvfp4Dynamic or num_mqa_tokens == 0)
         )
 
         if num_mha_tokens > 0:
