@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import time
-from collections.abc import AsyncGenerator, Sequence
+from collections.abc import AsyncGenerator, Callable, Generator, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Generic, TypeAlias, TypeVar
 
@@ -9,7 +9,7 @@ from fastapi import Request
 from pydantic import ConfigDict
 
 from vllm import PoolingParams, PoolingRequestOutput, PromptType
-from vllm.inputs import DataPrompt, EngineInput
+from vllm.inputs import EngineInput
 from vllm.lora.request import LoRARequest
 
 from .classify.protocol import (
@@ -34,7 +34,6 @@ from .pooling.protocol import (
     PoolingResponse,
 )
 from .scoring.protocol import ScoringRequest, ScoringResponse
-from .scoring.typing import ScoringData
 
 PoolingCompletionLikeRequest: TypeAlias = (
     EmbeddingCompletionRequest
@@ -68,6 +67,9 @@ AnyPoolingResponse: TypeAlias = (
 )
 
 PoolingRequestT = TypeVar("PoolingRequestT", bound=AnyPoolingRequest)
+
+PromptGenerator: TypeAlias = Generator[tuple[dict[str, Any], dict[str, Any]]]
+PromptFactory: TypeAlias = Callable[[], PromptGenerator]
 
 
 @dataclass(kw_only=True)
@@ -111,12 +113,14 @@ class PoolingServeContext(Generic[PoolingRequestT]):
 
 @dataclass
 class OfflineInputsContext:
-    prompts: PromptType | Sequence[PromptType] | DataPrompt | ScoringData
-    pooling_params: PoolingParams | Sequence[PoolingParams]
-    tokenization_kwargs: dict[str, Any] | None = None
+    prompts: Sequence[PromptType]
+    pooling_params: Sequence[PoolingParams]
+    tokenization_kwargs: dict[str, Any]
+    seq_lora_requests: Sequence[LoRARequest | None]
+    priorities: Sequence[int]
+
+    # for scoring
     chat_template: str | None = None
-    seq_lora_requests: Sequence[LoRARequest | None] | None = None
-    priorities: Sequence[int] | None = None
 
     ## for bi-encoder & late-interaction
     n_queries: int | None = None

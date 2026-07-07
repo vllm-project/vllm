@@ -4,7 +4,10 @@
 from collections.abc import Sequence
 from typing import Any, Final
 
-from vllm import PoolingParams, PoolingRequestOutput, PromptType
+from vllm import (
+    PoolingParams,
+    PoolingRequestOutput,
+)
 from vllm.config import VllmConfig
 from vllm.entrypoints.chat_utils import (
     ChatCompletionMessageParam,
@@ -14,18 +17,19 @@ from vllm.entrypoints.chat_utils import (
 )
 from vllm.entrypoints.serve.engine.typing import RendererChatRequest, RendererRequest
 from vllm.inputs import EngineInput, SingletonPrompt
-from vllm.renderers import BaseRenderer, TokenizeParams, merge_kwargs
+from vllm.renderers import BaseRenderer, merge_kwargs
 from vllm.renderers.inputs.preprocess import parse_model_prompt, prompt_to_seq
 from vllm.tool_parsers import ToolParser
 from vllm.utils.mistral import is_mistral_tokenizer
 
-from ..scoring.typing import ScoringData
 from ..typing import (
     OfflineInputsContext,
     OfflineOutputsContext,
     PoolingChatLikeRequest,
     PoolingCompletionLikeRequest,
     PoolingServeContext,
+    PromptFactory,
+    PromptGenerator,
 )
 
 
@@ -98,15 +102,36 @@ class PoolingIOProcessor:
     #######################################
     # offline APIs
 
-    def pre_process_offline(self, ctx: OfflineInputsContext) -> Sequence[EngineInput]:
-        assert not isinstance(ctx.prompts, ScoringData) and not (
-            isinstance(ctx.prompts, dict) and "data" in ctx.prompts
-        )
+    def get_prompt_factory_offline(self, ctx: OfflineInputsContext) -> PromptFactory:
+        num_requests = len(ctx.prompts)
 
+        parsed_prompts = [
+            (
+                prompt
+                if isinstance(prompt, bytes)
+                else parse_model_prompt(self.model_config, prompt)
+            )
+            for prompt in ctx.prompts
+        ]
         tok_params = self.renderer.default_cmpl_tok_params.with_kwargs(
             **(ctx.tokenization_kwargs or {})
         )
-        return self._preprocess_cmpl_offline(prompts=ctx.prompts, tok_params=tok_params)
+
+        def prompt_factory() -> PromptGenerator:
+            for i in range(num_requests):
+                yield (
+                    {
+                        "prompts": [parsed_prompts[i]],
+                        "tok_params": tok_params,
+                    },
+                    {
+                        "params": [ctx.pooling_params[i]],
+                        "lora_requests": [ctx.seq_lora_requests[i]],
+                        "priorities": [ctx.priorities[i]],
+                    },
+                )
+
+        return prompt_factory
 
     def post_process_offline(
         self,
@@ -116,6 +141,20 @@ class PoolingIOProcessor:
 
     #######################################
     # helpers
+
+    def render(
+        self,
+        render_params: tuple[dict[str, Any], dict[str, Any]],
+    ) -> dict[str, Any]:
+        render_params, engine_inputs = render_params
+
+        if "conversations" in render_params:
+            (_,), (engine_input,) = self.renderer.render_chat(**render_params)
+        else:
+            engine_input = self.renderer.render_cmpl(**render_params)
+
+        engine_inputs["prompts"] = engine_input
+        return engine_inputs
 
     def _preprocess_cmpl_online(
         self,
@@ -194,26 +233,6 @@ class PoolingIOProcessor:
         )
 
         return conversation, [engine_input]
-
-    def _preprocess_cmpl_offline(
-        self,
-        prompts: PromptType | Sequence[PromptType],
-        tok_params: TokenizeParams,
-        prompt_extras: dict[str, Any] | None = None,
-    ) -> Sequence[EngineInput]:
-        prompts = prompt_to_seq(prompts)
-        parsed_prompts = [
-            (
-                prompt
-                if isinstance(prompt, bytes)
-                else parse_model_prompt(self.model_config, prompt)
-            )
-            for prompt in prompts
-        ]
-
-        return self.renderer.render_cmpl(
-            parsed_prompts, tok_params, prompt_extras=prompt_extras
-        )
 
     def _validate_chat_template(
         self,

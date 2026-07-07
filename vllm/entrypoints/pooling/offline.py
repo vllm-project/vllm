@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from tqdm.auto import tqdm
@@ -25,7 +25,7 @@ from .base.io_processor import PoolingIOProcessor
 from .factories import init_pooling_io_processors
 from .scoring.io_processor import ScoringIOProcessor
 from .scoring.typing import ScoreInput
-from .typing import OfflineInputsContext, OfflineOutputsContext
+from .typing import OfflineInputsContext, OfflineOutputsContext, PromptFactory
 
 logger = init_logger(__name__)
 
@@ -104,58 +104,38 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                 tokenization_kwargs=tokenization_kwargs,
             )
 
-        prompts_seq = prompt_to_seq(prompts)
-        num_requests = len(prompts_seq)
-
-        if isinstance(lora_request, Sequence) and len(lora_request) != num_requests:
-            raise ValueError(
-                f"The lengths of prompts ({num_requests}) "
-                f"and lora_request ({len(lora_request)}) must be the same."
-            )
-
-        if isinstance(pooling_params, Sequence) and len(pooling_params) != num_requests:
-            raise ValueError(
-                f"The lengths of prompts ({num_requests}) "
-                f"and params ({len(pooling_params)}) must be the same."
-            )
-
         assert pooling_task is not None and pooling_task in self.pooling_io_processors
         io_processor = self.pooling_io_processors[pooling_task]
 
         if pooling_params is None:
             pooling_params = PoolingParams()
 
-        def pre_process_iterator():
-            for i in range(num_requests):
-                if isinstance(pooling_params, Sequence):
-                    param = pooling_params[i]
-                else:
-                    param = pooling_params
+        prompts = prompt_to_seq(prompts)
+        num_requests = len(prompts)
 
-                if param.task is None:
-                    param.task = pooling_task
-                elif param.task != pooling_task:
-                    msg = (
-                        f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
-                    )
-                    raise ValueError(msg)
+        params_seq = self._params_to_seq(pooling_params, num_requests)
+        seq_lora_requests = self._lora_request_to_seq(lora_request, num_requests)
+        seq_priority = self._priority_to_seq(None, num_requests)
 
-                if isinstance(lora_request, Sequence):
-                    lora_requests = [lora_request[i]]
-                else:
-                    lora_requests = [lora_request]
+        for param in params_seq:
+            if param.task is None:
+                param.task = pooling_task
+            elif param.task != pooling_task:
+                msg = f"You cannot overwrite {param.task=!r} with {pooling_task=!r}!"
+                raise ValueError(msg)
 
-                ctx = OfflineInputsContext(
-                    prompts=[prompts_seq[i]],
-                    pooling_params=[param],
-                    tokenization_kwargs=tokenization_kwargs,
-                    seq_lora_requests=lora_requests,
-                    priorities=None,
-                )
-                yield ctx
+        ctx = OfflineInputsContext(
+            prompts=prompts,
+            pooling_params=params_seq,
+            tokenization_kwargs=tokenization_kwargs,
+            seq_lora_requests=seq_lora_requests,
+            priorities=seq_priority,
+        )
+
+        prompt_factory = io_processor.get_prompt_factory_offline(ctx)
 
         outputs = self._run_tiling_engine(
-            io_processor, pre_process_iterator(), num_requests, use_tqdm=use_tqdm
+            io_processor, prompt_factory, num_requests, use_tqdm=use_tqdm
         )
         outputs = io_processor.post_process_offline(
             ctx=OfflineOutputsContext(outputs=outputs)
@@ -472,7 +452,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
     def _run_tiling_engine(
         self,
         io_processor: PoolingIOProcessor,
-        iterator: Iterable[OfflineInputsContext],
+        prompt_factory: PromptFactory,
         num_requests: int,
         use_tqdm: bool | Callable[..., tqdm] = True,
     ):
@@ -496,16 +476,7 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
         outputs: list[PoolingRequestOutput] = []
         added_request_ids: set[str] = set()
 
-        def pre_process(ctx):
-            engine_inputs = io_processor.pre_process_offline(ctx)
-            return {
-                "prompts": engine_inputs,
-                "params": ctx.pooling_params,
-                "lora_requests": ctx.seq_lora_requests,
-                "priorities": ctx.priorities,
-            }
-
-        it = self._executor.map(pre_process, iterator)
+        it = self._executor.map(io_processor.render, prompt_factory())
 
         try:
             while num_waited_requests or self.llm_engine.has_unfinished_requests():
@@ -528,7 +499,6 @@ class PoolingOfflineMixin(OfflineInferenceMixin):
                         added_request_ids.add(request_id)
 
                 step_outputs = self.llm_engine.step()
-
                 for output in step_outputs:
                     assert isinstance(output, PoolingRequestOutput)
                     assert output.finished
