@@ -352,9 +352,7 @@ class FlashInferBackend(AttentionBackend):
                 and num_qo_heads // num_kv_heads > 1
                 and can_use_trtllm_attention(num_qo_heads, num_kv_heads)
             )
-        if not use_large_pages:
-            return [16, 32, 64]
-        return [16, 32, 64, 128, 256, 512, 1024]
+        return [16, 32, 64]
 
     @staticmethod
     def get_name() -> str:
