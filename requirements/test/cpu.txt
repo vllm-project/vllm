@@ -1134,6 +1134,8 @@ torchaudio==2.11.0+cpu
     #   -r requirements/test/cuda.in
     #   encodec
     #   vocos
+torchcodec==0.14.0+cpu
+    # via -r requirements/test/cuda.in
 torchvision==0.26.0+cpu
     # via
     #   -r requirements/test/cuda.in
