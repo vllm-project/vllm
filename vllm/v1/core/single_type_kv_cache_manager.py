@@ -1150,9 +1150,6 @@ class MambaManager(SingleTypeKVCacheManager):
     ) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
 
-        # Spec-rollback safety: callers pass the processed-token basis, which
-        # excludes possibly-rejected in-flight tokens, so the previous
-        # `num_speculative_blocks` guard here is no longer needed.
         super().remove_skipped_blocks(
             request_id, processed_computed_tokens, num_prompt_tokens
         )
