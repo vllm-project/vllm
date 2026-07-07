@@ -155,15 +155,9 @@ impl<T: Tokenizer + ?Sized> IncrementalDecoder for DecodeStream<'_, T> {
     }
 
     fn flush(&mut self, truncate_output_to: Option<usize>) -> Result<(Option<String>, String)> {
-        let just_seeded = !self.prefix_seeded && !self.ids.is_empty();
-        if just_seeded {
-            self.seed_prefix()?;
-            self.prefix_seeded = true;
-        }
-        // When seeding happens during flush (no push_token was called), `ids`
-        // holds only prompt context — decoding it would re-emit prompt text,
-        // so skip it. Otherwise decode the generated delta normally.
-        if !self.ids.is_empty() && !just_seeded {
+        // If the prefix was never seeded (no push_token was called), `ids`
+        // holds only prompt context — decoding it would re-emit prompt text.
+        if self.prefix_seeded && !self.ids.is_empty() {
             let string = self.tokenizer.decode(&self.ids, self.skip_special_tokens)?;
             let prefix_len = self.prefix.len();
             // Ensure we split at a utf-8 char boundary.
