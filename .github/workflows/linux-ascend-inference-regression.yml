@@ -235,7 +235,19 @@ jobs:
       - name: Acquire Ascend hardware lock
         run: bash .github/workflows/scripts/acquire_ascend_hardware_lock.sh
 
+      - name: Install Ascend torch stack for preflight
+        run: |
+          source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
+          if "$PYTHON_BIN" -c "import torch, torch_npu; print(f'torch={torch.__version__}')"; then
+            echo "Ascend torch stack is already importable."
+            exit 0
+          fi
+
+          "$PYTHON_BIN" -m pip install "torch==2.9.0" "torch-npu==2.9.0"
+
       - name: Prepare Ascend runtime and install current checkout
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
         run: |
           source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
           "$PYTHON_BIN" -m pip uninstall -y torchvision 2>/dev/null || true
@@ -244,6 +256,8 @@ jobs:
           VLLM_TARGET_DEVICE=empty "$PYTHON_BIN" -m pip install -e . --no-build-isolation --no-deps
 
       - name: Verify installation
+        env:
+          TORCH_DEVICE_BACKEND_AUTOLOAD: "0"
         run: |
           source "$VLLM_ASCEND_HUST_REPO/scripts/use_single_ascend_env.sh"
           which python

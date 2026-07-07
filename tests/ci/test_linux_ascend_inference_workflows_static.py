@@ -62,6 +62,31 @@ def test_inference_workflows_remove_stale_torchvision_and_verify_server_import()
         assert "torchvision importable:" in verify_step
 
 
+def test_inference_workflows_install_matching_ascend_torch_stack():
+    for workflow_path in WORKFLOW_PATHS:
+        text = workflow_path.read_text(encoding="utf-8")
+
+        assert "Install Ascend torch stack for preflight" in text
+        assert '"$PYTHON_BIN" -c "import torch, torch_npu;' in text
+        assert '"$PYTHON_BIN" -m pip install "torch==2.9.0" "torch-npu==2.9.0"' in text
+
+
+def test_inference_workflows_disable_backend_autoload_during_install_checks():
+    for workflow_path in WORKFLOW_PATHS:
+        text = workflow_path.read_text(encoding="utf-8")
+        install_step = text[
+            text.index("      - name: Prepare Ascend runtime and install current checkout") :
+            text.index("      - name: Verify installation")
+        ]
+        verify_step = text[
+            text.index("      - name: Verify installation") :
+            text.index("      - name: Run real")
+        ]
+
+        assert 'TORCH_DEVICE_BACKEND_AUTOLOAD: "0"' in install_step
+        assert 'TORCH_DEVICE_BACKEND_AUTOLOAD: "0"' in verify_step
+
+
 def test_inference_workflows_fetch_target_sha_without_default_branch_clone():
     for workflow_path in WORKFLOW_PATHS:
         text = workflow_path.read_text(encoding="utf-8")
