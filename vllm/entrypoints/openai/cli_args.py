@@ -20,16 +20,13 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     validate_chat_template,
 )
-from vllm.entrypoints.constants import (
+from vllm.entrypoints.openai.models.protocol import LoRAModulePath
+from vllm.entrypoints.serve.utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
-from vllm.entrypoints.openai.models.protocol import LoRAModulePath
-from vllm.logger import init_logger
 from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-logger = init_logger(__name__)
 
 
 class LoRAParserAction(argparse.Action):
@@ -134,6 +131,8 @@ class BaseFrontendArgs:
     log. The default of None means unlimited."""
     enable_prompt_tokens_details: bool = False
     """If set to True, enable prompt_tokens_details in usage."""
+    enable_per_request_metrics: bool = False
+    """If set to True, include per-request timing metrics in API responses."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
@@ -229,6 +228,17 @@ class FrontendArgs(BaseFrontendArgs):
     """Host name."""
     port: int = 8000
     """Port number."""
+    data_parallel_supervisor_port: int = 9256
+    """HTTP port for aggregated health endpoints in multi-port external LB
+    mode."""
+    dp_supervisor_probe_interval_s: float = 5.0
+    """Seconds between aggregated health probes in multi-port external LB mode."""
+    dp_supervisor_probe_timeout_s: float = 5.0
+    """Seconds to wait between retries when a child health probe fails with a
+    connection error in multi-port external LB mode."""
+    dp_supervisor_probe_failure_threshold: int = 3
+    """Number of consecutive connection-error retries before a child health
+    probe is declared failed in multi-port external LB mode."""
     uds: str | None = None
     """Unix domain socket path. If set, host and port arguments are ignored."""
     uvicorn_log_level: Literal[
@@ -386,6 +396,21 @@ def validate_parsed_serve_args(args: argparse.Namespace):
         raise TypeError("Error: --enable-auto-tool-choice requires --tool-call-parser")
     if args.enable_log_outputs and not args.enable_log_requests:
         raise TypeError("Error: --enable-log-outputs requires --enable-log-requests")
+
+    if getattr(args, "enable_per_request_metrics", False) and getattr(
+        args, "disable_log_stats", False
+    ):
+        raise ValueError(
+            "Error: --enable-per-request-metrics requires engine statistics "
+            "logging; remove --disable-log-stats to enable per-request metrics."
+        )
+
+    if args.data_parallel_multi_port_external_lb:
+        from vllm.entrypoints.openai.dp_supervisor import (
+            validate_multi_port_external_lb_args,
+        )
+
+        validate_multi_port_external_lb_args(args)
 
 
 def create_parser_for_docs() -> FlexibleArgumentParser:

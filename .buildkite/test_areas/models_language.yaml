@@ -14,7 +14,10 @@ steps:
     - pip freeze | grep -E 'torch'
     - pytest -v -s models/language -m 'core_model and (not slow_test)'
   mirror:
-    torch_nightly: {}
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
 
 - label: Language Models Tests (Extra Standard) %N
   key: language-models-tests-extra-standard
@@ -31,7 +34,21 @@ steps:
     - pytest -v -s models/language -m 'core_model and slow_test' --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
   mirror:
-    torch_nightly: {}
+    amd:
+      device: mi300_1
+      depends_on:
+      - image-build-amd
+      source_file_dependencies:
+      - vllm/model_executor/models/
+      - vllm/model_executor/model_loader/
+      - vllm/model_executor/layers/
+      - vllm/v1/attention/backends/
+      - vllm/v1/attention/selector.py
+      - tests/models/language/pooling/test_embedding.py
+      - tests/models/language/generation/test_common.py
+      - tests/models/language/pooling/test_classification.py
+      - vllm/_aiter_ops.py
+      - vllm/platforms/rocm.py
 
 - label: Language Models Tests (Hybrid) %N
   key: language-models-tests-hybrid
@@ -48,9 +65,9 @@ steps:
     - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
   parallelism: 2
   mirror:
-    torch_nightly: {}
     amd:
-      device: mi300_1
+      device: mi325_1
+      timeout_in_minutes: 90
       depends_on:
       - image-build-amd
       commands:
@@ -59,6 +76,7 @@ steps:
       - pytest -v -s models/language/generation -m hybrid_model --num-shards=$$BUILDKITE_PARALLEL_JOB_COUNT --shard-id=$$BUILDKITE_PARALLEL_JOB
 
 - label: Language Models Test (Extended Generation) # 80min
+  device: h200_35gb
   key: language-models-test-extended-generation
   timeout_in_minutes: 110
   optional: true
@@ -84,6 +102,7 @@ steps:
     - pytest -v -s models/language/generation_ppl_test
 
 - label: Language Models Test (Extended Pooling)  # 36min
+  device: h200_35gb
   key: language-models-test-extended-pooling
   timeout_in_minutes: 50
   optional: true
@@ -92,6 +111,12 @@ steps:
   - tests/models/language/pooling
   commands:
     - pytest -v -s models/language/pooling -m 'not core_model'
+  mirror:
+    amd:
+      device: mi325_1
+      timeout_in_minutes: 100
+      depends_on:
+      - image-build-amd
 
 - label: Language Models Test (MTEB)
   key: language-models-test-mteb

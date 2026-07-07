@@ -19,6 +19,7 @@ from vllm.utils.flashinfer import (
     has_flashinfer_nvlink_one_sided,
     has_flashinfer_nvlink_two_sided,
 )
+from vllm.utils.import_utils import has_deep_ep_v2
 from vllm.utils.network_utils import get_open_port
 
 from ..utils import init_test_distributed_environment
@@ -194,6 +195,10 @@ requires_ptrace = pytest.mark.skipif(
     not _has_sys_ptrace(),
     reason="SYS_PTRACE required (docker run --cap-add=SYS_PTRACE)",
 )
+requires_deep_ep_v2 = pytest.mark.skipif(
+    not has_deep_ep_v2(),
+    reason="DeepEP v2 (ElasticBuffer) not available or NCCL < 2.30.4",
+)
 
 # NOTE: No module-level pytestmark here. The FlashInfer lifecycle tests have
 # their own @requires_two_sided / @requires_one_sided decorators, and
@@ -337,6 +342,90 @@ def test_one_sided_manager_lifecycle(world_size):
     """Test init, cleanup, and reinit with different params."""
     _spawn_workers(
         _one_sided_lifecycle_worker,
+        world_size,
+        dp_size=world_size,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Test 2b: One-sided manager grows workspace across heterogeneous MoE layers
+# ---------------------------------------------------------------------------
+#
+# Models with heterogeneous MoE quantization — most notably a quantized base
+# MoE combined with an unquantized MTP head — can call initialize() multiple
+# times with different per-token dispatch payload sizes. The shared workspace
+# must grow to the union and the MoeAlltoAll must be rebuilt; otherwise a
+# later layer's combine call overruns the workspace sized for the first
+# layer's smaller payload and trips FlashInfer's combinePayloadOffset assert.
+# ---------------------------------------------------------------------------
+
+
+def _one_sided_workspace_grow_worker(rank, world_size):
+    from vllm.distributed.device_communicators.all2all import (
+        FlashInferNVLinkOneSidedManager,
+    )
+    from vllm.distributed.parallel_state import get_dp_group
+
+    cpu_group = get_dp_group().cpu_group
+    manager = FlashInferNVLinkOneSidedManager(cpu_group)
+
+    base_kwargs = dict(
+        max_num_tokens=1024,
+        top_k=2,
+        num_experts=world_size * 8,
+        hidden_size=4096,
+    )
+    nvfp4_kwargs = dict(
+        dispatch_dtype_bytes_per_elem=0,
+        dispatch_scale_bytes_per_token=base_kwargs["hidden_size"] // 16,
+    )
+    bf16_kwargs = dict(
+        dispatch_dtype_bytes_per_elem=2,
+        dispatch_scale_bytes_per_token=0,
+    )
+
+    # First init: NVFP4-like (hidden_bytes = hidden // 2 + hidden // 16).
+    manager.initialize(**base_kwargs, **nvfp4_kwargs)
+    assert manager.initialized
+    nvfp4_workspace_size = manager.workspace_size
+    nvfp4_moe_alltoall = manager.moe_alltoall
+
+    torch.distributed.barrier()
+
+    # Second init: bf16-like (hidden_bytes = hidden * 2). Models the case of
+    # a quantized base MoE followed by an unquantized MoE layer (e.g. an MTP
+    # head). Per-token dispatch payload is ~4x larger, so the union workspace
+    # must grow and MoeAlltoAll must be rebuilt.
+    manager.initialize(**base_kwargs, **bf16_kwargs)
+    assert manager.initialized
+    assert manager.workspace_size > nvfp4_workspace_size
+    assert manager.moe_alltoall is not nvfp4_moe_alltoall
+    bf16_workspace_size = manager.workspace_size
+    bf16_moe_alltoall = manager.moe_alltoall
+
+    torch.distributed.barrier()
+
+    # Third init: back to NVFP4-like shape. Existing workspace already covers
+    # it, so initialize() must no-op — no shrink, no rebuild.
+    manager.initialize(**base_kwargs, **nvfp4_kwargs)
+    assert manager.initialized
+    assert manager.workspace_size == bf16_workspace_size
+    assert manager.moe_alltoall is bf16_moe_alltoall
+
+    torch.distributed.barrier()
+    manager.cleanup()
+
+
+@requires_multi_gpu
+@requires_one_sided
+@requires_ptrace
+@pytest.mark.parametrize("world_size", [2])
+def test_one_sided_manager_workspace_grow(world_size):
+    """A later initialize() with a larger per-token payload must grow the
+    workspace and rebuild MoeAlltoAll; a later initialize() with a smaller
+    payload must no-op."""
+    _spawn_workers(
+        _one_sided_workspace_grow_worker,
         world_size,
         dp_size=world_size,
     )
@@ -658,6 +747,11 @@ def _one_sided_data_worker(rank, world_size):
         top_k=experts_per_token,
         num_experts=num_experts,
         hidden_size=hidden_size,
+        # Account for the fp8 block-scale payload (a1q_scale: hidden//16 bytes
+        # per token) that is dispatched alongside the nvfp4 hidden states.
+        # Without this the dispatch region is under-reserved and the combine
+        # payload overflows the per-rank workspace.
+        dispatch_scale_bytes_per_token=hidden_size // 16,
     )
     assert manager.initialized
     assert manager.moe_alltoall is not None
@@ -772,3 +866,76 @@ def _one_sided_data_worker(rank, world_size):
 def test_one_sided_dispatch_combine(world_size):
     """Test FlashInfer one-sided dispatch/combine with actual data flow."""
     _spawn_workers(_one_sided_data_worker, world_size, dp_size=world_size)
+
+
+# ---------------------------------------------------------------------------
+# Test 6: DeepEP v2 (ElasticBuffer) manager lifecycle
+# ---------------------------------------------------------------------------
+#
+# Tests DeepEPV2All2AllManager which wraps DeepEP's ElasticBuffer API using
+# the NCCL GIN backend. Requires DeepEP >= 2.0 and NCCL >= 2.30.4.
+#
+# Uses EP group because the DeepEP v2 manager is constructed with an
+# EP-scoped communicator in production. With tp=world_size the EP group
+# spans all ranks.
+# ---------------------------------------------------------------------------
+
+
+def _deepep_v2_lifecycle_worker(rank, world_size):
+    from vllm.distributed.device_communicators.all2all import (
+        DeepEPV2All2AllManager,
+    )
+
+    cpu_group = get_ep_group().cpu_group
+    manager = DeepEPV2All2AllManager(cpu_group)
+
+    assert manager.rank == rank
+    assert manager.world_size == world_size
+    assert manager._num_sms is None
+
+    hidden_size = 7168
+    num_experts = world_size * 32
+    num_topk = 8
+    max_tokens = 256
+
+    handle_kwargs = dict(
+        num_max_tokens_per_rank=max_tokens,
+        hidden=hidden_size,
+        num_topk=num_topk,
+        num_experts=num_experts,
+        use_fp8_dispatch=False,
+    )
+
+    handle = manager.get_handle(handle_kwargs)
+    assert handle is not None
+    assert manager._num_sms is not None
+    assert manager._num_sms > 0
+
+    torch.distributed.barrier()
+
+    # get_handle again with same args should return cached handle
+    handle2 = manager.get_handle(dict(handle_kwargs))
+    assert handle2 is handle
+
+    torch.distributed.barrier()
+
+    # Destroy clears the cache
+    manager.destroy()
+    assert len(manager.handle_cache._cache) == 0
+
+    torch.distributed.barrier()
+
+    # Re-create after destroy
+    handle3 = manager.get_handle(dict(handle_kwargs))
+    assert handle3 is not None
+
+    torch.distributed.barrier()
+    manager.destroy()
+
+
+@requires_multi_gpu
+@requires_deep_ep_v2
+@pytest.mark.parametrize("world_size", [2])
+def test_deepep_v2_manager_lifecycle(world_size):
+    """Test DeepEP v2 ElasticBuffer manager init, caching, and destroy."""
+    _spawn_workers(_deepep_v2_lifecycle_worker, world_size)

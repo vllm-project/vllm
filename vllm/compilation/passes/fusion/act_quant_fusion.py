@@ -70,7 +70,11 @@ class ActivationQuantPattern(VllmPatternReplacement):
         self.silu_and_mul_matcher = MatcherSiluAndMul()
 
     def empty_quant(self, *args: Any, **kwargs: Any) -> torch.Tensor:
-        kwargs = {"dtype": self.quant_dtype, "device": "cuda", **kwargs}
+        kwargs = {
+            "dtype": self.quant_dtype,
+            "device": current_platform.device_type,
+            **kwargs,
+        }
         return torch.empty(*args, **kwargs)
 
 

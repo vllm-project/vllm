@@ -28,32 +28,29 @@
 ###############################################################################
 set -o pipefail
 
-# Export Python path
-export PYTHONPATH=".."
+: "${BUILDKIT_PROGRESS:=plain}"
+: "${TERM:=xterm-256color}"
+: "${FORCE_COLOR:=1}"
+: "${CLICOLOR_FORCE:=1}"
+: "${PY_COLORS:=1}"
+: "${ROCM_DOCKER_TTY:=1}"
+if [[ " ${PYTEST_ADDOPTS:-} " != *" --color"* ]]; then
+  PYTEST_ADDOPTS="${PYTEST_ADDOPTS:+${PYTEST_ADDOPTS} }--color=yes"
+fi
+export BUILDKIT_PROGRESS TERM FORCE_COLOR CLICOLOR_FORCE PY_COLORS PYTEST_ADDOPTS ROCM_DOCKER_TTY
+
+# Export Python path for commands that run directly on the host. Containerized
+# tests set this to /vllm-workspace below so spawned Python processes do not
+# depend on their current working directory.
+export PYTHONPATH="${PYTHONPATH:-..}"
 
 ###############################################################################
 # Helper Functions
 ###############################################################################
 
-cleanup_docker() {
-  # Get Docker's root directory
-  docker_root=$(docker info -f '{{.DockerRootDir}}')
-  if [ -z "$docker_root" ]; then
-    echo "Failed to determine Docker root directory."
-    exit 1
-  fi
-  echo "Docker root directory: $docker_root"
-
-  disk_usage=$(df "$docker_root" | tail -1 | awk '{print $5}' | sed 's/%//')
-  threshold=70
-  if [ "$disk_usage" -gt "$threshold" ]; then
-    echo "Disk usage is above $threshold%. Cleaning up Docker images and volumes..."
-    docker image prune -f
-    docker volume prune -f && docker system prune --force --filter "until=72h" --all
-    echo "Docker images and volumes cleanup completed."
-  else
-    echo "Disk usage is below $threshold%. No cleanup needed."
-  fi
+report_docker_usage() {
+  echo "--- Docker usage"
+  docker system df || true
 }
 
 cleanup_network() {
@@ -66,6 +63,109 @@ cleanup_network() {
   if docker network ls | grep -q docker-net; then
     docker network rm docker-net || true
   fi
+}
+
+prepare_artifact_image() {
+  if [[ "${VLLM_CI_USE_ARTIFACTS:-0}" != "1" ]]; then
+    return 1
+  fi
+  if ! command -v buildkite-agent >/dev/null 2>&1; then
+    echo "buildkite-agent not found; cannot download ROCm wheel artifact"
+    return 1
+  fi
+
+  local artifact_glob="${VLLM_CI_ARTIFACT_GLOB:-artifacts/vllm-rocm-install/vllm-rocm-install.tar.gz}"
+  local archive=""
+  local metadata_file=""
+  local base_image="${VLLM_CI_BASE_IMAGE:-rocm/vllm-dev:ci_base}"
+  local artifact_image=""
+  local artifact_key=""
+  local base_digest=""
+  local wheel_dir=""
+  local context_dir=""
+  local workspace_dir=""
+
+  artifact_work_dir=$(mktemp -d -t vllm-rocm-artifact.XXXXXX)
+  wheel_dir="${artifact_work_dir}/wheels"
+  context_dir="${artifact_work_dir}/context"
+  workspace_dir="${context_dir}/workspace"
+  mkdir -p "${wheel_dir}" "${context_dir}/wheels" "${workspace_dir}"
+
+  echo "--- Downloading ROCm wheel artifact"
+  if ! buildkite-agent artifact download "${artifact_glob}" "${artifact_work_dir}"; then
+    echo "Failed to download ${artifact_glob}"
+    return 1
+  fi
+  buildkite-agent artifact download \
+    "artifacts/vllm-rocm-install/ci-base-image.txt" \
+    "${artifact_work_dir}" >/dev/null 2>&1 || true
+
+  archive=$(find "${artifact_work_dir}" -name "vllm-rocm-install.tar.gz" -type f | head -1)
+  if [[ -z "${archive}" || ! -f "${archive}" ]]; then
+    echo "ROCm wheel artifact archive was not found"
+    return 1
+  fi
+
+  metadata_file=$(find "${artifact_work_dir}" -name "ci-base-image.txt" -type f | head -1)
+  if [[ -n "${metadata_file}" && -s "${metadata_file}" ]]; then
+    base_image=$(tr -d '[:space:]' < "${metadata_file}")
+  fi
+
+  echo "--- Preparing local ROCm test image"
+  echo "Base image: ${base_image}"
+  docker pull "${base_image}" || return 1
+  base_digest=$(
+    docker image inspect \
+      --format='{{if .RepoDigests}}{{index .RepoDigests 0}}{{else}}{{.Id}}{{end}}' \
+      "${base_image}" 2>/dev/null || printf '%s' "${base_image}"
+  )
+
+  artifact_key=$(
+    {
+      printf 'base-image:%s\n' "${base_digest}"
+      sha256sum "${archive}"
+    } | sha256sum | cut -c1-24
+  )
+  artifact_image="rocm/vllm-ci-artifact:${artifact_key}"
+
+  if docker image inspect "${artifact_image}" >/dev/null 2>&1; then
+    echo "Using existing local ROCm artifact image: ${artifact_image}"
+    image_name="${artifact_image}"
+    return 0
+  fi
+
+  tar -xzf "${archive}" -C "${wheel_dir}" || return 1
+  if ! ls "${wheel_dir}"/*.whl >/dev/null 2>&1; then
+    echo "ROCm wheel artifact did not contain a wheel"
+    return 1
+  fi
+  if [[ ! -d "${wheel_dir}/tests" ]]; then
+    echo "ROCm wheel artifact did not contain the test workspace"
+    return 1
+  fi
+
+  cp "${wheel_dir}"/*.whl "${context_dir}/wheels/" || return 1
+  tar -C "${wheel_dir}" --exclude='*.whl' -cf - . \
+    | tar -C "${workspace_dir}" -xf - || return 1
+  cat > "${context_dir}/Dockerfile" <<'EOF'
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY wheels/ /tmp/vllm-wheels/
+COPY workspace/ /vllm-workspace/
+RUN python3 -m pip install --no-deps --force-reinstall /tmp/vllm-wheels/*.whl \
+    && rm -rf /tmp/vllm-wheels
+WORKDIR /vllm-workspace
+EOF
+
+  echo "--- Building local ROCm test image"
+  docker build \
+    --pull=false \
+    --progress "${BUILDKIT_PROGRESS}" \
+    --build-arg "BASE_IMAGE=${base_image}" \
+    -t "${artifact_image}" \
+    "${context_dir}" || return 1
+  image_name="${artifact_image}"
+  return 0
 }
 
 is_multi_node() {
@@ -114,8 +214,7 @@ handle_pytest_exit() {
 # unquoted since they have no spaces and work fine.
 #
 # Already-quoted expressions (containing literal single quotes) are passed
-# through untouched to avoid double-quoting values injected by
-# apply_rocm_test_overrides.
+# through untouched to avoid double-quoting well-formed shell fragments.
 #
 # NOTE: This ONLY fixes -m/-k flags. It cannot recover arbitrary inner
 # double-quotes stripped by the calling shell (see header comment).
@@ -248,102 +347,6 @@ re_quote_pytest_markers() {
 }
 
 ###############################################################################
-# ROCm-specific pytest command rewrites
-#
-# These apply ignore flags and environment overrides for tests that are not
-# yet supported or behave differently on ROCm hardware. Kept as a single
-# function so new exclusions are easy to add in one place.
-###############################################################################
-
-apply_rocm_test_overrides() {
-  local cmds="$1"
-
-  # --- Model registry filter ---
-  if [[ $cmds == *"pytest -v -s models/test_registry.py"* ]]; then
-    cmds=${cmds//"pytest -v -s models/test_registry.py"/"pytest -v -s models/test_registry.py -k 'not BambaForCausalLM and not GritLM and not Mamba2ForCausalLM and not Zamba2ForCausalLM'"}
-  fi
-
-  # --- LoRA: disable custom paged attention ---
-  if [[ $cmds == *"pytest -v -s lora"* ]]; then
-    cmds=${cmds//"pytest -v -s lora"/"pytest -v -s lora"}
-  fi
-
-  # --- Kernel ignores ---
-  if [[ $cmds == *" kernels/core"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/core/test_fused_quant_layernorm.py \
-    --ignore=kernels/core/test_permute_cols.py"
-  fi
-
-  if [[ $cmds == *" kernels/attention"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/attention/test_attention_selector.py \
-    --ignore=kernels/attention/test_encoder_decoder_attn.py \
-    --ignore=kernels/attention/test_flash_attn.py \
-    --ignore=kernels/attention/test_flashinfer.py \
-    --ignore=kernels/attention/test_prefix_prefill.py \
-    --ignore=kernels/attention/test_cascade_flash_attn.py \
-    --ignore=kernels/attention/test_mha_attn.py \
-    --ignore=kernels/attention/test_lightning_attn.py \
-    --ignore=kernels/attention/test_attention.py"
-  fi
-
-  if [[ $cmds == *" kernels/quantization"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/quantization/test_int8_quant.py \
-    --ignore=kernels/quantization/test_machete_mm.py \
-    --ignore=kernels/quantization/test_block_fp8.py \
-    --ignore=kernels/quantization/test_block_int8.py \
-    --ignore=kernels/quantization/test_marlin_gemm.py \
-    --ignore=kernels/quantization/test_cutlass_scaled_mm.py \
-    --ignore=kernels/quantization/test_int8_kernel.py"
-  fi
-
-  if [[ $cmds == *" kernels/mamba"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/mamba/test_mamba_mixer2.py \
-    --ignore=kernels/mamba/test_causal_conv1d.py \
-    --ignore=kernels/mamba/test_mamba_ssm_ssd.py"
-  fi
-
-  if [[ $cmds == *" kernels/moe"* ]]; then
-    cmds="${cmds} \
-    --ignore=kernels/moe/test_moe.py \
-    --ignore=kernels/moe/test_cutlass_moe.py"
-  fi
-
-  # --- Entrypoint ignores ---
-  if [[ $cmds == *" entrypoints/openai "* ]]; then
-    cmds=${cmds//" entrypoints/openai "/" entrypoints/openai \
-    --ignore=entrypoints/openai/chat_completion/test_audio.py \
-    --ignore=entrypoints/openai/completion/test_shutdown.py \
-    --ignore=entrypoints/openai/test_completion.py \
-    --ignore=entrypoints/openai/models/test_models.py \
-    --ignore=entrypoints/openai/test_return_tokens_as_ids.py \
-    --ignore=entrypoints/openai/chat_completion/test_root_path.py \
-    --ignore=entrypoints/openai/completion/test_prompt_validation.py "}
-  fi
-
-  if [[ $cmds == *" entrypoints/serve"* ]]; then
-    cmds="${cmds} \
-    --ignore=entrypoints/serve/lora/test_lora_adapters.py"
-  fi
-
-  if [[ $cmds == *" entrypoints/llm "* ]]; then
-    cmds=${cmds//" entrypoints/llm "/" entrypoints/llm \
-    --ignore=entrypoints/llm/test_chat.py \
-    --ignore=entrypoints/llm/test_accuracy.py \
-    --ignore=entrypoints/llm/test_init.py \
-    --ignore=entrypoints/llm/test_prompt_validation.py "}
-  fi
-
-  # Clean up escaped newlines from --ignore appends
-  cmds=$(echo "$cmds" | sed 's/ \\ / /g')
-
-  echo "$cmds"
-}
-
-###############################################################################
 # Main
 ###############################################################################
 
@@ -351,19 +354,49 @@ apply_rocm_test_overrides() {
 echo "--- ROCm info"
 rocminfo
 
-# --- Docker housekeeping ---
-cleanup_docker
+# --- Docker status ---
+report_docker_usage
 
 # --- Pull test image ---
 echo "--- Pulling container"
-image_name="rocm/vllm-ci:${BUILDKITE_COMMIT}"
+image_name="${VLLM_CI_FALLBACK_IMAGE:-rocm/vllm-ci:${BUILDKITE_COMMIT:-local}}"
+artifact_work_dir=""
 container_name="rocm_${BUILDKITE_COMMIT}_$(tr -dc A-Za-z0-9 < /dev/urandom | head -c 10; echo)"
-docker pull "${image_name}"
 
 remove_docker_container() {
-  docker rm -f "${container_name}" || docker image rm -f "${image_name}" || true
+  if docker container inspect "${container_name}" >/dev/null 2>&1; then
+    docker rm -f "${container_name}" || true
+  fi
+  if [[ "${VLLM_CI_REMOVE_TEST_IMAGE:-0}" == "1" ]]; then
+    docker image rm -f "${image_name}" || true
+  else
+    # Keep images by default so later jobs on the same AMD node can reuse layers.
+    echo "Keeping ROCm test image locally: ${image_name}"
+  fi
+  if [[ -n "${artifact_work_dir}" ]]; then
+    rm -rf "${artifact_work_dir}"
+  fi
 }
 trap remove_docker_container EXIT
+
+# python_only_compile.sh runs `python setup.py develop` and needs the full repo tree
+# under /vllm-workspace (Dockerfile.rocm test stage: mkdir src && mv vllm).
+# The ROCm wheel artifact tarball only ships a thin tree (tests, etc.), so
+# artifact images cannot satisfy that test — use the full rocm/vllm-ci image.
+_cmd_probe="${VLLM_TEST_COMMANDS:-}"
+if [[ -z "${_cmd_probe}" ]]; then
+  _cmd_probe="$*"
+fi
+if [[ "${VLLM_CI_USE_ARTIFACTS:-0}" == "1" && "${_cmd_probe}" == *python_only_compile.sh* ]]; then
+  echo "INFO: disabling VLLM_CI_USE_ARTIFACTS for python_only_compile (requires full /vllm-workspace tree)"
+  export VLLM_CI_USE_ARTIFACTS=0
+fi
+unset -v _cmd_probe
+
+if ! prepare_artifact_image; then
+  echo "Using full ROCm CI image: ${image_name}"
+  docker pull "${image_name}" || exit 1
+fi
 
 # --- Prepare commands ---
 echo "--- Running container"
@@ -371,6 +404,14 @@ echo "--- Running container"
 HF_CACHE="$(realpath ~)/huggingface"
 mkdir -p "${HF_CACHE}"
 HF_MOUNT="/root/.cache/huggingface"
+
+# Hugging Face Hub defaults to 10s request/download timeouts, while the ROCm
+# CI image currently raises downloads to 60s. AMD model-test jobs routinely
+# start from a cold or partially-populated shared cache, and the 60s read cap
+# has still timed out before pytest reached the vLLM behavior under test.
+# Keep the CI default explicit and overridable from the Buildkite environment.
+: "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
+: "${HF_HUB_ETAG_TIMEOUT:=60}"
 
 # ---- Command source selection ----
 # Prefer VLLM_TEST_COMMANDS (preserves all inner quoting intact).
@@ -409,10 +450,36 @@ else
   echo "Skipping re-quoting for VLLM_TEST_COMMANDS input"
 fi
 
-commands=$(apply_rocm_test_overrides "$commands")
 echo "Final commands: $commands"
 
-MYPYTHONPATH=".."
+# The ROCm test image often ships /vllm-workspace without .git (artifact tarball unpack).
+# tests/standalone_tests/python_only_compile.sh uses merge-base(HEAD, origin/main) for
+# wheels.vllm.ai; compute on the agent (full git checkout) and pass into the container.
+vllm_standalone_merge_base=""
+checkout="${BUILDKITE_BUILD_CHECKOUT_PATH:-}"
+if [[ -z "${checkout}" || ! -d "${checkout}" ]]; then
+  checkout="."
+fi
+# Pass safe.directory per-command (-c) because buildkite runs will always fail
+# the next check on git 2.35.2+ due to mixed uses of root and buildkite-agent/uids.
+if git -c "safe.directory=${checkout}" -C "${checkout}" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+  vllm_standalone_merge_base="$(
+    git -c "safe.directory=${checkout}" -C "${checkout}" merge-base HEAD origin/main 2>/dev/null || true
+  )"
+fi
+if [[ -z "${vllm_standalone_merge_base}" ]]; then
+  vllm_standalone_merge_base="${BUILDKITE_COMMIT:-}"
+fi
+echo "INFO: passing VLLM_STANDALONE_MERGE_BASE into container: ${vllm_standalone_merge_base}"
+
+MYPYTHONPATH="/vllm-workspace"
+
+container_job_id="${BUILDKITE_JOB_ID:-${BUILDKITE_PARALLEL_JOB:-0}}"
+container_job_id="${container_job_id//[^A-Za-z0-9_.-]/_}"
+container_job_id_short="${container_job_id:0:8}"
+CONTAINER_TMPDIR="/tmp/vllm-${container_job_id_short}"
+CONTAINER_CACHE_ROOT="/tmp/vllm-buildkite-${container_job_id}/cache"
+CONTAINER_PREFLIGHT="mkdir -p \"\$TMPDIR\" \"\$TORCHINDUCTOR_CACHE_DIR\" \"\$TRITON_CACHE_DIR\" \"\$VLLM_CACHE_ROOT\" \"\$XDG_CACHE_HOME\" && python -c \"import encodings, importlib.metadata as im, importlib.util as iu; [im.version(d) for d in ('transformers', 'torch', 'ray', 'sympy', 'markupsafe', 'vllm')]; missing=[m for m in ('torch.utils.model_zoo', 'transformers.models.nomic_bert', 'ray.dag', 'sympy.physics', 'markupsafe._speedups') if iu.find_spec(m) is None]; assert not missing, missing\""
 
 # Verify GPU access
 render_gid=$(getent group render | cut -d: -f3)
@@ -480,26 +547,62 @@ if is_multi_node "$commands"; then
 else
   echo "--- Single-node job"
   echo "Render devices: $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES"
+  docker_run_terminal_args=(-i)
+  if [[ "${ROCM_DOCKER_TTY}" == "1" ]]; then
+    docker_run_terminal_args+=(-t)
+    echo "Docker interactive stdin: enabled; TTY allocation: enabled"
+  else
+    echo "Docker interactive stdin: enabled; TTY allocation: disabled"
+  fi
+
+  ulimit_core_hard=$(ulimit -H -c)
+  if [[ "$ulimit_core_hard" == "unlimited" ]]; then
+    # docker run can't pass "unlimited" to --ulimit
+    ulimit_core_hard="-1"
+  fi
+   # Disable core dumps in the ROCm test container unless the ROCm debug agent is enabled
+  coredump_flags="--ulimit core=0:$ulimit_core_hard"
+  if [[ "$commands" == *"ROCm debug agent enabled"* ]]; then
+    # Works around https://github.com/rocm/rocm-systems/issues/6206
+    coredump_flags='-e HSA_COREDUMP_PATTERN="/tmp/gpucore.%p"'
+  else
+    echo "ROCm debug agent not enabled, coredumps are disabled in the test container."
+  fi
 
   docker run \
+    "${docker_run_terminal_args[@]}" \
     --device /dev/kfd $BUILDKITE_AGENT_META_DATA_RENDER_DEVICES \
     $RDMA_FLAGS \
     --network=host \
     --shm-size=16gb \
     --group-add "$render_gid" \
     --rm \
+    $coredump_flags \
     -e HF_TOKEN \
+    -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
+    -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \
     -e AWS_ACCESS_KEY_ID \
     -e AWS_SECRET_ACCESS_KEY \
     -e BUILDKITE_PARALLEL_JOB \
     -e BUILDKITE_PARALLEL_JOB_COUNT \
+    -e TERM \
+    -e FORCE_COLOR \
+    -e CLICOLOR_FORCE \
+    -e PY_COLORS \
+    -e PYTEST_ADDOPTS \
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
+    -e "TMPDIR=${CONTAINER_TMPDIR}/tmp" \
+    -e "TORCHINDUCTOR_CACHE_DIR=${CONTAINER_CACHE_ROOT}/torchinductor" \
+    -e "TRITON_CACHE_DIR=${CONTAINER_CACHE_ROOT}/triton" \
+    -e "VLLM_CACHE_ROOT=${CONTAINER_CACHE_ROOT}/vllm" \
+    -e "XDG_CACHE_HOME=${CONTAINER_CACHE_ROOT}/xdg" \
     -e "PYTORCH_ROCM_ARCH=" \
+    -e "VLLM_STANDALONE_MERGE_BASE=${vllm_standalone_merge_base}" \
     --name "${container_name}" \
     "${image_name}" \
-    /bin/bash -c "${commands}"
+    /bin/bash -c "${CONTAINER_PREFLIGHT} && ${commands}"
 
   exit_code=$?
   handle_pytest_exit "$exit_code"

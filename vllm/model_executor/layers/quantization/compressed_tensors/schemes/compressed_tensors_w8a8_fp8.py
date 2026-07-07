@@ -13,6 +13,10 @@ from vllm.logger import init_logger
 from vllm.model_executor.kernels.linear import (
     init_fp8_linear_kernel,
 )
+from vllm.model_executor.layers.fusion.quant_activation import (
+    QuantizedActivation,
+    expose_input_quant_key,
+)
 from vllm.model_executor.layers.quantization.compressed_tensors.schemes import (
     CompressedTensorsScheme,
 )
@@ -143,6 +147,8 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
             module_name=self.__class__.__name__,
         )
 
+        expose_input_quant_key(layer, self.fp8_linear)
+
     def process_weights_after_loading(self, layer) -> None:
         if self.strategy == QuantizationStrategy.TENSOR:
             weight, weight_scale, input_scale = process_fp8_weight_tensor_strategy(
@@ -175,6 +181,10 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
 
         # required by torch.compile to be torch.nn.Parameter
         layer.weight = Parameter(weight.data, requires_grad=False)
+        # Preserve the dim tags dropped by the transpose so layout-aware
+        # kernels (humming) see (K, N) instead of assuming (N, K).
+        layer.weight.input_dim = 0
+        layer.weight.output_dim = 1
         layer.weight_scale = Parameter(weight_scale.data, requires_grad=False)
         if input_scale is not None:
             layer.input_scale = Parameter(input_scale.data, requires_grad=False)
@@ -191,7 +201,7 @@ class CompressedTensorsW8A8Fp8(CompressedTensorsScheme):
     def apply_weights(
         self,
         layer: torch.nn.Module,
-        x: torch.Tensor,
+        x: torch.Tensor | QuantizedActivation,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
         return self.fp8_linear.apply_weights(layer, x, bias)

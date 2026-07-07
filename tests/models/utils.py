@@ -486,6 +486,8 @@ def dummy_hf_overrides(
                 "Gemma3nForConditionalGeneration",
                 "Gemma4ForCausalLM",
                 "Gemma4ForConditionalGeneration",
+                "Gemma4MTPModel",
+                "DiffusionGemmaForBlockDiffusion",
             )
             else 1
         )
@@ -506,12 +508,19 @@ def dummy_hf_overrides(
     # Only set MoE related config when the model has MoE layers.
     # Otherwise all models detected as MoE by _get_transformers_backend_cls.
     if model_arch_config.num_experts > 0:
+        num_experts_per_tok = 2
+        if model_arch in (
+            "Llama4ForConditionalGeneration",
+            "Llama4ForCausalLM",
+            "EagleLlama4ForCausalLM",
+        ):
+            num_experts_per_tok = 1
         update_dict.update(
             {
                 "num_experts": num_experts,
-                "num_experts_per_tok": 2,
+                "num_experts_per_tok": num_experts_per_tok,
                 # Kimi uses `num_experts_per_token`.
-                "num_experts_per_token": 2,
+                "num_experts_per_token": num_experts_per_tok,
                 "num_local_experts": num_experts,
                 # Otherwise there will not be any expert layers
                 "first_k_dense_replace": 0,
@@ -558,7 +567,8 @@ def dummy_hf_overrides(
         )
 
     # e.g.: Qwen/Qwen2-Audio-7B-Instruct
-    if hasattr(hf_config, "audio_config"):
+    # audio_config may exist but be None (e.g. audio-less Gemma4 variants).
+    if getattr(hf_config, "audio_config", None) is not None:
         hf_config.audio_config.update(
             {
                 "num_layers": 1,
