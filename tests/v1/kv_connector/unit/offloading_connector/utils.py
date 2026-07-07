@@ -73,10 +73,6 @@ class MockLoadStoreSpec(LoadStoreSpec):
     def __init__(self, offload_keys: Iterable[OffloadKey]):
         self.offload_keys: list[OffloadKey] = list(offload_keys)
 
-    @staticmethod
-    def medium() -> str:
-        return "Mock"
-
     def __repr__(self) -> str:
         return repr(self.offload_keys)
 
