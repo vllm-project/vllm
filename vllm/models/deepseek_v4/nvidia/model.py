@@ -898,7 +898,7 @@ def _select_dsv4_attn_cls(vllm_config: VllmConfig) -> type[DeepseekV4Attention]:
     kernel (FlashInfer PR3395, released in flashinfer >= 0.6.13) instead of the
     FlashMLA decode kernel; everything else (packed ``fp8_ds_mla`` cache,
     metadata, prefill) is unchanged. Availability-gated (silent FlashMLA fallback
-    when the kernel is absent). Default off.
+    when the kernel is absent). Default on.
     """
     backend = vllm_config.attention_config.backend
     device_capability = current_platform.get_device_capability()

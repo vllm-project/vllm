@@ -23,7 +23,7 @@ reused, never reallocated per step.
 
 Gated behind ``VLLM_DEEPSEEK_V4_FLASHINFER_SM120_DECODE``; selected only on SM12x
 when the official packed kernel is importable (see ``_select_dsv4_attn_cls``).
-Default off; gate-off behavior is identical to the FlashMLA decode path.
+Default on; gate-off behavior is identical to the FlashMLA decode path.
 """
 
 from typing import TYPE_CHECKING
