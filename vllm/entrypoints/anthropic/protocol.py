@@ -61,6 +61,34 @@ class AnthropicContentBlock(BaseModel):
     # For redacted thinking content (safety-filtered by the API)
     data: str | None = None
 
+    @model_validator(mode="after")
+    def validate_required_fields(self) -> "AnthropicContentBlock":
+        if self.type == "tool_use":
+            if not self.id:
+                raise ValueError("tool_use block requires a non-empty 'id'")
+            if not self.name:
+                raise ValueError("tool_use block requires a non-empty 'name'")
+            if self.input is None:
+                raise ValueError(
+                    "tool_use block requires 'input' (use {} for no arguments)"
+                )
+        elif self.type == "tool_result":
+            if not self.tool_use_id:
+                raise ValueError("tool_result block requires a non-empty 'tool_use_id'")
+        elif self.type == "text":
+            if self.text is None:
+                raise ValueError("text block requires 'text'")
+        elif self.type == "image":
+            if self.source is None:
+                raise ValueError("image block requires 'source'")
+        elif self.type == "thinking":
+            if self.thinking is None:
+                raise ValueError("thinking block requires 'thinking'")
+        elif self.type == "redacted_thinking":
+            if not self.data:
+                raise ValueError("redacted_thinking block requires a non-empty 'data'")
+        return self
+
 
 class AnthropicMessage(BaseModel):
     """Message structure"""
