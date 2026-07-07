@@ -940,7 +940,7 @@ tqdm==4.67.3
     #   pqdm
     #   sentence-transformers
     #   transformers
-transformers==5.12.1
+transformers==5.10.4
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
