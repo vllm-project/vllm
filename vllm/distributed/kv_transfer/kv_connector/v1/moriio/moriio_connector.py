@@ -545,11 +545,6 @@ class MoRIIOConnectorScheduler:
             self._reqs_need_save[request.request_id] = (request, local_block_ids)
 
         if params is not None and params.get("do_remote_prefill"):
-            # Gate loading on `num_external_tokens`, not on `blocks`: a
-            # non-chosen MultiConnector sub-connector receives the request's
-            # real blocks but must not load. `num_external_tokens == 0` (also a
-            # full prefix cache hit) still issues an empty notify so P frees the
-            # prefill blocks, without reading/writing any KV.
             if self.mode == MoRIIOMode.READ:
                 if remote_block_ids := params.get("remote_block_ids"):
                     # remote_engine_id is returned by the prefill's request_finished.
@@ -564,8 +559,9 @@ class MoRIIOConnectorScheduler:
                                     -len(local_block_ids) :
                                 ]
                         else:
-                            # No KV to load: empty recv still notifies P to
-                            # free the prefill blocks.
+                            # If remote_blocks and num_external_tokens = 0, we have
+                            # a full prefix cache hit on the D worker. We need to call
+                            # send_notify in _read_blocks to free the memory on the P.
                             local_block_ids = []
 
                         self._reqs_need_recv[request.request_id] = (
