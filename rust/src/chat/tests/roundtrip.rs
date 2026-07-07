@@ -130,6 +130,19 @@ impl RoundtripCase {
         }
     }
 
+    /// DeepSeek V3.2 DSML tool-call format.
+    fn deepseek_v32() -> Self {
+        Self {
+            model_id: "deepseek-ai/DeepSeek-V3.2-Exp",
+            assistant_stop_suffix: "<｜end▁of▁sentence｜>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: false },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// GLM-4.7 XML-like argument format with `<think>` reasoning tags.
     fn glm47() -> Self {
         Self {
@@ -214,14 +227,17 @@ macro_rules! roundtrip_tests {
     ($($case:ident => [$($(#[$fixture_attr:meta])* $fixture:ident),* $(,)?]),+ $(,)?) => {
         paste::paste! {
             $(
-                $(
-                    #[tokio::test]
-                    $(#[$fixture_attr])*
-                    #[file_serial([<hf_ $case>])]
-                    async fn [<roundtrip_ $case _ $fixture>]() -> Result<()> {
-                        [<run_roundtrip_ $fixture>](RoundtripCase::$case()).await
-                    }
-                )*
+                #[tokio::test]
+                #[file_serial([<hf_ $case>])]
+                async fn [<roundtrip_ $case>]() -> Result<()> {
+                    let case = RoundtripCase::$case();
+                    let backends = load_roundtrip_backends(&case).await?;
+                    $(
+                        $(#[$fixture_attr])*
+                        [<run_roundtrip_ $fixture>](&case, &backends).await?;
+                    )*
+                    Ok(())
+                }
             )+
         }
     };
@@ -232,6 +248,7 @@ roundtrip_tests! {
     qwen35 => [reasoning_and_content, tool_call_mix],
     minimax_m25 => [reasoning_and_content, tool_call_mix],
     deepseek_v4 => [reasoning_and_content, tool_call_mix],
+    deepseek_v32 => [tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
     seed_oss => [reasoning_and_content],
     step3p5 => [reasoning_and_content],
@@ -241,18 +258,21 @@ roundtrip_tests! {
 }
 
 /// Run the fixed reasoning+content fixture for one model/parser case.
-async fn run_roundtrip_reasoning_and_content(case: RoundtripCase) -> Result<()> {
+async fn run_roundtrip_reasoning_and_content(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+) -> Result<()> {
     for thinking in case.thinking_behavior.fixtures() {
-        run_roundtrip_reasoning_and_content_inner(case.clone(), thinking).await?;
+        run_roundtrip_reasoning_and_content_inner(case, backends, thinking).await?;
     }
     Ok(())
 }
 
 async fn run_roundtrip_reasoning_and_content_inner(
-    case: RoundtripCase,
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
     thinking: Option<bool>,
 ) -> Result<()> {
-    let backends = load_roundtrip_backends(&case).await?;
     let request = roundtrip_request(
         "roundtrip-reasoning-content",
         vec![ChatMessage::text(ChatRole::User, "What is 2 + 2?")],
@@ -275,7 +295,7 @@ async fn run_roundtrip_reasoning_and_content_inner(
         });
         AssistantMessage { content }
     };
-    let result = run_roundtrip(&case, &backends, &request, assistant).await?;
+    let result = run_roundtrip(case, backends, &request, assistant).await?;
 
     assert_eq!(
         result.parsed_message.reasoning().as_deref().map(str::trim),
@@ -293,8 +313,10 @@ async fn run_roundtrip_reasoning_and_content_inner(
 }
 
 /// Run the fixed reasoning+multiple-tools fixture for one model/parser case.
-async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
-    let backends = load_roundtrip_backends(&case).await?;
+async fn run_roundtrip_tool_call_mix(
+    case: &RoundtripCase,
+    backends: &vllm_chat::LoadedModelBackends,
+) -> Result<()> {
     let request = roundtrip_request(
         "roundtrip-reasoning-tools",
         vec![ChatMessage::text(
@@ -308,8 +330,8 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
     let expected_text = "I will call the tools.";
 
     let result = run_roundtrip(
-        &case,
-        &backends,
+        case,
+        backends,
         &request,
         AssistantMessage {
             content: vec![
@@ -353,12 +375,12 @@ async fn run_roundtrip_tool_call_mix(case: RoundtripCase) -> Result<()> {
     assert_eq!(tool_calls[0].name, "get_weather");
     assert_eq!(
         tool_calls[0].arguments,
-        expected_arguments(&case, r#"{"location": "Shanghai"}"#)?,
+        expected_arguments(case, r#"{"location": "Shanghai"}"#)?,
     );
     assert_eq!(tool_calls[1].name, "add");
     assert_eq!(
         tool_calls[1].arguments,
-        expected_arguments(&case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
+        expected_arguments(case, r#"{"y": 1.0, "x": 2, "items": ["left", "right"]}"#)?,
     );
 
     assert_eq!(

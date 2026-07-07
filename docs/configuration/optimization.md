@@ -276,8 +276,9 @@ By default vLLM uses the standard Hugging Face `tokenizers` library to power
 the fast tokenizer. For BPE tokenizers (Qwen, Llama, DeepSeek, GPT-OSS, etc.)
 you can switch to the [fastokens](https://github.com/crusoecloud/fastokens)
 Rust backend, a drop-in replacement that's substantially faster on
-encode/decode and on streaming detokenization. Enable it by setting
-`VLLM_USE_FASTOKENS=1`:
+encode/decode and on streaming detokenization. `VLLM_USE_FASTOKENS` is
+available in vLLM v0.23.0 and later. If your installed vLLM version does not
+recognize the environment variable, upgrade vLLM before enabling the override:
 
 ```console
 VLLM_USE_FASTOKENS=1 vllm serve Qwen/Qwen3-8B

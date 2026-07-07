@@ -464,9 +464,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
             attn_cg_support.min_cg_support,
             attn_cg_support.min_cg_attn_backend,
             self.decode_query_len,
-            self.parallel_config.tensor_parallel_size,
-            self.kv_cache_config,
-            self.max_num_reqs,
+            use_v2_model_runner=True,
+            tensor_parallel_size=self.parallel_config.tensor_parallel_size,
+            kv_cache_config=self.kv_cache_config,
+            max_num_reqs=self.max_num_reqs,
         )
         self.cudagraph_manager = ModelCudaGraphManager(
             self.vllm_config,
@@ -1569,6 +1570,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if hasattr(self, "kv_cache_config"):
             del self.kv_cache_config
         free_before_shutdown(self.vllm_config)
+        if hasattr(self, "model_state"):
+            del self.model_state
+        if getattr(self, "speculator", None) is not None:
+            self.speculator = None
         if hasattr(self, "model"):
             del self.model
 
