@@ -11,7 +11,6 @@ from torch._ops import OpOverload
 from torch.distributed import ProcessGroup
 
 import vllm.envs as envs
-from vllm.logger import init_logger
 from vllm.platforms import current_platform
 from vllm.utils.import_utils import PlaceholderModule
 from vllm.utils.torch_utils import direct_register_custom_op
@@ -30,7 +29,6 @@ except ImportError:
 # which is a host op, so we cache it once here.
 FP8_DTYPE = current_platform.fp8_dtype()
 _HIPB_MM_INITIALIZED_DEVICES: set[int] = set()
-logger = init_logger(__name__)
 KB = 1024
 MB = 1024 * KB
 
@@ -79,11 +77,7 @@ def _get_or_create_aiter_qr_rmsnorm_comm(device_comm: object) -> tuple[int, int,
         handles = [None] * world_size
         dist.all_gather_object(handles, handle, group=group)
         aiter.qr_open_handles(ptr, handles)
-    except Exception as exc:
-        logger.warning_once(
-            "AITER fused QR+RMSNorm communicator initialization failed: %s",
-            exc,
-        )
+    except:
         setattr(device_comm, "_aiter_qr_rmsnorm_comm", False)
         return None
 
@@ -947,12 +941,6 @@ def _rocm_aiter_fused_allreduce_rmsnorm_impl(
                 quant_level = qr_comm._get_qr_quant_level(input_)
                 out = torch.empty_like(input_)
                 residual_out = torch.empty_like(residual)
-                logger.info_once(
-                    "Using AITER fused QuickReduce allreduce + RMSNorm for "
-                    "shape=%s dtype=%s",
-                    tuple(input_.shape),
-                    input_.dtype,
-                )
                 aiter.qr_all_reduce_rmsnorm(
                     ptr,
                     input_,
