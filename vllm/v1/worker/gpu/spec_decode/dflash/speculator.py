@@ -334,7 +334,6 @@ class DFlashSpeculator(DraftModelSpeculator):
                 last_sampled,
                 next_prefill_tokens,
                 self.block_tables.input_block_tables[gid],
-                # Input block tables contain kernel-block IDs after virtual splitting.
                 self.block_tables.kernel_block_sizes[gid],
                 self.parallel_drafting_token_id,
                 self.num_query_per_req,
