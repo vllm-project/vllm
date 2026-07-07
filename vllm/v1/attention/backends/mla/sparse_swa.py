@@ -23,6 +23,7 @@ from vllm.v1.kv_cache_interface import (
     KVCacheSpec,
     MLAAttentionSpec,
     SlidingWindowMLASpec,
+    get_kv_quant_mode,
 )
 
 # DeepseekV4 decode layer types, keyed by compress_ratio. Each type has a distinct
@@ -91,6 +92,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             cache_dtype_str=self.cache_config.cache_dtype,
             alignment=576 if uses_fp8_ds_mla_layout else None,
             model_version="deepseek_v4",
+            kv_quant_mode=get_kv_quant_mode(self.cache_config.cache_dtype),
         )
 
     def forward(self): ...
@@ -399,7 +401,6 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         For prefill, we use chunked prefill to align with the indexer's chunking.
         """
-        num_reqs = common_attn_metadata.num_reqs
         seq_lens = common_attn_metadata.seq_lens
         seq_lens_cpu = common_attn_metadata.seq_lens_cpu_upper_bound
         query_start_loc = common_attn_metadata.query_start_loc
@@ -416,10 +417,9 @@ class DeepseekSparseSWAMetadataBuilder(AttentionMetadataBuilder):
 
         # NOTE: Ensure all metadata tensors maintain fixed memory addresses
         # for CUDA graph compatibility.
-        query_lens = query_start_loc_cpu[1:] - query_start_loc_cpu[:-1]
-        x = torch.repeat_interleave(torch.arange(num_reqs), query_lens).pin_memory()
-        token_to_req_indices = self.token_to_req_indices[: x.shape[0]]
-        token_to_req_indices.copy_(x, non_blocking=True)
+        token_to_req_indices = common_attn_metadata.token_to_req_indices(
+            self.token_to_req_indices
+        )
 
         is_valid_token = self.is_valid_token[: slot_mapping.shape[0]]
         is_valid_token.copy_(slot_mapping >= 0)
