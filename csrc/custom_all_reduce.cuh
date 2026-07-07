@@ -9,6 +9,7 @@
 typedef __hip_bfloat16 nv_bfloat16;
 #endif
 
+#include <exception>
 #include <iostream>
 #include <array>
 #include <limits>
@@ -297,10 +298,12 @@ DINLINE P packed_reduce(const P* ptrs[], int idx) {
 
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
-    cross_device_reduce_1stage(RankData* _dp, RankSignals sg, Signal* self_sg,
+    cross_device_reduce_1stage(RankData* _dp, const RankSignals* _sg,
                                T* __restrict__ result, int rank, int size) {
   using P = typename packed_t<T>::P;
   using A = typename packed_t<T>::A;
+  auto sg = *_sg;
+  auto self_sg = sg.signals[rank];
   // note: we don't reorder the address so the accumulation order is the same
   // for all ranks, ensuring bitwise identical results
   auto dp = *_dp;
@@ -320,12 +323,14 @@ DINLINE P* get_tmp_buf(Signal* sg) {
 
 template <typename T, int ngpus>
 __global__ void __launch_bounds__(512, 1)
-    cross_device_reduce_2stage(RankData* _dp, RankSignals sg, Signal* self_sg,
+    cross_device_reduce_2stage(RankData* _dp, const RankSignals* _sg,
                                T* __restrict__ result, int rank, int size) {
   int tid = blockIdx.x * blockDim.x + threadIdx.x;
   int stride = gridDim.x * blockDim.x;
   using P = typename packed_t<T>::P;
   using A = typename packed_t<T>::A;
+  auto sg = *_sg;
+  auto self_sg = sg.signals[rank];
   int part = size / ngpus;
   int start = rank * part;
   int end = rank == ngpus - 1 ? size : start + part;
@@ -371,12 +376,24 @@ static_assert(alignof(IPC_KEY) == alignof(cudaIpcMemHandle_t));
 
 class CustomAllreduce {
  public:
+  enum class LifecycleState { Active, Detached, Failed };
+
+  struct PointerLayout {
+    char* base;
+    size_t size;
+    int64_t offset;
+  };
+
+  struct GraphBufferRecord {
+    void* local_ptr;
+    RankData* rank_data;
+  };
+
   int rank_;
   int world_size_;
   // Full NVLink or xGMI connection between GPUs.
   bool fully_connected_;
 
-  RankSignals sg_;
   // Stores a map from a pointer to its peer pointers from all ranks.
   std::unordered_map<void*, RankData*> buffers_;
   Signal* self_sg_;
@@ -397,10 +414,16 @@ class CustomAllreduce {
   // 3. (In Python) all gather the IPC handles.
   // 4. Obtain the peer pointers by opening the IPC handles, and store them in
   // the rank data array at corresponding positions.
+  RankSignals* d_rank_signals_;
   RankData *d_rank_data_base_, *d_rank_data_end_;
   std::vector<void*> graph_unreg_buffers_;
+  std::vector<GraphBufferRecord> graph_buffers_;
   // a map from IPC handles to opened IPC pointers
   std::map<IPC_KEY, char*> ipc_handles_;
+  // Active --prepare_for_suspend--> Detached --reinit_after_resume-->
+  // Active. Transition work first enters Failed so errors leave the
+  // communicator in a terminal failed state.
+  LifecycleState lifecycle_state_ = LifecycleState::Active;
 
   /**
    * Signals are an array of ipc-enabled buffers from all ranks.
@@ -419,44 +442,140 @@ class CustomAllreduce {
         world_size_(world_size),
         fully_connected_(fully_connected),
         self_sg_(signals[rank]),
-        d_rank_data_base_(reinterpret_cast<RankData*>(rank_data)),
-        d_rank_data_end_(d_rank_data_base_ + rank_data_sz / sizeof(RankData)) {
+        d_rank_signals_(reinterpret_cast<RankSignals*>(rank_data)),
+        d_rank_data_base_(reinterpret_cast<RankData*>(rank_data) + 1),
+        d_rank_data_end_(reinterpret_cast<RankData*>(rank_data) +
+                         rank_data_sz / sizeof(RankData)) {
+    static_assert(sizeof(RankSignals) == sizeof(RankData));
+    if (rank_data_sz < sizeof(RankSignals) + sizeof(RankData)) {
+      throw std::invalid_argument("rank data buffer is too small");
+    }
+    RankSignals rank_signals{};
     for (int i = 0; i < world_size_; i++) {
-      sg_.signals[i] = signals[i];
+      rank_signals.signals[i] = signals[i];
+    }
+    check_cuda(cudaMemcpy(d_rank_signals_, &rank_signals, sizeof(rank_signals),
+                          cudaMemcpyHostToDevice),
+               "cudaMemcpy");
+  }
+
+  static void check_cuda(cudaError_t result, const char* operation) {
+    if (result != cudaSuccess) {
+      throw std::runtime_error(std::string(operation) +
+                               " failed: " + cudaGetErrorString(result));
     }
   }
 
+#if !defined(USE_ROCM)
+  static void check_driver(CUresult result, const char* operation) {
+    if (result != CUDA_SUCCESS) {
+      const char* error = nullptr;
+      cuGetErrorString(result, &error);
+      throw std::runtime_error(
+          std::string(operation) +
+          " failed: " + (error == nullptr ? "unknown CUDA error" : error));
+    }
+  }
+#endif
+
+  void require_active() const {
+    if (lifecycle_state_ == LifecycleState::Detached) {
+      throw std::runtime_error("custom allreduce peer mappings are detached");
+    }
+    if (lifecycle_state_ != LifecycleState::Active) {
+      throw std::runtime_error(
+          "custom allreduce lifecycle is in a failed state");
+    }
+  }
+
+  static IPC_KEY ipc_key(const void* handle) {
+    IPC_KEY key;
+    std::memcpy(key.data(), handle, key.size());
+    return key;
+  }
+
+  PointerLayout get_pointer_layout(void* ptr) const {
+#if defined(USE_ROCM)
+    void* base_ptr;
+    if (cuPointerGetAttribute(&base_ptr, rangeStartAddrAttr,
+                              reinterpret_cast<CUdeviceptr>(ptr)) !=
+        CUDA_SUCCESS) {
+      throw std::runtime_error("failed to get custom allreduce pointer base");
+    }
+    size_t size = 0;
+#else
+    CUdeviceptr base;
+    size_t size;
+    check_driver(
+        cuMemGetAddressRange(&base, &size, reinterpret_cast<CUdeviceptr>(ptr)),
+        "cuMemGetAddressRange");
+    auto base_ptr = reinterpret_cast<void*>(base);
+#endif
+    return {reinterpret_cast<char*>(base_ptr), size,
+            reinterpret_cast<char*>(ptr) - reinterpret_cast<char*>(base_ptr)};
+  }
+
   char* open_ipc_handle(const void* ipc_handle) {
-    auto [it, new_handle] =
-        ipc_handles_.insert({*((IPC_KEY*)ipc_handle), nullptr});
+    auto [it, new_handle] = ipc_handles_.insert({ipc_key(ipc_handle), nullptr});
     if (new_handle) {
       char* ipc_ptr;
-      CUDACHECK(cudaIpcOpenMemHandle((void**)&ipc_ptr,
-                                     *((const cudaIpcMemHandle_t*)ipc_handle),
-                                     cudaIpcMemLazyEnablePeerAccess));
+      try {
+        check_cuda(cudaIpcOpenMemHandle(
+                       reinterpret_cast<void**>(&ipc_ptr),
+                       *reinterpret_cast<const cudaIpcMemHandle_t*>(ipc_handle),
+                       cudaIpcMemLazyEnablePeerAccess),
+                   "cudaIpcOpenMemHandle");
+      } catch (...) {
+        ipc_handles_.erase(it);
+        throw;
+      }
       it->second = ipc_ptr;
     }
     return it->second;
   }
 
   std::pair<std::string, std::vector<int64_t>> get_graph_buffer_ipc_meta() {
+    require_active();
     auto num_buffers = graph_unreg_buffers_.size();
     auto handle_sz = sizeof(cudaIpcMemHandle_t);
     std::string handles(handle_sz * num_buffers, static_cast<char>(0));
     std::vector<int64_t> offsets(num_buffers);
     for (int i = 0; i < num_buffers; i++) {
       auto ptr = graph_unreg_buffers_[i];
-      void* base_ptr;
-      // note: must share the base address of each allocation, or we get wrong
-      // address
-      if (cuPointerGetAttribute(&base_ptr, rangeStartAddrAttr,
-                                (CUdeviceptr)ptr) != CUDA_SUCCESS)
-        throw std::runtime_error("failed to get pointer attr");
-      CUDACHECK(cudaIpcGetMemHandle(
-          (cudaIpcMemHandle_t*)&handles[i * handle_sz], base_ptr));
-      offsets[i] = ((char*)ptr) - ((char*)base_ptr);
+      auto layout = get_pointer_layout(ptr);
+      check_cuda(cudaIpcGetMemHandle(reinterpret_cast<cudaIpcMemHandle_t*>(
+                                         &handles[i * handle_sz]),
+                                     layout.base),
+                 "cudaIpcGetMemHandle");
+      offsets[i] = layout.offset;
     }
     return std::make_pair(handles, offsets);
+  }
+
+  std::pair<std::string, std::vector<int64_t>>
+  get_graph_buffer_ipc_meta_for_reinit() {
+#if defined(USE_ROCM)
+    throw std::runtime_error(
+        "custom allreduce suspend/resume is only supported on CUDA");
+#else
+    if (lifecycle_state_ != LifecycleState::Detached) {
+      throw std::runtime_error(
+          "custom allreduce must be detached before graph buffer reinit");
+    }
+    auto handle_sz = sizeof(cudaIpcMemHandle_t);
+    std::string handles(handle_sz * graph_buffers_.size(),
+                        static_cast<char>(0));
+    std::vector<int64_t> offsets(graph_buffers_.size());
+    for (size_t i = 0; i < graph_buffers_.size(); i++) {
+      auto layout = get_pointer_layout(graph_buffers_[i].local_ptr);
+      check_cuda(cudaIpcGetMemHandle(reinterpret_cast<cudaIpcMemHandle_t*>(
+                                         &handles[i * handle_sz]),
+                                     layout.base),
+                 "cudaIpcGetMemHandle");
+      offsets[i] = layout.offset;
+    }
+    return std::make_pair(handles, offsets);
+#endif
   }
 
   void check_rank_data_capacity(size_t num = 1) {
@@ -466,18 +585,23 @@ class CustomAllreduce {
           std::to_string(d_rank_data_base_ + num - d_rank_data_end_));
   }
 
-  /**
-   * Register already-shared IPC pointers.
-   */
+  // Custom allreduce owns exactly one eager RankData slot. Captured inputs use
+  // separate graph slots below.
   void register_buffer(void** ptrs) {
+    require_active();
+    if (!buffers_.empty()) {
+      throw std::runtime_error(
+          "custom allreduce supports exactly one eager registered buffer");
+    }
     check_rank_data_capacity();
     RankData data;
     for (int i = 0; i < world_size_; i++) {
       data.ptrs[i] = ptrs[i];
     }
     auto d_data = d_rank_data_base_++;
-    CUDACHECK(
-        cudaMemcpy(d_data, &data, sizeof(RankData), cudaMemcpyHostToDevice));
+    check_cuda(
+        cudaMemcpy(d_data, &data, sizeof(RankData), cudaMemcpyHostToDevice),
+        "cudaMemcpy");
     buffers_[ptrs[rank_]] = d_data;
   }
 
@@ -491,7 +615,19 @@ class CustomAllreduce {
   void register_graph_buffers(
       const std::vector<std::string>& handles,
       const std::vector<std::vector<int64_t>>& offsets) {
+    require_active();
     auto num_buffers = graph_unreg_buffers_.size();
+    if (handles.size() != world_size_ || offsets.size() != world_size_) {
+      throw std::runtime_error(
+          "custom allreduce graph metadata world size mismatch");
+    }
+    for (int i = 0; i < world_size_; i++) {
+      if (handles[i].size() != num_buffers * sizeof(cudaIpcMemHandle_t) ||
+          offsets[i].size() != num_buffers) {
+        throw std::runtime_error(
+            "custom allreduce graph metadata buffer count mismatch");
+      }
+    }
     check_rank_data_capacity(num_buffers);
     std::vector<RankData> rank_data(num_buffers);
     for (int i = 0; i < num_buffers; i++) {
@@ -508,11 +644,124 @@ class CustomAllreduce {
         }
       }
     }
-    CUDACHECK(cudaMemcpy(d_rank_data_base_, rank_data.data(),
-                         sizeof(RankData) * num_buffers,
-                         cudaMemcpyHostToDevice));
+    check_cuda(
+        cudaMemcpy(d_rank_data_base_, rank_data.data(),
+                   sizeof(RankData) * num_buffers, cudaMemcpyHostToDevice),
+        "cudaMemcpy");
+    for (int i = 0; i < num_buffers; i++) {
+      graph_buffers_.push_back(
+          {graph_unreg_buffers_[i], d_rank_data_base_ + i});
+    }
     d_rank_data_base_ += num_buffers;
     graph_unreg_buffers_.clear();
+  }
+
+  // Closes all mappings in ipc_handles_, keeping the entries whose close
+  // failed and rethrowing the first error at the end.
+  void close_ipc_handles() {
+    std::exception_ptr close_error;
+    for (auto it = ipc_handles_.begin(); it != ipc_handles_.end();) {
+      auto result = cudaIpcCloseMemHandle(it->second);
+      if (result == cudaSuccess) {
+        it = ipc_handles_.erase(it);
+      } else {
+        if (close_error == nullptr) {
+          close_error = std::make_exception_ptr(
+              std::runtime_error(std::string("cudaIpcCloseMemHandle failed: ") +
+                                 cudaGetErrorString(result)));
+        }
+        ++it;
+      }
+    }
+    if (close_error != nullptr) std::rethrow_exception(close_error);
+  }
+
+  void prepare_for_suspend() {
+#if defined(USE_ROCM)
+    throw std::runtime_error(
+        "custom allreduce suspend/resume is only supported on CUDA");
+#else
+    if (lifecycle_state_ == LifecycleState::Detached) return;
+    require_active();
+    lifecycle_state_ = LifecycleState::Failed;
+    check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+    close_ipc_handles();
+    lifecycle_state_ = LifecycleState::Detached;
+#endif
+  }
+
+  // TODO: robust post-resume validation is deferred; the cheap invariants
+  // below cannot detect all stale-pointer scenarios and layout comparison is
+  // not sufficient either.
+  void reinit_after_resume(const std::vector<std::string>& handles,
+                           const std::vector<std::vector<int64_t>>& offsets,
+                           Signal** signals, void** buffers) {
+#if defined(USE_ROCM)
+    throw std::runtime_error(
+        "custom allreduce suspend/resume is only supported on CUDA");
+#else
+    if (lifecycle_state_ != LifecycleState::Detached) {
+      throw std::runtime_error(
+          "custom allreduce must be detached before reinit");
+    }
+    lifecycle_state_ = LifecycleState::Failed;
+    check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+    if (signals[rank_] != self_sg_) {
+      throw std::runtime_error(
+          "custom allreduce local signal pointer changed after resume");
+    }
+    auto eager_buffer = buffers_.find(buffers[rank_]);
+    if (eager_buffer == buffers_.end()) {
+      throw std::runtime_error(
+          "custom allreduce local eager buffer changed after resume");
+    }
+    const auto num_buffers = graph_buffers_.size();
+    if (handles.size() != world_size_ || offsets.size() != world_size_) {
+      throw std::runtime_error(
+          "custom allreduce graph metadata world size mismatch");
+    }
+    for (int i = 0; i < world_size_; i++) {
+      if (handles[i].size() != num_buffers * sizeof(cudaIpcMemHandle_t) ||
+          offsets[i].size() != num_buffers) {
+        throw std::runtime_error(
+            "custom allreduce graph metadata buffer count mismatch");
+      }
+    }
+
+    std::vector<RankData> rank_data(num_buffers);
+    for (size_t i = 0; i < num_buffers; i++) {
+      auto& rd = rank_data[i];
+      for (int j = 0; j < world_size_; j++) {
+        if (j != rank_) {
+          char* handle =
+              open_ipc_handle(&handles[j][i * sizeof(cudaIpcMemHandle_t)]);
+          rd.ptrs[j] = handle + offsets[j][i];
+        } else {
+          rd.ptrs[j] = graph_buffers_[i].local_ptr;
+        }
+      }
+    }
+
+    RankSignals rank_signals{};
+    RankData eager_rank_data{};
+    for (int i = 0; i < world_size_; i++) {
+      rank_signals.signals[i] = signals[i];
+      eager_rank_data.ptrs[i] = buffers[i];
+    }
+    check_cuda(cudaMemcpy(d_rank_signals_, &rank_signals, sizeof(rank_signals),
+                          cudaMemcpyHostToDevice),
+               "cudaMemcpy");
+    check_cuda(cudaMemcpy(eager_buffer->second, &eager_rank_data,
+                          sizeof(eager_rank_data), cudaMemcpyHostToDevice),
+               "cudaMemcpy");
+    for (size_t i = 0; i < num_buffers; i++) {
+      check_cuda(cudaMemcpy(graph_buffers_[i].rank_data, &rank_data[i],
+                            sizeof(RankData), cudaMemcpyHostToDevice),
+                 "cudaMemcpy");
+    }
+    check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+    lifecycle_state_ = LifecycleState::Active;
+#endif
   }
 
   /**
@@ -527,6 +776,7 @@ class CustomAllreduce {
   template <typename T>
   void allreduce(cudaStream_t stream, T* input, T* output, int size,
                  int threads = 512, int block_limit = defaultBlockLimit) {
+    require_active();
     auto d = packed_t<T>::P::size;
     if (size % d != 0)
       throw std::runtime_error(
@@ -576,9 +826,9 @@ class CustomAllreduce {
       }
     }
 
-#define KL(ngpus, name)                                                       \
-  name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, sg_, self_sg_, output, \
-                                                 rank_, size);
+#define KL(ngpus, name)                                                 \
+  name<T, ngpus><<<blocks, threads, 0, stream>>>(ptrs, d_rank_signals_, \
+                                                 output, rank_, size);
 #define REDUCE_CASE(ngpus)                              \
   case ngpus: {                                         \
     if (force_1stage) {                                 \
@@ -616,10 +866,14 @@ class CustomAllreduce {
 #undef KL
   }
 
-  ~CustomAllreduce() {
-    for (auto [_, ptr] : ipc_handles_) {
-      CUDACHECK(cudaIpcCloseMemHandle(ptr));
-    }
+  void close() {
+    lifecycle_state_ = LifecycleState::Failed;
+    check_cuda(cudaDeviceSynchronize(), "cudaDeviceSynchronize");
+    close_ipc_handles();
+  }
+
+  ~CustomAllreduce() noexcept {
+    for (auto [_, ptr] : ipc_handles_) cudaIpcCloseMemHandle(ptr);
   }
 };
 

@@ -888,13 +888,22 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C_custom_ar, custom_ar) {
       "all_reduce(int fa, Tensor inp, Tensor! out, int reg_buffer, "
       "int reg_buffer_sz_bytes) -> ()");
   custom_ar.def("dispose(int fa) -> ()");
+  custom_ar.def("custom_ar_close(int fa) -> ()");
   custom_ar.def("meta_size() -> int");
   custom_ar.def("register_buffer(int fa, int[] ipc_tensors) -> ()");
   custom_ar.def("get_graph_buffer_ipc_meta(int fa) -> (int[], int[])");
   custom_ar.def(
+      "get_graph_buffer_ipc_meta_for_reinit(int fa) -> (int[], int[])");
+  custom_ar.def(
       "register_graph_buffers(int fa, int[][] handles, int[][] offsets) -> ()");
+  custom_ar.def("custom_ar_prepare_for_suspend(int fa) -> ()");
+  custom_ar.def(
+      "custom_ar_reinit_after_resume(int fa, int[][] handles, "
+      "int[][] offsets, int[] signal_ptrs, int[] buffer_ptrs) -> ()");
   custom_ar.def("allocate_shared_buffer_and_handle(int size) -> (int, Tensor)");
   custom_ar.def("open_mem_handle(Tensor mem_handle) -> int");
+  custom_ar.def("get_mem_handle(int ptr) -> Tensor");
+  custom_ar.def("close_mem_handle(int ptr) -> ()");
   custom_ar.def("free_shared_buffer(int ptr) -> ()");
 }
 
@@ -909,13 +918,22 @@ STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CPU, custom_ar) {
 
 STABLE_TORCH_LIBRARY_IMPL(_C_custom_ar, CompositeExplicitAutograd, custom_ar) {
   custom_ar.impl("dispose", TORCH_BOX(&dispose));
+  custom_ar.impl("custom_ar_close", TORCH_BOX(&custom_ar_close));
   custom_ar.impl("meta_size", TORCH_BOX(&meta_size));
   custom_ar.impl("register_buffer", TORCH_BOX(&register_buffer));
   custom_ar.impl("get_graph_buffer_ipc_meta",
                  TORCH_BOX(&get_graph_buffer_ipc_meta));
+  custom_ar.impl("get_graph_buffer_ipc_meta_for_reinit",
+                 TORCH_BOX(&get_graph_buffer_ipc_meta_for_reinit));
   custom_ar.impl("register_graph_buffers", TORCH_BOX(&register_graph_buffers));
+  custom_ar.impl("custom_ar_prepare_for_suspend",
+                 TORCH_BOX(&custom_ar_prepare_for_suspend));
+  custom_ar.impl("custom_ar_reinit_after_resume",
+                 TORCH_BOX(&custom_ar_reinit_after_resume));
   custom_ar.impl("allocate_shared_buffer_and_handle",
                  TORCH_BOX(&allocate_shared_buffer_and_handle));
+  custom_ar.impl("get_mem_handle", TORCH_BOX(&get_mem_handle));
+  custom_ar.impl("close_mem_handle", TORCH_BOX(&close_mem_handle));
   custom_ar.impl("free_shared_buffer", TORCH_BOX(&free_shared_buffer));
 }
 

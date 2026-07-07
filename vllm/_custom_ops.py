@@ -2907,6 +2907,10 @@ def dispose(fa: int) -> None:
     torch.ops._C_custom_ar.dispose(fa)
 
 
+def custom_ar_close(fa: int) -> None:
+    torch.ops._C_custom_ar.custom_ar_close(fa)
+
+
 def meta_size() -> int:
     return torch.ops._C_custom_ar.meta_size()
 
@@ -2919,10 +2923,32 @@ def get_graph_buffer_ipc_meta(fa: int) -> tuple[list[int], list[int]]:
     return torch.ops._C_custom_ar.get_graph_buffer_ipc_meta(fa)
 
 
+def get_graph_buffer_ipc_meta_for_reinit(
+    fa: int,
+) -> tuple[list[int], list[int]]:
+    return torch.ops._C_custom_ar.get_graph_buffer_ipc_meta_for_reinit(fa)
+
+
 def register_graph_buffers(
     fa: int, handles: list[list[int]], offsets: list[list[int]]
 ) -> None:
     torch.ops._C_custom_ar.register_graph_buffers(fa, handles, offsets)
+
+
+def custom_ar_prepare_for_suspend(fa: int) -> None:
+    torch.ops._C_custom_ar.custom_ar_prepare_for_suspend(fa)
+
+
+def custom_ar_reinit_after_resume(
+    fa: int,
+    handles: list[list[int]],
+    offsets: list[list[int]],
+    signal_ptrs: list[int],
+    buffer_ptrs: list[int],
+) -> None:
+    torch.ops._C_custom_ar.custom_ar_reinit_after_resume(
+        fa, handles, offsets, signal_ptrs, buffer_ptrs
+    )
 
 
 def allocate_shared_buffer_and_handle(size: int) -> tuple[int, torch.Tensor]:
@@ -2931,6 +2957,14 @@ def allocate_shared_buffer_and_handle(size: int) -> tuple[int, torch.Tensor]:
 
 def open_mem_handle(mem_handle: torch.Tensor):
     return torch.ops._C_custom_ar.open_mem_handle(mem_handle)
+
+
+def get_mem_handle(ptr: int) -> torch.Tensor:
+    return torch.ops._C_custom_ar.get_mem_handle(ptr)
+
+
+def close_mem_handle(ptr: int) -> None:
+    torch.ops._C_custom_ar.close_mem_handle(ptr)
 
 
 def free_shared_buffer(ptr: int) -> None:

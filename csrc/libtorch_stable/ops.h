@@ -374,16 +374,27 @@ void all_reduce(fptr_t _fa, torch::stable::Tensor& inp,
                 torch::stable::Tensor& out, fptr_t reg_buffer,
                 int64_t reg_buffer_sz_bytes);
 void dispose(fptr_t _fa);
+void custom_ar_close(fptr_t _fa);
 int64_t meta_size();
 void register_buffer(fptr_t _fa, const std::vector<int64_t>& fake_ipc_ptrs);
 std::tuple<std::vector<int64_t>, std::vector<int64_t>>
 get_graph_buffer_ipc_meta(fptr_t _fa);
+std::tuple<std::vector<int64_t>, std::vector<int64_t>>
+get_graph_buffer_ipc_meta_for_reinit(fptr_t _fa);
 void register_graph_buffers(fptr_t _fa,
                             const std::vector<std::vector<int64_t>>& handles,
                             const std::vector<std::vector<int64_t>>& offsets);
+void custom_ar_prepare_for_suspend(fptr_t _fa);
+void custom_ar_reinit_after_resume(
+    fptr_t _fa, const std::vector<std::vector<int64_t>>& handles,
+    const std::vector<std::vector<int64_t>>& offsets,
+    const std::vector<int64_t>& fake_signal_ptrs,
+    const std::vector<int64_t>& fake_buffer_ptrs);
 std::tuple<int64_t, torch::stable::Tensor> allocate_shared_buffer_and_handle(
     int64_t size);
 int64_t open_mem_handle(torch::stable::Tensor& mem_handle);
+torch::stable::Tensor get_mem_handle(int64_t buffer);
+void close_mem_handle(int64_t ptr);
 void free_shared_buffer(int64_t buffer);
 
 // Activation kernels (shared CUDA/ROCm)

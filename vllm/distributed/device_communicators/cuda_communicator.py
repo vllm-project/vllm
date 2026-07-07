@@ -508,6 +508,12 @@ class CudaCommunicator(DeviceCommunicatorBase):
             self.pynccl_comm.destroy()
             self.pynccl_comm = None
         if self.ca_comm is not None:
+            try:
+                self.ca_comm.close()
+            except Exception:
+                logger.warning(
+                    "Failed to close custom allreduce communicator.", exc_info=True
+                )
             self.ca_comm = None
         if self.fi_ar_comm is not None:
             self.fi_ar_comm.destroy()
