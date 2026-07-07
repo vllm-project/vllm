@@ -27,6 +27,7 @@ from typing import ClassVar
 
 import torch
 
+from vllm.config import VllmConfig
 from vllm.forward_context import get_forward_context
 from vllm.models.minimax_m3.common.indexer import (
     MiniMaxM3IndexerBackend,
@@ -44,6 +45,7 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
 )
 from vllm.v1.attention.backends.utils import split_decodes_and_prefills
+from vllm.v1.kv_cache_interface import AttentionSpec
 
 # Page size == sparse block size == index-K block; fmha tile id == M3 block id.
 PAGE_SIZE = 128
@@ -51,6 +53,13 @@ PAGE_SIZE = 128
 # Fill for unwritten score tiles: -inf so they never win the top-k (score kernels
 # only write causally-valid blocks).
 _SCORE_SENTINEL = float("-inf")
+
+# Tile (KV-block) dim of the unified score buffer, hardcoded as a cudagraph
+# capture-time constant so the decode score kernel's buffer shape is frozen
+# across replays. 8192 tiles == 1M tokens of context; -inf padding +
+# num_valid_pages bound each row to its causal range, so shorter replays reuse
+# the same buffer safely.
+MAX_K_TILES = 8192
 
 
 class MiniMaxM3IndexerMSABackend(MiniMaxM3IndexerBackend):
@@ -79,10 +88,13 @@ class MiniMaxM3IndexerMSAMetadata(MiniMaxM3IndexerMetadata):
     (the base ``prefill`` field is unused on this path)."""
 
     prefill_msa: MiniMaxM3IndexerMSAPrefillMetadata | None = None
-    # Tile (KV-block) dim of the unified [total_q, H, max_k_tiles] score buffer
-    # shared by decode and prefill. fmha's convention:
-    # round_up(cdiv(max_seq_len, 128), 128). When prefill is present this is
-    # forced as the fmha plan's ``max_k_tiles`` so prefill writes its max_score
+    # Per-forward view (``[:num_tokens]``) of the builder's persistent unified
+    # score buffer ``[total_q, H, MAX_K_TILES]``, shared by decode and prefill
+    # and reused across all layers. Pre-filled with the -inf sentinel in
+    # ``build()``; each layer overwrites its valid tiles before its own top-k.
+    unified_scores: torch.Tensor | None = None
+    # Tile (KV-block) dim of the unified score buffer (== ``MAX_K_TILES``).
+    # Forced as the fmha plan's ``max_k_tiles`` so prefill writes its max_score
     # straight into the shared buffer.
     max_k_tiles: int = 0
     # Batch-wide inputs for the single top-k over the unified buffer (decode +
@@ -102,6 +114,28 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
     fmha plan is built eagerly (prefill batches are not captured)."""
 
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.UNIFORM_BATCH
+
+    def __init__(
+        self,
+        kv_cache_spec: AttentionSpec,
+        layer_names: list[str],
+        vllm_config: VllmConfig,
+        device: torch.device,
+    ) -> None:
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+        # Persistent unified score buffer [T, H, MAX_K_TILES] shared by all
+        # indexer layers and reused across forwards. Stable address (required
+        # for the captured decode path) + fixed tile dim so the decode score
+        # kernel's shape is frozen at capture. Filled with -inf per forward in
+        # build(); the valid/padding partition is a per-forward constant, so
+        # every layer overwrites the same valid tiles before its own top-k.
+        self.unified_scores_buffer = torch.empty(
+            vllm_config.scheduler_config.max_num_batched_tokens,
+            self.num_index_heads,
+            MAX_K_TILES,
+            dtype=torch.float32,
+            device=device,
+        )
 
     def build(
         self,
@@ -137,11 +171,12 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
         num_valid_pages = self.num_valid_pages_buffer[:num_tokens]
         num_valid_pages.copy_(positions[:num_tokens] // PAGE_SIZE + 1)
 
-        # Tile dim of the unified score buffer (fmha tile convention:
-        # round_up(cdiv(max_seq_len, 128), 128)); covers both decode and prefill
-        # since it is taken over the whole-batch max_seq_len.
-        nblocks = (common_attn_metadata.max_seq_len + PAGE_SIZE - 1) // PAGE_SIZE
-        max_k_tiles = ((nblocks + PAGE_SIZE - 1) // PAGE_SIZE) * PAGE_SIZE
+        # Unified score buffer: a per-forward view of the persistent buffer,
+        # reset to the -inf sentinel once here and shared by every layer (the
+        # tile dim is the capture-time constant MAX_K_TILES).
+        max_k_tiles = MAX_K_TILES
+        unified_scores = self.unified_scores_buffer[:num_tokens]
+        unified_scores.fill_(_SCORE_SENTINEL)
 
         decode: MiniMaxM3IndexerDecodeMetadata | None = None
         if num_decodes > 0:
@@ -212,6 +247,7 @@ class MiniMaxM3IndexerMSAMetadataBuilder(MiniMaxM3IndexerMetadataBuilder):
             num_prefill_tokens=num_prefill_tokens,
             decode=decode,
             prefill_msa=prefill,
+            unified_scores=unified_scores,
             max_k_tiles=max_k_tiles,
             topk_cu_seqlens_q=query_start_loc[: num_reqs + 1],
             topk_prefix_lens=context_lens,
@@ -246,18 +282,15 @@ class MiniMaxM3IndexerMSAImpl(MiniMaxM3IndexerImpl):
         buf = self.topk_indices_buffer
         assert buf is not None
 
-        # Unified token-major score buffer [total_q, H, max_k_tiles]: the tile
+        # Unified token-major score buffer [total_q, H, MAX_K_TILES]: the tile
         # dim is innermost/contiguous, so both fmha writes (native [T,H,K]) and
         # the block-iterating top-k reads hit contiguous tiles. Each side gets a
         # contiguous slice on dim 0: decode [:nd], prefill [nd:]; the kernels
-        # read/write by strides. Pre-filled with the sentinel so the top-k never
-        # picks an unwritten tile (the score kernels only write valid blocks).
-        unified_scores = torch.full(
-            (num_tokens, self.num_index_heads, md.max_k_tiles),
-            _SCORE_SENTINEL,
-            dtype=torch.float32,
-            device=index_q.device,
-        )
+        # read/write by strides. The builder allocates it once (persistent,
+        # shared by all layers) and resets it to the sentinel each forward, so
+        # the top-k never picks an unwritten tile.
+        unified_scores = md.unified_scores
+        assert unified_scores is not None
 
         # Decode scores -> unified[:nd] (transposed [H, nd, MK] view; the kernel
         # writes by strides). Top-k is deferred to the single unified call below.
