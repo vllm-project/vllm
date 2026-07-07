@@ -88,6 +88,12 @@ class PunicaWrapperXPU(PunicaWrapperBase):
         self.token_mapping_meta.prepare_tensors(self.token_lora_indices)
         self.prompt_mapping_meta.prepare_tensors(self.sampler_indices)
 
+        # Cache the no-LoRA state computed inside prepare_tensors as a Python
+        # bool. no_lora_flag_cpu already lives on CPU, so .item() adds no device
+        # sync. Layers read this to skip the LoRA path in eager mode.
+        self.no_lora = bool(self.token_mapping_meta.no_lora_flag_cpu.item())
+
+
     def _get_token_lora_indices(self, x: torch.Tensor) -> torch.IntTensor:
         return torch.narrow(self._token_lora_indices, 0, 0, x.size(0))
 

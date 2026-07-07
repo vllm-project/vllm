@@ -751,6 +751,107 @@ def test_linear_parallel(
 
 
 @torch.inference_mode()
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("stage", STAGES)
+def test_empty_lora_eager_skip(default_vllm_config, dist_init, device, stage) -> None:
+    """When a batch has no active LoRA, the layer skips the LoRA path in eager
+    mode and returns the base output, while staying on the normal path (and
+    still correct) under cudagraph.
+    """
+    from unittest.mock import MagicMock
+
+    import vllm.lora.layers.base as lora_base
+    from vllm.config import CUDAGraphMode
+
+    if current_platform.is_cuda_alike() or current_platform.is_xpu():
+        torch.accelerator.set_device_index(device)
+
+    max_loras = 8
+    torch.set_default_device(device)
+    lora_config = LoRAConfig(
+        max_loras=max_loras, max_lora_rank=8, lora_dtype=torch.float16
+    )
+    punica_wrapper = get_punica_wrapper(8192, 256, device, lora_config=lora_config)
+    assert check_punica_wrapper(punica_wrapper)
+
+    linear = ColumnParallelLinear(
+        4096, 4096, bias=False, params_dtype=torch.float16, prefix="layer_0"
+    )
+    linear.weight.data = torch.rand_like(linear.weight.data)
+    lora_linear = ColumnParallelLinearWithLoRA(linear)
+    lora_linear.create_lora_weights(max_loras, lora_config)
+    lora_linear.set_mapping(punica_wrapper)
+
+    id_to_index = get_random_id_to_index(2, max_loras)
+    lora_dict, _ = populate_loras(
+        id_to_index, layer=lora_linear, layer_weights=linear.weight
+    )
+    active_lora_ids = list(lora_dict.keys())
+
+    def make_ctx(mode):
+        ctx = MagicMock()
+        ctx.cudagraph_runtime_mode = mode
+        return ctx
+
+    def set_no_lora_batch(no_lora: bool):
+        # active id 0 maps to "no LoRA" (token index -1). Mixing in a real
+        # adapter id yields a batch that does require LoRA.
+        ids = [0] if no_lora else [0, active_lora_ids[0]]
+        inputs, index_mapping, prompt_mapping = create_random_inputs(
+            active_lora_ids=ids,
+            num_inputs=8,
+            input_size=(1, 4096),
+            input_range=(0, 1),
+            input_type=torch.float16,
+            device=device,
+        )
+        lora_mapping = LoRAMapping(index_mapping, prompt_mapping, is_prefill=stage)
+        punica_wrapper.update_metadata(lora_mapping, id_to_index, max_loras, 512)
+        return torch.cat(inputs)
+
+    # No active LoRA in the batch: wrapper detects it and eager path skips.
+    x = set_no_lora_batch(no_lora=True)
+    assert punica_wrapper.no_lora is True
+    expected = linear(x)[0]
+    rtol, atol = TOLERANCES[expected.dtype]
+
+    # Eager (cudagraph mode NONE) -> skip taken, output == base.
+    with (
+        patch.object(lora_base, "is_forward_context_available", return_value=True),
+        patch.object(
+            lora_base, "get_forward_context", return_value=make_ctx(CUDAGraphMode.NONE)
+        ),
+    ):
+        assert lora_linear._can_skip_empty_lora() is True
+        skipped = lora_linear(x)[0]
+    torch.testing.assert_close(skipped, expected, rtol=rtol, atol=atol)
+
+    # Cudagraph (PIECEWISE) -> skip NOT taken, output still correct (== base).
+    with (
+        patch.object(lora_base, "is_forward_context_available", return_value=True),
+        patch.object(
+            lora_base,
+            "get_forward_context",
+            return_value=make_ctx(CUDAGraphMode.PIECEWISE),
+        ),
+    ):
+        assert lora_linear._can_skip_empty_lora() is False
+        not_skipped = lora_linear(x)[0]
+    torch.testing.assert_close(not_skipped, expected, rtol=rtol, atol=atol)
+
+    # Mixed batch (some tokens need LoRA): must never skip, even in eager.
+    set_no_lora_batch(no_lora=False)
+    assert punica_wrapper.no_lora is False
+    with (
+        patch.object(lora_base, "is_forward_context_available", return_value=True),
+        patch.object(
+            lora_base, "get_forward_context", return_value=make_ctx(CUDAGraphMode.NONE)
+        ),
+    ):
+        assert lora_linear._can_skip_empty_lora() is False
+
+
+@torch.inference_mode()
 @pytest.mark.parametrize("num_loras", [1, 2, 4])
 @pytest.mark.parametrize("repeats", [1, 2, 3])
 @pytest.mark.parametrize("fully_shard", [True, False])

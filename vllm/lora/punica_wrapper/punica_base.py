@@ -163,6 +163,11 @@ class PunicaWrapperBase(PunicaWrapperABC):
         self.token_nums: int = 0
         self.batch_size: int = -1
         self.is_prefill = False
+        # Whether the current forward pass has no active LoRA at all, i.e. every
+        # token maps to the base model (token lora index == -1). Maintained by
+        # each backend's update_metadata and consumed by the LoRA layers to skip
+        # the LoRA path entirely in eager mode
+        # (see BaseLayerWithLoRA._can_skip_empty_lora).
         self.no_lora = False
 
     def _update_base_metadata(
