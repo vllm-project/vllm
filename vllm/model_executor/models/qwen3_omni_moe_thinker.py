@@ -1921,9 +1921,7 @@ class Qwen3OmniMoeThinkerForConditionalGeneration(
                 is_multimodal,
                 num_video,
                 num_audio,
-                embedding_modalities=getattr(
-                    self, "_last_embedding_modalities", None
-                ),
+                embedding_modalities=getattr(self, "_last_embedding_modalities", None),
             )
 
         # Default: standard merge (no interleaving), same as parent class.

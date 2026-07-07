@@ -213,14 +213,11 @@ def merge_interleaved_embeddings(
     # Qwen Omni multimodal placeholders are image/video/audio; after excluding
     # video and audio positions, the remaining multimodal positions are images.
     is_image = is_multimodal & ~is_video & ~is_audio
-    num_image = is_image.sum().item()
 
     if embedding_modalities is None or len(embedding_modalities) != len(
         multimodal_embeddings
     ):
-        raise ValueError(
-            "Embedding modalities must match multimodal_embeddings length"
-        )
+        raise ValueError("Embedding modalities must match multimodal_embeddings length")
 
     video_embeds = [
         embedding
@@ -1495,9 +1492,7 @@ class Qwen2_5OmniThinkerForConditionalGeneration(
                 is_multimodal,
                 num_video,
                 num_audio,
-                embedding_modalities=getattr(
-                    self, "_last_embedding_modalities", None
-                ),
+                embedding_modalities=getattr(self, "_last_embedding_modalities", None),
             )
 
         # Default: standard merge (no interleaving), same as parent class

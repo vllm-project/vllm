@@ -3513,11 +3513,7 @@ class GPUModelRunner(
                     self._gather_mm_embeddings(scheduler_output)
                 )
 
-            setattr(
-                self.get_model(),
-                "_last_embedding_modalities",
-                mm_embed_modalities,
-            )
+            self.get_model()._last_embedding_modalities = mm_embed_modalities
 
             # NOTE(woosuk): To unify token ids and soft tokens (vision
             # embeddings), we always use embeddings (rather than token ids)
