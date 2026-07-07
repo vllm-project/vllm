@@ -1,13 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
 import torch
 from torch.nn.parameter import Parameter
 
-from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.auto_awq import AutoAWQConfig
 from vllm.model_executor.layers.quantization.auto_gptq import AutoGPTQConfig
 from vllm.model_executor.layers.quantization.utils.marlin_utils import (
@@ -22,33 +20,8 @@ from vllm.scalar_type import scalar_types
 
 from .inc_scheme import INCLinearScheme
 
-logger = init_logger(__name__)
-
 if TYPE_CHECKING:
     from ..config_parser import INCLayerConfig
-
-
-@lru_cache(maxsize=1)
-def get_ark_state() -> tuple[bool, str | None, Any | None, Any | None]:
-    """Return ARK availability, error details, cached module, and QuantLinear."""
-    try:
-        import auto_round_kernel as ark
-        from auto_round_kernel.qlinear import QuantLinear
-
-        logger.info("Successfully imported auto_round_kernel.")
-    except ImportError as error:
-        return False, str(error), None, None
-
-    if getattr(ark, "cpu_lib", None) is None and getattr(ark, "xpu_lib", None) is None:
-        return (
-            False,
-            "No ARK backend library is available.",
-            None,
-            None,
-        )
-    logger.info("Successfully loaded auto_round_kernel backend library.")
-
-    return True, None, ark, QuantLinear
 
 
 class INCWNA16LinearScheme(INCLinearScheme):
@@ -399,6 +372,8 @@ class INCARKLinearMethod(INCXPULinearBase):
     def __init__(self, layer_config: "INCLayerConfig") -> None:
         super().__init__(layer_config)
 
+        from .inc_ark_ops import get_ark_state
+
         is_available, error_str, _, quant_linear_cls = get_ark_state()
         if not is_available or quant_linear_cls is None:
             reason = error_str or "unknown error"
@@ -472,9 +447,13 @@ class INCARKLinearMethod(INCXPULinearBase):
                 ark_linear.bias.copy_(layer.bias.detach())
 
         ark_linear.post_init()
-        layer.ark_linear = ark_linear
 
-        del layer.qweight
+        layer.qweight = Parameter(ark_linear.qweight.detach(), requires_grad=False)
+        layer.ark_bias = ark_linear.bias
+        layer.ark_compute_type = ark_linear.cdt
+        layer.ark_weight_type = ark_linear.wdt
+        layer.ark_scale_type = ark_linear.sdt
+
         if hasattr(layer, "qzeros"):
             del layer.qzeros
         del layer.scales
@@ -485,8 +464,18 @@ class INCARKLinearMethod(INCXPULinearBase):
         x: torch.Tensor,
         bias: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del bias
-        return layer.ark_linear.forward(x)
+        return torch.ops.vllm.inc_ark_woq_linear.default(
+            x,
+            layer.qweight,
+            layer.ark_bias,
+            layer.out_features,
+            layer.in_features,
+            self.group_size,
+            layer.ark_compute_type,
+            layer.ark_weight_type,
+            layer.ark_scale_type,
+            not self.sym,
+        )
 
 
 class INCXPUW4A16LinearScheme(INCXPULinearMethod):
