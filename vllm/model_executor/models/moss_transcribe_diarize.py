@@ -12,7 +12,6 @@ The checkpoint layout is:
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
-from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
@@ -498,17 +497,12 @@ class MossTranscribeDiarizeMultiModalProcessor(
                 prompt,
                 add_special_tokens=tok_kwargs.get("add_special_tokens", False),
             )
-            return BatchFeature({"input_ids": [input_ids]})
+            return BatchFeature({"input_ids": [input_ids]}, tensor_type="pt")
 
-        hf_processor = self.info.get_hf_processor(**mm_kwargs)
-        processor_kwargs = dict(mm_kwargs)
-        if "max_length" in tok_kwargs:
-            processor_kwargs["max_length"] = tok_kwargs["max_length"]
-
-        processed = hf_processor(
-            text=prompt,
-            audio=audios,
-            **processor_kwargs,
+        processed = self.info.ctx.call_hf_processor(
+            self.info.get_hf_processor(**mm_kwargs),
+            dict(text=prompt, audio=audios),
+            dict(**mm_kwargs, **tok_kwargs),
         )
         return _add_vllm_audio_metadata(processed, len(audios))
 
@@ -571,28 +565,19 @@ class MossTranscribeDiarizeMultiModalProcessor(
                 raise ValueError("Audio input is too short to produce any tokens.")
             return num_tokens
 
-        def get_replacement(
-            item_idx: int, *, include_boundaries: bool
-        ) -> PromptUpdateDetails[list[int]]:
+        def get_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
             num_tokens = get_num_tokens(item_idx)
             audio_tokens = processor._audio_span_ids(num_tokens)
-            if include_boundaries:
-                audio_tokens = [audio_start_id] + audio_tokens + [audio_end_id]
             return PromptUpdateDetails.select_token_id(
-                audio_tokens,
+                [audio_start_id] + audio_tokens + [audio_end_id],
                 embed_token_id=audio_token_id,
             )
 
         return [
             PromptReplacement(
                 modality="audio",
-                target=[audio_token_id],
-                replacement=partial(get_replacement, include_boundaries=False),
-            ),
-            PromptReplacement(
-                modality="audio",
                 target=AUDIO_PLACEHOLDER,
-                replacement=partial(get_replacement, include_boundaries=True),
+                replacement=get_replacement,
             ),
         ]
 
