@@ -1870,6 +1870,28 @@ class NixlBaseConnectorWorker:
         indices = torch.tensor(block_ids, device=self.device_type, dtype=torch.long)
 
         for _, cache_or_caches in self.device_kv_caches.items():
+            if self.backend_name == "CPU_ATTN" and cache_or_caches.dim() == 4:
+                num_blocks, num_heads, block_size, fused_head_size = (
+                    cache_or_caches.shape
+                )
+                head_size = fused_head_size // 2
+                blocks_to_update = cache_or_caches.view(
+                    num_blocks, 2, num_heads, block_size, head_size
+                ).index_select(0, indices)
+                cpu_kv_cache = cache_or_caches.view(
+                    num_blocks, num_heads, block_size * 2, head_size
+                )
+                key_cache, value_cache = cpu_kv_cache.chunk(2, dim=2)
+                current_platform.pack_kv_cache(
+                    key=blocks_to_update[:, 0],
+                    value=blocks_to_update[:, 1],
+                    key_cache=key_cache,
+                    value_cache=value_cache,
+                    block_ids=block_ids,
+                    indices=indices,
+                )
+                continue
+
             blocks_to_update = cache_or_caches.index_select(1, indices)
             current_platform.pack_kv_cache(
                 key=blocks_to_update[0],
