@@ -91,8 +91,10 @@ def get_mem_info_wrapper(
             f"device must be int, str, torch.device, or None, got {type(device)}"
         )
 
-    # Call the underlying C++ implementation
-    free, total = torch.ops._C_cache_ops.getMemoryInfo(device)
+    # Use torch.xpu.mem_get_info directly (the C++ getMemoryInfo op
+    # incorrectly reports free=0 on Max 1550 due to ext_intel_free_memory
+    # not being properly supported in the driver context).
+    free, total = torch.xpu.mem_get_info(device)
 
     return free, total
 
