@@ -49,7 +49,25 @@ MODELS = [
         ),
         id="auto_round:auto_awq",
     ),
+    pytest.param(
+        "OPEA/Qwen2.5-72B-Instruct-int2-sym-inc",
+        marks=pytest.mark.skipif(
+            not (current_platform.is_cuda() or current_platform.is_xpu())
+            or current_platform.device_count() < 2,
+            reason="72B INT2 AutoRound model requires XPU with at least 2 devices.",
+        ),
+        id="auto_round:auto_gptq_int2_tp2",
+    ),
 ]
+
+MODEL_RUNNER_KWARGS = {
+    "OPEA/Qwen2.5-72B-Instruct-int2-sym-inc": {
+        "block_size": 64,
+        "gpu_memory_utilization": 0.15,
+        "max_model_len": 512,
+        "tensor_parallel_size": 2,
+    },
+}
 
 
 @pytest.mark.skipif(
@@ -62,7 +80,7 @@ MODELS = [
 )
 @pytest.mark.parametrize("model", MODELS)
 def test_auto_round_model(vllm_runner, model):
-    with vllm_runner(model) as llm:
+    with vllm_runner(model, **MODEL_RUNNER_KWARGS.get(model, {})) as llm:
         output = llm.generate_greedy(["The capital of France is"], max_tokens=8)
 
     assert output
@@ -423,10 +441,10 @@ def test_wna16_xpu_int2_unsupported_config_still_raises(monkeypatch) -> None:
 
     with pytest.raises(NotImplementedError, match="unsupported config"):
         INCWna16Scheme().get_linear_method(
-            make_config(sym=False),
+            make_config(bits=2, sym=False),
             object(),
             "layer",
-            make_layer_config(sym=False),
+            make_layer_config(bits=2, sym=False),
         )
 
 

@@ -20,6 +20,8 @@ if TYPE_CHECKING:
 
 logger = init_logger(__name__)
 
+XPU_WNA16_SUPPORTED_BITS = {2, 4}
+
 
 class INCWna16Scheme(INCScheme):
     @staticmethod
@@ -35,7 +37,7 @@ class INCWna16Scheme(INCScheme):
     ):
         del config, layer
         if current_platform.is_xpu():
-            if layer_config.bits in {2, 4} and layer_config.sym:
+            if layer_config.bits in XPU_WNA16_SUPPORTED_BITS and layer_config.sym:
                 from .inc_ark_ops import get_ark_state
                 from .inc_wna16_linear import (
                     INCARKLinearMethod,
