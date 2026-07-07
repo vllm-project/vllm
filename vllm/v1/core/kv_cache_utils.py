@@ -1286,7 +1286,6 @@ def _get_kv_cache_config_packed(
     tables so block-id namespaces never collide). Each emitted tensor aliases
     one physical backing allocation, with per-block data laid out contiguously.
     """
-    # buckets = {page_size: [[layer_names], [layer_names], ...]}
     buckets = _bucket_layers_by_page_size(kv_cache_groups)
     total_num_bytes_per_block = sum(ps * len(slots) for ps, slots in buckets.items())
 
@@ -1312,7 +1311,58 @@ def _get_kv_cache_config_packed(
     return num_blocks, kv_cache_tensors
 
 
-_get_kv_cache_config_deepseek_v4 = _get_kv_cache_config_packed
+def _get_kv_cache_config_unpacked(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> tuple[int, list[KVCacheTensor]]:
+    """Per-layer KV cache tensors without packed block-stride layout."""
+    buckets = _bucket_layers_by_page_size(kv_cache_groups)
+    total_num_bytes_per_block = sum(ps * len(slots) for ps, slots in buckets.items())
+
+    num_blocks = available_memory // total_num_bytes_per_block
+    num_blocks = may_override_num_blocks(vllm_config, num_blocks)
+
+    kv_cache_tensors: list[KVCacheTensor] = []
+    for ps, slots in buckets.items():
+        for slot in slots:
+            kv_cache_tensors.append(
+                KVCacheTensor(size=ps * num_blocks, shared_by=slot)
+            )
+
+    return num_blocks, kv_cache_tensors
+
+
+def _dsv4_uses_flashinfer(vllm_config: VllmConfig) -> bool:
+    from vllm.v1.attention.backends.registry import AttentionBackendEnum
+
+    backend = vllm_config.attention_config.backend
+    if backend == AttentionBackendEnum.FLASHINFER_MLA_SPARSE_DSV4:
+        return True
+    # SM120 auto-selects FlashInfer when no explicit backend is set.
+    if backend is None:
+        from vllm.platforms import current_platform
+
+        cap = current_platform.get_device_capability()
+        if cap is not None and cap.major == 12:
+            return True
+    return False
+
+
+def _get_kv_cache_config_deepseek_v4(
+    vllm_config: VllmConfig,
+    kv_cache_groups: list[KVCacheGroupSpec],
+    available_memory: int,
+) -> tuple[int, list[KVCacheTensor]]:
+    # FlashInfer DSV4 kernels only use token-level strides, so the packed
+    # block-stride layout corrupts attention.
+    if _dsv4_uses_flashinfer(vllm_config):
+        return _get_kv_cache_config_unpacked(
+            vllm_config, kv_cache_groups, available_memory
+        )
+    return _get_kv_cache_config_packed(
+        vllm_config, kv_cache_groups, available_memory
+    )
 
 
 def get_kv_cache_config_from_groups(
@@ -1360,9 +1410,8 @@ def get_kv_cache_config_from_groups(
             for layer_name in kv_cache_groups[0].layer_names
         ]
     elif _use_packed_kv_cache_config(vllm_config, kv_cache_groups):
-        # DeepSeek V4 uses the packed layout by default. Other multi-group
-        # layouts can opt in with --enable-cross-layers.
-        num_blocks, kv_cache_tensors = _get_kv_cache_config_packed(
+        # DeepSeek V4 and cross-layer opt-in layouts.
+        num_blocks, kv_cache_tensors = _get_kv_cache_config_deepseek_v4(
             vllm_config, kv_cache_groups, available_memory
         )
     else:
