@@ -1076,7 +1076,10 @@ class NixlBaseConnectorWorker:
                     layer_spec, (MLAAttentionSpec, SlidingWindowMLASpec)
                 )
                 self._region_is_mla.append(is_mla_region)
-                num_blocks_per_region.append(num_blocks)
+                # All registered regions use the physical num_blocks for
+                # descriptor layout, even Mamba (whose tensor has fewer blocks
+                # but is covered via half-page strides in _build_fa_local).
+                num_blocks_per_region.append(self.num_blocks)
 
                 if not is_mla_region:
                     if tensor_size_bytes is None:
