@@ -19,6 +19,14 @@ except ImportError:
     cv2 = PlaceholderModule("cv2")
     vr = PlaceholderModule("cv2").placeholder_attr("videoio_registry")
 
+# NEW: Try importing PyAV for interlaced video deinterlacing
+try:
+    import av
+    import av.filter
+    _PYAV_AVAILABLE = True
+except ImportError:
+    _PYAV_AVAILABLE = False
+
 
 logger = init_logger(__name__)
 
@@ -144,6 +152,117 @@ class OpenCVVideoBackendMixin:
             original_fps=original_fps,
             duration=duration,
         )
+
+    # NEW: Detect if video is interlaced using PyAV
+    @classmethod
+    def _is_interlaced_video(cls, data: bytes) -> bool:
+        """
+        Use PyAV to detect whether the video is interlaced by decoding
+        a few frames and checking their interlaced_frame property.
+        
+        Compatible with PyAV 18+ which uses VideoFrame.interlaced_frame
+        instead of the deprecated av.field_order constants.
+        
+        Returns False if PyAV is unavailable (falls back to OpenCV path).
+        """
+        if not _PYAV_AVAILABLE:
+            return False
+        
+        try:
+            container = av.open(BytesIO(data))
+            stream = container.streams.video[0]
+            
+            # Decode first few frames to check interlaced_frame property
+            is_interlaced = False
+            frames_checked = 0
+            max_check_frames = 10
+            
+            for packet in container.demux(stream):
+                for frame in packet.decode():
+                    if frames_checked >= max_check_frames:
+                        break
+                    
+                    # Check if this frame is marked as interlaced
+                    if frame.interlaced_frame:
+                        is_interlaced = True
+                        break
+                    
+                    frames_checked += 1
+                
+                if is_interlaced or frames_checked >= max_check_frames:
+                    break
+            
+            container.close()
+            return is_interlaced
+        except Exception:
+            return False
+
+    # NEW: Read video frames using PyAV + yadif filter
+    @classmethod
+    def _read_frames_with_pyav(
+        cls,
+        data: bytes,
+        frame_indices: list[int],
+    ) -> tuple[npt.NDArray, list[int]]:
+        """
+        Read video frames using PyAV with yadif deinterlace filter.
+        yadif automatically detects interlaced frames and only processes them;
+        progressive frames pass through unchanged.
+
+        Args:
+            data: Raw video bytes
+            frame_indices: List of target frame indices to sample
+
+        Returns:
+            Tuple of (frames_array, valid_frame_indices)
+        """
+        container = av.open(BytesIO(data))
+        stream = container.streams.video[0]
+        
+        # Create yadif filter chain
+        # mode=send_frame: process frame by frame
+        # parity=auto: auto-detect field order
+        # deint=all: detect all frames, only deinterlace interlaced ones
+        graph = av.filter.Graph()
+        buffer_src = graph.add_buffer(template=stream)
+        yadif = graph.add("yadif", "mode=send_frame:parity=auto:deint=all")
+        buffer_sink = graph.add("buffersink")
+        buffer_src.link_to(yadif)
+        yadif.link_to(buffer_sink)
+        graph.configure()
+
+        target_indices = set(frame_indices)
+        frames = []
+        valid_indices = []
+        
+        frame_count = 0
+
+        for packet in container.demux(stream):
+            for frame in packet.decode():
+                frame_count += 1
+                
+                # Use frame_count (0-based) to match target indices
+                if (frame_count - 1) in target_indices:
+                    current_idx = frame_count - 1
+                    
+                    graph.push(frame)
+                    try:
+                        # yadif passes progressive frames through, deinterlaces interlaced ones
+                        filtered = graph.pull()
+                        img = filtered.to_ndarray(format="rgb24")
+                    except av.FFmpegError:
+                        # If filter decides no processing needed (rare), use raw frame
+                        img = frame.to_ndarray(format="rgb24")
+                    
+                    frames.append(img)
+                    valid_indices.append(current_idx)
+
+        container.close()
+
+        if frames:
+            return np.stack(frames), valid_indices
+        
+        return np.empty((0, 1, 1, 3), dtype=np.uint8), []
 
     @classmethod
     def _can_use_for_recovery(
@@ -325,7 +444,34 @@ class OpenCVVideoBackendMixin:
         total_frames_num: int,
         *,
         frame_recovery: bool = False,
+        data: bytes | None = None,
     ) -> tuple[npt.NDArray, list[int]]:
+        # NEW: Detect interlaced video and use PyAV path
+        if data is not None:
+            is_interlaced = cls._is_interlaced_video(data)
+            
+            if is_interlaced:
+                logger.info(
+                    "Detected interlaced video, using PyAV + yadif "
+                    "for deinterlacing."
+                )
+                try:
+                    frames, valid_frame_indices = cls._read_frames_with_pyav(
+                        data, frame_idx
+                    )
+                    
+                    if len(frames) > 0:
+                        return frames, valid_frame_indices
+                    
+                    logger.warning(
+                        "PyAV returned empty frames, falling back to OpenCV."
+                    )
+                except Exception as e:
+                    logger.warning(
+                        "PyAV deinterlace failed (%s), "
+                        "falling back to OpenCV path.",
+                        str(e),
+                    )
         if frame_recovery:
             num_frames_to_sample = len(frame_idx)
             frames, valid_frame_indices, recovered_map = cls._read_frames_with_recovery(
@@ -431,6 +577,7 @@ class OpenCVVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             frame_idx,
             total_frames_num=source.total_frames_num,
             frame_recovery=frame_recovery,
+            data=data,
         )
 
         metadata = cls.create_hf_metadata(
@@ -537,6 +684,7 @@ class OpenCVDynamicVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             frame_indices_list,
             total_frames_num=source.total_frames_num,
             frame_recovery=frame_recovery,
+            data=data,
         )
 
         metadata = cls.create_hf_metadata(
@@ -803,6 +951,7 @@ class Molmo2VideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             frame_idx,
             total_frames_num=source.total_frames_num,
             frame_recovery=frame_recovery,
+            data=data,
         )
 
         metadata = cls.create_hf_metadata(
@@ -950,6 +1099,7 @@ class OpenCVDynamicOpenPanguVideoBackend(VideoLoader, OpenCVVideoBackendMixin):
             frame_indices_list,
             total_frames_num=source.total_frames_num,
             frame_recovery=frame_recovery,
+            data=data,
         )
 
         # Use transformers.video_utils.VideoMetadata format
