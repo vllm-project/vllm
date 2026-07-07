@@ -449,6 +449,12 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
         super().__init__(base_layer)
         # There are three LoRA layer.
         self.n_slices = len(self.base_layer.output_sizes)
+        # The transformers-model QKV fuser sets `split_sizes` on the base
+        # QKVParallelLinear and its rewritten forward reads it from the
+        # submodule attribute. Preserve it on the wrapper so
+        # `self.qkv_proj.split_sizes` continues to resolve after LoRA wrapping.
+        if hasattr(base_layer, "split_sizes"):
+            self.split_sizes = base_layer.split_sizes
 
         self.q_proj_shard_size = self.base_layer.num_heads * self.base_layer.head_size
         self.kv_proj_shard_size = (

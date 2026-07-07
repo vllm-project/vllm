@@ -55,6 +55,7 @@ def test_ilama_lora(ilama_lora_files):
         max_lora_rank=16,
         trust_remote_code=True,
         enable_chunked_prefill=True,
+        enforce_eager=True,
     )
 
     output1 = do_sample(llm, ilama_lora_files, lora_id=1)
