@@ -94,15 +94,8 @@ class NixlBaseConnectorWorker:
         block_size_ratio: float | None,
         physical_blocks_per_logical: int,
     ) -> np.ndarray:
-        """Compute NIXL descriptor IDs for given block IDs.
-
-        ``dst_num_blocks`` is the per-region block count on the target side
-        (remote for remote descs, local for local descs). When ``block_size_ratio``
-        is set, it scales the local count to match the remote descriptor layout.
-        All FA regions share the same count (under HMA the shared tensor uses
-        the global ratio; without HMA there is only one group), so the layout
-        is rectangular: ``region_id * num_blocks + block_id``.
-        """
+        """Compute NIXL descriptor IDs for given block IDs."""
+        num_fa_regions = self.num_regions
         num_ssm_regions = 0
         if self._has_mamba:
             assert self._conv_decomp is not None
@@ -111,13 +104,10 @@ class NixlBaseConnectorWorker:
             ssm_regions_per_layer = len(self._conv_decomp.local_conv_offsets) + 1
             num_ssm_regions = len(self.block_len_per_layer) * ssm_regions_per_layer
 
-        # Per-region num_blocks on the target side. All FA regions share the
-        # same count, so we use a uniform scalar stride (matching the original
-        # rectangular layout). block_size_ratio scales local→remote when the
-        # two sides have different block sizes (heterogeneous TP).
-        ratio = 1 if block_size_ratio is None else int(block_size_ratio)
-        nblk_per_region = dst_num_blocks * ratio
-        region_bases = np.arange(self.num_regions) * nblk_per_region
+        num_blocks = dst_num_blocks
+        if block_size_ratio is not None:
+            num_blocks = int(num_blocks * block_size_ratio)
+        num_fa_descs = num_fa_regions * num_blocks
 
         # All-attention fast path: single vectorized broadcast.
         if num_ssm_regions == 0:
@@ -128,18 +118,21 @@ class NixlBaseConnectorWorker:
             # always differ (different areas). Therefore we can just flatten the
             # block_ids and compute the descs ids for all groups at once.
             block_arr = np.concatenate(block_ids)[None, :]
-            return (region_bases[:, None] + block_arr).flatten()
+            region_ids = np.arange(num_fa_regions)[:, None]
+            return (region_ids * num_blocks + block_arr).flatten()
 
         # Compute desc ids per group using the right stride: FA descs have
         # num_blocks entries per region (kernel granularity), SSM descs have
         # logical_blocks entries per region (no kernel splitting).
-        num_fa_descs = self.num_regions * nblk_per_region
-        logical_blocks = (dst_num_blocks * ratio) // physical_blocks_per_logical
+        logical_blocks = num_blocks // physical_blocks_per_logical
         all_descs: list[np.ndarray] = []
         for i, group in enumerate(block_ids):
             group_arr = np.asarray(group)
             if _is_attention_spec(self._group_spec_types[i]):
-                all_descs.append((region_bases[:, None] + group_arr[None, :]).flatten())
+                fa_region_ids = np.arange(num_fa_regions)[:, None]
+                all_descs.append(
+                    (fa_region_ids * num_blocks + group_arr[None, :]).flatten()
+                )
             elif _is_ssm_spec(self._group_spec_types[i]):
                 # NOTE (NickLucche) SSM and Attention block regions can
                 # be exchanged arbitrarily by manager.  Therefore, descs
@@ -351,9 +344,6 @@ class NixlBaseConnectorWorker:
         self.tp_rank = get_tensor_model_parallel_rank()
         self.world_size = get_tensor_model_parallel_world_size()
 
-        # Logical block count from the scheduler; scaled by the physical ratio in
-        # ``_sync_block_size_with_kernel``. Per-region counts live in
-        # ``_num_blocks_per_physical_region``.
         self.num_blocks = kv_cache_config.num_blocks
         self.enable_permute_local_kv = False
         self.enable_heterogeneous_attn_post_process = False
@@ -497,12 +487,6 @@ class NixlBaseConnectorWorker:
         self.consumer_notification_counts_by_req = defaultdict[ReqId, int](int)
         self.xfer_stats = NixlKVConnectorStats()
 
-        # Physical blocks per logical block (common denominator across all
-        # attention backends). Under HMA the shared tensor is allocated at this
-        # granularity, so it is the correct ratio for every attention group.
-        # Without HMA there is only one group, so the global ratio is still
-        # correct. Mamba specs have no kernel block constraint (ratio 1) and
-        # are special-cased at call sites.
         self._physical_blocks_per_logical_kv_block = 1
         self._sync_block_size_with_kernel()
 
@@ -545,7 +529,6 @@ class NixlBaseConnectorWorker:
                 self.block_size // kernel_block_size
             )
             self.block_size = kernel_block_size
-            # *Global* physical number of blocks (logical * ratio) across all backends
             self.num_blocks *= self._physical_blocks_per_logical_kv_block
 
     def _nixl_handshake(
@@ -1021,8 +1004,6 @@ class NixlBaseConnectorWorker:
         # to better exploit the memory layout (ie num_blocks is the first dim).
         tensor_size_bytes = None
         # Per-region num_blocks, 1:1 with block_len_per_layer / _region_is_mla.
-        # Different attention groups may have different kernel block size
-        # constraints, so their physical num_blocks can differ.
         num_blocks_per_region: list[int] = []
 
         for layer_name, cache_or_caches in xfer_buffers.items():
@@ -1030,6 +1011,7 @@ class NixlBaseConnectorWorker:
             # that of FI, with block laid out as in `get_backend_aware_kv_block_len`.
             # However, physical page_size may differ when kernel requires a specific
             # block size. This leads to SSM and FA layers having different num_blocks.
+            # `_physical_blocks_per_logical_kv_block` ratio is used to adjust for this.
             layer_spec = self._layer_specs.get(layer_name)
             if layer_spec is None:
                 logger.debug(
@@ -1044,18 +1026,14 @@ class NixlBaseConnectorWorker:
             cache_list = self.transfer_topo.get_transfer_cache_regions(
                 cache_or_caches, layer_spec
             )
-            # Physical blocks per logical block. Under HMA all attention groups share
-            # a tensor at the global kernel block granularity, so the global ratio
-            # applies to all of them. Without HMA there is only one group. Mamba has
-            # no kernel block constraint, so its ratio is always 1.
-            r = (
-                1
-                if isinstance(layer_spec, MambaSpec)
-                else self._physical_blocks_per_logical_kv_block
-            )
             # `layer_spec.page_size_bytes` only accounts for logical page_size, that is
             # the page_size assuming constant `self._logical_num_blocks`.
-            physical_page_size = layer_spec.page_size_bytes // r
+            physical_page_size = (
+                layer_spec.page_size_bytes
+                if isinstance(layer_spec, MambaSpec)
+                else layer_spec.page_size_bytes
+                // self._physical_blocks_per_logical_kv_block
+            )
             # For when registering multiple tensors eg K/V in separate regions.
             physical_page_size = physical_page_size // len(cache_list)
             if self.transfer_topo._cross_layers_blocks:
@@ -1063,7 +1041,11 @@ class NixlBaseConnectorWorker:
                 physical_page_size = physical_page_size * len(
                     self.kv_cache_config.kv_cache_tensors
                 )
-            num_blocks = self._logical_num_blocks * r
+            num_blocks = (
+                self._logical_num_blocks
+                if isinstance(layer_spec, MambaSpec)
+                else self.num_blocks
+            )
             # `page_size` accounts for physical blocks, st KVCache is always
             # [`num_blocks` * `page_size`]
             curr_tensor_size_bytes = num_blocks * physical_page_size
@@ -1083,8 +1065,7 @@ class NixlBaseConnectorWorker:
                     "Registering layer %s with cache shape: %s", layer_name, cache.shape
                 )
                 seen_base_addresses.append(base_addr)
-                # Mamba blocks span `ratio` physical blocks in the shared tensor,
-                # so the per-block stride is the physical page size divided by ratio.
+                # Only record non-Mamba page sizes.
                 if isinstance(layer_spec, MambaSpec):
                     self.block_len_per_layer.append(
                         physical_page_size // self._physical_blocks_per_logical_kv_block
@@ -1140,7 +1121,6 @@ class NixlBaseConnectorWorker:
         self.kv_caches_base_addr[self.engine_id][self.tp_rank] = seen_base_addresses
         self.num_regions = len(caches_data)
 
-        # Pre-V-split per-region num_blocks, 1:1 with block_len_per_layer.
         self._num_blocks_per_physical_region = num_blocks_per_region
 
         if self.transfer_topo.virtually_split_kv_in_blocks:
@@ -1237,12 +1217,15 @@ class NixlBaseConnectorWorker:
         conv_offsets = self._conv_decomp.local_conv_offsets
         conv_size, ssm_size = self._mamba_ssm_size
         num_blocks = self._logical_num_blocks * block_size_ratio
+        physical_per_logical = self._physical_blocks_per_logical_kv_block
 
         result: list[tuple[int, int, int]] = []
         for i, base_addr in enumerate(base_addresses):
-            # block_len_per_layer[i] already accounts for the per-layer ratio
-            # (1 for Mamba), so page_stride is just block_len_per_layer[i].
-            page_stride = self.block_len_per_layer[i] // block_size_ratio
+            # Jump one page_size, but ssm page_size may be bigger when kernel
+            # locks block size to a specific value (physical_per_logical scale).
+            page_stride = (
+                self.block_len_per_layer[i] // block_size_ratio * physical_per_logical
+            )
             for off, sz in conv_offsets:
                 for blk in range(num_blocks):
                     result.append(
@@ -1282,7 +1265,6 @@ class NixlBaseConnectorWorker:
             ssm_read_size = nixl_agent_meta.ssm_sizes[1]
 
         remote_physical_per_logical = transfer_info.remote_physical_blocks_per_logical
-        # Mamba's per-region ratio is always 1, use remote's logical num_blocks directly
         num_blocks = nixl_agent_meta.num_blocks // remote_physical_per_logical
         device_id = nixl_agent_meta.device_id
 
@@ -1290,7 +1272,7 @@ class NixlBaseConnectorWorker:
         # NOTE (ZhanqiuHu): use per-layer block_lens[i], not [0], in case
         # block lengths vary across layers (e.g. MLA).
         for i, base_addr in enumerate(nixl_agent_meta.kv_caches_base_addr):
-            page_stride = nixl_agent_meta.block_lens[i]
+            page_stride = nixl_agent_meta.block_lens[i] * remote_physical_per_logical
             for off, sz in conv_offsets:
                 for blk in range(num_blocks):
                     result.append((base_addr + blk * page_stride + off, sz, device_id))
@@ -2179,11 +2161,17 @@ class NixlBaseConnectorWorker:
         if self._physical_blocks_per_logical_kv_block == 1:
             # Noop when physical and logical block sizes are the same
             return block_ids
-        r = self._physical_blocks_per_logical_kv_block
-        block_arange = np.arange(0, r).reshape(1, -1)
+        block_arange = np.arange(0, self._physical_blocks_per_logical_kv_block).reshape(
+            1, -1
+        )
+        # Mamba blocks have no logical<>physical discrepancy
         group_specs = self.kv_cache_config.kv_cache_groups
         return [
-            BlockTable.map_to_kernel_blocks(np.array(group), r, block_arange).tolist()
+            BlockTable.map_to_kernel_blocks(
+                np.array(group),
+                self._physical_blocks_per_logical_kv_block,
+                block_arange,
+            ).tolist()
             if not isinstance(group_specs[i].kv_cache_spec, MambaSpec)
             else group
             for i, group in enumerate(block_ids)
