@@ -135,6 +135,16 @@ class OnlineDerenderer:
                     if tool_calls
                     else []
                 )
+                auto_tools_called = (
+                    bool(tc_items)
+                    and bool(chat_request.tools)
+                    and (
+                        chat_request.tool_choice == "auto"
+                        or chat_request.tool_choice is None
+                    )
+                    and self.enable_auto_tools
+                )
+                is_required_tool_choice = chat_request.tool_choice == "required"
 
                 message = ChatMessage(
                     role="assistant",
@@ -142,19 +152,30 @@ class OnlineDerenderer:
                     content=content,
                     tool_calls=tc_items,
                 )
+                finish_reason = (
+                    "tool_calls"
+                    if auto_tools_called
+                    or (
+                        is_required_tool_choice
+                        and bool(tc_items)
+                        and choice.finish_reason == "stop"
+                    )
+                    else choice.finish_reason
+                )
             else:
                 # No parser: plain detokenization.
                 decoded_text = tokenizer.decode(
                     choice.token_ids, skip_special_tokens=True
                 )
                 message = ChatMessage(role="assistant", content=decoded_text)
+                finish_reason = choice.finish_reason
 
             choices.append(
                 ChatCompletionResponseChoice(
                     index=choice.index,
                     message=message,
                     logprobs=resolved_logprobs,
-                    finish_reason=choice.finish_reason,
+                    finish_reason=finish_reason,
                 )
             )
 
