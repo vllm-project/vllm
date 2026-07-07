@@ -5,7 +5,6 @@ import asyncio
 from collections.abc import (
     AsyncGenerator,
     Callable,
-    Iterable,
     Mapping,
     MutableSequence,
     Sequence,
