@@ -36,7 +36,6 @@ from vllm.config import (
     set_current_vllm_config,
     update_config,
 )
-from vllm.config.cache import CacheConfig
 from vllm.distributed.ec_transfer import get_ec_transfer, has_ec_transfer
 from vllm.distributed.eplb.eplb_state import EplbState
 from vllm.distributed.kv_transfer import get_kv_transfer_group, has_kv_transfer_group
@@ -666,51 +665,26 @@ class GPUModelRunner(
         self.num_prompt_logprobs: dict[str, int] = {}
 
         # Input Batch
-        # NOTE(Chen): Ideally, we should initialize the input batch inside
-        # `initialize_kv_cache` based on the kv cache config. However, as in
-        # https://github.com/vllm-project/vllm/pull/18298, due to some unknown
-        # reasons, we have to initialize the input batch before `load_model`,
-        # quantization + weight offloading will fail otherwise. As a temporary
-        # solution, we initialize the input batch here, and re-initialize it
-        # in `initialize_kv_cache` if the block_sizes here is different from
-        # the block_sizes in the kv cache config.
         logits_processors = model_config.logits_processors
         custom_logitsprocs: Sequence[str | type[LogitsProcessor]] = (
             tuple(logits_processors) if logits_processors is not None else ()
         )
-        placeholder_block_size = (
-            self.cache_config.block_size or CacheConfig.DEFAULT_BLOCK_SIZE
+        self._logitsprocs = build_logitsprocs(
+            self.vllm_config,
+            self.device,
+            PIN_MEMORY,
+            self.is_pooling_model,
+            custom_logitsprocs,
         )
-        self._init_block_sizes = [placeholder_block_size]
-        self._init_kernel_block_sizes = [placeholder_block_size]
-        self.input_batch = InputBatch(
-            max_num_reqs=self.max_num_reqs,
-            # We need to use the encoder length for encoder-decoder
-            # because of KV cache for cross-attention.
-            max_model_len=max(self.max_model_len, self.max_encoder_len),
-            max_num_batched_tokens=self.max_num_tokens,
-            device=self.device,
-            vocab_size=self.model_config.get_vocab_size(),
-            block_sizes=[placeholder_block_size],
-            kernel_block_sizes=[placeholder_block_size],
-            num_spec_tokens=self.num_spec_tokens,
-            logitsprocs=build_logitsprocs(
-                self.vllm_config,
-                self.device,
-                PIN_MEMORY,
-                self.is_pooling_model,
-                custom_logitsprocs,
-            ),
-            # We currently don't know whether a particular custom logits processor
-            # uses output token ids so we set this conservatively.
-            # ThinkingTokenBudgetLogitsProcessor also needs output token ids to
-            # correctly track think start/end token sequences in async scheduling.
-            logitsprocs_need_output_token_ids=bool(custom_logitsprocs)
-            or self.vllm_config.reasoning_config is not None,
-            is_pooling_model=self.is_pooling_model,
-            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
-            reasoning_config=self.vllm_config.reasoning_config,
+        # We currently don't know whether a particular custom logits processor
+        # uses output token ids so we set this conservatively.
+        # ThinkingTokenBudgetLogitsProcessor also needs output token ids to
+        # correctly track think start/end token sequences in async scheduling.
+        self._logitsprocs_need_output_token_ids = (
+            bool(custom_logitsprocs) or self.vllm_config.reasoning_config is not None
         )
+        # Initialized in initialize_kv_cache.
+        self.input_batch: InputBatch
 
         # Separate cuda stream for overlapping transfer of sampled token ids from
         # GPU to CPU when async scheduling is enabled.
@@ -7014,20 +6988,10 @@ class GPUModelRunner(
             return
         self.reorder_batch_threshold = reduce(min_none_high, reorder_batch_thresholds)  # type: ignore[assignment]
 
-    def may_reinitialize_input_batch(
+    def initialize_input_batch(
         self, kv_cache_config: KVCacheConfig, kernel_block_sizes: list[int]
     ) -> None:
-        """
-        Re-initialize the input batch if the block sizes are different from
-        what it was originally created with. This happens when the final
-        block size (determined after model loading) differs from the
-        placeholder used during __init__, or when there are multiple
-        KV cache groups.
-
-        Args:
-            kv_cache_config: The KV cache configuration.
-            kernel_block_sizes: The kernel block sizes for each KV cache group.
-        """
+        """Initialize the input batch based on the final KV cache configuration."""
         block_sizes = []
         max_num_blocks = []
         max_model_len = max(self.max_model_len, self.max_encoder_len)
@@ -7047,35 +7011,21 @@ class GPUModelRunner(
                 ) + kv_cache_group.kv_cache_spec.num_speculative_blocks
             max_num_blocks.append(max_num_blocks_per_req)
 
-        if (
-            block_sizes != self._init_block_sizes
-            or kernel_block_sizes != self._init_kernel_block_sizes
-        ):
-            self._init_block_sizes = block_sizes
-            self._init_kernel_block_sizes = kernel_block_sizes
-            self.input_batch = InputBatch(
-                max_num_reqs=self.max_num_reqs,
-                max_model_len=max_model_len,
-                max_num_batched_tokens=self.max_num_tokens,
-                device=self.device,
-                vocab_size=self.model_config.get_vocab_size(),
-                block_sizes=block_sizes,
-                kernel_block_sizes=kernel_block_sizes,
-                max_num_blocks_per_req=max_num_blocks,
-                num_spec_tokens=self.num_spec_tokens,
-                logitsprocs=self.input_batch.logitsprocs,
-                logitsprocs_need_output_token_ids=self.input_batch.logitsprocs_need_output_token_ids,
-                is_pooling_model=self.is_pooling_model,
-                reasoning_config=self.vllm_config.reasoning_config,
-            )
-
-        assert self._init_block_sizes == block_sizes, (
-            f"InputBatch block_sizes {self._init_block_sizes} != "
-            f"kv_cache block_sizes {block_sizes}"
-        )
-        assert self._init_kernel_block_sizes == kernel_block_sizes, (
-            f"InputBatch kernel_block_sizes {self._init_kernel_block_sizes} "
-            f"!= kv_cache kernel_block_sizes {kernel_block_sizes}"
+        self.input_batch = InputBatch(
+            max_num_reqs=self.max_num_reqs,
+            max_model_len=max_model_len,
+            max_num_batched_tokens=self.max_num_tokens,
+            device=self.device,
+            vocab_size=self.model_config.get_vocab_size(),
+            block_sizes=block_sizes,
+            kernel_block_sizes=kernel_block_sizes,
+            max_num_blocks_per_req=max_num_blocks,
+            num_spec_tokens=self.num_spec_tokens,
+            logitsprocs=self._logitsprocs,
+            logitsprocs_need_output_token_ids=self._logitsprocs_need_output_token_ids,
+            is_pooling_model=self.is_pooling_model,
+            cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
+            reasoning_config=self.vllm_config.reasoning_config,
         )
 
     def _allocate_kv_cache_tensors(
@@ -7435,8 +7385,7 @@ class GPUModelRunner(
         # create metadata builders
         self.initialize_metadata_builders(kv_cache_config, kernel_block_sizes)
 
-        # Reinitialize need to after initialize_attn_backend
-        self.may_reinitialize_input_batch(kv_cache_config, kernel_block_sizes)
+        self.initialize_input_batch(kv_cache_config, kernel_block_sizes)
         kv_caches = self.initialize_kv_cache_tensors(
             kv_cache_config, kernel_block_sizes
         )
