@@ -127,15 +127,14 @@ class QKVFuser(StackedFuser):
         if len({id(block) for block, _ in blocks}) != 1:
             raise ValueError("projection calls are in different blocks")
 
-        # q(x), k(x), v(x) -> q, k, v = qkv(x).split(self.qkv.split_sizes, -1)
+        # q(x), k(x), v(x) -> q, k, v = qkv(x).split(self.qkv.output_sizes, -1)
         names = {node.id for node in ast.walk(funcdef) if isinstance(node, ast.Name)}
         temps = [f"{name}_fused" for name in (self.q_name, self.k_name, self.v_name)]
         if names & set(temps):
             raise ValueError("fused temporaries would shadow existing names")
         merged = f"self.{self.merged_name}"
-        template = (
-            f"{', '.join(temps)} = {merged}(__arg__).split({merged}.split_sizes, -1)"
-        )
+        sections = f"[s // {merged}.tp_size for s in {merged}.output_sizes]"
+        template = f"{', '.join(temps)} = {merged}(__arg__).split({sections}, -1)"
         assign = ast.parse(template).body[0]
         arg = next(
             node
@@ -198,13 +197,6 @@ class QKVFuser(StackedFuser):
             self.merged_name,
             merged,
         )
-        # The rewritten forward splits the merged projection into this rank's
-        # shard sizes (see `update_forward`)
-        merged.split_sizes = [
-            merged.num_heads * merged.head_size,
-            merged.num_kv_heads * merged.head_size,
-            merged.num_kv_heads * merged.v_head_size,
-        ]
         setattr(module, self.merged_name, merged)
         # Drop the consumed submodules so their (meta) params are not expected.
         for name in (self.q_name, self.k_name, self.v_name):
