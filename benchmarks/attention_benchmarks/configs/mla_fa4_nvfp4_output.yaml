@@ -39,7 +39,7 @@ decode_backends:
 # the NVFP4 global scale.
 fp8_output_scale: 500.0
 fuse_quant_op: [false, true]
-fp8_output_nvfp4: true
+nvfp4_output: true
 
 device: "cuda:0"
 repeats: 50

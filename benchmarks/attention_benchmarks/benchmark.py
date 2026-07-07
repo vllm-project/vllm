@@ -516,7 +516,7 @@ def main():
         "comparison instead of per-tensor static.",
     )
     parser.add_argument(
-        "--fp8-output-nvfp4",
+        "--nvfp4-output",
         action="store_true",
         help="Use NVFP4 (packed e2m1 + swizzled e4m3 block scales) for the "
         "quant-output comparison; --fp8-output-scale is the global scale.",
@@ -661,8 +661,8 @@ def main():
             args.fuse_quant_op = yaml_config.get("fuse_quant_op", None)
         if not args.fp8_output_pergroup:
             args.fp8_output_pergroup = yaml_config.get("fp8_output_pergroup", False)
-        if not args.fp8_output_nvfp4:
-            args.fp8_output_nvfp4 = yaml_config.get("fp8_output_nvfp4", False)
+        if not args.nvfp4_output:
+            args.nvfp4_output = yaml_config.get("nvfp4_output", False)
 
         # Check for special modes
         args.mode = yaml_config.get("mode", None)
@@ -840,7 +840,7 @@ def main():
         decode_backend = backends[0]
         fuse_variants = args.fuse_quant_op or [False, True]
         pergroup = getattr(args, "fp8_output_pergroup", False)
-        nvfp4 = getattr(args, "fp8_output_nvfp4", False)
+        nvfp4 = getattr(args, "nvfp4_output", False)
         label_of = {False: "post_quant", True: "fused"}
         quant_label = "nvfp4" if nvfp4 else "per-group" if pergroup else "static"
         console.print(
