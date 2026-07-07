@@ -3,6 +3,7 @@
 
 import logging
 from collections.abc import Callable
+from importlib.metadata import entry_points
 from typing import TYPE_CHECKING, Any
 
 import vllm.envs as envs
@@ -35,8 +36,6 @@ plugins_loaded = False
 
 def load_plugins_by_group(group: str) -> dict[str, Callable[[], Any]]:
     """Load plugins registered under the given entry point group."""
-    from importlib.metadata import entry_points
-
     allowed_plugins = envs.VLLM_PLUGINS
 
     discovered_plugins = entry_points(group=group)
@@ -116,8 +115,6 @@ def load_endpoint_plugins(
     Returns:
         Instantiated plugins that passed gating in discovery order.
     """
-    from importlib.metadata import entry_points
-
     if envs.VLLM_PLUGINS is None:
         discovered = entry_points(group=ENDPOINT_PLUGINS_GROUP)
         if discovered:
