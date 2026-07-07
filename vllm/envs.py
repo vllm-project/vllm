@@ -79,6 +79,7 @@ if TYPE_CHECKING:
     VLLM_MAX_AUDIO_CLIP_FILESIZE_MB: int = 25
     VLLM_MAX_AUDIO_DECODE_DURATION_S: int = 600
     VLLM_MAX_AUDIO_PREPROCESS_WORKERS: int = max(1, min(os.cpu_count() or 1, 2))
+    VLLM_MAX_IMAGE_PIXELS: int = 178_956_970
     VLLM_VIDEO_LOADER_BACKEND: str = "opencv"
     VLLM_MEDIA_CONNECTOR: str = "http"
     VLLM_MM_HASHER_ALGORITHM: str = "blake3"
@@ -87,6 +88,7 @@ if TYPE_CHECKING:
     VLLM_FLOAT32_MATMUL_PRECISION: Literal["highest", "high", "medium"] = "highest"
     VLLM_BATCH_INVARIANT: bool = False
     VLLM_TRITON_ATTN_USE_TD: bool | None = None
+    VLLM_GPU_SYNC_CHECK: Literal["warn", "error"] | None = None
     MAX_JOBS: str | None = None
     NVCC_THREADS: str | None = None
     VLLM_USE_PRECOMPILED: bool = False
@@ -117,6 +119,7 @@ if TYPE_CHECKING:
     VLLM_USE_OINK_OPS: bool = False
     VLLM_MXFP8_EMULATION_DEQUANT_AT_LOAD: bool = True
     VLLM_ROCM_USE_AITER: bool = False
+    VLLM_ROCM_USE_AITER_CUSTOM_AR: bool = True
     VLLM_ROCM_USE_AITER_PAGED_ATTN: bool = False
     VLLM_ROCM_USE_AITER_LINEAR: bool = True
     VLLM_ROCM_USE_AITER_LINEAR_HIPBMM: bool = False
@@ -584,6 +587,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     "VLLM_TRITON_ATTN_USE_TD": lambda: {"1": True, "0": False}.get(
         os.getenv("VLLM_TRITON_ATTN_USE_TD", "").strip()
     ),
+    # If set, enable PyTorch's GPU<->CPU synchronization debug mode around
+    # the worker's `execute_model` and `sample_tokens` calls. Valid values
+    # are "warn" (print a warning on each sync) or "error" (raise on sync).
+    # Unset disables the check. See `torch.cuda.set_sync_debug_mode`.
+    "VLLM_GPU_SYNC_CHECK": env_with_choices(
+        "VLLM_GPU_SYNC_CHECK", None, ["warn", "error"]
+    ),
     # Maximum number of compilation jobs to run in parallel.
     # By default this is the number of CPUs
     "MAX_JOBS": lambda: os.getenv("MAX_JOBS", None),
@@ -946,6 +956,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
             str(max(1, min(os.cpu_count() or 1, 2))),
         )
     ),
+    # Maximum decoded image size in pixels.  Small compressed images can
+    # expand into gigabytes of raster memory.  This limit is enforced before
+    # decoding so the memory is never allocated.  Default matches PIL's
+    # built-in 2x decompression-bomb threshold (~179M pixels, ~680 MB RGB).
+    "VLLM_MAX_IMAGE_PIXELS": lambda: int(
+        os.getenv("VLLM_MAX_IMAGE_PIXELS", "178956970")
+    ),
     # Backend for Video IO — selects the frame-sampling algorithm.
     # - "opencv": uniform sampling.
     # - "opencv_dynamic": duration-aware dynamic sampling.
@@ -1129,6 +1146,11 @@ environment_variables: dict[str, Callable[[], Any]] = {
     ),
     "VLLM_ROCM_USE_AITER": lambda: (
         os.getenv("VLLM_ROCM_USE_AITER", "False").lower() in ("true", "1")
+    ),
+    # Use AITER's CustomAllreduce as the custom-allreduce backend inside vLLM's
+    # CudaCommunicator on ROCm.
+    "VLLM_ROCM_USE_AITER_CUSTOM_AR": lambda: (
+        os.getenv("VLLM_ROCM_USE_AITER_CUSTOM_AR", "True").lower() in ("true", "1")
     ),
     # Whether to use aiter paged attention.
     # By default is disabled.
@@ -2075,6 +2097,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_MAX_AUDIO_CLIP_FILESIZE_MB",
         "VLLM_MAX_AUDIO_DECODE_DURATION_S",
         "VLLM_MAX_AUDIO_PREPROCESS_WORKERS",
+        "VLLM_MAX_IMAGE_PIXELS",
         "VLLM_VIDEO_LOADER_BACKEND",
         "VLLM_MEDIA_CONNECTOR",
         "VLLM_OBJECT_STORAGE_SHM_BUFFER_NAME",

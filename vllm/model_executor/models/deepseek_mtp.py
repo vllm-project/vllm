@@ -169,6 +169,21 @@ class DeepSeekMultiTokenPredictor(nn.Module):
                     if mla_attn is not None and hasattr(mla_attn, "skip_topk"):
                         mla_attn.skip_topk = skip
 
+    def compact_topk_indices(self, slot_ids: torch.Tensor):
+        """Gather the top-k index rows at ``slot_ids`` to the front of the buffer."""
+        num_slots = slot_ids.numel()
+        for layer in self.layers.values():
+            mtp_block = getattr(layer, "mtp_block", None)
+            if mtp_block is not None:
+                self_attn = getattr(mtp_block, "self_attn", None)
+                if self_attn is not None:
+                    mla_attn = getattr(self_attn, "mla_attn", None)
+                    if mla_attn is not None and hasattr(
+                        mla_attn, "topk_indices_buffer"
+                    ):
+                        topk_indices_buffer = mla_attn.topk_indices_buffer
+                        topk_indices_buffer[:num_slots] = topk_indices_buffer[slot_ids]
+
     def embed_input_ids(self, input_ids: torch.Tensor) -> torch.Tensor:
         return self.embed_tokens(input_ids)
 
@@ -217,7 +232,6 @@ class DeepSeekMTP(nn.Module, DeepseekV2MixtureOfExperts):
         self.set_moe_parameters()
 
     def set_moe_parameters(self):
-        self.expert_weights = []
         self.num_moe_layers = self.config.num_nextn_predict_layers
         self.num_expert_groups = self.config.n_group
 

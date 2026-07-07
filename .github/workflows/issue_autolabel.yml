@@ -327,7 +327,7 @@ jobs:
                 message: 'CC {users} for ROCm-related issue',
               },
               mistral: {
-                users: ['patrickvonplaten', 'juliendenize', 'andylolu2'],
+                users: ['patrickvonplaten', 'juliendenize', 'andylolu2', 'NickLucche'],
                 message: 'CC {users} for Mistral-related issue',
               },
               // Add more label -> user mappings here

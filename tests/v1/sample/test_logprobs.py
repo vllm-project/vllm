@@ -85,6 +85,7 @@ def _model_config(vocab_size: int = 10):
     return SimpleNamespace(
         max_logprobs=20,
         logits_processors=None,
+        is_diffusion=False,
         get_vocab_size=lambda: vocab_size,
     )
 
@@ -1285,7 +1286,7 @@ def test_token_logprobs_large_batch_int64_row_offset():
     batch_size = 2**31 // vocab_size + 64  # batch_size * vocab_size > 2**31
     # logits (the large input) plus small logprob/rank outputs; ~1 GB headroom.
     required_bytes = batch_size * vocab_size * 4 + (1 << 30)
-    if torch.cuda.mem_get_info()[0] < required_bytes:
+    if torch.accelerator.get_memory_info()[0] < required_bytes:
         pytest.skip(f"needs ~{required_bytes / 1e9:.0f} GB of free GPU memory")
 
     logits = torch.randn(batch_size, vocab_size, device=device, dtype=torch.float32)
