@@ -349,31 +349,46 @@ class Scheduler(SchedulerInterface):
             + num_new_local_computed_tokens
             + num_external_computed_tokens
         )
+
+        # Apply block-aligned splitting during prefill. In mamba_cache_mode="align",
+        # a cached Mamba block at position p represents the recurrent state after
+        # exactly (p + 1) * block_size tokens. Therefore every non-final prefill
+        # chunk must end on a Mamba block boundary; otherwise the block hash would
+        # describe a different token offset than the state stored in the block.
+        #
+        # The final prefill chunk may end unaligned because that tail is not reused
+        # as a boundary state for prefix-cache hits.
         prefill_end = max(request.num_prompt_tokens, request.num_tokens - 1)
         if num_computed_tokens < prefill_end:
             block_size = self.cache_config.block_size
+
+            # Last boundary that may be cached/reused for this request. With EAGLE,
+            # full-attention cache lookup can drop the last matched block, so keep
+            # the Mamba reusable boundary one block earlier to preserve alignment
+            # between full-attention KV blocks and Mamba/GDN state blocks.
             last_cache_position = round_down(request.num_tokens, block_size)
-            # eagle prune
             if self.use_eagle:
                 last_cache_position = max(last_cache_position - block_size, 0)
-            
+
             chunk_end = num_computed_tokens + num_new_tokens
 
-            # Marconi cache admission optimization:
-            # cache common prefixes by scheduling num_new_tokens = common prefix length
+            # Marconi cache admission optimization: stop at the uncached common
+            # prefix so requests can share it. Apply this as an end-position cap
+            # before block alignment, the optimization cannot reintroduce an
+            # unaligned intermediate Mamba state.
             if (
                 num_uncached_common_prefix_tokens >= block_size
                 and num_new_tokens > num_uncached_common_prefix_tokens
             ):
                 chunk_end = num_computed_tokens + num_uncached_common_prefix_tokens
-            
+
             if num_computed_tokens < last_cache_position:
                 chunk_end = min(round_down(chunk_end, block_size), last_cache_position)
             elif chunk_end < prefill_end:
                 chunk_end = round_down(chunk_end, block_size)
-            
+
             num_new_tokens = max(chunk_end - num_computed_tokens, 0)
-            
+
         return num_new_tokens
 
     def schedule(self, throttle_prefills: bool = False) -> SchedulerOutput:
