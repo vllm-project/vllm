@@ -34,15 +34,6 @@
     "INSTALL_KV_CONNECTORS": {
       "default": "false"
     },
-    "TORCH_CUDA_ARCH_LIST": {
-      "default": "7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0+PTX"
-    },
-    "MAX_JOBS": {
-      "default": "2"
-    },
-    "NVCC_THREADS": {
-      "default": "8"
-    },
     "SCCACHE_BUCKET_NAME": {
       "default": "vllm-build-sccache"
     },
@@ -51,6 +42,15 @@
     },
     "SCCACHE_S3_NO_CREDENTIALS": {
       "default": "0"
+    },
+    "TORCH_CUDA_ARCH_LIST": {
+      "default": "7.5 8.0 8.6 8.9 9.0 10.0 11.0 12.0"
+    },
+    "MAX_JOBS": {
+      "default": "2"
+    },
+    "NVCC_THREADS": {
+      "default": "8"
     },
     "vllm_target_device": {
       "default": "cuda"
@@ -68,7 +68,7 @@
       "default": "true"
     },
     "FLASHINFER_VERSION": {
-      "default": "0.6.8.post1"
+      "default": "0.6.13"
     },
     "GDRCOPY_CUDA_VERSION": {
       "default": "12.8"

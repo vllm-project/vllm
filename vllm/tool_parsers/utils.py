@@ -3,12 +3,16 @@
 
 import ast
 import json
+import math
+import warnings
+from dataclasses import dataclass
 from json import JSONDecodeError, JSONDecoder
 from typing import Any, TypeAlias
 
 import partial_json_parser
 from openai.types.responses import (
     FunctionTool,
+    NamespaceTool,
     ToolChoiceFunction,
 )
 from openai.types.responses.tool import Tool as ResponsesTool
@@ -29,6 +33,12 @@ from vllm.logger import init_logger
 Tool: TypeAlias = ChatCompletionToolsParam | ResponsesTool
 
 logger = init_logger(__name__)
+
+
+def safe_literal_eval(text: str):
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        return ast.literal_eval(text)
 
 
 def partial_tag_overlap(text: str, tag: str) -> int:
@@ -138,10 +148,113 @@ def is_complete_json(input_str: str) -> bool:
         return False
 
 
+def _is_json_finite(obj: Any) -> bool:
+    """Whether *obj* can be serialized to valid JSON.
+
+    ``json.dumps(..., allow_nan=False)`` raises ``ValueError`` on any
+    non-finite float (``inf``/``-inf``/``nan``) anywhere in the value, so this
+    detects non-finite floats nested inside parsed lists/dicts too.
+    """
+    try:
+        json.dumps(obj, allow_nan=False)
+        return True
+    except (ValueError, TypeError):
+        return False
+
+
 def consume_space(i: int, s: str) -> int:
     while i < len(s) and s[i].isspace():
         i += 1
     return i
+
+
+_NAMESPACE_TOOL_SEPARATOR = "__"
+
+
+@dataclass(frozen=True)
+class ResponsesToolCallName:
+    name: str
+    namespace: str | None = None
+
+
+def flat_namespace_tool_name(namespace: str, name: str) -> str:
+    return f"{namespace}{_NAMESPACE_TOOL_SEPARATOR}{name}"
+
+
+def iter_response_function_tool_info(
+    tool: ResponsesTool,
+) -> list[tuple[str, dict[str, Any] | None]]:
+    if isinstance(tool, FunctionTool):
+        return [(tool.name, tool.parameters)]
+    if not isinstance(tool, NamespaceTool):
+        return []
+
+    namespace = tool.name
+    return [
+        (
+            flat_namespace_tool_name(namespace, namespaced_tool.name),
+            namespaced_tool.parameters,
+        )
+        for namespaced_tool in tool.tools
+        if namespaced_tool.type == "function"
+    ]
+
+
+def iter_response_function_tool_dicts(
+    tools: list[ResponsesTool],
+) -> list[dict[str, Any]]:
+    function_tools: list[dict[str, Any]] = []
+    for tool in tools:
+        if isinstance(tool, NamespaceTool):
+            namespace = tool.name
+            for namespaced_tool in tool.tools:
+                if namespaced_tool.type != "function":
+                    continue
+                tool_dict = namespaced_tool.model_dump()
+                tool_dict["name"] = flat_namespace_tool_name(
+                    namespace, namespaced_tool.name
+                )
+                function_tools.append(tool_dict)
+        else:
+            function_tools.append(tool.model_dump())
+    return function_tools
+
+
+def build_responses_tool_call_name_map(
+    tools: list[ResponsesTool] | None,
+) -> dict[str, ResponsesToolCallName]:
+    if not tools:
+        return {}
+
+    name_map: dict[str, ResponsesToolCallName] = {}
+    for tool in tools:
+        if not isinstance(tool, NamespaceTool):
+            continue
+        namespace = tool.name
+        for namespaced_tool in tool.tools:
+            if namespaced_tool.type != "function":
+                continue
+            flat_name = flat_namespace_tool_name(namespace, namespaced_tool.name)
+            name_map[flat_name] = ResponsesToolCallName(
+                name=namespaced_tool.name,
+                namespace=namespace,
+            )
+    return name_map
+
+
+def resolve_responses_tool_call_name(
+    name: str,
+    tools: list[ResponsesTool] | None = None,
+    tool_call_name_map: dict[str, ResponsesToolCallName] | None = None,
+) -> ResponsesToolCallName:
+    name_map = tool_call_name_map
+    if name_map is None:
+        name_map = build_responses_tool_call_name_map(tools)
+    return name_map.get(name, ResponsesToolCallName(name=name))
+
+
+def _is_function_tool(tool: Tool) -> bool:
+    return isinstance(tool, (FunctionTool, ChatCompletionToolsParam))
 
 
 def _extract_tool_info(
@@ -163,14 +276,43 @@ def find_tool_properties(
     if not tools:
         return {}
     for tool in tools:
+        if isinstance(tool, (FunctionTool, NamespaceTool)):
+            for name, params in iter_response_function_tool_info(tool):
+                if name == tool_name:
+                    return (params or {}).get("properties", {})
+            continue
+        if not _is_function_tool(tool):
+            continue
         name, params = _extract_tool_info(tool)
         if name == tool_name:
             return (params or {}).get("properties", {})
     return {}
 
 
-def _get_tool_schema_from_tool(tool: Tool) -> dict:
-    name, params = _extract_tool_info(tool)
+def find_tool_name(
+    tools: list[Tool] | None,
+    tool_name: str,
+) -> bool:
+    """Return whether a function tool with *tool_name* exists."""
+    if not tools:
+        return False
+    for tool in tools:
+        if isinstance(tool, (FunctionTool, NamespaceTool)):
+            for name, _ in iter_response_function_tool_info(tool):
+                if name == tool_name:
+                    return True
+            continue
+        if not _is_function_tool(tool):
+            continue
+        name, _ = _extract_tool_info(tool)
+        if name == tool_name:
+            return True
+    return False
+
+
+def _get_tool_schema_from_name_and_params(
+    name: str, params: dict[str, Any] | None
+) -> dict:
     params = params if params else {"type": "object", "properties": {}}
     return {
         "properties": {
@@ -179,6 +321,11 @@ def _get_tool_schema_from_tool(tool: Tool) -> dict:
         },
         "required": ["name", "parameters"],
     }
+
+
+def _get_tool_schema_from_tool(tool: Tool) -> dict:
+    name, params = _extract_tool_info(tool)
+    return _get_tool_schema_from_name_and_params(name, params)
 
 
 def _get_tool_schema_defs(
@@ -203,15 +350,28 @@ def _get_tool_schema_defs(
 def _get_json_schema_from_tools(
     tools: list[Tool],
 ) -> dict:
+    fn_tool_schemas: list[dict[str, Any]] = []
+    fn_tools: list[Tool] = []
+    for tool in tools:
+        if isinstance(tool, (FunctionTool, NamespaceTool)):
+            fn_tool_schemas.extend(
+                _get_tool_schema_from_name_and_params(name, params)
+                for name, params in iter_response_function_tool_info(tool)
+            )
+            if isinstance(tool, FunctionTool):
+                fn_tools.append(tool)
+        elif _is_function_tool(tool):
+            fn_tool_schemas.append(_get_tool_schema_from_tool(tool))
+            fn_tools.append(tool)
     json_schema = {
         "type": "array",
         "minItems": 1,
         "items": {
             "type": "object",
-            "anyOf": [_get_tool_schema_from_tool(tool) for tool in tools],
+            "anyOf": fn_tool_schemas,
         },
     }
-    json_schema_defs = _get_tool_schema_defs(tools)
+    json_schema_defs = _get_tool_schema_defs(fn_tools)
     if json_schema_defs:
         json_schema["$defs"] = json_schema_defs
     return json_schema
@@ -229,23 +389,30 @@ def get_json_schema_from_tools(
         tool_choice, ToolChoiceFunction
     ):
         tool_name = tool_choice.name
-        tool_map = {tool.name: tool for tool in tools if isinstance(tool, FunctionTool)}
-        if tool_name not in tool_map:
+        responses_tool_map: dict[str, dict[str, Any] | None] = {}
+        for tool in tools:
+            if not isinstance(tool, (FunctionTool, NamespaceTool)):
+                continue
+            for name, params in iter_response_function_tool_info(tool):
+                responses_tool_map[name] = params
+                if "__" in name:
+                    responses_tool_map.setdefault(name.rsplit("__", 1)[1], params)
+        if tool_name not in responses_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-        return tool_map[tool_name].parameters
+        return responses_tool_map[tool_name]
     # tool_choice: Forced Function (ChatCompletion)
     if (not isinstance(tool_choice, str)) and isinstance(
         tool_choice, ChatCompletionNamedToolChoiceParam
     ):
         tool_name = tool_choice.function.name
-        tool_map = {
+        chat_tool_map: dict[str, ChatCompletionToolsParam] = {
             tool.function.name: tool
             for tool in tools
             if isinstance(tool, ChatCompletionToolsParam)
         }
-        if tool_name not in tool_map:
+        if tool_name not in chat_tool_map:
             raise ValueError(f"Tool '{tool_name}' has not been passed in `tools`.")
-        return tool_map[tool_name].function.parameters
+        return chat_tool_map[tool_name].function.parameters
     # tool_choice: "required"
     if tool_choice == "required":
         return _get_json_schema_from_tools(tools)
@@ -308,20 +475,43 @@ def get_parameter_value(val: ast.expr) -> Any:
         raise UnexpectedAstError("Tool call arguments must be literals")
 
 
+def _ast_callable_dotted_name(node: ast.expr) -> str:
+    """Return the dotted name for a call target, walking ``ast.Attribute``
+    chains so ``a.b.c(...)`` becomes ``"a.b.c"``.
+
+    Raises:
+        UnexpectedAstError: If the chain does not bottom out in an
+            ``ast.Name`` (e.g. subscript or call expression as receiver).
+    """
+    parts: list[str] = []
+    current: ast.expr = node
+    while isinstance(current, ast.Attribute):
+        parts.append(current.attr)
+        current = current.value
+    if not isinstance(current, ast.Name):
+        raise UnexpectedAstError("Invalid tool call name")
+    parts.append(current.id)
+    return ".".join(reversed(parts))
+
+
 def handle_single_tool(call: ast.Call) -> ToolCall:
     """Convert a single AST function call node into a ToolCall object.
 
+    Accepts both bare names (``foo(...)``) and dotted attribute chains
+    (``a.b.c(...)``); the resulting tool call ``name`` field preserves the
+    dotted form.
+
     Raises:
-        UnexpectedAstError: If the call node does not have a simple
-            function name (e.g. it's an attribute access or subscript).
+        UnexpectedAstError: If the call target is neither a simple name
+            nor a chain of attribute accesses bottoming out in a name.
     """
-    if not isinstance(call.func, ast.Name):
+    if not isinstance(call.func, (ast.Name, ast.Attribute)):
         logger.warning(
             "Tool call has non-simple function name: %s",
             ast.dump(call.func),
         )
         raise UnexpectedAstError("Invalid tool call name")
-    function_name = call.func.id
+    function_name = _ast_callable_dotted_name(call.func)
     arguments = {}
     for keyword in call.keywords:
         arguments[keyword.arg] = get_parameter_value(keyword.value)
@@ -403,7 +593,188 @@ def make_valid_python(text: str) -> tuple[str, str] | None:
     for char in reversed(bracket_stack):
         added_text += _CLOSING[char]
 
-    return text + added_text, added_text
+    candidate = text + added_text
+
+    # Streaming partial text can land in shapes the bracket-counting
+    # heuristics above don't catch. Two failure modes:
+    #   1. Mid-key inside a dict (`..., "k`) closes to `..., "k"}` — a
+    #      syntactically invalid mixed dict/set.
+    #   2. A bare string inside a dict (`{"k`) closes to `{"k"}` — valid
+    #      Python but a *set* literal, which downstream tool-call AST
+    #      handling rejects.
+    # Validate the candidate parses, has a body, and contains no Set
+    # nodes (pythonic tool calls always use dicts for `{...}`).
+    try:
+        module = ast.parse(candidate)
+    except SyntaxError:
+        return None
+    if not module.body:
+        return None
+    for node in ast.walk(module):
+        if isinstance(node, ast.Set):
+            return None
+
+    return candidate, added_text
+
+
+def extract_types_from_schema(schema: Any) -> list[str]:
+    """Extract all possible type strings from a JSON Schema definition.
+
+    Handles ``type`` (string or list), ``enum`` value inference, and
+    recursive ``anyOf``/``oneOf``/``allOf``.  Returns ``["string"]``
+    when no type information can be determined.
+    """
+    if schema is None or not isinstance(schema, dict):
+        return ["string"]
+
+    types: set[str] = set()
+
+    if "type" in schema:
+        type_value = schema["type"]
+        if isinstance(type_value, str):
+            types.add(type_value)
+        elif isinstance(type_value, list):
+            for t in type_value:
+                if isinstance(t, str):
+                    types.add(t)
+
+    if "enum" in schema and isinstance(schema["enum"], list) and schema["enum"]:
+        for value in schema["enum"]:
+            if value is None:
+                types.add("null")
+            elif isinstance(value, bool):
+                types.add("boolean")
+            elif isinstance(value, int):
+                types.add("integer")
+            elif isinstance(value, float):
+                types.add("number")
+            elif isinstance(value, str):
+                types.add("string")
+            elif isinstance(value, list):
+                types.add("array")
+            elif isinstance(value, dict):
+                types.add("object")
+
+    for choice_field in ("anyOf", "oneOf", "allOf"):
+        if choice_field in schema and isinstance(schema[choice_field], list):
+            for choice in schema[choice_field]:
+                types.update(extract_types_from_schema(choice))
+
+    return list(types) if types else ["string"]
+
+
+_TYPE_ALIASES: dict[str, str] = {
+    "str": "string",
+    "text": "string",
+    "varchar": "string",
+    "char": "string",
+    "enum": "string",
+    "int": "integer",
+    "int32": "integer",
+    "int64": "integer",
+    "uint": "integer",
+    "uint32": "integer",
+    "uint64": "integer",
+    "long": "integer",
+    "short": "integer",
+    "unsigned": "integer",
+    "float": "number",
+    "float32": "number",
+    "float64": "number",
+    "double": "number",
+    "bool": "boolean",
+    "dict": "object",
+    "arr": "array",
+    "list": "array",
+    "sequence": "array",
+}
+
+
+def coerce_to_schema_type(value: str, schema_type: str | list[str]) -> Any:
+    """Best-effort coercion of a raw string value to a JSON Schema type.
+
+    Tries each type in priority order (null > integer > number > boolean >
+    object > array > string) and returns the first successful coercion.
+    Falls back to the original string when no coercion succeeds.
+
+    Args:
+        value: The raw string value from the model output.
+        schema_type: One or more JSON Schema type strings
+            (e.g. ``"string"`` or ``["string", "null"]``).
+    """
+    if isinstance(schema_type, str):
+        schema_type = [schema_type]
+
+    normalized_types = {
+        _TYPE_ALIASES.get(key, key) for t in schema_type for key in [t.strip().lower()]
+    }
+
+    # Priority: null > integer > number > boolean > object > array > string
+    type_priority = [
+        "null",
+        "integer",
+        "number",
+        "boolean",
+        "object",
+        "array",
+        "string",
+    ]
+
+    for candidate_type in type_priority:
+        if candidate_type not in normalized_types:
+            continue
+
+        if candidate_type == "null":
+            if value.lower() == "null":
+                return None
+            continue
+        if candidate_type == "string":
+            return value
+        if candidate_type == "integer":
+            try:
+                return int(value)
+            except (ValueError, TypeError):
+                continue
+        if candidate_type == "number":
+            try:
+                val = float(value)
+            except (ValueError, TypeError):
+                continue
+            if not math.isfinite(val):
+                # inf/-inf/nan are not valid JSON numbers. Fall through so
+                # the value is preserved as a string instead of crashing
+                # (int(float("inf")) raises OverflowError) or emitting
+                # invalid JSON (json.dumps(inf) -> "Infinity").
+                continue
+            return val if val != int(val) else int(val)
+        if candidate_type == "boolean":
+            lower_val = value.lower().strip()
+            if lower_val in ("true", "1"):
+                return True
+            if lower_val in ("false", "0"):
+                return False
+            continue
+        if candidate_type in ("object", "array"):
+            try:
+                parsed = json.loads(value)
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
+            if _is_json_finite(parsed):
+                return parsed
+            # Non-finite floats (e.g. "[1e999]" -> [inf]) cannot be
+            # serialized back to valid JSON; preserve the raw string.
+            continue
+
+    try:
+        parsed = json.loads(value)
+    except (json.JSONDecodeError, ValueError):
+        return value
+    # Reject non-finite results (e.g. json.loads("1e999") -> inf, or nested
+    # inf/nan inside a parsed list/dict) which json.dumps would render as
+    # invalid JSON (Infinity/NaN). Preserve the raw string instead.
+    if not _is_json_finite(parsed):
+        return value
+    return parsed
 
 
 def compute_tool_delta(

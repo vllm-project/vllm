@@ -2,28 +2,32 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only Qwen3_5 MTP model."""
 
-import typing
-from collections.abc import Callable, Iterable
+from collections.abc import Iterable
 
 import torch
 from torch import nn
 
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.compilation.decorators import support_torch_compile
-from vllm.config import VllmConfig
+from vllm.config import VllmConfig, get_current_vllm_config
 from vllm.distributed.parallel_state import get_pp_group
 from vllm.logger import init_logger
-from vllm.model_executor.layers.fused_moe import (
-    fused_moe_make_expert_params_mapping,
-)
 from vllm.model_executor.layers.linear import ColumnParallelLinear
 from vllm.model_executor.layers.logits_processor import LogitsProcessor
 from vllm.model_executor.layers.vocab_parallel_embedding import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
-from vllm.model_executor.models.qwen3_5 import Qwen3_5DecoderLayer, Qwen3_5RMSNorm
-from vllm.model_executor.models.qwen3_next import QwenNextMixtureOfExperts
+from vllm.model_executor.models.interfaces import LocalArgmaxMixin
+from vllm.model_executor.models.qwen3_5 import (
+    Qwen3_5DecoderLayer,
+    Qwen3_5Model,
+    Qwen3_5RMSNorm,
+)
+from vllm.model_executor.models.qwen3_next import (
+    QwenNextMixtureOfExperts,
+    _is_shared_expert_fse_compatible,
+)
 from vllm.sequence import IntermediateTensors
 from vllm.transformers_utils.configs.qwen3_5 import Qwen3_5TextConfig
 from vllm.transformers_utils.configs.qwen3_5_moe import Qwen3_5MoeTextConfig
@@ -36,8 +40,8 @@ from .interfaces import (
 from .utils import (
     AutoWeightsLoader,
     PPMissingLayer,
+    WeightsMapper,
     _merge_multimodal_embeddings,
-    is_pp_missing_parameter,
     make_empty_intermediate_tensors_factory,
     maybe_prefix,
 )
@@ -57,6 +61,8 @@ logger = init_logger(__name__)
     }
 )
 class Qwen3_5MultiTokenPredictor(nn.Module):
+    hf_to_vllm_mapper = Qwen3_5Model.hf_to_vllm_mapper
+
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -158,181 +164,18 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         hidden_states, _ = self.norm(hidden_states, residual)
         return hidden_states
 
-    def load_fused_expert_weights(
-        self,
-        name: str,
-        params_dict: dict,
-        loaded_weight: torch.Tensor,
-        shard_id: str,
-        num_experts: int,
-    ) -> bool:
-        param = params_dict[name]
-        weight_loader = typing.cast(Callable[..., bool], param.weight_loader)
-        loaded_local_expert = False
-        for expert_id in range(num_experts):
-            curr_expert_weight = loaded_weight[expert_id]
-            success = weight_loader(
-                param,
-                curr_expert_weight,
-                name,
-                shard_id,
-                expert_id,
-                return_success=True,
-            )
-            if success:
-                loaded_local_expert = True
-
-        return loaded_local_expert
-
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            # (param_name, shard_name, shard_id)
-            ("qkv_proj", "q_proj", "q"),
-            ("qkv_proj", "k_proj", "k"),
-            ("qkv_proj", "v_proj", "v"),
-            ("gate_up_proj", "gate_proj", 0),
-            ("gate_up_proj", "up_proj", 1),
-        ]
-
-        # Params for weights, fp8 weight scales, fp8 activation scales
-        # (param_name, weight_name, expert_id, shard_id)
-        expert_params_mapping = fused_moe_make_expert_params_mapping(
-            self,
-            ckpt_gate_proj_name="gate_proj",
-            ckpt_down_proj_name="down_proj",
-            ckpt_up_proj_name="up_proj",
-            num_experts=self.config.num_experts
-            if hasattr(self.config, "num_experts")
-            else 0,
+        mapper = self.hf_to_vllm_mapper
+        is_fse = rocm_aiter_ops.is_fusion_moe_shared_experts_enabled() and (
+            _is_shared_expert_fse_compatible(get_current_vllm_config().quant_config)
         )
-
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
-        is_fused_expert = False
-        base_layer = (
-            "base_layer." if any(".base_layer." in name for name in params_dict) else ""
-        )
-        fused_expert_params_mapping = [
-            (f"experts.{base_layer}w13_weight", "experts.gate_up_proj", 0, "w1"),
-            (f"experts.{base_layer}w2_weight", "experts.down_proj", 0, "w2"),
-        ]
-        num_experts = (
-            self.config.num_experts if hasattr(self.config, "num_experts") else 0
-        )
-        for name, loaded_weight in weights:
-            if "rotary_emb.inv_freq" in name:
-                continue
-
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if "experts.gate_up_proj" in name or "experts.down_proj" in name:
-                    is_fused_expert = True
-                    expert_params_mapping = fused_expert_params_mapping
-
-                if weight_name not in name:
-                    continue
-
-                if "mlp.experts" in name:
-                    continue
-
-                name = name.replace(weight_name, param_name)
-                # Skip loading extra bias for GPTQ models.
-                if name.endswith(".bias") and name not in params_dict:
-                    continue
-                # Skip layers on other devices.
-                if is_pp_missing_parameter(name, self):
-                    continue
-                if name not in params_dict:
-                    continue
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                is_expert_weight = False
-                for mapping in expert_params_mapping:
-                    param_name, weight_name, expert_id, shard_id = mapping
-                    if weight_name not in name:
-                        continue
-                    is_expert_weight = True
-                    name_mapped = name.replace(weight_name, param_name)
-                    # Skip layers on other devices.
-                    if is_pp_missing_parameter(name_mapped, self):
-                        continue
-                    if is_fused_expert:
-                        # qwen3.5 no need to transpose
-                        # loaded_weight = loaded_weight.transpose(-1, -2)
-                        if "experts.gate_up_proj" in name:
-                            loaded_weight = loaded_weight.chunk(2, dim=-2)
-                            success_w1 = self.load_fused_expert_weights(
-                                name_mapped,
-                                params_dict,
-                                loaded_weight[0],
-                                "w1",
-                                num_experts,
-                            )
-                            success_w3 = self.load_fused_expert_weights(
-                                name_mapped,
-                                params_dict,
-                                loaded_weight[1],
-                                "w3",
-                                num_experts,
-                            )
-                            success = success_w1 and success_w3
-                        else:
-                            # down_proj
-                            success = self.load_fused_expert_weights(
-                                name_mapped,
-                                params_dict,
-                                loaded_weight,
-                                shard_id,
-                                num_experts,
-                            )
-                        if success:
-                            name = name_mapped
-                            break
-                    else:
-                        # Skip loading extra bias for GPTQ models.
-                        if (
-                            name_mapped.endswith(".bias")
-                            or name_mapped.endswith("_bias")
-                        ) and name_mapped not in params_dict:
-                            continue
-                        param = params_dict[name_mapped]
-                        weight_loader = param.weight_loader
-                        success = weight_loader(
-                            param,
-                            loaded_weight,
-                            name_mapped,
-                            shard_id=shard_id,
-                            expert_id=expert_id,
-                            return_success=True,
-                        )
-                    if success:
-                        name = name_mapped
-                        break
-                else:
-                    if is_expert_weight:
-                        # We've checked that this is an expert weight
-                        # However it's not mapped locally to this rank
-                        # So we simply skip it
-                        continue
-                    # Skip loading extra bias for GPTQ models.
-                    if name.endswith(".bias") and name not in params_dict:
-                        continue
-                    if is_pp_missing_parameter(name, self):
-                        continue
-                    if name not in params_dict:
-                        logger.warning_once(
-                            f"Parameter {name} not found in params_dict, skip loading"
-                        )
-                        continue
-                    param = params_dict[name]
-                    weight_loader = getattr(
-                        param, "weight_loader", default_weight_loader
-                    )
-                    weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        if is_fse:
+            num_routed = getattr(self.config, "num_experts", 0)
+            mapper = mapper | WeightsMapper(
+                orig_to_new_substr={"mlp.shared_expert.": f"mlp.experts.{num_routed}."}
+            )
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=mapper)
 
 
 @support_torch_compile(
@@ -346,7 +189,7 @@ class Qwen3_5MultiTokenPredictor(nn.Module):
         "hidden_states": 0,
     }
 )
-class Qwen3_5MTP(nn.Module, SupportsMultiModal):
+class Qwen3_5MTP(LocalArgmaxMixin, nn.Module, SupportsMultiModal):
     packed_modules_mapping = {
         "qkv_proj": [
             "q_proj",
@@ -381,6 +224,7 @@ class Qwen3_5MTP(nn.Module, SupportsMultiModal):
                 self.lm_head = ParallelLMHead(
                     config.vocab_size,
                     config.hidden_size,
+                    quant_config=self.quant_config,
                     prefix=maybe_prefix(prefix, "lm_head"),
                 )
         else:

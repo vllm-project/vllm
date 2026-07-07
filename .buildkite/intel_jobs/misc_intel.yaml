@@ -5,6 +5,10 @@ steps:
 - label: V1 Core + KV + Metrics
   timeout_in_minutes: 30
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
   no_plugin: true
   working_dir: "."
   env:
@@ -31,6 +35,10 @@ steps:
 - label: V1 Sample + Logits
   timeout_in_minutes: 30
   device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
   no_plugin: true
   working_dir: "."
   env:
@@ -38,7 +46,17 @@ steps:
     REPO: "vllm-ci-test-repo"
     VLLM_TEST_DEVICE: "xpu"
   source_file_dependencies:
-    - vllm/
+    - vllm/config/
+    - vllm/distributed/
+    - vllm/engine/
+    - vllm/inputs/
+    - vllm/logger.py
+    - vllm/model_executor/
+    - vllm/platforms/
+    - vllm/sampling_params.py
+    - vllm/transformers_utils/
+    - vllm/utils/
+    - vllm/v1/
     - tests/v1/sample
     - tests/v1/logits_processors
     - tests/v1/test_oracle.py
@@ -47,9 +65,199 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      'pip install lm_eval[api]>=0.4.12 &&
+      export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       cd tests &&
-      pytest -v -s v1/logits_processors &&
+      pytest -v -s v1/logits_processors --ignore=v1/logits_processors/test_custom_online.py --ignore=v1/logits_processors/test_custom_offline.py &&
       pytest -v -s v1/test_oracle.py &&
       pytest -v -s v1/test_request.py &&
-      pytest -v -s v1/test_outputs.py'
+      pytest -v -s v1/test_outputs.py &&
+      pytest -v -s v1/sample/test_topk_topp_sampler.py &&
+      pytest -v -s v1/sample/test_logprobs.py &&
+      pytest -v -s v1/sample/test_logprobs_e2e.py'
+
+- label: Basic Models Tests (Initialization)
+  timeout_in_minutes: 60
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/
+    - tests/models/test_initialization.py
+    - tests/models/registry.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'export VLLM_XPU_FUSED_MOE_USE_REF=1 &&
+      cd tests &&
+      pytest -v -s models/test_initialization.py::test_can_initialize_large_subset[Eagle3MiniMaxM2ForCausalLM]'
+
+- label: XPU CPU Offload
+  timeout_in_minutes: 60
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/
+    - vllm/v1/kv_offload/
+    - vllm/v1/kv_connector/
+    - tests/v1/kv_offload/
+    - tests/v1/kv_connector/unit/test_offloading_connector.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
+      cd tests &&
+      pytest -v -s v1/kv_offload &&
+      pytest -v -s v1/kv_connector/unit/test_offloading_connector.py'
+
+- label: NixlConnector PD accuracy (2 GPUs)
+  timeout_in_minutes: 60
+  num_devices: 2
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+    - vllm/distributed/kv_transfer/kv_connector/v1/nixl/
+    - vllm/v1/worker/kv_connector_model_runner_mixin.py
+    - tests/v1/kv_connector/nixl_integration/
+    - vllm/platforms/xpu.py
+  commands:
+    - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'cd tests &&
+      bash v1/kv_connector/nixl_integration/run_xpu_disagg_accuracy_test.sh'
+
+- label: Regression
+  key: regression
+  timeout_in_minutes: 30
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/sampling_params.py
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - tests/test_regression
+  commands:
+  - >-
+      bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+      'pip install modelscope\<1.38 &&
+      cd tests &&
+      pytest -v -s test_regression.py'
+
+- label: Metrics, Tracing (2 GPUs)
+  key: metrics-tracing-2-gpus
+  timeout_in_minutes: 30
+  num_devices: 2
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 2+
+    mem: 16+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/sampling_params.py
+  - vllm/tracing/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - tests/v1/tracing
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'pip install opentelemetry-sdk\>=1.26.0 opentelemetry-api\>=1.26.0 opentelemetry-exporter-otlp\>=1.26.0 opentelemetry-semantic-conventions-ai\>=0.4.1 &&
+    cd tests &&
+    pytest -v -s v1/tracing'
+
+- label: Async Engine, Inputs, Utils, Worker
+  key: async-engine-inputs-utils-worker
+  timeout_in_minutes: 30
+  device: intel_gpu
+  agent_tags:
+    label: production
+    gpu: 1+
+    mem: 24+
+  no_plugin: true
+  working_dir: "."
+  env:
+    REGISTRY: "public.ecr.aws/q9t5s3a7"
+    REPO: "vllm-ci-test-repo"
+    VLLM_TEST_DEVICE: "xpu"
+  source_file_dependencies:
+  - vllm/assets/
+  - vllm/config/
+  - vllm/distributed/
+  - vllm/engine/
+  - vllm/inputs/
+  - vllm/model_executor/
+  - vllm/multimodal/
+  - vllm/platforms/
+  - vllm/sampling_params.py
+  - vllm/tokenizers/
+  - vllm/transformers_utils/
+  - vllm/utils/
+  - vllm/v1/
+  - tests/detokenizer
+  - tests/multimodal
+  - tests/utils_
+  commands:
+  - >-
+    bash .buildkite/scripts/hardware_ci/run-intel-test.sh
+    'cd tests &&
+    pip install av &&
+    pytest -v -s detokenizer &&
+    pytest -v -s -m "not cpu_test" ./multimodal &&
+    pytest -v -s utils_ --ignore=utils_/test_mem_utils.py'

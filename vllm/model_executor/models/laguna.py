@@ -20,7 +20,10 @@ from vllm.distributed import (
 )
 from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
-from vllm.model_executor.layers.fused_moe import FusedMoE
+from vllm.model_executor.layers.fused_moe import (
+    FusedMoE,
+    fused_moe_make_expert_params_mapping,
+)
 from vllm.model_executor.layers.layernorm import RMSNorm
 from vllm.model_executor.layers.linear import (
     ColumnParallelLinear,
@@ -39,7 +42,12 @@ from vllm.model_executor.model_loader.weight_utils import (
     default_weight_loader,
     maybe_remap_kv_scale_name,
 )
-from vllm.model_executor.models.interfaces import SupportsLoRA, SupportsPP
+from vllm.model_executor.models.interfaces import (
+    EagleModelMixin,
+    SupportsEagle3,
+    SupportsLoRA,
+    SupportsPP,
+)
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     PPMissingLayer,
@@ -261,8 +269,14 @@ class LagunaAttention(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         attention_sink: bool = False,
+        layer_idx: int | None = None,
+        attention_prefix: str | None = None,
     ) -> None:
         super().__init__()
+        if layer_idx is None:
+            layer_idx = extract_layer_index(prefix)
+        if attention_prefix is None:
+            attention_prefix = prefix
         self.hidden_size = hidden_size
         tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -286,7 +300,6 @@ class LagunaAttention(nn.Module):
         # Per-layer sliding window (follows Gemma2/Cohere2 convention)
         layer_types = getattr(config, "layer_types", None)
         if layer_types is not None:
-            layer_idx = extract_layer_index(prefix)
             is_sliding = layer_types[layer_idx] == "sliding_attention"
             self.sliding_window = config.sliding_window if is_sliding else None
         else:
@@ -353,9 +366,7 @@ class LagunaAttention(nn.Module):
         # crash `get_rope`'s cache lookup, so always pull out the layer's
         # sub-dict before forwarding.
         layer_type = (
-            layer_types[extract_layer_index(prefix)]
-            if layer_types is not None
-            else "full_attention"
+            layer_types[layer_idx] if layer_types is not None else "full_attention"
         )
         is_sliding = layer_type == "sliding_attention"
 
@@ -407,7 +418,7 @@ class LagunaAttention(nn.Module):
             cache_config=cache_config,
             quant_config=quant_config,
             per_layer_sliding_window=self.sliding_window,
-            prefix=f"{prefix}.attn",
+            prefix=f"{attention_prefix}.attn",
             sinks=sinks,
         )
 
@@ -460,10 +471,13 @@ class LagunaDecoderLayer(nn.Module):
         quant_config: QuantizationConfig | None = None,
         prefix: str = "",
         enable_eplb: bool = False,
+        layer_idx: int | None = None,
+        attention_prefix: str | None = None,
     ) -> None:
         super().__init__()
         self.hidden_size = config.hidden_size
-        layer_idx = extract_layer_index(prefix)
+        if layer_idx is None:
+            layer_idx = extract_layer_index(prefix)
 
         # Determine if this layer uses sliding window attention
         layer_types = getattr(config, "layer_types", None)
@@ -495,6 +509,12 @@ class LagunaDecoderLayer(nn.Module):
             quant_config=quant_config,
             prefix=f"{prefix}.self_attn",
             attention_sink=attention_sink,
+            layer_idx=layer_idx,
+            attention_prefix=(
+                f"{attention_prefix}.self_attn"
+                if attention_prefix is not None
+                else None
+            ),
         )
 
         # Check if this layer uses MoE or dense MLP (matches Qwen2/Qwen3 convention)
@@ -554,7 +574,7 @@ class LagunaDecoderLayer(nn.Module):
 
 
 @support_torch_compile
-class LagunaModel(nn.Module):
+class LagunaModel(nn.Module, EagleModelMixin):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = ""):
         super().__init__()
 
@@ -633,8 +653,17 @@ class LagunaModel(nn.Module):
             hidden_states = intermediate_tensors["hidden_states"]
             residual = intermediate_tensors["residual"]
 
-        for layer in islice(self.layers, self.start_layer, self.end_layer):
+        aux_hidden_states = self._maybe_add_hidden_state(
+            [], self.start_layer, hidden_states, residual
+        )
+        for layer_idx, layer in enumerate(
+            islice(self.layers, self.start_layer, self.end_layer),
+            start=self.start_layer,
+        ):
             hidden_states, residual = layer(positions, hidden_states, residual)
+            self._maybe_add_hidden_state(
+                aux_hidden_states, layer_idx + 1, hidden_states, residual
+            )
 
         if not get_pp_group().is_last_rank:
             return IntermediateTensors(
@@ -642,6 +671,8 @@ class LagunaModel(nn.Module):
             )
 
         hidden_states, _ = self.norm(hidden_states, residual)
+        if len(aux_hidden_states) > 0:
+            return hidden_states, aux_hidden_states
         return hidden_states
 
     def get_expert_mapping(self) -> list[tuple[str, str, int, str]]:
@@ -650,7 +681,7 @@ class LagunaModel(nn.Module):
         Returns mapping tuples of (param_name, weight_name, expert_id, shard_id)
         that handle both weights and quantization scales.
         """
-        return FusedMoE.make_expert_params_mapping(
+        return fused_moe_make_expert_params_mapping(
             self,
             ckpt_gate_proj_name="gate_proj",
             ckpt_down_proj_name="down_proj",
@@ -703,20 +734,6 @@ class LagunaModel(nn.Module):
                     )
                     param.data.copy_(narrow_weight)
                     loaded_params.add(name)
-                continue
-
-            # Handle KV cache quantization scales
-            if self.quant_config is not None and (
-                scale_name := self.quant_config.get_cache_scale(name)
-            ):
-                param = params_dict[scale_name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                assert loaded_weight.numel() == 1, (
-                    f"KV scale numel {loaded_weight.numel()} != 1"
-                )
-                loaded_weight = loaded_weight.squeeze()
-                weight_loader(param, loaded_weight)
-                loaded_params.add(scale_name)
                 continue
 
             # Handle stacked params (QKV, gate_up for
@@ -821,7 +838,7 @@ class LagunaModel(nn.Module):
         return loaded_params
 
 
-class LagunaForCausalLM(nn.Module, SupportsPP, SupportsLoRA):
+class LagunaForCausalLM(nn.Module, SupportsPP, SupportsLoRA, SupportsEagle3):
     fall_back_to_pt_during_load = False
 
     packed_modules_mapping = {

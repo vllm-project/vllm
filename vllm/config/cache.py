@@ -1,10 +1,11 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
+from collections.abc import Callable
 from dataclasses import field
-from typing import ClassVar, Literal
+from typing import Any, ClassVar, Literal
 
-from pydantic import Field, SkipValidation, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from vllm.config.utils import config
 from vllm.logger import init_logger
@@ -28,11 +29,12 @@ CacheDType = Literal[
     "turboquant_4bit_nc",
     "turboquant_k3v4_nc",
     "turboquant_3bit_nc",
+    "int4_per_token_head",
     "int8_per_token_head",
     "fp8_per_token_head",
     "nvfp4",
 ]
-MambaDType = Literal["auto", "float32", "float16"]
+MambaDType = Literal["auto", "float32", "float16", "bfloat16"]
 MambaCacheMode = Literal["all", "align", "none"]
 PrefixCachingHashAlgo = Literal["sha256", "sha256_cbor", "xxhash", "xxhash_cbor"]
 KVOffloadingBackend = Literal["native", "lmcache"]
@@ -44,14 +46,14 @@ class CacheConfig:
 
     DEFAULT_BLOCK_SIZE: ClassVar[int] = 16
 
-    block_size: SkipValidation[int] = None  # type: ignore[assignment]
+    block_size: int = Field(default=None, gt=0)  # type: ignore[assignment]
     """Size of a contiguous cache block in number of tokens.
     Accepts None (meaning "use default"). After construction, always int."""
     user_specified_block_size: bool = field(default=False, init=False)
     """Whether block_size was explicitly provided. Derived automatically."""
     user_specified_mamba_block_size: bool = field(default=False, init=False)
     """Whether mamba_block_size was explicitly provided. Derived automatically."""
-    hash_block_size: SkipValidation[int] | None = None  # type: ignore
+    hash_block_size: int | None = Field(default=None, gt=0)
     """Block size (in tokens) used for computing Request's block_hashes.
 
     This can be set to a finer granularity than the physical KV cache block
@@ -117,6 +119,11 @@ class CacheConfig:
     mamba_page_size_padded: int | None = None
     """ Optional override for mamba page size; used by hybrid mamba/attention
     models to ensure exact alignment with attention page size."""
+    skip_page_size_padded: int | None = None
+    """Optional override for the page size of layers skipped from KV cache
+    quantization (``--kv-cache-dtype-skip-layers``); set during block-size
+    alignment so unquantized skip layers pad up to the quantized primary's
+    page."""
     mamba_block_size: int | None = Field(default=None, gt=0)
     """Size of a contiguous cache block in number of tokens for mamba cache.
     Can be set only when prefix caching is enabled.
@@ -144,6 +151,14 @@ class CacheConfig:
     """The number of blocks to allocate for GPU memory."""
     num_cpu_blocks: int | None = field(default=None, init=False)
     """The number of blocks to allocate for CPU memory."""
+
+    # Set after KV cache initialization.
+    kv_cache_size_tokens: int | None = field(default=None, init=False)
+    """Per-DP-engine KV cache capacity in tokens (group-aware). Uses
+    group-aware capacity since num_gpu_blocks * block_size can be wrong
+    for hybrid models where requests occupy multiple KV cache groups."""
+    kv_cache_max_concurrency: float | None = field(default=None, init=False)
+    """Per-DP-engine maximum concurrency at max_model_len tokens."""
 
     kv_sharing_fast_prefill: bool = False
     """This feature is work in progress and no prefill optimization takes place
@@ -197,12 +212,15 @@ class CacheConfig:
             # Prefix-caching implementation detail (doesn't affect compiled graph).
             "hash_block_size",
             "mamba_page_size_padded",
+            "skip_page_size_padded",
             "user_specified_block_size",
             "user_specified_mamba_block_size",
             "_block_size_resolved",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",
+            "kv_cache_size_tokens",
+            "kv_cache_max_concurrency",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
         }
@@ -220,19 +238,26 @@ class CacheConfig:
     _block_size_resolved: bool = field(default=False, init=False)
     """Guard against pydantic re-running _apply_block_size_default."""
 
+    @field_validator("block_size", mode="wrap")
+    @classmethod
+    def _skip_none_validation(cls, value: Any, handler: Callable) -> Any:
+        if value is None:
+            return value
+        return handler(value)
+
     @model_validator(mode="after")
     def _apply_block_size_default(self) -> "CacheConfig":
         # Pydantic re-runs validators when CacheConfig is nested inside
         # another pydantic model (e.g. VllmConfig). Guard against that.
         if self._block_size_resolved:
             return self
-        object.__setattr__(self, "_block_size_resolved", True)
+        self._block_size_resolved = True
         if self.block_size is None:
-            object.__setattr__(self, "block_size", self.DEFAULT_BLOCK_SIZE)
+            self.block_size = self.DEFAULT_BLOCK_SIZE
         else:
-            object.__setattr__(self, "user_specified_block_size", True)
+            self.user_specified_block_size = True
         if self.mamba_block_size is not None:
-            object.__setattr__(self, "user_specified_mamba_block_size", True)
+            self.user_specified_mamba_block_size = True
         return self
 
     @field_validator("calculate_kv_scales", mode="after")
