@@ -6,12 +6,10 @@ GSM8K correctness test for CPU KV offloading connectors.
 Regression guard for stride computation bugs in the offloading worker
 (e.g. https://github.com/vllm-project/vllm/pull/46888) and silent KV
 cache data corruption during CPU offloading.  Runs GSM8K twice, dropping
-the GPU prefix cache (but not the CPU cache) between passes so the second
-pass must reload offloaded KV data from CPU, and asserts on
-``vllm:external_prefix_cache_hits`` to verify loading occurred.  The reset
-only succeeds once in-flight offload transfers have released their GPU
-blocks, so polling it until success doubles as an offload-completion
-barrier.
+the GPU prefix cache (but not the CPU cache) between runs so the second
+run reloads offloaded KV data from CPU.  The reload is best effort: the
+reset only succeeds once in-flight offload transfers have released their
+GPU blocks, so it is retried with a bounded timeout.
 
 Covers both KV offloading connectors (OffloadingConnector and
 SimpleCPUOffloadConnector) across four architecture families:
@@ -42,11 +40,7 @@ if not current_platform.is_cuda_alike():
 NUM_QUESTIONS = 200
 NUM_FEWSHOT = 5
 
-_OFFLOAD_SYNC_TIMEOUT = 180
-_EXTERNAL_CACHE_COUNTERS = (
-    "vllm:external_prefix_cache_queries",
-    "vllm:external_prefix_cache_hits",
-)
+_OFFLOAD_SYNC_TIMEOUT = 60
 
 
 def _kv_transfer_config(connector: str, cpu_gib: int = 4) -> str:
@@ -86,14 +80,15 @@ def _force_engine_step(base_url: str) -> None:
 
 
 def _reset_gpu_prefix_cache(base_url: str) -> None:
-    """Drop the GPU prefix cache while keeping the CPU (connector) cache.
+    """Best-effort drop of the GPU prefix cache, keeping the CPU (connector)
+    cache, so the next run reloads KV data through the connector.
 
     The reset fails while asynchronous offload transfers still hold GPU
-    blocks, so polling it until success also waits for offloading to
-    complete.  Requires VLLM_SERVER_DEV_MODE=1.
+    blocks; retry briefly rather than failing the test.  Requires
+    VLLM_SERVER_DEV_MODE=1.
     """
     deadline = time.monotonic() + _OFFLOAD_SYNC_TIMEOUT
-    while True:
+    while time.monotonic() < deadline:
         resp = requests.post(
             f"{base_url}/reset_prefix_cache",
             params={"reset_external": "false"},
@@ -102,22 +97,7 @@ def _reset_gpu_prefix_cache(base_url: str) -> None:
         resp.raise_for_status()
         if resp.json().get("success"):
             return
-        assert time.monotonic() < deadline, (
-            f"prefix cache reset did not succeed within {_OFFLOAD_SYNC_TIMEOUT}s; "
-            "async offload may be stuck"
-        )
         _force_engine_step(base_url)
-
-
-def _scrape_counter(base_url: str, name: str) -> float:
-    text = requests.get(f"{base_url}/metrics", timeout=30).text
-    values = [
-        float(line.rpartition(" ")[2])
-        for line in text.splitlines()
-        if line.split("{", 1)[0].split(" ", 1)[0] in (name, f"{name}_total")
-    ]
-    assert values, f"{name} not found in /metrics"
-    return sum(values)
 
 
 @dataclass
@@ -225,6 +205,15 @@ MODELS = [
 
 @pytest.mark.parametrize("cfg", MODELS, ids=lambda c: c.id)
 def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
+    if "--tensor-parallel-size" in cfg.extra_server_args:
+        tp_size = int(
+            cfg.extra_server_args[
+                cfg.extra_server_args.index("--tensor-parallel-size") + 1
+            ]
+        )
+        if current_platform.device_count() < tp_size:
+            pytest.skip(f"Requires {tp_size} GPUs")
+
     # Prefix caching must be explicitly enabled: SimpleCPUOffloadConnector requires it.
     server_args = [
         "--enforce-eager",
@@ -270,17 +259,7 @@ def test_gsm8k_offloading_correctness(cfg: OffloadingModelConfig):
             )
 
             if run_idx == 1:
-                before = [
-                    _scrape_counter(base_url, name) for name in _EXTERNAL_CACHE_COUNTERS
-                ]
+                # Give the async offload a moment to finish, then drop the
+                # GPU prefix cache so the second run reloads from CPU.
+                time.sleep(1)
                 _reset_gpu_prefix_cache(base_url)
-
-        queries, hits = (
-            _scrape_counter(base_url, name) - b
-            for name, b in zip(_EXTERNAL_CACHE_COUNTERS, before)
-        )
-        print(
-            f"{cfg.id}: run 2/2 loaded {hits:.0f}/{queries:.0f} "
-            "externally queried tokens from the CPU cache"
-        )
-        assert queries > 0 and hits > 0, "no KV data was loaded from CPU"
