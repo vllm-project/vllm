@@ -6,18 +6,20 @@ Ported from lucifer1004/vllm-jasl with the two env-var knobs removed
 (`VLLM_ENABLE_DEEPSEEK_V4_MHC_WARMUP`, `VLLM_DEEPSEEK_V4_MHC_WARMUP_TOKEN_SIZES`).
 Gating is intrinsic: non-DSv4 models and layers without hc_* attributes
 return early, so the warmup is a no-op except where it's needed.
+
+The warmup path matches each platform's inference code: NVIDIA fuses
+RMSNorm into the TileLang kernels, while AMD/XPU apply RMSNorm outside
+and use MHCPreOp / MHCFusedPostPreOp wrappers.
 """
 
-import time
 from collections.abc import Iterable
 
 import torch
+from tqdm import tqdm
 
-from vllm.logger import init_logger
+from vllm.distributed.parallel_state import is_global_first_rank
 from vllm.tracing import instrument
 from vllm.utils.math_utils import cdiv
-
-logger = init_logger(__name__)
 
 
 def _compute_mhc_pre_num_split(
@@ -66,8 +68,6 @@ def _find_first_mhc_layer(model: torch.nn.Module) -> torch.nn.Module | None:
         if all(
             hasattr(module, attr)
             for attr in (
-                "hc_pre",
-                "hc_post",
                 "hc_attn_fn",
                 "hc_attn_scale",
                 "hc_attn_base",
@@ -95,6 +95,7 @@ def _find_deepseek_v4_model(model: torch.nn.Module) -> torch.nn.Module | None:
 def _warmup_layer_mhc(
     layer: torch.nn.Module,
     token_sizes: list[int],
+    pbar: tqdm | None = None,
 ) -> None:
     max_tokens = max(token_sizes)
     hidden_size = int(layer.hidden_size)
@@ -107,6 +108,11 @@ def _warmup_layer_mhc(
         dtype=torch.bfloat16,
         device=device,
     )
+
+    # NVIDIA's decoder layer calls the TileLang ops directly and fuses
+    # RMSNorm into mhc_pre / mhc_fused_post_pre. AMD/XPU layers wrap those
+    # ops in MHCPreOp / MHCFusedPostPreOp and apply RMSNorm separately.
+    use_fused_norm = not hasattr(layer, "mhc_pre")
 
     # Use real RMSNorm weights so norm-fused TileLang kernels are warmed up
     # with the same tensors passed at runtime.
@@ -127,14 +133,7 @@ def _warmup_layer_mhc(
         ),
     )
 
-    for i, size in enumerate(token_sizes):
-        if i % 1000 == 0:
-            logger.info(
-                "mHC warmup progress: %d/%d (size=%d)",
-                i,
-                len(token_sizes),
-                size,
-            )
+    for size in token_sizes:
         residual_slice = residual[:size]
         # Dummy inputs for the fused post+pre variant.
         x_dummy = torch.zeros(
@@ -147,45 +146,77 @@ def _warmup_layer_mhc(
             size, hc_mult, hc_mult, dtype=torch.float32, device=device
         )
         for fn, scale, base, norm_weight, norm_eps in norm_configs:
-            layer_input, post_mix, comb_mix = layer.hc_pre(
-                residual_slice,
-                fn,
-                scale,
-                base,
-                norm_weight=norm_weight,
-                norm_eps=norm_eps,
-            )
-            layer.hc_post(layer_input, residual_slice, post_mix, comb_mix)
+            if use_fused_norm:
+                post_mix, comb_mix, layer_input = torch.ops.vllm.mhc_pre_tilelang(
+                    residual_slice,
+                    fn,
+                    scale,
+                    base,
+                    layer.rms_norm_eps,
+                    layer.hc_eps,
+                    layer.hc_eps,
+                    layer.hc_post_alpha,
+                    layer.hc_sinkhorn_iters,
+                    norm_weight=norm_weight,
+                    norm_eps=norm_eps,
+                )
+                torch.ops.vllm.mhc_post_tilelang(
+                    layer_input, residual_slice, post_mix, comb_mix
+                )
+            else:
+                layer_input, post_mix, comb_mix = layer.hc_pre(
+                    residual_slice, fn, scale, base
+                )
+                layer.hc_post(layer_input, residual_slice, post_mix, comb_mix)
 
             # Warm up the fused post+pre variant used after the first layer.
-            torch.ops.vllm.mhc_fused_post_pre_tilelang(
-                x_dummy,
-                residual_slice,
-                post_mix_dummy,
-                comb_mix_dummy,
-                fn,
-                scale,
-                base,
-                layer.rms_norm_eps,
-                layer.hc_eps,
-                layer.hc_eps,
-                layer.hc_post_alpha,
-                layer.hc_sinkhorn_iters,
-                n_splits=1,
-                tile_n=1,
-                norm_weight=norm_weight,
-                norm_eps=norm_eps,
-            )
+            if use_fused_norm:
+                torch.ops.vllm.mhc_fused_post_pre_tilelang(
+                    x_dummy,
+                    residual_slice,
+                    post_mix_dummy,
+                    comb_mix_dummy,
+                    fn,
+                    scale,
+                    base,
+                    layer.rms_norm_eps,
+                    layer.hc_eps,
+                    layer.hc_eps,
+                    layer.hc_post_alpha,
+                    layer.hc_sinkhorn_iters,
+                    n_splits=1,
+                    tile_n=1,
+                    norm_weight=norm_weight,
+                    norm_eps=norm_eps,
+                )
+            else:
+                layer.mhc_fused_post_pre(
+                    x_dummy,
+                    residual_slice,
+                    post_mix_dummy,
+                    comb_mix_dummy,
+                    fn,
+                    scale,
+                    base,
+                    layer.rms_norm_eps,
+                    layer.hc_eps,
+                    layer.hc_eps,
+                    layer.hc_post_alpha,
+                    layer.hc_sinkhorn_iters,
+                )
+        if pbar is not None:
+            pbar.update(1)
 
 
 def _warmup_hc_head(
     model: torch.nn.Module,
     token_sizes: list[int],
+    pbar: tqdm | None = None,
 ) -> None:
-    # Exercise the same HCHeadOp instance used during inference.
+    # Exercise the same HCHeadOp instance used during inference, or on
+    # NVIDIA the direct TileLang kernel that is called from the model.
     hc_head_op = getattr(model, "hc_head_op", None)
-    if hc_head_op is None:
-        return
+    use_op = hc_head_op is None
 
     max_tokens = max(token_sizes)
     hidden_size = int(model.config.hidden_size)
@@ -200,43 +231,48 @@ def _warmup_hc_head(
     )
 
     for size in token_sizes:
-        hc_head_op(
-            hidden_states[:size],
-            model.hc_head_fn,
-            model.hc_head_scale,
-            model.hc_head_base,
-            model.rms_norm_eps,
-            model.hc_eps,
-        )
+        hs_slice = hidden_states[:size]
+        if use_op:
+            torch.ops.vllm.hc_head_fused_kernel_tilelang(
+                hs_slice,
+                model.hc_head_fn,
+                model.hc_head_scale,
+                model.hc_head_base,
+                model.rms_norm_eps,
+                model.hc_eps,
+            )
+        else:
+            hc_head_op(
+                hs_slice,
+                model.hc_head_fn,
+                model.hc_head_scale,
+                model.hc_head_base,
+                model.rms_norm_eps,
+                model.hc_eps,
+            )
+        if pbar is not None:
+            pbar.update(1)
 
 
-@instrument(span_name="DeepSeek V4 mHC warmup")
+@instrument(span_name="mHC warmup")
 def deepseek_v4_mhc_warmup(
     model: torch.nn.Module,
     *,
     max_tokens: int,
     cudagraph_capture_sizes: list[int] | None = None,
 ) -> None:
-    logger.info("[mhc-debug] deepseek_v4_mhc_warmup called")
-
     # Bail out early for non-DeepSeek-V4 models to avoid walking modules.
     config = getattr(model, "config", None)
     model_type = getattr(config, "model_type", None) if config is not None else None
-    logger.info("[mhc-debug] model_type=%s", model_type)
     if model_type is not None and model_type != "deepseek_v4":
-        logger.info("[mhc-debug] not deepseek_v4, return")
         return
 
     layer = _find_first_mhc_layer(model)
-    logger.info("[mhc-debug] first mhc layer found=%s", layer is not None)
     if layer is None:
-        logger.info("[mhc-debug] no mhc layer, return")
         return
 
     device = layer.hc_attn_fn.device
-    logger.info("[mhc-debug] device=%s", device)
     if device.type != "cuda":
-        logger.info("[mhc-debug] device not cuda, return")
         return
 
     deepseek_model = _find_deepseek_v4_model(model)
@@ -244,22 +280,22 @@ def deepseek_v4_mhc_warmup(
         max_tokens=max_tokens,
         cudagraph_capture_sizes=cudagraph_capture_sizes or [],
     )
-    logger.info("[mhc-debug] token_sizes count=%d, first few=%s", len(token_sizes), token_sizes[:10])
     if not token_sizes:
-        logger.info("[mhc-debug] empty token_sizes, return")
         return
 
-    started = time.perf_counter()
-    logger.info(
-        "Warming up DeepSeek V4 mHC TileLang kernels for token sizes: %s",
-        token_sizes,
-    )
+    total = len(token_sizes)
+    if deepseek_model is not None:
+        total += len(token_sizes)
+
     with torch.inference_mode():
-        _warmup_layer_mhc(layer, token_sizes)
-        if deepseek_model is not None:
-            _warmup_hc_head(deepseek_model, token_sizes)
-        torch.accelerator.synchronize()
-    logger.info(
-        "DeepSeek V4 mHC TileLang warmup finished in %.2f seconds.",
-        time.perf_counter() - started,
-    )
+        if is_global_first_rank():
+            with tqdm(total=total, desc="mHC warmup") as pbar:
+                _warmup_layer_mhc(layer, token_sizes, pbar)
+                if deepseek_model is not None:
+                    _warmup_hc_head(deepseek_model, token_sizes, pbar)
+                torch.accelerator.synchronize()
+        else:
+            _warmup_layer_mhc(layer, token_sizes, None)
+            if deepseek_model is not None:
+                _warmup_hc_head(deepseek_model, token_sizes, None)
+            torch.accelerator.synchronize()
