@@ -15,6 +15,18 @@ individual checkpoint names vLLM's DeepseekV3 load_weights fuses internally.
 The vLLM weight-transfer engine (bake/replay) is unchanged: the bake drives
 vLLM's own load_weights over the checkpoint names, so fp8 weight + weight_scale_inv
 flow through as ordinary slices into the fp8/fp32 layerwise-reload destinations.
+
+PRODUCER SERVE PATH — SIMPLE (copy into a staging buffer). Each sync, gather_layer
+all-gathers each physical tensor via full_tensor() into a fresh buffer, and the
+serve replays each name's view op-chain then COPIES the slice into a reused,
+registered per-dtype serve arena (the staging buffer). This is intentionally
+sharding-agnostic: it does NOT require the served slice to be a zero-copy view of a
+persistent, pre-registered gather buffer, so it drops in on top of a stock
+fully_shard'd trainer where we don't control the gather layout. It is the revert of
+the "slice baking" optimization (persistent registered gather buffer + cached serve
+plan + zero-copy views), which was faster (~0.05 s vs ~1.1 s producer serve/iter)
+but coupled the serve to a bespoke gather. See multi_node_rdt.md for the profiled
+critical-path delta.
 """
 import asyncio
 import glob
@@ -99,19 +111,12 @@ def _layerwise_groups(names: list[str]) -> list[list[str]]:
     return groups
 
 
-def _cstride(shape):
-    """Contiguous strides for a shape (for DTensor.from_local explicit global stride)."""
-    s = [1] * len(shape)
-    for i in range(len(shape) - 2, -1, -1):
-        s[i] = s[i + 1] * shape[i + 1]
-    return tuple(s)
-
-
 @ray.remote(num_gpus=1, max_concurrency=8, enable_tensor_transport=True)
 class KimiTrainWorker:
-    """Raw FP8 sharded checkpoint server (one per GPU). Holds every checkpoint
-    tensor sharded Shard(0) on GPU; gathers per layer and serves slices over NIXL.
-    No HF model / no forward; gather + serve only."""
+    """Raw FP8 checkpoint server (one per GPU), sharded with STANDARD ``fully_shard``.
+    Holds every checkpoint tensor as a fully_shard'd param (Shard(0) DTensor) on GPU;
+    gathers per layer via ``full_tensor()`` and serves slices over NIXL. No HF model /
+    no forward; gather + serve only."""
 
     def __init__(self, model_name, rank, world_size, master_addr, master_port):
         self.rank = rank
@@ -125,6 +130,20 @@ class KimiTrainWorker:
 
         self._load_checkpoint(model_name)
 
+        # [RDT-GC] Straggler FIX (measured): ~0.4% of produce calls stalled 0.24-0.6s
+        # with the RDMA transfer dead-normal -> stop-the-world gen-2 GC scanning the
+        # large resident tensor graph (139k params) during the 148k-slice produce.
+        # gc.freeze() moves that static graph into a permanent gen never scanned, so
+        # gen-2 collections stay cheap (real garbage still collected). Measured: p99
+        # pull 0.240->0.160s, >0.3s stragglers 0.37%->0.20%, median unchanged. Default
+        # on; RDT_GC=0 disables the fix (A/B), =2 fully disables GC (aggressive test).
+        import gc as _gc
+        _gcmode = os.environ.get("RDT_GC", "1")
+        if _gcmode == "1":
+            _gc.collect(); _gc.freeze()
+        elif _gcmode == "2":
+            _gc.disable()
+
         # gather cache (bounded: freed per layer group) + sync
         self._cache: dict[str, torch.Tensor] = {}       # individual name -> view
         self._cache_phys: dict[str, torch.Tensor] = {}  # physical (stack/indiv) -> full
@@ -134,23 +153,29 @@ class KimiTrainWorker:
         from ray.experimental import register_nixl_memory
         self._register_nixl_memory = register_nixl_memory
 
-        # A2: gather DIRECTLY into a persistent, NIXL-registered GATHER BUFFER and
-        # serve names as views into it -- no serve arena, no per-slice copy, and
-        # (via the cached serve plan below) no per-spec op-chain replay on the warm
-        # path. DOUBLE-BUFFERED (slot = group_idx % 2) so gather(N+1) lands in the
-        # other slot while the consumer still RDMA-reads slot N -- preserving the
-        # gather/transfer overlap that hides the all-gather. Per-dtype, high-water
-        # reused, (re)registered on grow. Memory ~= today's transient 2-group peak.
-        self._NSLOTS = 2
-        self._gbuf: list[dict[torch.dtype, torch.Tensor]] = [
-            {} for _ in range(self._NSLOTS)]
-        # Per-group cached serve plan (key = group's sorted name set): the list of
-        # served views (gbuf views auto-refresh as gather rewrites gbuf in place) +
-        # the per-phys data_ptrs it is valid against (cheap O(#phys) revalidation).
-        self._serve_plan: dict[tuple, dict] = {}
-        # Fallback arena (per dtype) for the rare materialize specs (chains that
-        # copy / are not pure views of gbuf -- 0% on Kimi). Registered, reused.
+        # Simple, sharding-agnostic producer serve (reverted from the gbuf +
+        # cached-serve-plan "slice baking"): gather_layer all-gathers each phys via
+        # full_tensor() into a FRESH buffer; the serve path replays each name's
+        # op-chain and copies the resulting slice into this reused, registered
+        # per-dtype serve arena (a staging buffer), then serves the arena view. It
+        # does NOT assume the served slice is a zero-copy view of a pre-registered
+        # region, so it works regardless of how the trainer shards/gathers the model
+        # -- the point of the revert: a real RL trainer wraps its model with
+        # fully_shard and we don't control the gather layout.
         self._serve_arenas: dict[torch.dtype, torch.Tensor] = {}
+
+        # [RDT-NOSYNC EXPERIMENT] When RDT_NOSYNC=1, replace Ray's whole-device
+        # cuda.synchronize in extract_tensor_transport_metadata (which blocks on the
+        # OVERLAPPING next-group all_gather, ~1s/iter) with a SCOPED guarantee: run
+        # the serve copies on a dedicated stream that waits only on THIS group's
+        # gather-completion event, then sync that stream -- so the served buffers are
+        # materialized before produce returns, without waiting on unrelated GPU work.
+        # (Ray's device sync is env-gated out under the same flag by
+        # deploy_rdt_nosync.py.) Default RDT_NOSYNC=0 = stock: copies on the default
+        # stream, Ray's device sync guarantees materialization.
+        self._scoped_sync = os.environ.get("RDT_NOSYNC", "0") == "1"
+        self._serve_stream = torch.cuda.Stream() if self._scoped_sync else None
+        self._cache_event: dict[str, "torch.cuda.Event"] = {}
 
         # profiling counters
         self._timing_lock = threading.Lock()
@@ -161,19 +186,30 @@ class KimiTrainWorker:
         install_nixl_timing()
 
     def _load_checkpoint(self, model_name):
-        """Load the FP8 checkpoint to GPU sharded Shard(0), STACKING routed experts.
+        """Load the FP8 checkpoint as a STANDARD FSDP2 model.
 
-        Routed experts are stacked per (layer, proj, weight/scale) into fused
-        tensors [E, *expert] (like the Qwen HF model's fused experts), so the gather
-        is a handful of large all-gathers per layer instead of ~2300 tiny ones.
-        Non-expert params stay individual. We still serve INDIVIDUAL checkpoint names
-        (views/slices of the stacks) -- the contract vLLM's DeepseekV3 load_weights
-        expects. Sharding is manual uniform Shard(0) (verified byte-exact), not
-        fully_shard (which flat-shards a multi-param holder non-uniformly).
+        Build a plain ``nn.Module`` whose parameters are the checkpoint tensors
+        (fp8 ``.weight`` + fp32 ``.weight_scale_inv``; routed experts FUSED per
+        (layer, proj, wkind) into ``[E, *expert]`` params, like an HF MoE model's
+        fused experts), then call ``fully_shard`` on it and stream each rank's shard
+        from disk. There is NO custom DTensor construction: ``fully_shard`` shards
+        every param ``Shard(0)`` and ``full_tensor()`` reconstructs it byte-exact --
+        exactly the contract a real RL trainer's FSDP2 model exposes, so this drops
+        in wherever we don't control the gather layout. We still SERVE INDIVIDUAL
+        checkpoint names (views/slices of the fused params) via ``_name_to_src`` --
+        the contract vLLM's DeepseekV3 load_weights expects. Experts are fused only
+        so ``full_tensor()`` is ~20 large all-gathers/layer, not ~2300 tiny ones
+        (same reason HF MoE models fuse them); that's a data-layout choice, not
+        custom sharding.
         """
         import re
+        from collections import OrderedDict
+
+        import torch.nn as nn
         from safetensors import safe_open
-        from torch.distributed.tensor import DTensor, Shard, init_device_mesh
+        from torch.distributed.tensor._utils import (
+            compute_local_shape_and_global_offset,
+        )
         snap = glob.glob(
             f"/root/.cache/huggingface/hub/models--{model_name.replace('/','--')}/snapshots/*"
         )[0]
@@ -208,7 +244,9 @@ class KimiTrainWorker:
             self.weight_shapes.append(list(sl.get_shape()))
             self.weight_dtype_names.append(str(_ST_DTYPE[sl.get_dtype()]).split(".")[-1])
 
-        # Parse names: routed experts -> per-(layer,proj,wkind) stack; else individual.
+        # Parse names: routed experts -> per-(layer,proj,wkind) FUSED param; else
+        # individual. _name_to_src maps each served (individual) name to its physical
+        # param + expert row; unchanged from the serve's point of view.
         expert_re = re.compile(
             r"^(.*\.experts)\.(\d+)\.(gate_proj|up_proj|down_proj)\.(weight|weight_scale_inv)$"
         )
@@ -218,52 +256,79 @@ class KimiTrainWorker:
         for n in names:
             m = expert_re.match(n)
             if m:
-                pk = f"{m.group(1)}.{m.group(3)}.{m.group(4)}"  # synthetic stack key
+                pk = f"{m.group(1)}.{m.group(3)}.{m.group(4)}"  # synthetic fused key
                 self._name_to_src[n] = (pk, int(m.group(2)))
                 stacks.setdefault(pk, {})[int(m.group(2))] = n
             else:
                 self._name_to_src[n] = (n, None)
                 individuals.append(n)
 
-        mesh = init_device_mesh("cuda", (self.world_size,))
-        self._mesh = mesh
-        self._phys: dict[str, torch.Tensor] = {}
-
-        def make_shard0(full_shape, dtype, load_rows):
-            """Uniform Shard(0) DTensor; load_rows(start,end) returns rows [start:end)
-            on cuda. Last rank's shard is zero-padded."""
-            D = full_shape[0]
-            rest = tuple(full_shape[1:])
-            world = self.world_size
-            sp = (D + world - 1) // world
-            start, end = self.rank * sp, min((self.rank + 1) * sp, D)
-            local = torch.zeros((sp,) + rest, dtype=dtype, device="cuda:0")
-            if end > start:
-                local[: end - start].copy_(load_rows(start, end))
-            return DTensor.from_local(local, mesh, [Shard(0)], run_check=False,
-                                      shape=torch.Size(full_shape),
-                                      stride=_cstride(full_shape))
-
+        # Physical param spec per phys key: (pk, full_shape, dtype, loader). loader is
+        # ("indiv", ckpt_name) or ("stack", {expert_idx: ckpt_name}).
+        specs: list[tuple] = []
         for n in individuals:
             sl = H(n).get_slice(n)
-            shape, dt = tuple(sl.get_shape()), _ST_DTYPE[sl.get_dtype()]
-            self._phys[n] = make_shard0(
-                shape, dt, lambda a, b, _n=n: H(_n).get_slice(_n)[a:b])
-
+            specs.append((n, tuple(sl.get_shape()), _ST_DTYPE[sl.get_dtype()],
+                          ("indiv", n)))
         for pk, idx_map in stacks.items():
             E = len(idx_map)
             assert set(idx_map) == set(range(E)), f"non-contiguous experts in {pk}"
             sl = H(idx_map[0]).get_slice(idx_map[0])
-            eshape, dt = tuple(sl.get_shape()), _ST_DTYPE[sl.get_dtype()]
+            specs.append((pk, (E,) + tuple(sl.get_shape()),
+                          _ST_DTYPE[sl.get_dtype()], ("stack", idx_map)))
 
-            def load_rows(a, b, _im=idx_map, _es=eshape, _dt=dt):
-                out = torch.empty((b - a,) + _es, dtype=_dt, device="cuda:0")
-                for i, e in enumerate(range(a, b)):
-                    cn = _im[e]
-                    out[i].copy_(H(cn).get_tensor(cn))
-                return out
+        # Group phys by decoder layer (pre/post -> -1) and build one ParameterDict
+        # submodule per group; fully_shard each submodule + the root (the standard
+        # FSDP2 pattern -- see rlhf_sharded_rdt_fsdp_ep.py). Params start on META so
+        # nothing is allocated before sharding; keyed by index to avoid name mangling.
+        def _lyr(pk):
+            return (int(pk[len("model.layers."):].split(".", 1)[0])
+                    if pk.startswith("model.layers.") else -1)
+        by_layer: "OrderedDict[int, list]" = OrderedDict()
+        for s in specs:
+            by_layer.setdefault(_lyr(s[0]), []).append(s)
 
-            self._phys[pk] = make_shard0((E,) + eshape, dt, load_rows)
+        root = nn.Module()
+        root.groups = nn.ModuleList()
+        submods: list[tuple] = []
+        for _lyr_idx, group_specs in by_layer.items():
+            sub = nn.Module()
+            pd = nn.ParameterDict()
+            for j, (pk, shape, dt, _loader) in enumerate(group_specs):
+                pd[str(j)] = nn.Parameter(
+                    torch.empty(shape, dtype=dt, device="meta"), requires_grad=False)
+            sub.pd = pd
+            root.groups.append(sub)
+            submods.append((sub, group_specs))
+        for sub, _ in submods:
+            fully_shard(sub)
+        fully_shard(root)
+
+        # Allocate ONLY each rank's local shards, then stream them from disk. The full
+        # checkpoint is never materialized on any GPU. Uses FSDP2's own local
+        # shape/offset so any padding rows stay zero (full_tensor() strips them).
+        root.to_empty(device="cuda")
+        self.model = root
+        self._phys: dict[str, torch.Tensor] = {}
+        with torch.no_grad():
+            for sub, group_specs in submods:
+                for j, (pk, shape, dt, loader) in enumerate(group_specs):
+                    param = sub.pd[str(j)]
+                    self._phys[pk] = param
+                    local = param.to_local().detach()
+                    lshape, goff = compute_local_shape_and_global_offset(
+                        param.shape, param.device_mesh, param.placements)
+                    local.zero_()
+                    n0 = lshape[0]  # real rows this rank owns along the sharded dim
+                    if n0 == 0:
+                        continue
+                    kind, info = loader
+                    if kind == "indiv":
+                        local[:n0].copy_(H(info).get_slice(info)[goff[0]:goff[0] + n0])
+                    else:  # fused expert stack: dim-0 rows ARE experts
+                        for i in range(n0):
+                            cn = info[goff[0] + i]
+                            local[i].copy_(H(cn).get_tensor(cn))
         torch.cuda.synchronize()
 
     def get_rank(self):
@@ -304,16 +369,17 @@ class KimiTrainWorker:
 
     # ---- gather / serve / free ----
     def gather_layer(self, names, slot):
-        """Gather a layer group DIRECTLY into the persistent, NIXL-registered gather
-        buffer for `slot` (= group_idx % 2), then expose each requested name as a
-        VIEW into gbuf (stack[expert_idx] or the individual full tensor).
+        """Gather a layer group by all-gathering each unique PHYSICAL tensor (stacks
+        + individuals) via ``DTensor.full_tensor()`` into a FRESH buffer, then expose
+        each requested name as a view into that fresh tensor (stack[expert_idx] or
+        the individual full tensor).
 
-        Uses all_gather_into_tensor on a uint8 bytecast (dtype-agnostic, fp8-safe)
-        + a [:D] strip of the padded shards -- byte-exact vs full_tensor() (verified
-        in ~/gather_check.py). Serving views straight from gbuf removes the serve
-        arena and the per-slice copy. ~20 all-gathers/layer (stacks + individuals).
-        Bounded: high-water-reused per slot; the driver frees the group (cache refs)
-        after its update_weights drains, and the OTHER slot absorbs the next group.
+        Simple and sharding-agnostic: ``full_tensor()`` is FSDP's own all-gather, so
+        this works for any DTensor sharding a real trainer produces (no assumption of
+        a specific layout, no persistent registered gather buffer). ``slot`` is
+        accepted for driver-signature compatibility but IGNORED (fresh alloc each
+        call; the driver frees the group's refs synchronously after its update
+        drains, keeping resident memory bounded to ~2 groups).
         """
         try:
             phys_keys: list[str] = []
@@ -323,39 +389,23 @@ class KimiTrainWorker:
                 if pk not in seen:
                     seen.add(pk)
                     phys_keys.append(pk)
-            # byte layout of this group's phys tensors within the slot's per-dtype
-            # gbuf (16-byte aligned offsets so the uint8->dtype view is legal).
-            ALIGN = 16
-            plan: list[tuple] = []   # (pk, dtype, off, glen, full_shape, sp, local)
-            totals: dict[torch.dtype, int] = {}
-            for pk in phys_keys:
-                ph = self._phys[pk]
-                full_shape = tuple(ph.shape)
-                local = ph.to_local()                  # (sp,)+rest, contiguous
-                dtype = local.dtype
-                glen = self.world_size * local.numel() * local.element_size()
-                off = totals.get(dtype, 0)
-                plan.append((pk, dtype, off, glen, full_shape, local.shape[0], local))
-                totals[dtype] = off + ((glen + ALIGN - 1) & ~(ALIGN - 1))
-            for dtype, total in totals.items():
-                b = self._gbuf[slot].get(dtype)
-                if b is None or b.numel() < total:
-                    b = torch.empty(total, dtype=torch.uint8, device="cuda:0")
-                    self._register_nixl_memory(b)     # registered once per (slot,dtype)
-                    self._gbuf[slot][dtype] = b
             gathered: dict[str, torch.Tensor] = {}
-            for (pk, dtype, off, glen, full_shape, sp, local) in plan:
-                region = self._gbuf[slot][dtype][off:off + glen]   # uint8, contiguous
-                dist.all_gather_into_tensor(
-                    region, local.reshape(-1).view(torch.uint8).contiguous())
-                rest = full_shape[1:]
-                full_padded = region.view(dtype).view((self.world_size * sp,) + rest)
-                gathered[pk] = full_padded[:full_shape[0]]         # logical, gbuf view
+            for pk in phys_keys:
+                gathered[pk] = self._phys[pk].full_tensor()   # all-gather -> FRESH buf
+            # [RDT-NOSYNC] Record a completion event for THIS group's all_gathers so
+            # the serve can scope its sync to exactly this group (not the overlapping
+            # next-group gather). Only recorded/used when scoped_sync is on.
+            gather_ev = None
+            if self._scoped_sync:
+                gather_ev = torch.cuda.Event()
+                gather_ev.record()
             with self._cache_cond:
                 self._cache_phys.update(gathered)
                 for n in names:
                     pk, idx = self._name_to_src[n]
                     self._cache[n] = gathered[pk] if idx is None else gathered[pk][idx]
+                    if gather_ev is not None:
+                        self._cache_event[n] = gather_ev
                 self._cache_cond.notify_all()
         except BaseException as e:
             with self._cache_cond:
@@ -366,43 +416,6 @@ class KimiTrainWorker:
     @ray.method(tensor_transport="nixl")
     def rdt_warmup(self):
         return torch.zeros(1, device="cuda:0")
-
-    def _build_serve_plan(self, specs):
-        """Cold path (once per group): replay each op-chain, classify pure-view
-        (served DIRECTLY as a gbuf view) vs materialize (copied into the fallback
-        arena), and cache the served list + the per-phys gbuf data_ptrs the plan is
-        valid against. Purely storage-based -- generalizes to any pure-view chain."""
-        served: list = [None] * len(specs)
-        ptrs: dict[str, int] = {}
-        fb_specs: list = []
-        nbytes = 0
-        for i, (name, chain) in enumerate(specs):
-            t = self._cache[name]
-            for op, args, kw in chain:
-                if op not in _ALLOWED_OPS:
-                    raise ValueError(f"{name!r}: disallowed op {op!r}")
-                t = getattr(t, op)(*args, **dict(kw))
-            nbytes += t.element_size() * t.numel()
-            phys = self._cache_phys[self._name_to_src[name][0]]
-            if t.untyped_storage().data_ptr() == phys.untyped_storage().data_ptr():
-                served[i] = t                                   # pure view into gbuf
-                ptrs[self._name_to_src[name][0]] = phys.data_ptr()
-            else:
-                fb_specs.append((i, name, chain, t.dtype, t.numel()))   # materialize
-        # lay fallback specs into the registered fallback arena (offsets cached)
-        fb: list = []
-        fb_totals: dict[torch.dtype, int] = {}
-        for (i, name, chain, dt, n) in fb_specs:
-            off = fb_totals.get(dt, 0)
-            fb.append((i, name, chain, dt, off, n))
-            fb_totals[dt] = off + ((n + 7) & ~7)
-        for dt, total in fb_totals.items():
-            a = self._serve_arenas.get(dt)
-            if a is None or a.numel() < total:
-                a = torch.empty(total, dtype=dt, device="cuda:0")
-                self._register_nixl_memory(a)
-                self._serve_arenas[dt] = a
-        return {"served": served, "ptrs": ptrs, "fb": fb, "nbytes": nbytes}
 
     @ray.method(tensor_transport="nixl")
     def rdt_produce_weights_batched(self, specs):
@@ -418,34 +431,59 @@ class KimiTrainWorker:
         wait_s = time.perf_counter() - _t_w0
 
         _t_s0 = time.perf_counter()
-        # Warm path: reuse the cached serve plan. served[i] are gbuf views, which
-        # auto-refresh because gather rewrote gbuf IN PLACE this sync. Revalidate
-        # cheaply (O(#phys), not O(#specs)) via the gbuf data_ptrs -- a high-water
-        # realloc / changed specs forces a rebuild. NO per-spec op-chain replay.
-        gk = tuple(needed)
-        plan = self._serve_plan.get(gk)
-        if not (plan is not None and len(plan["served"]) == len(specs)
-                and all(self._cache_phys[pk].data_ptr() == ptr
-                        for pk, ptr in plan["ptrs"].items())):
-            plan = self._build_serve_plan(specs)
-            self._serve_plan[gk] = plan
-        served = plan["served"]
-        # refresh materialize-fallback specs (0% on Kimi): re-copy from the freshly
-        # gathered source into the registered fallback arena.
-        for (i, name, chain, dt, off, n) in plan["fb"]:
+        # Simple serve: REPLAY every name's op-chain (pure Python) to produce the
+        # slice, then COPY each slice into the reused, registered per-dtype serve
+        # arena (staging buffer) and serve the arena view. No cached serve plan and
+        # no zero-copy gbuf views -- the copy makes the serve independent of how the
+        # slice was gathered/sharded, at the cost of the op-chain replay (~1.8 s) +
+        # the copy (~0.6 s) the "slice baking" had removed.
+        sliced: list = []                    # (dtype, off, numel, shape, tensor)
+        totals: dict[torch.dtype, int] = {}
+        nbytes = 0
+        for name, chain in specs:
             t = self._cache[name]
             for op, args, kw in chain:
+                if op not in _ALLOWED_OPS:
+                    raise ValueError(f"{name!r}: disallowed op {op!r}")
                 t = getattr(t, op)(*args, **dict(kw))
-            view = self._serve_arenas[dt][off:off + n].reshape(t.shape)
-            view.copy_(t)
-            served[i] = view
+            dt, n = t.dtype, t.numel()
+            off = totals.get(dt, 0)
+            sliced.append((dt, off, n, tuple(t.shape), t))
+            totals[dt] = off + ((n + 7) & ~7)
+            nbytes += t.element_size() * n
+        for dt, total in totals.items():
+            a = self._serve_arenas.get(dt)
+            if a is None or a.numel() < total:
+                a = torch.empty(total, dtype=dt, device="cuda:0")
+                self._register_nixl_memory(a)                   # registered once, reused
+                self._serve_arenas[dt] = a
+        served: list = [None] * len(specs)
+        # [RDT-NOSYNC] Scoped-sync serve: enqueue the copies on a dedicated stream
+        # that waits ONLY on this group's gather event(s), then synchronize that
+        # stream -- the served buffers are materialized before we return (so Ray's
+        # whole-device sync can be skipped) WITHOUT blocking on the overlapping
+        # next-group all_gather. When scoped_sync is off, ss is None and
+        # torch.cuda.stream(None) is a no-op (copies on the default stream, as before).
+        ss = self._serve_stream
+        if ss is not None:
+            for ev in {id(e): e for e in
+                       (self._cache_event.get(nm) for nm in needed)
+                       if e is not None}.values():
+                ss.wait_event(ev)
+        with torch.cuda.stream(ss):
+            for i, (dt, off, n, shape, t) in enumerate(sliced):
+                view = self._serve_arenas[dt][off:off + n].reshape(shape)
+                view.copy_(t)                                   # the per-slice copy
+                served[i] = view
+        if ss is not None:
+            ss.synchronize()
         slice_s = time.perf_counter() - _t_s0
         with self._timing_lock:
             self._produce_calls += 1
             self._produce_specs += len(specs)
             self._produce_wait_seconds += wait_s
             self._produce_slice_seconds += slice_s
-            self._produce_bytes += plan["nbytes"]
+            self._produce_bytes += nbytes
             self._produce_method_seconds += time.perf_counter() - _t_m0
         return served
 
@@ -454,6 +492,7 @@ class KimiTrainWorker:
             pks: set[str] = set()
             for name in names:
                 self._cache.pop(name, None)
+                self._cache_event.pop(name, None)
                 pks.add(self._name_to_src[name][0])
             # Drop the gathered physical tensors (stacks) so the layer's memory is
             # released; the per-name views above held refs to them.
@@ -591,17 +630,24 @@ async def main():
         print(f"[sync] iter {sync_iter}: gather + update_weights...", flush=True)
         prev_task = None
         prev_names = None
+        pending_frees: list = []  # fire-and-forget free_group refs; drained once/iter
         for gidx, group_names in enumerate(layer_groups):
             gi = ShardedRDTWeightTransferUpdateInfo(names=group_names)
-            slot = gidx % 2  # double-buffer: gather(N+1) lands in the other slot
+            slot = gidx % 2  # accepted by gather_layer for signature compat (ignored)
             # Dispatch this group's gather NOW (non-blocking) so it overlaps the
             # previous group's update_weights, which we await next.
             gfuts = [w.gather_layer.remote(group_names, slot) for w in workers]
             if prev_task is not None:
                 with cp.timed("update_weights"):
                     await prev_task
-                with cp.timed("free_group"):
-                    ray.get([w.free_group.remote(prev_names) for w in workers])
+                # Fire-and-forget free(prev), drained once at end of iter. Safe even
+                # though the gather allocates a FRESH full_tensor per group (no
+                # persistent gbuf): the WORKER runs each free_group as its RPC arrives
+                # (~one update_weights, ~7s, apart) -- NOT deferred to the driver's
+                # drain -- so it reclaims the prev group's memory long before the next
+                # group's gather, keeping ~2 groups resident. Moving the ~0.6s Ray
+                # round-trip off the critical path (was synchronous here).
+                pending_frees += [w.free_group.remote(prev_names) for w in workers]
             # For gidx==0 this is the pipeline fill (nothing overlapped it); for
             # gidx>0 it is only the residual gather tail not hidden by the await.
             with cp.timed("gather_fill" if gidx == 0 else "gather_tail"):
@@ -612,8 +658,12 @@ async def main():
         if prev_task is not None:
             with cp.timed("update_weights"):
                 await prev_task
-            with cp.timed("free_group"):
-                ray.get([w.free_group.remote(prev_names) for w in workers])
+            pending_frees += [w.free_group.remote(prev_names) for w in workers]
+        # Single drain barrier: ensure this iter's cache is fully evicted before the
+        # next iter's produce (else a stale view could satisfy the produce wait). ~0
+        # on the critical path since the workers ran each free as its RPC arrived.
+        with cp.timed("free_group"):
+            ray.get(pending_frees)
         with cp.timed("finish_weight_update"):
             await engine.finish_weight_update()
         cp.finish()
