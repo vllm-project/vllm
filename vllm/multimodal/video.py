@@ -14,10 +14,10 @@ import numpy.typing as npt
 import torch
 
 from vllm import envs
+from vllm.logger import init_logger
 from vllm.utils.import_utils import PlaceholderModule, check_torchcodec_available
 from vllm.utils.mem_constants import MiB_bytes
 from vllm.utils.registry import ExtensionManager
-
 
 try:
     import cv2
@@ -33,10 +33,13 @@ except ImportError:
 
 try:
     from torchcodec.decoders import VideoDecoder
-except (ImportError, RuntimeError) as e:
+except (ImportError, RuntimeError):
     VideoDecoder = PlaceholderModule("torchcodec").placeholder_attr(  # type: ignore[assignment]
         "decoders.VideoDecoder"
     )
+
+
+logger = init_logger(__name__)
 
 
 class VideoLoaderRegistry(ExtensionManager):

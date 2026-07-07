@@ -563,7 +563,9 @@ def check_torchcodec_available():
         # ImportError when a native dependency fails to load, with a
         # message that embeds a per-backend-version traceback dump.
         # Trim it down to just the human-readable summary.
-        marker = "The following exceptions were raised as we tried to load libtorchcodec:"
+        marker = (
+            "The following exceptions were raised as we tried to load libtorchcodec:"
+        )
         message = str(e)
         if marker in message:
             raise RuntimeError(message.split(marker, 1)[0].rstrip()) from None
