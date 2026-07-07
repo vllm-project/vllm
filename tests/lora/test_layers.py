@@ -797,12 +797,18 @@ def test_column_parallel_packed(
                 params_dtype=torch.float16,
                 prefix=f"layer_{idx}",
             )
+            linear.split_sizes = [
+                linear.num_heads * linear.head_size,
+                linear.num_kv_heads * linear.head_size,
+                linear.num_kv_heads * linear.v_head_size,
+            ]
             linear.weight.data = torch.rand_like(linear.weight.data)
             lora_linear = (
                 MergedQKVParallelLinearWithLoRA(linear)
                 if not fully_shard
                 else MergedQKVParallelLinearWithShardedLoRA(linear)
             )
+            assert lora_linear.split_sizes == linear.split_sizes
         else:
             linear = QKVParallelLinear(
                 4096,

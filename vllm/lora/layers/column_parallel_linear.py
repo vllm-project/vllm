@@ -467,6 +467,17 @@ class MergedQKVParallelLinearWithLoRA(MergedColumnParallelLinearWithLoRA):
             self.kv_shard_id,
             self.kv_shard_id,
         )
+        self.split_sizes = list(
+            getattr(
+                self.base_layer,
+                "split_sizes",
+                [
+                    self.q_proj_shard_size,
+                    self.kv_proj_shard_size,
+                    self.base_layer.num_kv_heads * self.base_layer.v_head_size,
+                ],
+            )
+        )
 
     def create_lora_weights(
         self,
