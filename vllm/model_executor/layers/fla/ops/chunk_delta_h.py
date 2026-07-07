@@ -13,10 +13,12 @@ import torch
 from vllm.triton_utils import tl, triton
 
 from .index import prepare_chunk_indices, prepare_chunk_offsets
-from .op import exp
+from .op import exp, exp2
 from .utils import FLA_CHUNK_SIZE, use_cuda_graph
 
 NUM_WARPS = [2, 4, 8, 16]
+# Triton's AMD backend fails to lower this kernel with num_stages=4.
+_CHUNK_DELTA_H_NUM_STAGES = [2, 3] if torch.version.hip else [2, 3, 4]
 
 
 @triton.heuristics(
@@ -33,7 +35,7 @@ NUM_WARPS = [2, 4, 8, 16]
     configs=[
         triton.Config({"BV": BV}, num_warps=num_warps, num_stages=num_stages)
         for num_warps in [2, 4]
-        for num_stages in [2, 3, 4]
+        for num_stages in _CHUNK_DELTA_H_NUM_STAGES
         for BV in [32, 64]
     ],
     key=["H", "K", "V", "BT"],
@@ -65,6 +67,7 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
     STORE_FINAL_STATE: tl.constexpr,
     SAVE_NEW_VALUE: tl.constexpr,
     IS_VARLEN: tl.constexpr,
+    USE_EXP2: tl.constexpr,
 ):
     i_v, i_nh = tl.program_id(0), tl.program_id(1)
     i_n, i_h = i_nh // H, i_nh % H
@@ -210,8 +213,12 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 g + bos * H + i_h, (T,), (H,), (i_t * BT,), (BT,), (0,)
             )
             b_g = tl.load(p_g, boundary_check=(0,))
-            b_v = b_v * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
-            b_g_last = exp(b_g_last)
+            if USE_EXP2:
+                b_v = b_v * tl.where(m_t, exp2(b_g_last - b_g), 0)[:, None]
+                b_g_last = exp2(b_g_last)
+            else:
+                b_v = b_v * tl.where(m_t, exp(b_g_last - b_g), 0)[:, None]
+                b_g_last = exp(b_g_last)
             b_h1 *= b_g_last
             if K > 64:
                 b_h2 *= b_g_last
@@ -227,7 +234,10 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                 mask=(o_k1 < K),
                 other=0.0,
             )
-            b_h1 *= exp(b_gk_last1)[None, :]
+            if USE_EXP2:
+                b_h1 *= exp2(b_gk_last1)[None, :]
+            else:
+                b_h1 *= exp(b_gk_last1)[None, :]
             if K > 64:
                 o_k2 = 64 + o_k1
                 b_gk_last2 = tl.load(
@@ -235,7 +245,10 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k2 < K),
                     other=0.0,
                 )
-                b_h2 *= exp(b_gk_last2)[None, :]
+                if USE_EXP2:
+                    b_h2 *= exp2(b_gk_last2)[None, :]
+                else:
+                    b_h2 *= exp(b_gk_last2)[None, :]
             if K > 128:
                 o_k3 = 128 + o_k1
                 b_gk_last3 = tl.load(
@@ -243,7 +256,10 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k3 < K),
                     other=0.0,
                 )
-                b_h3 *= exp(b_gk_last3)[None, :]
+                if USE_EXP2:
+                    b_h3 *= exp2(b_gk_last3)[None, :]
+                else:
+                    b_h3 *= exp(b_gk_last3)[None, :]
             if K > 192:
                 o_k4 = 192 + o_k1
                 b_gk_last4 = tl.load(
@@ -251,7 +267,10 @@ def chunk_gated_delta_rule_fwd_kernel_h_blockdim64(
                     mask=(o_k4 < K),
                     other=0.0,
                 )
-                b_h4 *= exp(b_gk_last4)[None, :]
+                if USE_EXP2:
+                    b_h4 *= exp2(b_gk_last4)[None, :]
+                else:
+                    b_h4 *= exp(b_gk_last4)[None, :]
         b_v = b_v.to(k.dtype.element_ty)
 
         p_k = tl.make_block_ptr(
@@ -311,6 +330,7 @@ def chunk_gated_delta_rule_fwd_h(
     cu_seqlens: torch.Tensor | None = None,
     chunk_indices: torch.Tensor | None = None,
     chunk_offsets: torch.Tensor | None = None,
+    use_exp2: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     # This kernel is slightly different from fla to support Q/K with different head numbers.
     # In fla, Q/K always have the same head number, so Hg is always equal to H.
@@ -357,5 +377,6 @@ def chunk_gated_delta_rule_fwd_h(
         K=K,
         V=V,
         BT=BT,
+        USE_EXP2=use_exp2,
     )
     return h, v_new, final_state

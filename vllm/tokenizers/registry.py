@@ -11,14 +11,7 @@ from typing_extensions import TypeVar, assert_never
 
 import vllm.envs as envs
 from vllm.logger import init_logger
-from vllm.transformers_utils.config import get_config
-from vllm.transformers_utils.gguf_utils import (
-    check_gguf_file,
-    get_gguf_file_path_from_hf,
-    is_gguf,
-    is_remote_gguf,
-    split_remote_gguf,
-)
+from vllm.transformers_utils.config import _maybe_register_hf_config, get_config
 from vllm.transformers_utils.repo_utils import (
     any_pattern_in_repo_files,
     is_mistral_model_repo,
@@ -38,17 +31,18 @@ logger = init_logger(__name__)
 # temporary workaround and better long term solutions are:
 # - Add model type to MODELS_WITH_INCORRECT_HUB_TOKENIZER_CLASS in transformers (better)
 # - Fix tokenizer_class on the hub for the affected models (best)
-_MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {"step3_vl"}
+_MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS: set[str] = {
+    "step3_vl",
+    "step3p7",
+    "unlimited-ocr",
+}
 
 _VLLM_TOKENIZERS = {
     "deepseek_v32": ("deepseek_v32", "DeepseekV32Tokenizer"),
     "deepseek_v4": ("deepseek_v4", "DeepseekV4Tokenizer"),
-    "fastokens": ("fastokens", "FastokensTokenizer"),
-    "grok2": ("grok2", "Grok2Tokenizer"),
     "hf": ("hf", "CachedHfTokenizer"),
     "kimi_audio": ("kimi_audio", "KimiAudioTokenizer"),
     "mistral": ("mistral", "MistralTokenizer"),
-    "qwen_vl": ("qwen_vl", "QwenVLTokenizer"),
 }
 
 
@@ -126,21 +120,6 @@ def resolve_tokenizer_args(
                 )
                 tokenizer_name = tokenizer_path
 
-    # Separate model folder from file path for GGUF models
-    if is_gguf(tokenizer_name):
-        if check_gguf_file(tokenizer_name):
-            kwargs["gguf_file"] = Path(tokenizer_name).name
-            tokenizer_name = Path(tokenizer_name).parent
-        elif is_remote_gguf(tokenizer_name):
-            tokenizer_name, quant_type = split_remote_gguf(tokenizer_name)
-            # Get the HuggingFace Hub path for the GGUF file
-            gguf_file = get_gguf_file_path_from_hf(
-                tokenizer_name,
-                quant_type,
-                revision=revision,
-            )
-            kwargs["gguf_file"] = gguf_file
-
     if "truncation_side" not in kwargs:
         if runner_type == "generate" or runner_type == "draft":
             kwargs["truncation_side"] = "left"
@@ -204,6 +183,13 @@ def get_tokenizer(
     **kwargs,
 ) -> _T:
     """Gets a tokenizer for the given model name via HuggingFace or ModelScope."""
+    if envs.VLLM_USE_FASTOKENS:
+        # Process-global, idempotent patch that swaps the Rust BPE backend
+        # of any HF fast tokenizer loaded afterwards. No-op for non-HF modes.
+        from .fastokens import apply_fastokens_patch
+
+        apply_fastokens_patch()
+
     tokenizer_mode, tokenizer_name, args, kwargs = cached_resolve_tokenizer_args(
         tokenizer_name,
         *args,
@@ -243,6 +229,10 @@ def get_tokenizer(
         tokenizer_cls_ = tokenizer_cls
 
     tokenizer = tokenizer_cls_.from_pretrained(tokenizer_name, *args, **kwargs)
+    if model_type in _MODEL_TYPES_WITH_INCORRECT_TOKENIZER_CLASS:
+        from vllm.tokenizers.hf import get_cached_tokenizer
+
+        tokenizer = get_cached_tokenizer(tokenizer)
     if not tokenizer.is_fast:
         logger.warning(
             "Using a slow tokenizer. This might cause a significant "
@@ -258,6 +248,8 @@ cached_get_tokenizer = lru_cache(get_tokenizer)
 def cached_tokenizer_from_config(model_config: "ModelConfig", **kwargs):
     if model_config.skip_tokenizer_init:
         return None
+
+    _maybe_register_hf_config(getattr(model_config, "hf_config", None))
 
     return cached_get_tokenizer(
         model_config.tokenizer,

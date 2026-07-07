@@ -2,15 +2,24 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 import asyncio
+import io
 import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
-from typing import TYPE_CHECKING, cast
+from typing import cast
 
+import numpy as np
+import pybase64 as base64
 from fastapi import Request
 
 from vllm.engine.protocol import EngineClient
-from vllm.entrypoints.logger import RequestLogger
+from vllm.entrypoints.generate.base.serving import (
+    GenerateBaseServing,
+    GenerationError,
+    build_per_request_timing_metrics,
+    clamp_prompt_logprobs,
+    format_token_id_placeholder,
+)
 from vllm.entrypoints.openai.completion.protocol import (
     CompletionLogProbs,
     CompletionRequest,
@@ -21,44 +30,40 @@ from vllm.entrypoints.openai.completion.protocol import (
 )
 from vllm.entrypoints.openai.engine.protocol import (
     ErrorResponse,
+    PerRequestTimingMetrics,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     UsageInfo,
 )
-from vllm.entrypoints.openai.engine.serving import (
-    GenerationError,
-    OpenAIServing,
-    clamp_prompt_logprobs,
-)
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
-from vllm.entrypoints.utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
+from vllm.entrypoints.serve.utils.request_logger import RequestLogger
 from vllm.exceptions import VLLMValidationError
 from vllm.inputs import EngineInput
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
 from vllm.outputs import RequestOutput
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
 
-if TYPE_CHECKING:
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
-
 logger = init_logger(__name__)
 
 
-class OpenAIServingCompletion(OpenAIServing):
+class OpenAIServingCompletion(GenerateBaseServing):
     def __init__(
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         *,
-        openai_serving_render: "OpenAIServingRender",
+        online_renderer: "OnlineRenderer",
         request_logger: RequestLogger | None,
         return_tokens_as_token_ids: bool = False,
         enable_prompt_tokens_details: bool = False,
         enable_force_include_usage: bool = False,
+        enable_per_request_metrics: bool = False,
     ):
         super().__init__(
             engine_client=engine_client,
@@ -67,9 +72,10 @@ class OpenAIServingCompletion(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
-        self.openai_serving_render = openai_serving_render
+        self.online_renderer = online_renderer
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        self.enable_per_request_metrics = enable_per_request_metrics
 
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
@@ -86,7 +92,7 @@ class OpenAIServingCompletion(OpenAIServing):
         """
         Validate the model and preprocess a completion request.
 
-        Delegates preprocessing logic to OpenAIServingRender, adding the
+        Delegates preprocessing logic to OnlineRenderer, adding the
         engine-aware checks (LoRA model validation, engine health).
 
         Returns:
@@ -102,7 +108,7 @@ class OpenAIServingCompletion(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        return await self.openai_serving_render.render_completion(request)
+        return await self.online_renderer.render_completion(request)
 
     async def create_completion(
         self,
@@ -118,6 +124,15 @@ class OpenAIServingCompletion(OpenAIServing):
             - suffix (the language models we currently support do not support
             suffix)
         """
+        return await self._with_kv_transfer_rejection_cleanup(
+            self._create_completion(request, raw_request), request, raw_request
+        )
+
+    async def _create_completion(
+        self,
+        request: CompletionRequest,
+        raw_request: Request | None = None,
+    ) -> AsyncGenerator[str, None] | CompletionResponse | ErrorResponse:
         if request.stream and request.use_beam_search:
             return self.create_error_response(
                 "Streaming is not currently supported with beam search"
@@ -289,8 +304,10 @@ class OpenAIServingCompletion(OpenAIServing):
             stream_options, self.enable_force_include_usage
         )
 
+        last_res: RequestOutput | None = None
         try:
             async for prompt_idx, res in result_generator:
+                last_res = res
                 prompt_token_ids = res.prompt_token_ids
                 prompt_logprobs = res.prompt_logprobs
 
@@ -431,12 +448,29 @@ class OpenAIServingCompletion(OpenAIServing):
                 total_tokens=total_prompt_tokens + total_completion_tokens,
             )
 
-            if self.enable_prompt_tokens_details and num_cached_tokens:
+            if self.enable_prompt_tokens_details and num_cached_tokens is not None:
                 final_usage_info.prompt_tokens_details = PromptTokenUsageInfo(
                     cached_tokens=num_cached_tokens
                 )
 
             if include_usage:
+                # In streaming, metrics ride on this final usage chunk, which is
+                # only emitted when usage reporting is enabled (i.e.
+                # ``stream_options.include_usage=true`` or
+                # ``--enable-force-include-usage``).
+                stream_per_request_metrics: PerRequestTimingMetrics | None = None
+                if (
+                    self.enable_per_request_metrics
+                    # See note in request_output_to_completion_response: suppress
+                    # when not attributable to one stream (multi-prompt or n>1).
+                    and num_prompts == 1
+                    and (request.n or 1) == 1
+                ):
+                    last_metrics = last_res.metrics if last_res is not None else None
+                    stream_per_request_metrics = build_per_request_timing_metrics(
+                        last_metrics, total_completion_tokens
+                    )
+
                 final_usage_chunk = CompletionStreamResponse(
                     id=request_id,
                     created=created_time,
@@ -444,6 +478,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     choices=[],
                     usage=final_usage_info,
                     system_fingerprint=self.system_fingerprint,
+                    metrics=stream_per_request_metrics,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=False, exclude_none=True
@@ -529,6 +564,18 @@ class OpenAIServingCompletion(OpenAIServing):
                 else:
                     logprobs = None
 
+                # Encode routed_experts for transport. JSON can't carry raw
+                # bytes, so we write the ndarray as a ``.npy`` byte stream
+                # and base64-encode it. ``pybase64`` is ~3x faster than the
+                # stdlib ``base64`` on large payloads thanks to SIMD.
+                routed_experts_b64 = None
+                if output.routed_experts is not None:
+                    buf = io.BytesIO()
+                    np.save(buf, output.routed_experts)
+                    routed_experts_b64 = base64.b64encode(buf.getvalue()).decode(
+                        "ascii"
+                    )
+
                 choice_data = CompletionResponseChoice(
                     index=len(choices),
                     text=output_text,
@@ -542,11 +589,7 @@ class OpenAIServingCompletion(OpenAIServing):
                     token_ids=(
                         as_list(output.token_ids) if request.return_token_ids else None
                     ),
-                    routed_experts=(
-                        output.routed_experts.tolist()
-                        if output.routed_experts is not None
-                        else None
-                    ),
+                    routed_experts=routed_experts_b64,
                 )
                 choices.append(choice_data)
 
@@ -563,20 +606,32 @@ class OpenAIServingCompletion(OpenAIServing):
         if (
             self.enable_prompt_tokens_details
             and last_final_res
-            and last_final_res.num_cached_tokens
+            and last_final_res.num_cached_tokens is not None
         ):
             usage.prompt_tokens_details = PromptTokenUsageInfo(
                 cached_tokens=last_final_res.num_cached_tokens
             )
 
         request_metadata.final_usage_info = usage
-        prompt_routed_experts = None
+
+        per_request_metrics: PerRequestTimingMetrics | None = None
+        if (
+            self.enable_per_request_metrics
+            # Metrics describe a single generation stream, so suppress them when
+            # they cannot be attributed to one: multiple prompts (timestamps
+            # span prompts) or n>1 (stats belong to one of the n sequences).
+            and len(final_res_batch) == 1
+            and (request.n or 1) == 1
+        ):
+            last_metrics = (
+                last_final_res.metrics if last_final_res is not None else None
+            )
+            per_request_metrics = build_per_request_timing_metrics(
+                last_metrics, num_generated_tokens
+            )
+
         if final_res_batch:
             kv_transfer_params = final_res_batch[0].kv_transfer_params
-            pre = final_res_batch[0].prompt_routed_experts
-            if pre is not None:
-                prompt_routed_experts = pre.tolist()
-
         return CompletionResponse(
             id=request_id,
             created=created_time,
@@ -585,7 +640,7 @@ class OpenAIServingCompletion(OpenAIServing):
             usage=usage,
             system_fingerprint=self.system_fingerprint,
             kv_transfer_params=kv_transfer_params,
-            prompt_routed_experts=prompt_routed_experts,
+            metrics=per_request_metrics,
         )
 
     def _create_completion_logprobs(
@@ -614,7 +669,7 @@ class OpenAIServingCompletion(OpenAIServing):
             step_top_logprobs = top_logprobs[i]
             if step_top_logprobs is None:
                 if should_return_as_token_id:
-                    token = f"token_id:{token_id}"
+                    token = format_token_id_placeholder(token_id)
                 else:
                     if tokenizer is None:
                         raise VLLMValidationError(

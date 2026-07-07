@@ -2,16 +2,15 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from collections.abc import Callable
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
-from torch.nn import Module
 
 import vllm.envs as envs
 from vllm.logger import init_logger
 from vllm.model_executor.custom_op import CustomOp
 from vllm.model_executor.layers.fused_moe.config import (
-    FUSED_MOE_UNQUANTIZED_CONFIG,
     FusedMoEConfig,
     FusedMoEQuantConfig,
     biased_moe_quant_config,
@@ -29,9 +28,15 @@ from vllm.model_executor.layers.fused_moe.oracle.unquantized import (
     make_unquantized_moe_kernel,
     select_unquantized_moe_backend,
 )
+from vllm.model_executor.layers.fused_moe.runner.shared_experts import (
+    SharedExperts,
+)
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform
 from vllm.platforms.interface import CpuArchEnum
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.routed_experts import RoutedExperts
 
 logger = init_logger(__name__)
 
@@ -73,7 +78,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
     def select_gemm_impl(
         self,
         prepare_finalize: FusedMoEPrepareAndFinalizeModular,
-        layer: torch.nn.Module,
+        layer: "RoutedExperts",
     ) -> FusedMoEExpertsModular:
         raise ValueError(
             f"{self.__class__.__name__} uses the new modular kernel initialization "
@@ -82,7 +87,7 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def create_weights(
         self,
-        layer: torch.nn.Module,
+        layer: "RoutedExperts",
         num_experts: int,
         hidden_size: int,
         intermediate_size_per_partition: int,
@@ -149,14 +154,14 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
     def _setup_kernel(
         self,
-        layer: Module,
+        layer: "RoutedExperts",
         w13: torch.Tensor,
         w2: torch.Tensor,
     ) -> None:
         # Shuffle weights to runtime format.
         w13_new, w2_new = convert_to_unquantized_kernel_format(
             self.unquantized_backend,
-            layer=layer,
+            moe_config=layer.moe_config,
             w13_weight=w13,
             w2_weight=w2,
         )
@@ -178,11 +183,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
 
         if not is_weight_update:
             # Setup moe kernel only on the first call. For the unquantized
-            # method, moe_quant_config is either the constant
-            # FUSED_MOE_UNQUANTIZED_CONFIG or biased_moe_quant_config(...)
-            # which references layer.w{13,2}_bias; since weight updates
-            # mutate those bias tensors in place, the kernel does not need
-            # to be re-built.
+            # method, moe_quant_config carries no quantized scales -- only
+            # optional w{13,2}_bias references and SwiGLU gate params. Since
+            # weight updates mutate those bias tensors in place, the kernel
+            # does not need to be re-built.
             self.moe_quant_config = self.get_fused_moe_quant_config(layer)
             assert self.moe_quant_config is not None
             assert self.experts_cls is not None
@@ -191,11 +195,10 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
                 moe_config=self.moe,
                 backend=self.unquantized_backend,
                 experts_cls=self.experts_cls,
-                routing_tables=layer._maybe_init_expert_routing_tables(),
-                shared_experts=layer.shared_experts,
+                routing_tables=layer._expert_routing_tables(),
             )
 
-    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
+    def process_weights_after_loading(self, layer: "RoutedExperts") -> None:
         super().process_weights_after_loading(layer)
 
         # Padding the weight for better performance on ROCm.
@@ -267,20 +270,35 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             )
 
     def get_fused_moe_quant_config(self, layer: torch.nn.Module) -> FusedMoEQuantConfig:
+        # SwiGLU/swigluoai gate params live on the layer; plumb them into the
+        # quant config so the fused activation (e.g. swigluoai_uninterleave on
+        # MiniMax-M3) receives gemm1_clamp_limit/alpha/beta.
+        gemm1_alpha = getattr(layer, "swiglu_alpha", None)
+        gemm1_beta = getattr(layer, "swiglu_beta", None)
+        gemm1_clamp_limit = getattr(layer, "swiglu_limit", None)
+
         if self.moe.has_bias:
             return biased_moe_quant_config(
                 layer.w13_bias,
                 layer.w2_bias,
+                gemm1_alpha=gemm1_alpha,
+                gemm1_beta=gemm1_beta,
+                gemm1_clamp_limit=gemm1_clamp_limit,
             )
-        else:
-            return FUSED_MOE_UNQUANTIZED_CONFIG
+
+        return FusedMoEQuantConfig.make(
+            gemm1_alpha=gemm1_alpha,
+            gemm1_beta=gemm1_beta,
+            gemm1_clamp_limit=gemm1_clamp_limit,
+        )
 
     def apply(
         self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        layer: "RoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         return self.forward(
@@ -288,15 +306,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             x=x,
             topk_weights=topk_weights,
             topk_ids=topk_ids,
+            shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
 
     def forward_native(
         self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        layer: "RoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         assert self.moe_kernel is not None
@@ -310,15 +330,17 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             apply_router_weight_on_input=layer.apply_router_weight_on_input,
             global_num_experts=layer.global_num_experts,
             expert_map=layer.expert_map,
+            shared_experts=shared_experts,
             shared_experts_input=shared_experts_input,
         )
 
     def forward_cuda(
         self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        layer: "RoutedExperts",
         x: torch.Tensor,
         topk_weights: torch.Tensor,
         topk_ids: torch.Tensor,
+        shared_experts: SharedExperts | None,
         shared_experts_input: torch.Tensor | None,
     ) -> torch.Tensor:
         return self.forward_native(
@@ -326,12 +348,13 @@ class UnquantizedFusedMoEMethod(FusedMoEMethodBase, CustomOp):
             x,
             topk_weights,
             topk_ids,
+            shared_experts,
             shared_experts_input,
         )
 
     def apply_monolithic(
         self,
-        layer: "FusedMoE",  # type: ignore[name-defined] # noqa: F821
+        layer: "RoutedExperts",
         x: torch.Tensor,
         router_logits: torch.Tensor,
         input_ids: torch.Tensor | None = None,
