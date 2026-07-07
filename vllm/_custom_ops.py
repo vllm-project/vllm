@@ -2219,6 +2219,240 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "fp32_router_gemm"):
         return
 
 
+def diffusion_gemma_flashdenoise(
+    entropy: torch.Tensor,
+    sample_values: torch.Tensor,
+    sample_indices: torch.Tensor,
+    clean_values: torch.Tensor,
+    clean_indices: torch.Tensor,
+    soft_embed: torch.Tensor,
+    hidden: torch.Tensor,
+    lm_head_weight: torch.Tensor,
+    normalizer: float,
+    mode_flags: int = 16,
+    rng_seed: int = 0,
+    rng_offset: int = 0,
+) -> None:
+    if not (
+        hasattr(torch.ops, "_C")
+        and hasattr(torch.ops._C, "diffusion_gemma_flashdenoise")
+    ):
+        raise RuntimeError("diffusion_gemma_flashdenoise native op is unavailable")
+    torch.ops._C.diffusion_gemma_flashdenoise(
+        entropy,
+        sample_values,
+        sample_indices,
+        clean_values,
+        clean_indices,
+        soft_embed,
+        hidden,
+        lm_head_weight,
+        float(normalizer),
+        int(mode_flags),
+        int(rng_seed),
+        int(rng_offset),
+    )
+
+
+def diffusion_gemma_flashdenoise_scaled(
+    entropy: torch.Tensor,
+    sample_values: torch.Tensor,
+    sample_indices: torch.Tensor,
+    clean_values: torch.Tensor,
+    clean_indices: torch.Tensor,
+    soft_embed: torch.Tensor,
+    hidden: torch.Tensor,
+    lm_head_weight: torch.Tensor,
+    logit_scale: torch.Tensor,
+    normalizer: float,
+    final_logit_softcapping: float = 0.0,
+    mode_flags: int = 16,
+    rng_seed: int = 0,
+    rng_offset: int = 0,
+    rng_row_offset: int = 0,
+) -> None:
+    if not (
+        hasattr(torch.ops, "_C")
+        and hasattr(torch.ops._C, "diffusion_gemma_flashdenoise_scaled")
+    ):
+        raise RuntimeError(
+            "diffusion_gemma_flashdenoise_scaled native op is unavailable"
+        )
+    torch.ops._C.diffusion_gemma_flashdenoise_scaled(
+        entropy,
+        sample_values,
+        sample_indices,
+        clean_values,
+        clean_indices,
+        soft_embed,
+        hidden,
+        lm_head_weight,
+        logit_scale,
+        float(normalizer),
+        float(final_logit_softcapping),
+        int(mode_flags),
+        int(rng_seed),
+        int(rng_offset),
+        int(rng_row_offset),
+    )
+
+
+def diffusion_gemma_flashdenoise_local_state_scaled(
+    local_max: torch.Tensor,
+    local_sum_exp: torch.Tensor,
+    local_weighted_logits: torch.Tensor,
+    local_soft_part: torch.Tensor,
+    clean_values: torch.Tensor,
+    clean_indices: torch.Tensor,
+    sample_values: torch.Tensor,
+    sample_indices: torch.Tensor,
+    hidden: torch.Tensor,
+    lm_head_weight: torch.Tensor,
+    logit_scale: torch.Tensor,
+    vocab_start_index: int,
+    final_logit_softcapping: float = 0.0,
+    rng_seed: int = 0,
+    rng_offset: int = 0,
+) -> None:
+    if not (
+        hasattr(torch.ops, "_C")
+        and hasattr(torch.ops._C, "diffusion_gemma_flashdenoise_local_state_scaled")
+    ):
+        raise RuntimeError(
+            "diffusion_gemma_flashdenoise_local_state_scaled native op is unavailable"
+        )
+    torch.ops._C.diffusion_gemma_flashdenoise_local_state_scaled(
+        local_max,
+        local_sum_exp,
+        local_weighted_logits,
+        local_soft_part,
+        clean_values,
+        clean_indices,
+        sample_values,
+        sample_indices,
+        hidden,
+        lm_head_weight,
+        logit_scale,
+        int(vocab_start_index),
+        float(final_logit_softcapping),
+        int(rng_seed),
+        int(rng_offset),
+    )
+
+
+def diffusion_gemma_flashdenoise_pack_local_state(
+    packed: torch.Tensor,
+    local_max: torch.Tensor,
+    global_max: torch.Tensor,
+    local_sum_exp: torch.Tensor,
+    local_weighted_logits: torch.Tensor,
+    local_soft_part: torch.Tensor,
+) -> None:
+    if not (
+        hasattr(torch.ops, "_C")
+        and hasattr(torch.ops._C, "diffusion_gemma_flashdenoise_pack_local_state")
+    ):
+        raise RuntimeError(
+            "diffusion_gemma_flashdenoise_pack_local_state native op is unavailable"
+        )
+    torch.ops._C.diffusion_gemma_flashdenoise_pack_local_state(
+        packed,
+        local_max,
+        global_max,
+        local_sum_exp,
+        local_weighted_logits,
+        local_soft_part,
+    )
+
+
+if hasattr(torch.ops, "_C") and hasattr(
+    torch.ops._C, "diffusion_gemma_flashdenoise"
+):
+
+    @register_fake("_C::diffusion_gemma_flashdenoise")
+    def diffusion_gemma_flashdenoise_fake(
+        entropy: torch.Tensor,
+        sample_values: torch.Tensor,
+        sample_indices: torch.Tensor,
+        clean_values: torch.Tensor,
+        clean_indices: torch.Tensor,
+        soft_embed: torch.Tensor,
+        hidden: torch.Tensor,
+        lm_head_weight: torch.Tensor,
+        normalizer: float,
+        mode_flags: int,
+        rng_seed: int,
+        rng_offset: int,
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_C") and hasattr(
+    torch.ops._C, "diffusion_gemma_flashdenoise_scaled"
+):
+
+    @register_fake("_C::diffusion_gemma_flashdenoise_scaled")
+    def diffusion_gemma_flashdenoise_scaled_fake(
+        entropy: torch.Tensor,
+        sample_values: torch.Tensor,
+        sample_indices: torch.Tensor,
+        clean_values: torch.Tensor,
+        clean_indices: torch.Tensor,
+        soft_embed: torch.Tensor,
+        hidden: torch.Tensor,
+        lm_head_weight: torch.Tensor,
+        logit_scale: torch.Tensor,
+        normalizer: float,
+        final_logit_softcapping: float,
+        mode_flags: int,
+        rng_seed: int,
+        rng_offset: int,
+        rng_row_offset: int,
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_C") and hasattr(
+    torch.ops._C, "diffusion_gemma_flashdenoise_local_state_scaled"
+):
+
+    @register_fake("_C::diffusion_gemma_flashdenoise_local_state_scaled")
+    def diffusion_gemma_flashdenoise_local_state_scaled_fake(
+        local_max: torch.Tensor,
+        local_sum_exp: torch.Tensor,
+        local_weighted_logits: torch.Tensor,
+        local_soft_part: torch.Tensor,
+        clean_values: torch.Tensor,
+        clean_indices: torch.Tensor,
+        sample_values: torch.Tensor,
+        sample_indices: torch.Tensor,
+        hidden: torch.Tensor,
+        lm_head_weight: torch.Tensor,
+        logit_scale: torch.Tensor,
+        vocab_start_index: int,
+        final_logit_softcapping: float,
+        rng_seed: int,
+        rng_offset: int,
+    ) -> None:
+        return
+
+
+if hasattr(torch.ops, "_C") and hasattr(
+    torch.ops._C, "diffusion_gemma_flashdenoise_pack_local_state"
+):
+
+    @register_fake("_C::diffusion_gemma_flashdenoise_pack_local_state")
+    def diffusion_gemma_flashdenoise_pack_local_state_fake(
+        packed: torch.Tensor,
+        local_max: torch.Tensor,
+        global_max: torch.Tensor,
+        local_sum_exp: torch.Tensor,
+        local_weighted_logits: torch.Tensor,
+        local_soft_part: torch.Tensor,
+    ) -> None:
+        return
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,

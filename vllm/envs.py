@@ -47,6 +47,11 @@ if TYPE_CHECKING:
     VLLM_LOG_STATS_INTERVAL: float = 10.0
     VLLM_TRACE_FUNCTION: int = 0
     VLLM_USE_FLASHINFER_SAMPLER: bool = True
+    VLLM_DIFFUSION_GEMMA_LOCAL_VOCAB_SAMPLER: bool = False
+    VLLM_DIFFUSION_GEMMA_FLASHDENOISE_NATIVE: bool = False
+    VLLM_DIFFUSION_GEMMA_FLASHDENOISE_NATIVE_TP_STATE: bool = False
+    VLLM_DIFFUSION_GEMMA_FLASHDENOISE_NATIVE_MODE_FLAGS: int = 16
+    VLLM_CONSUMER_STATE_TRACE_JSONL: str = ""
     VLLM_PP_LAYER_PARTITION: str | None = None
     VLLM_CPU_KVCACHE_SPACE: int | None = 0
     VLLM_CPU_OMP_THREADS_BIND: str = "auto"
@@ -809,6 +814,29 @@ environment_variables: dict[str, Callable[[], Any]] = {
         bool(int(os.environ["VLLM_USE_FLASHINFER_SAMPLER"]))
         if "VLLM_USE_FLASHINFER_SAMPLER" in os.environ
         else True
+    ),
+    # Enable an experimental DiffusionGemma path that keeps denoise-state
+    # sampling, entropy, and soft self-conditioning on TP vocab shards.
+    "VLLM_DIFFUSION_GEMMA_LOCAL_VOCAB_SAMPLER": lambda: bool(
+        int(os.getenv("VLLM_DIFFUSION_GEMMA_LOCAL_VOCAB_SAMPLER", "0"))
+    ),
+    # Opt-in native DiffusionGemma denoise sampler. The current backend is the
+    # exact mode16 materialized cuBLAS/warp-stats path and falls back when a
+    # request requires unsupported features.
+    "VLLM_DIFFUSION_GEMMA_FLASHDENOISE_NATIVE": lambda: bool(
+        int(os.getenv("VLLM_DIFFUSION_GEMMA_FLASHDENOISE_NATIVE", "0"))
+    ),
+    # Native TP-sharded DiffusionGemma sampler-state path. This avoids
+    # full-vocab probability materialization by merging local state across TP
+    # ranks before the denoise post-processing step.
+    "VLLM_DIFFUSION_GEMMA_FLASHDENOISE_NATIVE_TP_STATE": lambda: bool(
+        int(os.getenv("VLLM_DIFFUSION_GEMMA_FLASHDENOISE_NATIVE_TP_STATE", "0"))
+    ),
+    "VLLM_DIFFUSION_GEMMA_FLASHDENOISE_NATIVE_MODE_FLAGS": lambda: int(
+        os.getenv("VLLM_DIFFUSION_GEMMA_FLASHDENOISE_NATIVE_MODE_FLAGS", "16")
+    ),
+    "VLLM_CONSUMER_STATE_TRACE_JSONL": lambda: os.getenv(
+        "VLLM_CONSUMER_STATE_TRACE_JSONL", ""
     ),
     # Pipeline stage partition strategy
     "VLLM_PP_LAYER_PARTITION": lambda: os.getenv("VLLM_PP_LAYER_PARTITION", None),
@@ -2076,6 +2104,7 @@ def compile_factors() -> dict[str, object]:
         "VLLM_LOGGING_STREAM",
         "VLLM_LOGGING_CONFIG_PATH",
         "VLLM_LOGGING_COLOR",
+        "VLLM_CONSUMER_STATE_TRACE_JSONL",
         "VLLM_LOG_STATS_INTERVAL",
         "VLLM_DEBUG_LOG_API_SERVER_RESPONSE",
         "VLLM_TUNED_CONFIG_FOLDER",

@@ -10,6 +10,7 @@ from vllm.distributed import (
     tensor_model_parallel_gather,
 )
 from vllm.model_executor.custom_op import PluggableLayer
+from vllm.model_executor.layers.consumer_state_trace import emit_full_vocab_trace
 from vllm.model_executor.layers.vocab_parallel_embedding import VocabParallelEmbedding
 from vllm.platforms import current_platform
 
@@ -101,6 +102,12 @@ class LogitsProcessor(PluggableLayer):
         # Remove paddings in vocab (if any).
         if logits is not None:
             logits = logits[..., : self.org_vocab_size]
+            emit_full_vocab_trace(
+                component="vllm.logits_processor._get_logits",
+                full_logits=logits,
+                vocab_size=self.org_vocab_size,
+                consumer_contract="generic_logits_processor",
+            )
         return logits
 
     def get_top_tokens(

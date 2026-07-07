@@ -27,6 +27,30 @@ STABLE_TORCH_LIBRARY_FRAGMENT(_C, ops) {
       "per_token_group_quant_int8(Tensor input, Tensor! output_q, Tensor! "
       "output_s, int group_size, float eps, float int8_min, float int8_max) -> "
       "()");
+#ifndef USE_ROCM
+  ops.def(
+      "diffusion_gemma_flashdenoise(Tensor! entropy, Tensor! sample_values, "
+      "Tensor! sample_indices, Tensor! clean_values, Tensor! clean_indices, "
+      "Tensor! soft_embed, Tensor hidden, Tensor lm_head_weight, "
+      "float normalizer, int mode_flags, int rng_seed, int rng_offset) -> ()");
+  ops.def(
+      "diffusion_gemma_flashdenoise_scaled(Tensor! entropy, Tensor! "
+      "sample_values, Tensor! sample_indices, Tensor! clean_values, Tensor! "
+      "clean_indices, Tensor! soft_embed, Tensor hidden, Tensor lm_head_weight, "
+      "Tensor logit_scale, float normalizer, float final_logit_softcapping, "
+      "int mode_flags, int rng_seed, int rng_offset, int rng_row_offset) -> ()");
+  ops.def(
+      "diffusion_gemma_flashdenoise_local_state_scaled(Tensor! local_max, "
+      "Tensor! local_sum_exp, Tensor! local_weighted_logits, "
+      "Tensor! local_soft_part, Tensor! clean_values, Tensor! clean_indices, "
+      "Tensor! sample_values, Tensor! sample_indices, Tensor hidden, "
+      "Tensor lm_head_weight, Tensor logit_scale, int vocab_start_index, "
+      "float final_logit_softcapping, int rng_seed, int rng_offset) -> ()");
+  ops.def(
+      "diffusion_gemma_flashdenoise_pack_local_state(Tensor! packed, "
+      "Tensor local_max, Tensor global_max, Tensor local_sum_exp, "
+      "Tensor local_weighted_logits, Tensor local_soft_part) -> ()");
+#endif
   ops.def("permute_cols(Tensor A, Tensor perm) -> Tensor");
 
   ops.def("get_cuda_view_from_cpu_tensor(Tensor cpu_tensor) -> Tensor");
@@ -607,6 +631,17 @@ STABLE_TORCH_LIBRARY_IMPL(_C, CUDA, ops) {
            TORCH_BOX(&per_token_group_quant_8bit_packed));
   ops.impl("per_token_group_quant_int8",
            TORCH_BOX(&per_token_group_quant_int8));
+
+#ifndef USE_ROCM
+  ops.impl("diffusion_gemma_flashdenoise",
+           TORCH_BOX(&diffusion_gemma_flashdenoise));
+  ops.impl("diffusion_gemma_flashdenoise_scaled",
+           TORCH_BOX(&diffusion_gemma_flashdenoise_scaled));
+  ops.impl("diffusion_gemma_flashdenoise_local_state_scaled",
+           TORCH_BOX(&diffusion_gemma_flashdenoise_local_state_scaled));
+  ops.impl("diffusion_gemma_flashdenoise_pack_local_state",
+           TORCH_BOX(&diffusion_gemma_flashdenoise_pack_local_state));
+#endif
 
   ops.impl("permute_cols", TORCH_BOX(&permute_cols));
 
