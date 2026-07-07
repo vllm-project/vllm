@@ -259,7 +259,8 @@ class AsyncGPUModelRunnerOutput(AsyncModelRunnerOutput):
         self._invalid_req_indices = invalid_req_indices
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
-        self.async_copy_ready_event = torch.Event()
+        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        self.async_copy_ready_event = torch.cuda.Event(blocking=True)
 
         # Keep a reference to the device tensor to avoid it being
         # deallocated until we finish copying it to the host.
@@ -392,7 +393,8 @@ class AsyncGPUPoolingModelRunnerOutput(AsyncModelRunnerOutput):
         self._model_runner_output = model_runner_output
 
         # Event on the copy stream so we can synchronize the non-blocking copy.
-        self.async_copy_ready_event = torch.Event()
+        # Blocking (sleep) event to avoid busy-polling the CUDA driver lock.
+        self.async_copy_ready_event = torch.cuda.Event(blocking=True)
 
         # Keep a reference to the device tensors to avoid them being
         # deallocated until we finish copying it to the host.
@@ -718,7 +720,9 @@ class GPUModelRunner(
         self.prepare_inputs_event: torch.Event | None = None
         if self.use_async_scheduling:
             self.async_output_copy_stream = torch.cuda.Stream()
-            self.prepare_inputs_event = torch.Event()
+            # Blocking (sleep) event to avoid busy-polling the CUDA driver lock;
+            # under TP contention that spin can balloon and make the rank a straggler.
+            self.prepare_inputs_event = torch.cuda.Event(blocking=True)
 
         # self.cudagraph_batch_sizes sorts in ascending order.
         if (
@@ -2204,10 +2208,7 @@ class GPUModelRunner(
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 draft_len = len(draft_token_ids)
                 num_draft_tokens[req_idx] = draft_len
-                if (
-                    self.input_batch.num_computed_tokens_cpu[req_idx]
-                    >= self.input_batch.num_prompt_tokens[req_idx]
-                ):
+                if num_scheduled_tokens[req_idx] == draft_len + 1:
                     num_decode_draft_tokens[req_idx] = draft_len
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens

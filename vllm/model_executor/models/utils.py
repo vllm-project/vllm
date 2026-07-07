@@ -11,7 +11,6 @@ import regex as re
 import torch
 import torch.nn as nn
 from torch.nn.modules.module import register_module_module_registration_hook
-from transformers import PretrainedConfig
 
 from vllm.config import VllmConfig
 from vllm.distributed import (
@@ -33,6 +32,9 @@ from vllm.utils.torch_utils import (
 )
 
 if TYPE_CHECKING:
+    from transformers import PretrainedConfig
+    from transformers.conversion_mapping import WeightRenaming
+
     from vllm.model_executor.layers.quantization import QuantizationConfig
 
 logger = init_logger(__name__)
@@ -46,7 +48,7 @@ class WeightsMapper:
 
     If a key maps to a value of `None`, the corresponding weight is ignored."""
 
-    orig_to_new_renamings: list[Any] = field(default_factory=list)
+    orig_to_new_renaming: list["WeightRenaming"] = field(default_factory=list)
     orig_to_new_regex: Mapping[re.Pattern, str | None] = field(default_factory=dict)
     orig_to_new_substr: Mapping[str, str | None] = field(default_factory=dict)
     orig_to_new_stacked: Mapping[str, tuple[str, ShardId]] = field(default_factory=dict)
@@ -56,9 +58,9 @@ class WeightsMapper:
     def __or__(self, other: "WeightsMapper") -> "WeightsMapper":
         """Combine two `WeightsMapper`s by merging their mappings."""
         return WeightsMapper(
-            orig_to_new_renamings=[
-                *self.orig_to_new_renamings,
-                *other.orig_to_new_renamings,
+            orig_to_new_renaming=[
+                *self.orig_to_new_renaming,
+                *other.orig_to_new_renaming,
             ],
             orig_to_new_regex={**self.orig_to_new_regex, **other.orig_to_new_regex},
             orig_to_new_substr={**self.orig_to_new_substr, **other.orig_to_new_substr},
@@ -92,7 +94,7 @@ class WeightsMapper:
                 "k_scale to v_scale"
             )
 
-        for renaming in self.orig_to_new_renamings:
+        for renaming in self.orig_to_new_renaming:
             key, _ = renaming.rename_source_key(key)
 
         for pattern, new_key in self.orig_to_new_regex.items():
@@ -426,7 +428,7 @@ def init_vllm_registered_model(
     vllm_config: VllmConfig,
     *,
     prefix: str = "",
-    hf_config: PretrainedConfig | None = None,
+    hf_config: "PretrainedConfig | None" = None,
     architectures: list[str] | None = None,
 ) -> nn.Module:
     """

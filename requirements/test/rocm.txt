@@ -731,7 +731,7 @@ pathvalidate==3.3.1
     # via pytablewriter
 patsy==1.0.2
     # via statsmodels
-peft==0.18.1
+peft==0.19.1
     # via -r requirements/test/rocm.in
 perceptron==0.1.4
     # via -r requirements/test/rocm.in
@@ -1218,7 +1218,7 @@ tqdm==4.67.3
     #   sentence-transformers
     #   tilelang
     #   transformers
-transformers==5.5.3
+transformers==5.10.4
     # via
     #   -c requirements/common.txt
     #   -r requirements/test/../common.txt
