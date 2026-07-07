@@ -9,7 +9,7 @@ item doesn't change based on other items in the batch).
 
 import pytest
 import torch
-from utils import skip_unsupported_device
+from utils import skip_unsupported
 
 from vllm.model_executor.layers.batch_invariant import matmul_batch_invariant
 from vllm.platforms import current_platform
@@ -17,7 +17,7 @@ from vllm.platforms import current_platform
 DEVICE_TYPE = current_platform.device_type
 
 
-@skip_unsupported_device
+@skip_unsupported
 @pytest.mark.parametrize(
     "a_shape,b_shape",
     [
@@ -80,7 +80,7 @@ def test_matmul_correctness(a_shape, b_shape, dtype):
     )
 
 
-@skip_unsupported_device
+@skip_unsupported
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_matmul_batch_invariance(dtype):
     """

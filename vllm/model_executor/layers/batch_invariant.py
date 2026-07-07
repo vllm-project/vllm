@@ -895,12 +895,6 @@ _fp16_block_size_n = 256
 
 
 def enable_batch_invariant_mode():
-    if not (current_platform.is_cuda() or current_platform.is_xpu()):
-        raise NotImplementedError(
-            "Batch invariance is only supported on CUDA and XPU platforms, "
-            f"got {current_platform.device_name}"
-        )
-
     global _batch_invariant_MODE, _batch_invariant_LIB
     global _fp16_block_size_n
 

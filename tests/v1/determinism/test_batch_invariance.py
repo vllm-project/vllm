@@ -12,8 +12,8 @@ from utils import (
     _extract_step_logprobs,
     _random_prompt,
     skip_if_not_cuda,
-    skip_unsupported_device,
-    skip_unsupported_xpu_backends,
+    skip_unsupported,
+    skip_unsupported_backend,
 )
 
 import vllm.envs as envs
@@ -21,7 +21,7 @@ from vllm import LLM, SamplingParams
 from vllm.platforms import current_platform
 
 
-@skip_unsupported_device
+@skip_unsupported
 @pytest.mark.flaky(reruns=3)
 @pytest.mark.timeout(1000)
 @pytest.mark.parametrize(
@@ -52,7 +52,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
       seed.
     - Keep max_tokens and max_model_len bounded for speed and memory use.
     """
-    skip_unsupported_xpu_backends(backend)
+    skip_unsupported_backend(backend)
 
     # Not all batch-invariant kernels are registered on XPU yet
     # (e.g. attention, custom ops), so e2e determinism is not guaranteed.
@@ -153,7 +153,7 @@ def test_v1_generation_is_deterministic_across_batch_sizes_with_needle(
                 llm.shutdown()
 
 
-@skip_unsupported_device
+@skip_unsupported
 @pytest.mark.parametrize(
     "backend",
     BACKENDS,
@@ -167,7 +167,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
     block_m,
     block_n,
 ):
-    skip_unsupported_xpu_backends(backend)
+    skip_unsupported_backend(backend)
 
     # Not all batch-invariant kernels are registered on XPU yet
     # (e.g. attention, custom ops), so e2e determinism is not guaranteed.
@@ -392,7 +392,7 @@ def test_logprobs_bitwise_batch_invariance_bs1_vs_bsN(
         pytest.fail(msg)
 
 
-@skip_unsupported_device
+@skip_unsupported
 @pytest.mark.parametrize(
     "backend",
     BACKENDS,
@@ -402,7 +402,7 @@ def test_simple_generation(backend):
     Simple test that runs the model with a basic prompt and prints the output.
     Useful for quick smoke testing and debugging.
     """
-    skip_unsupported_xpu_backends(backend)
+    skip_unsupported_backend(backend)
 
     model = TEST_MODEL
 
@@ -444,7 +444,7 @@ def test_simple_generation(backend):
             llm.shutdown()
 
 
-@skip_unsupported_device
+@skip_unsupported
 @pytest.mark.parametrize(
     "backend",
     BACKENDS,
@@ -461,7 +461,7 @@ def test_logprobs_without_batch_invariance_should_fail(
     The test will PASS if we detect differences (proving batch invariance matters).
     The test will FAIL if everything matches (suggesting batch invariance isn't needed).
     """
-    skip_unsupported_xpu_backends(backend)
+    skip_unsupported_backend(backend)
 
     # CRITICAL: Disable batch invariance for this test
     monkeypatch.setenv("VLLM_BATCH_INVARIANT", "0")

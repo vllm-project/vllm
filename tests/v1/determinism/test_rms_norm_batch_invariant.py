@@ -9,7 +9,7 @@ with the standard CUDA-based implementation to ensure numerical accuracy.
 
 import pytest
 import torch
-from utils import skip_if_not_cuda, skip_unsupported_device
+from utils import skip_if_not_cuda, skip_unsupported
 
 from vllm.model_executor.layers.batch_invariant import (
     rms_norm_batch_invariant,
@@ -270,7 +270,7 @@ def test_rms_norm_numerical_stability(default_vllm_config):
         )
 
 
-@skip_unsupported_device
+@skip_unsupported
 def test_rms_norm_formula(default_vllm_config):
     """
     Test that RMS norm follows the correct mathematical formula.
@@ -341,7 +341,7 @@ def test_rms_norm_different_hidden_sizes(default_vllm_config, hidden_size: int):
     )
 
 
-@skip_unsupported_device
+@skip_unsupported
 def test_rms_norm_determinism(default_vllm_config):
     """
     Test that batch-invariant RMS norm produces deterministic results.
@@ -377,7 +377,7 @@ def test_rms_norm_determinism(default_vllm_config):
         )
 
 
-@skip_unsupported_device
+@skip_unsupported
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_rms_norm_batch_invariance(dtype):
     """Same row gives identical rms_norm result regardless of batch neighbors.

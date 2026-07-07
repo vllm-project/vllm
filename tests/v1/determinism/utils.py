@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import os
 import random
+from typing import NamedTuple
 
 import pytest
 import torch
@@ -14,51 +15,65 @@ from vllm.transformers_utils.model_arch_config_convertor import (
 from vllm.triton_utils import HAS_TRITON
 from vllm.v1.attention.backends.fa_utils import flash_attn_supports_mla
 
-skip_if_not_cuda = pytest.mark.skipif(
-    not (current_platform.is_cuda() and current_platform.has_device_capability(80)),
-    # Supports testing on Ampere and Ada Lovelace devices.
-    # Note: For devices with SM < 90, batch invariance does not support CUDA Graphs.
-    reason="Requires CUDA and >= Ampere (SM80)",
-)
 
-skip_unsupported_device = pytest.mark.skipif(
-    not (
-        (current_platform.is_cuda() and current_platform.has_device_capability(80))
-        or (current_platform.is_xpu() and HAS_TRITON)
+class DeviceConfig(NamedTuple):
+    available: bool
+    backends: list[str]
+
+
+# Maps each device to its availability and supported backends.
+DEVICE_BACKENDS: dict[str, DeviceConfig] = {
+    "cuda": DeviceConfig(
+        available=current_platform.is_cuda()
+        and current_platform.has_device_capability(80),
+        # FlashInfer backend temporarily disabled due to invariant CTA sizes.
+        # See FlashInfer issue #2424
+        backends=["FLASH_ATTN", "TRITON_ATTN", "FLEX_ATTENTION"],
     ),
-    reason="Requires CUDA >= Ampere (SM80) or Intel XPU with Triton",
-)
+    "xpu": DeviceConfig(
+        available=current_platform.is_xpu() and HAS_TRITON,
+        backends=["TRITON_ATTN"],
+    ),
+}
 
 DEFAULT_MODEL = "Qwen/Qwen3-1.7B"
 TEST_MODEL = os.getenv("VLLM_TEST_MODEL", DEFAULT_MODEL)
 
-BACKENDS: list[str] = [
-    "FLASH_ATTN",
-    "TRITON_ATTN",
-    "FLEX_ATTENTION",
-]
-
-# FlashInfer temporarily disabled due to invariant CTA sizes.
-# See FlashInfer issue #2424
-# if has_flashinfer():
-#     BACKENDS.append("FLASHINFER")
-
-# only run MLA backends when the requested test model is itself an MLA model.
+# Override backends for MLA models (MLA only supported on CUDA).
 if os.getenv("VLLM_TEST_MODEL"):
     config = get_config(TEST_MODEL, trust_remote_code=False)
     if ModelArchConfigConvertorBase(config, config.get_text_config()).is_deepseek_mla():
-        BACKENDS = ["TRITON_MLA"]
-        if flash_attn_supports_mla():
-            BACKENDS.append("FLASH_ATTN_MLA")
+        DEVICE_BACKENDS["cuda"] = DeviceConfig(
+            available=DEVICE_BACKENDS["cuda"].available,
+            backends=["TRITON_MLA"]
+            + (["FLASH_ATTN_MLA"] if flash_attn_supports_mla() else []),
+        )
+        DEVICE_BACKENDS["xpu"] = DeviceConfig(
+            available=DEVICE_BACKENDS["xpu"].available,
+            backends=[],
+        )
 
-XPU_BACKENDS: list[str] = [
-    "TRITON_ATTN",
-]
+# Union of all backends across devices; unsupported ones are skipped at runtime.
+BACKENDS: list[str] = sorted(
+    {b for cfg in DEVICE_BACKENDS.values() for b in cfg.backends}
+)
+
+skip_unsupported = pytest.mark.skipif(
+    not any(cfg.available for cfg in DEVICE_BACKENDS.values()),
+    reason="Requires CUDA >= Ampere (SM80) or Intel XPU with Triton",
+)
+
+skip_if_not_cuda = pytest.mark.skipif(
+    not DEVICE_BACKENDS["cuda"].available,
+    reason="Requires CUDA >= Ampere (SM80)",
+)
 
 
-def skip_unsupported_xpu_backends(backend: str):
-    if current_platform.is_xpu() and backend not in XPU_BACKENDS:
-        pytest.skip(f"Backend {backend} not verified for batch invariance on XPU")
+def skip_unsupported_backend(backend: str):
+    """Skip if the current device does not support this backend."""
+    for device, cfg in DEVICE_BACKENDS.items():
+        if cfg.available and backend not in cfg.backends:
+            pytest.skip(f"Backend {backend} not supported on {device}")
 
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
