@@ -133,6 +133,7 @@ class FlashAttnMLASparseMetadata(AttentionMetadata):
     num_decodes: int = 0
     num_prefills: int = 0
     num_decode_tokens: int = 0
+    prefill_max_seq_len: int = 0
     prefill: MLACommonPrefillMetadata | None = None
 
 

@@ -703,10 +703,10 @@ class MLAAttention(nn.Module, AttentionLayerBase):
         # Sparse MLA can use dense MHA while the sequence is short enough that
         # the sparse top-k would cover the full sequence anyway.
         if self.impl.is_sparse and num_mha_tokens > 0:
-            max_seq_len = attn_metadata.max_seq_len  # type: ignore[union-attr]
+            prefill_max_seq_len = attn_metadata.prefill_max_seq_len  # type: ignore[attr-defined]
             use_mha = (
                 getattr(self.impl, "_fa4_available", False)
-                and max_seq_len <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
+                and prefill_max_seq_len <= attn_metadata.topk_tokens  # type: ignore[attr-defined]
                 and not self._vllm_config.attention_config.sparse_mla_force_mqa
             )
             if not use_mha:

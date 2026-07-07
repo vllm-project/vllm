@@ -256,6 +256,7 @@ class FlashInferMLASparseMetadata(AttentionMetadata):
     num_decodes: int
     num_prefills: int
     num_decode_tokens: int
+    prefill_max_seq_len: int = 0
     prefill: MLACommonPrefillMetadata | None = None
 
     # Sparse-specific

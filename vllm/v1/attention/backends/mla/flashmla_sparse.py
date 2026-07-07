@@ -163,6 +163,7 @@ class FlashMLASparseMetadata(AttentionMetadata):
     num_prefills: int = 0
     num_decode_tokens: int = 0
     seq_lens: torch.Tensor | None = None
+    prefill_max_seq_len: int = 0
     prefill: MLACommonPrefillMetadata | None = None
 
     @dataclass
