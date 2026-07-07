@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+from collections.abc import Mapping
 from typing import Any
 
 import torch
@@ -94,7 +95,6 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.device,
             cudagraph_mode,
             decode_query_len=self.num_query_per_req,
-            causal=self.dflash_causal,
         )
 
     def capture(self, attn_states: dict | None = None) -> None:
@@ -112,6 +112,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             self.attn_groups,
             self.kv_cache_config,
             self.max_model_len,
+            causal=self._group_causal,
             progress_bar_desc=f"Capturing {self._speculator_name.lower()} CUDA graphs",
         )
 
@@ -151,7 +152,10 @@ class DFlashSpeculator(DraftModelSpeculator):
         # of the kv-cache group its cache belongs to. Models that share a single group
         # leave this as None and share one context slot mapping.
         self._layer_group_idx: list[int] | None = None
+        # Per-KV-group causal, falling back to the scalar dflash_causal.
+        self._group_causal: dict[int, bool] | bool = self.dflash_causal
         if hasattr(self.model, "get_draft_kv_cache_layer_names"):
+            layer_names = self.model.get_draft_kv_cache_layer_names()
             name_to_gid = {
                 ln: gid
                 for gid, group in enumerate(kv_cache_config.kv_cache_groups)
@@ -159,9 +163,15 @@ class DFlashSpeculator(DraftModelSpeculator):
             }
             gid_to_idx = {gid: i for i, gid in enumerate(self.draft_kv_cache_group_ids)}
             self._layer_group_idx = [
-                gid_to_idx[name_to_gid[name]]
-                for name in self.model.get_draft_kv_cache_layer_names()
+                gid_to_idx[name_to_gid[name]] for name in layer_names
             ]
+            if hasattr(self.model, "get_draft_attn_causal"):
+                self._group_causal = {
+                    name_to_gid[name]: layer_causal
+                    for name, layer_causal in zip(
+                        layer_names, self.model.get_draft_attn_causal()
+                    )
+                }
 
     @torch.inference_mode()
     def _run_model(
@@ -229,7 +239,7 @@ class DFlashSpeculator(DraftModelSpeculator):
         num_reqs_padded: int,
         num_tokens_padded: int,
         num_query_per_req: int | None = None,
-        causal: bool = False,
+        causal: bool | Mapping[int, bool] = False,
     ) -> dict[str, Any] | None:
         if not self.draft_attn_layer_names:
             return None
@@ -386,7 +396,7 @@ class DFlashSpeculator(DraftModelSpeculator):
             num_reqs=num_reqs,
             num_reqs_padded=num_reqs_padded,
             num_tokens_padded=num_tokens_padded,
-            causal=self.dflash_causal,
+            causal=self._group_causal,
         )
         draft_slot_mappings_by_layer = build_slot_mappings_by_layer(
             self.block_tables.slot_mappings[:, :num_tokens_padded],
