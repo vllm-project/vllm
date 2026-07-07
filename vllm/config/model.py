@@ -213,7 +213,7 @@ class ModelConfig:
     flexibility."""
     enable_return_routed_experts: bool = False
     """Whether to return routed experts."""
-    max_logprobs: int = 20
+    max_logprobs: int = Field(default=20, ge=-1)
     """Maximum number of log probabilities to return when `logprobs` is
     specified in `SamplingParams`. The default value comes the default for the
     OpenAI Chat Completions API. -1 means no cap, i.e. all (output_length *
@@ -289,6 +289,11 @@ class ModelConfig:
     enable_sleep_mode: bool = False
     """Enable sleep mode for the engine (only cuda and
     hip platforms are supported)."""
+    sleep_mode_backend: str = "cumem"
+    """Mechanism used to free and restore GPU state for sleep mode. ``"cumem"``
+    (default) uses the built-in ``CuMemAllocator`` and is behavior-compatible
+    with prior releases. Additional backends (CUDA checkpoint, CRIU, durable
+    snapshot) may be registered in-tree or by plugins (RFC #34303)."""
     enable_cumem_allocator: bool = False
     """Enable the custom cumem allocator to leverage advanced GPU memory
     allocation features such as multi-node NVLink support.
@@ -994,6 +999,7 @@ class ModelConfig:
                 "modelopt",
                 "modelopt_fp4",
                 "modelopt_mxfp8",
+                "mxfp8",
                 "modelopt_mixed",
                 # Ensure heavy backends are probed last to avoid unnecessary
                 # imports during override detection (e.g., MXFP4 imports Triton)
@@ -1247,9 +1253,13 @@ class ModelConfig:
     def is_deepseek_mla(self) -> bool:
         return self.model_arch_config.is_deepseek_mla
 
-    @property
+    @cached_property
     def is_mm_prefix_lm(self) -> bool:
         return self.model_arch_config.is_mm_prefix_lm
+
+    @property
+    def rswa_window(self) -> int | None:
+        return self.model_arch_config.rswa_window
 
     def get_head_size(self) -> int:
         return self.model_arch_config.head_size

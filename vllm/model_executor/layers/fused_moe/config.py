@@ -1038,7 +1038,7 @@ class FusedMoEParallelConfig:
 
     @property
     def use_all2all_kernels(self):
-        return self.dp_size > 1 and self.use_ep
+        return self.use_ep and (self.dp_size > 1 or self.is_sequence_parallel)
 
     @property
     def use_deepep_ht_kernels(self):
@@ -1286,6 +1286,12 @@ class FusedMoEConfig:
     max_num_tokens: int = SchedulerConfig.DEFAULT_MAX_NUM_BATCHED_TOKENS_FOR_BATCHED_DP
     has_bias: bool = False
     is_lora_enabled: bool = False
+
+    # When True, the MoE skips its final cross-rank all-reduce (and the separate
+    # shared-expert reduce), returning the partial per-rank sum. The caller is
+    # then responsible for the reduction (e.g. fusing it into the next RMSNorm).
+    # Only honored on the non-reduced (late-AR) TP path. Default False.
+    skip_final_all_reduce: bool = False
 
     # SwiGLU clamp limit. When set, backends that do not implement the clamp
     # are filtered out by `FusedMoEExperts.is_supported_config` so the oracle
