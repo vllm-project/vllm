@@ -42,6 +42,17 @@ def test_benchmark_snapshot_sync_explains_missing_write_credentials():
     assert "Benchmark repo publish target:" in text
 
 
+def test_same_spec_benchmark_failure_prints_server_log_tail():
+    text = script_text("run_ascend_benchmark_ci.sh")
+    same_spec_block = text[text.index("run_same_spec_current_benchmark() {") :]
+
+    assert "same_spec_server_log=$RESULT_ROOT/server.stdout.log" in same_spec_block
+    assert "print_same_spec_server_log_tail() {" in same_spec_block
+    assert "current same-spec vLLM server log tail" in same_spec_block
+    assert 'collect_ascend_diagnostics "same-spec-current-failure"' in same_spec_block
+    assert 'return "$same_spec_status"' in same_spec_block
+
+
 def test_e2e_inference_scripts_retry_http_requests_and_print_server_log():
     for script_name in (
         "run_e2e_serve_smoke.sh",
