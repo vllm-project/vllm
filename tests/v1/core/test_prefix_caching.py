@@ -2044,6 +2044,91 @@ def test_maybe_evict_cached_block():
     assert pool.cached_block_hash_to_block._cache == {}
 
 
+def _set_cached_block(
+    pool: BlockPool,
+    block: KVCacheBlock,
+    block_hash: bytes,
+    retention_priority: int,
+) -> None:
+    block_hash_with_group_id = make_block_hash_with_group_id(BlockHash(block_hash), 0)
+    block.set_block_hash(block_hash_with_group_id)
+    block.retention_priority = retention_priority
+    pool.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
+
+
+def test_priority_aware_eviction_prefers_low_priority_blocks():
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    high_priority, low_priority, medium_priority = pool.get_new_blocks(3)
+    _set_cached_block(pool, high_priority, b"high", retention_priority=0)
+    _set_cached_block(pool, low_priority, b"low", retention_priority=10)
+    _set_cached_block(pool, medium_priority, b"medium", retention_priority=5)
+
+    pool.free_blocks([high_priority, low_priority, medium_priority])
+
+    evicted = pool.get_new_blocks(1)[0]
+    assert evicted is low_priority
+    assert evicted.block_hash is None
+    assert evicted.retention_priority is None
+
+
+def test_priority_aware_eviction_preserves_lru_within_priority():
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    first, second, third = pool.get_new_blocks(3)
+    _set_cached_block(pool, first, b"first", retention_priority=3)
+    _set_cached_block(pool, second, b"second", retention_priority=3)
+    _set_cached_block(pool, third, b"third", retention_priority=3)
+
+    pool.free_blocks([first, second, third])
+
+    assert pool.get_new_blocks(1)[0] is first
+
+
+def test_lru_eviction_policy_ignores_retention_priority():
+    pool = BlockPool(
+        num_gpu_blocks=4,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="lru",
+    )
+    first, second, third = pool.get_new_blocks(3)
+    _set_cached_block(pool, first, b"first", retention_priority=0)
+    _set_cached_block(pool, second, b"second", retention_priority=10)
+    _set_cached_block(pool, third, b"third", retention_priority=5)
+
+    pool.free_blocks([first, second, third])
+
+    assert pool.get_new_blocks(1)[0] is first
+
+
+def test_touch_upgrades_retention_priority():
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    shared_block, low_priority_block = pool.get_new_blocks(2)
+    _set_cached_block(pool, shared_block, b"shared", retention_priority=10)
+    _set_cached_block(pool, low_priority_block, b"low", retention_priority=10)
+    pool.free_blocks([shared_block, low_priority_block])
+
+    pool.touch([shared_block], retention_priority=0)
+    assert shared_block.retention_priority == 0
+    pool.free_blocks([shared_block])
+
+    assert pool.get_new_blocks(1)[0] is low_priority_block
+
+
 @pytest.mark.parametrize("blocks_to_cache", [2, 3, 10])
 def test_kv_cache_events(blocks_to_cache: int):
     block_size = 16

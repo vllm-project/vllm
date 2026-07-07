@@ -6,7 +6,7 @@ from typing import NamedTuple
 
 from vllm import envs
 from vllm.utils.math_utils import cdiv
-from vllm.v1.core.block_pool import BlockPool
+from vllm.v1.core.block_pool import BlockPool, KVCacheEvictionPolicy
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import (
     BlockHash,
@@ -74,6 +74,7 @@ class KVCacheCoordinator(ABC):
         pcp_world_size: int,
         scheduler_block_size: int,
         hash_block_size: int,
+        kv_cache_eviction_policy: KVCacheEvictionPolicy = "lru",
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         self.kv_cache_config = kv_cache_config
@@ -91,6 +92,7 @@ class KVCacheCoordinator(ABC):
             num_gpu_blocks=kv_cache_config.num_blocks,
             enable_caching=enable_caching,
             hash_block_size=hash_block_size,
+            kv_cache_eviction_policy=kv_cache_eviction_policy,
             enable_kv_cache_events=enable_kv_cache_events,
             metrics_collector=metrics_collector,
         )
@@ -192,6 +194,7 @@ class KVCacheCoordinator(ABC):
     def allocate_new_computed_blocks(
         self,
         request_id: str,
+        request_priority: int,
         new_computed_blocks: tuple[Sequence[KVCacheBlock], ...],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
@@ -223,6 +226,7 @@ class KVCacheCoordinator(ABC):
         for i, manager in enumerate(self.single_type_managers):
             manager.add_local_computed_blocks(
                 request_id,
+                request_priority,
                 new_computed_blocks[i],
                 num_local_computed_tokens,
                 num_external_computed_tokens,
@@ -398,6 +402,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
         pcp_world_size: int,
         scheduler_block_size: int,
         hash_block_size: int,
+        kv_cache_eviction_policy: KVCacheEvictionPolicy = "lru",
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
@@ -411,6 +416,7 @@ class KVCacheCoordinatorNoPrefixCache(KVCacheCoordinator):
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            kv_cache_eviction_policy=kv_cache_eviction_policy,
             metrics_collector=metrics_collector,
         )
         self.num_single_type_manager = len(self.single_type_managers)
@@ -448,6 +454,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
         pcp_world_size: int,
         scheduler_block_size: int,
         hash_block_size: int,
+        kv_cache_eviction_policy: KVCacheEvictionPolicy = "lru",
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
@@ -461,6 +468,7 @@ class UnitaryKVCacheCoordinator(KVCacheCoordinator):
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            kv_cache_eviction_policy=kv_cache_eviction_policy,
             metrics_collector=metrics_collector,
         )
         self.kv_cache_spec = self.kv_cache_config.kv_cache_groups[0].kv_cache_spec
@@ -534,6 +542,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
         pcp_world_size: int,
         scheduler_block_size: int,
         hash_block_size: int,
+        kv_cache_eviction_policy: KVCacheEvictionPolicy = "lru",
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
         super().__init__(
@@ -547,6 +556,7 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            kv_cache_eviction_policy=kv_cache_eviction_policy,
             metrics_collector=metrics_collector,
         )
         # hash_block_size: the block size used to compute block hashes.
@@ -844,6 +854,7 @@ def get_kv_cache_coordinator(
     pcp_world_size: int,
     scheduler_block_size: int,
     hash_block_size: int,
+    kv_cache_eviction_policy: KVCacheEvictionPolicy = "lru",
     metrics_collector: KVCacheMetricsCollector | None = None,
 ) -> KVCacheCoordinator:
     if not enable_caching:
@@ -857,6 +868,7 @@ def get_kv_cache_coordinator(
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            kv_cache_eviction_policy=kv_cache_eviction_policy,
             metrics_collector=metrics_collector,
         )
     if len(kv_cache_config.kv_cache_groups) == 1:
@@ -871,6 +883,7 @@ def get_kv_cache_coordinator(
             pcp_world_size=pcp_world_size,
             scheduler_block_size=scheduler_block_size,
             hash_block_size=hash_block_size,
+            kv_cache_eviction_policy=kv_cache_eviction_policy,
             metrics_collector=metrics_collector,
         )
     return HybridKVCacheCoordinator(
@@ -884,5 +897,6 @@ def get_kv_cache_coordinator(
         pcp_world_size=pcp_world_size,
         scheduler_block_size=scheduler_block_size,
         hash_block_size=hash_block_size,
+        kv_cache_eviction_policy=kv_cache_eviction_policy,
         metrics_collector=metrics_collector,
     )

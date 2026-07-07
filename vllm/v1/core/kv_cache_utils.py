@@ -128,6 +128,9 @@ class KVCacheBlock:
     # Number of prefix tokens covered by _block_hash. For full blocks this is
     # the full block boundary; partial entries can end inside a cache block.
     _block_hash_num_tokens: int | None = None
+    # Request priority used for cache retention. Lower values mean higher
+    # priority, matching scheduler semantics.
+    retention_priority: int | None = None
 
     # Used to construct a doubly linked list for free blocks.
     # These two attributes should only be manipulated by FreeKVCacheBlockQueue.
@@ -160,6 +163,7 @@ class KVCacheBlock:
         """Reset the block hash when the block is evicted."""
         self._block_hash = None
         self._block_hash_num_tokens = None
+        self.retention_priority = None
 
     def __repr__(self) -> str:
         # Use block_id instead of KVCacheBlock object to avoid calling __repr__
@@ -171,6 +175,7 @@ class KVCacheBlock:
             f"ref_cnt={self.ref_cnt}, "
             f"_block_hash={self._block_hash!r}, "
             f"_block_hash_num_tokens={self._block_hash_num_tokens}, "
+            f"retention_priority={self.retention_priority}, "
             f"prev_free_block={prev_block_id}, "
             f"next_free_block={next_block_id})"
         )
@@ -391,6 +396,34 @@ class FreeKVCacheBlockQueue:
         self.fake_free_list_tail.prev_free_block = last_block
 
         self.num_free_blocks += len(blocks)
+
+    def append_n_by_eviction_priority(self, blocks: list[KVCacheBlock]) -> None:
+        """Insert blocks ordered by retention priority, preserving LRU ties."""
+        for block in blocks:
+            block_priority = (
+                block.retention_priority if block.retention_priority is not None else 0
+            )
+
+            curr_block = self.fake_free_list_head.next_free_block
+            assert curr_block is not None, (
+                "next_free_block of fake_free_list_head should always exist"
+            )
+            while curr_block is not self.fake_free_list_tail:
+                curr_priority = curr_block.retention_priority
+                if curr_block.block_hash is not None:
+                    curr_priority = 0 if curr_priority is None else curr_priority
+                    if curr_priority < block_priority:
+                        break
+                curr_block = curr_block.next_free_block
+                assert curr_block is not None
+
+            prev_block = curr_block.prev_free_block
+            assert prev_block is not None
+            prev_block.next_free_block = block
+            block.prev_free_block = prev_block
+            block.next_free_block = curr_block
+            curr_block.prev_free_block = block
+            self.num_free_blocks += 1
 
     def get_all_free_blocks(self) -> list[KVCacheBlock]:
         """Get all free blocks in the free list. Mainly used for testing.

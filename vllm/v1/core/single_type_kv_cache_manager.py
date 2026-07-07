@@ -223,6 +223,7 @@ class SingleTypeKVCacheManager(ABC):
     def add_local_computed_blocks(
         self,
         request_id: str,
+        request_priority: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,
@@ -236,6 +237,7 @@ class SingleTypeKVCacheManager(ABC):
 
         Args:
             request_id: The request ID.
+            request_priority: The request priority used for cache retention.
             new_computed_blocks: The new computed blocks just hitting the
                 prefix cache.
             num_local_computed_tokens: The number of local computed tokens.
@@ -257,7 +259,10 @@ class SingleTypeKVCacheManager(ABC):
 
         # Touch the computed blocks to make sure they won't be evicted.
         if self.enable_caching:
-            self.block_pool.touch(new_computed_blocks)
+            self.block_pool.touch(
+                new_computed_blocks,
+                retention_priority=request_priority,
+            )
         else:
             assert not any(new_computed_blocks), (
                 "Computed blocks should be empty when prefix caching is disabled"
@@ -1675,6 +1680,7 @@ class CrossAttentionManager(SingleTypeKVCacheManager):
     def add_local_computed_blocks(
         self,
         request_id: str,
+        request_priority: int,
         new_computed_blocks: Sequence[KVCacheBlock],
         num_local_computed_tokens: int,
         num_external_computed_tokens: int,

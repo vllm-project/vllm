@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from collections.abc import Iterable, Sequence
-from typing import Any
+from typing import Any, Literal
 
 from vllm.distributed.kv_events import (
     MEDIUM_GPU,
@@ -28,6 +28,8 @@ from vllm.v1.core.kv_cache_utils import (
 from vllm.v1.request import Request
 
 logger = init_logger(__name__)
+
+KVCacheEvictionPolicy = Literal["lru", "priority-aware"]
 
 
 class BlockHashToBlockMap:
@@ -164,6 +166,7 @@ class BlockPool:
         num_gpu_blocks: int,
         enable_caching: bool,
         hash_block_size: int,
+        kv_cache_eviction_policy: KVCacheEvictionPolicy = "lru",
         enable_kv_cache_events: bool = False,
         metrics_collector: KVCacheMetricsCollector | None = None,
     ):
@@ -171,6 +174,7 @@ class BlockPool:
         self.num_gpu_blocks = num_gpu_blocks
         self.enable_caching = enable_caching
         self.hash_block_size = hash_block_size
+        self.kv_cache_eviction_policy = kv_cache_eviction_policy
         # All kv-cache blocks.
         self.blocks: list[KVCacheBlock] = [
             KVCacheBlock(idx) for idx in range(num_gpu_blocks)
@@ -294,6 +298,7 @@ class BlockPool:
                 block_hash_with_group_id,
                 blk,
                 num_tokens=num_hash_tokens,
+                retention_priority=request.priority,
             )
             if new_hashes is not None:
                 new_hashes.append(maybe_convert_block_hash(block_hash))
@@ -509,6 +514,7 @@ class BlockPool:
             block_hash_with_group_id,
             block,
             num_tokens=num_hash_blocks * self.hash_block_size,
+            retention_priority=request.priority,
         )
         if self.enable_kv_cache_events and not already_cached:
             parent_hash, block_start = self._get_partial_block_parent_hash_and_start(
@@ -609,7 +615,10 @@ class BlockPool:
         block_hash_with_group_id: BlockHashWithGroupId,
         block: KVCacheBlock,
         num_tokens: int | None,
+        retention_priority: int,
     ) -> None:
+        self._update_retention_priority(block, retention_priority)
+
         if block.block_hash == block_hash_with_group_id:
             return
 
@@ -625,6 +634,16 @@ class BlockPool:
                 block_hash_with_group_id
             )
         self.cached_block_hash_to_block.insert(block_hash_with_group_id, block)
+@staticmethod
+    def _update_retention_priority(
+        block: KVCacheBlock,
+        retention_priority: int,
+    ) -> None:
+        if block.retention_priority is None:
+            block.retention_priority = retention_priority
+        else:
+            block.retention_priority = min(block.retention_priority, retention_priority)
+
 
     def move_block_hashes(
         self,
@@ -699,7 +718,11 @@ class BlockPool:
         self._emit_block_removed_events(evicted_hashes)
         return True
 
-    def touch(self, blocks: Sequence[KVCacheBlock]) -> None:
+    def touch(
+        self,
+        blocks: Sequence[KVCacheBlock],
+        retention_priority: int | None = None,
+    ) -> None:
         """Touch a block increases its reference count by 1, and may remove
         the block from the free queue. This is used when a block is hit by
         another request with the same prefix.
@@ -712,6 +735,8 @@ class BlockPool:
             # candidate), so remove it.
             if block.ref_cnt == 0 and not block.is_null:
                 self.free_block_queue.remove(block)
+            if retention_priority is not None and block.block_hash is not None:
+                self._update_retention_priority(block, retention_priority)
             block.ref_cnt += 1
             if self.metrics_collector:
                 self.metrics_collector.on_block_accessed(block)
@@ -737,7 +762,10 @@ class BlockPool:
 
         # Blocks without hash always get evicted first - prepend them last to the tail
         self.free_block_queue.prepend_n(blocks_without_hash)
-        self.free_block_queue.append_n(blocks_with_hash)
+        if self.kv_cache_eviction_policy == "priority-aware":
+            self.free_block_queue.append_n_by_eviction_priority(blocks_with_hash)
+        else:
+            self.free_block_queue.append_n(blocks_with_hash)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
