@@ -132,6 +132,10 @@ impl TextLlm {
     ) -> Result<(TextRequest, GenerateOutputStream)> {
         request.validate()?;
 
+        if request.arrival_time.is_none() {
+            request.arrival_time = Some(vllm_llm::current_unix_timestamp_secs());
+        }
+
         let tokenizer = self.backend.tokenizer();
         let prompt_token_ids = match take(&mut request.prompt) {
             Prompt::Text(text) => tokenizer.encode(&text, request.add_special_tokens)?,
