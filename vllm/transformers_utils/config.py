@@ -71,6 +71,7 @@ class LazyConfigDict(dict):
 
 _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     afmoe="AfmoeConfig",
+    arctic="ArcticConfig",
     bagel="BagelConfig",
     umm="CheersConfig",
     chatglm="ChatGLMConfig",
@@ -123,11 +124,10 @@ _CONFIG_REGISTRY: dict[str, type[PretrainedConfig]] = LazyConfigDict(
     qwen3_5_moe="Qwen3_5MoeConfig",
     laguna="LagunaConfig",
     lfm2_moe="Lfm2MoeConfig",
-    tarsier2="Tarsier2Config",
     **{"unlimited-ocr": "UnlimitedOCRConfig"},
 )
 
-_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators"}
+_SPECULATIVE_DECODING_CONFIGS: set[str] = {"eagle", "speculators", "medusa"}
 
 _PATCH_HF_VALIDATE_ROPE: set[str] = {"sarvam_mla"}
 

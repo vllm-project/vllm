@@ -3,14 +3,13 @@
 
 from __future__ import annotations
 
-import contextlib
 import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import TYPE_CHECKING, NamedTuple
 
-from openai_harmony import HarmonyError
+from openai_harmony import HarmonyError, Message, Role
 
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
@@ -93,6 +92,9 @@ class HarmonyParser(DelegatingParser):
         self._num_processed_messages = 0
         self._encountered_parse_error = False
 
+        # For error recovery
+        self._current_message_tokens: list[int] = []
+
     @property
     def _harmony_parser(self) -> StreamableParser:
         """Lazily initializes the Harmony parser."""
@@ -105,31 +107,71 @@ class HarmonyParser(DelegatingParser):
         if len(messages) <= self._num_processed_messages:
             return None
         msg = messages[self._num_processed_messages]
+        msg.recipient = self._normalize_recipient(msg.recipient)
         self._num_processed_messages += 1
         return msg
 
-    def flush(self) -> Segment | None:
-        msg = None
-        with contextlib.suppress(HarmonyError):
-            self._harmony_parser.process_eos()
-            # TODO: Consider reraising
-
-        msg = self._poll_completed_message()
-
+    def _reset_parser_state(self) -> None:
         # Reset to the initial assistant-parser state for the next turn.
         self._parser = None
         self._num_processed_messages = 0
         self._encountered_parse_error = False
+        self._current_message_tokens.clear()
+
+    def _recover_raw_current_message(self) -> list[Segment]:
+        if not self._current_message_tokens:
+            return []
+
+        final_channel = "final"
+        text = self.model_tokenizer.decode(self._current_message_tokens)
+        msg = Message.from_role_and_content(Role.ASSISTANT, text).with_channel(
+            final_channel
+        )
+        return [
+            Segment(
+                channel=final_channel,
+                recipient=None,
+                delta=text,
+                completed_message=None,
+            ),
+            Segment(
+                channel=msg.channel,
+                recipient=msg.recipient,
+                delta="",
+                completed_message=msg,
+            ),
+        ]
+
+    def flush(self) -> list[Segment]:
+        if self._encountered_parse_error:
+            self._reset_parser_state()
+            return []
+
+        try:
+            self._harmony_parser.process_eos()
+            msg = self._poll_completed_message()
+        except HarmonyError:
+            logger.warning(
+                "Harmony parser ended in a non-terminal state; returning the "
+                "recovered raw output."
+            )
+            segments = self._recover_raw_current_message()
+            self._reset_parser_state()
+            return segments
+
+        self._reset_parser_state()
 
         if msg is None:
-            return None
+            return []
 
-        return Segment(
-            channel=msg.channel,
-            recipient=msg.recipient,
-            delta="",
-            completed_message=msg,
-        )
+        return [
+            Segment(
+                channel=msg.channel,
+                recipient=msg.recipient,
+                delta="",
+                completed_message=msg,
+            )
+        ]
 
     def parse(
         self,
@@ -144,9 +186,9 @@ class HarmonyParser(DelegatingParser):
         Callers must decide whether to surface them.
         """
         result = self.process_chunk(model_output_token_ids)
-        flushed_segment = self.flush()
-        if flushed_segment is not None:
-            result.segments.append(flushed_segment)
+        flushed_segments = self.flush()
+        if flushed_segments:
+            result.segments.extend(flushed_segments)
 
         reasoning_parts: list[str] = []
         content_parts: list[str] = []
@@ -198,12 +240,14 @@ class HarmonyParser(DelegatingParser):
         *,
         finished: bool,
     ) -> DeltaMessage | None:
-        prev_recipient = self._harmony_parser.current_recipient
+        prev_recipient = self._normalize_recipient(
+            self._harmony_parser.current_recipient
+        )
         result = self.process_chunk(delta_token_ids)
         if finished:
-            flushed_segment = self.flush()
-            if flushed_segment is not None:
-                result.segments.append(flushed_segment)
+            flushed_segments = self.flush()
+            if flushed_segments:
+                result.segments.extend(flushed_segments)
         combined_content = ""
         combined_reasoning = ""
         tool_messages: list[DeltaToolCall] = []
@@ -289,9 +333,16 @@ class HarmonyParser(DelegatingParser):
                 self._encountered_parse_error = True
                 break
             channel = self._harmony_parser.current_channel
-            recipient = self._harmony_parser.current_recipient
+            recipient = self._normalize_recipient(
+                self._harmony_parser.current_recipient
+            )
             delta = self._harmony_parser.last_content_delta or ""
             completed_message = self._poll_completed_message()
+
+            if completed_message is not None:
+                self._current_message_tokens.clear()
+            else:
+                self._current_message_tokens.append(token_id)
 
             if channel == "analysis" or (
                 channel == "commentary" and recipient is not None
@@ -313,3 +364,14 @@ class HarmonyParser(DelegatingParser):
             segments=segments,
             reasoning_token_count=reasoning_token_count,
         )
+
+    @staticmethod
+    def _normalize_recipient(recipient: str | None) -> str | None:
+        """Remove constrained formats misparsed into recipients by older Harmony."""
+        if recipient is None:
+            return None
+
+        constrain_index = recipient.find("<|constrain|>")
+        if constrain_index == -1:
+            return recipient
+        return recipient[:constrain_index].rstrip() or None
