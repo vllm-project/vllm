@@ -3,6 +3,7 @@
 
 import sys
 import types
+from importlib.metadata import PackageNotFoundError
 from unittest import mock
 
 from vllm.triton_utils.importing import TritonLanguagePlaceholder, TritonPlaceholder
@@ -92,3 +93,16 @@ def test_no_triton_fallback():
         assert triton.__class__.__name__ == "TritonPlaceholder"
         assert triton.language.__class__.__name__ == "TritonLanguagePlaceholder"
         assert tl.__class__.__name__ == "TritonLanguagePlaceholder"
+
+
+def test_triton_import_tolerates_missing_vllm_metadata():
+    sys.modules.pop("vllm.triton_utils", None)
+    sys.modules.pop("vllm.triton_utils.importing", None)
+
+    with mock.patch(
+        "importlib.metadata.version",
+        side_effect=PackageNotFoundError("vllm"),
+    ):
+        import vllm.triton_utils.importing as importing
+
+        assert isinstance(importing.HAS_TRITON, bool)
