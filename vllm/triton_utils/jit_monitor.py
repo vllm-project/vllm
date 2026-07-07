@@ -118,11 +118,7 @@ def _setup_triton_jit_hook() -> None:
     # gemm_a16w16), and triton builds spec-data for ANY registered hook.
     # This monitor is purely diagnostic, so skip registering to avoid
     # crashing live kernel compilation.
-    # TODO: Find a better way around this
-    from vllm.platforms.rocm import on_gfx1250
-
-    if on_gfx1250():
-        return
+    return
     if not HAS_TRITON:
         return
     from triton import knobs  # type: ignore[import-untyped]

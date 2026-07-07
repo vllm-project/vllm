@@ -2,8 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 
-import os
-
 import torch
 import torch.nn as nn
 
@@ -20,16 +18,17 @@ if HAS_TRITON:
 
 logger = init_logger(__name__)
 
+import os as _os  # PATCH5_AITER_TEMP_SAMPLE
 
-_PATCH5_ON = (
-    os.environ.get("VLLM_AITER_TEMP_SAMPLE", "1" if on_gfx1250() else "0") == "1"
-)
+_PATCH5_ON = _os.environ.get("VLLM_AITER_TEMP_SAMPLE", "0") == "1"
+_PATCH5_DEBUG_DONE = False
 
 
 def _aiter_temp_gumbel_sample(logits, generators, use_fp64_gumbel):
     """Fused temperature Gumbel-max sampling via aiter (ATOM parity).
     logits are ALREADY temperature-scaled by the parent Sampler, so temps=1.
     Returns int64 token ids (num_tokens,)."""
+    global _PATCH5_DEBUG_DONE
     import torch as _torch
     from aiter import mixed_sample_outer_exponential
 
@@ -51,6 +50,14 @@ def _aiter_temp_gumbel_sample(logits, generators, use_fp64_gumbel):
             exp[i].exponential_(generator=g)
     temps = _torch.ones(n, dtype=_torch.float32, device=logits.device)
     mixed_sample_outer_exponential(out, logits, exp, temps, eps=1e-10)
+    if not _PATCH5_DEBUG_DONE:
+        logger.info(
+            "PATCH5 aiter fused temp-sample ACTIVE (n=%d vocab=%d seeded=%d)",
+            n,
+            vocab,
+            nseed,
+        )
+        _PATCH5_DEBUG_DONE = True
     return out.to(_torch.int64)
 
 
