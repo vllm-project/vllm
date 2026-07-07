@@ -202,9 +202,7 @@ _TEXT_GENERATION_EXAMPLE_MODELS = {
     "AfmoeForCausalLM": _HfExamplesInfo("arcee-ai/Trinity-Nano-Preview"),
     "ApertusForCausalLM": _HfExamplesInfo("swiss-ai/Apertus-8B-Instruct-2509"),
     "ArceeForCausalLM": _HfExamplesInfo("arcee-ai/AFM-4.5B-Base"),
-    "ArcticForCausalLM": _HfExamplesInfo(
-        "Snowflake/snowflake-arctic-instruct", trust_remote_code=True
-    ),
+    "ArcticForCausalLM": _HfExamplesInfo("Snowflake/snowflake-arctic-instruct"),
     "AXK1ForCausalLM": _HfExamplesInfo("skt/A.X-K1", trust_remote_code=True),
     "BailingMoeForCausalLM": _HfExamplesInfo(
         "inclusionAI/Ling-lite-1.5", trust_remote_code=True
