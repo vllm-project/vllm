@@ -10,8 +10,12 @@ torchaudio==2.11.0
 torchvision==0.26.0 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
 PyNvVideoCodec==2.1.0
 # FlashInfer should be updated together with the Dockerfile
-flashinfer-python==0.6.13
-flashinfer-cubin==0.6.13
+# SM12x override: upstream pins 0.6.13, but PyPI 0.6.13 LACKS the DeepSeek-V4
+# SM120 sparse-MLA kernel (flashinfer.mla._sparse_mla_sm120). Pin 0.6.14, which
+# carries it. flashinfer-cubin 0.6.14 is only on the GitHub release (not PyPI),
+# so reference the release wheel directly; python+cubin must be same-version.
+flashinfer-python==0.6.14
+flashinfer-cubin @ https://github.com/flashinfer-ai/flashinfer/releases/download/v0.6.14/flashinfer_cubin-0.6.14-py3-none-any.whl
 apache-tvm-ffi==0.1.9
 tilelang==0.1.9
 nvidia-cudnn-frontend>=1.19.1
