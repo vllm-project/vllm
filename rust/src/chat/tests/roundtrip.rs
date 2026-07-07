@@ -130,6 +130,19 @@ impl RoundtripCase {
         }
     }
 
+    /// DeepSeek V3.2 DSML tool-call format.
+    fn deepseek_v32() -> Self {
+        Self {
+            model_id: "deepseek-ai/DeepSeek-V3.2-Exp",
+            assistant_stop_suffix: "<｜end▁of▁sentence｜>",
+            tool_call_parser: ParserSelection::Auto,
+            reasoning_parser: ParserSelection::Auto,
+            thinking_behavior: ThinkingBehavior::Toggleable { default: false },
+            json_fmt: compact_json_fmt(),
+            sort_json_keys: false,
+        }
+    }
+
     /// GLM-4.7 XML-like argument format with `<think>` reasoning tags.
     fn glm47() -> Self {
         Self {
@@ -235,6 +248,7 @@ roundtrip_tests! {
     qwen35 => [reasoning_and_content, tool_call_mix],
     minimax_m25 => [reasoning_and_content, tool_call_mix],
     deepseek_v4 => [reasoning_and_content, tool_call_mix],
+    deepseek_v32 => [tool_call_mix],
     glm47 => [reasoning_and_content, tool_call_mix],
     seed_oss => [reasoning_and_content, tool_call_mix],
     step3p5 => [reasoning_and_content],
