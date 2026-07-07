@@ -8,6 +8,7 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from unittest.mock import PropertyMock, patch
 
 import pytest
+from pydantic.dataclasses import rebuild_dataclass
 from transformers import AutoTokenizer
 
 from vllm import SamplingParams
@@ -30,6 +31,9 @@ from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.outputs import ModelRunnerOutput
 
 from ...utils import create_new_process_for_each_test, multi_gpu_test
+
+rebuild_dataclass(VllmConfig)
+
 
 if not current_platform.is_cuda():
     pytest.skip(reason="V1 currently only supported on CUDA.", allow_module_level=True)
@@ -608,3 +612,41 @@ def test_encoder_instance_zero_kv_cache(
         assert not engine_core.scheduler.ec_connector.is_producer, (
             "Consumer instance EC connector should be consumer"
         )
+
+
+def test_engine_core_handles_observation_abort():
+    """Test that EngineCore handles aborted requests from ModelRunnerOutput."""
+    from unittest.mock import MagicMock
+
+    from vllm.v1.outputs import ModelRunnerOutput
+
+    engine_args = EngineArgs(model=MODEL_NAME)
+    vllm_config = engine_args.create_engine_config()
+    executor_class = Executor.get_class(vllm_config)
+
+    with set_default_torch_num_threads(1):
+        engine_core = EngineCore(
+            vllm_config=vllm_config, executor_class=executor_class, log_stats=True
+        )
+
+    # Add a request
+    request = make_request()
+    engine_core.add_request(*engine_core.preprocess_add_request(request))
+    assert len(engine_core.scheduler.waiting) == 1
+
+    # Mock the executor to return an aborted request ID
+    mock_output = ModelRunnerOutput(
+        req_ids=[request.request_id],
+        req_id_to_index={request.request_id: 0},
+        aborted_req_ids=[request.request_id],
+    )
+
+    # Mock model_executor.execute_model
+    engine_core.model_executor.execute_model = MagicMock(return_value=mock_output)
+
+    # Call step_fn
+    # We expect it to process the step and trigger abort!
+    _ = engine_core.step_fn()
+
+    # Verify that the request was aborted (removed from scheduler state)
+    assert request.request_id not in engine_core.scheduler.req_id_to_state

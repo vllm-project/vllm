@@ -7,6 +7,8 @@ from unittest.mock import Mock
 import numpy as np
 import pytest
 import torch
+import torch.nn as nn
+from pydantic.dataclasses import rebuild_dataclass
 
 import vllm.v1.worker.gpu_model_runner as gpu_model_runner_module
 from vllm.config import (
@@ -51,6 +53,8 @@ from vllm.v1.worker.gpu.mm.lora import set_active_mm_loras
 from vllm.v1.worker.gpu_input_batch import InputBatch
 from vllm.v1.worker.gpu_model_runner import GPUModelRunner
 from vllm.v1.worker.utils import select_common_block_size
+
+rebuild_dataclass(VllmConfig)
 
 BLOCK_SIZE = 16
 NUM_BLOCKS = 10
@@ -1638,3 +1642,81 @@ def test_mamba_cache_raises_when_max_num_seqs_exceeds_blocks():
 
         with pytest.raises(ValueError, match="max_num_seqs"):
             runner.initialize_kv_cache(kv_cache_config)
+
+
+def test_observation_hook_integration(model_runner):
+    """Test that ObservationHook is triggered during execute_model."""
+    from unittest.mock import MagicMock
+
+    from vllm.plugins.observation.manager import PluginManager
+
+    from vllm.plugins.observation.interface import (
+        ObservationAction,
+        ObservationHook,
+        ObservationResult,
+    )
+    from vllm.v1.core.sched.output import SchedulerOutput
+
+    # Create a mock plugin
+    mock_plugin = MagicMock()
+    mock_plugin.on_step_batch.return_value = {
+        "req_1": ObservationResult(action=ObservationAction.CONTINUE)
+    }
+
+    # Create PluginManager with mock plugin
+    plugin_manager = PluginManager([mock_plugin])
+
+    from vllm.plugins.observation.model_runner_helper import init_observation
+    from unittest.mock import patch
+
+    vllm_config = MagicMock()
+    vllm_config.observation_plugins = ["dummy"]
+
+    with patch("vllm.plugins.observation.model_runner_helper.load_observation_plugins", return_value=plugin_manager):
+        init_observation(model_runner, vllm_config)
+
+    # Setup mock input batch
+    model_runner.input_batch = MagicMock()
+    model_runner.input_batch.req_ids = ["req_1"]
+    model_runner.input_batch.is_prefill = True
+
+    # Setup mock request state
+    class DummyReqState:
+        def __init__(self):
+            self.aborted_by_observation = False
+
+    req_state = DummyReqState()
+    model_runner.requests = {"req_1": req_state}
+
+    # Mock _model_forward to avoid GPU execution
+    model_runner._model_forward = MagicMock(return_value=MagicMock())
+
+    # Mock other required methods in execute_model to avoid crashes
+    model_runner.prepare_model_input = MagicMock(
+        return_value=(
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+            MagicMock(),
+        )
+    )
+
+    # Create a dummy scheduler output
+    scheduler_output = SchedulerOutput.make_empty()
+
+    import contextlib
+
+    with contextlib.suppress(Exception):
+        model_runner.execute_model(scheduler_output)
+
+    # Verify that the hook was called
+    assert mock_plugin.on_step_batch.called

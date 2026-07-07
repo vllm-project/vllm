@@ -280,6 +280,9 @@ class ModelRunnerOutput:
     # ``None`` when ``enable_return_routed_experts`` is off.
     routed_experts: RoutedExpertsLists | None = None
 
+    # IDs of requests aborted by observation plugins
+    aborted_req_ids: list[str] = field(default_factory=list)
+
     @staticmethod
     def with_kv_conn_output_only(
         kv_connector_output: KVConnectorOutput | None,
