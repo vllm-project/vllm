@@ -690,7 +690,7 @@ class DominoHead(nn.Module):
             nn.SiLU(),
             ReplicatedLinear(
                 input_size=self.emb_dim,
-                output_size=config.vocab_size,
+                output_size=getattr(config, "draft_vocab_size", config.vocab_size),
                 bias=False,
                 params_dtype=vllm_config.model_config.dtype,
                 quant_config=quant_config,
