@@ -212,7 +212,7 @@ async fn collect_chat_completion(
                     Some(prefix) => Some(format!("{prefix}{}", message.text())),
                     None => Some(message.text()).filter(|t| !t.is_empty()),
                 },
-                tool_calls: Some(tool_calls).filter(|calls| !calls.is_empty()),
+                tool_calls,
                 reasoning: if include_reasoning { reasoning } else { None },
             },
             logprobs,
