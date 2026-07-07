@@ -5,6 +5,8 @@ import pytest
 from vllm.config import ProfilerConfig
 from vllm.config.profiler import _is_uri_path
 from vllm.profiler.wrapper import WorkerProfiler
+from vllm.v1.core.sched.output import SchedulerOutput
+from vllm.v1.utils import should_profile_scheduler_output
 
 
 class ConcreteWorkerProfiler(WorkerProfiler):
@@ -203,6 +205,28 @@ def test_mixed_delay_and_stop(default_profiler_config):
     profiler.step()
 
     assert profiler.start_call_count == 0
+
+
+def test_should_profile_scheduler_output_keeps_empty_non_connector_step():
+    scheduler_output = SchedulerOutput.make_empty()
+
+    assert should_profile_scheduler_output(scheduler_output) is True
+
+
+def test_should_profile_scheduler_output_skips_empty_connector_step():
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.kv_connector_metadata = object()
+
+    assert should_profile_scheduler_output(scheduler_output) is False
+
+
+def test_should_profile_scheduler_output_keeps_non_empty_connector_step():
+    scheduler_output = SchedulerOutput.make_empty()
+    scheduler_output.kv_connector_metadata = object()
+    scheduler_output.num_scheduled_tokens = {"req-0": 1}
+    scheduler_output.total_num_scheduled_tokens = 1
+
+    assert should_profile_scheduler_output(scheduler_output) is True
 
 
 class TestIsUriPath:
