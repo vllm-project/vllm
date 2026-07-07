@@ -1,0 +1,13 @@
+gpt-oss-20b-humming.yaml
+Qwen3-30B-A3B-MXFP4A16-humming.yaml
+Qwen2-1.5B-Instruct-FP8W8-humming.yaml
+Qwen3-0.6B-MXFP8-humming.yaml
+Qwen3.6-35B-A3B-NVFP4-humming.yaml
+Qwen3-30B-A3B-Fp8-v1-humming.yaml
+Qwen3-30B-A3B-FP8-block-humming.yaml
+Qwen3-30B-A3B-GPTQ-Int4-humming.yaml
+Qwen3-30B-A3B-Instruct-2507-quantized.w8a8-humming.yaml
+Qwen3-30B-A3B-NVFP4-humming.yaml
+Qwen3-30B-A3B-AWQ-humming.yaml
+Qwen3.5-35B-A3B-FP8-humming.yaml
+Qwen3.5-35B-A3B-experts-int8-humming.yaml

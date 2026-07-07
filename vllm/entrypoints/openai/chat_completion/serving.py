@@ -7,7 +7,7 @@ import time
 from collections.abc import AsyncGenerator, AsyncIterator
 from collections.abc import Sequence as GenericSequence
 from http import HTTPStatus
-from typing import TYPE_CHECKING, Any, Final, cast
+from typing import Any, Final, cast
 
 import numpy as np
 import pybase64 as base64
@@ -17,9 +17,14 @@ from vllm.engine.protocol import EngineClient
 from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
     ConversationMessage,
-    get_history_tool_calls_cnt,
-    get_tool_call_id_type,
     make_tool_call_id,
+)
+from vllm.entrypoints.generate.base.serving import (
+    GenerateBaseServing,
+    GenerationError,
+    build_per_request_timing_metrics,
+    clamp_prompt_logprobs,
+    format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionLogProb,
@@ -37,16 +42,11 @@ from vllm.entrypoints.openai.engine.protocol import (
     DeltaMessage,
     ErrorResponse,
     FunctionCall,
+    PerRequestTimingMetrics,
     PromptTokenUsageInfo,
     RequestResponseMetadata,
     ToolCall,
     UsageInfo,
-)
-from vllm.entrypoints.openai.engine.serving import (
-    GenerationError,
-    OpenAIServing,
-    clamp_prompt_logprobs,
-    format_token_id_placeholder,
 )
 from vllm.entrypoints.openai.models.serving import OpenAIServingModels
 from vllm.entrypoints.serve.utils.api_utils import get_max_tokens, should_include_usage
@@ -61,13 +61,11 @@ from vllm.outputs import RequestOutput
 from vllm.parser import ParserManager
 from vllm.parser.abstract_parser import Parser
 from vllm.renderers import ChatParams
+from vllm.renderers.online_renderer import OnlineRenderer
 from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.mistral import is_mistral_tool_parser
-
-if TYPE_CHECKING:
-    from vllm.entrypoints.serve.render.serving import OpenAIServingRender
 
 logger = init_logger(__name__)
 
@@ -80,7 +78,7 @@ def _get_mm_token_counts(engine_input: EngineInput) -> dict[str, int]:
     counted in ``usage.prompt_tokens``.
     """
     mm_placeholders = cast(
-        "MultiModalPlaceholders | None", engine_input.get("mm_placeholders")
+        MultiModalPlaceholders | None, engine_input.get("mm_placeholders")
     )
     return {
         modality: sum(p.length for p in ranges)
@@ -105,14 +103,14 @@ def _make_prompt_tokens_details(
     )
 
 
-class OpenAIServingChat(OpenAIServing):
+class OpenAIServingChat(GenerateBaseServing):
     def __init__(
         self,
         engine_client: EngineClient,
         models: OpenAIServingModels,
         response_role: str,
         *,
-        openai_serving_render: "OpenAIServingRender",
+        online_renderer: "OnlineRenderer",
         request_logger: RequestLogger | None,
         chat_template: str | None,
         chat_template_content_format: ChatTemplateContentFormatOption,
@@ -127,6 +125,7 @@ class OpenAIServingChat(OpenAIServing):
         enable_log_outputs: bool = False,
         enable_log_deltas: bool = True,
         default_chat_template_kwargs: dict[str, Any] | None = None,
+        enable_per_request_metrics: bool = False,
     ) -> None:
         super().__init__(
             engine_client=engine_client,
@@ -135,7 +134,7 @@ class OpenAIServingChat(OpenAIServing):
             return_tokens_as_token_ids=return_tokens_as_token_ids,
         )
 
-        self.openai_serving_render = openai_serving_render
+        self.online_renderer = online_renderer
         self.response_role = response_role
         self.chat_template = chat_template
         self.chat_template_content_format: Final = chat_template_content_format
@@ -165,6 +164,7 @@ class OpenAIServingChat(OpenAIServing):
 
         self.enable_prompt_tokens_details = enable_prompt_tokens_details
         self.enable_force_include_usage = enable_force_include_usage
+        self.enable_per_request_metrics = enable_per_request_metrics
         self.default_sampling_params = self.model_config.get_diff_sampling_param()
         mc = self.model_config
         self.override_max_tokens = (
@@ -172,8 +172,6 @@ class OpenAIServingChat(OpenAIServing):
             if mc.generation_config not in ("auto", "vllm")
             else getattr(mc, "override_generation_config", {}).get("max_new_tokens")
         )
-        self.tool_call_id_type = get_tool_call_id_type(self.model_config)
-
         # NOTE(woosuk): While OpenAI's chat completion API supports browsing
         # for some models, currently vLLM doesn't support it. Please use the
         # Responses API instead.
@@ -212,7 +210,7 @@ class OpenAIServingChat(OpenAIServing):
         """
         Validate the model and preprocess a chat completion request.
 
-        Delegates preprocessing logic to OpenAIServingRender, adding the
+        Delegates preprocessing logic to OnlineRenderer, adding the
         engine-aware checks (LoRA model validation, engine health).
 
         Returns:
@@ -230,7 +228,7 @@ class OpenAIServingChat(OpenAIServing):
         if self.engine_client.errored:
             raise self.engine_client.dead_error
 
-        return await self.openai_serving_render.render_chat(request)
+        return await self.online_renderer.render_chat(request)
 
     async def create_chat_completion(
         self,
@@ -263,6 +261,7 @@ class OpenAIServingChat(OpenAIServing):
                 tokenizer,
                 request.tools,
                 chat_template_kwargs=chat_template_kwargs,
+                model_config=self.model_config,
             )
         result = await self.render_chat_request(request)
         if isinstance(result, ErrorResponse):
@@ -435,11 +434,6 @@ class OpenAIServingChat(OpenAIServing):
         else:
             tool_choice_function_name = None
 
-        if self.tool_call_id_type == "kimi_k2":
-            history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
-        else:
-            history_tool_call_cnt = 0
-
         previous_texts = [""] * num_choices
 
         try:
@@ -453,14 +447,10 @@ class OpenAIServingChat(OpenAIServing):
                         tokenizer,
                         request.tools,
                         chat_template_kwargs=chat_template_kwargs,
+                        model_config=self.model_config,
                     )
                     for _ in range(num_choices)
                 ]
-                for p in parsers:
-                    if p is not None:
-                        # NOTE: HarmonyParser ignores _stream_state (uses its own FSM).
-                        p._stream_state.tool_call_id_type = self.tool_call_id_type
-                        p._stream_state.history_tool_call_cnt = history_tool_call_cnt
             else:
                 parsers = [None] * num_choices
         except Exception as e:
@@ -475,8 +465,10 @@ class OpenAIServingChat(OpenAIServing):
             stream_options, self.enable_force_include_usage
         )
 
+        last_res: RequestOutput | None = None
         try:
             async for res in result_generator:
+                last_res = res
                 if res.prompt_token_ids is not None:
                     num_prompt_tokens = len(res.prompt_token_ids)
                     if res.encoder_prompt_token_ids is not None:
@@ -766,6 +758,21 @@ class OpenAIServingChat(OpenAIServing):
                     mm_token_counts,
                 )
 
+                # In streaming, metrics ride on this final usage chunk, which is
+                # only emitted when usage reporting is enabled (i.e.
+                # ``stream_options.include_usage=true`` or
+                # ``--enable-force-include-usage``).
+                stream_per_request_metrics: PerRequestTimingMetrics | None = None
+                if (
+                    self.enable_per_request_metrics
+                    # See note in chat_completion_full_generator: suppress for n>1.
+                    and (request.n or 1) == 1
+                ):
+                    last_metrics = last_res.metrics if last_res is not None else None
+                    stream_per_request_metrics = build_per_request_timing_metrics(
+                        last_metrics, completion_tokens
+                    )
+
                 final_usage_chunk = ChatCompletionStreamResponse(
                     id=request_id,
                     object=chunk_object_type,
@@ -774,6 +781,7 @@ class OpenAIServingChat(OpenAIServing):
                     model=model_name,
                     usage=final_usage,
                     system_fingerprint=self.system_fingerprint,
+                    metrics=stream_per_request_metrics,
                 )
                 final_usage_data = final_usage_chunk.model_dump_json(
                     exclude_unset=True, exclude_none=True
@@ -844,10 +852,6 @@ class OpenAIServingChat(OpenAIServing):
             )
 
         choices: list[ChatCompletionResponseChoice] = []
-        if self.tool_call_id_type == "kimi_k2":
-            history_tool_call_cnt = get_history_tool_calls_cnt(conversation)
-        else:
-            history_tool_call_cnt = 0
 
         role = self.get_chat_request_role(request)
         tool_parser_cls = (
@@ -887,54 +891,26 @@ class OpenAIServingChat(OpenAIServing):
                 tool_calls = []
 
             auto_tools_called = False
+            is_named_tool_choice = (
+                request.tool_choice is not None
+                and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
+            )
+            is_required_tool_choice = request.tool_choice == "required"
 
             if (not self.enable_auto_tools or not tool_parser_cls) and (
-                not isinstance(request.tool_choice, ChatCompletionNamedToolChoiceParam)
-                and request.tool_choice != "required"
+                not is_named_tool_choice and not is_required_tool_choice
             ):
                 message = ChatMessage(role=role, reasoning=reasoning, content=content)
 
-            elif (
-                request.tool_choice
-                and type(request.tool_choice) is ChatCompletionNamedToolChoiceParam
-            ):
-                tool_call_items = []
-                tool_calls = tool_calls or []
-                for tc in tool_calls:
-                    if not tc.id:
-                        tc.id = make_tool_call_id(
-                            id_type=self.tool_call_id_type,
-                            func_name=tc.name,
-                            idx=history_tool_call_cnt,
-                        )
-                    tool_call_items.append(ToolCall(id=tc.id, function=tc))
-                    history_tool_call_cnt += 1
+            elif is_named_tool_choice or is_required_tool_choice:
                 message = ChatMessage(
                     role=role,
                     reasoning=reasoning,
                     content=content or "",
-                    tool_calls=tool_call_items,
-                )
-
-            elif request.tool_choice and request.tool_choice == "required":
-                tool_call_items = []
-                tool_calls = tool_calls or []
-                for tool_call in tool_calls:
-                    if not tool_call.id:
-                        tool_call.id = make_tool_call_id(
-                            id_type=self.tool_call_id_type,
-                            func_name=tool_call.name,
-                            idx=history_tool_call_cnt,
-                        )
-                    tool_call_items.append(
-                        ToolCall(id=tool_call.id, function=tool_call)
-                    )
-                    history_tool_call_cnt += 1
-                message = ChatMessage(
-                    role=role,
-                    content=content or "",
-                    tool_calls=tool_call_items,
-                    reasoning=reasoning,
+                    tool_calls=[
+                        ToolCall(id=tc.id or make_tool_call_id(), function=tc)
+                        for tc in (tool_calls or [])
+                    ],
                 )
 
             # if the request doesn't use tool choice
@@ -951,21 +927,14 @@ class OpenAIServingChat(OpenAIServing):
             ):
                 auto_tools_called = tool_calls is not None and len(tool_calls) > 0
                 if tool_calls:
-                    tool_call_items = []
-                    for tc in tool_calls:
-                        if not tc.id:
-                            tc.id = make_tool_call_id(
-                                id_type=self.tool_call_id_type,
-                                func_name=tc.name,
-                                idx=history_tool_call_cnt,
-                            )
-                        tool_call_items.append(ToolCall(id=tc.id, function=tc))
-                        history_tool_call_cnt += 1
                     message = ChatMessage(
                         role=role,
                         reasoning=reasoning,
                         content=content,
-                        tool_calls=tool_call_items,
+                        tool_calls=[
+                            ToolCall(id=tc.id or make_tool_call_id(), function=tc)
+                            for tc in tool_calls
+                        ],
                     )
 
                 else:
@@ -1057,6 +1026,18 @@ class OpenAIServingChat(OpenAIServing):
         request_metadata.final_usage_info = usage
         request_metadata.finished_stats = final_res.finished_stats
 
+        per_request_metrics: PerRequestTimingMetrics | None = None
+        if (
+            self.enable_per_request_metrics
+            # Timing metrics describe a single generation stream. For n>1 the
+            # returned stats belong to only one of the n sequences, so they
+            # cannot be accurately attributed to the request; suppress instead.
+            and (request.n or 1) == 1
+        ):
+            per_request_metrics = build_per_request_timing_metrics(
+                final_res.metrics, num_generated_tokens
+            )
+
         # ``final_res.prompt`` is the rendered chat-templated prompt text
         prompt_text = final_res.prompt if request.return_prompt_text else None
 
@@ -1073,6 +1054,7 @@ class OpenAIServingChat(OpenAIServing):
             ),
             prompt_text=prompt_text,
             kv_transfer_params=final_res.kv_transfer_params,
+            metrics=per_request_metrics,
         )
 
         # Log complete response if output logging is enabled

@@ -68,41 +68,56 @@ def _build_responses_request(*, tool_choice: str | dict[str, Any]) -> ResponsesR
     )
 
 
-def _build_chat_request(*, tool_choice: str | dict[str, Any]) -> ChatCompletionRequest:
-    return ChatCompletionRequest.model_validate(
-        {
-            "model": "gemma4-test",
-            "messages": [{"role": "user", "content": "What is the weather in Hanoi?"}],
-            "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": "get_weather",
-                        "description": "Get current weather for a city",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {"city": {"type": "string"}},
-                            "required": ["city"],
-                        },
+def _build_chat_request(
+    *,
+    tool_choice: str | dict[str, Any],
+    chat_template_kwargs: dict[str, Any] | None = None,
+) -> ChatCompletionRequest:
+    data: dict[str, Any] = {
+        "model": "gemma4-test",
+        "messages": [{"role": "user", "content": "What is the weather in Hanoi?"}],
+        "tools": [
+            {
+                "type": "function",
+                "function": {
+                    "name": "get_weather",
+                    "description": "Get current weather for a city",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"city": {"type": "string"}},
+                        "required": ["city"],
                     },
-                }
-            ],
-            "tool_choice": tool_choice,
-        }
-    )
+                },
+            }
+        ],
+        "tool_choice": tool_choice,
+    }
+    if chat_template_kwargs is not None:
+        data["chat_template_kwargs"] = chat_template_kwargs
+    return ChatCompletionRequest.model_validate(data)
 
 
 class _StubTokenizer:
     """Minimal tokenizer stub to satisfy ``Gemma4EngineToolParser.__init__``."""
 
+    _VOCAB: dict[str, int] = {
+        "<|tool_call>": 256_000,
+        "<tool_call|>": 256_001,
+        '<|"|>': 52,
+        "<|channel>": 256_002,
+        "<channel|>": 256_003,
+    }
+
     def get_vocab(self) -> dict[str, int]:
-        return {
-            "<|tool_call>": 256_000,
-            "<tool_call|>": 256_001,
-            '<|"|>': 52,
-            "<|channel>": 256_002,
-            "<channel|>": 256_003,
-        }
+        return dict(self._VOCAB)
+
+    @property
+    def all_special_tokens(self) -> list[str]:
+        return list(self._VOCAB.keys())
+
+    @property
+    def all_special_ids(self) -> list[int]:
+        return list(self._VOCAB.values())
 
 
 def test_gemma4_adjust_request_sets_skip_special_tokens_on_responses() -> None:
@@ -211,4 +226,35 @@ def test_gemma4_named_skips_structured_outputs_responses() -> None:
     parser.adjust_request(request)
 
     assert request.text is None
+    assert request.skip_special_tokens is False
+
+
+def test_gemma4_keeps_special_tokens_with_tools_thinking_disabled() -> None:
+    """tools active + thinking disabled: ``skip_special_tokens`` must stay
+    False so ``<|tool_call>`` delimiters reach the extractor. The merged
+    enable_thinking early-return stripped them, breaking tool calling when
+    thinking is off.
+    """
+    parser = Gemma4ToolParser(_StubTokenizer())
+    request = _build_chat_request(
+        tool_choice="auto", chat_template_kwargs={"enable_thinking": False}
+    )
+
+    parser.adjust_request(request)
+
+    assert request.skip_special_tokens is False
+
+
+def test_gemma4_keeps_skip_special_tokens_false_when_nothing_to_preserve() -> None:
+    """No active tools + thinking disabled: ``skip_special_tokens`` stays
+    ``False`` because the parser engine's ``__DROP__`` terminal mechanism
+    strips unconfigured special tokens automatically.
+    """
+    parser = Gemma4ToolParser(_StubTokenizer())
+    request = _build_chat_request(
+        tool_choice="none", chat_template_kwargs={"enable_thinking": False}
+    )
+
+    parser.adjust_request(request)
+
     assert request.skip_special_tokens is False

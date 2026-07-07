@@ -9,7 +9,6 @@ from transformers import (
 )
 
 from vllm.tokenizers import TokenizerLike, get_tokenizer
-from vllm.tokenizers.grok2 import Grok2Tokenizer
 from vllm.tokenizers.hf import HfTokenizer
 from vllm.tokenizers.mistral import MistralTokenizer
 
@@ -24,7 +23,7 @@ def _assert_tokenizer_like(tokenizer: object):
 
 
 def test_tokenizer_like_protocol():
-    tokenizer = get_tokenizer("gpt2", use_fast=True)
+    tokenizer = get_tokenizer("openai-community/gpt2", use_fast=True)
     assert isinstance(tokenizer, PreTrainedTokenizerFast)
     _assert_tokenizer_like(tokenizer)
 
@@ -33,10 +32,6 @@ def test_tokenizer_like_protocol():
         tokenizer_mode="mistral",
     )
     assert isinstance(tokenizer, MistralTokenizer)
-    _assert_tokenizer_like(tokenizer)
-
-    tokenizer = get_tokenizer("xai-org/grok-2", tokenizer_mode="grok2")
-    assert isinstance(tokenizer, Grok2Tokenizer)
     _assert_tokenizer_like(tokenizer)
 
     tokenizer = get_tokenizer("deepseek-ai/DeepSeek-V3", tokenizer_mode="deepseek_v32")
@@ -48,7 +43,9 @@ def test_tokenizer_like_protocol():
     _assert_tokenizer_like(tokenizer)
 
 
-@pytest.mark.parametrize("tokenizer_name", ["facebook/opt-125m", "gpt2"])
+@pytest.mark.parametrize(
+    "tokenizer_name", ["facebook/opt-125m", "openai-community/gpt2"]
+)
 def test_tokenizer_revision(tokenizer_name: str):
     # Assume that "main" branch always exists
     tokenizer = get_tokenizer(tokenizer_name, revision="main")

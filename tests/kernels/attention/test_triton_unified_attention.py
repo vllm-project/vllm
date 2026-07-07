@@ -18,11 +18,7 @@ HEAD_SIZES = [128, 256]
 BLOCK_SIZES = [16]
 
 DTYPES = [torch.bfloat16]
-QDTYPES = (
-    [None, torch.float8_e4m3fn]
-    if not current_platform.is_rocm()
-    else [None, torch.float8_e4m3fnuz]
-)
+QDTYPES = [None, current_platform.fp8_dtype()]
 FP8_DTYPE = current_platform.fp8_dtype()
 
 # one value large enough to test overflow in index calculation.

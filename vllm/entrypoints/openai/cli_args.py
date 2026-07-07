@@ -25,11 +25,8 @@ from vllm.entrypoints.serve.utils.constants import (
     H11_MAX_HEADER_COUNT_DEFAULT,
     H11_MAX_INCOMPLETE_EVENT_SIZE_DEFAULT,
 )
-from vllm.logger import init_logger
 from vllm.tool_parsers import ToolParserManager
 from vllm.utils.argparse_utils import FlexibleArgumentParser
-
-logger = init_logger(__name__)
 
 
 class LoRAParserAction(argparse.Action):
@@ -134,6 +131,8 @@ class BaseFrontendArgs:
     log. The default of None means unlimited."""
     enable_prompt_tokens_details: bool = False
     """If set to True, enable prompt_tokens_details in usage."""
+    enable_per_request_metrics: bool = False
+    """If set to True, include per-request timing metrics in API responses."""
     enable_server_load_tracking: bool = False
     """If set to True, enable tracking server_load_metrics in the app state."""
     enable_force_include_usage: bool = False
@@ -407,6 +406,14 @@ def validate_parsed_serve_args(args: argparse.Namespace):
             "Error: --enable-request-stats-headers requires per-request stats "
             "collection, which is disabled by --disable-log-stats. Drop one of "
             "the two flags."
+        )
+
+    if getattr(args, "enable_per_request_metrics", False) and getattr(
+        args, "disable_log_stats", False
+    ):
+        raise ValueError(
+            "Error: --enable-per-request-metrics requires engine statistics "
+            "logging; remove --disable-log-stats to enable per-request metrics."
         )
 
     if args.data_parallel_multi_port_external_lb:
