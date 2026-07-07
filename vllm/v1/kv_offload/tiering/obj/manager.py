@@ -17,6 +17,7 @@ from vllm.v1.kv_offload.tiering.base import (
     JobMetadata,
     JobResult,
     RequestOffloadingContext,
+    ScheduleEndContext,
     SecondaryTierManager,
 )
 from vllm.v1.kv_offload.tiering.obj.config import ObjStoreConfig
@@ -156,8 +157,10 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
         except Exception as e:
             raise RuntimeError(
                 f"Object store tier connectivity probe failed — check bucket, "
-                f"endpoint_override, access_key, secret_key, and scheme. "
-                f"Error: {e}"
+                f"endpoint_override, and scheme. If using explicit credentials "
+                f"verify access_key and secret_key; otherwise ensure the AWS "
+                f"SDK default credential chain is configured (IAM role, env "
+                f"vars, credential file). Error: {e}"
             ) from e
 
     def _exists(self, obj_key: str) -> bool:
@@ -242,7 +245,7 @@ class ObjectStoreSecondaryTierManager(SecondaryTierManager):
     def on_request_finished(self, req_context: ReqContext) -> None:
         self._lookup_manager.cleanup(req_context.req_id)
 
-    def on_schedule_end(self) -> None:
+    def on_schedule_end(self, context: ScheduleEndContext) -> None:
         self._lookup_manager.flush()
 
     def on_new_request(self, req_context: ReqContext) -> RequestOffloadingContext:
