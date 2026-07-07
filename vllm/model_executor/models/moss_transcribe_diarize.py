@@ -12,17 +12,17 @@ The checkpoint layout is:
 
 import math
 from collections.abc import Iterable, Mapping, Sequence
+from functools import partial
 from typing import Annotated, Any, Literal, TypeAlias
 
 import torch
 from torch import nn
-from transformers import BatchFeature, Qwen3Config
+from transformers import BatchFeature
 
 from vllm.config import ModelConfig, SpeechToTextConfig, VllmConfig
 from vllm.config.multimodal import BaseDummyOptions
 from vllm.config.speech_to_text import SpeechToTextParams
 from vllm.inputs import ModalityData, MultiModalDataDict, PromptType, TextPrompt
-from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import (
     MultiModalEmbeddings,
     SupportsMultiModal,
@@ -31,6 +31,8 @@ from vllm.model_executor.models.interfaces import (
     _require_is_multimodal,
 )
 from vllm.model_executor.models.utils import (
+    AutoWeightsLoader,
+    WeightsMapper,
     _merge_multimodal_embeddings,
     init_vllm_registered_model,
     maybe_prefix,
@@ -283,6 +285,14 @@ def build_moss_transcribe_diarize_prompt(
 
 class MossTranscribeDiarizeWhisperEncoder(WhisperEncoder):
     packed_modules_mapping = {"qkv_proj": ["q_proj", "k_proj", "v_proj"]}
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_substr={".fc1.": ".mlp.fc1.", ".fc2.": ".mlp.fc2."},
+        orig_to_new_stacked={
+            ".self_attn.q_proj": (".self_attn.qkv_proj", "q"),
+            ".self_attn.k_proj": (".self_attn.qkv_proj", "k"),
+            ".self_attn.v_proj": (".self_attn.qkv_proj", "v"),
+        },
+    )
 
     def __init__(
         self,
@@ -299,31 +309,9 @@ class MossTranscribeDiarizeWhisperEncoder(WhisperEncoder):
         self.max_encoder_batch: int | None = None
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        stacked_params_mapping = [
-            (".self_attn.qkv_proj", ".self_attn.q_proj", "q"),
-            (".self_attn.qkv_proj", ".self_attn.k_proj", "k"),
-            (".self_attn.qkv_proj", ".self_attn.v_proj", "v"),
-        ]
-        params_dict = dict(self.named_parameters())
-        loaded_params: set[str] = set()
         weights = _create_fake_bias_for_k_proj(weights, ".k_proj.weight")
-        for name, loaded_weight in weights:
-            name = name.replace(".fc1.", ".mlp.fc1.")
-            name = name.replace(".fc2.", ".mlp.fc2.")
-            for param_name, weight_name, shard_id in stacked_params_mapping:
-                if weight_name not in name:
-                    continue
-                name = name.replace(weight_name, param_name)
-                param = params_dict[name]
-                weight_loader = param.weight_loader
-                weight_loader(param, loaded_weight, shard_id)
-                break
-            else:
-                param = params_dict[name]
-                weight_loader = getattr(param, "weight_loader", default_weight_loader)
-                weight_loader(param, loaded_weight)
-            loaded_params.add(name)
-        return loaded_params
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(weights, mapper=self.hf_to_vllm_mapper)
 
     def forward(
         self,
@@ -583,19 +571,15 @@ class MossTranscribeDiarizeMultiModalProcessor(
                 raise ValueError("Audio input is too short to produce any tokens.")
             return num_tokens
 
-        def get_token_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
+        def get_replacement(
+            item_idx: int, *, include_boundaries: bool
+        ) -> PromptUpdateDetails[list[int]]:
             num_tokens = get_num_tokens(item_idx)
             audio_tokens = processor._audio_span_ids(num_tokens)
+            if include_boundaries:
+                audio_tokens = [audio_start_id] + audio_tokens + [audio_end_id]
             return PromptUpdateDetails.select_token_id(
                 audio_tokens,
-                embed_token_id=audio_token_id,
-            )
-
-        def get_text_replacement(item_idx: int) -> PromptUpdateDetails[list[int]]:
-            num_tokens = get_num_tokens(item_idx)
-            audio_tokens = processor._audio_span_ids(num_tokens)
-            return PromptUpdateDetails.select_token_id(
-                [audio_start_id] + audio_tokens + [audio_end_id],
                 embed_token_id=audio_token_id,
             )
 
@@ -603,12 +587,12 @@ class MossTranscribeDiarizeMultiModalProcessor(
             PromptReplacement(
                 modality="audio",
                 target=[audio_token_id],
-                replacement=get_token_replacement,
+                replacement=partial(get_replacement, include_boundaries=False),
             ),
             PromptReplacement(
                 modality="audio",
                 target=AUDIO_PLACEHOLDER,
-                replacement=get_text_replacement,
+                replacement=partial(get_replacement, include_boundaries=True),
             ),
         ]
 
@@ -628,6 +612,14 @@ class MossTranscribeDiarizeForConditionalGeneration(
     supports_transcription_only = True
     supports_segment_timestamp = False
     supported_languages = ISO639_1_SUPPORTED_LANGS
+    hf_to_vllm_mapper = WeightsMapper(
+        orig_to_new_prefix={
+            "model.language_model.": "language_model.model.",
+            "model.whisper_encoder.": "whisper_encoder.",
+            "model.vq_adaptor.": "vq_adaptor.",
+            "model.": None,
+        },
+    )
 
     @classmethod
     def get_placeholder_str(cls, modality: str, i: int) -> str | None:
@@ -703,11 +695,10 @@ class MossTranscribeDiarizeForConditionalGeneration(
                 eps=float(self.config.text_config.rms_norm_eps),
             )
 
-        qwen3_config = self._make_qwen3_config(self.config)
         with self._mark_language_model(vllm_config):
             self.language_model = init_vllm_registered_model(
                 vllm_config=vllm_config,
-                hf_config=qwen3_config,
+                hf_config=self.config.text_config,
                 prefix=maybe_prefix(prefix, "language_model"),
                 architectures=["Qwen3ForCausalLM"],
             )
@@ -715,13 +706,6 @@ class MossTranscribeDiarizeForConditionalGeneration(
         self.make_empty_intermediate_tensors = (
             self.language_model.make_empty_intermediate_tensors
         )
-
-    @staticmethod
-    def _make_qwen3_config(config: Any) -> Qwen3Config:
-        text_config = config.text_config
-        if isinstance(text_config, dict):
-            return Qwen3Config(**text_config)
-        return text_config
 
     def _time_merge(self, features: torch.Tensor) -> torch.Tensor:
         batch, seq_len, dim = features.shape
@@ -814,12 +798,8 @@ class MossTranscribeDiarizeForConditionalGeneration(
         return self.language_model.compute_logits(hidden_states)
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
-        language_weights: list[tuple[str, torch.Tensor]] = []
-        whisper_weights: list[tuple[str, torch.Tensor]] = []
-        adaptor_weights: list[tuple[str, torch.Tensor]] = []
-
-        for name, loaded_weight in weights:
-            if not name.startswith("model."):
+        def reject_old_format_weights() -> Iterable[tuple[str, torch.Tensor]]:
+            for name, loaded_weight in weights:
                 if name.startswith(
                     ("language_model.", "whisper_encoder.", "vq_adaptor.")
                 ):
@@ -827,37 +807,10 @@ class MossTranscribeDiarizeForConditionalGeneration(
                         "MOSS-Transcribe-Diarize checkpoints must use the new "
                         f"`model.*` weight layout; got old-format key: {name}"
                     )
-                continue
+                yield name, loaded_weight
 
-            name = name.removeprefix("model.")
-
-            if name.startswith("language_model."):
-                language_weights.append(
-                    ("model." + name.removeprefix("language_model."), loaded_weight)
-                )
-            elif name.startswith("whisper_encoder."):
-                whisper_weights.append(
-                    (name.removeprefix("whisper_encoder."), loaded_weight)
-                )
-            elif name.startswith("vq_adaptor."):
-                adaptor_weights.append((name, loaded_weight))
-
-        loaded = {
-            "language_model." + name
-            for name in self.language_model.load_weights(language_weights)
-        }
-        loaded.update(
-            "whisper_encoder." + name
-            for name in self.whisper_encoder.load_weights(whisper_weights)
+        loader = AutoWeightsLoader(self)
+        return loader.load_weights(
+            reject_old_format_weights(),
+            mapper=self.hf_to_vllm_mapper,
         )
-
-        params = dict(self.named_parameters())
-        for name, loaded_weight in adaptor_weights:
-            if name not in params:
-                continue
-            param = params[name]
-            weight_loader = getattr(param, "weight_loader", default_weight_loader)
-            weight_loader(param, loaded_weight)
-            loaded.add(name)
-
-        return loaded
