@@ -260,7 +260,7 @@ def test_inc_config_parser_fused_module_requires_consistent_configs() -> None:
         config.config_parser.resolve(DummyLayer(), "layers.0.self_attn.qkv_proj")
 
 
-def test_inc_config_accepts_mxfp8_llm_compressor() -> None:
+def test_inc_mxfp8() -> None:
     config = make_config(
         weight_bits=8,
         group_size=32,
