@@ -650,10 +650,7 @@ class DeepseekV4IndexerCache(torch.nn.Module, AttentionLayerBase):
             head_size=self.head_dim,
             dtype=self.dtype,
             compress_ratio=self.compress_ratio,
-            # FlashMLA aligns indexer pages to 576B so they pack with the
-            # compressor state cache. The FlashInfer sparse backend instead needs
-            # every DSv4 page aligned to the 512B compressed-KV token stride so
-            # the packed per-block stride is a multiple of it (#44577).
+            # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
             alignment=576 if uses_fp8_ds_mla_layout else 512,
         )
 

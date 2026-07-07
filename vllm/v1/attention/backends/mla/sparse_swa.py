@@ -89,9 +89,7 @@ class DeepseekV4SWACache(torch.nn.Module, AttentionLayerBase):
             dtype=self.dtype,
             sliding_window=self.window_size,
             cache_dtype_str=self.cache_config.cache_dtype,
-            # 576B for FlashMLA; 512B for the FlashInfer
-            # so the packed per-block stride stays a multiple of the
-            # compressed-KV token stride (#44577).
+            # 576B for FlashMLA packing; 512B for FlashInfer sparse (#44577).
             alignment=576 if uses_fp8_ds_mla_layout else 512,
             model_version="deepseek_v4",
         )

@@ -46,15 +46,9 @@ def _get_flashinfer_dsv4_workspace(device: torch.device) -> torch.Tensor:
 
 
 def _packed_block_span(pool: torch.Tensor) -> int:
-    """Physical per-block stride of ``pool`` measured in tokens.
-
-    ``pool`` is ``[num_blocks, block_size, head_dim]``; a block spans
-    ``stride(0) // stride(-2)`` tokens. Equals ``block_size`` for the contiguous
-    (unpacked) layout and is larger for the packed layout (#44577), where the
-    per-block stride includes the other components interleaved in the block. The
-    flat-token TRT-LLM sparse decode kernel needs the sparse indices expressed in
-    this stride (see ``build_flashinfer_mixed_sparse_indices``).
-    """
+    """Per-block stride of ``pool`` in tokens (``stride(0)//stride(-2)``): ==
+    block_size for unpacked KV, larger when packed (#44577). Raises if not
+    token-aligned."""
     block_stride = pool.stride(0)
     token_stride = pool.stride(-2)
     if block_stride % token_stride != 0:
@@ -389,9 +383,6 @@ class DeepseekV4FlashInferMLAAttention(DeepseekV4Attention):
         )
         cached_sparse = swa_metadata.flashinfer_sparse_index_cache.get(cache_key, None)
         if cached_sparse is None:
-            # Packed KV (#44577) inflates each pool's per-block stride; express the
-            # sparse slot ids in that stride so the flat-token kernel reads the
-            # packed address. Spans equal the block sizes for the unpacked layout.
             swa_block_span = _packed_block_span(swa_k_cache)
             compressed_block_span = _packed_block_span(compressed_kv_cache)
             sparse_indices, sparse_topk_lens = build_flashinfer_mixed_sparse_indices(
