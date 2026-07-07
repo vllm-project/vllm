@@ -701,6 +701,19 @@ def test_build_per_request_timing_metrics_valid_timestamps():
     assert metrics.tokens_per_second == pytest.approx(10.0 / 1.5, rel=1e-4)
 
 
+def test_build_per_request_timing_metrics_missing_first_token():
+    from vllm.v1.metrics.stats import RequestStateStats
+
+    stats = RequestStateStats(queued_ts=1.0, scheduled_ts=1.5)
+    metrics = build_per_request_timing_metrics(stats, num_generation_tokens=0)
+
+    assert metrics.queue_time_ms == pytest.approx(500.0)
+    assert metrics.time_to_first_token_ms is None
+    assert metrics.generation_time_ms is None
+    assert metrics.mean_itl_ms is None
+    assert metrics.tokens_per_second is None
+
+
 @pytest.mark.asyncio
 async def test_chat_per_request_metrics_follow_server_flag():
     request = ChatCompletionRequest(

@@ -35,12 +35,17 @@ from vllm.tracing import (
     extract_trace_headers,
     log_tracing_disabled_warning,
 )
-from vllm.v1.metrics.stats import RequestStateStats
+from vllm.v1.metrics.stats import RequestStateStats, compute_timing_intervals
 
 logger = init_logger(__name__)
 
 RequestT = TypeVar("RequestT", bound=AnyRequest)
 _T = TypeVar("_T")
+
+
+def _ms(seconds: float | None) -> float | None:
+    """Convert an interval in seconds to milliseconds, preserving None."""
+    return seconds * 1000 if seconds is not None else None
 
 
 def build_per_request_timing_metrics(
@@ -49,52 +54,21 @@ def build_per_request_timing_metrics(
 ) -> PerRequestTimingMetrics:
     """Build per-request timing metrics from ``RequestStateStats``.
 
-    ``generation_time_ms`` is the decode interval only (first output token to
-    last output token); it excludes both queue wait and prefill/TTFT.
-    ``tokens_per_second`` is overall output throughput: all generated tokens
-    over the inference interval (scheduling to last output token), so it counts
-    the prefill/TTFT phase and is not simply the reciprocal of ``mean_itl_ms``.
-    Each field is left ``None`` when the timestamps it depends on are
-    unavailable.
+    Thin adapter over ``compute_timing_intervals``; fields are ``None`` when
+    their source timestamps are unavailable. ``tokens_per_second`` is overall
+    output throughput (all generated tokens over the inference interval), so it
+    is not the reciprocal of ``mean_itl_ms``.
     """
     if metrics is None:
         return PerRequestTimingMetrics()
 
-    queued_ts = metrics.queued_ts
-    scheduled_ts = metrics.scheduled_ts
-    first_token_ts = metrics.first_token_ts
-    last_token_ts = metrics.last_token_ts
-
-    time_to_first_token_ms: float | None = None
-    generation_time_ms: float | None = None
-    queue_time_ms: float | None = None
-    mean_itl_ms: float | None = None
-    tokens_per_second: float | None = None
-
-    if scheduled_ts > 0 and first_token_ts > 0:
-        time_to_first_token_ms = (first_token_ts - scheduled_ts) * 1000
-
-    if first_token_ts > 0 and last_token_ts > 0:
-        generation_time_ms = (last_token_ts - first_token_ts) * 1000
-
-    if queued_ts > 0 and scheduled_ts > 0:
-        queue_time_ms = (scheduled_ts - queued_ts) * 1000
-
-    if first_token_ts > 0 and last_token_ts > 0 and num_generation_tokens > 1:
-        decode_time = last_token_ts - first_token_ts
-        mean_itl_ms = decode_time / (num_generation_tokens - 1) * 1000
-
-    if scheduled_ts > 0 and last_token_ts > 0:
-        inference_time_ms = (last_token_ts - scheduled_ts) * 1000
-        if inference_time_ms > 0:
-            tokens_per_second = num_generation_tokens / inference_time_ms * 1000
-
+    iv = compute_timing_intervals(metrics, num_generation_tokens)
     return PerRequestTimingMetrics(
-        time_to_first_token_ms=time_to_first_token_ms,
-        generation_time_ms=generation_time_ms,
-        queue_time_ms=queue_time_ms,
-        mean_itl_ms=mean_itl_ms,
-        tokens_per_second=tokens_per_second,
+        time_to_first_token_ms=_ms(iv.prefill),
+        generation_time_ms=_ms(iv.decode),
+        queue_time_ms=_ms(iv.queue),
+        mean_itl_ms=_ms(iv.mean_per_output_token),
+        tokens_per_second=iv.tokens_per_second,
     )
 
 
