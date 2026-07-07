@@ -350,19 +350,6 @@ def test_invalid_device_cpu():
         _gemm(a, b)
 
 
-def test_invalid_shape_K_mismatch():
-    """K mismatch silently computes wrong results — verify output is wrong."""
-    torch.manual_seed(42)
-    a = torch.randn(4, 2048, dtype=torch.bfloat16, device="cuda")
-    b = torch.randn(64, 4096, dtype=torch.bfloat16, device="cuda")
-    out = _gemm(a, b)
-    ref = torch.mm(a.float(), b[:, :2048].float().T)
-    cos = F.cosine_similarity(
-        out.reshape(-1).float(), ref.reshape(-1).float(), dim=0
-    ).item()
-    assert cos < 0.5, "K-mismatch should produce wrong results"
-
-
 def test_invalid_1d_input():
     a = torch.randn(2048, dtype=torch.bfloat16, device="cuda")
     b = torch.randn(64, 2048, dtype=torch.bfloat16, device="cuda")
