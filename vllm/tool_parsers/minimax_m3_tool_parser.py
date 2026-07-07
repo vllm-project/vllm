@@ -9,6 +9,7 @@ from typing import Any
 from vllm.entrypoints.chat_utils import make_tool_call_id
 from vllm.entrypoints.openai.chat_completion.protocol import ChatCompletionRequest
 from vllm.entrypoints.openai.engine.protocol import (
+    DeltaMessage,
     ExtractedToolCallInformation,
     FunctionCall,
     ToolCall,
@@ -299,7 +300,7 @@ class MinimaxM3ToolParser(RustToolParser):
         if _TOOL_CALL_OPEN in current_text:
             delta_text = _MISSING_NS_RE.sub(_NS + r"\1", delta_text)
 
-        return super().extract_tool_calls_streaming(
+        result = super().extract_tool_calls_streaming(
             previous_text,
             current_text,
             delta_text,
@@ -308,3 +309,20 @@ class MinimaxM3ToolParser(RustToolParser):
             delta_token_ids,
             request,
         )
+
+        # The Rust parser can leak the NS prefix (]<]minimax[>[) as content
+        # tokens while buffering toward the tool_call open tag.  Strip it from
+        # any content delta the parser emits, and suppress the delta entirely
+        # when we are already inside a tool call sequence.
+        if result is not None and result.content:
+            if _NS in current_text:
+                # NS prefix is present somewhere in current output — either
+                # inside a tool call already, or buffering toward one.
+                # Never emit NS prefix characters as user-visible content.
+                cleaned = result.content.replace(_NS, "").strip()
+                result = DeltaMessage(
+                    content=cleaned or None,
+                    tool_calls=result.tool_calls,
+                )
+
+        return result
