@@ -12,6 +12,7 @@ from vllm.config import (
     get_layers_from_vllm_config,
     set_current_vllm_config,
 )
+from vllm.logger import init_logger
 from vllm.model_executor.layers.attention import Attention
 from vllm.model_executor.layers.attention_layer_base import AttentionLayerBase
 from vllm.multimodal.inputs import MultiModalFeatureSpec
@@ -34,6 +35,8 @@ from vllm.v1.worker.utils import (
     bind_kv_cache,
     prepare_kernel_block_sizes,
 )
+
+logger = init_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -413,12 +416,91 @@ def _reshape_kv_cache(
             kernel_block_sizes=kernel_block_sizes,
             cache_dtype=cache_dtype,
         )
+    elif has_attn and kv_cache_config is not None:
+        _align_mixed_attention_kv_cache_views(
+            attn_groups=attn_groups,
+            kv_caches=kv_caches,
+            kernel_block_sizes=kernel_block_sizes,
+            cache_dtype=cache_dtype,
+            kv_cache_config=kv_cache_config,
+        )
 
     # Map any sharing layers to their target layer's KV cache.
     for layer_name, target_layer_name in shared_kv_cache_layers.items():
         kv_caches[layer_name] = kv_caches[target_layer_name]
 
     return kv_caches
+
+
+def _align_mixed_attention_kv_cache_views(
+    attn_groups: Iterable[AttentionGroup],
+    kv_caches: dict[str, Any],
+    kernel_block_sizes: list[int],
+    cache_dtype: str,
+    kv_cache_config: KVCacheConfig,
+) -> None:
+    """Align shared attention KV views when backends disagree on layout.
+
+    Encoder-decoder models can share one raw allocation between decoder
+    self-attention (K/V-first ROCM_ATTN, block dim 1) and cross-attention
+    (blocks-first backends, block dim 0). Keep the physical storage in the
+    K/V-first layout expected by ROCM_ATTN, and restride the blocks-first
+    logical views so block IDs address the same bytes.
+    """
+    block_dims_by_layer: dict[str, int] = {}
+    for group in attn_groups:
+        kv_cache_spec = group.kv_cache_spec
+        if not isinstance(kv_cache_spec, AttentionSpec):
+            continue
+        if group.kv_cache_group_id >= len(kernel_block_sizes):
+            continue
+        block_dim = group.backend.get_kv_cache_block_dim(
+            kernel_block_sizes[group.kv_cache_group_id],
+            kv_cache_spec.num_kv_heads,
+            kv_cache_spec.head_size,
+            cache_dtype_str=cache_dtype,
+        )
+        for layer_name in group.layer_names:
+            if layer_name in kv_caches:
+                block_dims_by_layer[layer_name] = block_dim
+
+    for kv_tensor in kv_cache_config.kv_cache_tensors:
+        if kv_tensor.block_stride > 0:
+            continue
+        shared_block_dims = {
+            block_dims_by_layer[layer_name]
+            for layer_name in kv_tensor.shared_by
+            if layer_name in block_dims_by_layer
+        }
+        if 0 not in shared_block_dims or 1 not in shared_block_dims:
+            continue
+
+        for layer_name in kv_tensor.shared_by:
+            if block_dims_by_layer.get(layer_name) == 0:
+                _restride_blocks_first_kv_cache_to_kv_first_storage(
+                    kv_caches[layer_name]
+                )
+
+
+def _restride_blocks_first_kv_cache_to_kv_first_storage(
+    kv_cache: torch.Tensor,
+) -> None:
+    assert kv_cache.ndim >= 3
+    assert kv_cache.shape[1] == 2
+    page_size = kv_cache.shape[2:].numel()
+    num_blocks = kv_cache.shape[0]
+    expected_tail_stride = torch.empty(kv_cache.shape[2:]).stride()
+    if kv_cache.stride()[2:] != expected_tail_stride:
+        logger.warning_once(
+            "Skipping mixed KV-cache layout alignment for a non-NHD "
+            "blocks-first attention view with stride %s.",
+            kv_cache.stride(),
+        )
+        return
+    kv_cache.as_strided_(
+        size=kv_cache.shape,
+        stride=(page_size, num_blocks * page_size, *expected_tail_stride),
+    )
 
 
 def _update_hybrid_attention_layout(
