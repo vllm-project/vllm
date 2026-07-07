@@ -7,10 +7,29 @@ import torch
 from vllm.model_executor.models.utils import (
     AutoWeightsLoader,
     _merge_multimodal_embeddings,
+    get_padded_num_video_frames,
 )
 from vllm.platforms import current_platform
 
 DEVICE_TYPE = current_platform.device_type
+
+
+@pytest.mark.cpu_test
+@pytest.mark.parametrize(
+    ("num_frames", "temporal_patch_size", "expected"),
+    [
+        (1, 2, 2),
+        (16, 4, 16),
+        (17, 4, 20),
+        (18, 4, 20),
+        (19, 4, 20),
+        (20, 4, 20),
+    ],
+)
+def test_get_padded_num_video_frames(
+    num_frames: int, temporal_patch_size: int, expected: int
+):
+    assert get_padded_num_video_frames(num_frames, temporal_patch_size) == expected
 
 
 class ModuleWithBatchNorm(torch.nn.Module):

@@ -26,7 +26,7 @@ from vllm.model_executor.model_loader.weight_utils import default_weight_loader
 from vllm.model_executor.models.interfaces import supports_any_eagle
 from vllm.multimodal import NestedTensors
 from vllm.sequence import IntermediateTensors
-from vllm.utils.math_utils import cdiv
+from vllm.utils.math_utils import cdiv, round_up
 from vllm.utils.torch_utils import (
     async_tensor_h2d,
     direct_register_custom_op,
@@ -38,6 +38,11 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 ShardId: TypeAlias = str | int | tuple[int, ...]
+
+
+def get_padded_num_video_frames(num_frames: int, temporal_patch_size: int) -> int:
+    """Pad video frames to a multiple of the temporal patch size."""
+    return round_up(num_frames, temporal_patch_size)
 
 
 @dataclass
