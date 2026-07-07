@@ -39,6 +39,7 @@ class VideoLoaderRegistry(ExtensionManager):
     def __init__(self) -> None:
         super().__init__()
         self.processor2backend: dict[str, str] = {}
+        self._requires_gpu: dict[str, bool] = {}
 
     @staticmethod
     def _normalize_registered_video_processors(
@@ -62,11 +63,13 @@ class VideoLoaderRegistry(ExtensionManager):
         name: str,
         *,
         video_processor: str | tuple[str, ...] | None = None,
+        requires_gpu: bool = False,
     ):
         processors = self._normalize_registered_video_processors(video_processor)
 
         def wrap(cls_to_register):
             self.name2class[name] = cls_to_register
+            self._requires_gpu[name] = requires_gpu
             for processor_name in processors:
                 self.processor2backend[processor_name] = name
             return cls_to_register
@@ -81,6 +84,9 @@ class VideoLoaderRegistry(ExtensionManager):
             return None
 
         return self.processor2backend.get(video_processor)
+
+    def backend_requires_gpu(self, name: str) -> bool:
+        return self._requires_gpu.get(name, False)
 
 
 def get_video_loader_backend_for_processor(
@@ -1044,7 +1050,7 @@ class VideoBackend(
         )
 
 
-@VIDEO_LOADER_REGISTRY.register(PYNVVIDEOCODEC_VIDEO_BACKEND)
+@VIDEO_LOADER_REGISTRY.register(PYNVVIDEOCODEC_VIDEO_BACKEND, requires_gpu=True)
 class PyNvVideoCodecVideoBackend(VideoBackend):
     """Hardware-accelerated video backend using PyNvVideoCodec.
 
