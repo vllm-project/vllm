@@ -240,11 +240,12 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             ".add_lora_linear() instead of being passed in."
         )
         r = lora_b_stacked[0].size(-1)
-        # We set the buffer to be float32 by default, refer to:
-        # https://github.com/triton-lang/triton/issues/1387
-        # Note: buffer is zeroed inside the shrink op
+        # Keep consistent with XPU and use the input dtype for the shrink buffer.
+        # Note: buffer is zeroed inside the shrink op.
         buffer = torch.empty(
-            (len(output_slices), x.size(0), r), dtype=torch.float32, device=x.device
+            (len(output_slices), x.size(0), r),
+            dtype=x.dtype,
+            device=x.device,
         )
         add_inputs = kwargs.pop("add_inputs", True)
         self.add_shrink(
@@ -298,10 +299,13 @@ class PunicaWrapperGPU(PunicaWrapperBase):
             "To minimize overhead, the buffer should be created by "
             ".add_lora_linear() instead of being passed in."
         )
-        # We set the buffer to be float32 by default, refer to:
-        # https://github.com/triton-lang/triton/issues/1387
-        # Note: buffer is zeroed inside the shrink op
-        buffer = torch.empty((x.size(0), r), dtype=torch.float32, device=x.device)
+        # Keep consistent with XPU and use the input dtype for the shrink buffer.
+        # Note: buffer is zeroed inside the shrink op.
+        buffer = torch.empty(
+            (x.size(0), r),
+            dtype=x.dtype,
+            device=x.device,
+        )
 
         lora_shrink(
             x,

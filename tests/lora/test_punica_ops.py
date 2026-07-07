@@ -515,6 +515,117 @@ def test_kernels_hidden_size(
 
 
 @pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_add_lora_linear_buffer_uses_input_dtype(device, dtype, monkeypatch):
+    from types import SimpleNamespace
+
+    from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
+
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    num_tokens = 16
+    hidden_size = 32
+    output_size = 64
+    rank = 16
+
+    wrapper = PunicaWrapperGPU(
+        max_num_batched_tokens=num_tokens,
+        max_batches=num_tokens,
+        device=device,
+        lora_config=SimpleNamespace(
+            max_loras=1,
+            specialize_active_lora=False,
+        ),
+    )
+
+    captured_dtypes = []
+
+    def add_shrink(buffer, x, lora_a_stacked, scale, **kwargs):
+        captured_dtypes.append(buffer.dtype)
+        buffer.zero_()
+
+    def add_expand(y, x, lora_b_stacked, output_slices, **kwargs):
+        captured_dtypes.append(x.dtype)
+
+    monkeypatch.setattr(wrapper, "add_shrink", add_shrink)
+    monkeypatch.setattr(wrapper, "add_expand", add_expand)
+
+    y = torch.zeros(num_tokens, output_size, dtype=dtype, device=device)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    lora_a_stacked = (torch.randn(1, 1, rank, hidden_size, dtype=dtype, device=device),)
+    lora_b_stacked = (torch.randn(1, 1, output_size, rank, dtype=dtype, device=device),)
+
+    wrapper.add_lora_linear(
+        y,
+        x,
+        lora_a_stacked,
+        lora_b_stacked,
+        scale=1.0,
+        output_slices=(output_size,),
+    )
+
+    assert captured_dtypes == [dtype, dtype]
+
+
+@pytest.mark.parametrize("device", DEVICES)
+@pytest.mark.parametrize("dtype", DTYPES)
+def test_add_lora_logits_buffer_uses_input_dtype(device, dtype, monkeypatch):
+    from types import SimpleNamespace
+
+    import vllm.lora.punica_wrapper.punica_gpu as punica_gpu
+    from vllm.lora.punica_wrapper.punica_gpu import PunicaWrapperGPU
+
+    torch.set_default_device(device)
+    torch.accelerator.set_device_index(device)
+
+    num_tokens = 16
+    hidden_size = 32
+    vocab_size = 64
+    rank = 16
+
+    wrapper = PunicaWrapperGPU(
+        max_num_batched_tokens=num_tokens,
+        max_batches=num_tokens,
+        device=device,
+        lora_config=SimpleNamespace(
+            max_loras=1,
+            specialize_active_lora=False,
+        ),
+    )
+    wrapper.prompt_mapping_meta.prepare_tensors(
+        torch.zeros(num_tokens, dtype=torch.long, device=device)
+    )
+
+    captured_dtypes = []
+
+    def lora_shrink(inputs, lora_a_stacked, output_tensor, *args, **kwargs):
+        captured_dtypes.append(output_tensor.dtype)
+        output_tensor.zero_()
+
+    def lora_expand(inputs, lora_b_stacked, output_tensor, *args, **kwargs):
+        captured_dtypes.append(inputs.dtype)
+
+    monkeypatch.setattr(punica_gpu, "lora_shrink", lora_shrink)
+    monkeypatch.setattr(punica_gpu, "lora_expand", lora_expand)
+
+    y = torch.zeros(num_tokens, vocab_size, dtype=dtype, device=device)
+    x = torch.randn(num_tokens, hidden_size, dtype=dtype, device=device)
+    lora_a_stacked = torch.randn(1, 1, rank, hidden_size, dtype=dtype, device=device)
+    lora_b_stacked = torch.randn(1, 1, vocab_size, rank, dtype=dtype, device=device)
+
+    wrapper.add_lora_logits(
+        y,
+        x,
+        lora_a_stacked,
+        lora_b_stacked,
+        scale=1.0,
+    )
+
+    assert captured_dtypes == [dtype, dtype]
+
+
+@pytest.mark.parametrize("device", DEVICES)
 def test_add_lora_fused_moe_early_exit(device):
     """
     Ensures add_lora_fused_moe does not invoke the LoRA kernel or
