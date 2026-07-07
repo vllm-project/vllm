@@ -117,9 +117,10 @@ charset-normalizer==3.4.0
     # via requests
 chz==0.3.0
     # via gpt-oss
-click==8.1.7
+click==8.4.2
     # via
     #   black
+    #   huggingface-hub
     #   jiwer
     #   nltk
     #   ray
@@ -330,7 +331,7 @@ h2==4.3.0
     # via httpx
 harfile==0.5.0
     # via schemathesis
-hf-xet==1.4.3
+hf-xet==1.5.1
     # via huggingface-hub
 hiredis==3.0.0
     # via tensorizer
@@ -356,7 +357,7 @@ httpx==0.27.2
     #   schemathesis
 httpx-sse==0.4.3
     # via mcp
-huggingface-hub==1.10.2
+huggingface-hub==1.22.0
     # via
     #   accelerate
     #   datasets
@@ -1232,6 +1233,10 @@ torchaudio==2.11.0+cu130
     #   -r requirements/test/cuda.in
     #   encodec
     #   vocos
+torchcodec==0.14.0+cu130
+    # via
+    #   -c requirements/cuda.txt
+    #   -r requirements/test/cuda.in
 torchvision==0.26.0+cu130
     # via
     #   -c requirements/cuda.txt
@@ -1285,7 +1290,6 @@ typer==0.26.8
     #   fastapi-cli
     #   fastapi-cloud-cli
     #   fastsafetensors
-    #   huggingface-hub
     #   perceptron
     #   transformers
 typing-extensions==4.15.0

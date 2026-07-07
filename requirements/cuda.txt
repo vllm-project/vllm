@@ -8,6 +8,7 @@ torch==2.11.0
 torchaudio==2.11.0
 # These must be updated alongside torch
 torchvision==0.26.0 # Required for phi3v processor. See https://github.com/pytorch/vision?tab=readme-ov-file#installation for corresponding version
+torchcodec >= 0.14
 PyNvVideoCodec==2.1.0
 # FlashInfer should be updated together with the Dockerfile
 flashinfer-python==0.6.13
@@ -25,7 +26,7 @@ nvidia-cutlass-dsl[cu13]==4.5.2
 quack-kernels>=0.3.3
 
 # Tokenspeed_MLA for faster mla with spec decode
-tokenspeed-mla==0.1.2
+tokenspeed-mla==0.1.2; platform_system == "Linux"
 
 # Humming kernels for quantization gemm
-humming-kernels[cu13]==0.1.6
+humming-kernels[cu13]==0.1.10
