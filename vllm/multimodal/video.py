@@ -23,6 +23,7 @@ except ImportError:
 try:
     import av
     import av.filter
+
     _PYAV_AVAILABLE = True
 except ImportError:
     _PYAV_AVAILABLE = False
@@ -159,39 +160,39 @@ class OpenCVVideoBackendMixin:
         """
         Use PyAV to detect whether the video is interlaced by decoding
         a few frames and checking their interlaced_frame property.
-        
+
         Compatible with PyAV 18+ which uses VideoFrame.interlaced_frame
         instead of the deprecated av.field_order constants.
-        
+
         Returns False if PyAV is unavailable (falls back to OpenCV path).
         """
         if not _PYAV_AVAILABLE:
             return False
-        
+
         try:
             container = av.open(BytesIO(data))
             stream = container.streams.video[0]
-            
+
             # Decode first few frames to check interlaced_frame property
             is_interlaced = False
             frames_checked = 0
             max_check_frames = 10
-            
+
             for packet in container.demux(stream):
                 for frame in packet.decode():
                     if frames_checked >= max_check_frames:
                         break
-                    
+
                     # Check if this frame is marked as interlaced
                     if frame.interlaced_frame:
                         is_interlaced = True
                         break
-                    
+
                     frames_checked += 1
-                
+
                 if is_interlaced or frames_checked >= max_check_frames:
                     break
-            
+
             container.close()
             return is_interlaced
         except Exception:
@@ -218,7 +219,7 @@ class OpenCVVideoBackendMixin:
         """
         container = av.open(BytesIO(data))
         stream = container.streams.video[0]
-        
+
         # Create yadif filter chain
         # mode=send_frame: process frame by frame
         # parity=auto: auto-detect field order
@@ -234,17 +235,17 @@ class OpenCVVideoBackendMixin:
         target_indices = set(frame_indices)
         frames = []
         valid_indices = []
-        
+
         frame_count = 0
 
         for packet in container.demux(stream):
             for frame in packet.decode():
                 frame_count += 1
-                
+
                 # Use frame_count (0-based) to match target indices
                 if (frame_count - 1) in target_indices:
                     current_idx = frame_count - 1
-                    
+
                     graph.push(frame)
                     try:
                         # yadif passes progressive frames through, deinterlaces interlaced ones
@@ -253,7 +254,7 @@ class OpenCVVideoBackendMixin:
                     except av.FFmpegError:
                         # If filter decides no processing needed (rare), use raw frame
                         img = frame.to_ndarray(format="rgb24")
-                    
+
                     frames.append(img)
                     valid_indices.append(current_idx)
 
@@ -261,7 +262,7 @@ class OpenCVVideoBackendMixin:
 
         if frames:
             return np.stack(frames), valid_indices
-        
+
         return np.empty((0, 1, 1, 3), dtype=np.uint8), []
 
     @classmethod
@@ -449,27 +450,25 @@ class OpenCVVideoBackendMixin:
         # NEW: Detect interlaced video and use PyAV path
         if data is not None:
             is_interlaced = cls._is_interlaced_video(data)
-            
+
             if is_interlaced:
                 logger.info(
-                    "Detected interlaced video, using PyAV + yadif "
-                    "for deinterlacing."
+                    "Detected interlaced video, using PyAV + yadif for deinterlacing."
                 )
                 try:
                     frames, valid_frame_indices = cls._read_frames_with_pyav(
                         data, frame_idx
                     )
-                    
+
                     if len(frames) > 0:
                         return frames, valid_frame_indices
-                    
+
                     logger.warning(
                         "PyAV returned empty frames, falling back to OpenCV."
                     )
                 except Exception as e:
                     logger.warning(
-                        "PyAV deinterlace failed (%s), "
-                        "falling back to OpenCV path.",
+                        "PyAV deinterlace failed (%s), falling back to OpenCV path.",
                         str(e),
                     )
         if frame_recovery:
