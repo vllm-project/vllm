@@ -18,6 +18,7 @@ from tests.v1.sample.utils import (
     fake_apply_logitsprocs,
     fake_update_logitsprocs_state,
 )
+from vllm import envs
 from vllm.config import VllmConfig
 from vllm.platforms import current_platform
 from vllm.sampling_params import SamplingParams, validate_thinking_token_budget
@@ -346,7 +347,7 @@ def _min_tokens_params(kwargs: dict) -> None:
     kwargs["min_tokens"] = MIN_TOKENS_LEN_THRESHOLD
     kwargs["stop_token_ids"] = [
         np.random.randint(0, VOCAB_SIZE - 1)
-        for _ in range(np.random.randint(0, VOCAB_SIZE))
+        for _ in range(np.random.randint(0, envs.VLLM_MAX_STOP_TOKEN_IDS))
     ]
 
 

@@ -601,6 +601,14 @@ class SamplingParams(
                 value=self.prompt_logprobs,
             )
         assert isinstance(self.stop_token_ids, list)
+        max_stop = envs.VLLM_MAX_STOP_TOKEN_IDS
+        if len(self.stop_token_ids) > max_stop:
+            raise ValueError(
+                f"stop_token_ids has {len(self.stop_token_ids)} entries, "
+                f"which exceeds the maximum of {max_stop}. "
+                "To increase this limit, set the "
+                "VLLM_MAX_STOP_TOKEN_IDS environment variable."
+            )
         if not all(isinstance(st_id, int) for st_id in self.stop_token_ids):
             raise ValueError(
                 f"stop_token_ids must contain only integers, got {self.stop_token_ids}."
@@ -613,12 +621,38 @@ class SamplingParams(
                 "stop strings are only supported when detokenize is True. "
                 "Set detokenize=True to use stop."
             )
+        if self.logit_bias is not None:
+            max_logit_bias = envs.VLLM_MAX_LOGIT_BIAS_SIZE
+            if max_logit_bias > 0 and len(self.logit_bias) > max_logit_bias:
+                raise ValueError(
+                    f"logit_bias has {len(self.logit_bias)} entries, "
+                    f"which exceeds the maximum of {max_logit_bias}. "
+                    "To increase this limit, set the "
+                    "VLLM_MAX_LOGIT_BIAS_SIZE environment variable."
+                )
         assert isinstance(self.bad_words, list)
-        if any(not bad_word for bad_word in self.bad_words):
+        max_bad_words = envs.VLLM_MAX_BAD_WORDS
+        if len(self.bad_words) > max_bad_words:
             raise ValueError(
-                f"bad_words cannot contain an empty string. "
-                f"Got bad_words={self.bad_words}"
+                f"bad_words has {len(self.bad_words)} entries, "
+                f"which exceeds the maximum of {max_bad_words}. "
+                "To increase this limit, set the "
+                "VLLM_MAX_BAD_WORDS environment variable."
             )
+        max_bad_word_len = envs.VLLM_MAX_BAD_WORD_LENGTH
+        for bad_word in self.bad_words:
+            if not bad_word:
+                raise ValueError(
+                    f"bad_words cannot contain an empty string. "
+                    f"Got bad_words={self.bad_words}"
+                )
+            if len(bad_word) > max_bad_word_len:
+                raise ValueError(
+                    f"bad_word {bad_word!r:.50} has length "
+                    f"{len(bad_word)}, which exceeds the maximum "
+                    f"of {max_bad_word_len}. To increase this limit, set "
+                    "the VLLM_MAX_BAD_WORD_LENGTH environment variable."
+                )
 
     def _verify_greedy_sampling(self) -> None:
         if self.n > 1:
@@ -813,11 +847,23 @@ class SamplingParams(
                 )
 
     def _validate_logit_bias(self, model_config: ModelConfig) -> None:
-        """Validate logit_bias token IDs are within vocabulary range."""
+        """Validate logit_bias size and token IDs against vocabulary."""
         if not self.logit_bias:
             return
 
         vocab_size = model_config.get_vocab_size()
+        max_size = envs.VLLM_MAX_LOGIT_BIAS_SIZE
+        effective_max = vocab_size if max_size <= 0 else min(max_size, vocab_size)
+        if len(self.logit_bias) > effective_max:
+            raise VLLMValidationError(
+                f"logit_bias has {len(self.logit_bias)} entries, "
+                f"which exceeds the maximum of {effective_max} "
+                f"(vocab_size={vocab_size}). To increase this limit, set "
+                "the VLLM_MAX_LOGIT_BIAS_SIZE environment variable.",
+                parameter="logit_bias",
+                value=len(self.logit_bias),
+            )
+
         invalid_token_ids = [
             token_id
             for token_id in self.logit_bias
@@ -853,6 +899,18 @@ class SamplingParams(
 
         if tokenizer is not None:
             vocab_size = len(tokenizer)
+            max_size = envs.VLLM_MAX_ALLOWED_TOKEN_IDS
+            effective_max = vocab_size if max_size <= 0 else min(max_size, vocab_size)
+            if len(allowed_token_ids) > effective_max:
+                raise VLLMValidationError(
+                    f"allowed_token_ids has {len(allowed_token_ids)} entries, "
+                    f"which exceeds the maximum of {effective_max} "
+                    f"(vocab_size={vocab_size}). To increase this limit, set "
+                    "the VLLM_MAX_ALLOWED_TOKEN_IDS environment variable.",
+                    parameter="allowed_token_ids",
+                    value=len(allowed_token_ids),
+                )
+
             invalid_token_ids = [
                 token_id
                 for token_id in allowed_token_ids

@@ -101,6 +101,12 @@ if TYPE_CHECKING:
     VLLM_ALLOW_LONG_MAX_MODEL_LEN: bool = False
     VLLM_HTTP_TIMEOUT_KEEP_ALIVE: int = 5  # seconds
     VLLM_MAX_N_SEQUENCES: int = 16384
+    VLLM_MAX_LOGIT_BIAS_SIZE: int = 0
+    VLLM_MAX_ALLOWED_TOKEN_IDS: int = 0
+    VLLM_MAX_STOP_TOKEN_IDS: int = 128
+    VLLM_MAX_BAD_WORDS: int = 1000
+    VLLM_MAX_BAD_WORD_LENGTH: int = 1000
+    VLLM_MAX_BATCH_CONVERSATIONS: int = 1000
     VLLM_PLUGINS: list[str] | None = None
     VLLM_LORA_RESOLVER_CACHE_DIR: str | None = None
     VLLM_LORA_RESOLVER_HF_REPO_LIST: str | None = None
@@ -1057,6 +1063,30 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # denial-of-service via excessively large fan-out. Default: 16384.
     "VLLM_MAX_N_SEQUENCES": lambda: int(
         os.environ.get("VLLM_MAX_N_SEQUENCES", "16384")
+    ),
+    # Maximum number of entries in logit_bias. Default 0 means use
+    # vocab_size as the natural upper bound (checked at verify() time).
+    "VLLM_MAX_LOGIT_BIAS_SIZE": lambda: int(
+        os.environ.get("VLLM_MAX_LOGIT_BIAS_SIZE", "0")
+    ),
+    # Maximum number of entries in allowed_token_ids. Default 0 means use
+    # vocab_size as the natural upper bound (checked at verify() time).
+    "VLLM_MAX_ALLOWED_TOKEN_IDS": lambda: int(
+        os.environ.get("VLLM_MAX_ALLOWED_TOKEN_IDS", "0")
+    ),
+    # Maximum number of stop_token_ids per request.
+    "VLLM_MAX_STOP_TOKEN_IDS": lambda: int(
+        os.environ.get("VLLM_MAX_STOP_TOKEN_IDS", "128")
+    ),
+    # Maximum number of bad_words entries per request.
+    "VLLM_MAX_BAD_WORDS": lambda: int(os.environ.get("VLLM_MAX_BAD_WORDS", "1000")),
+    # Maximum character length of a single bad_word entry.
+    "VLLM_MAX_BAD_WORD_LENGTH": lambda: int(
+        os.environ.get("VLLM_MAX_BAD_WORD_LENGTH", "1000")
+    ),
+    # Maximum number of conversations in a batch chat completion request.
+    "VLLM_MAX_BATCH_CONVERSATIONS": lambda: int(
+        os.environ.get("VLLM_MAX_BATCH_CONVERSATIONS", "1000")
     ),
     # a list of plugin names to load, separated by commas.
     # if this is not set, it means all plugins will be loaded
