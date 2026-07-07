@@ -147,6 +147,7 @@ class PagedShmManager:
             self._total_available_blocks -= len(item.blocks)
 
         item.ref_count += 1
+        return item
 
     def close_read(self, uuid: str):
         item = self._all_items.get(uuid, None)
@@ -229,6 +230,34 @@ class PagedShmManager:
             raise ValueError(f"UUID {uuid} not found")
 
         return item
+
+    def get_manager_state(self) -> dict[str, int]:
+        cached_blocks = self._total_available_blocks - len(self._free_blocks)
+        writing_count = 0
+        idle_count = 0
+        reading_count = 0
+        for item in self._all_items.values():
+            if item.ref_count < 0:
+                writing_count += 1
+            elif item.ref_count == 0:
+                idle_count += 1
+            else:
+                reading_count += 1
+
+        return {
+            "size": self.size,
+            "block_size": self.block_size,
+            "n_block": self.n_block,
+            "free_blocks_count": len(self._free_blocks),
+            "total_available_blocks": self._total_available_blocks,
+            "cached_items_count": len(self._lru_cache),
+            "cached_blocks_count": cached_blocks,
+            "pinned_items_count": len(self._pinned_items),
+            "total_items_count": len(self._all_items),
+            "writing_items_count": writing_count,
+            "reading_items_count": reading_count,
+            "idle_items_count": idle_count,
+        }
 
     def _evict(self, needed: int) -> None:
         while len(self._free_blocks) < needed:
