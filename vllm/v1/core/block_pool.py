@@ -18,6 +18,7 @@ from vllm.v1.core.kv_cache_utils import (
     ExternalBlockHash,
     FreeKVCacheBlockQueue,
     KVCacheBlock,
+    PriorityAwareFreeKVCacheBlockQueue,
     generate_block_hash_extra_keys,
     get_block_hash,
     get_group_id,
@@ -182,7 +183,13 @@ class BlockPool:
         # Free block queue that constructs and manipulates a doubly linked
         # list of free blocks (including eviction candidates when caching is
         # enabled).
-        self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+        self.free_block_queue: (
+            FreeKVCacheBlockQueue | PriorityAwareFreeKVCacheBlockQueue
+        )
+        if self.kv_cache_eviction_policy == "priority-aware":
+            self.free_block_queue = PriorityAwareFreeKVCacheBlockQueue(self.blocks)
+        else:
+            self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
 
         # Cache for block lookup
         self.cached_block_hash_to_block: BlockHashToBlockMap = BlockHashToBlockMap()
@@ -762,10 +769,7 @@ class BlockPool:
 
         # Blocks without hash always get evicted first - prepend them last to the tail
         self.free_block_queue.prepend_n(blocks_without_hash)
-        if self.kv_cache_eviction_policy == "priority-aware":
-            self.free_block_queue.append_n_by_eviction_priority(blocks_with_hash)
-        else:
-            self.free_block_queue.append_n(blocks_with_hash)
+        self.free_block_queue.append_n(blocks_with_hash)
 
     def evict_blocks(self, block_ids: set[int]) -> None:
         """evict blocks from the prefix cache by their block IDs.
@@ -811,6 +815,10 @@ class BlockPool:
         # Remove all hashes from all blocks.
         for block in self.blocks:
             block.reset_hash()
+        if self.kv_cache_eviction_policy == "priority-aware":
+            self.free_block_queue = PriorityAwareFreeKVCacheBlockQueue(
+                self.free_block_queue.get_all_free_blocks()
+            )
 
         if self.metrics_collector:
             self.metrics_collector.reset()

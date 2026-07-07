@@ -1930,13 +1930,15 @@ def test_prefill_not_enough_free_blocks_with_computed_blocks():
     assert {block.ref_cnt for block in block_part1[3:]} == {0}
 
 
-def test_reset_prefix_cache():
+@pytest.mark.parametrize("policy", ["fcfs", "priority"])
+def test_reset_prefix_cache(policy: str):
     block_size = 16
     manager = make_kv_cache_manager(
         make_kv_cache_config(block_size, 11),
         max_model_len=8192,
         enable_caching=True,
         hash_block_size=block_size,
+        policy=policy,
     )
 
     full_block_token_ids = [i for i in range(3) for _ in range(16)]
@@ -2091,6 +2093,23 @@ def test_priority_aware_eviction_preserves_lru_within_priority():
     pool.free_blocks([first, second, third])
 
     assert pool.get_new_blocks(1)[0] is first
+
+
+def test_priority_aware_eviction_keeps_existing_lru_on_priority_ties():
+    pool = BlockPool(
+        num_gpu_blocks=3,
+        enable_caching=True,
+        hash_block_size=16,
+        kv_cache_eviction_policy="priority-aware",
+    )
+    old_block, new_block = pool.get_new_blocks(2)
+    _set_cached_block(pool, old_block, b"old", retention_priority=3)
+    _set_cached_block(pool, new_block, b"new", retention_priority=3)
+
+    pool.free_blocks([old_block])
+    pool.free_blocks([new_block])
+
+    assert pool.get_new_blocks(1)[0] is old_block
 
 
 def test_lru_eviction_policy_ignores_retention_priority():
