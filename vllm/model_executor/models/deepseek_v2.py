@@ -829,7 +829,7 @@ def _try_load_fp8_indexer_wk(
     if "indexer.wk." not in name or "wk_weights" in name:
         return False  # Weight is not an isolated WK weight for the indexer, ignore.
     is_weight = name.endswith(".weight") and tensor.dtype == torch.float8_e4m3fn
-    is_scale = "weight_scale_inv" in name
+    is_scale = "weight_scale" in name
     if not is_weight and not is_scale:
         return False  # WK is not in FP8 format, ignore.
     # Buffer this tensor (weight or scale) until both have arrived.
@@ -1513,7 +1513,10 @@ class DeepseekV2Model(nn.Module):
             ("qkv_proj", "v_proj", "v"),
         ]
         # Fused indexer wk + weights_proj (shard 0 = wk, shard 1 = weights_proj)
-        _pending_wk_fp8: dict = {}  # When WK is in FP8, we dequant to BF16 for fusion
+        _pending_wk_fp8 = getattr(self, "_pending_indexer_wk_fp8", None)
+        if _pending_wk_fp8 is None:
+            self._pending_indexer_wk_fp8 = _pending_wk_fp8 = {}
+
         indexer_fused_mapping = [
             ("wk_weights_proj", "wk", 0),
             ("wk_weights_proj", "weights_proj", 1),
