@@ -388,6 +388,21 @@ class NixlBaseConnectorScheduler:
                 # Therefore, only pop if `not is_partial`.
                 self._reqs_need_save.pop(req_id)
 
+    def _get_attention_blocks_to_skip_zeroing(self, block_ids: BlockIds) -> set[int]:
+        """Return local attention blocks that remote KV loads will overwrite."""
+        if not block_ids:
+            return set()
+
+        blocks_to_skip: set[int] = set()
+        assert len(block_ids) == len(self.kv_cache_config.kv_cache_groups), (
+            "Number of KV cache groups must match"
+        )
+        for i, group_block_ids in enumerate(block_ids):
+            kv_cache_spec = self.kv_cache_config.kv_cache_groups[i].kv_cache_spec
+            if isinstance(kv_cache_spec, FullAttentionSpec):
+                blocks_to_skip.update(group_block_ids)
+        return blocks_to_skip
+
     def build_connector_meta(
         self,
         scheduler_output: SchedulerOutput,
@@ -401,6 +416,9 @@ class NixlBaseConnectorScheduler:
                 request_id=req_id,
                 local_block_ids=block_ids,
                 kv_transfer_params=req.kv_transfer_params,
+            )
+            meta.add_blocks_to_skip_kv_cache_zeroing(
+                self._get_attention_blocks_to_skip_zeroing(block_ids)
             )
 
         if self.use_host_buffer:

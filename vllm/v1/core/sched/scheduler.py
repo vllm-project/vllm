@@ -1078,12 +1078,6 @@ class Scheduler(SchedulerInterface):
             self.prev_step_scheduled_req_ids.clear()
             self.prev_step_scheduled_req_ids.update(num_scheduled_tokens.keys())
 
-        new_block_ids_to_zero = (
-            (self.kv_cache_manager.take_new_block_ids() or None)
-            if self.needs_kv_cache_zeroing
-            else None
-        )
-
         # Dynamic speculative decoding: compute optimal K
         num_spec_tokens_to_schedule = self.num_spec_tokens
         if self.dynamic_sd_lookup is not None and len(num_scheduled_tokens) > 0:
@@ -1106,7 +1100,6 @@ class Scheduler(SchedulerInterface):
             # the previous and the current steps.
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
-            new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
         )
 
@@ -1117,6 +1110,10 @@ class Scheduler(SchedulerInterface):
         if self.connector is not None:
             meta = self._build_kv_connector_meta(self.connector, scheduler_output)
             scheduler_output.kv_connector_metadata = meta
+
+        scheduler_output.new_block_ids_to_zero = self._get_new_block_ids_to_zero(
+            scheduler_output.kv_connector_metadata
+        )
 
         # Build the connector meta for ECConnector
         if self.ec_connector is not None:
@@ -1138,6 +1135,27 @@ class Scheduler(SchedulerInterface):
         self, connector: KVConnectorBase_V1, scheduler_output: SchedulerOutput
     ) -> KVConnectorMetadata:
         return connector.build_connector_meta(scheduler_output)
+
+    def _get_new_block_ids_to_zero(
+        self, kv_connector_metadata: KVConnectorMetadata | None
+    ) -> list[int] | None:
+        if not self.needs_kv_cache_zeroing:
+            return None
+
+        new_block_ids_to_zero = self.kv_cache_manager.take_new_block_ids()
+        if not new_block_ids_to_zero:
+            return None
+
+        if kv_connector_metadata is not None:
+            blocks_to_skip = kv_connector_metadata.get_blocks_to_skip_kv_cache_zeroing()
+            if blocks_to_skip:
+                new_block_ids_to_zero = [
+                    block_id
+                    for block_id in new_block_ids_to_zero
+                    if block_id not in blocks_to_skip
+                ]
+
+        return new_block_ids_to_zero or None
 
     def _preempt_request(self, request: Request, timestamp: float) -> None:
         """Preempt a request and put it back to the waiting queue.
