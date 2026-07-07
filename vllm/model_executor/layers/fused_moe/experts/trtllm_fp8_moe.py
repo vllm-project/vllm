@@ -117,6 +117,21 @@ class TrtLlmFp8ExpertsBase:
         ]
 
     @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """Both the modular and monolithic kernel invocations forward
+        `self.gemm1_clamp_limit` (a per-expert fp32 tensor built in
+        `__init__`) to the flashinfer TRTLLM FP8 MoE kernels via the
+        `gemm1_clamp_limit` arg, for every activation. Of the activations
+        accepted by `_supports_activation`, SILU and
+        SWIGLUOAI_UNINTERLEAVE are the SwiGLU clamp paths; RELU2_NO_MUL
+        has no clamp semantics.
+        """
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        )
+
+    @staticmethod
     def _supports_parallel_config(moe_parallel_config: FusedMoEParallelConfig) -> bool:
         """Monolithic kernel so only use with naive DP/EP and TP."""
         return (

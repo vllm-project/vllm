@@ -18,7 +18,6 @@ from vllm.model_executor.layers.fused_moe.modular_kernel import (
     FusedMoEExperts,
 )
 
-
 # ---------------------------------------------------------------------------
 # 1. Default and inheritance of `supports_swiglu_clamp_limit`
 # ---------------------------------------------------------------------------
@@ -33,12 +32,13 @@ def test_base_default_supports_swiglu_clamp_limit_false():
     )
 
 
-def test_marlin_inheritance_and_lora_override():
-    """Marlin classes declare clamp support only on SILU (the only branch
-    that threads `swiglu_limit_func`); SWIGLUOAI / SWIGLUSTEP fall through
-    to `activation_func` and are unwired. MarlinExperts (LoRA mixin)
-    additionally declares with_lora=False on every activation due to the
-    `_fused_marlin_moe` clamp/activation mutex.
+def test_marlin_inheritance_and_lora_default():
+    """Marlin routes every activation through `apply_moe_activation` with
+    `clamp_limit`/`alpha`/`beta` forwarded, which consumes the clamp for
+    SILU and SWIGLUOAI_UNINTERLEAVE only; SWIGLUOAI / SWIGLUSTEP ignore
+    the config clamp there. `activation_with_lora` also forwards
+    `clamp_limit`, so clamp and LoRA compose and no `_with_lora`
+    override exists (default True applies).
     """
     from vllm.model_executor.layers.fused_moe.experts.marlin_moe import (
         BatchedMarlinExperts,
@@ -46,10 +46,11 @@ def test_marlin_inheritance_and_lora_override():
         MarlinExpertsBase,
     )
 
-    # SILU is the only SwiGLU branch with clamp threading.
-    assert MarlinExpertsBase.supports_swiglu_clamp_limit(MoEActivation.SILU) is True
-    assert MarlinExperts.supports_swiglu_clamp_limit(MoEActivation.SILU) is True
-    assert BatchedMarlinExperts.supports_swiglu_clamp_limit(MoEActivation.SILU) is True
+    # SILU and SWIGLUOAI_UNINTERLEAVE are the clamp-threaded branches.
+    for act in (MoEActivation.SILU, MoEActivation.SWIGLUOAI_UNINTERLEAVE):
+        assert MarlinExpertsBase.supports_swiglu_clamp_limit(act) is True
+        assert MarlinExperts.supports_swiglu_clamp_limit(act) is True
+        assert BatchedMarlinExperts.supports_swiglu_clamp_limit(act) is True
     # Other SwiGLU variants are NOT clamp-threaded by Marlin.
     assert (
         MarlinExpertsBase.supports_swiglu_clamp_limit(MoEActivation.SWIGLUOAI) is False
@@ -59,23 +60,30 @@ def test_marlin_inheritance_and_lora_override():
         BatchedMarlinExperts.supports_swiglu_clamp_limit(MoEActivation.SWIGLUSTEP)
         is False
     )
-    # LoRA-specific override only on MarlinExperts: rejects every SwiGLU
-    # activation because the clamp path bypasses `activation_with_lora`.
+    # No LoRA-specific override anywhere in the Marlin hierarchy: the
+    # LoRA wrapper forwards clamp_limit, so the base default (True) holds.
+    for klass in (MarlinExpertsBase, MarlinExperts, BatchedMarlinExperts):
+        assert klass.supports_swiglu_clamp_limit_with_lora(MoEActivation.SILU) is True
+        assert (
+            klass.supports_swiglu_clamp_limit_with_lora(MoEActivation.SWIGLUOAI) is True
+        )
+
+
+def test_triton_declarations_for_clamp_mandatory_activation():
+    """TritonExperts stays False on SILU (the silu_and_mul_per_block_quant
+    fused fast path bypasses `activation()` and drops the clamp) but
+    declares True for SWIGLUOAI_UNINTERLEAVE, whose clamp is always
+    forwarded (and asserted present) by `activation()` and which never
+    takes the fused fast path.
+    """
+    from vllm.model_executor.layers.fused_moe.experts.triton_moe import TritonExperts
+
+    assert TritonExperts.supports_swiglu_clamp_limit(MoEActivation.SILU) is False
     assert (
-        MarlinExpertsBase.supports_swiglu_clamp_limit_with_lora(MoEActivation.SILU)
+        TritonExperts.supports_swiglu_clamp_limit(MoEActivation.SWIGLUOAI_UNINTERLEAVE)
         is True
     )
-    assert (
-        MarlinExperts.supports_swiglu_clamp_limit_with_lora(MoEActivation.SILU) is False
-    )
-    assert (
-        MarlinExperts.supports_swiglu_clamp_limit_with_lora(MoEActivation.SWIGLUOAI)
-        is False
-    )
-    assert (
-        BatchedMarlinExperts.supports_swiglu_clamp_limit_with_lora(MoEActivation.SILU)
-        is True
-    )
+    assert TritonExperts.supports_swiglu_clamp_limit(MoEActivation.SWIGLUOAI) is False
 
 
 # ---------------------------------------------------------------------------
@@ -210,8 +218,8 @@ def test_filter_passes_when_swiglu_limit_zero_regardless_of_backend():
 
 
 class _SupportingButNotWithLoraDummy(_DummyBase):
-    """Mimics MarlinExperts post-fix: declares clamp True but
-    with_lora False."""
+    """Backend whose clamp path is wired but bypasses LoRA injection:
+    declares clamp True but with_lora False."""
 
     @staticmethod
     def supports_swiglu_clamp_limit(activation) -> bool:
@@ -250,8 +258,8 @@ def test_filter_rejects_lora_enabled_with_clamp_backend_no_lora_support():
 
 
 def test_filter_passes_silu_only_backend_with_silu_config():
-    """A SILU-only backend (e.g. Marlin post-refactor) passes when the
-    model's activation is SILU and swiglu_limit is set."""
+    """A SILU-only backend (e.g. Humming) passes when the model's
+    activation is SILU and swiglu_limit is set."""
     config = _make_mock_config(swiglu_limit=7.0, activation=MoEActivation.SILU)
     supported, reason = FusedMoEExperts.is_supported_config(
         _SiluOnlyDummy, config, None, None, FusedMoEActivationFormat.Standard
@@ -277,15 +285,17 @@ def test_filter_rejects_silu_only_backend_with_non_silu_clamp_config():
 
 def test_filter_rejects_lora_plus_swiglu_combo():
     """When `is_lora_enabled=True` and `swiglu_limit` is set, a backend
-    that declares `supports_swiglu_clamp_limit=False` (the Marlin-post-fix
-    pattern) is filtered out by the SwiGLU filter — *not* the LoRA filter,
-    since `_RejectingDummy.supports_lora()` returns True. This is the
-    safety net for Marlin-style mutex bugs where the clamp path silently
-    bypasses LoRA injection (see gemini-code-assist comment on #42287).
+    that declares `supports_swiglu_clamp_limit=False` is filtered out by
+    the SwiGLU filter — *not* the LoRA filter, since
+    `_RejectingDummy.supports_lora()` returns True. This is the safety
+    net for clamp/activation mutex bugs where the clamp path silently
+    bypasses LoRA injection (a historical Marlin bug, see the
+    gemini-code-assist comment on #42287; since fixed upstream by
+    forwarding clamp_limit through the LoRA activation wrapper).
 
-    Note: we mimic Marlin's post-fix structure with `_RejectingDummy`
-    instead of importing real `MarlinExperts`, because real backends fail
-    earlier `_supports_current_device()` checks on CPU-only test hosts.
+    Note: we use `_RejectingDummy` instead of importing a real backend,
+    because real backends fail earlier `_supports_current_device()`
+    checks on CPU-only test hosts.
     """
     config = _make_mock_config(swiglu_limit=7.0, is_lora_enabled=True)
     supported, reason = FusedMoEExperts.is_supported_config(

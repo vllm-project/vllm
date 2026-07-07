@@ -777,10 +777,15 @@ class FusedMoEExperts(ABC):
         """Return True if this expert impl threads `gemm1_clamp_limit`
         through the SwiGLU activation path for the given `activation`.
 
-        Different SwiGLU variants (SILU, SWIGLUOAI, SWIGLUSTEP) often
-        take different code paths in `apply()` / `activation()`. A backend
-        that threads clamp in the SILU branch but skips it in the
-        SWIGLUOAI branch should declare True only for SILU.
+        Different SwiGLU variants (SILU, SWIGLUOAI,
+        SWIGLUOAI_UNINTERLEAVE, SWIGLUSTEP) often take different code
+        paths in `apply()` / `activation()`. A backend that threads clamp
+        in the SILU branch but skips it in the SWIGLUOAI branch should
+        declare True only for SILU. Backends that support
+        SWIGLUOAI_UNINTERLEAVE should declare True for it: that variant's
+        contract makes the clamp mandatory (`apply_moe_activation`
+        asserts it is present), so a backend that supports the activation
+        but leaves this declaration False would be pointlessly skipped.
 
         Backends declaring False for the model's activation will be
         skipped by the MoE oracle when the model config requires a

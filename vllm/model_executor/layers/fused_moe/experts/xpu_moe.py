@@ -75,6 +75,33 @@ class XPUExperts(mk.FusedMoEExpertsModular):
         return True
 
     @staticmethod
+    def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
+        """`apply` forwards `self.gemm1_clamp_limit` into the external
+        `vllm_xpu_kernels.fused_moe_interface.XpuFusedMoe`, but the clamp
+        does not reach every path faithfully there:
+
+        - SILU: `XpuFusedMoe._apply_kernel` honors the config clamp
+          (a pre-activation gate/up clamp equivalent to
+          `swiglu_limit_func`, then `silu_and_mul`). However, the
+          mxfp8/block-fp8 recipes (`XPUExpertsMxFp8`,
+          `XPUExpertsBlockFp8`) and the package's ref-fallback env toggle
+          route through `XpuFusedMoe._apply_ref`, which calls
+          `ref_fused_moe` WITHOUT forwarding `gemm1_clamp_limit`
+          (the parameter exists but defaults to None) - a silent drop
+          a static declaration cannot distinguish.
+        - SWIGLUOAI: the activation is invoked as
+          `_C.swigluoai_and_mul(out, in)` with the op's hardcoded default
+          alpha/limit (1.702/7.0); the config clamp only enters via the
+          pre-activation clamp, whose packed gate/up slicing does not
+          match SWIGLUOAI's interleaved w13 layout.
+
+        Declare False on every activation until the external kernel
+        forwards the clamp on the ref path and wires the config clamp
+        into the SWIGLUOAI op (both fixes live in vllm_xpu_kernels).
+        """
+        return False
+
+    @staticmethod
     def activation_format() -> mk.FusedMoEActivationFormat:
         return mk.FusedMoEActivationFormat.Standard
 

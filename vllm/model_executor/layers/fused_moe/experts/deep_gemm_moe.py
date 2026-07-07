@@ -154,12 +154,17 @@ class DeepGemmExperts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
-        """DeepGemm only threads `self.gemm1_clamp_limit` into the
-        silu_mul_post_quant kernel call on the SILU branch of
-        `_act_mul_quant`. Non-SILU activations (e.g. SWIGLUSTEP) fall
-        through to `self.activation()` which does not consume the clamp.
+        """`_act_mul_quant` treats SILU and SWIGLUOAI_UNINTERLEAVE as
+        `fused_gated` and threads `self.gemm1_clamp_limit` (plus
+        alpha/beta) into the fused act+mul+quant kernels on every quant
+        format path (UE8M0 packed and Hopper column-major). Other
+        activations (e.g. SWIGLUSTEP) fall through to `self.activation()`
+        without clamp kwargs and do not consume the clamp.
         """
-        return activation == MoEActivation.SILU
+        return activation in (
+            MoEActivation.SILU,
+            MoEActivation.SWIGLUOAI_UNINTERLEAVE,
+        )
 
     @staticmethod
     def _supports_current_device() -> bool:
@@ -430,10 +435,12 @@ class DeepGemmFP4Experts(mk.FusedMoEExpertsModular):
 
     @staticmethod
     def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
-        """DeepGemmFP4Experts only threads `self.gemm1_clamp_limit` through
-        the silu_mul_post_quant call on the SILU branch of
-        `_act_mul_quant`. Non-SILU activations fall through to
-        `self.activation()` which does not consume the clamp.
+        """DeepGemmFP4Experts only threads `self.gemm1_clamp_limit` into
+        the fused act+mul+quant kernels on the SILU branch of its
+        `_act_mul_quant`. The only other supported activation
+        (SWIGLUSTEP, see `_supports_activation`) falls through to
+        `self.activation()` without clamp kwargs and does not consume
+        the clamp.
         """
         return activation == MoEActivation.SILU
 

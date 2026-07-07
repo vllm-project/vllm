@@ -147,15 +147,20 @@ class TritonExperts(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
 
     @staticmethod
     def supports_swiglu_clamp_limit(activation: MoEActivation) -> bool:
-        """Although TritonExperts.activation() does thread gemm1_clamp_limit
-        through swiglu_limit_func when taking the slow path, the
-        silu_and_mul_per_block_quant fused fast path in apply() (SILU + FP8
-        block_shape=[128,128] + no LoRA + no DeepGemm E8M0) bypasses
-        activation() entirely and drops clamp silently.
-        Declaring False for all activations until that fast path is fixed
-        (separate follow-up PR).
+        """SILU: although TritonExperts.activation() does thread
+        gemm1_clamp_limit through swiglu_limit_func when taking the slow
+        path, the silu_and_mul_per_block_quant fused fast path in apply()
+        (SILU + FP8 block_shape=[128,128] + no LoRA + no DeepGemm E8M0)
+        bypasses activation() entirely and drops clamp silently, so SILU
+        stays False until that fast path is fixed (separate follow-up PR).
+
+        SWIGLUOAI_UNINTERLEAVE: activation() always forwards
+        gemm1_clamp_limit/alpha/beta for this variant (and asserts the
+        clamp is present), and the fused fast path only triggers for SILU,
+        so there is no bypass. Declared True so clamped models using the
+        packed-w13 SwiGLU-OAI layout (e.g. MiniMax-M3) keep this backend.
         """
-        return False
+        return activation == MoEActivation.SWIGLUOAI_UNINTERLEAVE
 
     def finalize_weight_and_reduce_impl(self) -> mk.TopKWeightAndReduce:
         return TopKWeightAndReduceNoOP()
