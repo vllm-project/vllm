@@ -101,6 +101,15 @@ fn runtime_lora_updating_enabled() -> bool {
         .is_some_and(|value| matches!(value.trim().to_lowercase().as_str(), "1" | "true"))
 }
 
+/// Maximum HTTP request body size (bytes) accepted by the API server,
+/// overridable via `VLLM_HTTP_MAX_JSON_BODY_SIZE`.
+fn json_body_limit_bytes() -> usize {
+    std::env::var("VLLM_HTTP_MAX_JSON_BODY_SIZE")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_REQUEST_BODY_LIMIT_BYTES)
+}
+
 /// Build the minimal OpenAI-compatible router for one configured model.
 pub fn build_router(state: Arc<AppState>) -> Router {
     let scale_out_endpoints_enabled = state.api_server_options.enable_scale_out;
@@ -109,6 +118,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         server_dev_mode_enabled(),
         runtime_lora_updating_enabled(),
         scale_out_endpoints_enabled,
+        json_body_limit_bytes(),
     )
 }
 
@@ -123,7 +133,13 @@ fn build_router_with_dev_mode_and_lora(
     dev_mode_enabled: bool,
     runtime_lora_updating_enabled: bool,
 ) -> Router {
-    build_router_with_options(state, dev_mode_enabled, runtime_lora_updating_enabled, true)
+    build_router_with_options(
+        state,
+        dev_mode_enabled,
+        runtime_lora_updating_enabled,
+        true,
+        DEFAULT_REQUEST_BODY_LIMIT_BYTES,
+    )
 }
 
 #[cfg(test)]
@@ -131,7 +147,18 @@ fn build_router_with_scale_out_endpoints(
     state: Arc<AppState>,
     scale_out_endpoints_enabled: bool,
 ) -> Router {
-    build_router_with_options(state, false, false, scale_out_endpoints_enabled)
+    build_router_with_options(
+        state,
+        false,
+        false,
+        scale_out_endpoints_enabled,
+        DEFAULT_REQUEST_BODY_LIMIT_BYTES,
+    )
+}
+
+#[cfg(test)]
+fn build_router_with_json_body_limit(state: Arc<AppState>, json_body_limit_bytes: usize) -> Router {
+    build_router_with_options(state, false, false, true, json_body_limit_bytes)
 }
 
 fn build_router_with_options(
@@ -139,6 +166,7 @@ fn build_router_with_options(
     dev_mode_enabled: bool,
     runtime_lora_updating_enabled: bool,
     scale_out_endpoints_enabled: bool,
+    json_body_limit_bytes: usize,
 ) -> Router {
     let mut router = Router::new()
         // Health & monitoring
@@ -255,7 +283,7 @@ fn build_router_with_options(
     let enable_api_key_auth = state.has_api_keys();
     let mut router = router
         .with_state(state.clone())
-        .layer(DefaultBodyLimit::max(DEFAULT_REQUEST_BODY_LIMIT_BYTES))
+        .layer(DefaultBodyLimit::max(json_body_limit_bytes))
         .layer(middleware::request_runtime_layer(state.clone()))
         .layer(from_fn_with_state(
             state.clone(),
