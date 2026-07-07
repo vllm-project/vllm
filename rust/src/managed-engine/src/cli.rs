@@ -78,6 +78,8 @@ impl ManagedEngineArgs {
         max_model_len: Option<u32>,
         max_logprobs: Option<i32>,
         profiler_config: Option<String>,
+        otlp_traces_endpoint: Option<String>,
+        collect_detailed_traces: Option<String>,
         reasoning_parser: Option<&str>,
         language_model_only: bool,
         disable_log_stats: bool,
@@ -97,6 +99,14 @@ impl ManagedEngineArgs {
         if let Some(profiler_config) = profiler_config {
             python_args.push("--profiler-config".to_string());
             python_args.push(profiler_config);
+        }
+        if let Some(otlp_traces_endpoint) = otlp_traces_endpoint {
+            python_args.push("--otlp-traces-endpoint".to_string());
+            python_args.push(otlp_traces_endpoint);
+        }
+        if let Some(collect_detailed_traces) = collect_detailed_traces {
+            python_args.push("--collect-detailed-traces".to_string());
+            python_args.push(collect_detailed_traces);
         }
         if let Some(reasoning_parser) = reasoning_parser {
             python_args.push("--reasoning-parser".to_string());

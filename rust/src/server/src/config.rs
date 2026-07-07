@@ -151,6 +151,31 @@ impl TlsConfig {
     }
 }
 
+/// OpenTelemetry / observability settings, mirroring Python's
+/// `ObservabilityConfig`. A `None` endpoint disables tracing.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Default)]
+pub struct ObservabilityConfig {
+    /// Target endpoint for the OTLP trace exporter. When `None`, no trace
+    /// provider is initialized.
+    pub otlp_traces_endpoint: Option<String>,
+    /// Opaque `--collect-detailed-traces` value, forwarded verbatim to the
+    /// engine (the frontend does not interpret it). Requires an endpoint.
+    pub collect_detailed_traces: Option<String>,
+}
+
+impl ObservabilityConfig {
+    /// Validate the tracing configuration, failing closed.
+    pub fn validate(&self) -> Result<()> {
+        if self.collect_detailed_traces.is_some() && self.otlp_traces_endpoint.is_none() {
+            bail!("--collect-detailed-traces requires --otlp-traces-endpoint to be set");
+        }
+        if self.otlp_traces_endpoint.is_some() {
+            crate::otel::validate_protocol_env()?;
+        }
+        Ok(())
+    }
+}
+
 /// Normalized runtime configuration for the minimal OpenAI-compatible server.
 #[derive(Educe, Clone, PartialEq, Eq, Serialize)]
 #[educe(Debug)]
@@ -211,6 +236,8 @@ pub struct Config {
     /// Profiler mode that registers `/start_profile` and `/stop_profile`
     /// routes when present.
     pub profiler: Option<String>,
+    /// OpenTelemetry / observability settings (OTLP trace export).
+    pub observability: ObservabilityConfig,
 }
 
 impl Config {
@@ -222,6 +249,7 @@ impl Config {
         if let Some(tls) = &self.tls {
             tls.validate()?;
         }
+        self.observability.validate()?;
         if let Some(max_logprobs) = self.max_logprobs
             && max_logprobs < -1
         {

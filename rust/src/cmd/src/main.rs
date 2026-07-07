@@ -98,6 +98,10 @@ async fn async_main(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Frontend(args) => vllm_server::serve(args.into_config(), shutdown_signal()).await,
         Command::Serve(args) => {
+            args.runtime
+                .observability_config()
+                .validate()
+                .context("invalid observability configuration")?;
             let handshake_port = args.managed_engine.resolve_handshake_port()?;
 
             if args.managed_engine.data_parallel_size_local == Some(0) {

@@ -62,6 +62,10 @@ ndarray = { version = "0.16.1", features = ["serde"] }
 openai-harmony = { package = "oss-harmony", git = "https://github.com/oss-harmony/harmony", tag = "v0.0.11", default-features = false }
 openai-protocol = "1.6.0"
 openssl = "0.10"
+opentelemetry = "0.32.0"
+opentelemetry-otlp = { version = "0.32.0", default-features = false, features = ["grpc-tonic", "trace"] }
+opentelemetry-proto = { version = "0.32.0", default-features = false, features = ["gen-tonic", "trace"] }
+opentelemetry_sdk = "0.32.1"
 parking_lot = "0.12.5"
 paste = "1.0.15"
 prometheus-client = "0.24.0"

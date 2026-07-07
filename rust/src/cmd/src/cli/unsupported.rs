@@ -322,14 +322,6 @@ pub struct EngineUnsupportedArgs {
     #[arg(long)]
     pub default_mm_loras: Option<Unsupported>,
 
-    /// Target URL to which OpenTelemetry traces will be sent.
-    #[arg(long)]
-    pub otlp_traces_endpoint: Option<Unsupported>,
-
-    /// It makes sense to set this only if `--otlp-traces-endpoint` is set.
-    #[arg(long)]
-    pub collect_detailed_traces: Option<Unsupported>,
-
     /// The interval (or buffer size) for streaming in terms of token length.
     #[arg(long)]
     pub stream_interval: Option<Unsupported>,
