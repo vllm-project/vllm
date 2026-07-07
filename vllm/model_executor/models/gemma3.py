@@ -186,6 +186,14 @@ class Gemma3Attention(nn.Module):
             else Attention
         )
 
+        # HACK: force different backends per layer type to test per-region
+        # kernel block size handling. FA accepts any multiple of 16, FlashInfer
+        # only [16,32,64], so with block_size=128 FA gets ratio=1 and FI gets
+        # ratio=2. Revert this after testing.
+        from vllm.v1.attention.backends.flash_attn import FlashAttentionBackend
+        from vllm.v1.attention.backends.flashinfer import FlashInferBackend
+
+        attn_backend = FlashInferBackend if self.is_sliding else FlashAttentionBackend
         self.attn = attn_cls(
             self.num_heads,
             self.head_dim,
@@ -197,6 +205,7 @@ class Gemma3Attention(nn.Module):
             logits_soft_cap=attn_logits_soft_cap,
             per_layer_sliding_window=sliding_window,
             prefix=f"{prefix}.attn",
+            attn_backend=attn_backend,
         )
 
     def forward(
