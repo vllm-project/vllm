@@ -7,9 +7,13 @@ Regression guard for stride computation bugs in the offloading worker
 (e.g. https://github.com/vllm-project/vllm/pull/46888) and silent KV
 cache data corruption during CPU offloading.  Runs GSM8K twice, dropping
 the GPU prefix cache (but not the CPU cache) between runs so the second
-run must reload offloaded KV data from CPU.  The reset only succeeds once
+run reloads offloaded KV data from CPU.  The reset only succeeds once
 in-flight offload transfers have released their GPU blocks, so retrying
 it until success also waits for offloading to complete.
+
+Correctness is enforced via GSM8K accuracy on both runs: corrupt reloaded
+KV drops accuracy below threshold.  The reload itself is not asserted, so
+a silently skipped reload (e.g. offloading disabled) would not be flagged.
 
 Covers both KV offloading connectors (OffloadingConnector and
 SimpleCPUOffloadConnector) across four architecture families:
