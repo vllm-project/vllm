@@ -130,6 +130,10 @@ _TOOL_PARSERS_TO_REGISTER = {
         "qwen3xml_tool_parser",
         "Qwen3XMLToolParser",
     ),
+    "rwkv": (
+        "rwkv_tool_parser",
+        "RWKVToolParser",
+    ),
     "seed_oss": (
         "seed_oss_tool_parser",
         "SeedOssToolParser",

@@ -7,20 +7,11 @@
 # the following copyright notice:
 # Copyright (c) 2023-2025, Songlin Yang, Yu Zhang
 
-import os
-
 import torch
 
 from vllm.triton_utils import HAS_TRITON, tl, triton
 
 from .op import exp
-
-
-def _rwkv7_fused_recurrent_disabled() -> bool:
-    return (
-        os.getenv("RWKV7_DISABLE_FUSED_RECURRENT") == "1"
-        or os.getenv("RWKV7_DISABLE_FUSED_PREFILL") == "1"
-    )
 
 
 @triton.heuristics(
@@ -389,12 +380,7 @@ def _fused_mul_recurrent_rwkv7_impl(
     checkpoint_offsets: torch.Tensor | None = None,
     output_checkpoint_states: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
-    if (
-        _rwkv7_fused_recurrent_disabled()
-        or not HAS_TRITON
-        or r.device.type != "cuda"
-        or r.numel() == 0
-    ):
+    if not HAS_TRITON or r.device.type != "cuda" or r.numel() == 0:
         return rwkv7_recurrent_reference_with_checkpoints(
             r=r,
             w=w,

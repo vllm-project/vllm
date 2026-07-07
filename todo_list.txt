@@ -20,7 +20,7 @@
 4. adapter-align (`/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-dev`, branch: `codex/rwkv7-adapter-align`) 仅作为参考源，不要整包搬运。
 5. 当前先不要引入 reasoning / tool parser / renderers / serving / io logging / tmp / benchmark / chat-template / no-thinking 等特化逻辑。
 6. 当前项目内 `.venv` 已补齐，创建方式为：
-   - `UV_CACHE_DIR=/tmp/uv-cache uv venv .venv --python /mnt/data/anaconda3/envs/vllm/bin/python --system-site-packages`
+   - `UV_CACHE_DIR=/tmp/uv-cache uv venv .venv --python /mnt/data/anaconda3/envs/vllm-rwkv7-upstream/bin/python --system-site-packages`
 7. 每次代码修改后，必须补：
    - 至少一轮与改动直接相关的 unit tests
    - 至少一轮相关 regression tests
@@ -79,6 +79,19 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
 - [ ] GPU / 显存相关 parity / CUDA 回归依然 pending
   - 用户要求当前暂不启动占显存测试
 
+
+## 2026-07-07 最新验证更新
+- [x] 已记录 RWKV7 迁移 inventory（已迁移 / 未迁移算子与能力）
+- [x] 已迁入并注册 `rwkv` reasoning parser
+- [x] 已迁入并注册 `rwkv` tool parser
+- [x] 已移除 `RWKV7_DISABLE_FUSED_PREFILL` / `RWKV7_DISABLE_FUSED_RECURRENT` 私有运行时开关
+- [x] RWKV7 CUDA custom-op wrapper 已显式注册到 `CUDA` dispatch key
+- [x] focused GPU pytest 通过（attention custom op / fused recurrent / checkpoint states / decode batching / cache-all）
+- [x] `vllm serve` smoke 通过：
+  - 参数包含 `--reasoning-parser rwkv --tool-call-parser rwkv --enable-auto-tool-choice`
+  - 参数包含 `--enable-prefix-caching --mamba-cache-mode all`
+  - `GET /v1/models` / `POST /v1/chat/completions` 均成功
+- [!] 当前测试模型 `/mnt/data/Models/rwkv/rwkv-step-7700-bf16-hf` 启动时仍需 `--trust-remote-code`
 
 ## 已完成
 - [x] 阅读 `/mnt/data/Codes/RWKV/vllm/vllm_rwkv7/vllm-upstream/rwkv7_upstream_handoff.md`
@@ -217,6 +230,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
    - `RWKV7_DISABLE_FUSED_PREFILL`
    - `RWKV7_DISABLE_FUSED_RECURRENT`
    - 这类模型私有环境变量通常不适合作为首个 upstream 核心 PR 的一部分。
+   - **2026-07-07 更新**：当前 upstream-prep 分支已先行剥离，改为按设备能力自动选择 fused / reference 路径。
 6. config 中的策略覆盖
    - prefix caching 默认强制 `align`
    - post optimization 默认把 cudagraph 从 `FULL_AND_PIECEWISE` 改成 `PIECEWISE`
@@ -363,7 +377,7 @@ PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 \
   - `git diff --check -- vllm/model_executor/models/rwkv7.py vllm/model_executor/models/config.py tests/model_executor/test_rwkv7.py`
 - [x] 已补齐 `.venv/bin/python`：
   - 使用 `vllm` 解释器创建：
-    `UV_CACHE_DIR=/tmp/uv-cache uv venv .venv --python /mnt/data/anaconda3/envs/vllm/bin/python --system-site-packages`
+    `UV_CACHE_DIR=/tmp/uv-cache uv venv .venv --python /mnt/data/anaconda3/envs/vllm-rwkv7-upstream/bin/python --system-site-packages`
 - [x] 已验证 `.venv` 可导入关键依赖：
   - `torch`
   - `pytest`

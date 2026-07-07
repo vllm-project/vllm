@@ -32,13 +32,13 @@
 ## 本地执行约定（2026-07-03 更新）
 
 1. **环境优先使用 `vllm`**。
-   - 推荐做法：用 `uv` 创建项目内 `.venv`，但底层解释器优先指向 `/mnt/data/anaconda3/envs/vllm/bin/python`。
+   - 推荐做法：用 `uv` 创建项目内 `.venv`，但底层解释器优先指向 `/mnt/data/anaconda3/envs/vllm-rwkv7-upstream/bin/python`。
    - 当前已验证可用的建环境方式：
 
    ```bash
    UV_CACHE_DIR=/tmp/uv-cache \
    uv venv .venv \
-     --python /mnt/data/anaconda3/envs/vllm/bin/python \
+     --python /mnt/data/anaconda3/envs/vllm-rwkv7-upstream/bin/python \
      --system-site-packages
    ```
 
@@ -71,6 +71,85 @@
 - 官方文档：
   - https://docs.vllm.ai/en/stable/contributing/
   - https://docs.vllm.ai/en/latest/contributing/#documentation
+
+## 2026-07-07 RWKV7 迁移 inventory（upstream-prep 当前状态）
+
+### 已迁移并默认启用的运行时能力
+
+- **核心 recurrent CUDA/Triton 路径已在仓内落地**
+  - `vllm/model_executor/layers/fla/ops/rwkv7.py`
+  - 已迁入并接线：
+    - `fused_recurrent_rwkv7_fwd_kernel`
+    - `fused_mul_recurrent_rwkv7`
+    - `fused_mul_recurrent_rwkv7_with_checkpoints`
+- **RWKV7 模型运行时已直接走仓内 fused 实现**
+  - `vllm/model_executor/models/rwkv7.py`
+  - decode / prefill / cache-all prefill 的 recurrent 核心都统一通过上述仓内实现调度
+- **fused 走法当前改为能力探测，而不是私有环境变量开关**
+  - packed prefill / fused recurrent 现在按设备能力自动选择
+  - CPU 继续走 reference / unpacked correctness 路径
+  - 已剥离：
+    - `RWKV7_DISABLE_FUSED_PREFILL`
+    - `RWKV7_DISABLE_FUSED_RECURRENT`
+- **serving 侧 RWKV parser 已补齐并注册**
+  - `--reasoning-parser rwkv`
+  - `--tool-call-parser rwkv`
+  - 对应实现：
+    - `vllm/reasoning/rwkv_reasoning_parser.py`
+    - `vllm/tool_parsers/rwkv_tool_parser.py`
+
+### 已迁移但仍需后续收敛的能力
+
+- **cache-all / checkpoint 预填充链路已经在当前分支中可用**
+  - 但这部分仍偏 RWKV7 定制化
+  - 是否作为首个 upstream PR 一并提交，仍需继续收敛
+- **runtime state 维持 FP32**
+  - 当前保留“仅真正需要数值稳定性的 runtime state 使用 FP32”的策略
+
+### 尚未迁移 / 仍未对齐 upstream 暴露面的能力
+
+- **旧私有分支中的细粒度 `RWKV7_USE_*` 开关未迁移，也不准备继续保留为 upstream 接口**
+  - `RWKV7_USE_FUSED_MIX6`
+  - `RWKV7_USE_FUSED_KK_PRE`
+  - `RWKV7_USE_FUSED_LNX_RKVRES_XG`
+  - `RWKV7_USE_ALT_RECURRENT_KERNEL`
+  - `RWKV7_USE_FUSED_CMIX`
+  - `RWKV7_USE_DIRECT_LINEAR`
+- **RWKV7 已声明 `supports_mamba_prefix_caching`**
+  - 当前 upstream-prep 分支会按 base `MambaModelConfig` 正式暴露 prefix caching `all` 支持
+  - 后续仍需继续评估：是否还需要进一步收敛 cache-all 相关实现边界，以便更适合首个 upstream PR
+
+### 本轮推进优先级（与用户确认一致）
+
+1. 记录算子/能力迁移 inventory
+2. 迁移 `rwkv` reasoning parser
+3. 迁移 `rwkv` tool parser
+4. 再评估 prefix caching 如何以更 upstream-friendly 的形态收敛
+
+### 2026-07-07 本轮验证结果
+
+- **CUDA custom-op wrapper 已补齐显式 CUDA 注册**
+  - `rwkv7_attention`
+  - `rwkv7_block_forward`
+  - 目的：避免测试/serve 环境里 `current_platform` 解析为 `CPU/Unspecified` 时，custom op 只注册到 CPU dispatch key，导致 CUDA 前向路径不可用。
+- **GPU focused pytest 已通过**
+  - `test_rwkv7_attention_custom_op_matches_direct_forward`
+  - `test_rwkv7_fused_recurrent_matches_reference`
+  - `test_rwkv7_fused_recurrent_checkpoint_states_match_reference`
+  - `test_rwkv7_block_batches_decode_tokens_without_changing_results_cuda`
+  - 以及 4 个 cache-all focused tests
+- **serve smoke 已通过**
+  - 成功启动命令包含：
+    - `--reasoning-parser rwkv`
+    - `--tool-call-parser rwkv`
+    - `--enable-auto-tool-choice`
+    - `--enable-prefix-caching --mamba-cache-mode all`
+  - 本地检查通过：
+    - `GET /v1/models` 返回 `rwkv7-7700`
+    - `POST /v1/chat/completions` 成功返回 `OK`
+- **当前测试模型仍需 `--trust-remote-code`**
+  - 对 `/mnt/data/Models/rwkv/rwkv-step-7700-bf16-hf`，若不加该参数，HF config 校验会拒绝加载。
+  - 这说明“当前分支的 vLLM 适配已能正常 serve”与“这个具体 checkpoint 已完全摆脱 HF custom code”是两个独立问题。
 
 ## 2026-07-06 最新状态补充
 

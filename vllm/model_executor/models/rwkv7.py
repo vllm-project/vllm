@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Inference-only RWKV7 model."""
 
-import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from itertools import islice
@@ -44,6 +43,7 @@ from vllm.model_executor.layers.vocab_parallel_embedding import (
 from vllm.model_executor.models.interfaces import (
     HasInnerState,
     IsAttentionFree,
+    SupportsMambaPrefixCaching,
     SupportsPP,
 )
 from vllm.sequence import IntermediateTensors
@@ -127,18 +127,13 @@ def token_shift_with_cache_varlen(
     return delta, final_state
 
 
-def _rwkv7_packed_prefill_enabled() -> bool:
-    return (
-        os.getenv("RWKV7_DISABLE_FUSED_PREFILL") != "1"
-        and os.getenv("RWKV7_DISABLE_FUSED_RECURRENT") != "1"
-    )
+def _rwkv7_packed_prefill_enabled(hidden_states: torch.Tensor) -> bool:
+    return hidden_states.device.type == "cuda"
 
 
 def _can_use_rwkv7_fused_recurrent(hidden_states: torch.Tensor) -> bool:
-    return (
-        hidden_states.device.type == "cuda"
-        and _rwkv7_packed_prefill_enabled()
-    )
+    return hidden_states.device.type == "cuda"
+
 
 def _custom_op_optional_tensor(
     tensor: torch.Tensor | None,
@@ -440,6 +435,10 @@ direct_register_custom_op(
         "v_first_out",
     ],
     fake_impl=rwkv7_attention_fake,
+    # These wrappers are only exercised on CUDA tensors. Register them
+    # explicitly on the CUDA dispatch key so they remain available even when
+    # current_platform resolves to an unspecified/CPU platform in test envs.
+    dispatch_key="CUDA",
 )
 
 
@@ -475,6 +474,7 @@ direct_register_custom_op(
     op_func=rwkv7_block_forward,
     mutates_args=["output", "v_first_out"],
     fake_impl=rwkv7_block_forward_fake,
+    dispatch_key="CUDA",
 )
 
 
@@ -1671,7 +1671,7 @@ class RWKV7Block(nn.Module, MambaBase):
                     block_size=self.cache_config.mamba_block_size,
                 )
 
-                if _rwkv7_packed_prefill_enabled():
+                if _rwkv7_packed_prefill_enabled(hidden_states):
                     states = self._get_prefill_kv_states(
                         prefill_plan.input_slot_ids,
                         prefill_plan.has_initial_state,
@@ -1796,7 +1796,7 @@ class RWKV7Block(nn.Module, MambaBase):
                     prefill_req_offset:prefill_req_end
                 ].to(dtype=torch.long)
 
-                if _rwkv7_packed_prefill_enabled():
+                if _rwkv7_packed_prefill_enabled(hidden_states):
                     prefill_query_start_loc = (
                         attn_metadata.query_start_loc[
                             prefill_req_offset : prefill_req_end + 1
@@ -2036,6 +2036,7 @@ class RWKV7ForCausalLM(
     HasInnerState,
     IsAttentionFree,
     SupportsPP,
+    SupportsMambaPrefixCaching,
 ):
     def __init__(self, *, vllm_config: VllmConfig, prefix: str = "") -> None:
         super().__init__()
