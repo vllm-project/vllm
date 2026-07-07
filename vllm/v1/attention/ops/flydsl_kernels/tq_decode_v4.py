@@ -29,24 +29,34 @@ from __future__ import annotations
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl, vector
-from flydsl.expr.typing import T, Int32
-from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
-from flydsl.runtime.device import get_rocm_arch as get_hip_arch
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import scf as _scf
-
+from flydsl.expr import (
+    arith,
+    buffer_ops,
+    const_expr,  # noqa: F401  kept for kernel-DSL API parity
+    gpu,
+    range_constexpr,
+    rocdl,
+    vector,
+)
+from flydsl.expr.typing import Int32, T  # noqa: F401  Int32 via fx.Int32
+from flydsl.runtime.device import get_rocm_arch as get_hip_arch
+from flydsl.utils.smem_allocator import SmemAllocator, SmemPtr
 
 # === Constants (Qwen-class TQ decode profile) ===============================
 HEAD_SIZE = 128
-KV_BLOCK_SIZE = 16          # default; overridable via build_tq_decode_v4_module(kv_block_size=...)
-TILE_SIZE = 16              # MFMA tile = 16 tokens (do not change without re-deriving MFMA shapes)
+# default; overridable via build_tq_decode_v4_module(kv_block_size=...)
+KV_BLOCK_SIZE = 16
+# MFMA tile = 16 tokens (do not change without re-deriving MFMA shapes)
+TILE_SIZE = 16
 N_CENTROIDS = 16
-QUERY_GROUP_SIZE = 16        # default for tests; overridable via build_tq_decode_v4_module(query_group_size=...)
+# default for tests; overridable via build_tq_decode_v4_module(query_group_size=...)
+QUERY_GROUP_SIZE = 16
 WARP_SIZE = 64
 NUM_WARPS = 1
 BLOCK_THREADS = NUM_WARPS * WARP_SIZE
-KV_COMPUTE_BLOCK = 256                      # 16 K-tiles × 16 tokens
+KV_COMPUTE_BLOCK = 256  # 16 K-tiles × 16 tokens
 
 # TQ SoA layout
 NUM_SOA_FIELDS = 3
@@ -59,22 +69,22 @@ DATA_BYTES_PER_SLOT = KEY_DATA_BYTES + VAL_DATA_BYTES
 
 # MFMA
 MFMA_M = MFMA_N = 16
-MFMA_K_BF16_QK = 32                         # CDNA4 wide-K (mfma_f32_16x16x32_bf16)
-MFMA_K_BF16_PV = 16                         # PV's K = token tile = 16
-QK_K_CHUNKS = HEAD_SIZE // MFMA_K_BF16_QK   # 4 (down from 8)
-PV_N_CHUNKS = HEAD_SIZE // MFMA_N           # 8
+MFMA_K_BF16_QK = 32  # CDNA4 wide-K (mfma_f32_16x16x32_bf16)
+MFMA_K_BF16_PV = 16  # PV's K = token tile = 16
+QK_K_CHUNKS = HEAD_SIZE // MFMA_K_BF16_QK  # 4 (down from 8)
+PV_N_CHUNKS = HEAD_SIZE // MFMA_N  # 8
 
 # LDS regions
-CENTROID_LDS_BYTES = N_CENTROIDS * 4                        # 64
-Q_LDS_BYTES = QUERY_GROUP_SIZE * HEAD_SIZE * 2              # 4096
-KV_TILE_LDS_BYTES = TILE_SIZE * HEAD_SIZE * 2               # 4096
+CENTROID_LDS_BYTES = N_CENTROIDS * 4  # 64
+Q_LDS_BYTES = QUERY_GROUP_SIZE * HEAD_SIZE * 2  # 4096
+KV_TILE_LDS_BYTES = TILE_SIZE * HEAD_SIZE * 2  # 4096
 
 LOG2E = 1.4426950408889634
 NEG_INF_VAL = float("-inf")
 
 
 def _vsplat_mul(vec, scalar):
-    s = scalar.ir_value() if hasattr(scalar, 'ir_value') else scalar
+    s = scalar.ir_value() if hasattr(scalar, "ir_value") else scalar
     return vec * vector.broadcast(T.f32x4, s)
 
 
@@ -149,17 +159,17 @@ def build_tq_decode_v4_module(
     PARTITION_EXTENT_TOKENS = TGPP * KV_COMPUTE_BLOCK
 
     QG = int(query_group_size)
-    QG_LOAD_ITERS = QG // 4         # 2 for QG=8, 4 for QG=16
-    OOB_OFFSET = 0x7FFFFFF0         # ~2GB byte offset; > any plausible buffer
+    QG_LOAD_ITERS = QG // 4  # 2 for QG=8, 4 for QG=16
+    OOB_OFFSET = 0x7FFFFFF0  # noqa: F841  ~2GB byte offset; > any plausible buffer
 
     _BS = int(kv_block_size)
-    _TILES_PER_BLOCK = _BS // TILE_SIZE     # 1 for BS=16, 2 for BS=32
+    _TILES_PER_BLOCK = _BS // TILE_SIZE  # 1 for BS=16, 2 for BS=32
 
     global allocator
     arch = get_hip_arch()
 
     if softmax_scale is None:
-        softmax_scale = 1.0 / (HEAD_SIZE ** 0.5)
+        softmax_scale = 1.0 / (HEAD_SIZE**0.5)
     _qk_scale = float(softmax_scale)
 
     # --- Strides ---
@@ -204,10 +214,10 @@ def build_tq_decode_v4_module(
         seq = gpu.block_idx.x
         kv_h = gpu.block_idx.y
         part = gpu.block_idx.z
-        lane = tid                                      # 0..63
-        mfma_row = lane & fx.Int32(15)                  # = query_row (B's N) /
-                                                        #   token (A's M for QK)
-        mfma_col_grp = lane >> fx.Int32(4)              # 0..3, K-group dim
+        lane = tid  # 0..63
+        mfma_row = lane & fx.Int32(15)  # = query_row (B's N) /
+        #   token (A's M for QK)
+        mfma_col_grp = lane >> fx.Int32(4)  # 0..3, K-group dim
 
         # ---- Buffer resources -------------------------------------------
         q_rsrc = buffer_ops.create_buffer_resource(query_ptr, max_size=True)
@@ -224,7 +234,7 @@ def build_tq_decode_v4_module(
         cent_lds = SmemPtr(base, centroid_off, T.f32, shape=(N_CENTROIDS,))
         q_lds_i32 = SmemPtr(base, q_off, T.i32, shape=(Q_LDS_BYTES // 4,)).get()
         q_lds_i64 = SmemPtr(base, q_off, T.i64, shape=(Q_LDS_BYTES // 8,)).get()
-        kv_lds_i32 = SmemPtr(base, kv_off, T.i32, shape=(KV_TILE_LDS_BYTES // 4,)).get()
+        kv_lds_i32 = SmemPtr(base, kv_off, T.i32, shape=(KV_TILE_LDS_BYTES // 4,)).get()  # noqa: F841
         kv_lds_i64 = SmemPtr(base, kv_off, T.i64, shape=(KV_TILE_LDS_BYTES // 8,)).get()
         kv_lds_i16 = SmemPtr(base, kv_off, T.i16, shape=(KV_TILE_LDS_BYTES // 2,)).get()
 
@@ -248,13 +258,11 @@ def build_tq_decode_v4_module(
 
         # Helper: unwrap fx wrapper → raw ir.Value (used in STEP B' and STEP F)
         def _ival(v):
-            return v.ir_value() if hasattr(v, 'ir_value') else v
+            return v.ir_value() if hasattr(v, "ir_value") else v
 
         # ===== STEP A: Load centroids → LDS (cooperative, race-safe) =====
         c_idx_safe = lane & fx.Int32(N_CENTROIDS - 1)
-        c_val = buffer_ops.buffer_load(
-            cent_rsrc, c_idx_safe, vec_width=1, dtype=T.f32
-        )
+        c_val = buffer_ops.buffer_load(cent_rsrc, c_idx_safe, vec_width=1, dtype=T.f32)
         cent_lds.store(c_val, [arith.index_cast(T.index, c_idx_safe)])
         gpu.barrier()
 
@@ -274,22 +282,21 @@ def build_tq_decode_v4_module(
         if not use_wht_butterfly:
             # --- STEP B: load pre-rotated q_rot → Q_LDS ---
             for c in range_constexpr(QG_LOAD_ITERS):
-                row_chunk = lane + fx.Int32(c * WARP_SIZE)     # 0..QG*16-1
-                row = row_chunk >> fx.Int32(4)                 # 0..QG-1
-                col_b = row_chunk & fx.Int32(15)               # 0..15
-                col_elem = col_b * fx.Int32(8)                 # 0..120 in bf16
-                q_off_elem = (
-                    seq * c_sq
-                    + (kv_h * c_qg + row) * c_qh
-                    + col_elem
-                )
+                row_chunk = lane + fx.Int32(c * WARP_SIZE)  # 0..QG*16-1
+                row = row_chunk >> fx.Int32(4)  # 0..QG-1
+                col_b = row_chunk & fx.Int32(15)  # 0..15
+                col_elem = col_b * fx.Int32(8)  # 0..120 in bf16
+                q_off_elem = seq * c_sq + (kv_h * c_qg + row) * c_qh + col_elem
                 q_v = buffer_ops.buffer_load(
-                    q_rsrc, q_off_elem // fx.Int32(2),
-                    vec_width=4, dtype=T.i32,
+                    q_rsrc,
+                    q_off_elem // fx.Int32(2),
+                    vec_width=4,
+                    dtype=T.i32,
                 )
                 q_lds_byte = row * fx.Int32(HEAD_SIZE * 2) + col_elem * fx.Int32(2)
                 vector.store(
-                    q_v, q_lds_i32,
+                    q_v,
+                    q_lds_i32,
                     [arith.index_cast(T.index, q_lds_byte // fx.Int32(4))],
                 )
         else:
@@ -298,29 +305,26 @@ def build_tq_decode_v4_module(
             # Lane i holds elements [2*i, 2*i+1] of one head at a time.
             # After all QG heads + barrier, Q_LDS is identical to what STEP B
             # would have produced from an externally pre-rotated q_rot tensor.
-            _WHT_SCALE = arith.constant(1.0 / (HEAD_SIZE ** 0.5), type=T.f32)
+            _WHT_SCALE = arith.constant(1.0 / (HEAD_SIZE**0.5), type=T.f32)
             _ONE_F32_I32 = arith.constant(0x3F800000, type=T.i32)  # +1.0 bits
             _C16 = arith.constant(16, type=T.i32)
             _C31 = arith.constant(31, type=T.i32)
-            _q_lds_smem = SmemPtr(base, q_off, T.i32,
-                                  shape=(Q_LDS_BYTES // 4,))
+            _q_lds_smem = SmemPtr(base, q_off, T.i32, shape=(Q_LDS_BYTES // 4,))
 
             for h in range_constexpr(QG):
                 # -- Load 2 packed bf16 (= 1 i32) for this lane / head --
                 _q_elem_off = (
-                    seq * c_sq
-                    + (kv_h * c_qg + fx.Int32(h)) * c_qh
-                    + lane * fx.Int32(2)
+                    seq * c_sq + (kv_h * c_qg + fx.Int32(h)) * c_qh + lane * fx.Int32(2)
                 )
                 _q_raw = buffer_ops.buffer_load(
-                    q_rsrc, _q_elem_off // fx.Int32(2),
-                    vec_width=1, dtype=T.i32,
+                    q_rsrc,
+                    _q_elem_off // fx.Int32(2),
+                    vec_width=1,
+                    dtype=T.i32,
                 )
                 # Unpack i32 → 2 × bf16 → 2 × f32
                 _lo_i16 = arith.trunci(T.i16, _q_raw)
-                _hi_i16 = arith.trunci(
-                    T.i16, arith.shrui(_q_raw, _C16)
-                )
+                _hi_i16 = arith.trunci(T.i16, arith.shrui(_q_raw, _C16))
                 _q_lo = arith.extf(T.f32, arith.bitcast(T.bf16, _lo_i16))
                 _q_hi = arith.extf(T.f32, arith.bitcast(T.bf16, _hi_i16))
 
@@ -340,14 +344,12 @@ def build_tq_decode_v4_module(
                 # the transform by a per-coordinate sign vs. the pure Hadamard
                 # PiT used to rotate K -> decorrelated Q·K scores -> garbage.
                 # sign = bitcast_f32(float_bits(1.0) XOR (lane_bit << 31))
-                for _log2m in range_constexpr(6):   # masks 1, 2, 4, 8, 16, 32
+                for _log2m in range_constexpr(6):  # masks 1, 2, 4, 8, 16, 32
                     _mask = 1 << _log2m
                     _other_lo = _q_lo.shuffle_xor(fx.Int32(_mask), c_w)
                     _other_hi = _q_hi.shuffle_xor(fx.Int32(_mask), c_w)
                     # lane_bit = 0 if this lane is "low" in the pair, else 1
-                    _lane_bit = _ival(
-                        (lane >> fx.Int32(_log2m)) & fx.Int32(1)
-                    )
+                    _lane_bit = _ival((lane >> fx.Int32(_log2m)) & fx.Int32(1))
                     _sign_f32 = arith.bitcast(
                         T.f32,
                         arith.xori(
@@ -365,12 +367,8 @@ def build_tq_decode_v4_module(
                 # Pack 2 × f32 → 2 × bf16 → 1 × i32
                 _lo_bf16_out = arith.truncf(T.bf16, _ival(_q_lo))
                 _hi_bf16_out = arith.truncf(T.bf16, _ival(_q_hi))
-                _lo_i32_out = arith.extui(
-                    T.i32, arith.bitcast(T.i16, _lo_bf16_out)
-                )
-                _hi_i32_out = arith.extui(
-                    T.i32, arith.bitcast(T.i16, _hi_bf16_out)
-                )
+                _lo_i32_out = arith.extui(T.i32, arith.bitcast(T.i16, _lo_bf16_out))
+                _hi_i32_out = arith.extui(T.i32, arith.bitcast(T.i16, _hi_bf16_out))
                 _packed = arith.ori(
                     _lo_i32_out,
                     arith.shli(_hi_i32_out, _C16),
@@ -400,7 +398,8 @@ def build_tq_decode_v4_module(
                 + mfma_col_grp * fx.Int32(2)
             )
             qv = vector.load_op(
-                T.vec(2, T.i64), q_lds_i64,
+                T.vec(2, T.i64),
+                q_lds_i64,
                 [arith.index_cast(T.index, q_idx_i64)],
             )
             q_chunks.append(vector.bitcast(T.vec(8, T.bf16), qv))
@@ -498,7 +497,8 @@ def build_tq_decode_v4_module(
         trip_idx = arith.index_cast(
             T.index,
             trip_or_zero.ir_value()
-            if hasattr(trip_or_zero, 'ir_value') else trip_or_zero,
+            if hasattr(trip_or_zero, "ir_value")
+            else trip_or_zero,
         )
         # Initial iter_args list: FA-2 accumulator state.
         # Order: running_max, running_sum, acc_pv[0..PV_N_CHUNKS-1].
@@ -512,7 +512,10 @@ def build_tq_decode_v4_module(
             *[_ival(p) for p in acc_pv],
         ]
         _for_op = _scf.ForOp(
-            c_zero_idx, trip_idx, c_one_idx, _init_iter,
+            c_zero_idx,
+            trip_idx,
+            c_one_idx,
+            _init_iter,
         )
         _for_ip = ir.InsertionPoint(_for_op.body)
         _for_ip.__enter__()
@@ -520,24 +523,22 @@ def build_tq_decode_v4_module(
             tg_idx = _for_op.induction_variable
             tg_i32 = fx.Int32(arith.index_cast(T.i32, tg_idx))
             partition_start = partition_base + tg_i32 * c_kcb
-            bt_seq_base = (
-                seq * c_bt + (partition_start // fx.Int32(_BS))
-            )
+            bt_seq_base = seq * c_bt + (partition_start // fx.Int32(_BS))
             running_max = _for_op.inner_iter_args[0]
             running_sum = _for_op.inner_iter_args[1]
             acc_pv = list(_for_op.inner_iter_args[2:])
             for n_tile in range_constexpr(16):
                 block_in_part = n_tile // _TILES_PER_BLOCK
                 tile_in_block = n_tile % _TILES_PER_BLOCK
-                tile_start_tok = (
-                    partition_start + fx.Int32(n_tile * TILE_SIZE)
-                )
+                tile_start_tok = partition_start + fx.Int32(n_tile * TILE_SIZE)
                 tile_in_seq = tile_start_tok < seq_len
                 bt_off = bt_seq_base + fx.Int32(block_in_part)
                 bt_off_safe = tile_in_seq.select(bt_off, seq * c_bt)
                 phys_block = buffer_ops.buffer_load(
-                    bt_rsrc, bt_off_safe,
-                    vec_width=1, dtype=T.i32,
+                    bt_rsrc,
+                    bt_off_safe,
+                    vec_width=1,
+                    dtype=T.i32,
                 )
                 block_base = phys_block * c_block
                 data_region = block_base
@@ -555,8 +556,10 @@ def build_tq_decode_v4_module(
                 )
                 k_byte = data_bases_byte + chunk_in_tok * fx.Int32(16)
                 k_packed = buffer_ops.buffer_load(
-                    kv_rsrc, k_byte // fx.Int32(4),
-                    vec_width=4, dtype=T.i32,
+                    kv_rsrc,
+                    k_byte // fx.Int32(4),
+                    vec_width=4,
+                    dtype=T.i32,
                 )
 
                 # ---- HOISTED: issue V data + meta HBM loads early ---------
@@ -565,33 +568,47 @@ def build_tq_decode_v4_module(
                 # of the V HBM latency behind compute.
                 v_byte = data_bases_byte + c_keydata + chunk_in_tok * fx.Int32(16)
                 v_packed = buffer_ops.buffer_load(
-                    kv_rsrc, v_byte // fx.Int32(4),
-                    vec_width=4, dtype=T.i32,
+                    kv_rsrc,
+                    v_byte // fx.Int32(4),
+                    vec_width=4,
+                    dtype=T.i32,
                 )
                 vscale_u16 = (
                     meta_region // fx.Int32(2)
                     + kv_h * c_meta_u16_per_kvh
-                    + c_vscale_off_u16 + slot
+                    + c_vscale_off_u16
+                    + slot
                 )
                 vzero_u16 = (
                     meta_region // fx.Int32(2)
                     + kv_h * c_meta_u16_per_kvh
-                    + c_vzero_off_u16 + slot
+                    + c_vzero_off_u16
+                    + slot
                 )
                 vscale_raw = buffer_ops.buffer_load(
-                    kv_rsrc, vscale_u16, vec_width=1, dtype=T.i16,
+                    kv_rsrc,
+                    vscale_u16,
+                    vec_width=1,
+                    dtype=T.i16,
                 )
                 vzero_raw = buffer_ops.buffer_load(
-                    kv_rsrc, vzero_u16, vec_width=1, dtype=T.i16,
+                    kv_rsrc,
+                    vzero_u16,
+                    vec_width=1,
+                    dtype=T.i16,
                 )
 
                 knorm_u16 = (
                     meta_region // fx.Int32(2)
                     + kv_h * c_meta_u16_per_kvh
-                    + c_knorm_off_u16 + slot
+                    + c_knorm_off_u16
+                    + slot
                 )
                 knorm_raw = buffer_ops.buffer_load(
-                    kv_rsrc, knorm_u16, vec_width=1, dtype=T.i16,
+                    kv_rsrc,
+                    knorm_u16,
+                    vec_width=1,
+                    dtype=T.i16,
                 )
                 knorm_f16 = arith.bitcast(T.f16, knorm_raw)
                 knorm_f32 = arith.extf(T.f32, knorm_f16)
@@ -613,7 +630,8 @@ def build_tq_decode_v4_module(
                     v_bf16 = vector.from_elements(T.vec(8, T.bf16), bf16_elems)
                     v_i64 = vector.bitcast(T.vec(2, T.i64), v_bf16)
                     vector.store(
-                        v_i64, kv_lds_i64,
+                        v_i64,
+                        kv_lds_i64,
                         [arith.index_cast(T.index, chunk_kreg + fx.Int32(w * 2))],
                     )
                 gpu.barrier()
@@ -629,7 +647,8 @@ def build_tq_decode_v4_module(
                         + mfma_col_grp * fx.Int32(2)
                     )
                     kv_load = vector.load_op(
-                        T.vec(2, T.i64), kv_lds_i64,
+                        T.vec(2, T.i64),
+                        kv_lds_i64,
                         [arith.index_cast(T.index, k_idx_i64)],
                     )
                     k_op = vector.bitcast(T.vec(8, T.bf16), kv_load)
@@ -652,8 +671,10 @@ def build_tq_decode_v4_module(
                     in_b = kv_tok < seq_len
                     v = vector.extract(qk_acc, static_position=[elem])
                     qk_acc = vector.insert(
-                        in_b.select(v, NEG_INF), qk_acc,
-                        static_position=[elem], dynamic_position=[],
+                        in_b.select(v, NEG_INF),
+                        qk_acc,
+                        static_position=[elem],
+                        dynamic_position=[],
                     )
 
                 # FA2 online softmax: per-query-row reduce.
@@ -682,8 +703,9 @@ def build_tq_decode_v4_module(
                     d = (new_max > NEG_INF).select(d, NEG_INF)
                     p = (d * LOG2E_C).exp2(fastmath=arith.FastMathFlags.fast)
                     tile_sum = tile_sum + p
-                    qk_acc = vector.insert(p, qk_acc,
-                                           static_position=[elem], dynamic_position=[])
+                    qk_acc = vector.insert(
+                        p, qk_acc, static_position=[elem], dynamic_position=[]
+                    )
 
                 ts1 = tile_sum.shuffle_xor(fx.Int32(16), c_w)
                 tile_sum = tile_sum + ts1
@@ -703,10 +725,9 @@ def build_tq_decode_v4_module(
                     # Each lane writes 32 contiguous bf16 (one token, head_dims
                     # chunk_in_tok*32..+31) as 4× ds_write_b128 = 4× vec(2,i64).
                     # Replaces 32× ds_write_b16 of the legacy transposed path.
-                    v_lds_elem_base = (
-                        tok_in_tile * fx.Int32(HEAD_SIZE)
-                        + chunk_in_tok * fx.Int32(32)
-                    )
+                    v_lds_elem_base = tok_in_tile * fx.Int32(
+                        HEAD_SIZE
+                    ) + chunk_in_tok * fx.Int32(32)
                     for w in range_constexpr(4):
                         word_i32 = vector.extract(v_packed, static_position=[w])
                         bf16_elems = []
@@ -718,11 +739,12 @@ def build_tq_decode_v4_module(
                             bf16_elems.append(elem_bf16)
                         v_bf16 = vector.from_elements(T.vec(8, T.bf16), bf16_elems)
                         v_i64 = vector.bitcast(T.vec(2, T.i64), v_bf16)
-                        v_lds_i64_idx = (
-                            v_lds_elem_base + fx.Int32(w * 8)
-                        ) // fx.Int32(4)
+                        v_lds_i64_idx = (v_lds_elem_base + fx.Int32(w * 8)) // fx.Int32(
+                            4
+                        )
                         vector.store(
-                            v_i64, kv_lds_i64,
+                            v_i64,
+                            kv_lds_i64,
                             [arith.index_cast(T.index, v_lds_i64_idx)],
                         )
                     # ── HW V transpose: cross-lane LDS sync ─────────────────────
@@ -771,8 +793,11 @@ def build_tq_decode_v4_module(
                             head_dim = chunk_in_tok * fx.Int32(32) + fx.Int32(w * 8 + n)
                             v_idx_i16 = head_dim * fx.Int32(TILE_SIZE) + tok_in_tile
                             v_vec = vector.from_elements(T.vec(1, T.i16), [elem_i16])
-                            vector.store(v_vec, kv_lds_i16,
-                                         [arith.index_cast(T.index, v_idx_i16)])
+                            vector.store(
+                                v_vec,
+                                kv_lds_i16,
+                                [arith.index_cast(T.index, v_idx_i16)],
+                            )
                 gpu.barrier()
 
                 # ---- PV MFMA: A=V[head_dim, token], B=P (=qk_acc bf16) -----
@@ -804,10 +829,12 @@ def build_tq_decode_v4_module(
                         v_byte_off = v_lane_byte + fx.Int32(h * 32)
                         v_byte_i64 = fx.Int64(v_byte_off)
                         v_ptr = buffer_ops.create_llvm_ptr(
-                            v_byte_i64, address_space=3,
+                            v_byte_i64,
+                            address_space=3,
                         )
                         v_op_raw = rocdl.ds_read_tr16_b64(
-                            T.vec(4, T.i16), v_ptr,
+                            T.vec(4, T.i16),
+                            v_ptr,
                         ).result
                         acc_pv[h] = rocdl.mfma_f32_16x16x16bf16_1k(
                             T.f32x4, [v_op_raw, p_op, acc_pv[h], 0, 0, 0]
@@ -818,12 +845,12 @@ def build_tq_decode_v4_module(
                     #          = (mfma_row + h*16) * 32 + col_grp*8
                     # i64 idx  = (mfma_row + h*16) * 4 + col_grp
                     for h in range_constexpr(PV_N_CHUNKS):
-                        v_idx_i64 = (
-                            (mfma_row + fx.Int32(h * 16)) * fx.Int32(4)
-                            + mfma_col_grp
-                        )
+                        v_idx_i64 = (mfma_row + fx.Int32(h * 16)) * fx.Int32(
+                            4
+                        ) + mfma_col_grp
                         kv_load = vector.load_op(
-                            T.vec(1, T.i64), kv_lds_i64,
+                            T.vec(1, T.i64),
+                            kv_lds_i64,
                             [arith.index_cast(T.index, v_idx_i64)],
                         )
                         v_op = vector.bitcast(T.vec(4, T.i16), kv_load)
@@ -831,11 +858,13 @@ def build_tq_decode_v4_module(
                             T.f32x4, [v_op, p_op, acc_pv[h], 0, 0, 0]
                         )
 
-            _scf.YieldOp([
-                _ival(running_max),
-                _ival(running_sum),
-                *[_ival(p) for p in acc_pv],
-            ])
+            _scf.YieldOp(
+                [
+                    _ival(running_max),
+                    _ival(running_sum),
+                    *[_ival(p) for p in acc_pv],
+                ]
+            )
         finally:
             _for_ip.__exit__(None, None, None)
         # Pull final accumulator values out of the for_op results.
@@ -860,7 +889,7 @@ def build_tq_decode_v4_module(
         # outputs are computational waste) skip the stores entirely.
         valid_row_pred = arith.cmpi(
             arith.CmpIPredicate.ult,
-            mfma_row.ir_value() if hasattr(mfma_row, 'ir_value') else mfma_row,
+            mfma_row.ir_value() if hasattr(mfma_row, "ir_value") else mfma_row,
             arith.constant(QG, type=T.i32),
         )
         _if = _scf.IfOp(valid_row_pred)
@@ -871,24 +900,21 @@ def build_tq_decode_v4_module(
                 pv_i32x2 = vector.bitcast(T.vec(2, T.i32), pv_bf16)
                 head_dim_start = fx.Int32(h * 16) + mfma_col_grp * fx.Int32(4)
                 out_off_elem = (
-                    out_base
-                    + mfma_row * fx.Int32(HEAD_SIZE)
-                    + head_dim_start
+                    out_base + mfma_row * fx.Int32(HEAD_SIZE) + head_dim_start
                 )
                 buffer_ops.buffer_store(
-                    pv_i32x2, out_rsrc,
+                    pv_i32x2,
+                    out_rsrc,
                     out_off_elem * fx.Int32(2),
                     offset_is_bytes=True,
                 )
 
             c_npq = fx.Int32(num_partitions * QG)
             ml_off = (
-                seq * fx.Int32(_stride_ml_seq)
-                + kv_h * c_npq + part * c_qg + mfma_row
+                seq * fx.Int32(_stride_ml_seq) + kv_h * c_npq + part * c_qg + mfma_row
             )
             es_off = (
-                seq * fx.Int32(_stride_es_seq)
-                + kv_h * c_npq + part * c_qg + mfma_row
+                seq * fx.Int32(_stride_es_seq) + kv_h * c_npq + part * c_qg + mfma_row
             )
             buffer_ops.buffer_store(running_max, ml_rsrc, ml_off)
             buffer_ops.buffer_store(running_sum, es_rsrc, es_off)

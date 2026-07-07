@@ -32,13 +32,13 @@ import torch
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
-from .triton_turboquant_decode import _use_fp8_e4b15
-from .triton_turboquant_decode_v2 import build_pair_lut
-
 # reduce_segments is KV-format-agnostic: by the time it runs, K/V have been
 # consumed and only (max, expsum, partial_output) triples remain. Reuse the
 # baseline's implementation verbatim to avoid code duplication.
 from vllm.v1.attention.ops.triton_unified_attention import reduce_segments
+
+from .triton_turboquant_decode import _use_fp8_e4b15
+from .triton_turboquant_decode_v2 import build_pair_lut
 
 _is_hip = current_platform.is_rocm()
 

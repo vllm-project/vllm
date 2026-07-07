@@ -24,11 +24,10 @@ Architecture:
 Kernel module is built once per ``(num_kv_heads, num_partitions,
 max_blocks_per_seq, scale)`` shape and cached.
 """
+
 from __future__ import annotations
 
-import math
 import os
-import sys
 from typing import Any
 
 import torch
@@ -40,31 +39,18 @@ from vllm.logger import init_logger
 logger = init_logger(__name__)
 
 # -- FlyDSL import bootstrap --------------------------------------------------
-# FlyDSL lives outside the vLLM package tree. Add both the source and the
-# built python_packages dir to sys.path lazily on first use, so import-time
-# failures don't break vLLM startup on non-MI355X hosts.
-# FlyDSL is imported directly when it is installed on the PYTHONPATH (e.g. via
-# pip). If it lives outside site-packages, point VLLM_FLYDSL_ROOT (source
-# checkout) and/or VLLM_FLYDSL_PKGS (built python_packages dir) at it and we
-# prepend them to sys.path on first use. Unset by default -- no machine-specific
-# paths are assumed.
-_FLYDSL_ROOT = os.environ.get("VLLM_FLYDSL_ROOT")
-_FLYDSL_PKGS = os.environ.get("VLLM_FLYDSL_PKGS")
-
-
-def _ensure_flydsl_paths() -> None:
-    for _p in (_FLYDSL_PKGS, _FLYDSL_ROOT):
-        if _p and _p not in sys.path:
-            sys.path.insert(0, _p)
+# FlyDSL is imported directly and must be importable (pip-installed, or on
+# PYTHONPATH). Import failures are caught below and fall back to the Triton v3
+# decode, so vLLM startup is unaffected on hosts without FlyDSL.
 
 
 _FLYDSL_AVAILABLE: bool | None = None
-_TQ_MOD = None       # kernels.tq_decode_v4 module (Qwen GQA-{8,16})
+_TQ_MOD = None  # kernels.tq_decode_v4 module (Qwen GQA-{8,16})
 _TQ_MOD_GQA6 = None  # kernels.tq_decode_v4_gqa6 module (MiniMax GQA-6, optional)
-_FLYC = None    # flydsl.compiler
-_FX = None      # flydsl.expr
+_FLYC = None  # flydsl.compiler
+_FX = None  # flydsl.expr
 _TYPING_T = None
-_CC = None      # CompilationContext
+_CC = None  # CompilationContext
 _IR = None
 
 
@@ -81,15 +67,16 @@ def is_flydsl_available() -> bool:
     if _FLYDSL_AVAILABLE is not None:
         return _FLYDSL_AVAILABLE
     try:
-        _ensure_flydsl_paths()
         import flydsl.compiler as flyc  # noqa: F401
         import flydsl.expr as fx  # noqa: F401
-        from flydsl.expr.typing import T  # noqa: F401
-        from flydsl.compiler.kernel_function import CompilationContext
         from flydsl._mlir import ir
+        from flydsl.compiler.kernel_function import CompilationContext
+        from flydsl.expr.typing import T  # noqa: F401
+
         # Kernel is vendored in-tree (ships with vLLM); FlyDSL provides only
-        # the compiler/runtime framework (imported above via sys.path).
+        # the compiler/runtime framework (imported above).
         from vllm.v1.attention.ops.flydsl_kernels import tq_decode_v4 as tq_mod
+
         _FLYC = flyc
         _FX = fx
         _TYPING_T = T
@@ -102,7 +89,8 @@ def is_flydsl_available() -> bool:
         _FLYDSL_AVAILABLE = False
         logger.warning_once(
             "FlyDSL TQ decode v4 launcher: unavailable (%s). "
-            "Falling back to Triton v3.", ex
+            "Falling back to Triton v3.",
+            ex,
         )
         return _FLYDSL_AVAILABLE
     # Best-effort GQA-6 sibling import (does NOT gate Qwen availability).
@@ -110,15 +98,15 @@ def is_flydsl_available() -> bool:
         from vllm.v1.attention.ops.flydsl_kernels import (
             tq_decode_v4_gqa6 as tq_mod_gqa6,
         )
+
         _TQ_MOD_GQA6 = tq_mod_gqa6
-        logger.info_once(
-            "FlyDSL TQ decode v4 GQA-6 sibling: available (MiniMax-class)"
-        )
+        logger.info_once("FlyDSL TQ decode v4 GQA-6 sibling: available (MiniMax-class)")
     except Exception as ex:  # noqa: BLE001
         _TQ_MOD_GQA6 = None
         logger.info_once(
             "FlyDSL TQ decode v4 GQA-6 sibling: not available (%s); "
-            "GQA-6 models will fall back to Triton v3.", ex
+            "GQA-6 models will fall back to Triton v3.",
+            ex,
         )
     return _FLYDSL_AVAILABLE
 
@@ -154,7 +142,8 @@ def _detect_max_capture_B() -> int:
     """Probe vLLM compilation config for the largest cudagraph capture size.
 
     Returns max(cudagraph_capture_sizes) if available, else falls back to
-    ``VLLM_TQ_FLYDSL_B_BUCKET`` (default 512 = vLLM default cap).
+    512 (vLLM's default cap). The segm-pool auto-grows if a larger batch is
+    seen (see ``_SegmBufPool.get``).
 
     Used to size the segm-pool bucket once, so that all distinct B's
     (whether captured in a graph, or hit eagerly in mixed batches) share
@@ -162,14 +151,9 @@ def _detect_max_capture_B() -> int:
     that previously dominated dense-capture VRAM cost (1.3 GiB at the
     25-size custom set, ~2.8 GiB at vLLM's full default sweep).
     """
-    env = os.environ.get("VLLM_TQ_FLYDSL_B_BUCKET")
-    if env is not None:
-        try:
-            return max(1, int(env))
-        except ValueError:
-            pass
     try:
         from vllm.config import get_current_vllm_config
+
         cfg = get_current_vllm_config()
         sizes = cfg.compilation_config.cudagraph_capture_sizes
         if sizes:
@@ -234,38 +218,50 @@ class _SegmBufPool:
         # always-eager configs.
         B_bucket = max(self._max_B, int(B))
         key = (
-            int(Hk), int(Hq), int(num_partitions),
-            int(QG), int(D), str(device), q_dtype,
+            int(Hk),
+            int(Hq),
+            int(num_partitions),
+            int(QG),
+            int(D),
+            str(device),
+            q_dtype,
         )
         bufs = self._bufs.get(key)
         if bufs is None or bufs["segm_out"].shape[0] < B_bucket:
             if bufs is not None and bufs["segm_out"].shape[0] < B_bucket:
                 # First-time grow: warn so user knows cudagraphs may be
-                # invalidated. In practice this means VLLM_TQ_FLYDSL_B_BUCKET
-                # should have been set higher.
+                # invalidated. This should only happen during warmup or in
+                # always-eager configs (a batch larger than any captured
+                # cudagraph size).
                 logger.warning_once(
                     "FlyDSL v4 _SegmBufPool: growing bucket from %d to %d "
                     "(B=%d). If you see this AFTER cudagraph warmup, the "
                     "previously-captured graphs hold stale pointers and "
-                    "will GPU-fault. Set VLLM_TQ_FLYDSL_B_BUCKET=%d "
-                    "before launch to avoid this.",
-                    bufs["segm_out"].shape[0], B_bucket, B, B_bucket,
+                    "will GPU-fault (max cudagraph capture size < B).",
+                    bufs["segm_out"].shape[0],
+                    B_bucket,
+                    B,
                 )
             bufs = {
                 "segm_out": torch.empty(
                     (B_bucket, Hk, num_partitions, QG, D),
-                    dtype=torch.bfloat16, device=device,
+                    dtype=torch.bfloat16,
+                    device=device,
                 ),
                 "segm_max": torch.empty(
                     (B_bucket, Hk, num_partitions, QG),
-                    dtype=torch.float32, device=device,
+                    dtype=torch.float32,
+                    device=device,
                 ),
                 "segm_sum": torch.empty(
                     (B_bucket, Hk, num_partitions, QG),
-                    dtype=torch.float32, device=device,
+                    dtype=torch.float32,
+                    device=device,
                 ),
                 "output": torch.empty(
-                    (B_bucket, Hq, D), dtype=q_dtype, device=device,
+                    (B_bucket, Hq, D),
+                    dtype=q_dtype,
+                    device=device,
                 ),
                 # q_rot fix: stable pre-allocated buffer for the rotated query
                 # tensor. On ROCm, fresh torch.empty / matmul-result allocations
@@ -275,18 +271,24 @@ class _SegmBufPool:
                 # segm_out/output above), the data_ptr is stable from first
                 # allocation onward — same for all captured B's and eager calls.
                 "q_rot": torch.empty(
-                    (B_bucket, Hq, D), dtype=q_dtype, device=device,
+                    (B_bucket, Hq, D),
+                    dtype=q_dtype,
+                    device=device,
                 ),
                 # q_float: fp32 copy of query (bf16→fp32 for mm input).
                 # Pooled to avoid fresh allocations post-capture.
                 "q_float": torch.empty(
-                    (B_bucket, Hq, D), dtype=torch.float32, device=device,
+                    (B_bucket, Hq, D),
+                    dtype=torch.float32,
+                    device=device,
                 ),
                 # q_rot_fp32: fp32 output of the rotation mm (before bf16 cast).
                 # Using torch.mm(..., out=this) eliminates the fresh mm-result
                 # allocation that would otherwise land in the HIP graph pool.
                 "q_rot_fp32": torch.empty(
-                    (B_bucket, Hq, D), dtype=torch.float32, device=device,
+                    (B_bucket, Hq, D),
+                    dtype=torch.float32,
+                    device=device,
                 ),
             }
             self._bufs[key] = bufs
@@ -296,10 +298,14 @@ class _SegmBufPool:
                 "shape=(Hk=%d, Hq=%d, P=%d, QG=%d, D=%d, dtype=%s) "
                 "B_bucket=%d (covers all captured + eager B's). "
                 "VRAM = %.1f MiB / shape.",
-                Hk, Hq, num_partitions, QG, D, q_dtype,
+                Hk,
+                Hq,
+                num_partitions,
+                QG,
+                D,
+                q_dtype,
                 B_bucket,
-                sum(t.numel() * t.element_size() for t in bufs.values())
-                / (1 << 20),
+                sum(t.numel() * t.element_size() for t in bufs.values()) / (1 << 20),
             )
         # Return [:B] views — same data_ptr base, narrower N dim.
         return {
@@ -341,13 +347,10 @@ def _wht_butterfly_enabled() -> bool:
     global _WHT_BF_CACHED
     if _WHT_BF_CACHED is not None:
         return _WHT_BF_CACHED
-    _WHT_BF_CACHED = (
-        os.environ.get("VLLM_TQ_FLYDSL_WHT_BUTTERFLY", "0") == "1"
-    )
+    _WHT_BF_CACHED = os.environ.get("VLLM_TQ_FLYDSL_WHT_BUTTERFLY", "0") == "1"
     if _WHT_BF_CACHED:
         logger.info_once(
-            "FlyDSL TQ v4: WHT butterfly ON "
-            "(VLLM_TQ_FLYDSL_WHT_BUTTERFLY=1)"
+            "FlyDSL TQ v4: WHT butterfly ON (VLLM_TQ_FLYDSL_WHT_BUTTERFLY=1)"
         )
     return _WHT_BF_CACHED
 
@@ -355,20 +358,15 @@ def _wht_butterfly_enabled() -> bool:
 def _hw_tr_enabled() -> bool:
     """Resolve the HW V-transpose build flag.
 
-    Default ON for gfx950+ (ds_read_tr16_b64 is bit-exact vs baseline and
-    5-7% faster on Qwen-class shapes). Off elsewhere. Override with
-    ``VLLM_TQ_FLYDSL_HW_TR=0`` (force off) or ``=1`` (force on).
+    ON for gfx950+ (ds_read_tr16_b64 is bit-exact vs baseline and 5-7%
+    faster on Qwen-class shapes), off elsewhere. Resolved from the GPU arch.
     """
     global _HW_TR_CACHED
     if _HW_TR_CACHED is not None:
         return _HW_TR_CACHED
-    env = os.environ.get("VLLM_TQ_FLYDSL_HW_TR")
-    if env is not None:
-        _HW_TR_CACHED = env == "1"
-        return _HW_TR_CACHED
     try:
-        _ensure_flydsl_paths()
         from flydsl.runtime.device import get_rocm_arch as _arch
+
         a = str(_arch() or "")
         _HW_TR_CACHED = a.startswith("gfx950")
     except Exception:  # noqa: BLE001
@@ -383,13 +381,18 @@ def _hw_tr_enabled() -> bool:
 _GET_KERNEL_STATS = {"hits": 0, "misses": 0, "build_total_s": 0.0}
 
 
-def _get_kernel(num_kv_heads: int, num_partitions: int,
-                max_blocks_per_seq: int, scale: float,
-                query_group_size: int, kv_block_size: int,
-                use_hw_v_transpose: bool = False,
-                num_seqs_hint: int = 1,
-                tile_groups_per_partition: int = 1,
-                use_wht_butterfly: bool = False):
+def _get_kernel(
+    num_kv_heads: int,
+    num_partitions: int,
+    max_blocks_per_seq: int,
+    scale: float,
+    query_group_size: int,
+    kv_block_size: int,
+    use_hw_v_transpose: bool = False,
+    num_seqs_hint: int = 1,
+    tile_groups_per_partition: int = 1,
+    use_wht_butterfly: bool = False,
+):
     # ``num_seqs_hint`` (= runtime B) is forwarded to the build for shape
     # awareness; it does NOT participate in the cache key because the
     # kernel body uses gpu.block_idx.x (= seq index at runtime) and is
@@ -397,10 +400,17 @@ def _get_kernel(num_kv_heads: int, num_partitions: int,
     #
     # ``tile_groups_per_partition`` (Option A) IS in the cache key — each
     # value compiles a different unrolled K-tile loop body.
-    key = (num_kv_heads, int(num_partitions), int(max_blocks_per_seq),
-           round(float(scale), 8), int(query_group_size), int(kv_block_size),
-           bool(use_hw_v_transpose), int(tile_groups_per_partition),
-           bool(use_wht_butterfly))
+    key = (
+        num_kv_heads,
+        int(num_partitions),
+        int(max_blocks_per_seq),
+        round(float(scale), 8),
+        int(query_group_size),
+        int(kv_block_size),
+        bool(use_hw_v_transpose),
+        int(tile_groups_per_partition),
+        bool(use_wht_butterfly),
+    )
     cached = _KERN_CACHE.get(key)
     if cached is not None:
         _GET_KERNEL_STATS["hits"] += 1
@@ -408,6 +418,7 @@ def _get_kernel(num_kv_heads: int, num_partitions: int,
     assert is_flydsl_available()
     # Time the FlyDSL build path so we can quantify cudagraph capture cost.
     import time as _t
+
     _build_t0 = _t.perf_counter()
 
     # Per-GQA dispatch: GQA-6 (MiniMax-M2.5) lives in the sibling module
@@ -458,21 +469,34 @@ def _get_kernel(num_kv_heads: int, num_partitions: int,
     ir_mod = _IR
 
     @flyc.jit
-    def _launch(out, es, ml, q, kvc, cents, bt, sl,
-                gx: fx.Int32, gy: fx.Int32, gz: fx.Int32,
-                stream: fx.Stream):
+    def _launch(
+        out,
+        es,
+        ml,
+        q,
+        kvc,
+        cents,
+        bt,
+        sl,
+        gx: fx.Int32,
+        gy: fx.Int32,
+        gz: fx.Int32,
+        stream: fx.Stream,
+    ):
         # Re-finalize the LDS allocator for this launch (idempotent per build).
         al.finalized = False
         ctx = CompilationContext.get_current()
         with ir_mod.InsertionPoint(ctx.gpu_module_body):
             al.finalize()
         from flydsl.expr import arith
+
         grid_x = arith.index_cast(T.index, gx.ir_value())
         grid_y = arith.index_cast(T.index, gy.ir_value())
         grid_z = arith.index_cast(T.index, gz.ir_value())
         kfn(out, es, ml, q, kvc, cents, bt, sl).launch(
             grid=(grid_x, grid_y, grid_z),
-            block=(block_threads, 1, 1), stream=stream,
+            block=(block_threads, 1, 1),
+            stream=stream,
         )
 
     _KERN_CACHE[key] = _launch
@@ -481,8 +505,10 @@ def _get_kernel(num_kv_heads: int, num_partitions: int,
     _GET_KERNEL_STATS["build_total_s"] += _build_dt
     logger.info(
         "FlyDSL v4 _get_kernel BUILD #%d dt=%.2fs (cumulative=%.1fs) key=%s",
-        _GET_KERNEL_STATS["misses"], _build_dt,
-        _GET_KERNEL_STATS["build_total_s"], key,
+        _GET_KERNEL_STATS["misses"],
+        _build_dt,
+        _GET_KERNEL_STATS["build_total_s"],
+        key,
     )
     return _launch
 
@@ -495,10 +521,10 @@ def _get_kernel(num_kv_heads: int, num_partitions: int,
 # → output [N, Hq=Hk*QG, D] of any (bf16/fp16/fp32) dtype.
 @triton.jit
 def _reduce_partitions_v4(
-    output_ptr,              # [N, Hq, D] in OUT_DTYPE
-    segm_out_ptr,            # [N, Hk, P, QG, D] bf16
-    segm_max_ptr,            # [N, Hk, P, QG] fp32
-    segm_sum_ptr,            # [N, Hk, P, QG] fp32
+    output_ptr,  # [N, Hq, D] in OUT_DTYPE
+    segm_out_ptr,  # [N, Hk, P, QG, D] bf16
+    segm_max_ptr,  # [N, Hk, P, QG] fp32
+    segm_sum_ptr,  # [N, Hk, P, QG] fp32
     out_stride_n: tl.int64,  # stride on N axis (in elems of OUT_DTYPE)
     out_stride_h: tl.int64,  # stride on Hq axis
     NUM_KV_HEADS: tl.constexpr,
@@ -514,11 +540,7 @@ def _reduce_partitions_v4(
 
     # Per-partition pointers for this (n, kv_h, qg) row.
     # Strides in elems of source dtype.
-    msum_base = (
-        n * (NUM_KV_HEADS * NUM_PARTS * QG)
-        + kv_h * (NUM_PARTS * QG)
-        + qg
-    )
+    msum_base = n * (NUM_KV_HEADS * NUM_PARTS * QG) + kv_h * (NUM_PARTS * QG) + qg
     so_base = (
         n * (NUM_KV_HEADS * NUM_PARTS * QG * HEAD_SIZE)
         + kv_h * (NUM_PARTS * QG * HEAD_SIZE)
@@ -543,11 +565,7 @@ def _reduce_partitions_v4(
     overall_sum = tl.sum(seg_sum_rescaled)
 
     # Load segment outputs and combine.
-    so_idx = (
-        so_base
-        + p_off[:, None] * (QG * HEAD_SIZE)
-        + d_off[None, :]
-    )
+    so_idx = so_base + p_off[:, None] * (QG * HEAD_SIZE) + d_off[None, :]
     seg_out = tl.load(segm_out_ptr + so_idx).to(tl.float32)
     # acc = sum_p( seg_out_p * (seg_sum_p * rescale_p) ) / overall_sum
     weighted = seg_out * seg_sum_rescaled[:, None]
@@ -561,12 +579,12 @@ def _reduce_partitions_v4(
 
 # -- Public launcher ----------------------------------------------------------
 def flydsl_turboquant_decode_attention_v4(
-    query: torch.Tensor,            # [B, Hq, D] bf16/fp16
-    kv_cache: torch.Tensor,         # [num_blocks, BS, Hk, slot_size_aligned]
-    block_table: torch.Tensor,      # [B, max_blocks_per_seq] int32
-    seq_lens: torch.Tensor,         # [B] int32
-    Pi: torch.Tensor,               # [D, D] fp32
-    centroids: torch.Tensor,        # [N_CENTROIDS] fp32
+    query: torch.Tensor,  # [B, Hq, D] bf16/fp16
+    kv_cache: torch.Tensor,  # [num_blocks, BS, Hk, slot_size_aligned]
+    block_table: torch.Tensor,  # [B, max_blocks_per_seq] int32
+    seq_lens: torch.Tensor,  # [B] int32
+    Pi: torch.Tensor,  # [D, D] fp32
+    centroids: torch.Tensor,  # [N_CENTROIDS] fp32
     scale: float,
     mse_bits: int,
     key_packed_size: int,
@@ -603,7 +621,8 @@ def flydsl_turboquant_decode_attention_v4(
     if not is_flydsl_available():
         raise RuntimeError(
             "VLLM_ROCM_TQ_FLYDSL_DECODE requested but FlyDSL is not available; "
-            "set VLLM_ROCM_TQ_FLYDSL_DECODE=0 or fix VLLM_FLYDSL_ROOT/VLLM_FLYDSL_PKGS."
+            "set VLLM_ROCM_TQ_FLYDSL_DECODE=0, or install FlyDSL "
+            "(pip / PYTHONPATH) to use the v4 decode."
         )
     assert not key_fp8, "FlyDSL v4 supports MSE-key path only"
     assert mse_bits == 4, f"FlyDSL v4 expects mse_bits=4, got {mse_bits}"
@@ -628,8 +647,7 @@ def flydsl_turboquant_decode_attention_v4(
             "set VLLM_ROCM_TQ_FLYDSL_DECODE=0 to fall back to Triton v3."
         )
     assert centroids.numel() == _TQ_MOD.N_CENTROIDS, (
-        f"centroids.numel={centroids.numel()} != "
-        f"{_TQ_MOD.N_CENTROIDS}"
+        f"centroids.numel={centroids.numel()} != {_TQ_MOD.N_CENTROIDS}"
     )
 
     # ---- T1.1 / T1.4: per-layer cache for PiT_f32 + contiguous centroids ---
@@ -643,7 +661,8 @@ def flydsl_turboquant_decode_attention_v4(
         if PiT_f32 is None:
             _PiT_src = PiT if PiT is not None else Pi.T.contiguous()
             PiT_f32 = (
-                _PiT_src if _PiT_src.dtype == torch.float32
+                _PiT_src
+                if _PiT_src.dtype == torch.float32
                 else _PiT_src.to(torch.float32)
             )
             buf_holder._tq_v4_PiT_f32 = PiT_f32
@@ -655,8 +674,7 @@ def flydsl_turboquant_decode_attention_v4(
         # Defensive fallback (unit tests may pass ``buf_holder=None``).
         _PiT_src = PiT if PiT is not None else Pi.T.contiguous()
         PiT_f32 = (
-            _PiT_src if _PiT_src.dtype == torch.float32
-            else _PiT_src.to(torch.float32)
+            _PiT_src if _PiT_src.dtype == torch.float32 else _PiT_src.to(torch.float32)
         )
         centroids_c = centroids.contiguous()
 
@@ -688,19 +706,14 @@ def flydsl_turboquant_decode_attention_v4(
     # Per-tile OOB redirects + the masked FA-2 reducer ensure that for
     # short sequences the extra partitions contribute zero to the output.
     #
-    # Override (for eager-mode testing only): set
-    # VLLM_TQ_FLYDSL_DYNAMIC_PARTS=1 to size from per-step actual
-    # `max_seq_len` instead. This will crash if cudagraph is enabled
-    # because the captured gridDim won't match runtime; safe ONLY with
-    # --enforce-eager or unit-test harnesses.
+    # We always size from the worst case (block_table.shape[1] * block_size),
+    # never from the per-step actual max_seq_len: a per-step size would make
+    # the captured gridDim mismatch runtime and GPU-fault under cudagraph.
     kv_compute_block = _TQ_MOD.KV_COMPUTE_BLOCK
     worst_case_max_seq_len = int(block_table.shape[1]) * int(block_size)
     if max_seq_len <= 0:
         max_seq_len = worst_case_max_seq_len
-    if os.environ.get("VLLM_TQ_FLYDSL_DYNAMIC_PARTS", "0") == "1":
-        sizing_max_seq_len = int(max_seq_len)
-    else:
-        sizing_max_seq_len = worst_case_max_seq_len
+    sizing_max_seq_len = worst_case_max_seq_len
 
     # ── Option A: bounded num_partitions + internal tile-group looping ──
     # The kernel previously hardcoded one partition = 256 tokens (=
@@ -725,15 +738,10 @@ def flydsl_turboquant_decode_attention_v4(
     #   max_model_len=32K:  required=128, parts=32, TGPP=4 (no waste)
     #   max_model_len=64K:  required=256, parts=32, TGPP=8 (no waste)
     #   max_model_len=128K: required=512, parts=32, TGPP=16
-    #
-    # Override via VLLM_TQ_FLYDSL_MAX_PARTITIONS (default 32). Smaller
-    # gives even less graph memory but more work per CTA; larger gives
-    # more parallelism but more graph memory.
-    MAX_PARTITIONS = int(os.environ.get(
-        "VLLM_TQ_FLYDSL_MAX_PARTITIONS", "32"))
-    MAX_PARTITIONS = max(2, MAX_PARTITIONS)
+    MAX_PARTITIONS = 32
     required_num_partitions = (
-        sizing_max_seq_len + kv_compute_block - 1) // kv_compute_block
+        sizing_max_seq_len + kv_compute_block - 1
+    ) // kv_compute_block
     # max_num_kv_splits acts as a parallelism floor (ensure at least this
     # many CTAs along grid.z), but is itself capped by MAX_PARTITIONS.
     parallelism_floor = min(MAX_PARTITIONS, max(1, max_num_kv_splits))
@@ -764,7 +772,14 @@ def flydsl_turboquant_decode_attention_v4(
     # buffers from the pool are safe to reuse.
     device = query.device
     pool_bufs = _SEGM_POOL.get(
-        B, Hk, Hq, num_partitions, QG, D, device, query.dtype,
+        B,
+        Hk,
+        Hq,
+        num_partitions,
+        QG,
+        D,
+        device,
+        query.dtype,
     )
     segm_out = pool_bufs["segm_out"]
     segm_max = pool_bufs["segm_max"]
@@ -786,18 +801,19 @@ def flydsl_turboquant_decode_attention_v4(
     # in-register (see STEP B' in the kernels).
     use_wht_bf = _wht_butterfly_enabled()
     if not use_wht_bf:
-        _q_float = pool_bufs["q_float"]          # [B, Hq, D] fp32, stable
-        _q_rot_f32 = pool_bufs["q_rot_fp32"]     # [B, Hq, D] fp32, stable mm output
-        _q_rot_out = pool_bufs["q_rot"]          # [B, Hq, D] query.dtype, stable
-        _q_float.copy_(query)                    # bf16 → fp32 in-place, no alloc
+        _q_float = pool_bufs["q_float"]  # [B, Hq, D] fp32, stable
+        _q_rot_f32 = pool_bufs["q_rot_fp32"]  # [B, Hq, D] fp32, stable mm output
+        _q_rot_out = pool_bufs["q_rot"]  # [B, Hq, D] query.dtype, stable
+        _q_float.copy_(query)  # bf16 → fp32 in-place, no alloc
         # mm into stable fp32 buffer via out= to avoid fresh allocations.
         # PiT_f32 is cached on buf_holder (stable ptr since first layer warmup).
         torch.mm(
-            _q_float.view(B * Hq, D), PiT_f32,
-            out=_q_rot_f32.view(B * Hq, D),     # in-place into pool buffer
+            _q_float.view(B * Hq, D),
+            PiT_f32,
+            out=_q_rot_f32.view(B * Hq, D),  # in-place into pool buffer
         )
-        _q_rot_out.copy_(_q_rot_f32)             # fp32 → bf16, into stable buf
-        q_for_kernel = _q_rot_out                # stable ptr for kernel launch
+        _q_rot_out.copy_(_q_rot_f32)  # fp32 → bf16, into stable buf
+        q_for_kernel = _q_rot_out  # stable ptr for kernel launch
     else:
         # Butterfly: pass raw query directly.  query is [B, Hq, D] bf16,
         # contiguous (guaranteed by the attention backend).
@@ -807,7 +823,12 @@ def flydsl_turboquant_decode_attention_v4(
     max_bps = int(block_table.shape[1])
     use_hw_tr = _hw_tr_enabled()
     launch = _get_kernel(
-        Hk, num_partitions, max_bps, scale, QG, block_size,
+        Hk,
+        num_partitions,
+        max_bps,
+        scale,
+        QG,
+        block_size,
         use_hw_v_transpose=use_hw_tr,
         num_seqs_hint=int(B),
         tile_groups_per_partition=int(tile_groups_per_partition),
@@ -823,22 +844,36 @@ def flydsl_turboquant_decode_attention_v4(
             "B=%d Hk=%d Hq=%d D=%d QG=%d num_partitions=%d (actual=%d, "
             "cap=%d) TGPP=%d max_bps=%d block_size=%d max_seq_len=%d "
             "hw_v_transpose=%s wht_butterfly=%s "
-            "(coverage=%d tokens, worst_case=%d tokens, sizing=%s)",
-            B, Hk, Hq, D, QG, num_partitions, num_partitions_actual,
-            MAX_PARTITIONS, tile_groups_per_partition,
-            max_bps, int(block_size), int(max_seq_len), use_hw_tr,
+            "(coverage=%d tokens, worst_case=%d tokens)",
+            B,
+            Hk,
+            Hq,
+            D,
+            QG,
+            num_partitions,
+            num_partitions_actual,
+            MAX_PARTITIONS,
+            tile_groups_per_partition,
+            max_bps,
+            int(block_size),
+            int(max_seq_len),
+            use_hw_tr,
             use_wht_bf,
             num_partitions * tile_groups_per_partition * kv_compute_block,
             worst_case_max_seq_len,
-            "per-step actual" if (
-                os.environ.get("VLLM_TQ_FLYDSL_DYNAMIC_PARTS", "0") == "1"
-            ) else "worst_case",
         )
     launch(
-        segm_out, segm_sum, segm_max,
-        q_for_kernel, kv_cache, centroids_c,
-        block_table, seq_lens,
-        B, Hk, num_partitions,
+        segm_out,
+        segm_sum,
+        segm_max,
+        q_for_kernel,
+        kv_cache,
+        centroids_c,
+        block_table,
+        seq_lens,
+        B,
+        Hk,
+        num_partitions,
         torch.cuda.current_stream(),
     )
 
