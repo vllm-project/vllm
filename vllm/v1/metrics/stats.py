@@ -260,9 +260,7 @@ def compute_timing_intervals(
     first_token_ts = stats.first_token_ts
     last_token_ts = stats.last_token_ts
 
-    queue = (
-        scheduled_ts - queued_ts if queued_ts > 0 and scheduled_ts > 0 else None
-    )
+    queue = scheduled_ts - queued_ts if queued_ts > 0 and scheduled_ts > 0 else None
     prefill = (
         first_token_ts - scheduled_ts
         if scheduled_ts > 0 and first_token_ts > 0
@@ -274,9 +272,7 @@ def compute_timing_intervals(
         else None
     )
     inference = (
-        last_token_ts - scheduled_ts
-        if scheduled_ts > 0 and last_token_ts > 0
-        else None
+        last_token_ts - scheduled_ts if scheduled_ts > 0 and last_token_ts > 0 else None
     )
     mean_per_output_token = (
         decode / (num_generation_tokens - 1)

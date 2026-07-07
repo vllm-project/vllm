@@ -1,13 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import pytest
+
 from vllm.v1.engine import FinishReason
 from vllm.v1.metrics.stats import (
     IterationStats,
     PrefillStats,
     PromptTokenStats,
     RequestStateStats,
-    TimingIntervals,
     compute_timing_intervals,
 )
 
@@ -346,7 +346,7 @@ def test_compute_timing_intervals_missing_first_token_is_none():
     stats = RequestStateStats(queued_ts=1.0, scheduled_ts=1.5)
     iv = compute_timing_intervals(stats, num_generation_tokens=0)
     assert iv.queue == pytest.approx(0.5)
-    assert iv.prefill is None          # not negative (was 0 - 1.5 = -1.5)
+    assert iv.prefill is None  # not negative (was 0 - 1.5 = -1.5)
     assert iv.decode is None
     assert iv.inference is None
     assert iv.mean_per_output_token is None
