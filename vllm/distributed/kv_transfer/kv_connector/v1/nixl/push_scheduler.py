@@ -268,11 +268,6 @@ class NixlPushConnectorScheduler(NixlBaseConnectorScheduler):
                 time.perf_counter() + self._kv_lease_duration
             )
 
-            # Drop trailing spec-decode lookahead blocks holding no computed
-            # KV; must happen before the SW clip below.
-            block_ids = self.clip_uncomputed_blocks(
-                block_ids, request.num_computed_tokens
-            )
             block_ids = self.get_sw_clipped_blocks(block_ids)
             remote_num_tokens = request.num_computed_tokens
 

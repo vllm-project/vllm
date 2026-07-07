@@ -50,7 +50,7 @@ from vllm.v1.core.sched.request_queue import (
     SchedulingPolicy,
     create_request_queue,
 )
-from vllm.v1.core.sched.utils import check_stop, remove_all
+from vllm.v1.core.sched.utils import check_stop, clip_uncomputed_blocks, remove_all
 from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
@@ -2375,6 +2375,16 @@ class Scheduler(SchedulerInterface):
         )
 
         block_ids = self.kv_cache_manager.get_block_ids(request.request_id)
+
+        # Connectors must only see blocks holding computed KV: drop trailing
+        # blocks allocated beyond the computed tokens (e.g. spec-decode
+        # lookahead slots), which would otherwise misalign connector
+        # block accounting.
+        block_ids = clip_uncomputed_blocks(
+            self.kv_cache_config.kv_cache_groups,
+            block_ids,
+            request.num_computed_tokens,
+        )
 
         if not isinstance(self.connector, SupportsHMA):
             # NOTE(Kuntai): We should deprecate this code path after we enforce

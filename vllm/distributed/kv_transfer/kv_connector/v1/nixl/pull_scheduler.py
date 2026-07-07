@@ -254,11 +254,6 @@ class NixlPullConnectorScheduler(NixlBaseConnectorScheduler):
             self._reqs_need_send[request.request_id] = (
                 time.perf_counter() + request_kv_blocks_ttl
             )
-            # Drop trailing spec-decode lookahead blocks holding no computed
-            # KV; must happen before the SW clip below.
-            block_ids = self.clip_uncomputed_blocks(
-                block_ids, request.num_computed_tokens
-            )
             # NOTE HMA will "mark" empty/null blocks in groups with 0s (eg SWA ones),
             # trimming down after allocating for the whole sequence length. Empty
             # blocks are always at the start of the list.

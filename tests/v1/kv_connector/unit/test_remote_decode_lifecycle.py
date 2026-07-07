@@ -5,14 +5,12 @@ import copy
 import pytest
 import torch
 
-from vllm.distributed.kv_transfer.kv_connector.v1.nixl.pull_scheduler import (
-    NixlPullConnectorScheduler,
-)
+from vllm.v1.core.sched.utils import clip_uncomputed_blocks
 from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
-    KVCacheConfig,
     KVCacheGroupSpec,
     MambaSpec,
+    SlidingWindowSpec,
 )
 from vllm.v1.outputs import EMPTY_MODEL_RUNNER_OUTPUT, KVConnectorOutput
 from vllm.v1.request import FinishReason, RequestStatus
@@ -23,7 +21,6 @@ from .utils import (
     create_request,
     create_scheduler,
     create_vllm_config,
-    make_kv_cache_config,
 )
 
 pytestmark = pytest.mark.cpu_test
@@ -233,72 +230,55 @@ def test_prefix_cache_lifecycle():
     assert_scheduler_empty(scheduler)
 
 
-def _make_nixl_scheduler(vllm_config, **kwargs) -> NixlPullConnectorScheduler:
-    """Build a standalone NIXL connector-scheduler for directly exercising
-    ``request_finished``. Defaults to a single full-attention KV cache group."""
-    kv_cache_config = make_kv_cache_config(
-        block_size=vllm_config.cache_config.block_size, **kwargs
-    )
-    return NixlPullConnectorScheduler(vllm_config, "test-engine-id", kv_cache_config)
-
-
-def _make_finished_request(num_computed_tokens: int, block_size: int):
-    request = create_request(
-        request_id=1,
-        block_size=block_size,
-        num_tokens=num_computed_tokens,
-        do_remote_decode=True,
-    )
-    request.status = RequestStatus.FINISHED_LENGTH_CAPPED
-    request.num_computed_tokens = num_computed_tokens
-    return request
-
-
 @pytest.mark.parametrize("extra_lookahead_blocks", [0, 1, 2])
-def test_remote_decode_drops_lookahead_blocks(extra_lookahead_blocks):
-    """Regression test: request_finished must advertise exactly the blocks
-    holding computed KV, not the spec-decode lookahead reservation blocks
-    allocated past num_computed_tokens. Sending an extra block makes the
-    decode side's suffix-trim (_apply_prefix_caching) misalign the block
-    mapping and read never-written KV.
+def test_clip_uncomputed_blocks(extra_lookahead_blocks):
+    """clip_uncomputed_blocks must keep exactly the blocks holding computed
+    KV, dropping the spec-decode lookahead reservation blocks allocated past
+    num_computed_tokens. Exposing an extra block to a P/D connector makes the
+    consumer side's block-list alignment misalign the block mapping and read
+    never-written KV.
     """
-    vllm_config = create_vllm_config()
-    connector = _make_nixl_scheduler(vllm_config)
+    block_size = 16
+    kv_cache_groups = [
+        KVCacheGroupSpec(
+            ["layer"],
+            FullAttentionSpec(
+                block_size=block_size,
+                num_kv_heads=1,
+                head_size=16,
+                dtype=torch.float16,
+            ),
+        )
+    ]
 
-    block_size = vllm_config.cache_config.block_size
     # Multiple of block_size: the worst case where the lookahead slot needs a
     # brand-new block. Allocate prompt blocks + the lookahead reservation.
     num_computed_tokens = 4 * block_size
     num_prompt_blocks = num_computed_tokens // block_size  # == 4
     allocated_block_ids = list(range(1, num_prompt_blocks + extra_lookahead_blocks + 1))
 
-    request = _make_finished_request(num_computed_tokens, block_size)
-    delay_free_blocks, params = connector.request_finished(
-        request, (allocated_block_ids,)
+    clipped = clip_uncomputed_blocks(
+        kv_cache_groups, (allocated_block_ids,), num_computed_tokens
     )
 
-    assert delay_free_blocks is True
-    assert params is not None
     # Trailing lookahead blocks dropped, regardless of how many were allocated.
-    assert params["remote_block_ids"] == ([1, 2, 3, 4],)
-    assert params["remote_num_tokens"] == num_computed_tokens
+    assert clipped == ([1, 2, 3, 4],)
 
 
-def test_remote_decode_lookahead_clip_is_per_group():
-    """Clipping is per-group with each group's own block_size: in a hybrid
-    model the attention group is clipped while a Mamba/SSM state group is left
-    untouched. The attention group uses a block_size != the global one, so a
-    global-block_size implementation would clip it incorrectly.
+def test_clip_uncomputed_blocks_is_per_group():
+    """Clipping is per-group with each group's own block_size: attention
+    groups (full and sliding-window) are clipped while a Mamba/SSM state group
+    is left untouched. The attention groups use a block_size != the Mamba one,
+    so a single-block_size implementation would clip them incorrectly.
     """
-    vllm_config = create_vllm_config()
-    global_block_size = vllm_config.cache_config.block_size  # 16
-    attn_block_size = 2 * global_block_size  # 32
+    mamba_block_size = 16
+    attn_block_size = 32
 
     kv_cache_groups = [
         KVCacheGroupSpec(
             ["mamba_layer"],
             MambaSpec(
-                block_size=global_block_size,
+                block_size=mamba_block_size,
                 shapes=((16,),),
                 dtypes=(torch.float16,),
             ),
@@ -312,50 +292,77 @@ def test_remote_decode_lookahead_clip_is_per_group():
                 dtype=torch.float16,
             ),
         ),
+        KVCacheGroupSpec(
+            ["swa_layer"],
+            SlidingWindowSpec(
+                block_size=attn_block_size,
+                num_kv_heads=1,
+                head_size=16,
+                dtype=torch.float16,
+                sliding_window=attn_block_size,
+            ),
+        ),
     ]
-    kv_cache_config = KVCacheConfig(
-        num_blocks=100, kv_cache_tensors=[], kv_cache_groups=kv_cache_groups
-    )
-    connector = NixlPullConnectorScheduler(
-        vllm_config, "test-engine-id", kv_cache_config
-    )
 
     # 64 tokens => 2 attn blocks at block_size 32, + 1 lookahead block.
-    # (cdiv(64, 16) == 4 would not clip, so this fails with the global size.)
+    # (cdiv(64, 16) == 4 would not clip, so this fails with the Mamba size.)
     num_computed_tokens = 2 * attn_block_size  # 64
-    request = _make_finished_request(num_computed_tokens, attn_block_size)
 
-    # group 0: Mamba state block; group 1: 2 prompt blocks + 1 lookahead block.
-    _, params = connector.request_finished(request, ([101], [1, 2, 3]))
-
-    # Mamba group passed through; attention group clipped at its own block_size.
-    assert params["remote_block_ids"] == ([101], [1, 2])
-
-
-def test_remote_decode_lookahead_clip_before_sw_clip():
-    """The lookahead clip must run before the sliding-window clip: the SW clip
-    keeps the *last* blocks_per_sw blocks, so a trailing lookahead block would
-    be absorbed into the window and a real leading window block dropped —
-    unrecoverable on the decode side.
-    """
-    vllm_config = create_vllm_config()
-    block_size = vllm_config.cache_config.block_size  # 16
-    # blocks_per_sw for the SWA group = cdiv(2 * 16, 16) + 1 = 3.
-    connector = _make_nixl_scheduler(
-        vllm_config, swa_enabled=True, sw_size=2 * block_size
+    # group 0: Mamba state block; groups 1/2: 2 prompt blocks + 1 lookahead.
+    clipped = clip_uncomputed_blocks(
+        kv_cache_groups, ([101], [1, 2, 3], [11, 12, 13]), num_computed_tokens
     )
 
-    num_computed_tokens = 5 * block_size
-    request = _make_finished_request(num_computed_tokens, block_size)
+    # Mamba group passed through; attention groups clipped at their own
+    # block_size.
+    assert clipped == ([101], [1, 2], [11, 12])
 
-    # Both groups: 5 computed blocks + 1 lookahead block.
-    full_ids = [1, 2, 3, 4, 5, 6]
-    swa_ids = [11, 12, 13, 14, 15, 16]
-    _, params = connector.request_finished(request, (full_ids, swa_ids))
 
-    # Full-attn group: lookahead clipped. SWA group: lookahead clipped first,
-    # then windowed to the last 3 computed blocks (not [14, 15, 16]).
-    assert params["remote_block_ids"] == ([1, 2, 3, 4, 5], [13, 14, 15])
+def test_remote_decode_drops_lookahead_blocks():
+    """End-to-end: with spec-decode lookahead slots reserved, a remote_decode
+    request whose prompt length is an exact multiple of block_size allocates
+    one extra (never-written) block. The kv_transfer_params handed back on
+    finish must not advertise it.
+    """
+    vllm_config = create_vllm_config()
+    scheduler = create_scheduler(vllm_config)
+    # Reserve one spec-decode lookahead slot per step (as with eagle etc.);
+    # avoids constructing a full SpeculativeConfig.
+    scheduler.num_lookahead_tokens = 1
+
+    block_size = vllm_config.cache_config.block_size
+    num_prompt_blocks = 4
+    num_tokens = num_prompt_blocks * block_size
+
+    request = create_request(
+        request_id=1,
+        block_size=block_size,
+        max_tokens=1,
+        num_tokens=num_tokens,
+        do_remote_decode=True,
+    )
+    scheduler.add_request(request)
+
+    scheduler_output = scheduler.schedule()
+
+    # The lookahead slot spilled into an extra allocated block.
+    allocated_blocks = scheduler.kv_cache_manager.coordinator.single_type_managers[
+        0
+    ].req_to_blocks[request.request_id]
+    assert len(allocated_blocks) == num_prompt_blocks + 1
+
+    model_runner_output = create_model_runner_output(reqs=[request])
+    engine_core_outputs = scheduler.update_from_output(
+        scheduler_output, model_runner_output
+    )
+
+    assert request.status == RequestStatus.FINISHED_LENGTH_CAPPED
+    params = engine_core_outputs[0].outputs[0].kv_transfer_params
+    assert params is not None
+    # Only the blocks holding computed KV are advertised.
+    (remote_block_ids,) = params["remote_block_ids"]
+    assert remote_block_ids == [b.block_id for b in allocated_blocks[:-1]]
+    assert params["remote_num_tokens"] == num_tokens
 
 
 def test_abort_during_kv_transfer():

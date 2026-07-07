@@ -4,7 +4,43 @@ import contextlib
 from collections.abc import Sequence
 
 from vllm.sampling_params import RepetitionDetectionParams
+from vllm.utils.math_utils import cdiv
+from vllm.v1.kv_cache_interface import (
+    FullAttentionSpec,
+    KVCacheGroupSpec,
+    SlidingWindowSpec,
+)
 from vllm.v1.request import Request, RequestStatus
+
+
+def clip_uncomputed_blocks(
+    kv_cache_groups: list[KVCacheGroupSpec],
+    block_ids: tuple[list[int], ...],
+    num_computed_tokens: int,
+) -> tuple[list[int], ...]:
+    """Drop trailing blocks allocated beyond ``num_computed_tokens``.
+
+    With speculative decoding the scheduler reserves lookahead slots that
+    spill into an extra block when ``num_computed_tokens`` is a multiple of
+    the block size. Such blocks hold no computed KV, so they must not be
+    exposed to KV connectors, whose block accounting would otherwise be
+    misaligned (e.g. P/D consumers matching local/remote block lists).
+
+    Clips per group using each group's own block size for self-attention
+    groups; state groups (Mamba/SSM) and any other spec whose block count
+    is not indexed by token count are passed through unchanged.
+    """
+    if num_computed_tokens <= 0:
+        return block_ids
+    clipped = list(block_ids)
+    for i, group in enumerate(kv_cache_groups):
+        spec = group.kv_cache_spec
+        if not isinstance(spec, (FullAttentionSpec, SlidingWindowSpec)):
+            continue
+        num_computed_blocks = cdiv(num_computed_tokens, spec.block_size)
+        if len(clipped[i]) > num_computed_blocks:
+            clipped[i] = clipped[i][:num_computed_blocks]
+    return tuple(clipped)
 
 
 def _has_repeating_pattern(
