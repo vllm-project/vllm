@@ -40,3 +40,22 @@ def test_benchmark_snapshot_sync_explains_missing_write_credentials():
     assert "VLLM_ASCEND_HUST_BENCHMARK_SSH_KEY" in text
     assert "VLLM_HUST_BENCHMARK_GH_TOKEN" in text
     assert "Benchmark repo publish target:" in text
+
+
+def test_e2e_inference_scripts_retry_http_requests_and_print_server_log():
+    for script_name in (
+        "run_e2e_serve_smoke.sh",
+        "run_e2e_inference_regression.sh",
+    ):
+        text = script_text(script_name)
+
+        assert "print_server_log_tail() {" in text
+        assert "curl_with_server_log() {" in text
+        assert "E2E_HTTP_REQUEST_ATTEMPTS" in text
+        assert "failed after ${max_attempts} attempts" in text
+        assert (
+            'done\n\ncurl -fsS "http://$HOST:$PORT/v1/models" >/dev/null'
+            not in text
+        )
+        assert "vLLM models endpoint readiness confirmation" in text
+        assert "curl_with_server_log" in text[text.index("completion_response=$(mktemp)") :]
