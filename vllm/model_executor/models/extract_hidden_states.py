@@ -54,6 +54,8 @@ def unified_kv_cache_update(
     kv_cache = attn_layer.kv_cache
 
     slot_mapping = forward_context.slot_mapping
+    if isinstance(slot_mapping, list):
+        slot_mapping = slot_mapping[0]  # spec decode: [0] is the base model
     assert isinstance(slot_mapping, dict), (
         f"Expected slot_mapping to be a dict, got {type(slot_mapping)}. "
     )
