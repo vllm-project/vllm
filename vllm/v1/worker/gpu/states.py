@@ -80,6 +80,15 @@ class RequestState:
             self.max_num_reqs, dtype=torch.int32, device=device
         )
 
+        # Tokens whose KV was restored (e.g. from the prefix cache) rather than
+        # computed at the request's most recent (re)admission. The target never
+        # runs a forward pass over them, so speculators that derive per-token
+        # state from target hidden states (DFlash/DSpark context KV) have
+        # nothing for these positions.
+        self.num_cached_tokens = StagedWriteTensor(
+            self.max_num_reqs, dtype=torch.int32, device=device
+        )
+
     @property
     def num_reqs(self) -> int:
         return len(self.req_id_to_index)
@@ -109,6 +118,7 @@ class RequestState:
         self.num_computed_prefill_tokens[req_idx] = num_computed_tokens
         self.num_computed_tokens_np[req_idx] = num_computed_tokens
         self.num_computed_tokens.stage_write_elem(req_idx, num_computed_tokens)
+        self.num_cached_tokens.stage_write_elem(req_idx, num_computed_tokens)
 
         self.draft_tokens[req_idx].zero_()
 
@@ -118,6 +128,7 @@ class RequestState:
         self.total_len.apply_write()
         self.all_token_ids.apply_write()
         self.num_computed_tokens.apply_write()
+        self.num_cached_tokens.apply_write()
 
     def remove_request(self, req_id: str) -> int | None:
         """Return the freed slot index, or None if the request was not found."""
