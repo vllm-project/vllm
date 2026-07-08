@@ -18,17 +18,62 @@ from vllm.v1.attention.backends.gdn_attn import GDNAttentionMetadataBuilder
 from vllm.v1.attention.backends.mamba2_attn import Mamba2AttentionMetadataBuilder
 from vllm.v1.core.sched.output import NewRequestData
 from vllm.v1.kv_cache_interface import KVCacheConfig, MambaSpec
-from vllm.v1.utils import CpuGpuBuffer
 from vllm.v1.worker.gpu.attn_utils import build_attn_metadata
 from vllm.v1.worker.gpu.input_batch import InputBatch
 from vllm.v1.worker.gpu.mm.encoder_cache import EncoderCache
 from vllm.v1.worker.gpu.model_states.default import DefaultModelState
 from vllm.v1.worker.gpu.model_states.interface import ModelSpecificAttnMetadata
-from vllm.v1.worker.mamba_utils import (
-    MambaSpecDecodeGPUContext,
-    preprocess_mamba_align_fused_kernel,
-)
+from vllm.v1.worker.mamba_utils import postprocess_mamba_fused_kernel
 from vllm.v1.worker.utils import AttentionGroup
+
+
+@triton.jit
+def _preprocess_mamba_fused_kernel(
+    idx_mapping_ptr,
+    state_idx_ptr,
+    num_computed_tokens_ptr,
+    query_start_loc_ptr,
+    num_accepted_tokens_ptr,
+    src_ssm_col_ptr,
+    conv_src_col_ptr,
+    conv_src_off_ptr,
+    num_reqs: tl.constexpr,
+    BLOCK_SIZE: tl.constexpr,
+    MAMBA_BLOCK_SIZE: tl.constexpr,
+):
+    """Fused preprocess: compute src columns for SSM/conv AND advance
+    state_idx with accepted-token reset, in a single kernel launch.
+
+    Per batch_idx (0..num_reqs-1):
+      1. Read pre-advance state_idx and num_accepted (last step's values).
+      2. Compute and store src columns for the forward pass:
+         - src_ssm_col = state_idx + num_accepted - 1  (or -1 if fresh)
+         - conv_src_col = state_idx
+         - conv_src_off = max(num_accepted - 1, 0)
+      3. Advance state_idx to the new block and reset num_accepted=1
+         when a block boundary is crossed.
+    """
+    offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+    mask = offsets < num_reqs
+    req_indices = tl.load(idx_mapping_ptr + offsets, mask=mask, other=0)
+
+    state_idx = tl.load(state_idx_ptr + req_indices, mask=mask, other=-1)
+    num_accepted = tl.load(num_accepted_tokens_ptr + req_indices, mask=mask, other=1)
+
+    ssm_col = tl.where(state_idx >= 0, state_idx + num_accepted - 1, -1)
+    conv_off = tl.maximum(num_accepted - 1, 0)
+    tl.store(src_ssm_col_ptr + req_indices, ssm_col, mask=mask)
+    tl.store(conv_src_col_ptr + req_indices, state_idx, mask=mask)
+    tl.store(conv_src_off_ptr + req_indices, conv_off, mask=mask)
+
+    num_computed = tl.load(num_computed_tokens_ptr + req_indices, mask=mask, other=0)
+    query_start = tl.load(query_start_loc_ptr + offsets, mask=mask, other=0)
+    query_end = tl.load(query_start_loc_ptr + offsets + 1, mask=mask, other=0)
+    computed_after = num_computed + query_end - query_start
+    new_state_idx = (computed_after + MAMBA_BLOCK_SIZE - 1) // MAMBA_BLOCK_SIZE - 1
+    tl.store(state_idx_ptr + req_indices, new_state_idx, mask=mask)
+    should_reset = (state_idx >= 0) & (state_idx != new_state_idx)
+    tl.store(num_accepted_tokens_ptr + req_indices, 1, mask=mask & should_reset)
 
 
 @dataclass
@@ -36,6 +81,14 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
     is_prefilling: torch.Tensor
     num_accepted_tokens: torch.Tensor | None = None
     num_decode_draft_tokens_cpu: torch.Tensor | None = None
+    # SSM/conv src columns in request-state-slot order (-1 = fresh). gdn_attn
+    # gathers them into batch order via align_idx_mapping and resolves them to
+    # physical block ids, so kernels read init state from the src block directly.
+    align_src_ssm_col: torch.Tensor | None = None
+    align_conv_src_col: torch.Tensor | None = None
+    align_conv_src_off: torch.Tensor | None = None
+    align_idx_mapping: torch.Tensor | None = None
+    align_num_reqs: int = 0
 
     def get_extra_common_attn_kwargs(
         self,
@@ -61,7 +114,51 @@ class MambaHybridAttnMetadata(ModelSpecificAttnMetadata):
             "num_decode_draft_tokens_cpu": None
             if self.num_decode_draft_tokens_cpu is None
             else self.num_decode_draft_tokens_cpu[:num_reqs],
+            # Src columns are passed unsliced: they are indexed by req-state slot
+            # (which can be >= num_reqs); align_idx_mapping + align_num_reqs drive
+            # the batch-order gather + resolve.
+            "align_src_ssm_col": self.align_src_ssm_col,
+            "align_conv_src_col": self.align_conv_src_col,
+            "align_conv_src_off": self.align_conv_src_off,
+            "align_idx_mapping": self.align_idx_mapping,
+            "align_num_reqs": self.align_num_reqs,
         }
+
+
+class MambaCacheAlignInfo:
+    def __init__(self, max_num_reqs: int, device: torch.device) -> None:
+        self.state_idx_gpu = torch.empty(max_num_reqs, dtype=torch.int32, device=device)
+        # Src columns for SSM and conv (per request slot, -1 = fresh).
+        # SSM: state_idx + (num_accepted - 1); conv: state_idx, offset separately.
+        self.src_ssm_col_gpu = torch.full(
+            (max_num_reqs,), -1, dtype=torch.int32, device=device
+        )
+        self.conv_src_col_gpu = torch.full(
+            (max_num_reqs,), -1, dtype=torch.int32, device=device
+        )
+        self.conv_src_off_gpu = torch.zeros(
+            max_num_reqs, dtype=torch.int32, device=device
+        )
+        self.current_step_block_tables: tuple[torch.Tensor, ...] | None = None
+        self.current_step_kv_cache_config: KVCacheConfig | None = None
+        self.group_kv_cache_config: KVCacheConfig | None = None
+        self.group_ids: list[int] = []
+        self.spec: MambaSpec | None = None
+
+        # Fused postprocess metadata (initialized lazily on first call)
+        self.fused_initialized = False
+        self.fused_state_base_addrs: torch.Tensor | None = None
+        self.fused_state_block_strides: torch.Tensor | None = None
+        self.fused_state_elem_sizes: torch.Tensor | None = None
+        self.fused_state_inner_sizes: torch.Tensor | None = None
+        self.fused_state_conv_widths: torch.Tensor | None = None
+        self.fused_state_group_indices: torch.Tensor | None = None
+        self.fused_state_dim_row_count: torch.Tensor | None = None
+        self.fused_state_dim_row_stride: torch.Tensor | None = None
+        self.fused_block_table_ptrs: torch.Tensor | None = None
+        self.fused_block_table_stride_req: int = 0
+        self.fused_num_layers: int = 0
+        self.fused_num_state_types: int = 0
 
 
 class MambaHybridModelState(DefaultModelState):
@@ -79,89 +176,79 @@ class MambaHybridModelState(DefaultModelState):
         self.num_accepted_tokens_gpu = torch.ones(
             self.max_num_reqs, dtype=torch.int32, device=self.device
         )
-        # Pre-copy "align" prefix-cache state (V2). The migration of each
-        # request's mamba state across block boundaries runs as a fused GPU
-        # kernel reusing the postprocess copy machinery, so the per-step src
-        # columns and the running state_idx are kept GPU-resident.
-        self._align_mode = self.cache_config.mamba_cache_mode == "align"
-        if self._align_mode:
-            self._mamba_state_idx_gpu = torch.zeros(
-                self.max_num_reqs, dtype=torch.int32, device=self.device
+        if self.cache_config.mamba_cache_mode == "align":
+            self.mamba_cache_align_info = MambaCacheAlignInfo(
+                self.max_num_reqs, self.device
             )
-            self._mamba_src_col_gpu = torch.full(
-                (self.max_num_reqs,), -1, dtype=torch.int32, device=self.device
-            )
-            self._mamba_src_off_gpu = torch.zeros(
-                self.max_num_reqs, dtype=torch.int32, device=self.device
-            )
-            self._mamba_ctx: MambaSpecDecodeGPUContext | None = None
-            self._mamba_group_ids: list[int] = []
-            self._mamba_spec: MambaSpec | None = None
 
     def add_request(self, req_index: int, new_req_data: NewRequestData) -> None:
         super().add_request(req_index, new_req_data)
-        if self._align_mode:
-            # Seed the running state block from the resumed/prefilled position.
-            self._mamba_state_idx_gpu[req_index] = (
-                new_req_data.num_computed_tokens - 1
-            ) // self.cache_config.block_size
-            self.num_accepted_tokens_gpu[req_index] = 1
+        if self.cache_config.mamba_cache_mode == "align":
+            state_idx = (new_req_data.num_computed_tokens - 1) // (
+                self.cache_config.block_size
+            )
+            self.mamba_cache_align_info.state_idx_gpu[req_index] = state_idx
+        self.num_accepted_tokens_gpu[req_index] = 1
+
+    @staticmethod
+    def _get_mamba_group_ids(
+        kv_cache_config: KVCacheConfig,
+    ) -> tuple[list[int], MambaSpec]:
+        mamba_group_ids: list[int] = []
+        mamba_specs: list[MambaSpec] = []
+        for i, kv_cache_group in enumerate(kv_cache_config.kv_cache_groups):
+            spec = kv_cache_group.kv_cache_spec
+            if isinstance(spec, MambaSpec):
+                mamba_group_ids.append(i)
+                mamba_specs.append(spec)
+        assert mamba_specs, "no mamba layers in the model"
+        assert all(mamba_specs[0] == spec for spec in mamba_specs)
+        return mamba_group_ids, mamba_specs[0]
 
     def _get_mamba_group_info(
-        self, kv_cache_config: KVCacheConfig
-    ) -> tuple[list[int], MambaSpec]:
-        if self._mamba_spec is None:
-            group_ids: list[int] = []
-            specs: list[MambaSpec] = []
-            for i, group in enumerate(kv_cache_config.kv_cache_groups):
-                spec = group.kv_cache_spec
-                if isinstance(spec, MambaSpec):
-                    group_ids.append(i)
-                    specs.append(spec)
-            assert specs, "no mamba layers in the model"
-            assert all(specs[0] == s for s in specs)
-            self._mamba_group_ids = group_ids
-            self._mamba_spec = specs[0]
-        return self._mamba_group_ids, self._mamba_spec
-
-    def _ensure_align_ctx(
         self,
         kv_cache_config: KVCacheConfig,
-        mamba_group_ids: list[int],
+    ) -> tuple[list[int], MambaSpec]:
+        info = self.mamba_cache_align_info
+        if info.group_kv_cache_config is not kv_cache_config:
+            mamba_group_ids, mamba_spec = self._get_mamba_group_ids(kv_cache_config)
+            info.group_kv_cache_config = kv_cache_config
+            info.group_ids = mamba_group_ids
+            info.spec = mamba_spec
+        assert info.spec is not None
+        return info.group_ids, info.spec
+
+    def _preprocess_mamba_cache_align(
+        self,
+        input_batch: InputBatch,
         block_tables: tuple[torch.Tensor, ...],
-    ) -> MambaSpecDecodeGPUContext:
-        if self._mamba_ctx is None:
-            copy_funcs = self.model.get_mamba_state_copy_func()
-            # The fused copy kernels shift conv windows assuming the SD layout;
-            # the DS layout cannot express a >0 spec-decode shift as a single
-            # contiguous copy (mirrors get_conv_copy_spec's NotImplementedError).
-            if get_conv_copy_spec in copy_funcs and is_conv_state_dim_first():
-                assert self.vllm_config.speculative_config is None, (
-                    "DS conv state layout does not support mamba align state "
-                    "copies with speculative decoding"
-                )
-            self._mamba_ctx = MambaSpecDecodeGPUContext.create(
-                max_num_reqs=self.max_num_reqs,
-                kv_cache_config=kv_cache_config,
-                num_state_types=len(copy_funcs),
-                device=self.device,
-                make_buffer=lambda n, dtype: CpuGpuBuffer(
-                    n, dtype=dtype, device=self.device
-                ),
-            )
-        ctx = self._mamba_ctx
-        if not ctx.is_initialized:
-            forward_context = self.vllm_config.compilation_config.static_forward_context
-            # block_tables are batch-order slices of the persistent
-            # input_block_tables (stable data_ptr), so the metadata is captured
-            # once here and reused across steps.
-            ctx.initialize_from_forward_context(
-                kv_cache_config,
-                forward_context,
-                self.model.get_mamba_state_copy_func(),
-                [block_tables[gid] for gid in mamba_group_ids],
-            )
-        return ctx
+        kv_cache_config: KVCacheConfig,
+        num_computed_tokens: torch.Tensor,
+    ) -> None:
+        mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
+        info = self.mamba_cache_align_info
+
+        info.current_step_block_tables = block_tables
+        info.current_step_kv_cache_config = kv_cache_config
+
+        num_reqs = input_batch.num_reqs
+        if num_reqs == 0:
+            return
+        block_size = 256
+        grid = (triton.cdiv(num_reqs, block_size),)
+        _preprocess_mamba_fused_kernel[grid](
+            input_batch.idx_mapping,
+            info.state_idx_gpu,
+            num_computed_tokens,
+            input_batch.query_start_loc,
+            self.num_accepted_tokens_gpu,
+            info.src_ssm_col_gpu,
+            info.conv_src_col_gpu,
+            info.conv_src_off_gpu,
+            num_reqs,
+            BLOCK_SIZE=block_size,
+            MAMBA_BLOCK_SIZE=mamba_spec.block_size,
+        )
 
     def preprocess_state(
         self,
@@ -170,46 +257,133 @@ class MambaHybridModelState(DefaultModelState):
         kv_cache_config: KVCacheConfig,
         num_computed_tokens: torch.Tensor,
     ) -> None:
-        """Migrate each request's mamba state across block boundaries before the
-        forward (V1 align semantics, done on GPU). Runs on real batches only
-        (dummy DP/profiling runs skip preprocess_state), and before
-        ``prepare_attn`` gathers ``num_accepted_tokens``, so the boundary reset
-        is visible to the forward kernels.
-        """
-        if not self._align_mode:
-            return
-        num_reqs = input_batch.num_reqs
-        if num_reqs == 0:
-            return
-        mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
-        ctx = self._ensure_align_ctx(kv_cache_config, mamba_group_ids, block_tables)
+        if self.cache_config.mamba_cache_mode == "align":
+            self._preprocess_mamba_cache_align(
+                input_batch,
+                block_tables,
+                kv_cache_config,
+                num_computed_tokens,
+            )
 
-        # The state-advance + pre-copy kernels run every step; they fast-exit per
-        # request when src_col < 0 or src_col == dst_col, so no copy happens on
-        # steps that don't cross a block boundary. (Skipping the launch entirely
-        # would need a V1-style async-D2H of the actual num_computed, since
-        # num_computed_tokens_np is an optimistic mirror under async scheduling;
-        # the launch cost is ~0.3% of TPOT, so the GPU fast-exit suffices.)
-        block = 256
-        grid = (triton.cdiv(num_reqs, block),)
-        preprocess_mamba_align_fused_kernel[grid](
-            input_batch.idx_mapping,
-            self._mamba_state_idx_gpu,
-            num_computed_tokens,
-            input_batch.query_start_loc,
-            self.num_accepted_tokens_gpu,
-            self._mamba_src_col_gpu,
-            self._mamba_src_off_gpu,
-            num_reqs,
-            BLOCK_SIZE=block,
-            MAMBA_BLOCK_SIZE=mamba_spec.block_size,
+    def _initialize_fused_postprocess(
+        self,
+        kv_cache_config: KVCacheConfig,
+        mamba_group_ids: list[int],
+        block_tables: tuple[torch.Tensor, ...],
+    ) -> None:
+        info = self.mamba_cache_align_info
+        if info.fused_initialized:
+            return
+
+        forward_context = self.vllm_config.compilation_config.static_forward_context
+        state_copy_funcs = self.model.get_mamba_state_copy_func()
+        num_state_types = len(state_copy_funcs)
+        num_layers = sum(
+            len(kv_cache_config.kv_cache_groups[gid].layer_names)
+            for gid in mamba_group_ids
         )
-        ctx.run_fused_precopy(
+        total_states = num_layers * num_state_types
+
+        base_addrs = torch.zeros(total_states, dtype=torch.int64, device=self.device)
+        block_strides = torch.zeros(total_states, dtype=torch.int64, device=self.device)
+        elem_sizes = torch.zeros(total_states, dtype=torch.int32, device=self.device)
+        inner_sizes = torch.zeros(total_states, dtype=torch.int64, device=self.device)
+        conv_widths = torch.zeros(total_states, dtype=torch.int32, device=self.device)
+        group_indices = torch.zeros(total_states, dtype=torch.int32, device=self.device)
+        # DS conv row metadata (zero keeps the single-region copy path for SD).
+        dim_row_count = torch.zeros(total_states, dtype=torch.int32, device=self.device)
+        dim_row_stride = torch.zeros(
+            total_states, dtype=torch.int64, device=self.device
+        )
+
+        idx = 0
+        for group_local_idx, gid in enumerate(mamba_group_ids):
+            layer_names = kv_cache_config.kv_cache_groups[gid].layer_names
+            for layer_name in layer_names:
+                kv_caches = forward_context[layer_name].kv_cache
+                for st_idx, state in enumerate(kv_caches):
+                    base_addrs[idx] = state.data_ptr()
+                    blk_stride = state.stride(0) if state.dim() > 1 else state.numel()
+                    block_strides[idx] = blk_stride * state.element_size()
+                    elem_sizes[idx] = state.element_size()
+
+                    copy_func = state_copy_funcs[st_idx]
+                    if copy_func is get_conv_copy_spec:
+                        conv_w = state.size(1) if state.dim() > 1 else 0
+                        conv_widths[idx] = conv_w
+                        inner_sizes[idx] = state.stride(1) if state.dim() > 2 else 1
+                    else:
+                        conv_widths[idx] = 0
+                        inner_sizes[idx] = state[0].numel() if state.dim() > 1 else 1
+                    group_indices[idx] = group_local_idx
+                    idx += 1
+
+        num_groups = len(mamba_group_ids)
+        bt_ptrs = torch.zeros(num_groups, dtype=torch.int64, device=self.device)
+        strides = {block_tables[gid].stride(0) for gid in mamba_group_ids}
+        assert len(strides) == 1
+        for i, gid in enumerate(mamba_group_ids):
+            bt_ptrs[i] = block_tables[gid].data_ptr()
+
+        info.fused_state_base_addrs = base_addrs
+        info.fused_state_block_strides = block_strides
+        info.fused_state_elem_sizes = elem_sizes
+        info.fused_state_inner_sizes = inner_sizes
+        info.fused_state_conv_widths = conv_widths
+        info.fused_state_group_indices = group_indices
+        info.fused_state_dim_row_count = dim_row_count
+        info.fused_state_dim_row_stride = dim_row_stride
+        info.fused_block_table_ptrs = bt_ptrs
+        info.fused_block_table_stride_req = int(next(iter(strides)))
+        info.fused_num_layers = num_layers
+        info.fused_num_state_types = num_state_types
+        info.fused_initialized = True
+
+    def _postprocess_mamba_cache_align(
+        self,
+        idx_mapping: torch.Tensor,
+        num_computed_tokens: torch.Tensor,
+        num_reqs: int,
+        query_start_loc: torch.Tensor | None,
+    ) -> None:
+        info = self.mamba_cache_align_info
+        block_tables = info.current_step_block_tables
+        kv_cache_config = info.current_step_kv_cache_config
+        assert block_tables is not None
+        assert kv_cache_config is not None
+        mamba_group_ids, mamba_spec = self._get_mamba_group_info(kv_cache_config)
+
+        self._initialize_fused_postprocess(
+            kv_cache_config, mamba_group_ids, block_tables
+        )
+
+        total_states = info.fused_num_layers * info.fused_num_state_types
+        grid = (num_reqs, total_states)
+
+        postprocess_mamba_fused_kernel[grid](
+            self.num_accepted_tokens_gpu,
+            info.state_idx_gpu,
+            None,
+            num_computed_tokens,
+            None,
+            info.fused_block_table_ptrs,
+            info.fused_block_table_stride_req,
+            info.fused_state_base_addrs,
+            info.fused_state_block_strides,
+            info.fused_state_elem_sizes,
+            info.fused_state_inner_sizes,
+            info.fused_state_conv_widths,
+            info.fused_state_group_indices,
+            info.fused_state_dim_row_count,
+            info.fused_state_dim_row_stride,
+            None,
+            idx_mapping,
             num_reqs,
-            self._mamba_state_idx_gpu,
-            self._mamba_src_col_gpu,
-            self._mamba_src_off_gpu,
-            input_batch.idx_mapping,
+            block_size=mamba_spec.block_size,
+            COPY_BLOCK_SIZE=1024,
+            CONV_STATE_DIM_FIRST=is_conv_state_dim_first(),
+            HAS_IDX_MAPPING=True,
+            PRECOMPUTED_NEW_COMPUTED=True,
         )
 
     def prepare_attn(
@@ -268,10 +442,31 @@ class MambaHybridModelState(DefaultModelState):
                 )
             num_decode_draft_tokens_cpu = torch.from_numpy(num_decode_draft_tokens_np)
 
+        # Copy-free src redirect: pass the req-order src columns + idx_mapping
+        # straight through; gdn_attn does the batch-order gather and resolve (no
+        # advanced-index gathers / padded allocations here).
+        align_src_ssm_col = None
+        align_conv_src_col = None
+        align_conv_src_off = None
+        align_idx_mapping = None
+        align_num_reqs_out = 0
+        if not for_capture and self.cache_config.mamba_cache_mode == "align":
+            info = self.mamba_cache_align_info
+            align_src_ssm_col = info.src_ssm_col_gpu
+            align_conv_src_col = info.conv_src_col_gpu
+            align_conv_src_off = info.conv_src_off_gpu
+            align_idx_mapping = input_batch.idx_mapping
+            align_num_reqs_out = input_batch.num_reqs
+
         mamba_attn_metadata = MambaHybridAttnMetadata(
             is_prefilling=is_prefilling,
             num_accepted_tokens=num_accepted_tokens,
             num_decode_draft_tokens_cpu=num_decode_draft_tokens_cpu,
+            align_src_ssm_col=align_src_ssm_col,
+            align_conv_src_col=align_conv_src_col,
+            align_conv_src_off=align_conv_src_off,
+            align_idx_mapping=align_idx_mapping,
+            align_num_reqs=align_num_reqs_out,
         )
         return build_attn_metadata(
             attn_groups=attn_groups,
@@ -297,6 +492,8 @@ class MambaHybridModelState(DefaultModelState):
         idx_mapping: torch.Tensor,
         num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
+        num_reqs: int | None = None,
+        query_start_loc: torch.Tensor | None = None,
     ) -> None:
         # Chunked prefill does not sample a token, so num_sampled can be 0.
         # Mamba treats num_accepted_tokens=1 as the neutral non-spec value.
@@ -309,29 +506,21 @@ class MambaHybridModelState(DefaultModelState):
                     idx_mapping, num_sampled, self.num_accepted_tokens_gpu
                 )
         else:
-            # Fill with single value.
             self.num_accepted_tokens_gpu.index_fill_(
                 0, idx_mapping, max(num_sampled, 1)
             )
 
-        # Align: save the running state to the block-aligned position when
-        # spec-decode acceptance leaves the sequence non-block-aligned (mirrors
-        # the V1 align postprocess). num_computed_tokens already holds the
-        # post-step advanced count.
         if (
-            self._align_mode
+            self.cache_config.mamba_cache_mode == "align"
             and num_computed_tokens is not None
-            and self._mamba_ctx is not None
+            and num_reqs is not None
         ):
-            num_reqs = idx_mapping.shape[0]
-            if num_reqs:
-                self._mamba_ctx.run_fused_postprocess_align(
-                    num_reqs,
-                    self.num_accepted_tokens_gpu,
-                    self._mamba_state_idx_gpu,
-                    num_computed_tokens,
-                    idx_mapping,
-                )
+            self._postprocess_mamba_cache_align(
+                idx_mapping,
+                num_computed_tokens,
+                num_reqs,
+                query_start_loc,
+            )
 
 
 @triton.jit

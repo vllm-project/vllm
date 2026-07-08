@@ -923,6 +923,12 @@ class GPUModelRunner(
         self.kv_connector_output: KVConnectorOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_bufs: mamba_utils.MambaBuffers | None = None
+        # Identity idx_mapping for copy-free align: V1's preprocess_mamba already
+        # stages the src columns in batch order, so an identity arange makes the
+        # fused gather in gdn_attn.build a no-op (resolve-only). Sliced per step.
+        self._mamba_align_identity_idx = torch.arange(
+            self.max_num_reqs, dtype=torch.int32, device=self.device
+        )
         self.mamba_prev_last_scheduled_idx: CpuGpuBuffer | None = None
         if self.cache_config.mamba_cache_mode == "all" and self.num_spec_tokens > 0:
             self.mamba_prev_last_scheduled_idx = self._make_buffer(
@@ -2467,6 +2473,32 @@ class GPUModelRunner(
                     extra_attn_metadata_args["prev_last_scheduled_idx"] = (
                         self.mamba_prev_last_scheduled_idx.gpu[:num_reqs_padded]
                     )
+
+            # Copy-free align (GDN): feed the src columns staged by
+            # preprocess_mamba so build gathers + resolves them to physical
+            # blocks. Applies to non-spec decode too, so it sits outside the
+            # spec-decode guard above. Columns are passed unsliced (padded slots
+            # are -1 = fresh); build reads only align_num_reqs of them and uses
+            # the identity idx_mapping since the columns are already batch-order.
+            if (
+                self.cache_config.mamba_cache_mode == "align"
+                and isinstance(builder, GDNAttentionMetadataBuilder)
+                and self._mamba_bufs is not None
+            ):
+                copy_bufs = self._mamba_bufs.preprocess
+                extra_attn_metadata_args["align_src_ssm_col"] = (
+                    copy_bufs.src_ssm_col_buf.gpu
+                )
+                extra_attn_metadata_args["align_conv_src_col"] = (
+                    copy_bufs.conv_src_col_buf.gpu
+                )
+                extra_attn_metadata_args["align_conv_src_off"] = (
+                    copy_bufs.conv_src_off_buf.gpu
+                )
+                extra_attn_metadata_args["align_idx_mapping"] = (
+                    self._mamba_align_identity_idx[:num_reqs]
+                )
+                extra_attn_metadata_args["align_num_reqs"] = num_reqs
 
             if for_cudagraph_capture:
                 attn_metadata_i = builder.build_for_cudagraph_capture(

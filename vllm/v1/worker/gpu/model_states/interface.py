@@ -103,15 +103,16 @@ class ModelState(ABC):
         num_computed_tokens: torch.Tensor,
     ) -> None:
         """Hook run on real batches before the forward pass (after block tables
-        are gathered). Used by mamba "align" prefix caching to pre-copy state
-        across block boundaries. No-op by default."""
+        are gathered). Used by mamba "align" prefix caching. No-op by default."""
         return None
 
     def postprocess_state(
         self,
         idx_mapping: torch.Tensor,
-        num_sampled: torch.Tensor,
+        num_sampled: torch.Tensor | int,
         num_computed_tokens: torch.Tensor | None = None,
+        num_reqs: int | None = None,
+        query_start_loc: torch.Tensor | None = None,
     ) -> None:
         return None
 

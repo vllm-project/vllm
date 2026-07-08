@@ -31,6 +31,29 @@ SUPPRESS_LEVEL = int(os.getenv("GDN_RECOMPUTE_SUPPRESS_LEVEL", "0"))
 FLA_CHUNK_SIZE = 64
 
 
+def select_ssm_src_indices(
+    src_indices: torch.Tensor | None,
+    dst_indices: torch.Tensor | None,
+    num_seqs: int,
+) -> tuple[torch.Tensor | None, bool]:
+    """Pick the read (src) state-index tensor for the copy-free "align" path.
+
+    The forward always writes to ``dst_indices`` (the window). When a distinct
+    ``src_indices`` tensor is passed it holds pre-resolved 1D physical block ids
+    that the kernel reads the initial state from directly (returns
+    ``src_preresolved=True``). When ``src_indices`` is None the read self-aliases
+    to ``dst_indices`` (no redirect). src and dst can both be 1D, so identity --
+    not a None check -- is the only safe selector; capture it before aliasing.
+    Both tensors are read-only, so the self-alias is safe.
+    """
+    src_preresolved = src_indices is not None and src_indices is not dst_indices
+    if src_indices is None:
+        src_indices = dst_indices
+    if src_preresolved:
+        assert src_indices.ndim == 1 and src_indices.shape[0] == num_seqs
+    return src_indices, src_preresolved
+
+
 def tensor_cache(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
     """
     A decorator that caches the most recent results of a function with tensor inputs.

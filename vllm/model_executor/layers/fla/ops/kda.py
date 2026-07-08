@@ -23,7 +23,7 @@ from .index import prepare_chunk_indices
 from .l2norm import l2norm_fwd
 from .op import exp2, log
 from .solve_tril import solve_tril
-from .utils import FLA_CHUNK_SIZE, is_amd
+from .utils import FLA_CHUNK_SIZE, is_amd, select_ssm_src_indices
 
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if is_amd else [4, 8, 16, 32]
@@ -40,6 +40,7 @@ def fused_recurrent_kda_fwd(
     inplace_final_state: bool = True,
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.Tensor | None = None,
+    src_ssm_state_indices: torch.Tensor | None = None,
     num_accepted_tokens: torch.Tensor | None = None,
     use_qk_l2norm_in_kernel: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -68,6 +69,14 @@ def fused_recurrent_kda_fwd(
     else:
         stride_indices_seq, stride_indices_tok = ssm_state_indices.stride()
 
+    # Launches fused_recurrent_gated_delta_rule_fwd_kernel directly (not its
+    # wrapper), so the src/dst selection is replicated here.
+    src_ssm_state_indices, src_preresolved = select_ssm_src_indices(
+        src_ssm_state_indices, ssm_state_indices, N
+    )
+    if num_accepted_tokens is not None and ssm_state_indices is not None:
+        assert ssm_state_indices.ndim == 2
+
     grid = (NK, NV, N * HV)
     fused_recurrent_gated_delta_rule_fwd_kernel[grid](
         q=q,
@@ -79,7 +88,8 @@ def fused_recurrent_kda_fwd(
         h0=initial_state,
         ht=final_state,
         cu_seqlens=cu_seqlens,
-        ssm_state_indices=ssm_state_indices,
+        src_ssm_state_indices=src_ssm_state_indices,
+        dst_ssm_state_indices=ssm_state_indices,
         num_accepted_tokens=num_accepted_tokens,
         scale=scale,
         N=N,
@@ -99,6 +109,7 @@ def fused_recurrent_kda_fwd(
         USE_QK_L2NORM_IN_KERNEL=use_qk_l2norm_in_kernel,
         INPLACE_FINAL_STATE=inplace_final_state,
         IS_KDA=True,
+        SRC_PRERESOLVED=src_preresolved,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -118,6 +129,7 @@ def fused_recurrent_kda(
     use_qk_l2norm_in_kernel: bool = True,
     cu_seqlens: torch.Tensor | None = None,
     ssm_state_indices: torch.LongTensor | None = None,
+    src_ssm_state_indices: torch.Tensor | None = None,
     **kwargs,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     if cu_seqlens is not None and q.shape[0] != 1:
@@ -139,6 +151,7 @@ def fused_recurrent_kda(
         inplace_final_state=inplace_final_state,
         cu_seqlens=cu_seqlens,
         ssm_state_indices=ssm_state_indices,
+        src_ssm_state_indices=src_ssm_state_indices,
         num_accepted_tokens=None,
         use_qk_l2norm_in_kernel=use_qk_l2norm_in_kernel,
     )
