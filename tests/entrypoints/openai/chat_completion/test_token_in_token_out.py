@@ -83,18 +83,37 @@ async def test_chat_token_in_matches_messages(server):
     assert token_in.choices[0].message.content == baseline.choices[0].message.content
 
 
+IMAGE_MESSAGES = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "image_url", "image_url": {"url": "http://example.com/x.png"}}
+        ],
+    }
+]
+
+
 @pytest.mark.asyncio
-async def test_chat_token_in_rejects_template_option(server):
-    """Chat-template options are incompatible with pre-tokenized input."""
+@pytest.mark.parametrize(
+    "messages, extra_options",
+    [
+        # A chat-template option cannot apply to pre-tokenized input.
+        ([], {"add_generation_prompt": True}),
+        # Token ids carry no multimodal features.
+        (IMAGE_MESSAGES, {}),
+    ],
+    ids=["template-option", "multimodal-content"],
+)
+async def test_chat_token_in_rejects_incompatible_input(
+    server, messages, extra_options
+):
+    """Options and message content that cannot apply are rejected, not ignored."""
     prompt_token_ids = _render_prompt_token_ids(server)
     async with server.get_async_client() as client:
         with pytest.raises(openai.BadRequestError):
             await client.chat.completions.create(
                 model=MODEL_PATH,
-                messages=[],
+                messages=messages,
                 max_completion_tokens=4,
-                extra_body={
-                    "prompt_token_ids": prompt_token_ids,
-                    "add_generation_prompt": True,
-                },
+                extra_body={"prompt_token_ids": prompt_token_ids, **extra_options},
             )

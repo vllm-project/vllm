@@ -105,7 +105,8 @@ class OnlineRenderer:
         # Pre-tokenized input (token-in): feed the provided ids straight to the
         # engine, skipping chat templating and tokenization. ``messages`` are
         # ignored; the output is still detokenized and parsed downstream
-        # (text-out). The protocol layer rejects template options here.
+        # (text-out). The protocol layer rejects template options and
+        # multimodal content, so this path is text tokens only.
         if request.prompt_token_ids:
             engine_input = tokens_input(
                 request.prompt_token_ids, cache_salt=request.cache_salt
