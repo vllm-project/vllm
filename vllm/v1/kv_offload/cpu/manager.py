@@ -6,6 +6,7 @@ from typing import Literal
 
 from typing_extensions import override
 
+from vllm.distributed.kv_events import MEDIUM_CPU
 from vllm.distributed.kv_transfer.kv_connector.v1.offloading.metrics import (
     OffloadingConnectorStats,
 )
@@ -51,7 +52,7 @@ class CPUOffloadingManager(OffloadingManager):
         store_threshold: int = 1,
         max_tracker_size: int = 64_000,
     ):
-        self.medium: str = CPULoadStoreSpec.medium()
+        self.medium: str = MEDIUM_CPU
         self._num_blocks: int = num_blocks
         self._num_allocated_blocks: int = 0
         self._free_list: list[int] = []
