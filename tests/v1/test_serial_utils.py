@@ -1,6 +1,9 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import threading
+import types
 from collections import UserDict
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 import msgspec
@@ -237,6 +240,155 @@ def test_numpy_array_serialization():
     assert np.allclose(array, decoded), (
         "Decoded numpy array does not match the original array."
     )
+
+
+def test_concurrent_encode_serializes_aux_buffer_access(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Regression test for sharing one encoder across concurrent requests."""
+
+    encoder = MsgpackEncoder(size_threshold=1)
+    decoder = MsgpackDecoder(np.ndarray)
+    original_encode_ndarray = encoder._encode_ndarray
+
+    first_inside = threading.Event()
+    release_first = threading.Event()
+    interleaved = threading.Event()
+    active_count = 0
+    active_count_lock = threading.Lock()
+
+    def encode_ndarray_with_pause(
+        _self: MsgpackEncoder,
+        obj: np.ndarray,
+    ) -> tuple[str, tuple[int, ...], int | memoryview]:
+        nonlocal active_count
+        with active_count_lock:
+            active_count += 1
+            if active_count > 1:
+                interleaved.set()
+        try:
+            if obj[0] == 1:
+                first_inside.set()
+                assert release_first.wait(timeout=2)
+            return original_encode_ndarray(obj)
+        finally:
+            with active_count_lock:
+                active_count -= 1
+
+    monkeypatch.setattr(
+        encoder,
+        "_encode_ndarray",
+        types.MethodType(encode_ndarray_with_pause, encoder),
+    )
+
+    first_array = np.full((1024,), 1, dtype=np.int64)
+    second_array = np.full((1024,), 2, dtype=np.int64)
+    encoded_results: list[Sequence[bytes | bytearray | memoryview]] = []
+    errors: list[BaseException] = []
+
+    def encode_array(array: np.ndarray):
+        try:
+            encoded_results.append(encoder.encode(array))
+        except BaseException as e:
+            errors.append(e)
+
+    first_thread = threading.Thread(target=encode_array, args=(first_array,))
+    first_thread.start()
+    assert first_inside.wait(timeout=2)
+
+    second_thread = threading.Thread(target=encode_array, args=(second_array,))
+    second_thread.start()
+    assert not interleaved.wait(timeout=0.1)
+    release_first.set()
+
+    first_thread.join(timeout=2)
+    second_thread.join(timeout=2)
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert not errors
+
+    decoded_results = [decoder.decode(encoded) for encoded in encoded_results]
+    assert len(decoded_results) == 2
+    assert any(np.array_equal(decoded, first_array) for decoded in decoded_results)
+    assert any(np.array_equal(decoded, second_array) for decoded in decoded_results)
+
+
+def test_concurrent_decode_serializes_aux_buffer_access(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """Regression test for sharing one decoder across concurrent requests."""
+
+    encoder = MsgpackEncoder(size_threshold=1)
+    first_array = np.full((1024,), 1, dtype=np.int64)
+    second_array = np.full((1024,), 2, dtype=np.int64)
+    first_encoded = encoder.encode(first_array)
+    second_encoded = encoder.encode(second_array)
+
+    decoder = MsgpackDecoder(np.ndarray)
+    original_decode_ndarray = decoder._decode_ndarray
+
+    first_inside = threading.Event()
+    release_first = threading.Event()
+    interleaved = threading.Event()
+    active_count = 0
+    active_count_lock = threading.Lock()
+
+    def decode_ndarray_with_pause(
+        self: MsgpackDecoder,
+        obj: tuple[str, tuple[int, ...], int | memoryview],
+    ) -> np.ndarray:
+        nonlocal active_count
+        with active_count_lock:
+            active_count += 1
+            if active_count > 1:
+                interleaved.set()
+        try:
+            dtype, _, data = obj
+            if isinstance(data, int):
+                first_value = np.frombuffer(
+                    self.aux_buffers[data], dtype=dtype, count=1
+                )[0]
+                if first_value == 1:
+                    first_inside.set()
+                    assert release_first.wait(timeout=2)
+            return original_decode_ndarray(obj)
+        finally:
+            with active_count_lock:
+                active_count -= 1
+
+    monkeypatch.setattr(
+        decoder,
+        "_decode_ndarray",
+        types.MethodType(decode_ndarray_with_pause, decoder),
+    )
+
+    decoded_results: list[np.ndarray] = []
+    errors: list[BaseException] = []
+
+    def decode_array(encoded: Sequence[bytes | bytearray | memoryview]):
+        try:
+            decoded_results.append(decoder.decode(encoded))
+        except BaseException as e:
+            errors.append(e)
+
+    first_thread = threading.Thread(target=decode_array, args=(first_encoded,))
+    first_thread.start()
+    assert first_inside.wait(timeout=2)
+
+    second_thread = threading.Thread(target=decode_array, args=(second_encoded,))
+    second_thread.start()
+    assert not interleaved.wait(timeout=0.1)
+    release_first.set()
+
+    first_thread.join(timeout=2)
+    second_thread.join(timeout=2)
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+    assert not errors
+
+    assert len(decoded_results) == 2
+    assert any(np.array_equal(decoded, first_array) for decoded in decoded_results)
+    assert any(np.array_equal(decoded, second_array) for decoded in decoded_results)
 
 
 class CustomClass:

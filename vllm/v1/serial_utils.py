@@ -4,6 +4,7 @@
 import dataclasses
 import importlib
 import pickle
+import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Sequence
 from functools import partial
@@ -136,8 +137,8 @@ class UtilityResult:
 class MsgpackEncoder:
     """Encoder with custom torch tensor and numpy array serialization.
 
-    Note that unlike vanilla `msgspec` Encoders, this interface is generally
-    not thread-safe when encoding tensors / numpy arrays.
+    Concurrent calls are serialized because tensor / numpy serialization uses
+    per-message auxiliary buffers that are visible to the msgspec hook.
 
     By default, arrays below 256B are serialized inline Larger will get sent
     via dedicated messages. Note that this is a per-tensor limit.
@@ -158,35 +159,38 @@ class MsgpackEncoder:
         # our custom `msgspec` hook, `enc_hook`. We don't have a way to
         # pass custom data to the hook otherwise.
         self.aux_buffers: list[bytestr] | None = None
+        self._encode_lock = threading.Lock()
         self.size_threshold = size_threshold
         self.oob_tensor_consumer = oob_tensor_consumer
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
     def encode(self, obj: Any) -> Sequence[bytestr]:
-        try:
-            if self.oob_tensor_consumer is not None:
-                self.oob_tensor_consumer.new_message()
-            self.aux_buffers = bufs = [b""]
-            bufs[0] = self.encoder.encode(obj)
-            # This `bufs` list allows us to collect direct pointers to backing
-            # buffers of tensors and np arrays, and return them along with the
-            # top-level encoded buffer instead of copying their data into the
-            # new buffer.
-            return bufs
-        finally:
-            self.aux_buffers = None
+        with self._encode_lock:
+            try:
+                if self.oob_tensor_consumer is not None:
+                    self.oob_tensor_consumer.new_message()
+                self.aux_buffers = bufs = [b""]
+                bufs[0] = self.encoder.encode(obj)
+                # This `bufs` list allows us to collect direct pointers to
+                # backing buffers of tensors and np arrays, and return them
+                # along with the top-level encoded buffer instead of copying
+                # their data into the new buffer.
+                return bufs
+            finally:
+                self.aux_buffers = None
 
     def encode_into(self, obj: Any, buf: bytearray) -> Sequence[bytestr]:
-        try:
-            if self.oob_tensor_consumer is not None:
-                self.oob_tensor_consumer.new_message()
-            self.aux_buffers = [buf]
-            bufs = self.aux_buffers
-            self.encoder.encode_into(obj, buf)
-            return bufs
-        finally:
-            self.aux_buffers = None
+        with self._encode_lock:
+            try:
+                if self.oob_tensor_consumer is not None:
+                    self.oob_tensor_consumer.new_message()
+                self.aux_buffers = [buf]
+                bufs = self.aux_buffers
+                self.encoder.encode_into(obj, buf)
+                return bufs
+            finally:
+                self.aux_buffers = None
 
     def enc_hook(self, obj: Any) -> Any:
         if isinstance(obj, torch.Tensor):
@@ -313,8 +317,8 @@ class MsgpackEncoder:
 class MsgpackDecoder:
     """Decoder with custom torch tensor and numpy array serialization.
 
-    Note that unlike vanilla `msgspec` Decoders, this interface is generally
-    not thread-safe when encoding tensors / numpy arrays.
+    Concurrent calls are serialized because tensor / numpy deserialization uses
+    per-message auxiliary buffers that are visible to msgspec hooks.
 
     ``oob_tensor_provider`` must be used when an OOBTensorConsumer is used on the
     encoder side.
@@ -333,19 +337,21 @@ class MsgpackDecoder:
             *args, ext_hook=self.ext_hook, dec_hook=self.dec_hook
         )
         self.aux_buffers: Sequence[bytestr] = ()
+        self._decode_lock = threading.Lock()
         self.oob_tensor_provider = oob_tensor_provider
         if envs.VLLM_ALLOW_INSECURE_SERIALIZATION:
             _log_insecure_serialization_warning()
 
     def decode(self, bufs: bytestr | Sequence[bytestr]) -> Any:
-        if isinstance(bufs, bytestr):  # type: ignore
-            return self.decoder.decode(bufs)
+        with self._decode_lock:
+            if isinstance(bufs, bytestr):  # type: ignore
+                return self.decoder.decode(bufs)
 
-        self.aux_buffers = bufs
-        try:
-            return self.decoder.decode(bufs[0])
-        finally:
-            self.aux_buffers = ()
+            self.aux_buffers = bufs
+            try:
+                return self.decoder.decode(bufs[0])
+            finally:
+                self.aux_buffers = ()
 
     def dec_hook(self, t: type, obj: Any) -> Any:
         # Given native types in `obj`, convert to type `t`.
