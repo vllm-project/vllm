@@ -702,11 +702,9 @@ class GPUModelRunner(
                 custom_logitsprocs,
             ),
             # We currently don't know whether a particular custom logits processor
-            # uses output token ids so we set this conservatively.
-            # ThinkingTokenBudgetLogitsProcessor also needs output token ids to
-            # correctly track think start/end token sequences in async scheduling.
-            logitsprocs_need_output_token_ids=bool(custom_logitsprocs)
-            or self.vllm_config.reasoning_config is not None,
+            # uses output token ids so we set this conservatively. Thinking-budget
+            # tracking is requested dynamically when a budgeted request is in the batch.
+            logitsprocs_need_output_token_ids=bool(custom_logitsprocs),
             is_pooling_model=self.is_pooling_model,
             cp_kv_cache_interleave_size=self.parallel_config.cp_kv_cache_interleave_size,
             reasoning_config=self.vllm_config.reasoning_config,
@@ -2208,10 +2206,7 @@ class GPUModelRunner(
                 req_idx = self.input_batch.req_id_to_index[req_id]
                 draft_len = len(draft_token_ids)
                 num_draft_tokens[req_idx] = draft_len
-                if (
-                    self.input_batch.num_computed_tokens_cpu[req_idx]
-                    >= self.input_batch.num_prompt_tokens[req_idx]
-                ):
+                if num_scheduled_tokens[req_idx] == draft_len + 1:
                     num_decode_draft_tokens[req_idx] = draft_len
             spec_decode_metadata = self._calc_spec_decode_metadata(
                 num_draft_tokens, cu_num_tokens
