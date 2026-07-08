@@ -7,6 +7,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from tests.cache_utils import download_url_to_file, get_vllm_test_cache_dir
 from tests.utils import RemoteLaunchRenderServer
 from vllm.tokenizers import get_tokenizer
 
@@ -990,20 +991,39 @@ def _ensure_harmony_vocab():
 
     The Rust tiktoken-rs backend downloads from Azure Blob Storage, which
     may be unreachable in some environments.  When the cache is cold we
-    fetch the file ourselves and place it in ``/tmp/tiktoken-rs-cache/``
-    using the SHA-1(URL) filename that tiktoken-rs expects.
+    fetch the file into the persistent vLLM test cache, then expose it at
+    ``/tmp/tiktoken-rs-cache/`` using the SHA-1(URL) filename that
+    tiktoken-rs expects.
     """
     import hashlib
-    import urllib.request
+    import os
+    import shutil
     from pathlib import Path
 
     url = "https://openaipublic.blob.core.windows.net/encodings/o200k_base.tiktoken"
-    cache_dir = Path("/tmp/tiktoken-rs-cache")
     cache_key = hashlib.sha1(url.encode()).hexdigest()
-    cache_file = cache_dir / cache_key
-    if not cache_file.exists():
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        urllib.request.urlretrieve(url, cache_file)
+
+    persistent_cache_file = download_url_to_file(
+        url, get_vllm_test_cache_dir("tiktoken-rs") / cache_key
+    ).resolve()
+
+    runtime_cache_dir = Path("/tmp/tiktoken-rs-cache")
+    runtime_cache_file = runtime_cache_dir / cache_key
+    if runtime_cache_file.is_file() and runtime_cache_file.stat().st_size > 0:
+        return
+
+    if runtime_cache_file.exists() or runtime_cache_file.is_symlink():
+        runtime_cache_file.unlink()
+
+    runtime_cache_dir.mkdir(parents=True, exist_ok=True)
+    tmp_cache_file = runtime_cache_file.with_name(
+        f".{runtime_cache_file.name}.{os.getpid()}.tmp"
+    )
+    try:
+        shutil.copy2(persistent_cache_file, tmp_cache_file)
+        tmp_cache_file.replace(runtime_cache_file)
+    finally:
+        tmp_cache_file.unlink(missing_ok=True)
 
 
 @pytest.fixture(scope="module")

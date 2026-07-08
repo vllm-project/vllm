@@ -7,7 +7,6 @@ import openai  # use the official client for correctness check
 import pytest
 import pytest_asyncio
 import torch
-from transformers import AutoConfig
 
 from tests.conftest import ImageTestAssets
 from tests.utils import RemoteOpenAIServer
@@ -15,7 +14,6 @@ from vllm.utils.serial_utils import tensor2base64
 
 # any model with a chat template should work here
 MODEL_NAME = "llava-hf/llava-1.5-7b-hf"
-CONFIG = AutoConfig.from_pretrained(MODEL_NAME)
 MAXIMUM_IMAGES = 2
 
 

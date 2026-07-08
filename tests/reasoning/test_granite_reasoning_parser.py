@@ -119,14 +119,16 @@ TEST_CASES = [
     ),
 ]
 
-# Global tokenizer initialization to avoid repeated loading
-tokenizer = AutoTokenizer.from_pretrained("facebook/opt-125m")
+@pytest.fixture(scope="module")
+def tokenizer():
+    return AutoTokenizer.from_pretrained("facebook/opt-125m")
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
 def test_reasoning(
     streaming: bool,
     param_dict: dict,
+    tokenizer,
 ):
     output = tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens
@@ -312,7 +314,7 @@ STREAMING_SUBCASES = [
 
 
 @pytest.mark.parametrize("param_dict", STREAMING_SUBCASES)
-def test_streaming_subcases(param_dict):
+def test_streaming_subcases(param_dict, tokenizer):
     # Get all of the token IDs
     previous_token_ids = (
         tokenizer.encode(param_dict["previous_text"])

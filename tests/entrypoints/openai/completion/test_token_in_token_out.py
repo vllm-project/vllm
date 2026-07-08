@@ -8,13 +8,11 @@ from vllm.model_executor.model_loader.weight_utils import download_weights_from_
 from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "Qwen/Qwen3-0.6B"
-MODEL_PATH = MODEL_NAME
 
 
 @pytest.fixture(scope="module")
-def server():
-    global MODEL_PATH
-    MODEL_PATH = download_weights_from_hf(
+def server_and_model_path():
+    model_path = download_weights_from_hf(
         MODEL_NAME,
         allow_patterns=["*"],
         cache_dir=None,
@@ -30,12 +28,12 @@ def server():
         "--load-format",
         "dummy",
     ]
-    with RemoteOpenAIServer(MODEL_PATH, args) as remote_server:
-        yield remote_server
+    with RemoteOpenAIServer(model_path, args) as remote_server:
+        yield remote_server, model_path
 
 
 @pytest.mark.asyncio
-async def test_token_in_token_out_and_logprobs(server):
+async def test_token_in_token_out_and_logprobs(server_and_model_path):
     """
     Test token-in-token-out and token_ids align with prompt_logprobs
     & logprobs when return_tokens_as_token_ids is enabled.
@@ -43,10 +41,11 @@ async def test_token_in_token_out_and_logprobs(server):
     tokenizer = get_tokenizer(tokenizer_name=MODEL_NAME)
     text = "Hello, world! How are you today?"
     token_ids = tokenizer.encode(text)
-    async with server.get_async_client() as client:
+    remote_server, model_path = server_and_model_path
+    async with remote_server.get_async_client() as client:
         # Test with both return_token_ids and return_tokens_as_token_ids enabled
         completion = await client.completions.create(
-            model=MODEL_PATH,
+            model=model_path,
             prompt=token_ids,
             max_tokens=20,
             temperature=0,

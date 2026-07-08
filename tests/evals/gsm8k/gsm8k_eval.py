@@ -9,16 +9,16 @@ import argparse
 import ast
 import asyncio
 import json
-import os
-import tempfile
 import time
 from collections.abc import Generator
+from pathlib import Path
 
 import aiohttp
 import numpy as np
 import regex as re
-import requests
 from tqdm.asyncio import tqdm
+
+from tests.cache_utils import download_to_vllm_test_cache, download_url_to_file
 
 INVALID = -9999999
 
@@ -26,22 +26,9 @@ INVALID = -9999999
 def download_and_cache_file(url: str, filename: str | None = None) -> str:
     """Download and cache a file from a URL."""
     if filename is None:
-        cache_dir = os.environ.get("VLLM_TEST_CACHE", tempfile.gettempdir())
-        os.makedirs(os.path.join(cache_dir, "gsm8k"), exist_ok=True)
-        filename = os.path.join(cache_dir, "gsm8k", url.split("/")[-1])
+        return str(download_to_vllm_test_cache(url, "gsm8k"))
 
-    if os.path.exists(filename):
-        return filename
-
-    print(f"Downloading from {url} to {filename}")
-    response = requests.get(url, stream=True)
-    response.raise_for_status()
-
-    with open(filename, "wb") as f:
-        for chunk in response.iter_content(chunk_size=1024):
-            f.write(chunk)
-
-    return filename
+    return str(download_url_to_file(url, Path(filename)))
 
 
 def load_gsm8k_data() -> tuple[list[dict], list[dict]]:

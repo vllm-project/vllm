@@ -1,12 +1,10 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
-import os
 from collections.abc import Sequence
 
 import pytest
 import regex as re
-from huggingface_hub import snapshot_download
 from transformers import AutoTokenizer
 
 from vllm.assets.image import ImageAsset
@@ -34,16 +32,6 @@ HF_IMAGE_PROMPTS = IMAGE_ASSETS.prompts(
 HF_MULTIIMAGE_IMAGE_PROMPT = (
     "<|user|>\n<|image_1|>\n<|image_2|>\nDescribe these images.<|end|>\n<|assistant|>\n"  # noqa: E501
 )
-
-model_path = snapshot_download("microsoft/Phi-4-multimodal-instruct")
-# Since the vision-lora and speech-lora co-exist with the base model,
-# we have to manually specify the path of the lora weights.
-vision_lora_path = os.path.join(model_path, "vision-lora")
-speech_question = os.path.join(
-    model_path, "examples", "what_is_shown_in_this_image.wav"
-)
-models = [model_path]
-
 
 def vllm_to_hf_output(
     vllm_output: tuple[list[int], str, SampleLogprobs | None], model: str
@@ -80,6 +68,7 @@ def run_test(
     num_logprobs: int,
     mm_limit: int,
     tensor_parallel_size: int,
+    vision_lora_path: str,
     distributed_executor_backend: str | None = None,
 ):
     """Inference result should be the same between hf and vllm.
@@ -166,7 +155,6 @@ def run_test(
         )
 
 
-@pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
     [
@@ -186,7 +174,8 @@ def test_models(
     hf_runner,
     vllm_runner,
     image_assets,
-    model,
+    phi4_multimodal_model_path,
+    phi4_multimodal_vision_lora_path,
     size_factors,
     dtype: str,
     max_model_len: int,
@@ -208,18 +197,18 @@ def test_models(
         hf_runner,
         vllm_runner,
         inputs_per_image,
-        model,
+        phi4_multimodal_model_path,
         dtype=dtype,
         max_model_len=max_model_len,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         mm_limit=1,
         tensor_parallel_size=1,
+        vision_lora_path=phi4_multimodal_vision_lora_path,
     )
 
 
 @large_gpu_test(min_gb=48)
-@pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize(
     "size_factors",
     [
@@ -241,7 +230,8 @@ def test_multi_images_models(
     hf_runner,
     vllm_runner,
     image_assets,
-    model,
+    phi4_multimodal_model_path,
+    phi4_multimodal_vision_lora_path,
     size_factors,
     dtype: str,
     max_model_len: int,
@@ -265,17 +255,17 @@ def test_multi_images_models(
         hf_runner,
         vllm_runner,
         inputs_per_case,
-        model,
+        phi4_multimodal_model_path,
         dtype=dtype,
         max_model_len=max_model_len,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         mm_limit=2,
         tensor_parallel_size=1,
+        vision_lora_path=phi4_multimodal_vision_lora_path,
     )
 
 
-@pytest.mark.parametrize("model", models)
 @pytest.mark.parametrize("dtype", [target_dtype])
 @pytest.mark.parametrize("max_model_len", [12800])
 @pytest.mark.parametrize("max_tokens", [128])
@@ -283,14 +273,16 @@ def test_multi_images_models(
 def test_vision_speech_models(
     hf_runner,
     vllm_runner,
-    model,
+    phi4_multimodal_model_path,
+    phi4_multimodal_vision_lora_path,
+    phi4_multimodal_speech_question_path,
     dtype: str,
     max_model_len: int,
     max_tokens: int,
     num_logprobs: int,
 ) -> None:
     # use the example speech question so that the model outputs are reasonable
-    audio = load_audio(speech_question, sr=None)
+    audio = load_audio(phi4_multimodal_speech_question_path, sr=None)
     image = convert_image_mode(ImageAsset("cherry_blossom").pil_image, "RGB")
 
     inputs_vision_speech = [
@@ -305,11 +297,12 @@ def test_vision_speech_models(
         hf_runner,
         vllm_runner,
         inputs_vision_speech,
-        model,
+        phi4_multimodal_model_path,
         dtype=dtype,
         max_model_len=max_model_len,
         max_tokens=max_tokens,
         num_logprobs=num_logprobs,
         mm_limit=1,
         tensor_parallel_size=1,
+        vision_lora_path=phi4_multimodal_vision_lora_path,
     )

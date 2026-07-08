@@ -12,20 +12,16 @@ import os
 import shlex
 import subprocess
 import sys
-import urllib.request
-from pathlib import Path
 
 import regex as re
 import yaml
 
+from tests.cache_utils import download_to_vllm_test_cache, get_vllm_test_cache_dir
 from tests.utils import RemoteOpenAIServer
 
 TOL = 0.05  # Absolute tolerance for accuracy comparison
 
-# Path to tiktoken encoding files
-TIKTOKEN_DATA_DIR = (
-    Path(os.environ.get("VLLM_TEST_CACHE", str(Path(__file__).parent))) / "tiktoken"
-)
+TIKTOKEN_CACHE_NAMESPACE = "gpt_oss/tiktoken"
 
 # Tiktoken encoding files to download
 TIKTOKEN_FILES = {
@@ -34,18 +30,26 @@ TIKTOKEN_FILES = {
 }
 
 
+def get_tiktoken_data_dir():
+    return get_vllm_test_cache_dir(TIKTOKEN_CACHE_NAMESPACE)
+
+
 def ensure_tiktoken_files():
     """Download tiktoken encoding files if they don't exist."""
-    TIKTOKEN_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    tiktoken_data_dir = get_tiktoken_data_dir()
 
     for filename, url in TIKTOKEN_FILES.items():
-        filepath = TIKTOKEN_DATA_DIR / filename
+        filepath = tiktoken_data_dir / filename
         if not filepath.exists():
             print(f"Downloading {filename} from {url}...")
-            urllib.request.urlretrieve(url, filepath)
+            filepath = download_to_vllm_test_cache(
+                url, TIKTOKEN_CACHE_NAMESPACE, filename=filename
+            )
             print(f"  Downloaded to {filepath}")
         else:
             print(f"  {filename} already exists.")
+
+    return tiktoken_data_dir
 
 
 def run_gpqa_eval(model_name: str, base_url: str, reasoning_effort: str) -> float:
@@ -110,11 +114,11 @@ def run_gpqa_eval(model_name: str, base_url: str, reasoning_effort: str) -> floa
 def test_gpqa_correctness(config_filename):
     """Test GPQA correctness for a given model configuration."""
     # Ensure tiktoken files are downloaded
-    ensure_tiktoken_files()
+    tiktoken_data_dir = ensure_tiktoken_files()
 
     # Verify tiktoken files exist
     for filename in TIKTOKEN_FILES:
-        filepath = TIKTOKEN_DATA_DIR / filename
+        filepath = tiktoken_data_dir / filename
         assert filepath.exists(), f"Tiktoken file not found: {filepath}"
 
     eval_config = yaml.safe_load(config_filename.read_text(encoding="utf-8"))
@@ -133,7 +137,7 @@ def test_gpqa_correctness(config_filename):
     )
 
     # Build server environment with tiktoken path and any config-specified vars
-    server_env = {"TIKTOKEN_ENCODINGS_BASE": str(TIKTOKEN_DATA_DIR)}
+    server_env = {"TIKTOKEN_ENCODINGS_BASE": str(tiktoken_data_dir)}
     if eval_config.get("env"):
         server_env.update(eval_config["env"])
 

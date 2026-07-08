@@ -140,16 +140,18 @@ TEST_CASES = [
     ),
 ]
 
-# Global tokenizer initialization to avoid repeated loading
-tokenizer = AutoTokenizer.from_pretrained(
-    "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
-)
+@pytest.fixture(scope="module")
+def tokenizer():
+    return AutoTokenizer.from_pretrained(
+        "tencent/Hunyuan-A13B-Instruct", trust_remote_code=True
+    )
 
 
 @pytest.mark.parametrize("streaming, param_dict", TEST_CASES)
 def test_reasoning(
     streaming: bool,
     param_dict: dict,
+    tokenizer,
 ):
     output = tokenizer.tokenize(param_dict["output"])
     # decode everything to tokens

@@ -401,17 +401,21 @@ fi
 # --- Prepare commands ---
 echo "--- Running container"
 
-HF_CACHE="$(realpath ~)/huggingface"
-mkdir -p "${HF_CACHE}"
+PERSISTENT_CACHE_ROOT="${VLLM_CI_PERSISTENT_CACHE_ROOT:-$(realpath ~)}"
+
+HF_CACHE="${VLLM_CI_HF_CACHE:-${PERSISTENT_CACHE_ROOT}/huggingface}"
 HF_MOUNT="/root/.cache/huggingface"
 
-MODELSCOPE_CACHE="$(realpath ~)/modelscope"
-mkdir -p "${MODELSCOPE_CACHE}"
+MODELSCOPE_CACHE="${VLLM_CI_MODELSCOPE_CACHE:-${PERSISTENT_CACHE_ROOT}/modelscope}"
 MODELSCOPE_MOUNT="/root/.cache/modelscope"
 
-VLLM_TEST_CACHE="$(realpath ~)/vllm-test-cache"
-mkdir -p "${VLLM_TEST_CACHE}"
+VLLM_TEST_CACHE="${VLLM_CI_TEST_CACHE:-${PERSISTENT_CACHE_ROOT}/vllm-test-cache}"
 VLLM_TEST_CACHE_MOUNT="/root/.cache/vllm-test-cache"
+
+VLLM_ASSETS_CACHE="${VLLM_CI_ASSETS_CACHE:-${PERSISTENT_CACHE_ROOT}/vllm-assets}"
+VLLM_ASSETS_CACHE_MOUNT="/root/.cache/vllm-assets"
+
+mkdir -p "${HF_CACHE}" "${MODELSCOPE_CACHE}" "${VLLM_TEST_CACHE}" "${VLLM_ASSETS_CACHE}"
 
 # Hugging Face Hub defaults to 10s request/download timeouts, while the ROCm
 # CI image currently raises downloads to 60s. AMD model-test jobs routinely
@@ -420,6 +424,7 @@ VLLM_TEST_CACHE_MOUNT="/root/.cache/vllm-test-cache"
 # Keep the CI default explicit and overridable from the Buildkite environment.
 : "${HF_HUB_DOWNLOAD_TIMEOUT:=300}"
 : "${HF_HUB_ETAG_TIMEOUT:=60}"
+: "${VLLM_TEST_CACHE_ONLY:=1}"
 
 # ---- Command source selection ----
 # Prefer VLLM_TEST_COMMANDS (preserves all inner quoting intact).
@@ -589,6 +594,7 @@ else
     -e HF_TOKEN \
     -e "HF_HUB_DOWNLOAD_TIMEOUT=${HF_HUB_DOWNLOAD_TIMEOUT}" \
     -e "HF_HUB_ETAG_TIMEOUT=${HF_HUB_ETAG_TIMEOUT}" \
+    -e "VLLM_TEST_CACHE_ONLY=${VLLM_TEST_CACHE_ONLY}" \
     -e AWS_ACCESS_KEY_ID \
     -e AWS_SECRET_ACCESS_KEY \
     -e BUILDKITE_PARALLEL_JOB \
@@ -601,9 +607,11 @@ else
     -v "${HF_CACHE}:${HF_MOUNT}" \
     -v "${MODELSCOPE_CACHE}:${MODELSCOPE_MOUNT}" \
     -v "${VLLM_TEST_CACHE}:${VLLM_TEST_CACHE_MOUNT}" \
+    -v "${VLLM_ASSETS_CACHE}:${VLLM_ASSETS_CACHE_MOUNT}" \
     -e "HF_HOME=${HF_MOUNT}" \
     -e "MODELSCOPE_CACHE=${MODELSCOPE_MOUNT}" \
     -e "VLLM_TEST_CACHE=${VLLM_TEST_CACHE_MOUNT}" \
+    -e "VLLM_ASSETS_CACHE=${VLLM_ASSETS_CACHE_MOUNT}" \
     -e "PYTHONPATH=${MYPYTHONPATH}" \
     -e "TMPDIR=${CONTAINER_TMPDIR}/tmp" \
     -e "TORCHINDUCTOR_CACHE_DIR=${CONTAINER_CACHE_ROOT}/torchinductor" \
