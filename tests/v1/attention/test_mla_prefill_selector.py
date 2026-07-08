@@ -27,7 +27,7 @@ def clear_cache():
 
 
 GFX950 = DeviceCapability(major=9, minor=5)
-HOPPER = DeviceCapability(major=9, minor=0)
+GFX942 = DeviceCapability(major=9, minor=4)
 
 if current_platform.is_rocm():
     from vllm.platforms.rocm import on_gfx950
@@ -472,7 +472,7 @@ class TestAiterAsmValidation:
         [
             (GFX950, "fp8", True, True, None),
             (GFX950, "auto", True, False, "fp8"),
-            (HOPPER, "fp8", True, False, "compute capability"),
+            (GFX942, "fp8", True, False, "compute capability"),
             (GFX950, "fp8", False, False, "MLA dimensions"),
         ],
     )
