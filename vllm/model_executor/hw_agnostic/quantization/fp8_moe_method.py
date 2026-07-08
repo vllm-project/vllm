@@ -30,13 +30,13 @@ from vllm.model_executor.hw_agnostic.layers.fused_moe.routed_experts import (
 from vllm.model_executor.hw_agnostic.layers.fused_moe.runner.shared_experts import (  # noqa: E501
     SharedExperts,
 )
-from vllm.model_executor.hw_agnostic.model_loader.reload.layerwise import (
-    initialize_online_processing,
-)
 from vllm.model_executor.hw_agnostic.quantization.fp8_config import Fp8Config
 from vllm.model_executor.hw_agnostic.quantization.utils import (
     process_fp8_input_tensor_strategy_moe,
     process_fp8_weight_tensor_strategy_moe,
+)
+from vllm.model_executor.model_loader.reload.layerwise import (
+    initialize_online_processing,
 )
 from vllm.model_executor.utils import replace_parameter, set_weight_attrs
 from vllm.platforms import current_platform

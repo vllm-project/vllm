@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import ast
+import contextlib
+import io
 import sys
+import textwrap
 from dataclasses import dataclass, field
 
 import regex as re
@@ -83,62 +87,6 @@ CHECK_IMPORTS = {
         ),
         allowed_files={"vllm/triton_utils/importing.py"},
     ),
-    "hw_agnostic_isolation": ForbiddenImport(
-        pattern=(
-            r"^\s*from\s+vllm\."
-            r"(?:"
-            r"model_executor\.layers(?!\.utils\b)(?!\.quantization\.base_config\b)(?!\.quantization\.kv_cache\b)(?!\.attention_layer_base\b)"
-            r"|model_executor\.kernels\b"
-            r"|model_executor\.models(?!\.utils\b)"
-            r"|model_executor\.model_loader\.reload\.layerwise\b"
-            r"|models\.[^.]+(?!\.hw_agnostic\b)"
-            r"|v1\.attention\.backends?\b"
-            r"|v1\.kv_cache_interface\b"
-            r")"
-            r"(?:\.|\s+import\b)"
-        ),
-        tip=(
-            "hardware-agnostic modelling code must not import from "
-            "non-hardware-agnostic parts. The only exceptions are general "
-            "utils.py files such as vllm.model_executor.layers.utils.py."
-        ),
-        applies_to=re.compile(
-            r"^vllm/(?:models/[^/]+/hw_agnostic|model_executor/hw_agnostic)"
-            r"/.*\.py$"
-        ),
-        allowed_files={
-            # Re-export modules whose only job is to expose an upstream
-            # symbol under a hw_agnostic-shaped path (identity match for
-            # framework isinstance checks, or a process-wide registry).
-            "vllm/model_executor/hw_agnostic/layers/attention.py",
-            "vllm/model_executor/hw_agnostic/model_loader/reload/layerwise.py",
-            "vllm/model_executor/hw_agnostic/quantization/quant_keys.py",
-            "vllm/model_executor/hw_agnostic/quantization/input_quant_fp8.py",
-            "vllm/model_executor/hw_agnostic/quantization/quant_activation.py",
-            # Attention-backend / KV-cache-spec shims: the V1 framework
-            # keys group identity on the same class object, so these
-            # re-exports must resolve to the upstream classes verbatim.
-            "vllm/model_executor/hw_agnostic/v1/attention/backend.py",
-            "vllm/model_executor/hw_agnostic/v1/kv_cache_interface.py",
-        },
-    ),
-    "hw_agnostic_no_vendor_utils": ForbiddenImport(
-        pattern=(
-            r"^\s*(?:from\s+vllm\.utils\."
-            r"(?:flashinfer|deep_gemm|cutlass|trtllm|deep_ep|aiter)\b"
-            r"|import\s+vllm\.utils\."
-            r"(?:flashinfer|deep_gemm|cutlass|trtllm|deep_ep|aiter)\b)"
-        ),
-        tip=(
-            "hardware-agnostic code must not import from vendor-specific "
-            "vllm.utils.* modules (flashinfer/deep_gemm/cutlass/trtllm/"
-            "deep_ep/aiter)."
-        ),
-        applies_to=re.compile(
-            r"^vllm/(?:models/[^/]+/hw_agnostic|model_executor/hw_agnostic)"
-            r"/.*\.py$"
-        ),
-    ),
     "protected_upstream_no_oot_leak": ForbiddenImport(
         # The principle: HW-specific attention authors must be able to
         # change these files without breaking the hw-agnostic path. The
@@ -166,10 +114,144 @@ CHECK_IMPORTS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Hardware-agnostic isolation (allowlist, AST-based)
+# ---------------------------------------------------------------------------
+# Files under a ``hw_agnostic`` subtree may only import from other
+# ``hw_agnostic`` code and from the vetted upstream modules listed below.
+HW_AGNOSTIC_SCOPE = re.compile(
+    r"^vllm/(?:models/[^/]+/hw_agnostic|model_executor/hw_agnostic)/.*\.py$"
+)
+
+HW_AGNOSTIC_ALLOWED_PREFIXES = frozenset(
+    {
+        # Framework primitives with no HW-specific behaviour.
+        "vllm._custom_ops",
+        "vllm.compilation",
+        "vllm.config",
+        "vllm.distributed",
+        "vllm.envs",
+        "vllm.forward_context",
+        "vllm.logger",
+        "vllm.platforms",
+        "vllm.sequence",
+        "vllm.triton_utils",
+        # model_executor pieces that are generic (not HW-specific).
+        "vllm.model_executor.custom_op",
+        "vllm.model_executor.parameter",
+        "vllm.model_executor.utils",
+        "vllm.model_executor.model_loader.weight_utils",
+        # Weight-loading infrastructure shared with the upstream online-quant
+        # path (online/fp8.py, dummy_loader.py). ``initialize_online_processing``
+        # mutates a single process-wide ``LAYERWISE_INFO`` registry, so it must
+        # resolve to the one upstream module rather than a vendored copy.
+        "vllm.model_executor.model_loader.reload.layerwise",
+        "vllm.model_executor.layers.utils",
+        # Abstract bases / registry keys the framework groups identity on.
+        # Vendored layers must inherit from the same upstream classes.
+        "vllm.model_executor.layers.attention_layer_base",
+        "vllm.model_executor.layers.quantization.base_config",
+        "vllm.model_executor.layers.quantization.kv_cache",
+        "vllm.model_executor.models.utils",
+        # Abstract LoRA wrapper base (used only as a type annotation on the
+        # MoE LoRA context dataclass); not HW-specific.
+        "vllm.lora.punica_wrapper.punica_base",
+        # Generic (non-vendor) utils. Vendor-specific ``vllm.utils.*``
+        # modules (flashinfer/deep_gemm/cutlass/trtllm/deep_ep/aiter) are
+        # deliberately NOT listed so they stay forbidden.
+        "vllm.utils.math_utils",
+        "vllm.utils.torch_utils",
+        "vllm.utils.import_utils",
+        "vllm.utils.multi_stream_utils",
+        "vllm.v1.worker",
+    }
+)
+
+HW_AGNOSTIC_TIP = (
+    "hardware-agnostic modelling code may only import from other "
+    "hw_agnostic modules and from a vetted allowlist of generic upstream "
+    "modules (see HW_AGNOSTIC_ALLOWED_PREFIXES in "
+    "tools/pre_commit/check_forbidden_imports.py). If the module you need is "
+    "genuinely HW-agnostic, add it to that allowlist; otherwise vendor it "
+    "under a hw_agnostic subtree."
+)
+
+# Re-export shims whose whole job is to expose an upstream symbol under a
+# hw_agnostic-shaped path so framework ``isinstance`` checks match on the same
+# class object. They are exempt from the isolation check.
+HW_AGNOSTIC_ALLOWED_FILES = frozenset(
+    {
+        "vllm/model_executor/hw_agnostic/layers/attention.py",
+        "vllm/model_executor/hw_agnostic/quantization/quant_keys.py",
+        "vllm/model_executor/hw_agnostic/quantization/input_quant_fp8.py",
+        "vllm/model_executor/hw_agnostic/quantization/quant_activation.py",
+        "vllm/model_executor/hw_agnostic/v1/attention/backend.py",
+        "vllm/model_executor/hw_agnostic/v1/kv_cache_interface.py",
+    }
+)
+
+def _hw_agnostic_import_allowed(module: str) -> bool:
+    """Whether hw_agnostic code may import ``module`` (a dotted path)."""
+    # Non-vllm (stdlib / third-party) imports are unconstrained.
+    if module == "vllm" or not module.startswith("vllm."):
+        return True
+    # Any hw_agnostic module (in any subtree) is fine.
+    if "hw_agnostic" in module.split("."):
+        return True
+    return any(
+        module == prefix or module.startswith(prefix + ".")
+        for prefix in HW_AGNOSTIC_ALLOWED_PREFIXES
+    )
+
+
+def forbidden_hw_agnostic_imports(content: str) -> list[tuple[str, int]]:
+    """Return ``(module, lineno)`` for every disallowed import in ``content``.
+
+    Both ``import vllm.x`` and ``from vllm.x import y`` are inspected;
+    relative imports stay within the subtree and are ignored.
+    """
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        # Let other tooling (e.g. the linter) report syntax errors.
+        return []
+    forbidden: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        modules: list[str] = []
+        if isinstance(node, ast.Import):
+            modules = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            if node.level and node.level > 0:
+                continue
+            if node.module is not None:
+                modules = [node.module]
+        for module in modules:
+            if not _hw_agnostic_import_allowed(module):
+                forbidden.append((module, node.lineno))
+    return forbidden
+
+
+def check_hw_agnostic_isolation(path: str, content: str) -> int:
+    """Allowlist check for the hw_agnostic subtrees (AST-based)."""
+    if not HW_AGNOSTIC_SCOPE.search(path):
+        return 0
+    if path in HW_AGNOSTIC_ALLOWED_FILES:
+        return 0
+    return_code = 0
+    for module, lineno in forbidden_hw_agnostic_imports(content):
+        print(
+            f"{path}:{lineno}: "
+            "\033[91merror:\033[0m "  # red color
+            f"Found forbidden import: {module}. {HW_AGNOSTIC_TIP}"
+        )
+        return_code = 1
+    return return_code
+
+
 def check_file(path: str) -> int:
     with open(path, encoding="utf-8") as f:
         content = f.read()
-    return_code = 0
+    return_code = check_hw_agnostic_isolation(path, content)
     # Check all patterns in the whole file
     for import_name, forbidden_import in CHECK_IMPORTS.items():
         # Path-scoped rules: skip files that don't match the rule's scope.
@@ -247,13 +329,10 @@ def test_regex():
         # Upstream Attention is forbidden — the vendored re-export at
         # ``hw_agnostic/layers/attention.py`` is used instead.
         ("from vllm.model_executor.layers.attention import Attention", True),
-        # initialize_online_processing is forbidden via upstream — the
-        # re-export at ``hw_agnostic/model_loader/reload/layerwise.py``
-        # is used instead.
         (
             "from vllm.model_executor.model_loader.reload.layerwise "
             "import initialize_online_processing",
-            True,
+            False,
         ),
         # The upstream Triton experts kernel is now vendored under
         # ``hw_agnostic/layers/fused_moe/experts/triton_moe.py``; the
@@ -483,19 +562,13 @@ def test_regex():
             "from vllm.models.minimax_m3.hw_agnostic.layers.layernorm import X",
             False,
         ),
-        ("from vllm.model_executor.layers_extra import x", False),
-        ("from vllm.model_executor.models_extra import x", False),
-    ]
-    rule = CHECK_IMPORTS["hw_agnostic_isolation"]
-    rule_pattern = re.compile(rule.pattern, re.MULTILINE)
-    for i, (line, should_match) in enumerate(hw_agnostic_cases):
-        result = bool(rule_pattern.match(line))
-        assert result == should_match, (
-            f"hw_agnostic test case {i} failed: '{line}' "
-            f"(expected {should_match}, got {result})"
-        )
-
-    no_vendor_utils_cases = [
+        # Unknown ``vllm.*`` modules are forbidden by default (allowlist
+        # semantics): a fresh module must be vetted onto the allowlist or
+        # vendored, rather than silently permitted.
+        ("from vllm.model_executor.layers_extra import x", True),
+        ("from vllm.model_executor.models_extra import x", True),
+        # Vendor-specific ``vllm.utils.*`` modules stay forbidden; generic
+        # ones are on the allowlist. (Previously a separate regex rule.)
         ("from vllm.utils.flashinfer import nvfp4_block_scale_interleave", True),
         ("from vllm.utils.deep_gemm import is_deep_gemm_e8m0_used", True),
         ("from vllm.utils.cutlass import foo", True),
@@ -504,15 +577,58 @@ def test_regex():
         ("from vllm.utils.math_utils import cdiv", False),
         ("from vllm.utils.torch_utils import aux_stream", False),
         ("from vllm.utils.import_utils import has_triton_kernels", False),
+        # ``import vllm...`` form is caught too, not just ``from`` (the AST
+        # check is symmetric across both).
+        ("import vllm.model_executor.layers.activation", True),
+        ("import vllm.model_executor.hw_agnostic.layers.linear", False),
+        ("import vllm.config", False),
+        # Indented imports (e.g. lazy imports inside a function body) are
+        # inspected just like module-level ones.
+        ("    from vllm.model_executor.layers.linear import X", True),
+        ("    from vllm.config import VllmConfig", False),
+        # Non-vllm imports are unconstrained.
+        ("import torch", False),
+        ("from typing import Optional", False),
     ]
-    no_vendor_rule = CHECK_IMPORTS["hw_agnostic_no_vendor_utils"]
-    no_vendor_pattern = re.compile(no_vendor_rule.pattern, re.MULTILINE)
-    for i, (line, should_match) in enumerate(no_vendor_utils_cases):
-        result = bool(no_vendor_pattern.match(line))
-        assert result == should_match, (
-            f"no_vendor_utils test case {i} failed: '{line}' "
-            f"(expected {should_match}, got {result})"
+    # ``should_forbid`` is True when the import must be flagged. We parse each
+    # snippet (dedenting so single indented statements stay valid) and ask the
+    # real AST-based allowlist checker.
+    for i, (line, should_forbid) in enumerate(hw_agnostic_cases):
+        result = bool(forbidden_hw_agnostic_imports(textwrap.dedent(line)))
+        assert result == should_forbid, (
+            f"hw_agnostic test case {i} failed: '{line}' "
+            f"(expected {should_forbid}, got {result})"
         )
+
+    # Scope + per-file-allowlist wiring for the isolation check.
+    assert HW_AGNOSTIC_SCOPE.search("vllm/model_executor/hw_agnostic/layers/linear.py")
+    assert not HW_AGNOSTIC_SCOPE.search("vllm/model_executor/layers/linear.py")
+    # A shim on the per-file allowlist is exempt even though it imports an
+    # upstream module.
+    shim = "vllm/model_executor/hw_agnostic/v1/attention/backend.py"
+    assert shim in HW_AGNOSTIC_ALLOWED_FILES
+    assert (
+        check_hw_agnostic_isolation(
+            shim, "from vllm.v1.attention.backend import AttentionBackend\n"
+        )
+        == 0
+    )
+    # The same import from a non-exempt hw_agnostic file is flagged (the
+    # error print is captured so the test output stays clean).
+    with contextlib.redirect_stdout(io.StringIO()):
+        flagged = check_hw_agnostic_isolation(
+            "vllm/model_executor/hw_agnostic/layers/linear.py",
+            "from vllm.v1.attention.backend import AttentionBackend\n",
+        )
+    assert flagged == 1
+    # Files outside the hw_agnostic scope are never touched by this check.
+    assert (
+        check_hw_agnostic_isolation(
+            "vllm/model_executor/layers/linear.py",
+            "from vllm.model_executor.layers.activation import SiluAndMul\n",
+        )
+        == 0
+    )
 
     protected_upstream_cases = [
         ("if current_platform.is_out_of_tree():", True),
@@ -546,7 +662,6 @@ def test_regex():
         "vllm/models/deepseek_v4/hw_agnostic/attention/sparse_attn_indexer.py"
     )
 
-    assert rule.applies_to is not None
     accept_paths = [
         "vllm/models/deepseek_v4/hw_agnostic/model.py",
         "vllm/models/deepseek_v4/hw_agnostic/attention/attention.py",
@@ -568,9 +683,9 @@ def test_regex():
         "tests/some_other.py",
     ]
     for p in accept_paths:
-        assert rule.applies_to.search(p), f"applies_to should match {p}"
+        assert HW_AGNOSTIC_SCOPE.search(p), f"scope should match {p}"
     for p in reject_paths:
-        assert not rule.applies_to.search(p), f"applies_to should NOT match {p}"
+        assert not HW_AGNOSTIC_SCOPE.search(p), f"scope should NOT match {p}"
 
     print("All regex tests passed.")
 

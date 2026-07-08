@@ -12,12 +12,12 @@ from vllm import _custom_ops as ops
 from vllm.config import get_current_vllm_config
 from vllm.model_executor.hw_agnostic.kernels.linear import init_fp8_linear_kernel
 from vllm.model_executor.hw_agnostic.layers.linear import LinearMethodBase
-from vllm.model_executor.hw_agnostic.model_loader.reload.layerwise import (
-    initialize_online_processing,
-)
 from vllm.model_executor.hw_agnostic.quantization.quant_keys import (
     kFp8DynamicTokenSym,
     kFp8StaticTensorSym,
+)
+from vllm.model_executor.model_loader.reload.layerwise import (
+    initialize_online_processing,
 )
 from vllm.model_executor.parameter import ModelWeightParameter
 from vllm.model_executor.utils import replace_parameter
