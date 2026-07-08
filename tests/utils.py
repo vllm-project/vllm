@@ -1,0 +1,2336 @@
+# SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+
+import asyncio
+import atexit
+import contextlib
+import copy
+import functools
+import importlib
+import itertools
+import json
+import os
+import random
+import signal
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import warnings
+from collections.abc import Callable, Iterable, MutableMapping, Sequence
+from contextlib import ExitStack, contextmanager
+from multiprocessing import Process, get_context
+from pathlib import Path
+from typing import Any, Literal, cast
+from unittest.mock import patch
+
+import anthropic
+import cloudpickle
+import httpx
+import openai
+import pytest
+import requests
+import torch
+import torch.nn.functional as F
+from huggingface_hub import hf_hub_download
+from huggingface_hub.constants import HF_HUB_OFFLINE
+from openai.types.completion import Completion
+from typing_extensions import ParamSpec
+
+import vllm.envs as envs
+from tests.models.utils import TextTextLogprobs
+from vllm.distributed import (
+    ensure_model_parallel_initialized,
+    init_distributed_environment,
+)
+from vllm.engine.arg_utils import AsyncEngineArgs
+from vllm.entrypoints.cli.serve import ServeSubcommand
+from vllm.logger import init_logger
+from vllm.model_executor.kernels.linear import (
+    _KernelT,
+    init_fp8_linear_kernel,
+)
+from vllm.model_executor.layers.quantization.utils.quant_utils import (
+    QuantKey,
+)
+from vllm.model_executor.model_loader import get_model_loader
+from vllm.platforms import current_platform
+from vllm.tokenizers import get_tokenizer
+from vllm.utils.argparse_utils import FlexibleArgumentParser
+from vllm.utils.mem_constants import GB_bytes
+from vllm.utils.network_utils import get_open_port
+from vllm.utils.torch_utils import (
+    set_random_seed,  # noqa: F401 - re-exported for use in test files
+)
+
+logger = init_logger(__name__)
+
+FP8_DTYPE = current_platform.fp8_dtype()
+
+
+def prewarm_hf_cache(assets: list[tuple[str, str]]) -> None:
+    """Pre-populate the HF cache for (repo_id, filename) pairs that upstream
+    trust_remote_code modules would otherwise fetch from third-party CDNs
+    (often unreachable from US-based CI)."""
+    if HF_HUB_OFFLINE:
+        return
+    for repo_id, filename in assets:
+        try:
+            hf_hub_download(repo_id=repo_id, filename=filename)
+        except Exception as e:
+            logger.warning(
+                "Failed to prefetch %s/%s: %r. Tests depending on this asset may fail.",
+                repo_id,
+                filename,
+                e,
+            )
+
+
+if current_platform.is_rocm():
+    from amdsmi import (
+        amdsmi_get_gpu_vram_usage,
+        amdsmi_get_processor_handles,
+        amdsmi_init,
+        amdsmi_shut_down,
+    )
+
+    _amdsmi_lock = threading.Lock()
+
+    @contextmanager
+    def _nvml():
+        with _amdsmi_lock:
+            try:
+                amdsmi_init()
+                yield
+            finally:
+                amdsmi_shut_down()
+elif current_platform.is_cuda():
+    from vllm.third_party.pynvml import (
+        nvmlDeviceGetHandleByIndex,
+        nvmlDeviceGetMemoryInfo,
+        nvmlInit,
+        nvmlShutdown,
+    )
+
+    @contextmanager
+    def _nvml():
+        try:
+            nvmlInit()
+            yield
+        finally:
+            nvmlShutdown()
+else:
+
+    @contextmanager
+    def _nvml():
+        yield
+
+
+VLLM_PATH = Path(__file__).parent.parent
+"""Path to root of the vLLM repository."""
+
+# ROCm: disable skinny GEMM to avoid non-deterministic results from
+# atomic reductions in wvSplitKrc kernel.
+# See: https://github.com/vllm-project/vllm/pull/33493#issuecomment-3906083975
+ROCM_ENV_OVERRIDES = (
+    {"VLLM_ROCM_USE_SKINNY_GEMM": "0"} if current_platform.is_rocm() else {}
+)
+# ROCm: disable prefix caching and eliminate batch variance to reduce
+# test flakiness.
+ROCM_EXTRA_ARGS = (
+    ["--no-enable-prefix-caching", "--max-num-seqs", "1"]
+    if current_platform.is_rocm()
+    else []
+)
+# Python-API equivalent of ROCM_EXTRA_ARGS for use with EngineArgs kwargs.
+ROCM_ENGINE_KWARGS: dict = (
+    {"enable_prefix_caching": False, "max_num_seqs": 1}
+    if current_platform.is_rocm()
+    else {}
+)
+_TILELANG_TVM_PYTHONPATH_FRAGMENT = os.path.join(
+    "tilelang", "3rdparty", "tvm", "python"
+)
+
+
+def _sanitize_pythonpath_value(pythonpath: str | None) -> str:
+    if not pythonpath:
+        return ""
+    entries = []
+    for entry in pythonpath.split(os.pathsep):
+        normalized = entry.replace(os.sep, "/")
+        if _TILELANG_TVM_PYTHONPATH_FRAGMENT.replace(os.sep, "/") in normalized:
+            continue
+        entries.append(entry)
+    return os.pathsep.join(entries)
+
+
+def _sanitize_pythonpath_env(env: MutableMapping[str, str]) -> None:
+    cleaned = _sanitize_pythonpath_value(env.get("PYTHONPATH"))
+    if cleaned:
+        env["PYTHONPATH"] = cleaned
+    else:
+        env.pop("PYTHONPATH", None)
+
+
+def _sanitize_current_pythonpath_env() -> None:
+    _sanitize_pythonpath_env(os.environ)
+
+
+@contextmanager
+def _temporarily_sanitized_pythonpath_env():
+    original = os.environ.get("PYTHONPATH")
+    _sanitize_current_pythonpath_env()
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop("PYTHONPATH", None)
+        else:
+            os.environ["PYTHONPATH"] = original
+
+
+def requires_spawn_multiprocessing() -> bool:
+    """Whether this platform requires spawn instead of fork for test processes."""
+    return current_platform.is_rocm() or current_platform.is_xpu()
+
+
+def _run_in_new_process_group(
+    child_process_fxn: Callable[[dict[str, str] | None, str, list[str]], None],
+    env_dict: dict[str, str] | None,
+    model: str,
+    vllm_serve_args: list[str],
+) -> None:
+    os.setsid()
+    child_process_fxn(env_dict, model, vllm_serve_args)
+
+
+class RemoteVLLMServer:
+    """Base class for launching vLLM server subprocesses for testing.
+
+    Subclasses must override ``_create_cli_subcommand`` and
+    ``_start_server``.
+    """
+
+    DUMMY_API_KEY = "token-abc123"  # vLLM's OpenAI server does not need API key
+    _active_servers: set["RemoteVLLMServer"] = set()
+    _active_servers_lock = threading.RLock()
+    _cleanup_hooks_registered = False
+    _signal_hooks_registered = False
+    _previous_signal_handlers: dict[int, Any] = {}
+    proc: subprocess.Popen
+
+    def _create_cli_subcommand(self):
+        """Return a CLISubcommand instance used to parse CLI args."""
+        raise NotImplementedError
+
+    def _start_server(
+        self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
+    ) -> None:
+        """Subclasses override this method to customize server process launch"""
+        raise NotImplementedError
+
+    def _pre_download_model(self, model: str, args) -> None:
+        """Download model weights before starting the server to avoid timeout."""
+        is_local = os.path.isdir(model)
+        if not is_local:
+            engine_args = AsyncEngineArgs.from_cli_args(args)
+            model_config = engine_args.create_model_config()
+            load_config = engine_args.create_load_config()
+
+            model_loader = get_model_loader(load_config)
+            model_loader.download_model(model_config)
+
+    def __init__(
+        self,
+        model: str,
+        vllm_serve_args: list[str],
+        *,
+        env_dict: dict[str, str] | None = None,
+        seed: int = 0,
+        auto_port: bool = True,
+        max_wait_seconds: float | None = None,
+        override_hf_configs: dict[str, Any] | None = None,
+    ) -> None:
+        if auto_port:
+            if "-p" in vllm_serve_args or "--port" in vllm_serve_args:
+                raise ValueError(
+                    "You have manually specified the port when `auto_port=True`."
+                )
+
+            # No need for a port if using unix sockets
+            if "--uds" not in vllm_serve_args:
+                # Don't mutate the input args
+                vllm_serve_args = vllm_serve_args + ["--port", str(get_open_port())]
+        if seed is not None:
+            if "--seed" in vllm_serve_args:
+                raise ValueError(
+                    f"You have manually specified the seed when `seed={seed}`."
+                )
+
+            vllm_serve_args = vllm_serve_args + ["--seed", str(seed)]
+
+        if override_hf_configs is not None:
+            vllm_serve_args = vllm_serve_args + [
+                "--hf-overrides",
+                json.dumps(override_hf_configs),
+            ]
+
+        parser = FlexibleArgumentParser(description="vLLM's remote server.")
+        subparsers = parser.add_subparsers(required=False, dest="subparser")
+        parser = self._create_cli_subcommand().subparser_init(subparsers)
+        args = parser.parse_args(["--model", model, *vllm_serve_args])
+        self.uds = args.uds
+        if args.uds:
+            self.host = None
+            self.port = None
+        else:
+            self.host = str(args.host or "127.0.0.1")
+            self.port = int(args.port)
+
+        self.show_hidden_metrics = (
+            getattr(args, "show_hidden_metrics_for_version", None) is not None
+        )
+
+        with _temporarily_sanitized_pythonpath_env():
+            self._pre_download_model(model, args)
+        self._shutdown_complete = False
+
+        # Record GPU memory before server start so we know what
+        # "released" looks like.
+        self._pre_server_gpu_memory = self._get_gpu_memory_used()
+        if self._pre_server_gpu_memory is not None:
+            pre_gb = self._pre_server_gpu_memory / 1e9
+            print(
+                f"[{type(self).__name__}] GPU memory before server start: "
+                f"{pre_gb:.2f} GB"
+            )
+
+        self._start_server(model, vllm_serve_args, env_dict)
+        self._register_active_server()
+        max_wait_seconds = max_wait_seconds or 480
+        try:
+            self._wait_for_server(url=self.url_for("health"), timeout=max_wait_seconds)
+        except Exception:
+            # If the server never became healthy, we must still clean up
+            # the subprocess tree. Without this, a timeout in __init__
+            # leaks the server + EngineCore processes (and their GPU
+            # memory), because __exit__ is never called when __init__
+            # raises inside a ``with`` statement.
+            self._shutdown()
+            raise
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self._shutdown()
+
+    def _shutdown(self) -> None:
+        """Kill the server process tree and wait for GPU memory release.
+
+        Called from both ``__exit__`` (normal path) and ``__init__``
+        (when the server fails to start). Must be safe to call even if
+        the process is already dead.
+        """
+        if self._shutdown_complete:
+            return
+
+        self._shutdown_complete = True
+        try:
+            self._terminate_process_tree()
+            self._wait_for_gpu_memory_release()
+        finally:
+            self._unregister_active_server()
+
+    @classmethod
+    def _ensure_cleanup_hooks_registered(cls) -> None:
+        """Register process-exit cleanup for detached server subprocesses."""
+        root_cls = RemoteVLLMServer
+        with root_cls._active_servers_lock:
+            if not root_cls._cleanup_hooks_registered:
+                atexit.register(root_cls._shutdown_active_servers)
+                root_cls._cleanup_hooks_registered = True
+
+            if (
+                threading.current_thread() is threading.main_thread()
+                and not root_cls._signal_hooks_registered
+            ):
+                for signum in (signal.SIGTERM, signal.SIGINT):
+                    root_cls._previous_signal_handlers[signum] = signal.getsignal(
+                        signum
+                    )
+                    signal.signal(signum, root_cls._handle_parent_signal)
+                root_cls._signal_hooks_registered = True
+
+    def _register_active_server(self) -> None:
+        """Track this server so parent-process exits still clean it up."""
+        RemoteVLLMServer._ensure_cleanup_hooks_registered()
+        with RemoteVLLMServer._active_servers_lock:
+            RemoteVLLMServer._active_servers.add(self)
+
+    def _unregister_active_server(self) -> None:
+        with RemoteVLLMServer._active_servers_lock:
+            RemoteVLLMServer._active_servers.discard(self)
+
+    @classmethod
+    def _shutdown_active_servers(cls) -> None:
+        """Best-effort shutdown for all live RemoteVLLMServer instances."""
+        with cls._active_servers_lock:
+            servers = list(cls._active_servers)
+
+        for server in servers:
+            with contextlib.suppress(Exception):
+                server._shutdown()
+
+    @classmethod
+    def _handle_parent_signal(cls, signum, frame) -> None:
+        """Clean up detached servers before letting the signal terminate pytest."""
+        cls._shutdown_active_servers()
+
+        previous_handler = cls._previous_signal_handlers.get(signum, signal.SIG_DFL)
+        if callable(previous_handler):
+            previous_handler(signum, frame)
+        elif previous_handler == signal.SIG_IGN:
+            return
+        elif signum == signal.SIGINT:
+            raise KeyboardInterrupt
+        else:
+            raise SystemExit(128 + signum)
+
+    def _terminate_process_tree(self) -> None:
+        """Kill the server process tree without waiting for GPU memory release.
+
+        Split out from ``_shutdown`` so that ``shutdown_many`` can run this
+        phase in parallel for sibling servers and then wait for GPU memory
+        release once at the end.
+        """
+        pid = self.proc.pid
+
+        # Get the process group ID. Because we used
+        # start_new_session=True the pgid equals the server's pid.
+        try:
+            pgid = os.getpgid(pid)
+        except (ProcessLookupError, OSError):
+            pgid = None
+
+        # Phase 1: graceful SIGTERM to the root process
+        with contextlib.suppress(ProcessLookupError, OSError):
+            self.proc.terminate()
+            print(f"[RemoteOpenAIServer] Sent SIGTERM to process {pid}")
+
+        try:
+            self.proc.wait(timeout=15)
+            print(f"[RemoteOpenAIServer] Server {pid} terminated gracefully")
+        except subprocess.TimeoutExpired:
+            # Phase 2: SIGKILL the entire process group
+            print(
+                f"[RemoteOpenAIServer] Server {pid} did not respond "
+                "to SIGTERM, sending SIGKILL to process group"
+            )
+            if pgid is not None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    os.killpg(pgid, signal.SIGKILL)
+            else:
+                self.proc.kill()
+
+            try:
+                self.proc.wait(timeout=10)
+                print(f"[RemoteOpenAIServer] Server {pid} killed")
+            except subprocess.TimeoutExpired:
+                pass
+
+        # After killing the root process, ensure all children in the
+        # process group (e.g. EngineCore workers) are also dead.
+        # On ROCm especially, surviving children hold GPU contexts and
+        # prevent VRAM from being reclaimed by the driver.
+        self._kill_process_group_survivors(pgid)
+
+    @classmethod
+    def shutdown_many(cls, servers: Sequence["RemoteVLLMServer"]) -> None:
+        """Shut down multiple sibling servers and wait for GPU memory once.
+
+        Test fixtures that hold several ``RemoteVLLMServer`` instances at
+        once must NOT shut them down by calling each server's ``__exit__``
+        sequentially: every server measures total GPU memory across all
+        visible devices in ``_wait_for_gpu_memory_release``, so the first
+        server's wait blocks the full timeout because later sibling
+        servers are still holding GPU memory.
+
+        Instead, this method terminates every server's process tree in
+        parallel, then runs the GPU-memory-release wait once against the
+        earliest recorded baseline (memory before any server started).
+        """
+        if not servers:
+            return
+
+        for server in servers:
+            server._shutdown_complete = True
+
+        threads = [
+            threading.Thread(
+                target=s._terminate_process_tree,
+                name=f"shutdown-{s.proc.pid}",
+                daemon=True,
+            )
+            for s in servers
+        ]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        # Use the smallest pre-server baseline so the wait targets memory
+        # usage before *any* of these sibling servers started, not after
+        # earlier siblings had already allocated.
+        earliest = min(
+            servers,
+            key=lambda s: (
+                float("inf")
+                if s._pre_server_gpu_memory is None
+                else s._pre_server_gpu_memory
+            ),
+        )
+        try:
+            earliest._wait_for_gpu_memory_release()
+        finally:
+            for server in servers:
+                server._unregister_active_server()
+
+    def _kill_process_group_survivors(
+        self, pgid: int | None, timeout: float = 15.0
+    ) -> None:
+        """SIGKILL any processes still in the server's process group
+        and wait for them to exit.
+
+        Because the server is launched with ``start_new_session=True``,
+        all its children (EngineCore, workers, etc.) share the same
+        pgid. After the root process is killed, stragglers -- especially
+        on ROCm where GPU contexts linger until the *process* exits --
+        must be reaped explicitly.
+
+        Uses ``/proc`` to scan for pgid members so this works even after
+        the parent has been reaped (unlike ``psutil.Process.children``).
+        """
+        if pgid is None:
+            return
+
+        # Send SIGKILL to the entire process group one more time.
+        # This is cheap and harmless if everyone is already dead.
+        with contextlib.suppress(ProcessLookupError, OSError):
+            os.killpg(pgid, signal.SIGKILL)
+
+        # Collect surviving PIDs by scanning /proc for matching pgid.
+        # This works on Linux even after the parent has been waited on
+        # and is more reliable than psutil.Process(parent).children().
+        survivor_pids = self._find_pgid_members(pgid)
+
+        if not survivor_pids:
+            return
+
+        print(
+            f"[RemoteOpenAIServer] {len(survivor_pids)} process(es) still "
+            f"in pgid {pgid} after SIGKILL: {survivor_pids}"
+        )
+
+        # Wait for each survivor to actually exit so the GPU driver
+        # releases its VRAM.
+        deadline = time.time() + timeout
+        while survivor_pids and time.time() < deadline:
+            still_alive = []
+            for spid in survivor_pids:
+                try:
+                    os.kill(spid, 0)  # Check if still alive
+                    still_alive.append(spid)
+                except (ProcessLookupError, OSError):
+                    pass
+            survivor_pids = still_alive
+            if survivor_pids:
+                time.sleep(0.5)
+
+        if survivor_pids:
+            print(
+                f"[RemoteOpenAIServer] WARNING: processes {survivor_pids} "
+                f"in pgid {pgid} could not be killed within {timeout}s"
+            )
+
+    @staticmethod
+    def _find_pgid_members(pgid: int) -> list[int]:
+        """Return PIDs of all living processes whose pgid matches."""
+        members: list[int] = []
+        proc_path = Path("/proc")
+        if not proc_path.is_dir():
+            return members
+        for entry in proc_path.iterdir():
+            if not entry.name.isdigit():
+                continue
+            pid = int(entry.name)
+            try:
+                if os.getpgid(pid) == pgid:
+                    members.append(pid)
+            except OSError:
+                continue
+        return members
+
+    def _get_gpu_memory_used(self) -> float | None:
+        """Get total GPU memory used across all visible devices in bytes."""
+        try:
+            if current_platform.is_rocm():
+                with _nvml():
+                    handles = amdsmi_get_processor_handles()
+                    devices = get_physical_device_indices(
+                        list(range(current_platform.device_count()))
+                    )
+                    total_used_mib = 0
+                    for device in devices:
+                        handle = handles[device]
+                        vram_info = amdsmi_get_gpu_vram_usage(handle)
+                        total_used_mib += vram_info["vram_used"]
+                    # amdsmi reports VRAM in MiB; convert to bytes so this
+                    # matches the CUDA/nvml branch (already bytes) and the
+                    # byte-based target in _wait_for_gpu_memory_release. Without
+                    # this, that wait compares MiB against a ~2e9-byte target,
+                    # is always satisfied instantly, and returns "released to
+                    # 0.00 GB" while the previous server's VRAM is still
+                    # resident -- OOMing the next server's startup on ROCm.
+                    return total_used_mib * 1024 * 1024
+            elif current_platform.is_cuda():
+                with _nvml():
+                    total_used = 0
+                    device_count = current_platform.device_count()
+                    for i in range(device_count):
+                        handle = nvmlDeviceGetHandleByIndex(i)
+                        mem_info = nvmlDeviceGetMemoryInfo(handle)
+                        total_used += mem_info.used
+                    return total_used
+            elif current_platform.is_xpu():
+                total_used = 0
+                device_count = current_platform.device_count()
+                for i in range(device_count):
+                    free, total = torch.xpu.mem_get_info(i)
+                    total_used += total - free
+                return total_used
+        except Exception as e:
+            print(f"[RemoteOpenAIServer] Could not query GPU memory: {e}")
+            return None
+        return None
+
+    def _wait_for_gpu_memory_release(
+        self, timeout: float = 120.0, log_interval: float = 10.0
+    ):
+        """Wait for GPU memory to drop back toward pre-server levels.
+
+        Waits the full timeout for memory to return close to the
+        pre-server baseline. Does NOT fall back to a "stabilization"
+        heuristic -- if memory is still held when the timeout expires,
+        the test fails so the problem is surfaced immediately rather
+        than causing cascading OOM failures in every subsequent test.
+        """
+        baseline = self._pre_server_gpu_memory
+        if baseline is None:
+            # Can't query GPU memory - nothing to do
+            return
+
+        # Allow up to 2 GiB overhead above baseline for driver/context state
+        # that may persist between server instances.
+        headroom_bytes = 2 * 1024 * 1024 * 1024
+        target = baseline + headroom_bytes
+
+        start = time.time()
+        next_log_time = start + log_interval
+
+        while time.time() - start < timeout:
+            used = self._get_gpu_memory_used()
+
+            if used is None:
+                return  # Can't query, assume ok
+
+            used_gb = used / 1e9
+            target_gb = target / 1e9
+            elapsed = time.time() - start
+
+            if used <= target:
+                print(
+                    f"[RemoteOpenAIServer] GPU memory released to "
+                    f"{used_gb:.2f} GB (target: {target_gb:.2f} GB) "
+                    f"in {elapsed:.1f}s"
+                )
+                return
+
+            now = time.time()
+            if now >= next_log_time:
+                print(
+                    f"[RemoteOpenAIServer] Waiting for GPU memory release: "
+                    f"{used_gb:.2f} GB (target: {target_gb:.2f} GB) "
+                    f"[{elapsed:.0f}s/{timeout:.0f}s]"
+                )
+                next_log_time = now + log_interval
+
+            time.sleep(1.0)
+
+        # Timeout -- raise so the current test fails with a clear
+        # message instead of silently poisoning subsequent tests.
+        final_used = self._get_gpu_memory_used()
+        final_gb = final_used / 1e9 if final_used else 0.0
+        raise RuntimeError(
+            f"[RemoteOpenAIServer] GPU memory did not release within "
+            f"{timeout}s. Current: {final_gb:.2f} GB, "
+            f"target: {target / 1e9:.2f} GB, "
+            f"baseline: {baseline / 1e9:.2f} GB. "
+            f"Child processes may still be holding GPU memory."
+        )
+
+    def _poll(self) -> int | None:
+        """Subclasses override this method to customize process polling"""
+        return self.proc.poll()
+
+    def _wait_for_server(self, *, url: str, timeout: float):
+        # run health check
+        start = time.time()
+        client = (
+            httpx.Client(transport=httpx.HTTPTransport(uds=self.uds))
+            if self.uds
+            else requests
+        )
+        while True:
+            try:
+                if client.get(url).status_code == 200:
+                    break
+            except Exception:
+                # this exception can only be raised by requests.get,
+                # which means the server is not ready yet.
+                # the stack trace is not useful, so we suppress it
+                # by using `raise from None`.
+                result = self._poll()
+                if result is not None and result != 0:
+                    raise RuntimeError("Server exited unexpectedly.") from None
+
+                time.sleep(0.5)
+                if time.time() - start > timeout:
+                    raise RuntimeError("Server failed to start in time.") from None
+
+    @property
+    def url_root(self) -> str:
+        return (
+            f"http://{self.uds.split('/')[-1]}"
+            if self.uds
+            else f"http://{self.host}:{self.port}"
+        )
+
+    def url_for(self, *parts: str) -> str:
+        path = "/".join(part.strip("/") for part in parts if part)
+        return f"{self.url_root}/{path}"
+
+    def get_client(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return openai.OpenAI(
+            base_url=self.url_for("v1"),
+            api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
+        )
+
+    def get_async_client(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return openai.AsyncOpenAI(
+            base_url=self.url_for("v1"),
+            api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
+        )
+
+    def get_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.Anthropic(
+            base_url=self.url_for(),
+            api_key=self.DUMMY_API_KEY,
+            max_retries=0,
+            **kwargs,
+        )
+
+    def get_async_client_anthropic(self, **kwargs):
+        if "timeout" not in kwargs:
+            kwargs["timeout"] = 600
+        return anthropic.AsyncAnthropic(
+            base_url=self.url_for(), api_key=self.DUMMY_API_KEY, max_retries=0, **kwargs
+        )
+
+
+class RemoteOpenAIServer(RemoteVLLMServer):
+    """Launches ``vllm serve`` for testing OpenAI-compatible endpoints."""
+
+    def _create_cli_subcommand(self):
+        return ServeSubcommand()
+
+    def _start_server(
+        self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
+    ) -> None:
+        env = os.environ.copy()
+        # the current process might initialize cuda,
+        # to be safe, we should use spawn method
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        if env_dict is not None:
+            env.update(env_dict)
+        _sanitize_pythonpath_env(env)
+        serve_cmd = ["vllm", "serve", model, *vllm_serve_args]
+        print(f"Launching RemoteOpenAIServer with: {' '.join(serve_cmd)}")
+        print(f"Environment variables: {env}")
+        self.proc: subprocess.Popen = subprocess.Popen(
+            serve_cmd,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            # Create a dedicated process group so we can kill
+            # the entire tree (parent + EngineCore + workers) at once.
+            start_new_session=True,
+        )
+
+
+class RemoteLaunchRenderServer(RemoteVLLMServer):
+    """Launches ``vllm launch render`` for GPU-less serving tests."""
+
+    def _create_cli_subcommand(self):
+        return ServeSubcommand()
+
+    def _start_server(
+        self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
+    ) -> None:
+        env = os.environ.copy()
+        env["VLLM_WORKER_MULTIPROC_METHOD"] = "spawn"
+        if env_dict is not None:
+            env.update(env_dict)
+        _sanitize_pythonpath_env(env)
+        serve_cmd = ["vllm", "launch", "render", model, *vllm_serve_args]
+        print(f"Launching RemoteLaunchRenderServer with: {' '.join(serve_cmd)}")
+        self.proc: subprocess.Popen = subprocess.Popen(
+            serve_cmd,
+            env=env,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            start_new_session=True,
+        )
+
+    def _pre_download_model(self, model: str, args) -> None:
+        """Download only the tokenizer files (no model weights needed)."""
+        is_local = os.path.isdir(model)
+        if not is_local:
+            engine_args = AsyncEngineArgs.from_cli_args(args)
+            model_config = engine_args.create_model_config()
+            get_tokenizer(
+                model_config.tokenizer,
+                tokenizer_mode=model_config.tokenizer_mode,
+                trust_remote_code=model_config.trust_remote_code,
+                revision=model_config.tokenizer_revision,
+            )
+
+    def _wait_for_gpu_memory_release(
+        self, timeout: float = 30.0, log_interval: float = 10.0
+    ):
+        pass  # No GPU used
+
+
+class RemoteOpenAIServerCustom(RemoteOpenAIServer):
+    """Launch test server with custom child process"""
+
+    def _start_server(
+        self, model: str, vllm_serve_args: list[str], env_dict: dict[str, str] | None
+    ) -> None:
+        method = "spawn" if requires_spawn_multiprocessing() else "fork"
+        ctx = get_context(method)
+        self.proc: Process = cast(Any, ctx).Process(
+            target=_run_in_new_process_group,
+            args=(self.child_process_fxn, env_dict, model, vllm_serve_args),
+        )  # type: ignore[assignment]
+        with _temporarily_sanitized_pythonpath_env():
+            self.proc.start()
+
+    def __init__(
+        self,
+        model: str,
+        vllm_serve_args: list[str],
+        child_process_fxn: Callable[[dict[str, str] | None, str, list[str]], None],
+        *,
+        env_dict: dict[str, str] | None = None,
+        seed: int = 0,
+        auto_port: bool = True,
+        max_wait_seconds: float | None = None,
+    ) -> None:
+        """Store custom child process function then invoke superclass
+        constructor which will indirectly launch it."""
+        self.child_process_fxn = child_process_fxn
+        super().__init__(
+            model=model,
+            vllm_serve_args=vllm_serve_args,
+            env_dict=env_dict,
+            seed=seed,
+            auto_port=auto_port,
+            max_wait_seconds=max_wait_seconds,
+        )
+
+    def _poll(self) -> int | None:
+        return self.proc.exitcode
+
+    def _terminate_process_tree(self) -> None:
+        pid = self.proc.pid
+        if pid is None:
+            return
+
+        pgid: int | None
+        try:
+            pgid = os.getpgid(pid)
+            # _run_in_new_process_group should make the child the group
+            # leader. Avoid signaling pytest's process group if startup failed
+            # before os.setsid() ran.
+            if pgid != pid:
+                pgid = None
+        except (ProcessLookupError, OSError):
+            pgid = None
+
+        with contextlib.suppress(ProcessLookupError, OSError):
+            self.proc.terminate()
+            print(f"[RemoteOpenAIServerCustom] Sent SIGTERM to process {pid}")
+
+        self.proc.join(15)
+        if self.proc.is_alive():
+            print(
+                f"[RemoteOpenAIServerCustom] Server {pid} did not respond "
+                "to SIGTERM, sending SIGKILL to process group"
+            )
+            if pgid is not None:
+                with contextlib.suppress(ProcessLookupError, OSError):
+                    os.killpg(pgid, signal.SIGKILL)
+            else:
+                self.proc.kill()
+            self.proc.join(10)
+
+        self._kill_process_group_survivors(pgid)
+
+
+def _test_completion(
+    client: openai.OpenAI,
+    model: str,
+    prompt: str,
+    token_ids: list[int],
+    include_seeded_sampling: bool = True,
+):
+    results = []
+
+    # test with text prompt
+    completion = client.completions.create(
+        model=model, prompt=prompt, max_tokens=5, temperature=0.0
+    )
+
+    results.append(
+        {
+            "test": "single_completion",
+            "text": completion.choices[0].text,
+            "finish_reason": completion.choices[0].finish_reason,
+            "usage": completion.usage,
+        }
+    )
+
+    # test using token IDs
+    completion = client.completions.create(
+        model=model,
+        prompt=token_ids,
+        max_tokens=5,
+        temperature=0.0,
+    )
+
+    results.append(
+        {
+            "test": "token_ids",
+            "text": completion.choices[0].text,
+            "finish_reason": completion.choices[0].finish_reason,
+            "usage": completion.usage,
+        }
+    )
+
+    if include_seeded_sampling:
+        # test seeded random sampling
+        completion = client.completions.create(
+            model=model, prompt=prompt, max_tokens=5, seed=33, temperature=1.0
+        )
+
+        results.append(
+            {
+                "test": "seeded_sampling",
+                "text": completion.choices[0].text,
+                "finish_reason": completion.choices[0].finish_reason,
+                "usage": completion.usage,
+            }
+        )
+
+        # test seeded random sampling with multiple prompts
+        completion = client.completions.create(
+            model=model,
+            prompt=[prompt, prompt],
+            max_tokens=5,
+            seed=33,
+            temperature=1.0,
+        )
+
+        results.append(
+            {
+                "test": "seeded_sampling",
+                "text": [choice.text for choice in completion.choices],
+                "finish_reason": [
+                    choice.finish_reason for choice in completion.choices
+                ],
+                "usage": completion.usage,
+            }
+        )
+
+    # test simple list
+    batch = client.completions.create(
+        model=model,
+        prompt=[prompt, prompt],
+        max_tokens=5,
+        temperature=0.0,
+    )
+
+    results.append(
+        {
+            "test": "simple_list",
+            "text0": batch.choices[0].text,
+            "text1": batch.choices[1].text,
+        }
+    )
+
+    # test streaming
+    batch = client.completions.create(
+        model=model,
+        prompt=[prompt, prompt],
+        max_tokens=5,
+        temperature=0.0,
+        stream=True,
+    )
+
+    texts = [""] * 2
+    for chunk in batch:
+        assert len(chunk.choices) == 1
+        choice = chunk.choices[0]
+        texts[choice.index] += choice.text
+
+    results.append(
+        {
+            "test": "streaming",
+            "texts": texts,
+        }
+    )
+
+    return results
+
+
+def _test_completion_close(
+    client: openai.OpenAI,
+    model: str,
+    prompt: str,
+):
+    results = []
+
+    # test with text prompt
+    completion = client.completions.create(
+        model=model, prompt=prompt, max_tokens=1, logprobs=5, temperature=0.0
+    )
+
+    logprobs = completion.choices[0].logprobs.top_logprobs[0]
+    logprobs = {k: round(v, 2) for k, v in logprobs.items()}
+
+    results.append(
+        {
+            "test": "completion_close",
+            "logprobs": logprobs,
+        }
+    )
+
+    return results
+
+
+def _test_chat(
+    client: openai.OpenAI,
+    model: str,
+    prompt: str,
+):
+    results = []
+
+    messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+
+    # test with text prompt
+    chat_response = client.chat.completions.create(
+        model=model, messages=messages, max_tokens=5, temperature=0.0
+    )
+
+    results.append(
+        {
+            "test": "completion_close",
+            "text": chat_response.choices[0].message.content,
+            "finish_reason": chat_response.choices[0].finish_reason,
+            "usage": chat_response.usage,
+        }
+    )
+
+    return results
+
+
+def _test_embeddings(
+    client: openai.OpenAI,
+    model: str,
+    text: str,
+):
+    results = []
+
+    # test with text input
+    embeddings = client.embeddings.create(
+        model=model,
+        input=text,
+        encoding_format="float",
+    )
+
+    results.append(
+        {
+            "test": "single_embedding",
+            "embedding": embeddings.data[0].embedding,
+            "usage": embeddings.usage,
+        }
+    )
+
+    return results
+
+
+def _test_image_text(
+    client: openai.OpenAI,
+    model_name: str,
+    image_url: str,
+):
+    results = []
+
+    # test pure text input
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": "How do you feel today?"},
+            ],
+        }
+    ]
+
+    chat_completion = client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        temperature=0.0,
+        max_tokens=1,
+        logprobs=True,
+        top_logprobs=5,
+    )
+    top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
+
+    for x in top_logprobs:
+        x.logprob = round(x.logprob, 2)
+
+    results.append(
+        {
+            "test": "pure_text",
+            "logprobs": top_logprobs,
+        }
+    )
+
+    messages = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "image_url", "image_url": {"url": image_url}},
+                {"type": "text", "text": "What's in this image?"},
+            ],
+        }
+    ]
+
+    chat_completion = client.chat.completions.create(
+        model=model_name,
+        messages=messages,
+        temperature=0.0,
+        max_tokens=1,
+        logprobs=True,
+        top_logprobs=5,
+    )
+    top_logprobs = chat_completion.choices[0].logprobs.content[0].top_logprobs
+
+    results.append(
+        {
+            "test": "text_image",
+            "logprobs": top_logprobs,
+        }
+    )
+
+    return results
+
+
+def compare_two_settings(
+    model: str,
+    arg1: list[str],
+    arg2: list[str],
+    env1: dict[str, str] | None = None,
+    env2: dict[str, str] | None = None,
+    *,
+    method: str = "generate",
+    max_wait_seconds: float | None = None,
+    include_seeded_sampling: bool = True,
+    force_v1_runner: bool = False,
+) -> None:
+    """
+    Launch API server with two different sets of arguments/environments
+    and compare the results of the API calls.
+
+    Args:
+        model: The model to test.
+        arg1: The first set of arguments to pass to the API server.
+        arg2: The second set of arguments to pass to the API server.
+        env1: The first set of environment variables to pass to the API server.
+        env2: The second set of environment variables to pass to the API server.
+        include_seeded_sampling: Whether to include temperature=1.0 seeded
+            sampling checks in the default generate comparison.
+        force_v1_runner: Whether to pin all compared settings to the v1 model
+            runner to avoid mixing model runner differences into correctness
+            tests.
+    """
+
+    compare_all_settings(
+        model,
+        [arg1, arg2],
+        [env1, env2],
+        method=method,
+        max_wait_seconds=max_wait_seconds,
+        include_seeded_sampling=include_seeded_sampling,
+        force_v1_runner=force_v1_runner,
+    )
+
+
+def compare_all_settings(
+    model: str,
+    all_args: list[list[str]],
+    all_envs: list[dict[str, str] | None],
+    *,
+    method: str = "generate",
+    max_wait_seconds: float | None = None,
+    include_seeded_sampling: bool = True,
+    force_v1_runner: bool = False,
+) -> None:
+    """
+    Launch API server with several different sets of arguments/environments
+    and compare the results of the API calls with the first set of arguments.
+    Args:
+        model: The model to test.
+        all_args: A list of argument lists to pass to the API server.
+        all_envs: A list of environment dictionaries to pass to the API server.
+        include_seeded_sampling: Whether to include temperature=1.0 seeded
+            sampling checks in the default generate comparison.
+        force_v1_runner: Whether to pin all compared settings to the v1 model
+            runner to avoid mixing model runner differences into correctness
+            tests.
+    """
+
+    if force_v1_runner:
+        all_envs = [
+            {"VLLM_USE_V2_MODEL_RUNNER": "0", **(env or {})} for env in all_envs
+        ]
+
+    trust_remote_code = False
+    for args in all_args:
+        if "--trust-remote-code" in args:
+            trust_remote_code = True
+            break
+
+    tokenizer_mode = "auto"
+    for args in all_args:
+        if "--tokenizer-mode" in args:
+            tokenizer_mode = args[args.index("--tokenizer-mode") + 1]
+            break
+
+    tokenizer = get_tokenizer(
+        model,
+        trust_remote_code=trust_remote_code,
+        tokenizer_mode=tokenizer_mode,
+    )
+
+    can_force_load_format = True
+
+    for args in all_args:
+        if "--load-format" in args:
+            can_force_load_format = False
+            break
+
+    prompt = "Hello, my name is"
+    token_ids = tokenizer(prompt).input_ids
+    ref_results: list = []
+    for i, (args, env) in enumerate(zip(all_args, all_envs)):
+        if can_force_load_format:
+            # we are comparing the results and
+            # usually we don't need real weights.
+            # we force to use dummy weights by default,
+            # and it should work for most of the cases.
+            # if not, we can use VLLM_TEST_FORCE_LOAD_FORMAT
+            # environment variable to force the load format,
+            # e.g. in quantization tests.
+            args = args + ["--load-format", envs.VLLM_TEST_FORCE_LOAD_FORMAT]
+        compare_results: list = []
+        results = ref_results if i == 0 else compare_results
+        with RemoteOpenAIServer(
+            model, args, env_dict=env, max_wait_seconds=max_wait_seconds
+        ) as server:
+            client = server.get_client()
+
+            # test models list
+            models = client.models.list()
+            models = models.data
+            served_model = models[0]
+            results.append(
+                {
+                    "test": "models_list",
+                    "id": served_model.id,
+                    "root": served_model.root,
+                }
+            )
+
+            if method == "generate":
+                results += _test_completion(
+                    client,
+                    model,
+                    prompt,
+                    token_ids,
+                    include_seeded_sampling=include_seeded_sampling,
+                )
+            elif method == "generate_close":
+                results += _test_completion_close(client, model, prompt)
+            elif method == "generate_chat":
+                results += _test_chat(client, model, prompt)
+            elif method == "generate_with_image":
+                results += _test_image_text(
+                    client,
+                    model,
+                    "https://vllm-public-assets.s3.us-west-2.amazonaws.com/vision_model_images/RGBA_comp.png",
+                )
+            elif method == "encode":
+                results += _test_embeddings(client, model, prompt)
+            else:
+                raise ValueError(f"Unknown method: {method}")
+
+            if i > 0:
+                # if any setting fails, raise an error early
+                ref_args = all_args[0]
+                ref_envs = all_envs[0]
+                compare_args = all_args[i]
+                compare_envs = all_envs[i]
+                for ref_result, compare_result in zip(ref_results, compare_results):
+                    ref_result = copy.deepcopy(ref_result)
+                    compare_result = copy.deepcopy(compare_result)
+                    if "embedding" in ref_result and method == "encode":
+                        sim = F.cosine_similarity(
+                            torch.tensor(ref_result["embedding"]),
+                            torch.tensor(compare_result["embedding"]),
+                            dim=0,
+                        )
+                        assert sim >= 0.999, (
+                            f"Embedding for {model=} are not the same.\n"
+                            f"cosine_similarity={sim}\n"
+                        )
+                        del ref_result["embedding"]
+                        del compare_result["embedding"]
+                    assert ref_result == compare_result, (
+                        f"Results for {model=} are not the same.\n"
+                        f"{ref_args=} {ref_envs=}\n"
+                        f"{compare_args=} {compare_envs=}\n"
+                        f"{ref_result=}\n"
+                        f"{compare_result=}\n"
+                    )
+
+
+@contextmanager
+def ensure_current_vllm_config():
+    """Ensures a vllm config is set for the duration of the context.
+
+    If a config is already set, this is a no-op. Otherwise, it creates a default
+    VllmConfig and sets it for the duration of the context.
+
+    Used for tests that call functions which require a vllm config but don't
+    need a specific config.
+
+    Example:
+        with ensure_current_vllm_config():
+            init_distributed_environment(...)
+            ensure_model_parallel_initialized(...)
+    """
+    from vllm.config import (
+        VllmConfig,
+        get_current_vllm_config_or_none,
+        set_current_vllm_config,
+    )
+
+    if get_current_vllm_config_or_none() is not None:
+        # Config already set, just yield
+        yield
+    else:
+        # No config set, create a default one for the duration
+        with set_current_vllm_config(VllmConfig()):
+            yield
+
+
+def init_test_distributed_environment(
+    tp_size: int,
+    pp_size: int,
+    rank: int,
+    distributed_init_port: str,
+    local_rank: int = -1,
+) -> None:
+    # Note: This function is often called from Ray worker processes, so we
+    # can't rely on pytest fixtures to set the config. We check if the config
+    # is already set and only create a default one if needed.
+    from vllm.config import (
+        VllmConfig,
+        get_current_vllm_config_or_none,
+        set_current_vllm_config,
+    )
+
+    distributed_init_method = f"tcp://localhost:{distributed_init_port}"
+
+    if get_current_vllm_config_or_none() is not None:
+        # Config already set, use it directly
+        init_distributed_environment(
+            world_size=pp_size * tp_size,
+            rank=rank,
+            distributed_init_method=distributed_init_method,
+            local_rank=local_rank,
+        )
+        ensure_model_parallel_initialized(tp_size, pp_size)
+    else:
+        # No config set, create a default one for the test
+        with set_current_vllm_config(VllmConfig()):
+            init_distributed_environment(
+                world_size=pp_size * tp_size,
+                rank=rank,
+                distributed_init_method=distributed_init_method,
+                local_rank=local_rank,
+            )
+            ensure_model_parallel_initialized(tp_size, pp_size)
+
+
+def multi_process_parallel(
+    monkeypatch: pytest.MonkeyPatch,
+    tp_size: int,
+    pp_size: int,
+    test_target: Any,
+) -> None:
+    import ray
+
+    # Using ray helps debugging the error when it failed as compared to
+    # multiprocessing. For local Ray workers, putting the repo root on
+    # PYTHONPATH is enough and avoids uploading the full source tree, which
+    # exceeds Ray's working_dir package size limit on CI.
+    env_vars = {
+        "PYTHONPATH": os.pathsep.join(
+            filter(None, [str(VLLM_PATH), os.environ.get("PYTHONPATH")])
+        ),
+        **{env_var: "1" for env_var in current_platform.ray_noset_device_env_vars},
+    }
+    ray.init(
+        runtime_env={
+            "env_vars": env_vars,
+        }
+    )
+
+    distributed_init_port = get_open_port()
+    try:
+        refs = []
+        for rank in range(tp_size * pp_size):
+            refs.append(
+                test_target.remote(
+                    monkeypatch,
+                    tp_size,
+                    pp_size,
+                    rank,
+                    distributed_init_port,
+                ),
+            )
+        ray.get(refs)
+    finally:
+        ray.shutdown()
+
+
+@contextmanager
+def error_on_warning(category: type[Warning] = Warning):
+    """
+    Within the scope of this context manager, tests will fail if any warning
+    of the given category is emitted.
+    """
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", category=category)
+
+        yield
+
+
+def get_physical_device_indices(devices: list[int]):
+    visible_devices = os.environ.get("CUDA_VISIBLE_DEVICES")
+    if visible_devices is None:
+        return devices
+
+    visible_indices = [int(x) for x in visible_devices.split(",")]
+    index_mapping = {i: physical for i, physical in enumerate(visible_indices)}
+    return [index_mapping[i] for i in devices if i in index_mapping]
+
+
+@_nvml()
+def record_gpu_memory_usage_stats(
+    *,
+    devices: list[int],
+) -> dict[int, tuple[float, float]]:
+    output: dict[int, tuple[float, float]] = {}
+    for device in devices:
+        if current_platform.is_rocm():
+            dev_handle = amdsmi_get_processor_handles()[device]
+            mem_info = amdsmi_get_gpu_vram_usage(dev_handle)
+            gb_used = mem_info["vram_used"] / 2**10
+            gb_total = mem_info["vram_total"] / 2**10
+        else:
+            dev_handle = nvmlDeviceGetHandleByIndex(device)
+            mem_info = nvmlDeviceGetMemoryInfo(dev_handle)
+            gb_used = mem_info.used / 2**30
+            gb_total = mem_info.total / 2**30
+        output[device] = (gb_used, gb_total)
+    return output
+
+
+def wait_for_gpu_memory_to_clear(
+    *,
+    devices: list[int],
+    threshold_bytes: int | dict[int, int] | None = None,
+    threshold_ratio: float | dict[int, float] | None = None,
+    timeout_s: float = 120,
+    stable_duration_s: float = 0,
+    stable_tolerance_bytes: int = 512 * 1024**2,
+    poll_interval_s: float = 5,
+) -> None:
+    assert threshold_bytes is not None or threshold_ratio is not None
+    devices = get_physical_device_indices(devices)
+    if isinstance(threshold_bytes, int):
+        threshold_bytes = {device: threshold_bytes for device in devices}
+    elif isinstance(threshold_bytes, dict):
+        assert threshold_bytes.keys() == set(devices)
+    if isinstance(threshold_ratio, float):
+        threshold_ratio = {device: threshold_ratio for device in devices}
+    elif isinstance(threshold_ratio, dict):
+        assert threshold_ratio.keys() == set(devices)
+    if current_platform.is_rocm() and threshold_ratio is not None:
+        # ROCm can keep a small runtime/driver footprint resident even after
+        # all model allocations are gone. On MI300 this has been observed
+        # around 2.5 GiB, which is above a strict 1% idle threshold but nowhere
+        # near the amount of free memory needed by the next vLLM runner.
+        min_threshold_b = 4 * 1024**3
+        if threshold_bytes is None:
+            threshold_bytes = {}
+        for device, ratio in threshold_ratio.items():
+            threshold_bytes[device] = max(
+                threshold_bytes.get(device, 0), min_threshold_b if ratio < 0.05 else 0
+            )
+
+    # Use nvml instead of pytorch to reduce measurement error from torch cuda
+    # context.
+    start_time = time.time()
+    stable_since: float | None = None
+    stable_used_bytes: dict[int, int] | None = None
+    while True:
+        output_raw = record_gpu_memory_usage_stats(devices=devices)
+        used_bytes_by_device = {
+            device: int(gb_used * 2**30) for device, (gb_used, _) in output_raw.items()
+        }
+        output = {
+            device: f"{gb_used:.02f}/{gb_total:.02f}"
+            for device, (gb_used, gb_total) in output_raw.items()
+        }
+        print("gpu memory used/total (GiB): ", end="")
+        for k, v in output.items():
+            print(f"{k}={v}; ", end="")
+        print("")
+
+        if threshold_bytes is not None and threshold_ratio is not None:
+            threshold_gib = {
+                device: threshold_b / 2**30
+                for device, threshold_b in threshold_bytes.items()
+            }
+            threshold = "; ".join(
+                f"{device=}: max({threshold_gib[device]:.2f} GiB, "
+                f"{threshold_ratio[device]:.3f})"
+                for device in devices
+            )
+            all_free = all(
+                used <= max(threshold_gib[device], total * threshold_ratio[device])
+                for device, (used, total) in output_raw.items()
+            )
+        elif threshold_bytes is not None:
+            threshold_gib = {
+                device: threshold_b / 2**30
+                for device, threshold_b in threshold_bytes.items()
+            }
+            threshold = "; ".join(
+                f"{device=}: {threshold_gib[device]:.2f} GiB" for device in devices
+            )
+            all_free = all(
+                used <= threshold_gib[device]
+                for device, (used, _) in output_raw.items()
+            )
+        else:
+            assert threshold_ratio is not None
+            threshold = "; ".join(
+                f"{device=}: {threshold_ratio[device]:.3f}" for device in devices
+            )
+            all_free = all(
+                used / total <= threshold_ratio[device]
+                for device, (used, total) in output_raw.items()
+            )
+
+        dur_s = time.time() - start_time
+        if all_free:
+            if stable_duration_s <= 0:
+                print(
+                    f"Done waiting for free GPU memory on devices {devices=} "
+                    f"({threshold=}) {dur_s=:.02f}"
+                )
+                break
+
+            now = time.time()
+            if stable_used_bytes is None:
+                stable_since = now
+                stable_used_bytes = used_bytes_by_device
+            else:
+                memory_changed = any(
+                    abs(used_bytes_by_device[device] - stable_used_bytes[device])
+                    > stable_tolerance_bytes
+                    for device in devices
+                )
+                if memory_changed:
+                    stable_since = now
+                    stable_used_bytes = used_bytes_by_device
+                elif (
+                    stable_since is not None and now - stable_since >= stable_duration_s
+                ):
+                    print(
+                        f"Done waiting for stable free GPU memory on devices "
+                        f"{devices=} ({threshold=}) {dur_s=:.02f}"
+                    )
+                    break
+        else:
+            stable_since = None
+            stable_used_bytes = None
+
+        if dur_s >= timeout_s:
+            raise ValueError(
+                f"Memory of devices {devices=} not free after "
+                f"{dur_s=:.02f} ({threshold=})"
+            )
+
+        time.sleep(poll_interval_s)
+
+
+def wait_for_rocm_memory_to_settle(
+    *,
+    threshold_ratio: float | dict[int, float] | None = 0.1,
+    timeout_s: float = 240,
+) -> None:
+    """Block until ROCm device VRAM usage drops below ``threshold_ratio``.
+
+    ROCm reclaims GPU memory more lazily than CUDA, so back-to-back model
+    loads in a single test process can OOM the *next* engine/model startup
+    even after ``cleanup_dist_env_and_memory``. This gives the driver time to
+    actually release VRAM before the next allocation. No-op off ROCm.
+    """
+    if not current_platform.is_rocm():
+        return
+
+    num_gpus = current_platform.device_count()
+    if num_gpus == 0:
+        return
+    if threshold_ratio is None:
+        threshold_ratio = 0.1
+
+    wait_for_gpu_memory_to_clear(
+        devices=list(range(num_gpus)),
+        threshold_ratio=threshold_ratio,
+        timeout_s=timeout_s,
+        stable_duration_s=2.0,
+        poll_interval_s=1.0,
+    )
+
+
+_P = ParamSpec("_P")
+
+
+def fork_new_process_for_each_test(func: Callable[_P, None]) -> Callable[_P, None]:
+    """Decorator to fork a new process for each test function.
+    See https://github.com/vllm-project/vllm/issues/7053 for more details.
+    """
+
+    @functools.wraps(func)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
+        from _pytest.outcomes import Skipped
+
+        # Create a unique temporary file to store exception info from child
+        # process. Use test function name and process ID to avoid collisions.
+        with (
+            tempfile.NamedTemporaryFile(
+                delete=False,
+                mode="w+b",
+                prefix=f"vllm_test_{func.__name__}_{os.getpid()}_",
+                suffix=".exc",
+            ) as exc_file,
+            ExitStack() as delete_after,
+        ):
+            exc_file_path = exc_file.name
+            delete_after.callback(os.remove, exc_file_path)
+
+            pid = os.fork()
+            print(f"Fork a new process to run a test {pid}")
+            if pid == 0:
+                # Make the child process the leader of its own process group
+                # to avoid sending SIGTERM to the parent process
+                os.setpgrp()
+                # Parent process responsible for deleting, don't delete
+                # in child.
+                delete_after.pop_all()
+                try:
+                    func(*args, **kwargs)
+                except Skipped as e:
+                    # convert Skipped to exit code 0
+                    print(str(e))
+                    os._exit(0)
+                except Exception as e:
+                    import traceback
+
+                    tb_string = traceback.format_exc()
+
+                    # Try to serialize the exception object first
+                    exc_to_serialize: dict[str, Any]
+                    try:
+                        # First, try to pickle the actual exception with
+                        # its traceback.
+                        exc_to_serialize = {"pickled_exception": e}
+                        # Test if it can be pickled
+                        cloudpickle.dumps(exc_to_serialize)
+                    except (Exception, KeyboardInterrupt):
+                        # Fall back to string-based approach.
+                        exc_to_serialize = {
+                            "exception_type": type(e).__name__,
+                            "exception_msg": str(e),
+                            "traceback": tb_string,
+                        }
+                    try:
+                        with open(exc_file_path, "wb") as f:
+                            cloudpickle.dump(exc_to_serialize, f)
+                    except Exception:
+                        # Fallback: just print the traceback.
+                        print(tb_string)
+                    os._exit(1)
+                else:
+                    os._exit(0)
+            else:
+                # After setpgrp(), the child's pgid equals its pid
+                pgid = pid
+                _pid, _exitcode = os.waitpid(pid, 0)
+                # kill all child processes - but they may already have exited cleanly
+                with contextlib.suppress(ProcessLookupError):
+                    os.killpg(pgid, signal.SIGTERM)
+                if _exitcode != 0:
+                    # Try to read the exception from the child process
+                    exc_info = {}
+                    if os.path.exists(exc_file_path):
+                        with (
+                            contextlib.suppress(Exception),
+                            open(exc_file_path, "rb") as f,
+                        ):
+                            exc_info = cloudpickle.load(f)
+
+                    if (
+                        original_exception := exc_info.get("pickled_exception")
+                    ) is not None:
+                        # Re-raise the actual exception object if it was
+                        # successfully pickled.
+                        assert isinstance(original_exception, Exception)
+                        raise original_exception
+
+                    if (original_tb := exc_info.get("traceback")) is not None:
+                        # Use string-based traceback for fallback case
+                        raise AssertionError(
+                            f"Test {func.__name__} failed when called with"
+                            f" args {args} and kwargs {kwargs}"
+                            f" (exit code: {_exitcode}):\n{original_tb}"
+                        ) from None
+
+                    # Fallback to the original generic error
+                    raise AssertionError(
+                        f"function {func.__name__} failed when called with"
+                        f" args {args} and kwargs {kwargs}"
+                        f" (exit code: {_exitcode})"
+                    ) from None
+
+    return wrapper
+
+
+def _format_subprocess_exit(returncode: int) -> str:
+    """Render a subprocess exit code, naming the signal for negative codes."""
+    if returncode >= 0:
+        return f"exit code {returncode}"
+    try:
+        return f"killed by {signal.Signals(-returncode).name} ({returncode})"
+    except ValueError:
+        return f"exit code {returncode}"
+
+
+# Set on the spawn-child interpreter so the wrapper short-circuits when the
+# child resolves `module.qualname` back to its own decorated form, instead of
+# launching another subprocess.
+_SPAWN_CHILD_ENV = "VLLM_TEST_SPAWN_CHILD"
+
+
+def spawn_new_process_for_each_test(f: Callable[_P, None]) -> Callable[_P, None]:
+    """Decorator to spawn a new process for each test function.
+
+    Uses subprocess to run each test in a fresh interpreter and propagates
+    exceptions back to the parent, so test failures are never silently
+    swallowed (fixes https://github.com/vllm-project/vllm/issues/41415).
+
+    The child resolves the test function by importing its module and looking
+    it up by qualified name, rather than reconstructing it from a cloudpickle
+    blob. Pickling the function by value would also pickle its ``__globals__``
+    by value — turning module-level singletons (e.g.
+    ``vllm.compilation.counter.compilation_counter``) into stale clones in
+    the child, so increments performed by the production code in the child
+    would never be observable to the test.
+
+    The child inherits the parent's stdout/stderr so its output (engine
+    cores, NCCL, CUDA, ...) reaches the test runner live; the Python-level
+    traceback is serialized to ``tb_file`` for structured re-raising. A
+    native crash leaves ``tb_file`` empty — the diagnostic is then only in
+    the inherited subprocess output.
+    """
+
+    @functools.wraps(f)
+    def wrapper(*args: _P.args, **kwargs: _P.kwargs) -> None:
+        if os.environ.get(_SPAWN_CHILD_ENV) == "1":
+            return f(*args, **kwargs)
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".tb", mode="wb") as tmp:
+            tb_file = tmp.name
+
+        try:
+            payload = cloudpickle.dumps(
+                {
+                    "module": f.__module__,
+                    "qualname": f.__qualname__,
+                    "args": args,
+                    "kwargs": kwargs,
+                    "tb_file": tb_file,
+                }
+            )
+
+            child_script = (
+                "import sys, importlib, cloudpickle, traceback\n"
+                "try:\n"
+                "    from _pytest.outcomes import Skipped\n"
+                "except ImportError:\n"
+                "    class Skipped(BaseException): pass\n"
+                "data = cloudpickle.loads(sys.stdin.buffer.read())\n"
+                "mod = importlib.import_module(data['module'])\n"
+                "target = mod\n"
+                "for name in data['qualname'].split('.'):\n"
+                "    target = getattr(target, name)\n"
+                "try:\n"
+                "    target(*data['args'], **data['kwargs'])\n"
+                "except Skipped:\n"
+                "    sys.exit(0)\n"
+                "except BaseException:\n"
+                "    with open(data['tb_file'], 'w') as fp:\n"
+                "        fp.write(traceback.format_exc())\n"
+                "    sys.exit(1)\n"
+            )
+
+            repo_root = str(VLLM_PATH.resolve())
+            env = os.environ.copy()
+            env["PYTHONPATH"] = repo_root + os.pathsep + env.get("PYTHONPATH", "")
+            env[_SPAWN_CHILD_ENV] = "1"
+
+            result = subprocess.run(
+                [sys.executable, "-c", child_script],
+                input=payload,
+                env=env,
+            )
+
+            if result.returncode != 0:
+                try:
+                    with open(tb_file) as fp:
+                        tb = fp.read()
+                except OSError:
+                    tb = ""
+                if not tb:
+                    tb = "<no Python traceback; see subprocess output above>"
+                raise RuntimeError(
+                    f"Test subprocess '{f.__name__}' failed "
+                    f"({_format_subprocess_exit(result.returncode)}):\n{tb}"
+                )
+        finally:
+            with contextlib.suppress(OSError):
+                os.remove(tb_file)
+
+    return wrapper
+
+
+def create_new_process_for_each_test(
+    method: Literal["spawn", "fork"] | None = None,
+) -> Callable[[Callable[_P, None]], Callable[_P, None]]:
+    """Creates a decorator that runs each test function in a new process.
+
+    Args:
+        method: The process creation method. Can be either "spawn" or "fork".
+               If not specified, it defaults to "spawn" on ROCm and XPU
+               platforms and "fork" otherwise.
+
+    Returns:
+        A decorator to run test functions in separate processes.
+    """
+    if method is None:
+        method = "spawn" if requires_spawn_multiprocessing() else "fork"
+
+    assert method in ["spawn", "fork"], "Method must be either 'spawn' or 'fork'"
+
+    if method == "fork":
+        return fork_new_process_for_each_test
+
+    return spawn_new_process_for_each_test
+
+
+def large_gpu_mark(min_gb: int) -> pytest.MarkDecorator:
+    """
+    Get a pytest mark, which skips the test if the GPU doesn't meet
+    a minimum memory requirement in GB.
+
+    This can be leveraged via `@large_gpu_test` to skip tests in environments
+    without enough resources, or called when filtering tests to run directly.
+    """
+    try:
+        if current_platform.is_cpu():
+            memory_gb = 0
+        else:
+            memory_gb = current_platform.get_device_total_memory() / GB_bytes
+    except Exception as e:
+        warnings.warn(
+            f"An error occurred when finding the available memory: {e}",
+            stacklevel=2,
+        )
+        memory_gb = 0
+
+    return pytest.mark.skipif(
+        memory_gb < min_gb,
+        reason=f"Need at least {min_gb}GB GPU memory to run the test.",
+    )
+
+
+requires_fp8 = pytest.mark.skipif(
+    not current_platform.supports_fp8(),
+    reason="FP8 is not supported on this GPU (requires Hopper or "
+    "Ada architecture, compute capability 8.9+)",
+)
+
+
+def large_gpu_test(*, min_gb: int):
+    """
+    Decorate a test to be skipped if no GPU is available or it does not have
+    sufficient memory.
+
+    Currently, the CI machine uses L4 GPU which has 24 GB VRAM.
+    """
+    mark = large_gpu_mark(min_gb)
+
+    def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
+        return mark(f)
+
+    return wrapper
+
+
+def multi_gpu_marks(*, num_gpus: int):
+    """Get a collection of pytest marks to apply for `@multi_gpu_test`."""
+    test_selector = pytest.mark.distributed(num_gpus=num_gpus)
+    test_skipif = pytest.mark.skipif(
+        current_platform.device_count() < num_gpus,
+        reason=f"Need at least {num_gpus} GPUs to run the test.",
+    )
+
+    return [test_selector, test_skipif]
+
+
+def multi_gpu_test(*, num_gpus: int):
+    """
+    Decorate a test to be run only when multiple GPUs are available.
+    """
+    marks = multi_gpu_marks(num_gpus=num_gpus)
+
+    def wrapper(f: Callable[_P, None]) -> Callable[_P, None]:
+        func = create_new_process_for_each_test()(f)
+        for mark in reversed(marks):
+            func = mark(func)
+
+        return func
+
+    return wrapper
+
+
+def gpu_tier_mark(*, min_gpus: int = 1, max_gpus: int | None = None):
+    """
+    Mark a test to only run when the GPU count falls within [min_gpus, max_gpus].
+
+    Examples:
+        @gpu_tier_mark(min_gpus=2)          # only on multi-GPU
+        @gpu_tier_mark(max_gpus=1)          # only on single-GPU
+        @gpu_tier_mark(min_gpus=2, max_gpus=4)  # 2-4 GPUs only
+    """
+    gpu_count = current_platform.device_count()
+    marks = []
+
+    if min_gpus > 1:
+        marks.append(pytest.mark.distributed(num_gpus=min_gpus))
+
+    reasons = []
+    if gpu_count < min_gpus:
+        reasons.append(f"Need at least {min_gpus} GPUs (have {gpu_count})")
+    if max_gpus is not None and gpu_count > max_gpus:
+        reasons.append(f"Need at most {max_gpus} GPUs (have {gpu_count})")
+
+    if reasons:
+        marks.append(pytest.mark.skipif(True, reason="; ".join(reasons)))
+
+    return marks
+
+
+def single_gpu_only(f=None):
+    """Skip this test when running in a multi-GPU environment."""
+    marks = gpu_tier_mark(max_gpus=1)
+
+    def wrapper(func):
+        for mark in reversed(marks):
+            func = mark(func)
+        return func
+
+    return wrapper(f) if f is not None else wrapper
+
+
+def multi_gpu_only(*, num_gpus: int = 2):
+    """Skip this test when running on fewer than num_gpus GPUs."""
+    marks = gpu_tier_mark(min_gpus=num_gpus)
+
+    def wrapper(f):
+        for mark in reversed(marks):
+            f = mark(f)
+        return f
+
+    return wrapper
+
+
+async def completions_with_server_args(
+    prompts: list[str],
+    model_name: str,
+    server_cli_args: list[str],
+    num_logprobs: int | None,
+    max_wait_seconds: int = 240,
+    max_tokens: int | list = 5,
+) -> list[Completion]:
+    """Construct a remote OpenAI server, obtain an async client to the
+    server & invoke the completions API to obtain completions.
+
+    Args:
+      prompts: test prompts
+      model_name: model to spin up on the vLLM server
+      server_cli_args: CLI args for starting the server
+      num_logprobs: Number of logprobs to report (or `None`)
+      max_wait_seconds: timeout interval for bringing up server.
+                        Default: 240sec
+      max_tokens: max_tokens value for each of the given input prompts.
+        if only one max_token value is given, the same value is used
+        for all the prompts.
+
+    Returns:
+      OpenAI Completion instance
+    """
+
+    if isinstance(max_tokens, int):
+        max_tokens = [max_tokens] * len(prompts)
+
+    assert len(max_tokens) == len(prompts)
+
+    outputs = None
+    with RemoteOpenAIServer(
+        model_name, server_cli_args, max_wait_seconds=max_wait_seconds
+    ) as server:
+        client = server.get_async_client()
+        outputs = [
+            client.completions.create(
+                model=model_name,
+                prompt=[p],
+                temperature=0,
+                stream=False,
+                max_tokens=max_tok,
+                logprobs=num_logprobs,
+            )
+            for p, max_tok in zip(prompts, max_tokens)
+        ]
+        outputs = await asyncio.gather(*outputs)
+
+    assert outputs is not None, "Completion API call failed."
+
+    return outputs
+
+
+def get_client_text_generations(completions: list[Completion]) -> list[str]:
+    """Extract generated tokens from the output of a
+    request made to an Open-AI-protocol completions endpoint.
+    """
+    assert all([len(x.choices) == 1 for x in completions])
+    return [x.choices[0].text for x in completions]
+
+
+def get_client_text_logprob_generations(
+    completions: list[Completion],
+) -> list[TextTextLogprobs]:
+    """Operates on the output of a request made to an Open-AI-protocol
+    completions endpoint; obtains top-rank logprobs for each token in
+    each {class}`SequenceGroup`
+    """
+    text_generations = get_client_text_generations(completions)
+    text = "".join(text_generations)
+    return [
+        (
+            text_generations,
+            text,
+            (None if x.logprobs is None else x.logprobs.top_logprobs),
+        )
+        for completion in completions
+        for x in completion.choices
+    ]
+
+
+def has_module_attribute(module_name, attribute_name):
+    """
+    Helper function to check if a module has a specific attribute.
+    """
+    try:
+        module = importlib.import_module(module_name)
+        return hasattr(module, attribute_name)
+    except ImportError:
+        return False
+
+
+def get_attn_backend_list_based_on_platform() -> list[str]:
+    if current_platform.is_cuda():
+        return ["FLASH_ATTN", "TRITON_ATTN"]
+    elif current_platform.is_rocm():
+        attn_backend_list = ["TRITON_ATTN"]
+        try:
+            import aiter  # noqa: F401
+
+            attn_backend_list.append("ROCM_AITER_FA")
+        except Exception:
+            print("Skip ROCM_AITER_FA on ROCm as aiter is not installed")
+
+        return attn_backend_list
+    elif current_platform.is_xpu():
+        return ["FLASH_ATTN", "TRITON_ATTN"]
+    else:
+        raise ValueError("Unsupported platform")
+
+
+@contextmanager
+def override_cutlass_fp8_supported(value: bool):
+    with patch(
+        "vllm.model_executor.layers.quantization.utils.w8a8_utils.cutlass_fp8_supported",
+        return_value=value,
+    ):
+        yield
+
+
+def disable_aiter_plain_rmsnorm(monkeypatch) -> None:
+    """Patch dispatch_rocm_rmsnorm_func so the plain (non-fused) rms_norm path
+    always uses the native float32 kernel for the duration of a test.
+
+    The fused path (rms_norm2d_with_add, selected when with_fused_add=True) is
+    left on AITER -- only the plain path is redirected to native.
+
+    AITER's plain rms_norm accumulates variance in bfloat16 (~1 ULP/call),
+    which drifts the KV cache over many decode steps. This drift is irrelevant
+    for a trained model (rank-1/rank-2 gap ~1-3 nats >> 1 ULP), but breaks
+    logprob comparison tests with randomly-initialised models like
+    TitanML/tiny-mixtral whose rank-1/rank-2 gap is only O(1/sqrt(V)) ~0.006
+    nats -- smaller than the accumulated per-step error.
+    """
+    import torch
+
+    import vllm.model_executor.layers.layernorm as _ln_mod
+    from vllm.model_executor.layers.layernorm import rms_norm as _native
+
+    _orig = _ln_mod.dispatch_rocm_rmsnorm_func
+
+    def _native_plain(
+        with_fused_add: bool, dtype: torch.dtype, use_aiter: bool = False
+    ):
+        if (
+            use_aiter
+            and not with_fused_add
+            and dtype in (torch.float16, torch.bfloat16)
+        ):
+            return _native
+        return _orig(with_fused_add, dtype, use_aiter)
+
+    monkeypatch.setattr(_ln_mod, "dispatch_rocm_rmsnorm_func", _native_plain)
+
+
+def prep_prompts(batch_size: int, ln_range: tuple[int, int] = (800, 1100)):
+    """
+    Generate prompts which a bunch of assignments,
+    then asking for the value of one of them.
+    The prompt is just under 10k tokens; sliding window is 4k
+    so the answer is outside sliding window, but should still be correct.
+    Args:
+        batch_size: number of prompts to generate
+        ln_range: an argument to control the length of the prompt
+    """
+    prompts: list[str] = []
+    answer: list[int] = []
+    indices: list[int] = []
+    random.seed(1)
+    for _ in range(batch_size):
+        idx = random.randint(30, 90)
+        indices.append(idx)
+        prompt = (
+            "```python\n# We set a number of variables, "
+            f"x{idx} will be important later\n"
+        )
+        ln = random.randint(*ln_range)
+        for k in range(30, ln):
+            v = random.randint(10, 99)
+            if k == idx:
+                answer.append(v)
+            prompt += f"x{k} = {v}\n"
+        prompt += f"# Now, we check the value of x{idx}:\n"
+        prompt += f"assert x{idx} == "
+        prompts.append(prompt)
+    return prompts, answer, indices
+
+
+def check_answers(
+    indices: list[int], answer: list[int], outputs: list[str], accept_rate: float = 0.7
+):
+    answer2 = [int(text[0:2].strip()) for text in outputs]
+    print(list(zip(indices, zip(answer, answer2))))
+    numok = 0
+    for a1, a2 in zip(answer, answer2):
+        if a1 == a2:
+            numok += 1
+    frac_ok = numok / len(answer)
+    print(f"Num OK: {numok}/{len(answer)} {frac_ok}")
+    assert frac_ok >= accept_rate
+
+
+def flat_product(*iterables: Iterable[Any]):
+    """
+    Flatten lists of tuples of the cartesian product.
+    Useful when we want to avoid nested tuples to allow
+    test params to be unpacked directly from the decorator.
+
+    Example:
+    flat_product([(1, 2), (3, 4)], ["a", "b"]) ->
+    [
+      (1, 2, "a"),
+      (1, 2, "b"),
+      (3, 4, "a"),
+      (3, 4, "b"),
+    ]
+    """
+    for element in itertools.product(*iterables):
+        normalized = (e if isinstance(e, tuple) else (e,) for e in element)
+        yield tuple(itertools.chain(*normalized))
+
+
+class TestFP8Layer(torch.nn.Module):
+    """
+    Test helper for FP8 linear operations. Creates random weights and scales
+    based on quantization configuration.
+
+    Args:
+        weight_shape: Shape of the weight tensor (out_features, in_features).
+        activation_quant_key: Activation quantization configuration.
+        weight_quant_key: Weight quantization configuration.
+        out_dtype: Output dtype. Defaults to current default dtype.
+        force_kernel: Optional kernel to force use of specific implementation.
+    """
+
+    def __init__(
+        self,
+        weight_shape: tuple[int, int],
+        activation_quant_key: QuantKey,
+        weight_quant_key: QuantKey,
+        input_dtype: torch.dtype,
+        out_dtype: torch.dtype | None = None,
+        transpose_weights: bool = False,
+        device: torch.device | None = None,
+        force_kernel: type[_KernelT] | None = None,
+    ):
+        super().__init__()
+        act_scale_desc = activation_quant_key.scale
+        weight_scale_desc = weight_quant_key.scale
+        is_block_wise = act_scale_desc.group_shape.is_per_group()
+        if is_block_wise:
+            block_size = weight_scale_desc.group_shape.col
+            weight_scale_shape = weight_shape[0] // block_size
+            self.weight_scale_inv = torch.rand(
+                (weight_scale_shape, weight_scale_shape), dtype=torch.float32
+            )
+            self.weight = torch.rand(weight_shape).to(dtype=FP8_DTYPE)
+            self.input_scale = None
+            self.weight_scale = None
+            self.weight_block_size = [block_size, block_size]
+            if transpose_weights:
+                self.weight = self.weight.t()
+        else:
+            per_tensor_weights = weight_scale_desc.group_shape.is_per_tensor()
+            is_static_activation_scale = act_scale_desc.static
+            weight_scale_shape = (1,) if per_tensor_weights else (weight_shape[0], 1)
+            self.weight_scale_inv = None
+            self.weight_scale = torch.rand(
+                weight_scale_shape, dtype=torch.float32, device=device
+            )
+            self.input_scale = (
+                torch.rand(1, dtype=torch.float32, device=device)
+                if is_static_activation_scale
+                else None
+            )
+            self.weight = (
+                torch.rand(weight_shape, device=device).to(dtype=FP8_DTYPE).t()
+            )
+            self.input_scale_ub = None
+
+        out_dtype = torch.get_default_dtype() if out_dtype is None else out_dtype
+
+        self.kernel = init_fp8_linear_kernel(
+            activation_quant_key=activation_quant_key,
+            weight_quant_key=weight_quant_key,
+            weight_shape=weight_shape,
+            input_dtype=input_dtype,
+            out_dtype=out_dtype,
+            force_kernel=force_kernel,
+        )
+        self.kernel.process_weights_after_loading(self)
+
+    def is_quant_fp8_enabled(self) -> bool:
+        return self.kernel.quant_fp8.enabled()
+
+    def forward(
+        self, y: torch.Tensor, bias: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        return self.kernel.apply_weights(self, y, bias)

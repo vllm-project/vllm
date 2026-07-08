@@ -1,0 +1,19 @@
+# docker-compose.yaml
+version: "3"
+
+services:
+  prometheus:
+    image: prom/prometheus:latest
+    extra_hosts:
+      - "host.docker.internal:host-gateway"     # allow a direct connection from container to the local machine
+    ports:
+      - "9090:9090"   # the default port used by Prometheus
+    volumes:
+      - ${PWD}/prometheus.yaml:/etc/prometheus/prometheus.yml # mount Prometheus config file
+
+  grafana:
+    image: grafana/grafana:latest
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000" # the default port used by Grafana
