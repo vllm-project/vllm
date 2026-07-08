@@ -33,6 +33,7 @@ from vllm.utils.deep_gemm import (
     is_deep_gemm_e8m0_used,
     transform_sf_into_required_layout,
 )
+from vllm.utils.platform_utils import get_device_name_as_file_name
 from vllm.utils.torch_utils import direct_register_custom_op
 
 logger = init_logger(__name__)
@@ -864,7 +865,7 @@ def get_w8a8_block_fp8_configs(
 
     # First look up if an optimized configuration is available in the configs
     # directory
-    device_name = current_platform.get_device_name().replace(" ", "_")
+    device_name = get_device_name_as_file_name()
     json_file_name = f"N={N},K={K},device_name={device_name},dtype=fp8_w8a8,block_shape=[{block_n},{block_k}].json"  # noqa: E501
 
     config_file_path = os.path.join(

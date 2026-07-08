@@ -30,6 +30,7 @@ from vllm.v1.kv_cache_interface import (
     FullAttentionSpec,
     KVCacheConfig,
     KVCacheGroupSpec,
+    KVCacheSpec,
 )
 from vllm.v1.request import Request
 from vllm.v1.structured_output import StructuredOutputManager
@@ -54,12 +55,16 @@ def create_scheduler(
     block_size: int = 16,
     max_model_len: int | None = None,
     num_speculative_tokens: int | None = None,
+    speculative_method: str | None = None,
     skip_tokenizer_init: bool = False,
     async_scheduling: bool = False,
     pipeline_parallel_size: int = 1,
+    data_parallel_size: int = 1,
+    num_speculative_tokens_per_batch_size: list[tuple[int, int, int]] | None = None,
     use_ec_connector: bool = False,
     ec_role: str | None = None,
     use_v2_model_runner: bool | None = None,
+    kv_cache_spec: KVCacheSpec | None = None,
 ) -> Scheduler | AsyncScheduler:
     """Create scheduler under test.
 
@@ -126,9 +131,18 @@ def create_scheduler(
 
     speculative_config: SpeculativeConfig | None = None
     if num_speculative_tokens is not None:
-        speculative_config = SpeculativeConfig(
+        spec_kwargs: dict = dict(
             model="ngram", num_speculative_tokens=num_speculative_tokens
         )
+        if num_speculative_tokens_per_batch_size is not None:
+            spec_kwargs["num_speculative_tokens_per_batch_size"] = (
+                num_speculative_tokens_per_batch_size
+            )
+        if speculative_method is not None:
+            spec_kwargs["method"] = speculative_method
+            spec_kwargs["prompt_lookup_max"] = num_speculative_tokens
+            spec_kwargs["prompt_lookup_min"] = 1
+        speculative_config = SpeculativeConfig(**spec_kwargs)
 
     ec_transfer_config = (
         ECTransferConfig(
@@ -144,25 +158,25 @@ def create_scheduler(
         scheduler_config=scheduler_config,
         model_config=model_config,
         cache_config=cache_config,
-        parallel_config=ParallelConfig(pipeline_parallel_size=pipeline_parallel_size),
+        parallel_config=ParallelConfig(
+            pipeline_parallel_size=pipeline_parallel_size,
+            data_parallel_size=data_parallel_size,
+        ),
         kv_transfer_config=kv_transfer_config,
         speculative_config=speculative_config,
         ec_transfer_config=ec_transfer_config,
     )
+    if kv_cache_spec is None:
+        kv_cache_spec = FullAttentionSpec(
+            block_size=block_size,
+            num_kv_heads=1,
+            head_size=1,
+            dtype=torch.float32,
+        )
     kv_cache_config = KVCacheConfig(
         num_blocks=num_blocks,  # A large number of blocks to hold all requests
         kv_cache_tensors=[],
-        kv_cache_groups=[
-            KVCacheGroupSpec(
-                ["layer"],
-                FullAttentionSpec(
-                    block_size=block_size,
-                    num_kv_heads=1,
-                    head_size=1,
-                    dtype=torch.float32,
-                ),
-            )
-        ],
+        kv_cache_groups=[KVCacheGroupSpec(["layer"], kv_cache_spec)],
     )
     cache_config.num_gpu_blocks = num_blocks
     register_all_kvcache_specs(vllm_config)
