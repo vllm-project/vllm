@@ -300,7 +300,23 @@ def select_fp8_moe_backend(
         activation_key: QuantKey | None,
         activation_format: mk.FusedMoEActivationFormat,
     ) -> tuple[Fp8MoeBackend, type[mk.FusedMoEExperts]]:
-        for k_cls in backend_to_kernel_cls(backend):
+        candidates = list(backend_to_kernel_cls(backend))
+        # Opt-in: only when the user explicitly requests the FlashInfer TRT-LLM
+        # backend do we offer the LoRA-aware FP8 block-scale experts
+        # (gemm1_lora_delta path, PR #3153). Under "auto", LoRA + FP8 keeps its
+        # historical fallback (the non-LoRA trtllm candidates are rejected by
+        # the LoRA gate, so selection moves on to the next backend).
+        if (
+            config.is_lora_enabled
+            and backend == Fp8MoeBackend.FLASHINFER_TRTLLM
+            and config.moe_backend == "flashinfer_trtllm"
+        ):
+            from vllm.model_executor.layers.fused_moe.experts.trtllm_lora_moe import (
+                TrtLlmFp8LoRAExperts,
+            )
+
+            candidates = [TrtLlmFp8LoRAExperts, *candidates]
+        for k_cls in candidates:
             supported, reason = k_cls.is_supported_config(
                 k_cls, config, weight_key, activation_key, activation_format
             )

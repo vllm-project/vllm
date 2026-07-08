@@ -228,13 +228,25 @@ class _TrtLlmLoRAExpertsBase(LoRAExpertsMixin, mk.FusedMoEExpertsModular):
                 dtype=torch.bfloat16,
                 device=hidden_states.device,
             )
+            # The LoRA shrink needs unquantized, correct-magnitude activations.
+            # On the quantized subclasses (MXFP8 / FP8 block-scale) the
+            # ``hidden_states`` passed here is already the quantized ``a1q``
+            # produced by the modular prepare step, so fall back to the
+            # unquantized stash the modular kernel keeps on the context.
+            lora_x = hidden_states
+            if not self.expects_unquantized_inputs:
+                orig = lora_context.original_hidden_states
+                assert orig is not None and orig.shape[0] == hidden_states.shape[0], (
+                    "quantized trtllm LoRA path requires original_hidden_states"
+                )
+                lora_x = orig
             # add_inputs=False: write the pure delta only (the base is fused in
             # by the kernel) and do NOT multiply by the routing weight (it is a
             # pre-SwiGLU bias).
             w13_meta = self.apply_w13_lora(
                 lora_context,
                 y=gemm1_lora_delta,
-                x=hidden_states,
+                x=lora_x,
                 topk_ids=topk_ids,
                 topk_weights=topk_weights,
                 expert_map=expert_map,
@@ -467,6 +479,93 @@ class TrtLlmMxfp8LoRAExperts(_TrtLlmLoRAExpertsBase):
             use_shuffled_weight=True,
             weight_layout=int(WeightLayout.MajorK),
             fp8_quantization_type=Fp8QuantizationType.MxFp8,
+            do_finalize=True,
+            output=output,
+        )
+
+
+# --------------------------------------------------------------------------- #
+#  FP8 block-scale (DeepSeekFp8, 128x128)
+# --------------------------------------------------------------------------- #
+class TrtLlmFp8LoRAExperts(_TrtLlmLoRAExpertsBase):
+    """FP8 128x128 block-scale (DeepSeekFp8) trtllm MoE + LoRA.
+
+    Mirrors the DeepSeekFp8 branch of the non-LoRA ``TrtLlmFp8ExpertsModular``
+    (``hidden_states_scale`` transposed, ``BlockMajorK`` layout) and adds the
+    ``gemm1_lora_delta`` W13 fusion; W2 LoRA is computed out of kernel by the
+    shared base ``apply``.
+    """
+
+    @property
+    def expects_unquantized_inputs(self) -> bool:
+        return False  # needs fp8-quantized inputs + block scale
+
+    @staticmethod
+    def _supports_quant_scheme(weight_key, activation_key) -> bool:
+        from vllm.model_executor.layers.quantization.utils.quant_utils import (
+            kFp8Dynamic128Sym,
+            kFp8Static128BlockSym,
+        )
+
+        return (weight_key, activation_key) == (
+            kFp8Static128BlockSym,
+            kFp8Dynamic128Sym,
+        )
+
+    @staticmethod
+    def _supports_activation(activation: MoEActivation) -> bool:
+        return activation in [MoEActivation.SILU]
+
+    @staticmethod
+    def _supports_routing_method(routing_method, weight_key, activation_key) -> bool:
+        return routing_method in [
+            RoutingMethodType.DeepSeekV3,
+            RoutingMethodType.Llama4,
+            RoutingMethodType.Renormalize,
+            RoutingMethodType.RenormalizeNaive,
+        ]
+
+    def _invoke_routed_moe(
+        self,
+        *,
+        hidden_states,
+        w1,
+        w2,
+        packed_topk_ids,
+        gemm1_lora_delta,
+        global_num_experts,
+        a1q_scale,
+        output,
+    ):
+        import flashinfer
+        from flashinfer.fused_moe import Fp8QuantizationType, WeightLayout
+
+        assert a1q_scale is not None, "FP8 block scale requires hidden_states_scale"
+        assert self.w1_scale is not None and self.w2_scale is not None
+        return flashinfer.fused_moe.trtllm_fp8_block_scale_routed_moe(
+            topk_ids=packed_topk_ids,
+            routing_bias=None,
+            hidden_states=hidden_states,
+            # DeepSeekFp8 wants the transposed per-block scale (matches the
+            # non-LoRA modular expert).
+            hidden_states_scale=a1q_scale.t().contiguous(),
+            gemm1_weights=w1,
+            gemm1_weights_scale=self.w1_scale,
+            gemm1_lora_delta=gemm1_lora_delta,
+            gemm2_weights=w2,
+            gemm2_weights_scale=self.w2_scale,
+            num_experts=global_num_experts,
+            top_k=self.topk,
+            n_group=None,
+            topk_group=None,
+            intermediate_size=self.intermediate_size_per_partition,
+            local_expert_offset=self.ep_rank * self.local_num_experts,
+            local_num_experts=self.local_num_experts,
+            routed_scaling_factor=None,
+            routing_method_type=int(self.routing_method_type),
+            use_shuffled_weight=True,
+            weight_layout=int(WeightLayout.BlockMajorK),
+            fp8_quantization_type=Fp8QuantizationType.DeepSeekFp8,
             do_finalize=True,
             output=output,
         )
