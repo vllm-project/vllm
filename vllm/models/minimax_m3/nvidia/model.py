@@ -769,8 +769,9 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
 
         # Reserved top-k indices buffer shared by all sparse-attention indexer
         # layers (mirrors DeepseekV4); kept at a stable address so the indexer's
-        # top-k output survives cudagraph capture/replay. Shape matches the
-        # per-head index top-k output [num_index_heads, total_q, topk].
+        # top-k output survives cudagraph capture/replay. Token-major
+        # [total_q, num_index_heads, topk] so the indexer writes its native
+        # [token, head, topk] top-k; the attend transposes to [H, tokens, topk].
         sparse_cfg = getattr(config, "sparse_attention_config", None)
         if sparse_cfg is not None:
             tp_size = get_tensor_model_parallel_world_size()
@@ -780,8 +781,8 @@ class MiniMaxM3Model(nn.Module, EagleModelMixin):
             max_num_batched_tokens = vllm_config.scheduler_config.max_num_batched_tokens
             padded_num_tokens = (max_num_batched_tokens + 3) // 4 * 4
             self.topk_indices_buffer = torch.empty(
-                num_index_heads,
                 padded_num_tokens,
+                num_index_heads,
                 sparse_cfg["sparse_topk_blocks"],
                 dtype=torch.int32,
             )
