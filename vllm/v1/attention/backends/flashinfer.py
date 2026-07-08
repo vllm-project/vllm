@@ -1641,14 +1641,11 @@ class FlashInferImpl(AttentionImpl):
         )
         self.kv_cache_dtype = kv_cache_dtype
         self.is_kvcache_nvfp4 = kv_cache_dtype == "nvfp4"
-        self.use_native_nvfp4_kv_cache_update = (
-            self.is_kvcache_nvfp4
-            and self.head_size_v == self.head_size
-            and (
-                current_platform.is_device_capability_family(100)
-                or current_platform.is_device_capability_family(120)
-            )
-        )
+        self.use_native_nvfp4_kv_cache_update = False
+        if self.is_kvcache_nvfp4 and self.head_size_v == self.head_size:
+            self.use_native_nvfp4_kv_cache_update = can_use_trtllm_attention(
+                num_heads, num_kv_heads, is_prefill=True
+            ) and can_use_trtllm_attention(num_heads, num_kv_heads, is_prefill=False)
         self._nvfp4_slot_writer: Callable[..., None] | None = None
         self._nvfp4_paged_dequant: Callable[..., None] | None = None
         if self.is_kvcache_nvfp4 and not self.use_native_nvfp4_kv_cache_update:
@@ -1660,7 +1657,7 @@ class FlashInferImpl(AttentionImpl):
             if nvfp4_slot_writer is None:
                 raise RuntimeError(
                     "FlashInfer NVFP4 slot-mapping KV cache update is "
-                    "required for pre-SM100 NVFP4 KV cache."
+                    "required when native NVFP4 KV cache update is unavailable."
                 )
             self._nvfp4_slot_writer = nvfp4_slot_writer
             self._nvfp4_paged_dequant = getattr(

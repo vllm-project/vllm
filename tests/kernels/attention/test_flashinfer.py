@@ -494,6 +494,62 @@ def test_flashinfer_impl_caches_nvfp4_slot_mapping_writer(monkeypatch) -> None:
     assert impl._nvfp4_slot_writer is fake_slot_writer
 
 
+@pytest.mark.parametrize(
+    ("prefill_ok", "decode_ok", "expected_native"),
+    [
+        (True, True, True),
+        (False, True, False),
+        (True, False, False),
+        (False, False, False),
+    ],
+)
+def test_flashinfer_impl_gates_native_nvfp4_update_on_trtllm_availability(
+    monkeypatch, prefill_ok: bool, decode_ok: bool, expected_native: bool
+) -> None:
+    from vllm.v1.attention.backends import flashinfer as flashinfer_backend
+
+    def fake_slot_writer(*args, **kwargs):
+        pass
+
+    def fake_can_use_trtllm_attention(
+        num_heads: int, num_kv_heads: int, is_prefill: bool = False
+    ) -> bool:
+        return prefill_ok if is_prefill else decode_ok
+
+    monkeypatch.setattr(
+        flashinfer_backend.flashinfer,
+        "nvfp4_quantize_append_paged_kv_cache_with_slot_mapping",
+        fake_slot_writer,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend.current_platform,
+        "is_device_capability_family",
+        lambda family: family == 120,
+    )
+    monkeypatch.setattr(
+        flashinfer_backend,
+        "can_use_trtllm_attention",
+        fake_can_use_trtllm_attention,
+    )
+
+    impl = flashinfer_backend.FlashInferImpl(
+        num_heads=1,
+        head_size=128,
+        scale=1.0,
+        num_kv_heads=1,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="nvfp4",
+    )
+
+    assert impl.use_native_nvfp4_kv_cache_update is expected_native
+    if expected_native:
+        assert impl._nvfp4_slot_writer is None
+    else:
+        assert impl._nvfp4_slot_writer is fake_slot_writer
+
+
 def test_flashinfer_impl_caches_nvfp4_kv_cache_views(monkeypatch) -> None:
     from vllm.v1.attention.backends import flashinfer as flashinfer_backend
 
