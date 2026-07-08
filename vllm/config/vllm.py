@@ -50,6 +50,7 @@ from .speculative import EagleModelTypes, NgramGPUTypes, SpeculativeConfig
 from .structured_outputs import StructuredOutputsConfig
 from .utils import SupportsHash, config, replace
 from .weight_transfer import WeightTransferConfig
+from .ec_manager_config import EncoderCacheManagerConfig
 
 if TYPE_CHECKING:
     from transformers import PretrainedConfig
@@ -366,6 +367,8 @@ class VllmConfig:
     kv_events_config: KVEventsConfig | None = None
     """The configurations for event publishing."""
     ec_transfer_config: ECTransferConfig | None = None
+    """The configurations for event publishing."""
+    ec_manager_config: EncoderCacheManagerConfig | None = None
     """The configurations for distributed EC cache transfer."""
     reasoning_config: ReasoningConfig | None = None
     """The configurations for reasoning model."""

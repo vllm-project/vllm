@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 
 from vllm.logger import init_logger
 from vllm.v1.request import Request
+from vllm.config.ec_manager_config import EncoderCacheManagerMetadata
 
 if TYPE_CHECKING:
     from vllm.config import SchedulerConfig
@@ -265,6 +266,8 @@ class EncoderCacheManager:
         self.freed = []
         return freed
 
+    def get_manager_metadata(self) -> EncoderCacheManagerMetadata | None:
+        return None
 
 def compute_mm_encoder_budget(
     scheduler_config: "SchedulerConfig",
