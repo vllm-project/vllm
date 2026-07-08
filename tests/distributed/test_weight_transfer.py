@@ -17,7 +17,15 @@ from torch.multiprocessing.reductions import reduce_tensor
 
 from vllm.config.parallel import ParallelConfig
 from vllm.config.weight_transfer import WeightTransferConfig
-from vllm.distributed.weight_transfer import WeightTransferEngineFactory
+from vllm.distributed.weight_transfer import (
+    HTTPVLLMWeightSyncClient,
+    ModuleSource,
+    RayVLLMWeightSyncClient,
+    TrainerWeightTransferEngine,
+    VLLMWeightSyncClient,
+    WeightTransferEngineFactory,
+    WeightTransferTrainerFactory,
+)
 from vllm.distributed.weight_transfer.ipc_engine import (
     IPCWeightTransferEngine,
     IPCWeightTransferInitInfo,
@@ -1190,3 +1198,184 @@ def test_ipc_receive_weights_missing_gpu_uuid_raises():
 
     with pytest.raises(ValueError, match="IPC handle not found"):
         engine.receive_weights(update_info)
+
+
+# --- Unit Tests: trainer-side abstractions (no GPU) ---
+#
+# The concrete NCCL/IPC trainer engines (and their end-to-end transfer tests)
+# land in the per-backend migration PRs. This PR ships the abstractions only, so
+# these tests exercise the base class, the `WeightSource`/`ModuleSource`
+# contract, the built-in clients, and the trainer factory mechanics.
+
+
+class RecordingClient:
+    """A fake VLLMWeightSyncClient that records the order of calls."""
+
+    def __init__(self):
+        self.order: list[str] = []
+        self.last_init_info: dict | None = None
+        self.last_update_info: dict | None = None
+
+    def init_weight_transfer_engine(self, init_info: dict) -> None:
+        self.order.append("init")
+        self.last_init_info = init_info
+
+    def start_weight_update(self) -> None:
+        self.order.append("start")
+
+    def update_weights(self, update_info: dict) -> None:
+        self.order.append("update")
+        self.last_update_info = update_info
+
+    def finish_weight_update(self) -> None:
+        self.order.append("finish")
+
+
+def _module_with(*pairs):
+    """A tiny nn.Module exposing the given (name, tensor) pairs as parameters,
+    so trainer tests can build a ModuleSource without a real model."""
+    module = torch.nn.Module()
+    for name, tensor in pairs:
+        module.register_parameter(name, torch.nn.Parameter(tensor, requires_grad=False))
+    return module
+
+
+class _DummyTrainerEngine(TrainerWeightTransferEngine):
+    """Minimal concrete trainer engine to exercise base-class + factory."""
+
+    @classmethod
+    def trainer_init(cls, config, init_info, *, client, source):
+        return cls(config, client=client, source=source)
+
+    def send_weights(self):
+        pass
+
+
+class TestTrainerClients:
+    """Structural protocol conformance for the built-in clients."""
+
+    def test_recording_client_is_protocol(self):
+        assert isinstance(RecordingClient(), VLLMWeightSyncClient)
+
+    def test_http_client_is_protocol(self):
+        assert isinstance(
+            HTTPVLLMWeightSyncClient("http://localhost:8000"), VLLMWeightSyncClient
+        )
+
+    def test_ray_client_is_protocol(self):
+        assert isinstance(RayVLLMWeightSyncClient(MagicMock()), VLLMWeightSyncClient)
+
+    def test_http_client_pickles_ipc_handles_for_json(self, monkeypatch):
+        """HTTP update_weights must encode raw ipc_handles as a base64 pickle."""
+        captured = {}
+
+        def fake_post(self, path, json=None):
+            captured["path"] = path
+            captured["json"] = json
+
+        monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
+        client = HTTPVLLMWeightSyncClient("http://localhost:8000")
+        client.update_weights({"names": ["w"], "ipc_handles": [{"gpu": ("args",)}]})
+        sent = captured["json"]["update_info"]
+        assert "ipc_handles" not in sent
+        assert "ipc_handles_pickled" in sent
+        assert pickle.loads(base64.b64decode(sent["ipc_handles_pickled"])) == [
+            {"gpu": ("args",)}
+        ]
+
+    def test_http_client_passes_through_nccl_update_info(self, monkeypatch):
+        """NCCL update_info has only JSON-native fields and passes unchanged."""
+        captured = {}
+
+        def fake_post(self, path, json=None):
+            captured["json"] = json
+
+        monkeypatch.setattr(HTTPVLLMWeightSyncClient, "_post", fake_post)
+        client = HTTPVLLMWeightSyncClient("http://localhost:8000")
+        update_info = {"names": ["w"], "dtype_names": ["float32"], "shapes": [[4]]}
+        client.update_weights(update_info)
+        assert captured["json"]["update_info"] == update_info
+
+
+class TestModuleSource:
+    """`ModuleSource` metadata vs. materialized iteration (dense, no GPU)."""
+
+    def test_metadata_reads_shape_and_dtype(self):
+        source = ModuleSource(
+            _module_with(("w", torch.zeros(2, 3)), ("b", torch.zeros(3)))
+        )
+        meta = source.metadata()
+        assert [m.name for m in meta] == ["w", "b"]
+        assert [m.shape for m in meta] == [(2, 3), (3,)]
+        assert all(m.dtype == torch.float32 for m in meta)
+
+    def test_iteration_yields_materialized_tensors(self):
+        w = torch.arange(6, dtype=torch.float32).reshape(2, 3)
+        source = ModuleSource(_module_with(("w", w)))
+        pairs = list(source)
+        assert [name for name, _ in pairs] == ["w"]
+        assert torch.equal(pairs[0][1], w)
+
+    def test_source_is_reiterable(self):
+        source = ModuleSource(_module_with(("w", torch.zeros(2))))
+        assert [n for n, _ in source] == [n for n, _ in source] == ["w"]
+
+
+class TestTrainerFactory:
+    """WeightTransferTrainerFactory registry mechanics."""
+
+    def test_builtin_registry_has_no_trainer_backends_yet(self):
+        # Concrete backends register in the per-backend migration PRs.
+        assert WeightTransferTrainerFactory._registry == {}
+
+    def test_register_and_dispatch(self):
+        saved = dict(WeightTransferTrainerFactory._registry)
+        try:
+            WeightTransferTrainerFactory.register_engine("dummy", _DummyTrainerEngine)
+            engine = WeightTransferTrainerFactory.trainer_init(
+                "dummy",
+                WeightTransferConfig(backend="dummy"),
+                MagicMock(),
+                client=RecordingClient(),
+                source=ModuleSource(_module_with(("w", torch.zeros(2)))),
+            )
+            assert isinstance(engine, _DummyTrainerEngine)
+            with pytest.raises(ValueError, match="already registered"):
+                WeightTransferTrainerFactory.register_engine(
+                    "dummy", _DummyTrainerEngine
+                )
+        finally:
+            WeightTransferTrainerFactory._registry = saved
+
+    def test_unknown_backend_raises(self):
+        with pytest.raises(ValueError, match="Invalid weight transfer backend"):
+            WeightTransferTrainerFactory.trainer_init(
+                "nope",
+                WeightTransferConfig(backend="nope"),
+                MagicMock(),
+                client=RecordingClient(),
+                source=ModuleSource(_module_with(("w", torch.zeros(2)))),
+            )
+
+
+class TestTrainerEngineBase:
+    """Base-class construction (no GPU)."""
+
+    def test_source_stored_and_sender_by_default(self):
+        engine = _DummyTrainerEngine(
+            WeightTransferConfig(backend="nccl"),
+            client=RecordingClient(),
+            source=ModuleSource(_module_with(("w", torch.zeros(2)))),
+        )
+        assert engine.is_sender is True
+        assert [name for name, _ in engine.source] == ["w"]
+
+    def test_shutdown_default_is_noop(self):
+        engine = _DummyTrainerEngine(
+            WeightTransferConfig(backend="nccl"),
+            client=RecordingClient(),
+            source=ModuleSource(_module_with(("w", torch.zeros(2)))),
+            is_sender=False,
+        )
+        assert engine.is_sender is False
+        engine.shutdown()  # must not raise
