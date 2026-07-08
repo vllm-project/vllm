@@ -279,7 +279,9 @@ class DeepseekV2MoE(nn.Module):
         config: DeepseekV2Config | DeepseekV3Config,
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
         prefix: str = "",
+        apply_routed_scale_to_output: bool = False,
     ):
         super().__init__()
         self.tp_size = get_tensor_model_parallel_world_size()
@@ -372,13 +374,13 @@ class DeepseekV2MoE(nn.Module):
             topk_group=getattr(config, "topk_group", 1),
             prefix=f"{prefix}.experts",
             scoring_func=getattr(config, "scoring_func", "softmax"),
-            # aiter applies routed_scaling_factor internally
             routed_scaling_factor=self.routed_scaling_factor,
-            apply_routed_scale_to_output=not self.is_rocm_aiter_moe_enabled,
+            apply_routed_scale_to_output=apply_routed_scale_to_output,
             e_score_correction_bias=self.gate.e_score_correction_bias,
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            reduce_results=reduce_results,
             n_shared_experts=config.n_shared_experts
             if self.is_fusion_moe_shared_experts_enabled
             else None,
@@ -1246,6 +1248,8 @@ class DeepseekV2DecoderLayer(nn.Module):
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                # aiter applies routed_scaling_factor internally
+                apply_routed_scale_to_output=not rocm_aiter_ops.is_fused_moe_enabled(),
             )
         else:
             self.mlp = DeepseekV2MLP(
