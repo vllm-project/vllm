@@ -299,25 +299,28 @@ impl MultimodalModelInfo {
             return Ok(None);
         };
 
-        // The spec's modality limits double as its capability declaration:
-        // a modality key is present iff this model (with this config) can
-        // consume that modality.
-        let limits = raw_spec
-            .modality_limits(&context.metadata())
-            .map_err(|error| multimodal!("{error}"))?;
+        // Warn and disable the modality if the placeholder resolution fails.
+        let resolve_placeholder =
+            |modality: Modality| match ResolvedPlaceholder::resolve(raw_spec, &context, modality) {
+                Ok(placeholder) => Some(placeholder),
+                Err(error) => {
+                    warn!(
+                        model_id = context.model_id,
+                        %modality,
+                        error = %error.as_report(),
+                        "placeholder tokens did not resolve; disabling this modality for this model"
+                    );
+                    None
+                }
+            };
 
-        let image = if limits.contains_key(&Modality::Image) {
-            Some(ModalitySupport {
-                placeholder: ResolvedPlaceholder::resolve(raw_spec, &context, Modality::Image)?,
-                processor,
-                config: preprocessor_config.clone(),
-            })
-        } else {
-            None
-        };
+        let image = resolve_placeholder(Modality::Image).map(|placeholder| ModalitySupport {
+            placeholder,
+            processor,
+            config: preprocessor_config.clone(),
+        });
 
-        let video = if limits.contains_key(&Modality::Video) {
-            let placeholder = ResolvedPlaceholder::resolve(raw_spec, &context, Modality::Video)?;
+        let video = resolve_placeholder(Modality::Video).and_then(|placeholder| {
             // Placeholder expansion attributes markers to modalities by token
             // ID, so a marker shared with the image modality is ambiguous.
             let image_marker = image.as_ref().map(|image| image.placeholder.marker_token_id);
@@ -336,9 +339,7 @@ impl MultimodalModelInfo {
                         .unwrap_or_else(|| preprocessor_config.clone()),
                 })
             }
-        } else {
-            None
-        };
+        });
 
         if image.is_none() && video.is_none() {
             warn!(
@@ -490,16 +491,6 @@ fn extract_media_parts(request: &ChatRequest) -> Result<Vec<MediaContentPart>> {
     Ok(all_parts)
 }
 
-/// Return the modality a media content part belongs to.
-fn part_modality(part: &MediaContentPart) -> Modality {
-    match part {
-        MediaContentPart::Text { .. } => unreachable!("text parts are not media"),
-        MediaContentPart::ImageUrl { .. } | MediaContentPart::ImageData { .. } => Modality::Image,
-        MediaContentPart::ImageEmbeds { .. } => Modality::ImageEmbeds,
-        MediaContentPart::VideoUrl { .. } | MediaContentPart::VideoData { .. } => Modality::Video,
-    }
-}
-
 impl MultimodalModelInfo {
     /// Run media fetch, per-modality preprocessing, prompt expansion, and
     /// feature build.
@@ -518,18 +509,8 @@ impl MultimodalModelInfo {
         }
         let media_parts_len = media_parts.len();
 
-        // Reject unsupported modalities before any fetch work happens.
-        // TODO: also enforce per-modality item-count limits, aligned with the
+        // TODO: enforce per-modality item-count limits, aligned with the
         // engine's `--limit-mm-per-prompt` semantics.
-        for part in &media_parts {
-            let modality = part_modality(part);
-            if self.modality_support(modality).is_none() {
-                return Err(Error::UnsupportedModality {
-                    modality: modality.to_string(),
-                });
-            }
-        }
-
         let fetched = self.fetch_media(media_parts).await?;
 
         let mut prepared = Vec::new();
@@ -635,7 +616,9 @@ impl MultimodalModelInfo {
         uuids: Vec<Option<String>>,
         model_dtype: ModelDtype,
     ) -> Result<PreparedMedia> {
-        let support = self.image.as_ref().expect("image support is checked before fetch");
+        let support = self.image.as_ref().ok_or_else(|| Error::UnsupportedModality {
+            modality: Modality::Image.to_string(),
+        })?;
         let preprocessed = self.preprocess_images(support, &frames).await?;
         let replacements =
             self.spec
@@ -692,7 +675,9 @@ impl MultimodalModelInfo {
         uuids: Vec<Option<String>>,
         model_dtype: ModelDtype,
     ) -> Result<PreparedMedia> {
-        let support = self.video.as_ref().expect("video support is checked before fetch");
+        let support = self.video.as_ref().ok_or_else(|| Error::UnsupportedModality {
+            modality: Modality::Video.to_string(),
+        })?;
         let mut replacements = Vec::with_capacity(clips.len());
         let mut items = Vec::with_capacity(clips.len());
 
@@ -1308,6 +1293,22 @@ mod tests {
             info.image.as_ref().unwrap().placeholder.marker_token_id,
             info.video.as_ref().unwrap().placeholder.marker_token_id,
         );
+    }
+
+    #[test]
+    fn qwen3_vl_without_video_token_id_disables_video_support_only() {
+        let config = serde_json::json!({
+            "model_type": "qwen3_vl",
+            "image_token_id": QWEN3_IMAGE_PAD_ID,
+            "vision_config": {"patch_size": 16}
+        });
+        let info = test_info("qwen3_vl", config, qwen3_vl_tokenizer());
+
+        assert_eq!(
+            info.placeholder_token(Modality::Image),
+            Some("<|image_pad|>")
+        );
+        assert_eq!(info.placeholder_token(Modality::Video), None);
     }
 
     #[test]
