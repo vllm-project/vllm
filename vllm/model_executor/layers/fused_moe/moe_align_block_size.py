@@ -155,6 +155,12 @@ def moe_align_block_size(
     Aligns the token distribution across experts to be compatible with block
     size for matrix multiplication.
 
+    This is the legacy compatibility entry point. It preserves the existing
+    expert-level grouping and padding behavior, but does not guarantee stable
+    within-expert token order. Callers that require deterministic within-expert
+    order should explicitly select `moe_align_block_size_stable_small` for at
+    most 256 routed entries or `moe_align_block_size_radix` for larger inputs.
+
     Note: In the case of expert_parallel, moe_align_block_size initially
     considers all experts as valid and aligns all tokens appropriately.
     Before the function returns it marks the experts_ids that are not in

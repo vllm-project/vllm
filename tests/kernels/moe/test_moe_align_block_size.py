@@ -11,6 +11,7 @@ import torch
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
     MoEAlignRadixScratch,
+    RADIX_SORT_MIN_ROUTED_ENTRIES,
     batched_moe_align_block_size,
     moe_align_block_size,
     moe_align_block_size_radix,
@@ -158,6 +159,35 @@ def _assert_stable_local_expert_order(
         len(expected),
     )
     assert actual == expected
+
+
+def _deterministic_moe_align_block_size_for_test(
+    topk_ids: torch.Tensor,
+    block_size: int,
+    num_experts: int,
+    expert_map: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if topk_ids.numel() >= RADIX_SORT_MIN_ROUTED_ENTRIES:
+        scratch = MoEAlignRadixScratch(
+            max_num_tokens=topk_ids.size(0),
+            topk=topk_ids.size(1),
+            num_experts=num_experts,
+            device=torch.device("cuda"),
+        )
+        return moe_align_block_size_radix(
+            topk_ids=topk_ids,
+            block_size=block_size,
+            num_experts=num_experts,
+            scratch=scratch,
+            expert_map=expert_map,
+        )
+
+    return moe_align_block_size_stable_small(
+        topk_ids=topk_ids,
+        block_size=block_size,
+        num_experts=num_experts,
+        expert_map=expert_map,
+    )
 
 
 def torch_moe_align_block_size(
@@ -423,12 +453,76 @@ def test_moe_align_block_size_stable_small_preserves_token_order(
     torch.testing.assert_close(actual_sorted_ids, golden_sorted_ids, atol=0, rtol=0)
 
 
+@pytest.mark.parametrize("num_routed_entries", [256, 257])
+@pytest.mark.parametrize("expert_map_enabled", [False, True])
+def test_deterministic_moe_align_block_size_threshold_preserves_token_order(
+    num_routed_entries: int, expert_map_enabled: bool
+):
+    topk, num_experts, block_size = 1, 16, 8
+    topk_ids = (
+        torch.arange(num_routed_entries, device="cuda", dtype=torch.int32)
+        .remainder(num_experts)
+        .view(-1, topk)
+    )
+    # Rotate the pattern so stable within-expert order is observable and not
+    # accidentally equivalent to expert-id order.
+    topk_ids = torch.roll(topk_ids, shifts=7, dims=0).contiguous()
+
+    expert_map = None
+    if expert_map_enabled:
+        expert_map = torch.full((num_experts,), -1, device="cuda", dtype=torch.int32)
+        for local_id, expert_id in enumerate(range(0, num_experts, 2)):
+            expert_map[expert_id] = local_id
+
+    actual_sorted_ids, actual_expert_ids, actual_num_tokens = (
+        _deterministic_moe_align_block_size_for_test(
+            topk_ids=topk_ids,
+            block_size=block_size,
+            num_experts=num_experts,
+            expert_map=expert_map,
+        )
+    )
+    golden_sorted_ids, golden_expert_ids, golden_num_tokens = (
+        torch_moe_align_block_size(
+            topk_ids=topk_ids,
+            block_size=block_size,
+            num_experts=num_experts,
+            expert_map=expert_map,
+        )
+    )
+
+    torch.testing.assert_close(actual_num_tokens, golden_num_tokens, atol=0, rtol=0)
+    torch.testing.assert_close(actual_expert_ids, golden_expert_ids, atol=0, rtol=0)
+    torch.testing.assert_close(actual_sorted_ids, golden_sorted_ids, atol=0, rtol=0)
+    _assert_stable_local_expert_order(
+        topk_ids,
+        actual_sorted_ids,
+        actual_expert_ids,
+        actual_num_tokens,
+        block_size,
+        num_experts,
+        expert_map,
+    )
+
+
 @pytest.mark.parametrize("topk_dtype", [torch.int16, torch.int32, torch.int64])
 @pytest.mark.parametrize("expert_map_enabled", [False, True])
+@pytest.mark.parametrize(
+    ("m", "topk", "num_experts", "block_size"),
+    [
+        (65, 4, 8, 16),
+        (257, 4, 64, 32),
+        (513, 8, 160, 64),
+    ],
+)
 def test_moe_align_block_size_radix_preserves_token_order(
-    topk_dtype: torch.dtype, expert_map_enabled: bool
+    topk_dtype: torch.dtype,
+    expert_map_enabled: bool,
+    m: int,
+    topk: int,
+    num_experts: int,
+    block_size: int,
 ):
-    m, topk, num_experts, block_size = 257, 4, 64, 32
     topk_ids = torch.randint(0, num_experts, (m, topk), device="cuda", dtype=topk_dtype)
     expert_map = None
     if expert_map_enabled:
