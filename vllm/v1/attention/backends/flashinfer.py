@@ -1412,14 +1412,11 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
         if needs_seq_lens_cpu:
             with gpu_sync_allowed():
                 seq_lens_cpu = common_attn_metadata.seq_lens_cpu
-            seq_lens_np = seq_lens_cpu.numpy()
-            num_blocks_np = (seq_lens_np + (page_size - 1)) // page_size
         else:
             seq_lens_cpu = None
-            seq_lens_np = None
-            num_blocks_np = None
 
-        # Adjust seq_lens_cpu for DCP
+        # Adjust seq_lens_cpu for DCP: num_blocks_np and last_page_len below
+        # must be derived from the rank-local lengths.
         if self.use_dcp:
             assert seq_lens_cpu is not None
             if num_prefills > 0:
@@ -1429,6 +1426,8 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 query_lens_prefill_cpu = (
                     qo_indptr_prefill_cpu[1:] - qo_indptr_prefill_cpu[:-1]
                 )
+                # Clone to avoid mutating the runner's shared buffer.
+                seq_lens_cpu = seq_lens_cpu.clone()
                 seq_lens_cpu[num_decodes:] = (
                     seq_lens_cpu[num_decodes:] - query_lens_prefill_cpu
                 )
@@ -1439,6 +1438,13 @@ class FlashInferMetadataBuilder(AttentionMetadataBuilder[FlashInferMetadata]):
                 self.dcp_rank,
                 self.dcp_kv_cache_interleave_size,
             )
+
+        seq_lens_np = seq_lens_cpu.numpy() if seq_lens_cpu is not None else None
+        num_blocks_np = (
+            (seq_lens_np + (page_size - 1)) // page_size
+            if seq_lens_np is not None
+            else None
+        )
 
         # Adjust num_block_np for cascade attention
         if use_cascade:
