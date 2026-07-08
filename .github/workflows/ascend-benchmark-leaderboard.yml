@@ -438,24 +438,29 @@ jobs:
           rm -f "$known_hosts_tmp"
           chmod 600 "$known_hosts_file"
 
-          cat > "$HOME/.ssh/config" <<EOF
-          Host github.com
-            HostName ssh.github.com
-            Port 443
-            User git
-            IdentityFile $key_file
-            IdentitiesOnly yes
-            StrictHostKeyChecking yes
-            HostKeyAlias [ssh.github.com]:443
-            UserKnownHostsFile $known_hosts_file
+          ssh_wrapper="$HOME/.ssh/github-ssh-wrapper.sh"
+          cat > "$ssh_wrapper" <<EOF
+          #!/usr/bin/env bash
+          exec ssh -F /dev/null \\
+            -o BatchMode=yes \\
+            -o HostName=ssh.github.com \\
+            -o Port=443 \\
+            -o User=git \\
+            -o IdentityFile="$key_file" \\
+            -o IdentitiesOnly=yes \\
+            -o StrictHostKeyChecking=yes \\
+            -o HostKeyAlias='[ssh.github.com]:443' \\
+            -o UserKnownHostsFile="$known_hosts_file" \\
+            "\$@"
           EOF
-          chmod 600 "$HOME/.ssh/config"
+          chmod 700 "$ssh_wrapper"
+          echo "GIT_SSH_COMMAND=$ssh_wrapper" >> "$GITHUB_ENV"
 
-          ssh_output="$(ssh -o BatchMode=yes -T git@github.com 2>&1)" && ssh_status=$? || ssh_status=$?
+          ssh_output="$("$ssh_wrapper" -T git@github.com 2>&1)" && ssh_status=$? || ssh_status=$?
           echo "$ssh_output"
           if [[ "$ssh_output" == *"Host key verification failed"* ]]; then
             echo "GitHub SSH host key probe failed. Effective non-secret SSH config:" >&2
-            ssh -G git@github.com 2>/dev/null \
+            "$ssh_wrapper" -G git@github.com 2>/dev/null \
               | grep -E '^(hostname|port|user|hostkeyalias|stricthostkeychecking|userknownhostsfile) ' >&2 || true
             echo "Known-hosts lookup for [ssh.github.com]:443:" >&2
             ssh-keygen -F '[ssh.github.com]:443' -f "$known_hosts_file" >&2 || true
