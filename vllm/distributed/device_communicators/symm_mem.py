@@ -8,6 +8,7 @@ from torch.distributed import ProcessGroup
 import vllm.envs as envs
 from vllm.distributed.device_communicators.all_reduce_utils import (
     SYMM_MEM_ALL_REDUCE_MAX_SIZES,
+    SYMM_MEM_ALL_REDUCE_MIN_SIZES,
 )
 from vllm.logger import init_logger
 from vllm.platforms import current_platform
@@ -27,6 +28,8 @@ class SymmMemCommunicator:
         "9.0": [4, 6, 8],
         "10.0": [6, 8],
         "10.3": [6, 8],
+        # 12.0: no multicast hardware; always two-shot P2P.
+        "12.0": [],
     }
 
     def __init__(
@@ -87,6 +90,7 @@ class SymmMemCommunicator:
             self.max_size = SYMM_MEM_ALL_REDUCE_MAX_SIZES[self.device_capability][
                 self.world_size
             ]
+        self.min_size = SYMM_MEM_ALL_REDUCE_MIN_SIZES.get(self.device_capability, 0)
         try:
             self.buffer = torch_symm_mem.empty(
                 self.max_size // self.dtype.itemsize,
@@ -102,7 +106,14 @@ class SymmMemCommunicator:
                 str(e),
             )
             return
-        if handle.multicast_ptr == 0:
+        # Multicast is only needed by the multimem kernels; the two-shot
+        # all-reduce runs on plain P2P mappings (e.g. PCIe-only devices).
+        may_use_multimem = force_multimem or (
+            force_multimem is None
+            and self.world_size
+            in self._WORLD_SIZES_MULTIMEM.get(self.device_capability, [])
+        )
+        if may_use_multimem and handle.multicast_ptr == 0:
             logger.warning(
                 "SymmMemCommunicator: symmetric memory "
                 "multicast operations are not supported."
@@ -121,7 +132,7 @@ class SymmMemCommunicator:
         inp_size = inp.numel() * inp.element_size()
         if inp_size % 4 != 0:
             return False
-        return inp_size <= self.max_size
+        return self.min_size <= inp_size <= self.max_size
 
     def all_reduce(
         self, inp: torch.Tensor, *, out: torch.Tensor | None = None
@@ -139,8 +150,8 @@ class SymmMemCommunicator:
             use_multimem = self.force_multimem
         else:
             # Normal logic: use multimem for supported world sizes
-            use_multimem = (
-                self.world_size in self._WORLD_SIZES_MULTIMEM[self.device_capability]
+            use_multimem = self.world_size in self._WORLD_SIZES_MULTIMEM.get(
+                self.device_capability, []
             )
 
         if use_multimem:

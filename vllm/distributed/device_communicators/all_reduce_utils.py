@@ -68,6 +68,22 @@ SYMM_MEM_ALL_REDUCE_MAX_SIZES = {
         6: 32 * MiB,  # 32 MB
         8: 64 * MiB,  # 64 MB
     },
+    # PCIe-only parts (no multicast): two-shot P2P all-reduce only.
+    # Measured on 4x RTX PRO 6000 (pairs behind PCIe switches): two-shot
+    # beats the NCCL ring 1.2-2x from its ~160 KB crossover through 64 MB;
+    # below that the ~28 us barrier floor loses to NCCL LL (~16-25 us).
+    "12.0": {
+        2: 64 * MiB,  # 64 MB
+        4: 64 * MiB,  # 64 MB
+        8: 64 * MiB,  # 64 MB
+    },
+}
+
+# Below these sizes the symm-mem barrier floor loses to NCCL LL; hand the
+# input back to the next backend in the dispatch order. Capabilities not
+# listed have no floor (previous behavior).
+SYMM_MEM_ALL_REDUCE_MIN_SIZES = {
+    "12.0": 128 * 1024,  # 128 KB
 }
 
 # NCCL symmetric memory allreduce configuration based on H100 and GB200 benchmarks.
