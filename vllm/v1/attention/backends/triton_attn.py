@@ -33,6 +33,7 @@ from vllm.v1.attention.backend import (
 from vllm.v1.attention.backends.utils import (
     compute_mm_prefix_range_tensor,
     get_kv_cache_layout,
+    get_num_attention_heads_from_layers,
 )
 from vllm.v1.attention.ops.triton_prefill_attention import context_attention_fwd
 from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
@@ -93,6 +94,8 @@ class TritonAttentionMetadata:
     prefix_scheduler_metadata: torch.Tensor | None = None
     mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
     mm_prefix_range_tensor: torch.Tensor | None = None
+    rswa_prefix_lens: torch.Tensor | None = None
+    rswa_window: int | None = None
 
 
 class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMetadata]):
@@ -110,9 +113,10 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
         self.block_size = kv_cache_spec.block_size
 
         model_config = vllm_config.model_config
-        self.num_heads_q = model_config.get_num_attention_heads(
-            vllm_config.parallel_config
-        )
+        # Compatible with models with non-uniform per-layer head counts.
+        self.num_heads_q = get_num_attention_heads_from_layers(
+            vllm_config, layer_names
+        ) or model_config.get_num_attention_heads(vllm_config.parallel_config)
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
 
@@ -169,6 +173,14 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             dtype=torch.float32,
             device=device,
         )
+        self.rswa_window = model_config.rswa_window
+        self.persistent_rswa_prefix_lens: torch.Tensor | None = None
+        if self.rswa_window is not None:
+            self.persistent_rswa_prefix_lens = torch.empty(
+                vllm_config.scheduler_config.max_num_seqs,
+                dtype=torch.int32,
+                device=device,
+            )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -241,6 +253,17 @@ class TritonAttentionMetadataBuilder(AttentionMetadataBuilder[TritonAttentionMet
             attn_metadata.mm_prefix_range_tensor = compute_mm_prefix_range_tensor(
                 mm_ranges, num_reqs, seq_lens.device
             )
+
+        rswa_prefix_lens = common_attn_metadata.rswa_prefix_lens
+        if self.rswa_window is not None and rswa_prefix_lens is not None:
+            assert self.persistent_rswa_prefix_lens is not None
+            rswa_prefix_lens = rswa_prefix_lens.to(
+                device=self.device, dtype=torch.int32, non_blocking=True
+            )
+            persistent_prefix_lens = self.persistent_rswa_prefix_lens[:num_reqs]
+            persistent_prefix_lens.copy_(rswa_prefix_lens[:num_reqs])
+            attn_metadata.rswa_prefix_lens = persistent_prefix_lens
+            attn_metadata.rswa_window = self.rswa_window
 
         return attn_metadata
 
@@ -669,11 +692,16 @@ class TritonAttentionImpl(AttentionImpl):
             sinks=self.sinks,
             output_scale=output_scale,
             mm_prefix_range=mm_prefix_range_tensor,
+            rswa_prefix_lens=attn_metadata.rswa_prefix_lens,
+            rswa_window=attn_metadata.rswa_window,
             kv_quant_mode=self._kv_quant_mode,
             k_scale_cache=k_scale_cache,
             v_scale_cache=v_scale_cache,
             chunk_lookback=self.chunk_lookback,
             use_td=self.use_td,
+            mm_prefix_clamp_sliding_window=getattr(
+                layer, "mm_prefix_clamp_sliding_window", False
+            ),
         )
 
         return output
