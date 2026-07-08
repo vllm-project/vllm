@@ -52,6 +52,7 @@ class ToolCallSlot:
         "_args_parts",
         "_args_joined",
         "name_sent",
+        "name_from_args",
         "string_keys",
         "streamed_json",
     )
@@ -62,6 +63,7 @@ class ToolCallSlot:
         self._args_parts: list[str] = []
         self._args_joined: str | None = ""
         self.name_sent: bool = False
+        self.name_from_args: bool = False
         self.string_keys: set[str] | None = None
         self.streamed_json: str = ""
 
@@ -796,9 +798,9 @@ class ParserEngine(Parser):
         idx: int,
         deltas: list[DeltaToolCall],
         name: str | None,
-    ) -> None:
+    ) -> bool:
         if not name or not self._is_valid_tool_name(name):
-            return
+            return False
         slot = self._tool_slots[idx]
         slot.name = name
         slot.name_sent = True
@@ -814,6 +816,7 @@ class ParserEngine(Parser):
                 function=DeltaFunctionCall(name=name),
             )
         )
+        return True
 
     def _handle_arg_chunk(
         self,
@@ -831,8 +834,11 @@ class ParserEngine(Parser):
             elif event.value:
                 # Name not yet known — try to extract from accumulated args
                 name = self._try_extract_name(idx)
+                if name:
+                    slot.name_from_args = True
                 self._emit_name_delta(idx, deltas, name)
-        elif event.value:
+
+        if slot.name_sent and event.value:
             # Name already sent — emit arg delta
             arg_delta = self._compute_arg_delta(idx, event.value)
             if arg_delta:
@@ -858,6 +864,8 @@ class ParserEngine(Parser):
         if not slot.name_sent:
             name = slot.name or self._try_extract_name(idx)
             if name and self._is_valid_tool_name(name):
+                if not slot.name:
+                    slot.name_from_args = True
                 slot.name = name
                 slot.name_sent = True
                 slot.string_keys = self._streamable_string_keys(
@@ -876,6 +884,17 @@ class ParserEngine(Parser):
                     )
                 )
                 remaining = None
+
+        if (
+            remaining is None
+            and slot.name_sent
+            and slot.name_from_args
+            and not slot.streamed_json
+        ):
+            extracted_name, args_json = self._extract_name_and_args(slot.args)
+            if extracted_name == slot.name and args_json:
+                remaining = args_json
+                slot.streamed_json = args_json
 
         if remaining and slot.name_sent:
             deltas.append(
@@ -922,7 +941,7 @@ class ParserEngine(Parser):
     def _compute_arg_delta(self, idx: int, raw_delta: str) -> str | None:
         converter = self._arg_converter
         if converter is None:
-            return raw_delta
+            return self._compute_raw_arg_delta(idx, raw_delta)
 
         if not self._stream_arg_deltas:
             return None
@@ -962,6 +981,28 @@ class ParserEngine(Parser):
             return diff
         return None
 
+    def _compute_raw_arg_delta(self, idx: int, raw_delta: str) -> str | None:
+        slot = self._tool_slots[idx]
+        if not slot.name_from_args:
+            return raw_delta
+
+        current_json = self._json_envelope_arg_value_prefix(slot.args)
+        if not current_json or current_json == slot.streamed_json:
+            return None
+
+        prev = slot.streamed_json
+        if prev:
+            if not current_json.startswith(prev):
+                return None
+            diff = current_json[len(prev) :]
+        else:
+            diff = current_json
+
+        if diff:
+            slot.streamed_json = current_json
+            return diff
+        return None
+
     def _flush_arg_converter(self, idx: int) -> str | None:
         converter = self._arg_converter
         if converter is None:
@@ -987,6 +1028,7 @@ class ParserEngine(Parser):
         return None
 
     _NAME_RE = re.compile(r'"name"\s*:\s*"([^"]*)"')
+    _ARG_VALUE_KEYS = frozenset(("arguments", "parameters"))
 
     def _try_extract_name(self, idx: int) -> str | None:
         m = self._NAME_RE.search(self._tool_slots[idx].args)
@@ -995,6 +1037,156 @@ class ParserEngine(Parser):
             if name:
                 return name
         return None
+
+    @classmethod
+    def _json_envelope_arg_value_prefix(cls, raw_args: str) -> str | None:
+        value_start = cls._find_json_envelope_arg_value_start(raw_args)
+        if value_start is None:
+            return None
+        return cls._json_value_prefix(raw_args, value_start)
+
+    @classmethod
+    def _find_json_envelope_arg_value_start(cls, raw_args: str) -> int | None:
+        i = 0
+        end = len(raw_args)
+        while i < end and raw_args[i].isspace():
+            i += 1
+        if i >= end or raw_args[i] != "{":
+            return None
+        i += 1
+
+        while i < end:
+            while i < end and raw_args[i].isspace():
+                i += 1
+            if i < end and raw_args[i] == ",":
+                i += 1
+                continue
+            if i >= end or raw_args[i] != '"':
+                return None
+
+            key_end = cls._json_string_end(raw_args, i)
+            if key_end is None:
+                return None
+            try:
+                key = json.loads(raw_args[i:key_end])
+            except json.JSONDecodeError:
+                return None
+
+            i = key_end
+            while i < end and raw_args[i].isspace():
+                i += 1
+            if i >= end or raw_args[i] != ":":
+                return None
+            i += 1
+            while i < end and raw_args[i].isspace():
+                i += 1
+
+            if key in cls._ARG_VALUE_KEYS:
+                return i
+
+            value_end = cls._json_value_end(raw_args, i)
+            if value_end is None:
+                return None
+            i = value_end
+        return None
+
+    @staticmethod
+    def _json_string_end(text: str, start: int) -> int | None:
+        if start >= len(text) or text[start] != '"':
+            return None
+        escaped = False
+        for i in range(start + 1, len(text)):
+            ch = text[i]
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                return i + 1
+        return None
+
+    @classmethod
+    def _json_container_end(cls, text: str, start: int) -> int | None:
+        pairs = {"{": "}", "[": "]"}
+        if start >= len(text) or text[start] not in pairs:
+            return None
+
+        stack = [text[start]]
+        in_string = False
+        escaped = False
+        for i in range(start + 1, len(text)):
+            ch = text[i]
+            if in_string:
+                if escaped:
+                    escaped = False
+                elif ch == "\\":
+                    escaped = True
+                elif ch == '"':
+                    in_string = False
+                continue
+
+            if ch == '"':
+                in_string = True
+            elif ch in pairs:
+                stack.append(ch)
+            elif ch in pairs.values():
+                if not stack or pairs[stack[-1]] != ch:
+                    return None
+                stack.pop()
+                if not stack:
+                    return i + 1
+        return None
+
+    @classmethod
+    def _json_value_end(cls, text: str, start: int) -> int | None:
+        end = len(text)
+        while start < end and text[start].isspace():
+            start += 1
+        if start >= end:
+            return None
+
+        ch = text[start]
+        if ch == '"':
+            return cls._json_string_end(text, start)
+        if ch in "{[":
+            return cls._json_container_end(text, start)
+
+        i = start
+        while i < end and text[i] not in ",}]":
+            i += 1
+        if i == end:
+            return None
+        return i
+
+    @classmethod
+    def _json_value_prefix(cls, text: str, start: int) -> str | None:
+        end = len(text)
+        while start < end and text[start].isspace():
+            start += 1
+        if start >= end:
+            return None
+
+        ch = text[start]
+        if ch == '"':
+            value_end = cls._json_string_end(text, start)
+            if value_end is None:
+                return None
+            try:
+                value = json.loads(text[start:value_end])
+            except json.JSONDecodeError:
+                return None
+            return value if isinstance(value, str) else None
+
+        if ch in "{[":
+            value_end = cls._json_container_end(text, start)
+            if value_end is None:
+                return text[start:]
+            return text[start:value_end]
+
+        i = start
+        while i < end and text[i] not in ",}]":
+            i += 1
+        return text[start:i].rstrip()
 
     # ── Build ExtractedToolCallInformation ─────────────────────────────
 
