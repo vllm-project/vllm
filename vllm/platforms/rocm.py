@@ -238,7 +238,6 @@ _ON_RDNA = any(
     for arch in _GCN_ARCH
     if (arch.startswith("gfx11") or arch.startswith("gfx12")) and arch != "gfx1250"
 )
-# TODO GFX1250: Use CDNA for MI3OR4
 
 
 def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
@@ -313,7 +312,7 @@ def _capability_from_gcn_arch(gcn_arch: str) -> tuple[int, int] | None:
 
 
 def on_gfx1x() -> bool:
-    return _ON_GFX1X  # and not _ON_GFX1250 TODO GFX1250: should we skip this explicitly
+    return _ON_GFX1X and not _ON_CDNA
 
 
 def on_gfx11() -> bool:
@@ -329,9 +328,7 @@ def on_gfx1151() -> bool:
 
 
 def on_gfx12x() -> bool:
-    return (
-        _ON_GFX12X  # and not _ON_GFX1250 TODO GFX1250: should we skip this explicitly
-    )
+    return _ON_GFX12X and not _ON_CDNA
 
 
 def on_gfx1250() -> bool:
@@ -933,7 +930,7 @@ class RocmPlatform(Platform):
 
     @classmethod
     def supports_fp8(cls) -> bool:
-        return on_cdna() or on_gfx12x()  # TODO GFX1250: We know this is redundant ATM
+        return on_cdna() or on_gfx12x()
 
     @classmethod
     def is_fp8_fnuz(cls) -> bool:

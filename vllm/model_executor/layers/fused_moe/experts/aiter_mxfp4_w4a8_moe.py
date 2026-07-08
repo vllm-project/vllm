@@ -53,8 +53,6 @@ def aiter_triton_kernel_w4a8_moe_forward(
     except ImportError:
         from aiter.ops.triton.moe_routing import routing as _routing_mod
 
-    # TODO: (JPVILLAM) This causes a tl compile error on 1250.
-    # Need to figure out why this is a problem and sync with triton team
     if on_gfx1250():
         _routing_mod.is_tdm_avail = lambda: False
     aiter_routing = _routing_mod.routing
@@ -139,12 +137,8 @@ def triton_kernel_fused_mxfp4_w4a8_experts(
     from vllm.model_executor.layers.quantization.utils.mxfp4_utils import (
         should_use_cdna4_mx_scale_swizzle,
     )
-    from vllm.platforms.rocm import on_gfx1250
 
-    from vllm.platforms.rocm import on_gfx1250
     _swizzle_mx_scale = "CDNA4_SCALE" if should_use_cdna4_mx_scale_swizzle() else None
-    # TODO (JPVILLAM): merge conflict resolve later if _swizzle_mx_scale is enough
-    mx_scale_swizzle = None if on_gfx1250() else "CDNA4_SCALE"
 
     assert quant_config.w1_precision is not None, (
         "w1_precision in quant config can't be None"
