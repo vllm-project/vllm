@@ -758,7 +758,7 @@ class Worker(WorkerBase):
         if (
             current_platform.is_rocm()
             and not self.use_v2_model_runner
-            and not self.model_config.enforce_eager
+            and self.vllm_config.compilation_config.cudagraph_mode != CUDAGraphMode.NONE
             and get_pp_group().is_last_rank
         ):
             max_num_reqs = min(
