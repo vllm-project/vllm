@@ -135,9 +135,6 @@ class DFlashSpeculator(DraftModelSpeculator):
         ]
         assert self.draft_kv_cache_group_ids, "No draft attention groups found."
         self.draft_kv_cache_group_id = self.draft_kv_cache_group_ids[0]
-        self.draft_block_size = self.block_tables.block_sizes[
-            self.draft_kv_cache_group_id
-        ]
 
         # Per-group context slot buffers for the precompute (one row per group).
         self._context_slot_mappings = torch.zeros(
@@ -337,7 +334,7 @@ class DFlashSpeculator(DraftModelSpeculator):
                 last_sampled,
                 next_prefill_tokens,
                 self.block_tables.input_block_tables[gid],
-                self.block_tables.block_sizes[gid],
+                self.block_tables.kernel_block_sizes[gid],
                 self.parallel_drafting_token_id,
                 self.num_query_per_req,
                 self.num_speculative_steps,
