@@ -559,6 +559,7 @@ _MULTIMODAL_MODELS = {
         "Qwen3_5MoeForConditionalGeneration",
     ),
     "RForConditionalGeneration": ("rvl", "RForConditionalGeneration"),
+    "ShukaModel": ("shuka1", "ShukaModel"),
     "SkyworkR1VChatModel": ("skyworkr1v", "SkyworkR1VChatModel"),
     "SmolVLMForConditionalGeneration": ("smolvlm", "SmolVLMForConditionalGeneration"),
     "StepVLForConditionalGeneration": ("step_vl", "StepVLForConditionalGeneration"),
