@@ -67,9 +67,6 @@ class SparseMLACommonMetadataBuilder(AttentionMetadataBuilder[T]):
             dtype=self.model_config.dtype,
             device=device,
         )
-        # Dense-MHA prefill runs through the shared MLA prefill backend (FA4 /
-        # TRT-LLM ragged / FlashInfer), selected per layer. Each builder gets its
-        # own clone since the backend caches per-forward metadata.
         self._prefill_backend = vllm_config.compilation_config.static_forward_context[
             layer_names[0]
         ].prefill_backend.clone()
