@@ -235,7 +235,9 @@ fn parse_llama_arguments_event(
 
 /// Parse the outer closing brace for one Llama JSON tool call.
 fn tool_call_close_event(input: &mut JsonToolInput<'_>) -> ModalResult<LlamaJsonEvent> {
-    literal("}").value(LlamaJsonEvent::ToolCallClose).parse_next(input)
+    seq!(_: ws0, _: literal("}"))
+        .value(LlamaJsonEvent::ToolCallClose)
+        .parse_next(input)
 }
 
 /// Parse a semicolon separator after one Llama JSON tool call.
@@ -261,6 +263,28 @@ mod tests {
 
     fn build_tool_call(function_name: &str, parameters: &str) -> String {
         format!(r#"{{"name":"{function_name}","parameters":{parameters}}}"#)
+    }
+
+    #[test]
+    fn llama_tolerates_whitespace_before_outer_brace() {
+        // Whitespace between the parameters object's `}` and the outer `}` must
+        // still parse (json.loads / raw_decode parity).
+        let mut whole = Llama3JsonToolParser::new(&test_tools());
+        let whole_output = whole.parse_complete(r#"{"name":"f","parameters":{"x":1} }"#).unwrap();
+        assert_eq!(whole_output.calls().len(), 1);
+        assert_eq!(whole_output.calls()[0].name.as_deref(), Some("f"));
+        assert_eq!(whole_output.calls()[0].arguments, r#"{"x":1}"#);
+
+        // Same input, whitespace before the outer `}` split across a chunk boundary.
+        let mut chunked = Llama3JsonToolParser::new(&test_tools());
+        let mut output = ToolParserOutput::default();
+        for chunk in [r#"{"name":"f","parameters":{"x":1}"#, " ", "}"] {
+            output.append(chunked.parse_chunk(chunk).unwrap());
+        }
+        output.append(chunked.finish().unwrap());
+        let output = output.coalesce();
+        assert_eq!(output.calls().len(), 1);
+        assert_eq!(output.calls()[0].arguments, r#"{"x":1}"#);
     }
 
     #[test]
