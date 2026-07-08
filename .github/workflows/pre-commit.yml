@@ -28,7 +28,8 @@ jobs:
             pull_number: context.payload.pull_request.number,
           });
 
-          const hasReadyLabel = pr.labels.some(l => l.name === 'ready');
+          const readyLabels = ['ready', 'ready-run-all-tests'];
+          const hasReadyLabel = pr.labels.some(l => readyLabels.includes(l.name));
           const hasVerifiedLabel = pr.labels.some(l => l.name === 'verified');
 
           const { data: mergedPRs } = await github.rest.search.issuesAndPullRequests({
@@ -40,7 +41,7 @@ jobs:
           if (hasReadyLabel || hasVerifiedLabel || mergedCount >= 4) {
             core.info(`Check passed: verified label=${hasVerifiedLabel}, ready label=${hasReadyLabel}, 4+ merged PRs=${mergedCount >= 4}`);
           } else {
-            core.setFailed(`PR must have the 'verified' or 'ready' (which also triggers tests) label or the author must have at least 4 merged PRs (found ${mergedCount}).`);
+            core.setFailed(`PR must have the 'verified', 'ready', or 'ready-run-all-tests' label (the ready labels also trigger tests) or the author must have at least 4 merged PRs (found ${mergedCount}).`);
           }
 
   pre-commit:
