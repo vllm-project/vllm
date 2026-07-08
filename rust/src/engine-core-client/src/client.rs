@@ -372,6 +372,14 @@ impl EngineCoreClient {
         self.engines.len()
     }
 
+    /// Return the engine-side indices connected to this client.
+    pub fn engine_indices(&self) -> Vec<u32> {
+        self.engines
+            .iter()
+            .map(|engine| engine.engine_id.engine_index().expect("engine id must encode as u16"))
+            .collect()
+    }
+
     /// Return the engine identities of all engines connected to this client.
     pub fn engine_identities(&self) -> Vec<&[u8]> {
         self.engines.iter().map(|engine| &*engine.engine_id).collect()
@@ -504,6 +512,7 @@ impl EngineCoreClient {
 
         Ok(EngineCoreOutputStream::new(
             request_id,
+            engine_id.engine_index().unwrap_or(0),
             self.abort_tx.clone(),
             rx,
         ))

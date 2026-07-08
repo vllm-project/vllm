@@ -522,12 +522,17 @@ class ROCMAiterMLASparseMetadataBuilder(
         # treated as its own batch entry), so persistent metadata can always
         # be precomputed here. The kernel switches to the persistent
         # work-stealing path automatically when work_meta_data is non-None.
-        # The output is a deterministic function of (num_tokens, max_query_len,
-        # num_heads, min(seq_lens, topk_tokens)); fingerprint those CPU-side
-        # and skip the launch when nothing changed.
+        # The output is a deterministic function of the per-request query and
+        # context lengths (both clamped to topk_tokens, past which per-token KV
+        # length saturates) and num_heads; fingerprint those CPU-side and skip
+        # the launch when nothing changed.
         num_reqs = common_attn_metadata.num_reqs
         clamped_seq_lens = np.minimum(
             common_attn_metadata.seq_lens_cpu[:num_reqs].numpy(),
+            self.topk_tokens,
+        )
+        clamped_context_lens = np.minimum(
+            common_attn_metadata.seq_lens_cpu[:num_reqs].numpy() - seg_lengths,
             self.topk_tokens,
         )
         metadata_key = (
@@ -535,6 +540,8 @@ class ROCMAiterMLASparseMetadataBuilder(
             int(common_attn_metadata.max_query_len),
             self._num_attention_heads,
             clamped_seq_lens.tobytes(),
+            clamped_context_lens.tobytes(),
+            seg_lengths.tobytes(),
         )
         if metadata_key != self._prev_metadata_key:
             from aiter import get_mla_metadata_v1
