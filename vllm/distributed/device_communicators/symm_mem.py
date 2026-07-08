@@ -79,6 +79,30 @@ class SymmMemCommunicator:
                 self.world_size,
             )
             return
+        # The one/two-shot kernels synchronize the group through signal
+        # pads with system-scope CAS on peer-mapped memory (put_signal /
+        # wait_signal). P2P read/write access does not imply atomic
+        # support: without native P2P atomics the CAS is not atomic,
+        # barrier tokens are lost or duplicated under load, and the whole
+        # group wedges permanently (observed on PCIe-only topologies).
+        # device.index is a visible ordinal, not a logical local ID.
+        physical_device_id = current_platform.visible_device_id_to_physical_device_id(
+            self.device.index
+        )
+        tensor = torch.tensor([physical_device_id], dtype=torch.int, device="cpu")
+        gather_list = [
+            torch.tensor([0], dtype=torch.int, device="cpu")
+            for _ in range(self.world_size)
+        ]
+        dist.all_gather(gather_list, tensor, group=self.group)
+        physical_device_ids = [t.item() for t in gather_list]
+        if not current_platform.has_native_p2p_atomics(physical_device_ids):
+            logger.warning(
+                "SymmMemCommunicator: native P2P atomics are not supported "
+                "between devices %s, communicator is not available.",
+                physical_device_ids,
+            )
+            return
         # Use override max_size if provided, otherwise use default
         if max_size_override is not None:
             self.max_size = max_size_override
