@@ -279,6 +279,7 @@ class DeepseekV2MoE(nn.Module):
         config: DeepseekV2Config | DeepseekV3Config,
         parallel_config: ParallelConfig,
         quant_config: QuantizationConfig | None = None,
+        reduce_results: bool = True,
         prefix: str = "",
         apply_routed_scale_to_output: bool = False,
     ):
@@ -306,9 +307,7 @@ class DeepseekV2MoE(nn.Module):
         self.gate = GateLinear(
             config.hidden_size,
             config.n_routed_experts,
-            params_dtype=self.router_dtype,
             out_dtype=self.router_dtype,
-            force_fp32_compute=self.router_dtype == torch.float32,
             prefix=f"{prefix}.gate",
         )
         if getattr(config, "topk_method", None) == "noaux_tc":
@@ -379,6 +378,7 @@ class DeepseekV2MoE(nn.Module):
             enable_eplb=self.enable_eplb,
             num_redundant_experts=self.n_redundant_experts,
             is_sequence_parallel=self.is_sequence_parallel,
+            reduce_results=reduce_results,
             n_shared_experts=config.n_shared_experts
             if self.is_fusion_moe_shared_experts_enabled
             else None,
