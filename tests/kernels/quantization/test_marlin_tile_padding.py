@@ -759,7 +759,7 @@ def test_fp8_marlin_moe_padded_round_trip(shape, quant, gated):
         s = s.reshape(1) if quant == "tensor" else s.squeeze(1)
         return wq, s, ref
 
-    a = torch.randn((m, k), device=device, dtype=dtype) / 10
+    a = torch.randn((m, k), device=device, dtype=dtype)
     w1 = torch.randn((e, w13_up_dim, k), device=device, dtype=dtype) / k**0.5
     w2 = torch.randn((e, k, n), device=device, dtype=dtype) / n**0.5
     w13_q, w13_s, w1_ref = zip(*(q(w1[i]) for i in range(e)))
@@ -844,7 +844,7 @@ def test_mxfp8_marlin_moe_padded_round_trip(shape, gated):
     padded_n = marlin_moe_padded_intermediate(n, gs)
     assert padded_n != n
 
-    a = torch.randn((m, k), device=device, dtype=dtype) / 10
+    a = torch.randn((m, k), device=device, dtype=dtype)
     w13_weight = torch.randn((e, w13_up_dim, k), device=device, dtype=dtype) / k**0.5
     w2_weight = torch.randn((e, k, n), device=device, dtype=dtype) / n**0.5
     w13_weight = w13_weight.clamp(-448, 448).to(fp8)

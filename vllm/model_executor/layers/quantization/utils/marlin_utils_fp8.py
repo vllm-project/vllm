@@ -218,7 +218,7 @@ def prepare_fp8_layer_for_marlin(
 
 
 def _moe_pad_shard_rows(
-    x: torch.Tensor, n: int, padded_n: int, num_shards: int = 2
+    x: torch.Tensor, n: int, padded_n: int, num_shards: int
 ) -> torch.Tensor:
     """Zero-pad each w13 shard of a ``(E, num_shards * n, ...)`` tensor to
     padded_n rows. FP8 zero decodes to 0.0, so the padded rows contribute
