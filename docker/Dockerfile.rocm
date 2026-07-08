@@ -252,6 +252,8 @@ COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/docker-bake.hcl /docker/doc
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/docker/docker-bake-rocm.hcl /docker/docker-bake-rocm.hcl
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/pyproject.toml /pyproject.toml
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/rust /rust
+COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/rust-toolchain.toml /rust-toolchain.toml
 COPY --from=build_vllm ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # RIXL/UCX build stages
@@ -543,6 +545,8 @@ COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/docker-bake.h
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/docker/docker-bake-rocm.hcl /docker/docker-bake-rocm.hcl
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/.buildkite /.buildkite
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/pyproject.toml /pyproject.toml
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/rust /rust
+COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/rust-toolchain.toml /rust-toolchain.toml
 COPY --from=build_vllm_wheel_release ${COMMON_WORKDIR}/vllm/vllm/v1 /vllm_v1
 
 # -----------------------
@@ -576,6 +580,7 @@ RUN apt-get update -q -y && apt-get install -q -y --no-install-recommends \
     libibverbs1 \
     ibverbs-providers \
     ibverbs-utils \
+    unzip \
     pkg-config ffmpeg libavcodec-dev libavformat-dev libavutil-dev \
     libswscale-dev libavdevice-dev libavfilter-dev libswresample-dev \
     && rm -rf /var/lib/apt/lists/*
