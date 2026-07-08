@@ -95,8 +95,6 @@ def _job_metadata(
 
 def _make_manager() -> P2PSecondaryTierManager:
     """Create a manager with stubbed __init__."""
-    from vllm.v1.kv_offload.tiering.p2p.tiering_callbacks import _AllMissCallbacks
-
     mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
     mgr._local_id = "127.0.0.1:7777"
     mgr._finished_jobs = []
@@ -104,7 +102,7 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._sessions = {}
     mgr._kv_to_session = {}
     mgr._unbound_stores = {}
-    mgr._tiering_callbacks = _AllMissCallbacks()
+    mgr._orphan_finish_ctxs = []
     return mgr
 
 
@@ -178,72 +176,73 @@ class TestLookup:
 
 
 # ---------------------------------------------------------------------------
-# Tests for TieringCallbacks plumbing
+# Tests for serve_external_requests
 # ---------------------------------------------------------------------------
 
 
-class TestTieringCallbacksPlumbing:
-    def test_default_uses_all_miss_callbacks(self):
-        """When no callbacks are passed, the manager defaults to
-        ``_AllMissCallbacks`` and that instance is forwarded to every
-        session's server role."""
-        from vllm.v1.kv_offload.tiering.p2p.tiering_callbacks import (
-            _AllMissCallbacks,
-        )
+class _RecordingParent:
+    """Minimal ParentManager stub recording on_request_finished calls."""
 
+    def __init__(self) -> None:
+        self.finished: list[str] = []
+
+    def on_new_request(self, ctx):
+        from vllm.v1.kv_offload.base import RequestOffloadingContext
+
+        return RequestOffloadingContext()
+
+    def lookup(self, key, ctx):
+        return LookupResult.MISS
+
+    def create_store_job(self, keys, ctx):
+        raise AssertionError("unreachable")
+
+    def on_request_finished(self, ctx) -> None:
+        self.finished.append(ctx.req_id)
+
+
+class _RecordingSession:
+    """Fake P2PSession that records the parent it was served with."""
+
+    def __init__(self) -> None:
+        self.served_with: list[object] = []
+
+    def serve_external_requests(self, parent) -> None:
+        self.served_with.append(parent)
+
+
+class TestServeExternalRequests:
+    def test_flushes_orphan_ctxs_then_serves_each_session(self):
+        """serve_external_requests releases ctxs orphaned by reaped
+        sessions via parent.on_request_finished (clearing the queue),
+        then delegates to every live session with the same parent."""
         mgr = _make_manager()
-        # _make_manager already sets _AllMissCallbacks; sanity check.
-        assert isinstance(mgr._tiering_callbacks, _AllMissCallbacks)
+        ctx = ReqContext(req_id="p2p:peer:req-1:lu1")
+        mgr._orphan_finish_ctxs = [ctx]
+        sess_a = _RecordingSession()
+        sess_b = _RecordingSession()
+        mgr._sessions = {"a": sess_a, "b": sess_b}  # type: ignore[assignment]
 
-    def test_custom_callbacks_forwarded_to_accepted_sessions(self):
-        """Inbound connections create sessions that share the manager's
-        ``tiering_callbacks`` instance."""
+        parent = _RecordingParent()
+        mgr.serve_external_requests(parent)  # type: ignore[arg-type]
 
-        class _Stub:
-            def lookup(self, key, ctx):
-                from vllm.v1.kv_offload.base import LookupResult
+        # Orphan released and queue cleared.
+        assert parent.finished == ["p2p:peer:req-1:lu1"]
+        assert mgr._orphan_finish_ctxs == []
+        # Every live session served with the same parent handle.
+        assert sess_a.served_with == [parent]
+        assert sess_b.served_with == [parent]
 
-                return LookupResult.MISS
-
-            def create_store_job(self, keys, ctx):
-                raise AssertionError("unreachable for MISS-only stub")
-
-            def finish_request(self, ctx):
-                pass
-
-        class _FakeData:
-            block_len = 4096
-            base_addr = 0x1000
-            num_blocks = 16
-            config_fingerprint = ""
-
-            def get_agent_metadata(self):
-                return b"meta"
-
-            def add_remote_peer(self, *args, **kwargs):
-                pass
-
-        class _Conn:
-            def __init__(self, pid: str) -> None:
-                self.peer_id = pid
-                self.alive = True
-
-            def send(self, msg: dict) -> None:
-                pass
-
-            def close(self) -> None:
-                self.alive = False
-
+    def test_no_orphans_still_serves_sessions(self):
         mgr = _make_manager()
-        stub = _Stub()
-        mgr._tiering_callbacks = stub  # type: ignore[assignment]
-        mgr._data = _FakeData()  # type: ignore[assignment]
-        peer_id = "10.0.0.5:9000"
+        sess = _RecordingSession()
+        mgr._sessions = {"a": sess}  # type: ignore[assignment]
 
-        mgr._accept_new_peers([_Conn(peer_id)])  # type: ignore[arg-type]
+        parent = _RecordingParent()
+        mgr.serve_external_requests(parent)  # type: ignore[arg-type]
 
-        session = mgr._sessions[peer_id]
-        assert session._server._cb is stub
+        assert parent.finished == []
+        assert sess.served_with == [parent]
 
 
 # ---------------------------------------------------------------------------
@@ -510,6 +509,7 @@ class _FakeSession:
         new_fetch_ids: list[str] | None = None,
         close_loads: list[tuple[int, str]] | None = None,
         close_stores: list[int] | None = None,
+        close_orphans: list[ReqContext] | None = None,
     ) -> None:
         self.peer_id = peer_id
         self.alive = alive
@@ -520,6 +520,7 @@ class _FakeSession:
         self._new_fetch_ids = new_fetch_ids or []
         self._close_loads = close_loads or []
         self._close_stores = close_stores or []
+        self._close_orphans = close_orphans or []
         self.requests: list[tuple[int, str]] = []
         self.stores_added: list[tuple[str, list, object, int]] = []
         self.attached: list[object] = []
@@ -555,7 +556,7 @@ class _FakeSession:
         self.finishes.append(kv_request_id)
 
     def close(self):
-        return self._close_loads, self._close_stores
+        return self._close_loads, self._close_stores, self._close_orphans
 
 
 class TestGetFinished:

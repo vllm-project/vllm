@@ -17,7 +17,6 @@ coordinator's ``_dispatch_message`` can reuse its existing
 
 from __future__ import annotations
 
-import contextlib
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -33,9 +32,8 @@ from vllm.v1.kv_offload.tiering.p2p.session.protocol import (
 )
 
 if TYPE_CHECKING:
-    from vllm.v1.kv_offload.tiering.base import JobId
+    from vllm.v1.kv_offload.tiering.base import JobId, ParentManager
     from vllm.v1.kv_offload.tiering.p2p.data import DataTransport
-    from vllm.v1.kv_offload.tiering.p2p.tiering_callbacks import TieringCallbacks
 
 logger = init_logger(__name__)
 
@@ -169,7 +167,7 @@ class _LookupBlocks:
     # in ``pending``.
     resolved: dict[OffloadKey, bool] = field(default_factory=dict)
     # Hashes still awaiting resolution (HIT_PENDING / RETRY from
-    # ``cb.lookup``); re-polled by ``_resolve_pending_lookups``.
+    # ``parent.lookup``); re-polled by ``_resolve_pending_lookups``.
     pending: set[OffloadKey] = field(default_factory=set)
     # Absolute deadline (``time.monotonic``). Once reached, remaining
     # ``pending`` hashes are force-resolved to MISS so the consumer
@@ -190,22 +188,10 @@ class ServerRole:
         peer_id: str,
         transport: DataTransport,
         send: Callable[[dict], None],
-        tiering_callbacks: TieringCallbacks | None = None,
     ) -> None:
         self._peer_id = peer_id
         self._transport = transport
         self._send = send
-        # Defaults to _AllMissCallbacks for tests and any caller that
-        # constructs a ServerRole without wiring real callbacks. Imported
-        # locally to avoid a circular import (p2p.session →
-        # p2p.tiering_callbacks → ... ).
-        if tiering_callbacks is None:
-            from vllm.v1.kv_offload.tiering.p2p.tiering_callbacks import (
-                _AllMissCallbacks,
-            )
-
-            tiering_callbacks = _AllMissCallbacks()
-        self._cb: TieringCallbacks = tiering_callbacks
 
         self._outbound: dict[str, _OutboundRequestState] = {}
         # transfer_id → xfer. Mutate ONLY via _inflight_add / _inflight_pop
@@ -223,13 +209,24 @@ class ServerRole:
         # tick to surface. Mirrors the deferred-result pattern used for
         # load timeouts.
         self._pending_store_results: list[StoreResult] = []
+        # Raw inbound LookupMsgs enqueued by ``on_lookup`` during message
+        # dispatch and drained by ``serve_external_requests`` (the only
+        # window where the ParentManager handle is valid). Each entry is
+        # (kv_request_id, hashes, enqueued_at); the deadline for any
+        # resulting HIT_PENDING / RETRY hash is measured from enqueued_at.
+        self._pending_inbound_lookups: list[tuple[str, list[OffloadKey], float]] = []
         # Per-LookupMsg state for hashes that resolved to HIT_PENDING /
         # RETRY on first sight. Drained by ``_resolve_pending_lookups``
-        # on every poll tick; entries leave the dict either when their
-        # last hash settles to HIT or MISS (definitive answer) or after
-        # ``_LOOKUP_PENDING_TIMEOUT_S`` has elapsed (force-MISS).
+        # during ``serve_external_requests``; entries leave the dict either
+        # when their last hash settles to HIT or MISS (definitive answer)
+        # or after ``_LOOKUP_PENDING_TIMEOUT_S`` has elapsed (force-MISS).
         self._inbound_lookups: dict[int, _LookupBlocks] = {}
         self._lookup_id_counter: int = 0
+        # Synthetic lookup ctxs whose ``on_request_finished`` still needs to
+        # fire but which were closed outside a serve window (FetchMsg / local
+        # finish popped their parked lookup). Drained via
+        # ``parent.on_request_finished`` in ``serve_external_requests``.
+        self._finished_lookup_ctxs: list[ReqContext] = []
 
     # ------------------------------------------------------------------
     # Public API
@@ -260,16 +257,18 @@ class ServerRole:
         In p2p mode FetchMsg is the server-side "request finished"
         signal for ``kv_request_id``. Three consequences flow from that:
 
-        - No further ``cb.create_store_job`` will fire for this id:
+        - No further ``parent.create_store_job`` will fire for this id:
           parked ``_inbound_lookups`` are popped here (via
-          ``_finish_inbound_lookups``) before the same poll tick's
-          ``collect_results`` calls ``_resolve_pending_lookups``, so
-          any HIT_PENDING / RETRY hash that would otherwise later
-          promote to HIT and pin a slot is dropped instead.
+          ``_finish_inbound_lookups``) before the next
+          ``serve_external_requests`` runs ``_resolve_pending_lookups``,
+          so any HIT_PENDING / RETRY hash that would otherwise later
+          promote to HIT and pin a slot is dropped instead. Any raw
+          not-yet-processed LookupMsg for this id is dropped too.
         - All server-side lookup state for the id is cleaned up (the
           ``_inbound_lookups`` entries themselves).
-        - ``cb.finish_request(lookup.ctx)`` fires so the TieringManager
-          can release per-lookup bookkeeping.
+        - The synthetic ctx is queued for ``parent.on_request_finished``
+          (fired by the next ``serve_external_requests``) so the
+          TieringManager can release per-lookup bookkeeping.
 
         The client contract guarantees exactly one FetchMsg per
         lookup-touched request — including an empty one when no
@@ -297,9 +296,9 @@ class ServerRole:
             self._submit_transfer(kv_request_id, result)
         # Close the peer's request as far as the server's lookup phase
         # is concerned: pop parked lookups so no further
-        # ``cb.create_store_job`` fires for this id, and fire
-        # ``cb.finish_request`` on each. Done before the finalize path
-        # below so bookkeeping releases in-order.
+        # ``parent.create_store_job`` fires for this id, and queue their
+        # ctxs for ``parent.on_request_finished``. Done before the
+        # finalize path below so bookkeeping releases in-order.
         self._finish_inbound_lookups(kv_request_id)
         # Prefiller-first mode: finish_request may have run before
         # fetch arrived. If so, finalize once we know what was
@@ -331,21 +330,14 @@ class ServerRole:
         kv_request_id: str,
         block_hashes: Sequence[OffloadKey],
     ) -> None:
-        """Handle a LookupMsg from a symmetric-P2P consumer.
+        """Enqueue a LookupMsg from a symmetric-P2P consumer.
 
-        For each hash, query the TieringManager via ``cb.lookup`` and
-        pin any HITs immediately via ``cb.create_store_job`` (plumbed
-        into the existing ``add_stored_blocks`` matching path so the
-        eventual FetchMsg finds them). HIT_PENDING / RETRY hashes park
-        in :class:`_LookupBlocks` for re-polling by
-        :meth:`_resolve_pending_lookups`.
-
-        The outbound ``LookupRespMsg`` is deferred until every hash in
-        the LookupMsg has settled to HIT or MISS (or the batch-level
-        ``deadline`` fires, forcing any stragglers to MISS). One
-        LookupRespMsg goes out per LookupMsg — carrying every hash in
-        wire order — after which ``cb.finish_request`` fires and the
-        entry is dropped.
+        Dispatch runs during ``session.poll()`` where the
+        :class:`ParentManager` handle is not available, so this only
+        records the raw request. It is resolved — querying the tiering
+        manager and emitting the aggregated ``LookupRespMsg`` — by the
+        next :meth:`serve_external_requests`, the sole window in which
+        parent calls are valid.
         """
         logger.debug(
             "P2P LOOKUP server %s: RECV LookupMsg kv_request_id=%s hashes=%d",
@@ -353,6 +345,55 @@ class ServerRole:
             kv_request_id,
             len(block_hashes),
         )
+        self._pending_inbound_lookups.append(
+            (kv_request_id, list(block_hashes), time.monotonic())
+        )
+
+    def serve_external_requests(self, parent: ParentManager) -> None:
+        """Resolve inbound peer lookups against the tiering manager.
+
+        Called once per scheduler step with a ``parent`` handle valid
+        only for this call. Drains newly-enqueued LookupMsgs, re-polls
+        any parked HIT_PENDING / RETRY hashes, and releases the
+        bookkeeping for lookups closed since the last serve.
+        """
+        if self._pending_inbound_lookups:
+            pending = self._pending_inbound_lookups
+            self._pending_inbound_lookups = []
+            for kv_request_id, block_hashes, enqueued_at in pending:
+                self._process_inbound_lookup(
+                    kv_request_id, block_hashes, enqueued_at, parent
+                )
+
+        self._resolve_pending_lookups(parent)
+
+        if self._finished_lookup_ctxs:
+            for ctx in self._finished_lookup_ctxs:
+                parent.on_request_finished(ctx)
+            self._finished_lookup_ctxs = []
+
+    def _process_inbound_lookup(
+        self,
+        kv_request_id: str,
+        block_hashes: list[OffloadKey],
+        enqueued_at: float,
+        parent: ParentManager,
+    ) -> None:
+        """Resolve one enqueued LookupMsg against ``parent``.
+
+        For each hash, query the tiering manager via ``parent.lookup``
+        and pin any HITs immediately via ``parent.create_store_job``
+        (plumbed into the existing ``add_stored_blocks`` matching path so
+        the eventual FetchMsg finds them). HIT_PENDING / RETRY hashes park
+        in :class:`_LookupBlocks` for re-polling by
+        :meth:`_resolve_pending_lookups`.
+
+        The outbound ``LookupRespMsg`` is deferred until every hash has
+        settled to HIT or MISS (or the batch-level ``deadline`` fires,
+        forcing any stragglers to MISS). One LookupRespMsg goes out per
+        LookupMsg — carrying every hash in wire order — after which
+        ``parent.on_request_finished`` fires and the entry is dropped.
+        """
         self._lookup_id_counter += 1
         lookup_id = self._lookup_id_counter
         ctx = ReqContext(req_id=f"p2p:{self._peer_id}:{kv_request_id}:lu{lookup_id}")
@@ -361,13 +402,13 @@ class ServerRole:
             kv_request_id=kv_request_id,
             ctx=ctx,
             hashes=list(block_hashes),
-            deadline=time.monotonic() + _LOOKUP_PENDING_TIMEOUT_S,
+            deadline=enqueued_at + _LOOKUP_PENDING_TIMEOUT_S,
         )
 
         # Open per-request bookkeeping for this synthetic ctx before the
-        # first lookup; released by ``finish_request`` once every hash
-        # has settled.
-        self._cb.on_new_request(ctx)
+        # first lookup; released by ``on_request_finished`` once every
+        # hash has settled.
+        parent.on_new_request(ctx)
 
         hit_hashes: list[OffloadKey] = []
         for h in lookup.hashes:
@@ -375,16 +416,15 @@ class ServerRole:
                 # Duplicate hash within the LookupMsg — its state has
                 # already been established on the first sighting.
                 continue
-            result = self._cb.lookup(h, ctx)
+            result = parent.lookup(h, ctx)
             if result is LookupResult.HIT:
                 hit_hashes.append(h)
                 lookup.resolved[h] = True
             elif result is LookupResult.MISS:
                 lookup.resolved[h] = False
             else:
-                # HIT_PENDING / RETRY — defer until the next poll tick
-                # gives the underlying primary write or promotion time
-                # to settle.
+                # HIT_PENDING / RETRY — defer until the next serve gives
+                # the underlying primary write or promotion time to settle.
                 lookup.pending.add(h)
 
         logger.debug(
@@ -398,30 +438,31 @@ class ServerRole:
         )
 
         if hit_hashes:
-            self._pin_and_register_hits(kv_request_id, hit_hashes, ctx)
+            self._pin_and_register_hits(kv_request_id, hit_hashes, ctx, parent)
 
         if lookup.pending:
             self._inbound_lookups[lookup_id] = lookup
         else:
             # Every hash resolved on first sight — emit the aggregated
             # response now and close the synthetic request.
-            self._finalize_lookup(lookup)
+            self._finalize_lookup(lookup, parent)
 
     def _pin_and_register_hits(
         self,
         kv_request_id: str,
         hashes: list[OffloadKey],
         ctx: ReqContext,
+        parent: ParentManager,
     ) -> None:
         """Pin primary slots for HIT hashes and feed them into the
         existing ``add_stored_blocks`` matching path.
 
         Caller has already confirmed every hash is HIT (single-threaded
         scheduler ⇒ no eviction race), so the JobMetadata returned by
-        ``create_store_job`` carries parallel ``keys``/``block_ids``
+        ``parent.create_store_job`` carries parallel ``keys``/``block_ids``
         of length ``len(hashes)``.
         """
-        meta = self._cb.create_store_job(hashes, ctx)
+        meta = parent.create_store_job(hashes, ctx)
         self.add_stored_blocks(
             kv_request_id,
             list(meta.keys),
@@ -429,15 +470,15 @@ class ServerRole:
             meta.job_id,
         )
 
-    def _resolve_pending_lookups(self) -> None:
+    def _resolve_pending_lookups(self, parent: ParentManager) -> None:
         """Re-poll deferred LookupMsg hashes; finalize when ready.
 
         Walks every parked :class:`_LookupBlocks` and re-calls
-        ``cb.lookup`` per still-pending hash, moving HIT/MISS results
+        ``parent.lookup`` per still-pending hash, moving HIT/MISS results
         into ``resolved``. If ``deadline`` has passed, remaining
         ``pending`` hashes are force-resolved to MISS so the consumer
         can fall back instead of waiting on a stuck producer. Newly-HIT
-        hashes are pinned via ``cb.create_store_job`` in one call per
+        hashes are pinned via ``parent.create_store_job`` in one call per
         affected ``kv_request_id``. Lookups whose ``pending`` empties
         out get their aggregated LookupRespMsg sent by
         :meth:`_finalize_lookup`.
@@ -449,7 +490,7 @@ class ServerRole:
         for lookup_id, lookup in self._inbound_lookups.items():
             new_hits: list[OffloadKey] = []
             for h in list(lookup.pending):
-                result = self._cb.lookup(h, lookup.ctx)
+                result = parent.lookup(h, lookup.ctx)
                 if result is LookupResult.HIT:
                     new_hits.append(h)
                     lookup.resolved[h] = True
@@ -457,7 +498,7 @@ class ServerRole:
                 elif result is LookupResult.MISS:
                     lookup.resolved[h] = False
                     lookup.pending.discard(h)
-                # else still HIT_PENDING / RETRY: leave for next tick,
+                # else still HIT_PENDING / RETRY: leave for next serve,
                 # unless the deadline forces MISS below.
 
             if lookup.pending and now >= lookup.deadline:
@@ -466,16 +507,18 @@ class ServerRole:
                 lookup.pending.clear()
 
             if new_hits:
-                self._pin_and_register_hits(lookup.kv_request_id, new_hits, lookup.ctx)
+                self._pin_and_register_hits(
+                    lookup.kv_request_id, new_hits, lookup.ctx, parent
+                )
 
             if not lookup.pending:
                 finished_lookups.append(lookup_id)
 
         for lookup_id in finished_lookups:
             lookup = self._inbound_lookups.pop(lookup_id)
-            self._finalize_lookup(lookup)
+            self._finalize_lookup(lookup, parent)
 
-    def _finalize_lookup(self, lookup: _LookupBlocks) -> None:
+    def _finalize_lookup(self, lookup: _LookupBlocks, parent: ParentManager) -> None:
         """Emit the aggregated LookupRespMsg and close the synthetic request.
 
         Called once per lookup when ``pending`` is empty — either every
@@ -503,19 +546,23 @@ class ServerRole:
                     LookupRespMsg.HITS: hits,
                 }
             )
-        self._cb.finish_request(lookup.ctx)
+        parent.on_request_finished(lookup.ctx)
 
     def _finish_inbound_lookups(self, kv_request_id: str) -> None:
         """Close the server-side lookup phase for ``kv_request_id``.
 
         Pops every parked ``_LookupBlocks`` for this id (so
         ``_resolve_pending_lookups`` cannot promote a HIT_PENDING /
-        RETRY hash into a fresh ``cb.create_store_job`` after this
-        point) and fires ``cb.finish_request(lookup.ctx)`` on each so
-        the TieringManager can release per-lookup bookkeeping. The
-        aggregated LookupRespMsg is skipped — the client already knows
-        the request is over (it just sent a terminal FetchMsg, or is
-        finishing locally).
+        RETRY hash into a fresh ``parent.create_store_job`` after this
+        point) and queues each ``lookup.ctx`` for
+        ``parent.on_request_finished`` (fired by the next
+        ``serve_external_requests``, since no parent handle is available
+        during dispatch) so the TieringManager can release per-lookup
+        bookkeeping. Any still-unprocessed raw LookupMsg for this id is
+        dropped — it never got ``on_new_request``, so nothing is owed.
+        The aggregated LookupRespMsg is skipped — the client already
+        knows the request is over (it just sent a terminal FetchMsg, or
+        is finishing locally).
 
         Called on the two events that mean "no more lookup traffic for
         ``kv_request_id`` is expected on this session": the terminal
@@ -523,6 +570,12 @@ class ServerRole:
         per lookup-touched request, even if empty), and a local
         ``finish``. Whichever fires second is a no-op.
         """
+        if self._pending_inbound_lookups:
+            self._pending_inbound_lookups = [
+                entry
+                for entry in self._pending_inbound_lookups
+                if entry[0] != kv_request_id
+            ]
         finished_lookup_ids = [
             lid
             for lid, lu in self._inbound_lookups.items()
@@ -530,7 +583,7 @@ class ServerRole:
         ]
         for lid in finished_lookup_ids:
             lookup = self._inbound_lookups.pop(lid)
-            self._cb.finish_request(lookup.ctx)
+            self._finished_lookup_ctxs.append(lookup.ctx)
 
     def finish(self, kv_request_id: str) -> None:
         """Mark an outbound request finishing.
@@ -541,11 +594,11 @@ class ServerRole:
         letting it hit _LOAD_TIMEOUT_S.
 
         Also drops any in-flight lookups for this kv_request_id and
-        fires their ``finish_request`` so the TieringManager can
-        release per-request bookkeeping. (For symmetric P2P this path
-        is rarely hit since the producer has no local request
-        lifecycle for the consumer's id; this cleanup is mostly
-        active on the PD side.)
+        queues their ctxs for ``parent.on_request_finished`` so the
+        TieringManager can release per-request bookkeeping. (For
+        symmetric P2P this path is rarely hit since the producer has no
+        local request lifecycle for the consumer's id; this cleanup is
+        mostly active on the PD side.)
 
         If the decoder hasn't sent fetch yet (no demand received),
         defer — on_fetch will finalize once demand arrives.
@@ -571,13 +624,13 @@ class ServerRole:
         self._finalize_outbound(kv_request_id)
 
     def collect_results(self) -> list[StoreResult]:
-        """Drain timeouts, deferred results, and transport completions."""
-        results: list[StoreResult] = self._timeout_pending_store_jobs()
+        """Drain timeouts, deferred results, and transport completions.
 
-        # Re-poll any LookupMsg hashes parked under HIT_PENDING / RETRY.
-        # Newly-resolved hashes get a follow-up LookupRespMsg; fully
-        # resolved lookups fire ``finish_request`` and drop.
-        self._resolve_pending_lookups()
+        Inbound LookupMsg resolution (including re-polling HIT_PENDING /
+        RETRY hashes) is NOT done here — it runs in
+        ``serve_external_requests`` where the ParentManager is available.
+        """
+        results: list[StoreResult] = self._timeout_pending_store_jobs()
 
         if self._pending_store_results:
             results.extend(self._pending_store_results)
@@ -690,8 +743,15 @@ class ServerRole:
         for kv_request_id in list(self._pending_aborts):
             self._drain_abort(kv_request_id)
 
-    def close(self) -> list[int]:
-        """Tear down. Cancels inflight, returns failed store job ids."""
+    def close(self) -> tuple[list[int], list[ReqContext]]:
+        """Tear down. Cancels inflight.
+
+        Returns ``(failed_store_job_ids, orphan_ctxs)`` where
+        ``orphan_ctxs`` are synthetic lookup ctxs still owing a
+        ``parent.on_request_finished``. The session is going away with no
+        parent handle in hand, so the manager flushes these in its next
+        ``serve_external_requests``.
+        """
         failed_stores = list(self._store_jobs.keys())
         self._store_jobs.clear()
         if self._inflight:
@@ -701,14 +761,16 @@ class ServerRole:
         self._outbound.clear()
         self._pending_aborts.clear()
         self._pending_store_results.clear()
-        # Best-effort: tell the TieringManager to release per-request
-        # bookkeeping for any in-flight lookups; suppress so
-        # a wedged callback can't block teardown.
-        for lookup in self._inbound_lookups.values():
-            with contextlib.suppress(Exception):
-                self._cb.finish_request(lookup.ctx)
+        # Surface every synthetic ctx still owing on_request_finished so
+        # the manager can release the TieringManager's per-request
+        # bookkeeping: parked lookups plus any already queued from a
+        # FetchMsg / finish that closed them before this teardown.
+        orphan_ctxs = [lu.ctx for lu in self._inbound_lookups.values()]
+        orphan_ctxs.extend(self._finished_lookup_ctxs)
         self._inbound_lookups.clear()
-        return failed_stores
+        self._finished_lookup_ctxs.clear()
+        self._pending_inbound_lookups.clear()
+        return failed_stores, orphan_ctxs
 
     # ------------------------------------------------------------------
     # Internal — inflight bookkeeping

@@ -44,9 +44,9 @@ from vllm.v1.kv_offload.tiering.p2p.session.server import (
 )
 
 if TYPE_CHECKING:
-    from vllm.v1.kv_offload.tiering.base import JobId
+    from vllm.v1.kv_offload.base import ReqContext
+    from vllm.v1.kv_offload.tiering.base import JobId, ParentManager
     from vllm.v1.kv_offload.tiering.p2p.data import DataTransport
-    from vllm.v1.kv_offload.tiering.p2p.tiering_callbacks import TieringCallbacks
 
 logger = init_logger(__name__)
 
@@ -96,7 +96,6 @@ class P2PSession:
         local_id: str,
         transport: DataTransport,
         local_block_len: int,
-        tiering_callbacks: TieringCallbacks | None = None,
         conn: ControlConnection | None = None,
     ) -> None:
         self.peer_id = peer_id
@@ -123,7 +122,6 @@ class P2PSession:
             peer_id=peer_id,
             transport=transport,
             send=self._send,
-            tiering_callbacks=tiering_callbacks,
         )
 
         if conn is not None:
@@ -219,6 +217,14 @@ class P2PSession:
         """
         self._client.flush_pending_lookups()
 
+    def serve_external_requests(self, parent: ParentManager) -> None:
+        """Resolve inbound peer lookups against the tiering manager.
+
+        Delegates to the server role; the ``parent`` handle is valid
+        only for the duration of this call.
+        """
+        self._server.serve_external_requests(parent)
+
     def poll(self) -> SessionPollResult:
         """Process incoming messages, drive transfers, apply timeouts."""
         if self._conn is None:
@@ -243,14 +249,19 @@ class P2PSession:
             loads=loads, stores=stores, new_fetch_ids=new_fetch_ids
         )
 
-    def close(self) -> tuple[list[tuple[int, str]], list[int]]:
-        """Shut down. Returns (failed_loads, failed_stores).
+    def close(
+        self,
+    ) -> tuple[list[tuple[int, str]], list[int], list[ReqContext]]:
+        """Shut down. Returns (failed_loads, failed_stores, orphan_ctxs).
 
         failed_loads: list of (job_id, kv_request_id) pairs.
         failed_stores: list of job_ids.
+        orphan_ctxs: synthetic lookup ctxs still owing
+            ``parent.on_request_finished`` (the manager flushes these on
+            its next ``serve_external_requests``).
         """
         failed_loads = self._client.close()
-        failed_stores = self._server.close()
+        failed_stores, orphan_ctxs = self._server.close()
 
         if self._conn is not None:
             with contextlib.suppress(Exception):
@@ -258,7 +269,7 @@ class P2PSession:
             self._conn.close()
             self._conn = None
 
-        return failed_loads, failed_stores
+        return failed_loads, failed_stores, orphan_ctxs
 
     # ------------------------------------------------------------------
     # Message dispatch

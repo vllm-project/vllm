@@ -34,13 +34,10 @@ from vllm.v1.kv_offload.tiering.base import (
 from vllm.v1.kv_offload.tiering.p2p.control import ControlTransport, ZmqTransport
 from vllm.v1.kv_offload.tiering.p2p.data import DataTransport, NixlTransport
 from vllm.v1.kv_offload.tiering.p2p.session import P2PSession
-from vllm.v1.kv_offload.tiering.p2p.tiering_callbacks import (
-    TieringCallbacks,
-    _AllMissCallbacks,
-)
 
 if TYPE_CHECKING:
     from vllm.v1.kv_offload.base import OffloadingSpec
+    from vllm.v1.kv_offload.tiering.base import ParentManager
     from vllm.v1.kv_offload.tiering.p2p.control.base import ControlConnection
 
 logger = init_logger(__name__)
@@ -167,7 +164,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         port: int | None = None,
         backends: list[str] | None = None,
         num_threads: int = 4,
-        tiering_callbacks: TieringCallbacks | None = None,
         **kwargs,
     ) -> None:
         """Initialize the P2P secondary tier manager.
@@ -201,17 +197,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             num_threads: NIXL agent worker threads for the UCX-only
                 branch. Ignored when ``backends`` contains a non-UCX
                 entry.
-            tiering_callbacks: TieringManager-facing callbacks invoked
-                by the producer's server role to answer inbound
-                ``LookupMsg`` traffic. Defaults to
-                :class:`_AllMissCallbacks`, which preserves today's
-                all-miss behaviour until the real adapter is wired.
             **kwargs: Reserved for future tier-specific options.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
-        self._tiering_callbacks: TieringCallbacks = (
-            tiering_callbacks if tiering_callbacks is not None else _AllMissCallbacks()
-        )
         if host is None:
             host = envs.VLLM_P2P_SIDE_CHANNEL_HOST
         if port is None:
@@ -262,6 +250,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # kv_request_ids that hit a transport/session failure; On load lookup()
         # rejects them so the request falls back to local prefill.
         self._failed_req_ids: set[str] = set()
+        # Synthetic lookup ctxs from reaped sessions still owing a
+        # ``parent.on_request_finished``. The dead session had no parent
+        # handle at teardown; these are flushed at the top of the next
+        # ``serve_external_requests`` where the handle is valid.
+        self._orphan_finish_ctxs: list[ReqContext] = []
 
     # ------------------------------------------------------------------
     # SecondaryTierManager interface
@@ -533,6 +526,24 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             time.sleep(_DRAIN_SLEEP_S)
 
     @override
+    def serve_external_requests(self, parent: ParentManager) -> None:
+        """Serve inbound peer lookups against the tiering manager.
+
+        Called once per scheduler step (before this tier's
+        ``on_schedule_end``) with a ``parent`` handle valid only for the
+        duration of the call — the sole window in which the P2P server
+        role may query the tiering manager. First release bookkeeping for
+        any lookups orphaned by a reaped session, then let every live
+        session resolve its enqueued inbound LookupMsgs.
+        """
+        if self._orphan_finish_ctxs:
+            for ctx in self._orphan_finish_ctxs:
+                parent.on_request_finished(ctx)
+            self._orphan_finish_ctxs = []
+        for session in self._sessions.values():
+            session.serve_external_requests(parent)
+
+    @override
     def on_schedule_end(self, context: ScheduleEndContext) -> None:
         # Flush any p2p lookups aggregated during this step.
         # One LookupMsg per (peer, kv_request_id) with unsent entries;
@@ -572,7 +583,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             local_id=self._local_id,
             transport=self._data,
             local_block_len=self._data.block_len,
-            tiering_callbacks=self._tiering_callbacks,
             conn=conn,
         )
         self._sessions[peer_id] = session
@@ -594,7 +604,6 @@ class P2PSecondaryTierManager(SecondaryTierManager):
                     local_id=self._local_id,
                     transport=self._data,
                     local_block_len=self._data.block_len,
-                    tiering_callbacks=self._tiering_callbacks,
                     conn=conn,
                 )
                 logger.info(
@@ -629,12 +638,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             ]
             for kid in stale_kv_ids:
                 del self._kv_to_session[kid]
-            failed_loads, failed_stores = session.close()
+            failed_loads, failed_stores, orphan_ctxs = session.close()
             for job_id, kv_request_id in failed_loads:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
                 self._failed_req_ids.add(kv_request_id)
             for job_id in failed_stores:
                 self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            # Release the TieringManager's per-request bookkeeping for the
+            # dead session's synthetic lookups on the next serve_external_requests.
+            self._orphan_finish_ctxs.extend(orphan_ctxs)
             self._data.remove_remote_peer(pid)
             logger.warning("P2P %s: peer %s down", self._local_id, pid)
 
@@ -731,6 +743,9 @@ class P2PSecondaryTierManager(SecondaryTierManager):
     def shutdown(self) -> None:
         self._drain_inflight_for_shutdown()
         for session in self._sessions.values():
+            # Orphan ctxs from close() are intentionally dropped: the manager
+            # is being torn down, so there is no next serve_external_requests
+            # to flush them and no TieringManager left to release.
             session.close()
         self._sessions.clear()
         self._kv_to_session.clear()

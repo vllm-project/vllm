@@ -120,19 +120,20 @@ There are three ways an entry leaves `_lookups`:
 
 The producer answers any incoming `LookupMsg` from a connected peer —
 there is no per-request producer flag. The reply is computed against
-the local TieringManager via three callbacks
-(`TieringCallbacks` Protocol, in `tiering/p2p/tiering_callbacks.py`):
+the local TieringManager via the `ParentManager` handle
+(`tiering/base.py`) that `TieringOffloadingManager` passes to the tier
+once per scheduler step through `serve_external_requests(parent)`. The
+handle is valid **only** for the duration of that call, so message
+dispatch merely enqueues inbound `LookupMsg`s (`on_lookup` →
+`_pending_inbound_lookups`) and all parent interaction happens inside
+`serve_external_requests`:
 
-| Callback | Purpose |
+| `ParentManager` method | Purpose |
 | --- | --- |
-| `lookup(key, ctx) -> LookupResult` | Hit/miss decision per hash. |
+| `on_new_request(ctx) -> RequestOffloadingContext` | Open per-request bookkeeping for the synthetic peer-driven `ctx` before its first `lookup`. |
+| `lookup(key, ctx) -> LookupResult` | Hit/miss decision per hash (fans out to the other tiers, P2P excluded). |
 | `create_store_job(keys, ctx) -> JobMetadata` | Pin the primary-tier slots for the HIT keys; returns parallel `keys` / `block_ids` and a fresh `job_id`. The pin survives until the engine processes the matching `JobResult`. |
-| `finish_request(ctx) -> None` | Release per-request bookkeeping the TieringManager accumulated under the synthetic peer-driven `ctx`. |
-
-The default is `_AllMissCallbacks` (every `lookup` returns `MISS`,
-`create_store_job` is unreachable, `finish_request` is a no-op),
-which preserves the pre-integration all-miss behaviour until the real
-adapter on `TieringOffloadingManager` is wired.
+| `on_request_finished(ctx) -> None` | Release per-request bookkeeping the TieringManager accumulated under the synthetic peer-driven `ctx`. |
 
 #### Per-LookupMsg tracking
 
@@ -146,14 +147,22 @@ ctx = ReqContext(req_id=f"p2p:{peer_id}:{kv_request_id}:lu{lookup_id}")
 
 A fresh ctx per LookupMsg gives the TieringManager a clean,
 bounded-lifetime request to attach state to — created on the first
-`lookup` call, closed by `finish_request` once the lookup's last hash
-has been answered on the wire.
+`parent.lookup` call, closed by `parent.on_request_finished` once the
+lookup's last hash has been answered on the wire.
 
-#### `on_lookup(kv_request_id, block_hashes)`
+#### `on_lookup(kv_request_id, block_hashes)` (dispatch)
 
-Build a `_LookupBlocks` for the LookupMsg with a `deadline` of
-`now + _LOOKUP_PENDING_TIMEOUT_S`, then for each hash call
-`cb.lookup(h, ctx)` and route:
+Runs during `session.poll()`, where no `parent` handle is available, so
+it only appends `(kv_request_id, hashes, enqueued_at)` to
+`_pending_inbound_lookups`. Resolution happens in the next
+`serve_external_requests`.
+
+#### `serve_external_requests(parent)` → `_process_inbound_lookup`
+
+Drains `_pending_inbound_lookups`. For each, build a `_LookupBlocks`
+with a `deadline` of `enqueued_at + _LOOKUP_PENDING_TIMEOUT_S`, call
+`parent.on_new_request(ctx)`, then for each hash call
+`parent.lookup(h, ctx)` and route:
 
 | `LookupResult` | Action |
 | --- | --- |
@@ -163,7 +172,7 @@ Build a `_LookupBlocks` for the LookupMsg with a `deadline` of
 
 Then:
 
-1. If any HITs: call `cb.create_store_job(hits, ctx)` once, then feed
+1. If any HITs: call `parent.create_store_job(hits, ctx)` once, then feed
    the returned JobMetadata into the existing
    `ServerRole.add_stored_blocks(...)` path so the eventual FetchMsg
    matches from `_outbound[kv_request_id].available`. HITs are pinned
@@ -171,7 +180,7 @@ Then:
    would let the block evict before the client's FetchMsg lands.
 2. If `lookup.pending` is empty (everything resolved on first sight),
    emit the aggregated `LookupRespMsg` now and fire
-   `cb.finish_request(ctx)` (see `_finalize_lookup`).
+   `parent.on_request_finished(ctx)` (see `_finalize_lookup`).
 3. Otherwise stash the entry in `_inbound_lookups` — the aggregate
    response is deferred until either every pending hash settles or
    `deadline` fires.
@@ -181,45 +190,52 @@ every hash in its original wire order. The single-thread guarantee
 (`lookup → HIT → create_store_job` in one synchronous sequence) means
 no eviction can race between HIT detection and the pin.
 
-#### `_resolve_pending_lookups` (driven from `collect_results`)
+#### `_resolve_pending_lookups` (driven from `serve_external_requests`)
 
-Called every poll tick. For every parked lookup:
+Called once per serve, after the newly-enqueued lookups are processed.
+For every parked lookup:
 
-- Re-call `cb.lookup` per still-pending hash.
+- Re-call `parent.lookup` per still-pending hash.
     - `HIT` → move to the newly-HIT list, record `resolved[h] = True`,
       drop from `pending`.
     - `MISS` → record `resolved[h] = False`, drop from `pending`.
-    - Still `HIT_PENDING` / `RETRY` → leave for next tick.
+    - Still `HIT_PENDING` / `RETRY` → leave for next serve.
 - If `now >= lookup.deadline` and `pending` is still non-empty, force
   the stragglers to MISS (record `resolved[h] = False` for each and
   clear `pending`). Guarantees the response goes out within the
   deadline even against a stuck producer.
-- For the newly-HIT list: one `cb.create_store_job(...)` call per
-  lookup, plumbed through `add_stored_blocks` as in `on_lookup`.
+- For the newly-HIT list: one `parent.create_store_job(...)` call per
+  lookup, plumbed through `add_stored_blocks` as above.
 - Any lookup whose `pending` is now empty is finalized by
   `_finalize_lookup`: emit the aggregated `LookupRespMsg` in wire
-  order using `resolved`, then fire `cb.finish_request(ctx)` and drop
-  the entry.
+  order using `resolved`, then fire `parent.on_request_finished(ctx)`
+  and drop the entry.
 
 #### Cleanup
 
-- `finish(kv_request_id)` (PD path) — drops every parked lookup
-  matching `kv_request_id` and fires `finish_request(ctx)` for each.
-  In symmetric P2P this rarely fires: the producer has no local
-  request lifecycle for the consumer's id, so the `on_request_finished`
-  path that calls into `session.finish_request` is not exercised on
-  this side.
-- `close()` — best-effort `finish_request` (under `contextlib.suppress`)
-  for every remaining lookup, then clears `_inbound_lookups`. Wedged
-  callbacks can't block teardown.
+Closing a lookup outside a serve window cannot call `parent`, so both
+paths below queue the ctx for the next `serve_external_requests` to
+release via `parent.on_request_finished`:
+
+- `finish(kv_request_id)` / `on_fetch` (via `_finish_inbound_lookups`) —
+  pops every parked lookup matching `kv_request_id`, drops any
+  still-unprocessed raw entry for it, and appends each popped
+  `lookup.ctx` to `_finished_lookup_ctxs`. In symmetric P2P `finish`
+  rarely fires: the producer has no local request lifecycle for the
+  consumer's id.
+- `close()` — returns `(failed_store_job_ids, orphan_ctxs)` where
+  `orphan_ctxs` is every remaining parked/queued ctx, then clears the
+  lookup collections. The manager stashes them in
+  `_orphan_finish_ctxs` and flushes them at the top of its next
+  `serve_external_requests`.
 
 #### Pin lifetime
 
-The pin created by `cb.create_store_job` covers the full lookup → fetch
-→ transfer → completion journey, which spans multiple engine steps:
+The pin created by `parent.create_store_job` covers the full lookup →
+fetch → transfer → completion journey, which spans multiple engine steps:
 
 ```text
-cb.create_store_job   ─►  JobMetadata registered, ref_cnt += 1 on each block
+create_store_job      ─►  JobMetadata registered, ref_cnt += 1 on each block
 add_stored_blocks     ─►  _outbound[req].available populated; _store_jobs[job_id] tracked
 on_fetch              ─►  add_fetch_demand matches available, NIXL write_blocks issued
 collect_results       ─►  StoreResult emitted on transfer completion
