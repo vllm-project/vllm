@@ -809,6 +809,11 @@ _MULTIMODAL_EXAMPLE_MODELS = {
         min_transformers_version="4.57",
         is_available_online=False,
     ),
+    "Cosmos3EdgeForConditionCausalLM": _HfExamplesInfo(
+        "nvidia/Cosmos3-Edge-Reasoner",
+        max_model_len=4096,
+        is_available_online=False,
+    ),
     "DeepseekVLV2ForCausalLM": _HfExamplesInfo(
         "deepseek-ai/deepseek-vl2-tiny",
         extras={"fork": "Isotr0py/deepseek-vl2-tiny"},
