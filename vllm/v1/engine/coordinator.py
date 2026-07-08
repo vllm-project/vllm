@@ -9,6 +9,7 @@ import weakref
 import msgspec.msgpack
 import zmq
 
+import vllm.envs as envs
 from vllm.config import ParallelConfig
 from vllm.logger import init_logger
 from vllm.utils.network_utils import make_zmq_socket
@@ -146,7 +147,7 @@ class DPCoordinatorProc:
     def __init__(
         self,
         engine_count: int,
-        min_stats_update_interval_ms: int = 100,
+        min_stats_update_interval_ms: int | None = None,
         enable_wave_coordination: bool = True,
     ):
         set_process_title("DPCoordinator")
@@ -154,7 +155,9 @@ class DPCoordinatorProc:
 
         self.engines = [EngineState() for _ in range(engine_count)]
 
-        self.stats_update_interval_ms = min_stats_update_interval_ms
+        self.stats_update_interval_ms = (
+            min_stats_update_interval_ms or envs.VLLM_DP_COORDINATOR_UPDATE_INTERVAL_MS
+        )
         self.enable_wave_coordination = enable_wave_coordination
 
     @staticmethod
@@ -164,7 +167,7 @@ class DPCoordinatorProc:
         back_output_address: str,
         back_publish_address: str,
         zmq_addr_pipe=None,
-        min_stats_update_interval_ms: int = 100,
+        min_stats_update_interval_ms: int | None = None,
         enable_wave_coordination: bool = True,
     ):
         coordinator = DPCoordinatorProc(

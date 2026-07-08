@@ -168,6 +168,7 @@ if TYPE_CHECKING:
     VLLM_DP_MASTER_IP: str = ""
     VLLM_DP_MASTER_PORT: int = 0
     VLLM_RANDOMIZE_DP_DUMMY_INPUTS: bool = False
+    VLLM_DP_COORDINATOR_UPDATE_INTERVAL_MS: int = 100
     VLLM_RAY_DP_PACK_STRATEGY: Literal["strict", "fill", "span"] = "strict"
     VLLM_RAY_DP_PLACEMENT_NODE_IPS: str = ""
     VLLM_RAY_EXTRA_ENV_VAR_PREFIXES_TO_COPY: str = ""
@@ -1373,6 +1374,10 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Randomize inputs during dummy runs when using Data Parallel
     "VLLM_RANDOMIZE_DP_DUMMY_INPUTS": lambda: (
         os.environ.get("VLLM_RANDOMIZE_DP_DUMMY_INPUTS", "0") == "1"
+    ),
+    # Minimum interval for the DP coordinator's periodic state updates
+    "VLLM_DP_COORDINATOR_UPDATE_INTERVAL_MS": lambda: int(
+        os.getenv("VLLM_DP_COORDINATOR_UPDATE_INTERVAL_MS", "100")
     ),
     # Strategy to pack the data parallel ranks for Ray.
     # Available options:
