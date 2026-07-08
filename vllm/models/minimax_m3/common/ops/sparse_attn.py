@@ -44,7 +44,6 @@ _FP8_DTYPES = (
     {
         "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
         "BLOCK_SIZE_H": lambda args: triton.next_power_of_2(args["gqa_group_size"]),
-        "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["max_topk"]),
         "BLOCK_SIZE_QH": lambda args: args["BLOCK_SIZE_Q"]
         * triton.next_power_of_2(args["gqa_group_size"]),
     }
@@ -84,7 +83,6 @@ def _gqa_sparse_fwd_kernel(
     BLOCK_SIZE_K: tl.constexpr,  # == SPARSE_BLOCK_SIZE (128)
     BLOCK_SIZE_D: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr,
-    BLOCK_SIZE_T: tl.constexpr,
     BLOCK_SIZE_QH: tl.constexpr,
     USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
 ):
@@ -109,9 +107,10 @@ def _gqa_sparse_fwd_kernel(
     for j in range(real_q_loop):
         pid_q_j = pid_q * num_q_loop + j
         t_ptr_j = t_ptr + (q_block_start + pid_q_j) * stride_tn + pid_kh * stride_th
-        off_t = tl.arange(0, BLOCK_SIZE_T)
-        topk_idx = tl.load(t_ptr_j + off_t * stride_tk, mask=off_t < max_topk, other=-1)
-        real_topk = tl.sum((topk_idx >= 0).to(tl.int32), axis=0)
+        # Valid block count from seq position (no sentinel): block_size_q == 1.
+        q_abs = prefix_len + pid_q_j * BLOCK_SIZE_Q
+        valid_blocks = (q_abs + BLOCK_SIZE_K) // BLOCK_SIZE_K
+        real_topk = tl.minimum(max_topk, valid_blocks)
         q_ptrs = tl.make_block_ptr(
             base=q_ptr + q_start * stride_qn + pid_h * stride_qh,
             shape=(q_len, gqa_group_size, head_dim),
@@ -200,7 +199,6 @@ def _gqa_sparse_fwd_kernel(
             16, triton.next_power_of_2(args["gqa_group_size"])
         ),
         "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
-        "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["max_topk"]),
     }
 )
 @triton.jit(do_not_specialize=["decode_query_len"])
@@ -240,7 +238,6 @@ def _gqa_sparse_decode_kernel(
     NUM_TOPK_CHUNKS: tl.constexpr,
     BLOCK_SIZE_H: tl.constexpr,
     BLOCK_SIZE_D: tl.constexpr,
-    BLOCK_SIZE_T: tl.constexpr,
     USE_FP8: tl.constexpr,  # fp8 KV cache: dequantize K/V to q.dtype on load
     USE_PDL: tl.constexpr,
 ):
@@ -265,11 +262,10 @@ def _gqa_sparse_decode_kernel(
     # attention range instead of letting padded rows produce negative lengths.
     kv_len = tl.maximum(query_pos + 1, 0)
 
-    # number of valid (non-padded) selected blocks for this query token
-    off_t = tl.arange(0, BLOCK_SIZE_T)
+    # Valid block count from seq_len (no sentinel): min(topk, cdiv(kv_len, blk)).
     idx_base = t_ptr + pid_kh * stride_th + pid_b * stride_tn
-    topk_idx = tl.load(idx_base + off_t * stride_tk, mask=off_t < max_topk, other=-1)
-    real_topk = tl.sum((topk_idx >= 0).to(tl.int32), axis=0)
+    num_blocks = (kv_len + BLOCK_SIZE_K - 1) // BLOCK_SIZE_K
+    real_topk = tl.minimum(max_topk, num_blocks)
     chunk_end_topk = tl.minimum(chunk_end_compiletime, real_topk)
 
     off_n = tl.arange(0, BLOCK_SIZE_K)
