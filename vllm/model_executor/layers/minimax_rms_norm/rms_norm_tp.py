@@ -2,7 +2,6 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 
 from functools import partial
-from typing import TYPE_CHECKING
 
 import torch
 from torch import nn
@@ -19,11 +18,6 @@ from vllm.model_executor.custom_op import CustomOp
 from vllm.triton_utils import HAS_TRITON, tl, triton
 from vllm.utils.torch_utils import direct_register_custom_op
 
-if TYPE_CHECKING:
-    from vllm.distributed.device_communicators.aiter_custom_all_reduce import (
-        AiterCustomAllreduce,
-    )
-
 logger = init_logger(__name__)
 
 # Max number of tokens supported by the Lamport fused allreduce+RMSNorm kernel.
@@ -31,16 +25,6 @@ logger = init_logger(__name__)
 MINIMAX_QK_NORM_MAX_TOKEN_NUM = 2048
 
 _MINIMAX_FUSED_AR_RMS_QK = getattr(torch.ops._C, "minimax_allreduce_rms_qk", None)
-
-
-def _get_aiter_custom_all_reduce() -> "AiterCustomAllreduce | None":
-    """Return the active AITER custom-allreduce, or None if it is unavailable."""
-    if not rocm_aiter_ops.is_custom_all_reduce_enabled():
-        return None
-    aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
-    if aiter_ar is None or getattr(aiter_ar, "disabled", False):
-        return None
-    return aiter_ar
 
 
 def _all_reduce_variance(var: torch.Tensor) -> torch.Tensor:
@@ -257,7 +241,7 @@ def _minimax_qk_norm_fusion(
         pack_size = 16 // qkv.element_size()
         warp_work_size = 32 * pack_size
         if q_size % warp_work_size == 0 and kv_size % warp_work_size == 0:
-            aiter_ar = _get_aiter_custom_all_reduce()
+            aiter_ar = rocm_aiter_ops.get_aiter_allreduce()
             if aiter_ar is not None:
                 try:
                     q_out, k_out, _ = aiter_ar.aiter_ca.custom_fused_qknorm_ar(
