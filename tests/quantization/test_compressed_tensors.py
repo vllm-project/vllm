@@ -33,6 +33,7 @@ from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tenso
     CompressedTensorsW8A8Int8,
     CompressedTensorsW8A8Mxfp8,
     CompressedTensorsW8A16Fp8,
+    CompressedTensorsWNA8O8Int,
     CompressedTensorsWNA16,
 )
 from vllm.model_executor.layers.quantization.compressed_tensors.compressed_tensors_moe.compressed_tensors_moe_w8a8_fp8 import (  # noqa: E501
@@ -702,6 +703,201 @@ def test_get_scheme_dict_returns_none_on_no_match():
         layer_name="model.layers.0.unmatched_layer",
     )
     assert result is None
+
+
+# Test constants for activation quantization
+_STATIC_SYM_INT8_ACT = QuantizationArgs(
+    num_bits=8,
+    type=QuantizationType.INT,
+    strategy=QuantizationStrategy.TENSOR.value,
+    symmetric=True,
+    dynamic=False,
+)
+
+_STATIC_ASYM_INT8_ACT = QuantizationArgs(
+    num_bits=8,
+    type=QuantizationType.INT,
+    strategy=QuantizationStrategy.TENSOR.value,
+    symmetric=False,
+    dynamic=False,
+)
+
+_DYNAMIC_INT8_ACT = QuantizationArgs(
+    num_bits=8,
+    type=QuantizationType.INT,
+    strategy=QuantizationStrategy.TOKEN.value,
+    symmetric=True,
+    dynamic=True,
+)
+
+
+@pytest.mark.parametrize(
+    "weight_bits,weight_strategy,input_act,output_act,format,expected_scheme",
+    [
+        # W8A8 int-quantized -> W8A8Int8 (regression test for #46389)
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            _STATIC_SYM_INT8_ACT,
+            None,
+            "int-quantized",
+            CompressedTensorsW8A8Int8,
+            id="w8a8_channel_static_sym",
+        ),
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            _STATIC_ASYM_INT8_ACT,
+            None,
+            "int-quantized",
+            CompressedTensorsW8A8Int8,
+            id="w8a8_channel_static_asym",
+        ),
+        pytest.param(
+            8,
+            QuantizationStrategy.TENSOR.value,
+            _STATIC_SYM_INT8_ACT,
+            None,
+            "int-quantized",
+            CompressedTensorsW8A8Int8,
+            id="w8a8_tensor_static",
+        ),
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            _DYNAMIC_INT8_ACT,
+            None,
+            "int-quantized",
+            CompressedTensorsW8A8Int8,
+            id="w8a8_channel_dynamic",
+        ),
+        # W8A8O8 int-quantized -> WNA8O8Int (both input and output)
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            _STATIC_SYM_INT8_ACT,
+            _STATIC_SYM_INT8_ACT,
+            "int-quantized",
+            CompressedTensorsWNA8O8Int,
+            id="w8a8o8_channel",
+        ),
+        pytest.param(
+            4,
+            QuantizationStrategy.GROUP.value,
+            _STATIC_SYM_INT8_ACT,
+            _STATIC_SYM_INT8_ACT,
+            "int-quantized",
+            CompressedTensorsWNA8O8Int,
+            id="w4a8o8_group",
+        ),
+        # Weight-only pack-quantized -> WNA16
+        pytest.param(
+            8,
+            QuantizationStrategy.CHANNEL.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w8_pack",
+        ),
+        pytest.param(
+            4,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w4_pack",
+        ),
+        pytest.param(
+            2,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w2_pack",
+        ),
+        pytest.param(
+            3,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w3_pack",
+        ),
+        pytest.param(
+            5,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w5_pack",
+        ),
+        pytest.param(
+            6,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w6_pack",
+        ),
+        pytest.param(
+            7,
+            QuantizationStrategy.GROUP.value,
+            None,
+            None,
+            "pack-quantized",
+            CompressedTensorsWNA16,
+            id="w7_pack",
+        ),
+    ],
+)
+def test_scheme_selection(
+    weight_bits, weight_strategy, input_act, output_act, format, expected_scheme
+):
+    """Test that _get_scheme_from_parts selects the correct scheme.
+
+    This parametrized test verifies scheme selection for various combinations
+    of weight bits, quantization strategies, input/output activations, and
+    compression formats.
+
+    Key regression test: W8A8 int-quantized models with channel-wise weights
+    should use W8A8Int8 (true int8 gemm), not WNA8O8Int (fake-quant).
+    WNA8O8Int should only match when BOTH input and output activations are
+    present.
+    """
+    weight_quant = QuantizationArgs(
+        num_bits=weight_bits,
+        type=QuantizationType.INT,
+        strategy=weight_strategy,
+        symmetric=True,
+        dynamic=False,
+        group_size=128 if weight_strategy == QuantizationStrategy.GROUP.value else None,
+    )
+
+    config = CompressedTensorsConfig(
+        target_scheme_map={},
+        ignore=[],
+        quant_format=format,
+    )
+
+    scheme = config._get_scheme_from_parts(
+        weight_quant=weight_quant,
+        input_quant=input_act,
+        output_quant=output_act,
+        format=format,
+    )
+
+    assert isinstance(scheme, expected_scheme), (
+        f"Expected {expected_scheme.__name__} for "
+        f"W{weight_bits} {weight_strategy} + "
+        f"input_act={input_act} + output_act={output_act} + "
+        f"format={format}, got {type(scheme).__name__}"
+    )
 
 
 @pytest.mark.skipif(
