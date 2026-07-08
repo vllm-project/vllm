@@ -42,6 +42,23 @@ if os.getenv("VLLM_TEST_MODEL"):
         if flash_attn_supports_mla():
             BACKENDS.append("FLASH_ATTN_MLA")
 
+IS_HETERO_HEAD_SIZE = False  # default model (Qwen) is homogeneous
+
+# Check if head size of models is heterogeneous. Some tests only run
+# on heterogeneous head size models as when no backend selected, attention
+# backends mix.
+if os.getenv("VLLM_TEST_MODEL"):
+    config = get_config(TEST_MODEL, trust_remote_code=False)
+    hf_text_config = config.get_text_config()
+    head_dim = getattr(hf_text_config, "head_dim", None)
+    global_head_dim = getattr(hf_text_config, "global_head_dim", None)
+
+    IS_HETERO_HEAD_SIZE = (
+        head_dim is not None
+        and global_head_dim is not None
+        and head_dim != global_head_dim
+    )
+
 
 def _random_prompt(min_words: int = 1024, max_words: int = 1024 * 2) -> str:
     # Generate more realistic prompts that will actually produce varied tokens
