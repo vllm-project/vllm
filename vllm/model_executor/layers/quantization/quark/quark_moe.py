@@ -1509,14 +1509,31 @@ class QuarkNvfp4MoEMethod(QuarkMoEMethod):
         Convert NVFP4 MoE weights into kernel format and setup the kernel.
         """
 
-        if not torch.allclose(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
-        ):
-            raise ValueError("Different global scales for w1 and w3 is not supported.")
+        w1_weight_scale_2 = layer.w13_weight_scale_2[:, 0]
+        w3_weight_scale_2 = layer.w13_weight_scale_2[:, 1]
+        if not torch.allclose(w1_weight_scale_2, w3_weight_scale_2):
+            max_abs_diff = torch.max(
+                torch.abs(w1_weight_scale_2 - w3_weight_scale_2)
+            ).item()
+            max_scale = torch.max(
+                torch.maximum(
+                    torch.abs(w1_weight_scale_2), torch.abs(w3_weight_scale_2)
+                )
+            ).item()
+            max_rel_diff = max_abs_diff / max(
+                max_scale, torch.finfo(torch.float32).tiny
+            )
+            logger.warning_once(
+                "Different NVFP4 global scales for MoE w1 and w3 were found. "
+                "Using the maximum per expert for fused w13. "
+                "max_abs_diff=%s, max_rel_diff=%s",
+                max_abs_diff,
+                max_rel_diff,
+            )
 
         # Use a single gscale for w13
         w13_weight_scale_2 = torch.maximum(
-            layer.w13_weight_scale_2[:, 0], layer.w13_weight_scale_2[:, 1]
+            w1_weight_scale_2, w3_weight_scale_2
         ).contiguous()
 
         w2_weight_scale_2 = layer.w2_weight_scale_2

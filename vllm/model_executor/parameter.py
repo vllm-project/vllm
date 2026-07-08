@@ -146,11 +146,18 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         return self._output_dim
 
     def load_column_parallel_weight(self, loaded_weight: torch.Tensor):
+        if self.tp_size == 1 and self.data.shape == loaded_weight.shape:
+            self.data.copy_(loaded_weight)
+            return
         shard_size = self.data.shape[self.output_dim]
         loaded_weight = loaded_weight.narrow(
             self.output_dim, self.tp_rank * shard_size, shard_size
         )
-        assert self.data.shape == loaded_weight.shape
+        assert self.data.shape == loaded_weight.shape, (
+            f"Column-parallel weight shape mismatch: param={self.data.shape}, "
+            f"loaded={loaded_weight.shape}, tp_rank={self.tp_rank}, "
+            f"tp_size={self.tp_size}, output_dim={self.output_dim}"
+        )
         self.data.copy_(loaded_weight)
 
     def load_merged_column_weight(self, loaded_weight: torch.Tensor, **kwargs):
@@ -169,10 +176,18 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data = self.data
 
         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
+        if self.tp_size == 1 and param_data.shape == loaded_weight.shape:
+            param_data.copy_(loaded_weight)
+            return
         loaded_weight = loaded_weight.narrow(
             self.output_dim, self.tp_rank * shard_size, shard_size
         )
-        assert param_data.shape == loaded_weight.shape
+        assert param_data.shape == loaded_weight.shape, (
+            f"Merged-column weight shape mismatch: param={param_data.shape}, "
+            f"loaded={loaded_weight.shape}, tp_rank={self.tp_rank}, "
+            f"tp_size={self.tp_size}, output_dim={self.output_dim}, "
+            f"shard_offset={shard_offset}, shard_size={shard_size}"
+        )
         param_data.copy_(loaded_weight)
 
     def load_qkv_weight(self, loaded_weight: torch.Tensor, **kwargs):
@@ -193,11 +208,20 @@ class _ColumnvLLMParameter(BasevLLMParameter):
         param_data = self.data
         shard_id_int = self.tp_rank if shard_id == "q" else self.tp_rank // num_heads
         param_data = param_data.narrow(self.output_dim, shard_offset, shard_size)
+        if self.tp_size == 1 and param_data.shape == loaded_weight.shape:
+            param_data.copy_(loaded_weight)
+            return
         loaded_weight = loaded_weight.narrow(
             self.output_dim, shard_id_int * shard_size, shard_size
         )
 
-        assert param_data.shape == loaded_weight.shape
+        assert param_data.shape == loaded_weight.shape, (
+            f"QKV weight shape mismatch: param={param_data.shape}, "
+            f"loaded={loaded_weight.shape}, tp_rank={self.tp_rank}, "
+            f"tp_size={self.tp_size}, output_dim={self.output_dim}, "
+            f"shard_id={shard_id}, shard_offset={shard_offset}, "
+            f"shard_size={shard_size}, num_heads={num_heads}"
+        )
         param_data.copy_(loaded_weight)
 
 
@@ -218,6 +242,9 @@ class RowvLLMParameter(BasevLLMParameter):
         return self._input_dim
 
     def load_row_parallel_weight(self, loaded_weight: torch.Tensor):
+        if self.tp_size == 1 and self.data.shape == loaded_weight.shape:
+            self.data.copy_(loaded_weight)
+            return
         shard_size = self.data.shape[self.input_dim]
         loaded_weight = loaded_weight.narrow(
             self.input_dim, self.tp_rank * shard_size, shard_size
@@ -226,7 +253,11 @@ class RowvLLMParameter(BasevLLMParameter):
         if len(loaded_weight.shape) == 0:
             loaded_weight = loaded_weight.reshape(1)
 
-        assert self.data.shape == loaded_weight.shape
+        assert self.data.shape == loaded_weight.shape, (
+            f"Row-parallel weight shape mismatch: param={self.data.shape}, "
+            f"loaded={loaded_weight.shape}, tp_rank={self.tp_rank}, "
+            f"tp_size={self.tp_size}, input_dim={self.input_dim}"
+        )
         self.data.copy_(loaded_weight)
 
 

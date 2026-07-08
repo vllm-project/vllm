@@ -616,6 +616,12 @@ class DeepseekV4Model(nn.Module):
         params_dict = dict(self.named_parameters())
         loaded_params: set[str] = set()
 
+        def _resolve_param_name(name: str) -> str:
+            inv_name = f"{name}_inv"
+            if name not in params_dict and inv_name in params_dict:
+                return inv_name
+            return name
+
         # TP for attention
         tp_size = get_tensor_model_parallel_world_size()
         tp_rank = get_tensor_model_parallel_rank()
@@ -638,10 +644,11 @@ class DeepseekV4Model(nn.Module):
 
                 if is_pp_missing_parameter(name, self):
                     break
-                param = params_dict[name]
+                param_name = _resolve_param_name(name)
+                param = params_dict[param_name]
                 weight_loader = param.weight_loader
                 weight_loader(param, loaded_weight, shard_id)
-                loaded_params.add(name)
+                loaded_params.add(param_name)
                 break
             else:
                 if ".experts." in name:
@@ -692,12 +699,13 @@ class DeepseekV4Model(nn.Module):
                 else:
                     if is_pp_missing_parameter(name, self):
                         continue
-                    param = params_dict[name]
+                    param_name = _resolve_param_name(name)
+                    param = params_dict[param_name]
                     weight_loader = getattr(
                         param, "weight_loader", default_weight_loader
                     )
                     weight_loader(param, loaded_weight)
-                    loaded_params.add(name)
+                    loaded_params.add(param_name)
                     continue
 
         return loaded_params
@@ -744,6 +752,7 @@ def _make_deepseek_v4_weights_mapper(expert_dtype: str) -> WeightsMapper:
             "head.weight": "lm_head.weight",
             "embed.weight": "embed_tokens.weight",
             ".ffn.gate.bias": ".ffn.gate.e_score_correction_bias",
+            ".input_scale": ".input_scale_2",
         },
         orig_to_new_substr={
             ".shared_experts.w2": ".shared_experts.down_proj",
