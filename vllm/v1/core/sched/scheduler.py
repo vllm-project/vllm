@@ -251,6 +251,7 @@ class Scheduler(SchedulerInterface):
         # Create the KV cache manager.
         if hash_block_size is None:
             hash_block_size = block_size
+        self.hash_block_size = hash_block_size
         self.kv_cache_manager = KVCacheManager(
             kv_cache_config=kv_cache_config,
             max_model_len=self.max_model_len,
@@ -288,6 +289,13 @@ class Scheduler(SchedulerInterface):
         self.needs_kv_cache_zeroing = kv_cache_config.needs_kv_cache_zeroing
         self.need_mamba_block_aligned_split = (
             self.has_mamba_layers and self.cache_config.mamba_cache_mode == "align"
+        )
+        # A finer prefix_match_unit is configured: a mamba partial tail entry
+        # can only be registered by a step ending exactly at the prompt's last
+        # hash boundary, so the split adds that stop.
+        self.mamba_partial_cache_hit = (
+            self.need_mamba_block_aligned_split
+            and self.hash_block_size < self.block_size
         )
 
         # Counts of non-empty steps scheduled / processed. update_from_output
@@ -360,9 +368,23 @@ class Scheduler(SchedulerInterface):
             if self.use_eagle:
                 last_cache_position = max(last_cache_position - block_size, 0)
             num_computed_tokens_after_sched = num_computed_tokens + num_new_tokens
-            if num_computed_tokens_after_sched < last_cache_position:
-                # align to block_size
-                num_new_tokens = num_new_tokens // block_size * block_size
+            next_boundary = (num_computed_tokens // block_size + 1) * block_size
+            if (
+                num_computed_tokens % block_size != 0
+                and next_boundary <= last_cache_position
+                and num_computed_tokens_after_sched > next_boundary
+            ):
+                # Resumed mid-block (partial hash hit): stop the first chunk
+                # at the next block boundary so chunk ends re-align to blocks
+                # and the boundary state is materialized before running past.
+                num_new_tokens = next_boundary - num_computed_tokens
+            elif num_computed_tokens_after_sched < last_cache_position:
+                # Align the chunk END (not its length) to block_size;
+                # identical to flooring the length when the start is
+                # block-aligned. May yield 0 (insufficient budget to reach
+                # the next boundary); the caller then skips the request.
+                aligned_end = num_computed_tokens_after_sched // block_size * block_size
+                num_new_tokens = max(aligned_end - num_computed_tokens, 0)
             elif (
                 num_computed_tokens
                 < last_cache_position
@@ -370,9 +392,23 @@ class Scheduler(SchedulerInterface):
             ):
                 # force to cache the last chunk
                 num_new_tokens = last_cache_position - num_computed_tokens
-            else:
-                # prefill the last few tokens
-                pass
+            elif self.mamba_partial_cache_hit:
+                # Prefill of the final partial block: stop once at the
+                # prompt's last hash boundary so the mamba partial tail entry
+                # can be registered.
+                tail_boundary = (
+                    request.num_prompt_tokens
+                    // self.hash_block_size
+                    * self.hash_block_size
+                )
+                if (
+                    num_computed_tokens
+                    < tail_boundary
+                    < num_computed_tokens_after_sched
+                    and tail_boundary < request.num_prompt_tokens
+                    and tail_boundary > last_cache_position
+                ):
+                    num_new_tokens = tail_boundary - num_computed_tokens
 
             # Marconi cache admission optimization:
             # cache common prefixes by scheduling num_new_tokens = common prefix length

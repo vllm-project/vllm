@@ -1068,7 +1068,10 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     # Next, validate scheduler logic for num_uncached_common_prefix_tokens > 0
     # Create minimal mock with just the needed attributes
     mock = SimpleNamespace(
-        cache_config=SimpleNamespace(block_size=block_size), use_eagle=False
+        cache_config=SimpleNamespace(block_size=block_size),
+        use_eagle=False,
+        hash_block_size=block_size,
+        mamba_partial_tail_stop=False,
     )
     num_new_tokens_adjusted = Scheduler._mamba_block_aligned_split(
         self=mock,
@@ -1083,6 +1086,50 @@ def test_hybrid_cache_mamba_align_shared_prefix_detection():
     manager.free(req_0)
     manager.free(req_1)
     manager.free(req_2)
+
+
+def test_mamba_align_split_partial_tail_schedule():
+    """Chunk ends with partial hits on: block-aligned chunks, one extra stop
+    at the prompt's last hash boundary (registering the partial tail), then
+    the remaining tokens. block=512, hash=32, prompt=10000, budget=8192:
+    0 -> 8192 -> 9728 -> 9984 -> 10000."""
+    block_size = 512
+    hash_block_size = 32
+    mock = SimpleNamespace(
+        cache_config=SimpleNamespace(block_size=block_size),
+        use_eagle=False,
+        hash_block_size=hash_block_size,
+        mamba_partial_tail_stop=True,
+    )
+    split = Scheduler._mamba_block_aligned_split
+
+    req = make_request("0", [0] * 10000, hash_block_size, sha256)
+    req.num_computed_tokens = 0
+    assert split(self=mock, request=req, num_new_tokens=8192) == 8192
+    req.num_computed_tokens = 8192
+    # Stop at the last block boundary (9728).
+    assert split(self=mock, request=req, num_new_tokens=1808) == 1536
+    req.num_computed_tokens = 9728
+    # Extra stop at the prompt's last hash boundary (9984).
+    assert split(self=mock, request=req, num_new_tokens=272) == 256
+    req.num_computed_tokens = 9984
+    # Final 16 tokens run unchanged (no mid-block-resume stop: the next
+    # block boundary is past the last block boundary).
+    assert split(self=mock, request=req, num_new_tokens=16) == 16
+
+    # Partial hits off: no extra stop, the tail runs in one chunk.
+    mock.mamba_partial_tail_stop = False
+    req.num_computed_tokens = 9728
+    assert split(self=mock, request=req, num_new_tokens=272) == 272
+    mock.mamba_partial_tail_stop = True
+
+    # A request resumed mid-block (partial hash hit at 9984): the first chunk
+    # stops at the next block boundary (10240), later chunk ends re-align.
+    req2 = make_request("1", [0] * 12000, hash_block_size, sha256)
+    req2.num_computed_tokens = 9984
+    assert split(self=mock, request=req2, num_new_tokens=2016) == 256
+    req2.num_computed_tokens = 10240
+    assert split(self=mock, request=req2, num_new_tokens=1000) == 512
 
 
 def test_hybrid_model_mamba_align_with_dynamic_draft_tokens():

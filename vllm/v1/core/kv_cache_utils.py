@@ -621,11 +621,11 @@ def resolve_kv_cache_block_sizes(
       group's block size — context parallelism is not supported here.
     - ``hash_block_size`` is the granularity at which ``Request.block_hashes``
       is computed. Single group: equals scheduler block size. Multiple groups:
-      ``cache_config.hash_block_size`` override if set, else the GCD of group
-      block sizes; every group's block size must be divisible by it. Returns
-      the scheduler block size (i.e. disables finer hashing) if block hashing
-      is inactive or a mamba group's block size diverges from the cache
-      block size (mamba_cache_mode != "align").
+      ``cache_config.prefix_match_unit`` override if set, else the GCD of
+      group block sizes; every group's block size must be divisible by it.
+      Returns the scheduler block size (i.e. disables finer hashing) if block
+      hashing is inactive or a mamba group's block size diverges from the
+      cache block size (mamba_cache_mode != "align").
     """
     cache_config = vllm_config.cache_config
     dcp = vllm_config.parallel_config.decode_context_parallel_size
@@ -662,14 +662,14 @@ def resolve_kv_cache_block_sizes(
     ):
         return scheduler_block_size, scheduler_block_size
 
-    requested = cache_config.hash_block_size
+    requested = cache_config.prefix_match_unit
     hash_block_size = (
         requested if requested is not None else math.gcd(*group_block_sizes)
     )
     if any(bs % hash_block_size != 0 for bs in group_block_sizes):
         raise ValueError(
-            f"Invalid hash_block_size={hash_block_size}; all KV cache group "
-            f"block sizes must be divisible by hash_block_size. "
+            f"Invalid prefix_match_unit={hash_block_size}; all KV cache group "
+            f"block sizes must be divisible by prefix_match_unit. "
             f"Got group block sizes={group_block_sizes}."
         )
     return scheduler_block_size, hash_block_size

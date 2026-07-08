@@ -52,17 +52,15 @@ class CacheConfig:
     """Whether block_size was explicitly provided. Derived automatically."""
     user_specified_mamba_block_size: bool = field(default=False, init=False)
     """Whether mamba_block_size was explicitly provided. Derived automatically."""
-    hash_block_size: int | None = Field(default=None, gt=0)
-    """Block size (in tokens) used for computing Request's block_hashes.
+    prefix_match_unit: int | None = Field(default=None, gt=0)
+    """The finest token boundary (in tokens) a prefix-cache hit can land on.
 
-    This can be set to a finer granularity than the physical KV cache block
-    sizes (e.g. 8) as long as every KV cache group's `block_size` is divisible
-    by it. This enables prefix-caching keys to be computed at the finest common
-    granularity and then merged for larger physical block sizes.
-
-    This config is not static default. If left unspecified, vLLM will choose a
-    default based on the resolved KV cache groups (typically the smallest KV
-    cache block size when there are multiple groups).
+    Prefix-cache keys are computed every `prefix_match_unit` tokens. It can
+    be set finer than the physical KV cache block sizes (e.g. 32 vs a
+    1024-token hybrid-model block) as long as every KV cache group's
+    `block_size` is divisible by it, enabling cache hits at boundaries
+    inside a physical block. It controls matching granularity only, not how
+    often states are stored.
     """
     gpu_memory_utilization: float = Field(default=0.92, gt=0, le=1)
     """The fraction of GPU memory to be used for the model executor, which can
@@ -204,7 +202,7 @@ class CacheConfig:
             "enable_prefix_caching",
             "prefix_caching_hash_algo",
             # Prefix-caching implementation detail (doesn't affect compiled graph).
-            "hash_block_size",
+            "prefix_match_unit",
             "mamba_page_size_padded",
             "user_specified_block_size",
             "user_specified_mamba_block_size",
