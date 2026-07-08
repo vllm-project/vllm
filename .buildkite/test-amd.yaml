@@ -380,6 +380,7 @@ steps:
   - tests/test_outputs.py
   - tests/test_pooling_params.py
   - tests/test_ray_env.py
+  - tests/test_sampling_params.py
   - tests/multimodal
   - tests/renderers
   - tests/standalone_tests/lazy_imports.py
@@ -395,6 +396,7 @@ steps:
   - pytest -v -s test_outputs.py
   - pytest -v -s test_pooling_params.py
   - pytest -v -s test_ray_env.py
+  - pytest -v -s test_sampling_params.py
   - pytest -v -s -m 'cpu_test' multimodal
   - pytest -v -s renderers
   - pytest -v -s tokenizers_
@@ -1936,6 +1938,11 @@ steps:
   - pytest -v -s plugins_tests/test_stats_logger_plugins.py
   - pip uninstall dummy_stat_logger -y
   # END: `stat_logger` plugins test
+  # BEGIN: `endpoint` plugins test
+  - pip install -e ./plugins/vllm_add_dummy_endpoint_plugin
+  - pytest -v -s plugins_tests/test_endpoint_plugins.py
+  - pip uninstall vllm_add_dummy_endpoint_plugin -y
+  # END: `endpoint` plugins test
   # BEGIN: other tests
   - pytest -v -s plugins_tests/test_scheduler_plugins.py
   - pip install -e ./plugins/vllm_add_dummy_model

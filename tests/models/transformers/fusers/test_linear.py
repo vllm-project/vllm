@@ -258,7 +258,8 @@ def _apply_qkv_fuser_with_stubs(module: nn.Module, fuser: QKVFuser):
         merged.weight.copy_(torch.cat([q.weight, k.weight, v.weight], dim=0))
         if q.bias is not None:
             merged.bias.copy_(torch.cat([q.bias, k.bias, v.bias], dim=0))
-    merged.split_sizes = [q.out_features, k.out_features, v.out_features]
+    merged.output_sizes = [q.out_features, k.out_features, v.out_features]
+    merged.tp_size = 1
     setattr(module, fuser.merged_name, merged)
     for name in (fuser.q_name, fuser.k_name, fuser.v_name):
         delattr(module, name)
@@ -332,7 +333,8 @@ def test_detects_and_rewrites_qkv(attn_cls, kv_heads):
     # original semantics (branches, kwargs, attribute reads)
     code = fuser.fused_forward.__code__
     names = code.co_names
-    assert "qkv_proj" in names and "split_sizes" in names and "o_proj" in names
+    assert "qkv_proj" in names and "output_sizes" in names and "o_proj" in names
+    assert "tp_size" in names
     assert not {"q_proj", "k_proj", "v_proj"} & set(names)
     if attn_cls is FakeAttention:
         assert "update" in names  # the cache branch survives
