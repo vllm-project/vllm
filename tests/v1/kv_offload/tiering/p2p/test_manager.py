@@ -12,6 +12,7 @@ import time
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from vllm.v1.kv_offload.base import LookupResult, ReqContext, ScheduleEndContext
 from vllm.v1.kv_offload.tiering.base import JobMetadata, JobResult
@@ -1384,8 +1385,17 @@ class TestBindHostPortDefaults:
     """host/port fall back to VLLM_P2P_SIDE_CHANNEL_* when not in config."""
 
     @staticmethod
-    def _construct(monkeypatch, dp_index=0, **kwargs) -> P2PSecondaryTierManager:
-        """Build a manager with the transports/file-mapper stubbed out."""
+    def _construct(
+        monkeypatch, dp_index=0, node_ip="203.0.113.9", **kwargs
+    ) -> P2PSecondaryTierManager:
+        """Build a manager with the transports/file-mapper stubbed out.
+
+        ``get_ip`` is stubbed to ``node_ip`` so wildcard/loopback bind hosts
+        resolve deterministically. The transport constructor args are
+        recorded on ``mgr._test_calls`` so tests can assert the bind host
+        stays decoupled from the advertised identity.
+        """
+        monkeypatch.setattr(manager_module, "get_ip", lambda: node_ip)
         monkeypatch.setattr(
             manager_module,
             "FileMapper",
@@ -1395,11 +1405,20 @@ class TestBindHostPortDefaults:
                 )
             ),
         )
+        calls: dict = {}
         monkeypatch.setattr(
-            manager_module, "NixlTransport", lambda *a, **k: SimpleNamespace()
+            manager_module,
+            "NixlTransport",
+            lambda local_id, *a, **k: calls.update(nixl_name=local_id)
+            or SimpleNamespace(),
         )
         monkeypatch.setattr(
-            manager_module, "ZmqTransport", lambda *a, **k: SimpleNamespace()
+            manager_module,
+            "ZmqTransport",
+            lambda local_id, host, port, *a, **k: calls.update(
+                zmq_id=local_id, zmq_host=host, zmq_port=port
+            )
+            or SimpleNamespace(),
         )
         spec = SimpleNamespace(
             block_size_factor=1,
@@ -1407,13 +1426,17 @@ class TestBindHostPortDefaults:
                 parallel_config=SimpleNamespace(data_parallel_index=dp_index)
             ),
         )
-        return P2PSecondaryTierManager(spec, memoryview(b""), **kwargs)
+        mgr = P2PSecondaryTierManager(spec, memoryview(b""), **kwargs)
+        mgr._test_calls = calls
+        return mgr
 
     def test_defaults_from_env_unset(self, monkeypatch):
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
         mgr = self._construct(monkeypatch)
-        assert mgr._local_id == "0.0.0.0:5710"
+        # 0.0.0.0 default binds all interfaces but the identity resolves to a
+        # routable node IP so peers can dial back and NIXL names stay unique.
+        assert mgr._local_id == "203.0.113.9:5710"
 
     def test_env_override(self, monkeypatch):
         monkeypatch.setenv("VLLM_P2P_SIDE_CHANNEL_HOST", "10.1.2.3")
@@ -1424,15 +1447,38 @@ class TestBindHostPortDefaults:
     def test_explicit_config_wins(self, monkeypatch):
         monkeypatch.setenv("VLLM_P2P_SIDE_CHANNEL_HOST", "10.1.2.3")
         monkeypatch.setenv("VLLM_P2P_SIDE_CHANNEL_PORT", "5799")
-        mgr = self._construct(monkeypatch, host="0.0.0.0", port=6001)
-        assert mgr._local_id == "0.0.0.0:6001"
+        mgr = self._construct(monkeypatch, host="192.0.2.5", port=6001)
+        assert mgr._local_id == "192.0.2.5:6001"
 
     def test_dp_index_offsets_default_port(self, monkeypatch):
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_HOST", raising=False)
         monkeypatch.delenv("VLLM_P2P_SIDE_CHANNEL_PORT", raising=False)
         mgr = self._construct(monkeypatch, dp_index=2)
-        assert mgr._local_id == "0.0.0.0:5712"
+        assert mgr._local_id == "203.0.113.9:5712"
 
     def test_dp_index_offsets_explicit_port(self, monkeypatch):
-        mgr = self._construct(monkeypatch, dp_index=1, host="0.0.0.0", port=6000)
-        assert mgr._local_id == "0.0.0.0:6001"
+        mgr = self._construct(monkeypatch, dp_index=1, host="192.0.2.5", port=6000)
+        assert mgr._local_id == "192.0.2.5:6001"
+
+    @pytest.mark.parametrize(
+        "bind_host", ["", "0.0.0.0", "::", "localhost", "127.0.0.1", "::1"]
+    )
+    def test_wildcard_or_loopback_resolves_to_node_ip(self, monkeypatch, bind_host):
+        # None of these are usable as a peer identity, so all resolve to the
+        # routable node IP while the port is preserved.
+        mgr = self._construct(monkeypatch, host=bind_host, port=5710)
+        assert mgr._local_id == "203.0.113.9:5710"
+
+    def test_explicit_routable_host_kept_verbatim(self, monkeypatch):
+        mgr = self._construct(monkeypatch, host="192.0.2.5", port=5710)
+        assert mgr._local_id == "192.0.2.5:5710"
+
+    def test_bind_host_decoupled_from_identity(self, monkeypatch):
+        # The wildcard is what the socket actually binds to, but both the ZMQ
+        # peer identity and the NIXL agent name use the resolved routable IP.
+        mgr = self._construct(monkeypatch, host="0.0.0.0", port=5710)
+        assert mgr._test_calls["zmq_host"] == "0.0.0.0"
+        assert mgr._test_calls["zmq_port"] == 5710
+        assert mgr._test_calls["zmq_id"] == "203.0.113.9:5710"
+        assert mgr._test_calls["nixl_name"] == "203.0.113.9:5710"
+        assert mgr._local_id == "203.0.113.9:5710"

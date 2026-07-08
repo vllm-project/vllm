@@ -17,6 +17,7 @@ from typing_extensions import override
 
 import vllm.envs as envs
 from vllm.logger import init_logger
+from vllm.utils.network_utils import get_ip
 from vllm.v1.kv_offload.base import (
     LookupResult,
     OffloadKey,
@@ -39,6 +40,31 @@ if TYPE_CHECKING:
     from vllm.v1.kv_offload.tiering.p2p.control.base import ControlConnection
 
 logger = init_logger(__name__)
+
+# Bind hosts that are not usable as a peer identity: a wildcard binds the
+# control socket to every interface but is not routable, and a loopback is
+# not unique across hosts. When the socket binds to one of these, the
+# advertised identity (NIXL agent name + the address peers dial back) is
+# resolved to a routable node IP instead. An explicit non-wildcard host is
+# always kept verbatim.
+_NON_ROUTABLE_BIND_HOSTS = frozenset(
+    {"", "0.0.0.0", "::", "localhost", "127.0.0.1", "::1"}
+)
+
+
+def _resolve_advertise_host(bind_host: str) -> str:
+    """Map a control-socket bind host to a routable peer identity.
+
+    The bind host may be a wildcard (``0.0.0.0``/``::``) so the socket
+    listens on all interfaces, or a loopback. Neither is usable as the
+    identity that peers dial back and that NIXL uses as the agent name, so
+    those resolve to a routable node IP (honoring ``VLLM_HOST_IP``). Any
+    explicit host is returned unchanged.
+    """
+    if bind_host in _NON_ROUTABLE_BIND_HOSTS:
+        return get_ip()
+    return bind_host
+
 
 # Reap unbound store batches that have been parked without a FetchMsg
 # binding them to a session for longer than this. Protects against the
@@ -161,7 +187,14 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         # NIXL). For DP=1 the index is 0, leaving the base port unchanged.
         dp_index = offloading_spec.vllm_config.parallel_config.data_parallel_index
         port = int(port) + dp_index
-        self._local_id = f"{host}:{port}"
+        # The socket binds to ``host`` (may be a wildcard so it listens on
+        # every interface), but the advertised identity — used as the NIXL
+        # agent name and as the address peers dial back — must be unique and
+        # routable. Resolve a node IP when ``host`` is a wildcard/loopback so
+        # two peers binding 0.0.0.0 don't both claim ``0.0.0.0:<port>`` and
+        # collide (NIXL rejects a remote agent whose name equals the local).
+        advertise_host = _resolve_advertise_host(host)
+        self._local_id = f"{advertise_host}:{port}"
 
         config_fields = FileMapper.from_offloading_spec(
             root_dir="",
