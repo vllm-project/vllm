@@ -51,7 +51,7 @@ from vllm.entrypoints.serve.utils.server_utils import (
     log_response,
     validation_exception_handler,
 )
-from vllm.exceptions import VLLMValidationError
+from vllm.exceptions import VLLMUnprocessableEntityError, VLLMValidationError
 from vllm.logger import init_logger
 from vllm.reasoning import ReasoningParserManager
 from vllm.renderers.online_derenderer import OnlineDerenderer
@@ -72,6 +72,41 @@ prometheus_multiproc_dir: tempfile.TemporaryDirectory
 logger = init_logger("vllm.entrypoints.openai.api_server")
 
 _FALLBACK_SUPPORTED_TASKS: tuple[SupportedTask, ...] = ("generate",)
+
+
+def _attach_endpoint_plugins(
+    app: FastAPI, supported_tasks: tuple["SupportedTask", ...]
+) -> None:
+    """Phase A of endpoint plugin wiring: discover, gate and attach routes.
+
+    Attached last after all core routers. This is so endpoint plugin routes can
+    shadow core routes with the same path (see `EndpointPlugin.attach_router`
+    docstring). No-ops when no plugins are discovered/allowlisted.
+    """
+    from vllm.plugins import load_endpoint_plugins
+
+    endpoint_plugins = load_endpoint_plugins(supported_tasks)
+    for plugin in endpoint_plugins:
+        plugin.attach_router(app)
+    app.state.endpoint_plugins = endpoint_plugins
+
+
+async def _init_endpoint_plugins_state(
+    engine_client: EngineClient | None, state: State, args: Namespace
+) -> None:
+    """Phase B of endpoint plugin wiring: initialize per app plugin state.
+
+    `state.endpoint_plugins` is set by `_attach_endpoint_plugins` (Phase A)
+    in `build_app`. Some `init_app_state` callers (e.g. `run_batch.py`)
+    build their own bare `State` without going through `build_app`. As a result
+    `endpoint_plugins` may be absent and are treated that the same as "none attached".
+
+    `engine_client` is `None` for the CPU only render server which has no
+    engine (see `init_render_app_state`). Plugins must handle a `None`
+    `engine_client` themselves (see `EndpointPlugin.init_state`).
+    """
+    for plugin in getattr(state, "endpoint_plugins", []):
+        await plugin.init_state(engine_client, state, args)
 
 
 @asynccontextmanager
@@ -230,6 +265,12 @@ def build_app(
 
         register_pooling_api_routers(app, supported_tasks, model_config)
 
+    # Endpoint plugins are attached last so their routes are registered after all core
+    # routers. This runs even for the CPU only render server. A plugin eligible for
+    # the `render` task still gets its routes registered. It receives
+    # `engine_client=None` at Phase B (see `_init_endpoint_plugins_state`).
+    _attach_endpoint_plugins(app, supported_tasks)
+
     app.root_path = args.root_path
     app.add_middleware(
         CORSMiddleware,
@@ -245,6 +286,7 @@ def build_app(
     app.exception_handler(EngineDeadError)(engine_error_handler)
     app.exception_handler(GenerationError)(generation_error_handler)
     app.exception_handler(VLLMValidationError)(exception_handler)
+    app.exception_handler(VLLMUnprocessableEntityError)(exception_handler)
     app.exception_handler(Exception)(exception_handler)
 
     # Ensure --api-key option from CLI takes precedence over VLLM_API_KEY
@@ -416,6 +458,8 @@ async def init_app_state(
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
 
+    await _init_endpoint_plugins_state(engine_client, state, args)
+
     state.enable_server_load_tracking = args.enable_server_load_tracking
     state.server_load_metrics = 0
 
@@ -507,15 +551,24 @@ async def init_render_app_state(
     state.enable_server_load_tracking = False
     state.server_load_metrics = 0
 
+    # No `EngineClient` exists for the render server, so plugins get `None` and
+    # must handle it themselves (see `EndpointPlugin.init_state`).
+    await _init_endpoint_plugins_state(None, state, args)
 
-def create_server_socket(addr: tuple[str, int]) -> socket.socket:
+
+def create_server_socket(
+    addr: tuple[str, int],
+    *,
+    reuse_port: bool,
+) -> socket.socket:
     family = socket.AF_INET
     if is_valid_ipv6_address(addr[0]):
         family = socket.AF_INET6
 
     sock = socket.socket(family=family, type=socket.SOCK_STREAM)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    if reuse_port:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
     sock.bind(addr)
 
     return sock
@@ -546,7 +599,7 @@ def validate_api_server_args(args):
 
 
 @instrument(span_name="API server setup")
-def setup_server(args):
+def setup_server(args, *, reuse_port: bool):
     """Validate API server args and create the server socket."""
 
     log_version_and_model(logger, VLLM_VERSION, args.model)
@@ -567,7 +620,7 @@ def setup_server(args):
         sock = create_server_unix_socket(args.uds)
     else:
         sock_addr = (args.host or "", args.port)
-        sock = create_server_socket(sock_addr)
+        sock = create_server_socket(sock_addr, reuse_port=reuse_port)
 
     # workaround to avoid footguns where uvicorn drops requests with too
     # many concurrent requests active
@@ -688,7 +741,7 @@ async def run_server(args, **uvicorn_kwargs) -> None:
 
     signal.signal(signal.SIGTERM, _interrupt_init)
 
-    listen_address, sock = setup_server(args)
+    listen_address, sock = setup_server(args, reuse_port=False)
     await run_server_worker(listen_address, sock, args, **uvicorn_kwargs)
 
 

@@ -16,6 +16,7 @@ import importlib
 
 _CLASS_TO_MODULE: dict[str, str] = {
     "AfmoeConfig": "vllm.transformers_utils.configs.afmoe",
+    "ArcticConfig": "vllm.transformers_utils.configs.arctic",
     "AXK1Config": "vllm.transformers_utils.configs.AXK1",
     "BagelConfig": "vllm.transformers_utils.configs.bagel",
     "CheersConfig": "vllm.transformers_utils.configs.cheers",
@@ -86,13 +87,13 @@ _CLASS_TO_MODULE: dict[str, str] = {
     "Qwen3_5TextConfig": "vllm.transformers_utils.configs.qwen3_5",
     "Qwen3_5MoeConfig": "vllm.transformers_utils.configs.qwen3_5_moe",
     "Qwen3_5MoeTextConfig": "vllm.transformers_utils.configs.qwen3_5_moe",
-    "Tarsier2Config": "vllm.transformers_utils.configs.tarsier2",
     # Special case: DeepseekV3Config is from HuggingFace Transformers
     "DeepseekV3Config": "transformers",
 }
 
 __all__ = [
     "AfmoeConfig",
+    "ArcticConfig",
     "AXK1Config",
     "BagelConfig",
     "CheersConfig",
@@ -161,7 +162,6 @@ __all__ = [
     "Qwen3_5TextConfig",
     "Qwen3_5MoeConfig",
     "Qwen3_5MoeTextConfig",
-    "Tarsier2Config",
 ]
 
 

@@ -77,6 +77,7 @@ class DeepseekV32DecoderLayer(torch.nn.Module):
                 parallel_config=parallel_config,
                 quant_config=quant_config,
                 prefix=f"{prefix}.mlp",
+                apply_routed_scale_to_output=False,
             )
             # Defer the MoE cross-rank all-reduce; it is fused into the next
             # layer's input_layernorm (or the final norm) via

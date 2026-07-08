@@ -28,6 +28,78 @@ else:
 logger = init_logger(__name__)
 
 
+def get_mem_info_wrapper(
+    device: int | str | torch.device | None = None,
+) -> tuple[int, int]:
+    """
+    Get memory info for a device, compatible with torch.accelerator.get_memory_info API.
+
+    Args:
+        device: Device specification. Can be:
+            - None: Use current XPU device
+            - int: Device index
+            - str: Device string (e.g., "xpu:0", "xpu")
+            - torch.device: Device object
+
+    Returns:
+        Tuple[int, int]: (free_memory, total_memory) in bytes
+    """
+    # Handle None - use current device
+    if device is None:
+        device = torch.xpu.current_device()
+
+    # Handle torch.device objects
+    elif isinstance(device, torch.device):
+        if device.type != "xpu":
+            raise RuntimeError(f"Expected 'xpu' device, got '{device.type}'")
+        # If device index is not specified, use current device
+        device = (
+            device.index if device.index is not None else torch.xpu.current_device()
+        )
+
+    # Handle string device specifications (e.g., "xpu:0", "xpu")
+    elif isinstance(device, str):
+        if not device.startswith("xpu"):
+            raise RuntimeError(f"Expected 'xpu' device string, got '{device}'")
+        # Parse device string
+        parts = device.split(":")
+        if len(parts) == 1:
+            # "xpu" -> use current device
+            device = torch.xpu.current_device()
+        elif len(parts) == 2:
+            # "xpu:0" -> use index 0
+            try:
+                device = int(parts[1])
+            except ValueError as err:
+                raise RuntimeError(
+                    f"Invalid device index: '{device}', expected integer after ':'"
+                ) from err
+        else:
+            raise RuntimeError(f"Invalid device string format: '{device}'")
+
+    # At this point, device should be an int
+    if isinstance(device, int):
+        # bounds check
+        device_count = torch.xpu.device_count()
+        if not (0 <= device < device_count):
+            raise ValueError(
+                f"Invalid device index {device}, must be in range [0, {device_count})"
+            )
+
+    elif not isinstance(device, int):
+        raise TypeError(
+            f"device must be int, str, torch.device, or None, got {type(device)}"
+        )
+
+    # Call the underlying C++ implementation
+    free, total = torch.ops._C_cache_ops.getMemoryInfo(device)
+
+    return free, total
+
+
+torch.accelerator.get_memory_info = get_mem_info_wrapper
+
+
 class XPUPlatform(Platform):
     _enum = PlatformEnum.XPU
     device_name: str = "xpu"
@@ -75,6 +147,15 @@ class XPUPlatform(Platform):
             return AttentionBackendEnum.TRITON_MLA.get_path()
         if selected_backend == AttentionBackendEnum.TRITON_ATTN:
             logger.info_once("Using Triton backend.")
+            return AttentionBackendEnum.TRITON_ATTN.get_path()
+        elif attn_selector_config.use_mm_prefix:
+            # Flash Attention on XPU has no FA4 kernel, so it cannot apply the
+            # multimodal prefix-LM bidirectional mask. Fall back to Triton
+            # Attention, which supports mm_prefix.
+            logger.warning_once(
+                "Flash Attention on XPU does not support multimodal prefix-LM "
+                "attention. Falling back to Triton Attention backend."
+            )
             return AttentionBackendEnum.TRITON_ATTN.get_path()
         elif dtype == torch.float32:
             logger.warning_once(
