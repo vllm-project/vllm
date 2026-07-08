@@ -1468,9 +1468,13 @@ class SpecDecodeBaseProposer:
                     "Sharing target model embedding weights with the draft model."
                 )
 
-            if share_embeddings:
+            if share_embeddings and hasattr(self.model, "has_own_embed_tokens"):
+                # EAGLE drafts consume input embeddings at their own hidden
+                # size, so only share when the widths match. MTP drafts
+                # project target-width embeddings (e.g. Gemma4 MTP's
+                # pre_projection takes 2 * backbone_hidden_size), so the
+                # width check does not apply to them.
                 draft_embed = self.model.model.embed_tokens
-                # Only share when both models use the same embedding width.
                 # Guard with isinstance so non-Tensor weights (e.g. in tests)
                 # are not affected — mirrors the weight-equality check above.
                 if isinstance(target_embed_tokens.weight, torch.Tensor) and isinstance(
