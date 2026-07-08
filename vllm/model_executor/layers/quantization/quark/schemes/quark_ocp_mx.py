@@ -4,6 +4,7 @@
 from collections.abc import Callable
 from fractions import Fraction
 from functools import partial
+from importlib.util import find_spec
 from typing import Any
 
 import torch
@@ -36,18 +37,14 @@ from .quark_scheme import QuarkScheme
 logger = init_logger(__name__)
 
 
-try:
-    from aiter.ops.shuffle import shuffle_weight
-    from aiter.ops.triton.gemm_afp4wfp4 import (
-        gemm_afp4wfp4,
-        gemm_afp4wfp4_preshuffled_weight_scales,
-    )
-    from aiter.ops.triton.quant import dynamic_mxfp4_quant
+# NOTE: Do not import aiter at module scope. Importing aiter eagerly initializes HIP
+# which can force the engine core to spawn instead of fork.
+# find_spec locates the package without executing its __init__, so it stays HIP-free.
+# Actual `aiter` imports are deferred to the functions/methods that need them.
+_AITER_FOUND = find_spec("aiter") is not None
 
+if _AITER_FOUND:
     from vllm.utils.torch_utils import direct_register_custom_op
-
-    if rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled():
-        from aiter import gemm_a4w4, per_1x32_f4_quant_hip
 
     def gemm_with_dynamic_quant(
         x: torch.Tensor,
@@ -57,6 +54,15 @@ try:
         out_dtype: torch.dtype | None = torch.bfloat16,
         x_scales: torch.Tensor | None = None,
     ) -> torch.Tensor:
+        from aiter.ops.triton.gemm_afp4wfp4 import (
+            gemm_afp4wfp4,
+            gemm_afp4wfp4_preshuffled_weight_scales,
+        )
+        from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
+        if rocm_use_aiter_fp4_asm_gemm:
+            from aiter import gemm_a4w4, per_1x32_f4_quant_hip
+
         M = x.shape[0]
         N = weight.shape[0]
         K = weight.shape[1]
@@ -137,13 +143,11 @@ try:
         fake_impl=gemm_with_dynamic_quant_fake,
         dispatch_key=current_platform.dispatch_key,
     )
-except (ImportError, AttributeError, RuntimeError):
-    if current_platform.is_rocm():
-        logger.warning(
-            "AITER is not found or QuarkOCP_MX is not supported on the current "
-            "platform. QuarkOCP_MX quantization will not be available."
-        )
-    dynamic_mxfp4_quant = gemm_afp4wfp4 = None
+elif current_platform.is_rocm():
+    logger.warning(
+        "AITER is not found or QuarkOCP_MX is not supported on the current "
+        "platform. QuarkOCP_MX quantization will not be available."
+    )
 
 
 class QuarkOCP_MX(QuarkScheme):
@@ -211,8 +215,8 @@ class QuarkOCP_MX(QuarkScheme):
             rocm_aiter_ops.is_asm_fp4_gemm_dynamic_quant_enabled()
         )
 
-        if not self.emulate and (dynamic_mxfp4_quant is None or gemm_afp4wfp4 is None):
-            # Currently need these kernels if not emulating
+        if not self.emulate and not _AITER_FOUND:
+            # Currently need AITER kernels if not emulating
             raise NotImplementedError(
                 f"{self.__class__.__name__} requires AITER to be installed "
                 "for non-emulation mode! Please refer to "
@@ -261,6 +265,8 @@ class QuarkOCP_MX(QuarkScheme):
     def process_dynamic_mxfp4_weights_after_loading(
         self, layer: torch.nn.Module
     ) -> None:
+        from aiter.ops.triton.quant import dynamic_mxfp4_quant
+
         w_q, w_s = dynamic_mxfp4_quant(layer.weight)
         layer.weight_scale = torch.nn.Parameter(w_s.T.contiguous(), requires_grad=False)
         layer.weight = torch.nn.Parameter(w_q, requires_grad=False)
@@ -279,6 +285,8 @@ class QuarkOCP_MX(QuarkScheme):
             if self.dynamic_mxfp4_quant:
                 self.process_dynamic_mxfp4_weights_after_loading(layer)
             elif self.rocm_use_aiter_fp4_asm_gemm:
+                from aiter.ops.shuffle import shuffle_weight
+
                 # shuffle weight scale
                 weight_scale_shuffle = layer.weight_scale.data
                 sm, sn = weight_scale_shuffle.shape
