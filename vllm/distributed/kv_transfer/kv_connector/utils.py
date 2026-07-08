@@ -414,30 +414,43 @@ class TransferTopology:
 
         self._engines: dict[tuple[EngineId, int], EngineTransferInfo] = {}
 
-        # Figure out whether the first dimension of the cache is K/V
-        # or num_blocks.
+        # Figure out whether the first dimension of the cache is K/V or
+        # num_blocks. Do this through the backend contract rather than the
+        # tensor rank: content-packed layouts can be 4D and still be
+        # blocks-first.
         attn_backend = self.attn_backends[0]
+        kv_cache_shape: tuple[int, ...] = ()
         if not self.is_mamba:
             _MOCK_BLOCK_SIZE = 16
-            kv_cache_shape: tuple[int, ...] = attn_backend.get_kv_cache_shape(
+            kv_cache_shape = attn_backend.get_kv_cache_shape(
                 num_blocks=1,
                 block_size=_MOCK_BLOCK_SIZE,
                 num_kv_heads=1,
                 head_size=1,
             )
             logger.debug("Test kv_cache_shape: %s", kv_cache_shape)
-        # Non-MLA backends caches have 5 dims [num_blocks, 2, H,N,D],
-        # we just mock num_blocks to 1 for the dimension check below.
-        # Hybrid SSM models assume a single blocks_first layout
-        self._is_kv_layout_blocks_first = self.is_mamba or (
-            len(kv_cache_shape) == 5 and kv_cache_shape[0] == 1
-        )
+            block_dim = attn_backend.get_kv_cache_block_dim(
+                block_size=_MOCK_BLOCK_SIZE,
+                num_kv_heads=1,
+                head_size=1,
+            )
+        else:
+            block_dim = 0
+
+        # Hybrid SSM models assume a single blocks-first layout.
+        self._is_kv_layout_blocks_first = self.is_mamba or block_dim == 0
 
         self._cross_layers_blocks = False
         if self.tensor_shape is not None:
             self._cross_layers_blocks = (
                 len(self.tensor_shape) == len(kv_cache_shape) + 1
             )
+        self._virtually_split_kv_in_blocks = (
+            self._is_kv_layout_blocks_first
+            and not self._cross_layers_blocks
+            and len(kv_cache_shape) == 5
+            and kv_cache_shape[1] == 2
+        )
 
         if self._cross_layers_blocks:
             logger.debug("Using cross-layer KV cache")
@@ -501,11 +514,11 @@ class TransferTopology:
     @property
     def virtually_split_kv_in_blocks(self) -> bool:
         # Whether to logically split each block into K and V halves.
-        # Applies when K/V are interleaved within each block (blocks-first),
+        # Applies when K/V are contiguous halves within each block,
         # but NOT when cross-layer blocks are used — cross-layer blocks have
         # per-layer K/V interleaving (L0_K, L0_V, L1_K, L1_V, ...) so a
         # simple half-split does not separate K from V.
-        return self._is_kv_layout_blocks_first and not self._cross_layers_blocks
+        return self._virtually_split_kv_in_blocks
 
     @property
     def split_k_and_v(self) -> bool:

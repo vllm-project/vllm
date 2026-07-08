@@ -215,6 +215,18 @@ __device__ __forceinline__ _B16x4 addx4(const _B16x4& inp1,
   }
 }
 
+template <typename T>
+__device__ __forceinline__ _B16x8 load_b16x8_strided(const T* ptr,
+                                                     const int stride) {
+  _B16x8 ret;
+  T* ret_ptr = reinterpret_cast<T*>(&ret);
+#pragma unroll
+  for (int i = 0; i < 16 / sizeof(T); i++) {
+    ret_ptr[i] = ptr[i * stride];
+  }
+  return ret;
+}
+
 __device__ __forceinline__ floatx4 to_float_fp8x4(const _B8x4& inp) {
   // From MI300+ platforms, we have v_cvt_pk_f32_fp8 instruction
   // to convert 2 packed fp8 to 2 packed fp32 values.
@@ -332,6 +344,11 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int q_stride,
     const int kv_block_stride,
     const int kv_head_stride,
+    const int k_dim_stride,
+    const int k_token_stride,
+    const int k_x_stride,
+    const int v_dim_stride,
+    const int v_token_stride,
     float* __restrict__ exp_sums,           // [num_seqs, num_heads, max_num_partitions]
     float* __restrict__ max_logits,         // [num_seqs, num_heads, max_num_partitions]
     scalar_t* __restrict__ out,             // [num_seqs, num_heads, max_num_partitions, head_size]
@@ -490,27 +507,34 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
   constexpr int KX =
       16 / sizeof(cache_t);  // vLLM defines x as 16 Bytes of kv cache elements
-  const cache_t* k_ptr = k_cache + wg_start_kv_head_idx * kv_head_stride;
-
   const int row_head_elem = rowid * CONTIGUOUS_KV_ELEMS_16B_LOAD;
   // fetch K values
   for (int token_depth = 0; token_depth < TLOOP; token_depth++) {
     const int64_t kblock_number =
         static_cast<int64_t>(kphysical_block_number[token_depth]);
-    const cache_t* k_ptr2 = k_ptr + kblock_number * kv_block_stride;
     const int klocal_token_idx =
         TOKENS_PER_WARP * warpid + token_depth * 16 + lane16id;
     const int kphysical_block_offset = klocal_token_idx % BLOCK_SIZE;
-    const cache_t* k_ptr3 = k_ptr2 + kphysical_block_offset * KX;
+    const cache_t* k_block_ptr =
+        k_cache + kblock_number * kv_block_stride +
+        static_cast<int64_t>(wg_start_kv_head_idx) * kv_head_stride;
 
     for (int qkhe_depth = 0; qkhe_depth < QKHELOOP; qkhe_depth++) {
       const int head_elem = row_head_elem + qkhe_depth * QKHE_PER_FETCH;
       const int offset1 = head_elem / KX;
       const int offset2 = head_elem % KX;
-      const cache_t* k_fetch_ptr = k_ptr3 + offset1 * BLOCK_SIZE * KX + offset2;
-      const _B16x8* k_fetch_ptr_16B =
-          reinterpret_cast<const _B16x8*>(k_fetch_ptr);
-      Klocal[token_depth][qkhe_depth] = *k_fetch_ptr_16B;
+      const cache_t* k_fetch_ptr =
+          k_block_ptr + static_cast<int64_t>(offset1) * k_dim_stride +
+          static_cast<int64_t>(kphysical_block_offset) * k_token_stride +
+          offset2 * k_x_stride;
+      if (k_x_stride == 1) {
+        const _B16x8* k_fetch_ptr_16B =
+            reinterpret_cast<const _B16x8*>(k_fetch_ptr);
+        Klocal[token_depth][qkhe_depth] = *k_fetch_ptr_16B;
+      } else {
+        Klocal[token_depth][qkhe_depth] =
+            load_b16x8_strided<cache_t>(k_fetch_ptr, k_x_stride);
+      }
     }
   }
 
@@ -554,26 +578,33 @@ __launch_bounds__(NUM_THREADS, 5) void paged_attention_ll4mi_QKV_mfma16_kernel(
 
   _B16x8 Vlocal[VTLOOP][VHELOOP][VTLANELOOP];  // this could be B8x16 too
 
-  const cache_t* v_ptr = v_cache + wg_start_kv_head_idx * kv_head_stride +
-                         ((rowid * VTOKENS_PER_LANE) % BLOCK_SIZE);
+  const int v_row_token_offset = (rowid * VTOKENS_PER_LANE) % BLOCK_SIZE;
 
   // v fetches are 16head elems across lanes x 16 tokens per lane
   for (int vhe_depth = 0; vhe_depth < VHELOOP; vhe_depth++) {
     const int vhead_elem = vhe_depth * NWARPS * 16 + warpid * 16 + lane16id;
-    const cache_t* v_ptr2 = v_ptr + vhead_elem * BLOCK_SIZE;
 
     for (int vtoken_depth = 0; vtoken_depth < VTLOOP; vtoken_depth++) {
       for (int vfetch_depth = 0; vfetch_depth < VTLANELOOP; vfetch_depth++) {
         const int vblock_depth = 0;
         const int64_t vblock_number = static_cast<int64_t>(
             vphysical_block_number[vtoken_depth][vblock_depth]);
-        const cache_t* v_ptr3 = v_ptr2 + (vblock_number * kv_block_stride);
-
+        const int vtoken_offset =
+            v_row_token_offset +
+            vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
         const cache_t* v_fetch_ptr =
-            v_ptr3 + vfetch_depth * CONTIGUOUS_KV_ELEMS_16B_LOAD;
-        const _B16x8* v_fetch_ptr_16B =
-            reinterpret_cast<const _B16x8*>(v_fetch_ptr);
-        Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = *v_fetch_ptr_16B;
+            v_cache + vblock_number * kv_block_stride +
+            static_cast<int64_t>(wg_start_kv_head_idx) * kv_head_stride +
+            static_cast<int64_t>(vhead_elem) * v_dim_stride +
+            static_cast<int64_t>(vtoken_offset) * v_token_stride;
+        if (v_token_stride == 1) {
+          const _B16x8* v_fetch_ptr_16B =
+              reinterpret_cast<const _B16x8*>(v_fetch_ptr);
+          Vlocal[vtoken_depth][vhe_depth][vfetch_depth] = *v_fetch_ptr_16B;
+        } else {
+          Vlocal[vtoken_depth][vhe_depth][vfetch_depth] =
+              load_b16x8_strided<cache_t>(v_fetch_ptr, v_token_stride);
+        }
       }
     }
   }
@@ -933,6 +964,11 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int q_stride,
     const int kv_block_stride,
     const int kv_head_stride,
+    const int k_dim_stride,
+    const int k_token_stride,
+    const int k_x_stride,
+    const int v_dim_stride,
+    const int v_token_stride,
     float* __restrict__ exp_sums,           // [num_seqs, num_heads, max_num_partitions]
     float* __restrict__ max_logits,         // [num_seqs, num_heads, max_num_partitions]
     scalar_t* __restrict__ out,             // [num_seqs, num_heads, max_num_partitions, head_size]
@@ -1733,6 +1769,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
+    const int k_dim_stride, const int k_token_stride, const int k_x_stride,
+    const int v_dim_stride, const int v_token_stride,
     float* __restrict__ exp_sums,  // [num_seqs, num_heads, max_num_partitions]
     float* __restrict__ max_logits,  // [num_seqs, num_heads,
                                      // max_num_partitions]
@@ -2170,6 +2208,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
+    const int k_dim_stride, const int k_token_stride, const int k_x_stride,
+    const int v_dim_stride, const int v_token_stride,
     float* __restrict__ exp_sums,  // [num_seqs, num_heads, max_num_partitions]
     float* __restrict__ max_logits,  // [num_seqs, num_heads,
                                      // max_num_partitions]
@@ -2501,6 +2541,8 @@ __launch_bounds__(NUM_THREADS, 3) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
+    const int k_dim_stride, const int k_token_stride, const int k_x_stride,
+    const int v_dim_stride, const int v_token_stride,
     float* __restrict__ exp_sums,  // [num_seqs, num_heads, max_num_partitions]
     float* __restrict__ max_logits,  // [num_seqs, num_heads,
                                      // max_num_partitions]
@@ -2903,6 +2945,8 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int max_num_blocks_per_seq,
     const float* __restrict__ alibi_slopes,  // [num_heads]
     const int q_stride, const int kv_block_stride, const int kv_head_stride,
+    const int k_dim_stride, const int k_token_stride, const int k_x_stride,
+    const int v_dim_stride, const int v_token_stride,
     float* __restrict__ exp_sums,  // [num_seqs, num_heads, max_num_partitions]
     float* __restrict__ max_logits,  // [num_seqs, num_heads,
                                      // max_num_partitions]
@@ -3134,6 +3178,11 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma16_kernel(
     const int q_stride,
     const int kv_block_stride,
     const int kv_head_stride,
+    const int k_dim_stride,
+    const int k_token_stride,
+    const int k_x_stride,
+    const int v_dim_stride,
+    const int v_token_stride,
     float* __restrict__ exp_sums,             // [num_seqs, num_heads, max_num_partitions]
     float* __restrict__ max_logits,           // [num_seqs, num_heads, max_num_partitions]
     scalar_t* __restrict__ out,               // [num_seqs, num_heads, max_num_partitions, head_size]
@@ -3161,6 +3210,11 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_QKV_mfma4_kernel(
     const int q_stride,
     const int kv_block_stride,
     const int kv_head_stride,
+    const int k_dim_stride,
+    const int k_token_stride,
+    const int k_x_stride,
+    const int v_dim_stride,
+    const int v_token_stride,
     float* __restrict__ exp_sums,            // [num_seqs, num_heads, max_num_partitions]
     float* __restrict__ max_logits,          // [num_seqs, num_heads, max_num_partitions]
     scalar_t* __restrict__ out,              // [num_seqs, num_heads, max_num_partitions, head_size]
@@ -3195,8 +3249,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
           block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
           max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride, \
-          kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,  \
-          max_ctx_blocks, k_scale_ptr, v_scale_ptr);
+          kv_head_stride, k_dim_stride, k_token_stride, k_x_stride,            \
+          v_dim_stride, v_token_stride, exp_sums_ptr, max_logits_ptr,          \
+          tmp_out_ptr, out_ptr, max_ctx_blocks, k_scale_ptr, v_scale_ptr);
 
 #define LAUNCH_CUSTOM_ATTENTION_MFMA4(GQA_RATIO)                               \
   paged_attention_ll4mi_QKV_mfma4_kernel<T, KVT, KV_DTYPE, OUTT, BLOCK_SIZE,   \
@@ -3206,8 +3261,9 @@ __launch_bounds__(NUM_THREADS) void paged_attention_ll4mi_reduce_kernel(
           query_ptr, key_cache_ptr, value_cache_ptr, num_kv_heads, scale,      \
           block_tables_ptr, seq_lens_ptr, query_start_loc_ptr,                 \
           max_num_blocks_per_seq, alibi_slopes_ptr, q_stride, kv_block_stride, \
-          kv_head_stride, exp_sums_ptr, max_logits_ptr, tmp_out_ptr, out_ptr,  \
-          max_ctx_blocks, k_scale_ptr, v_scale_ptr);
+          kv_head_stride, k_dim_stride, k_token_stride, k_x_stride,            \
+          v_dim_stride, v_token_stride, exp_sums_ptr, max_logits_ptr,          \
+          tmp_out_ptr, out_ptr, max_ctx_blocks, k_scale_ptr, v_scale_ptr);
 
 #define LAUNCH_CUSTOM_REDUCTION(NPAR_LOOPS)                                 \
   paged_attention_ll4mi_reduce_kernel<T, OUTT, HEAD_SIZE, HEAD_SIZE,        \
@@ -3234,6 +3290,11 @@ void paged_attention_custom_launcher(
   int q_stride = query.stride(0);
   int kv_block_stride = key_cache.stride(0);
   int kv_head_stride = key_cache.stride(1);
+  int k_dim_stride = key_cache.stride(2);
+  int k_token_stride = key_cache.stride(3);
+  int k_x_stride = key_cache.stride(4);
+  int v_dim_stride = value_cache.stride(2);
+  int v_token_stride = value_cache.stride(3);
 
   // NOTE: query start location is optional for V0 decode should not be used.
   // If batch contains mix of prefills and decode, prefills should be skipped.
@@ -3390,6 +3451,11 @@ void paged_attention_custom_launcher_navi(
   int q_stride = query.stride(0);
   int kv_block_stride = key_cache.stride(0);
   int kv_head_stride = key_cache.stride(1);
+  int k_dim_stride = key_cache.stride(2);
+  int k_token_stride = key_cache.stride(3);
+  int k_x_stride = key_cache.stride(4);
+  int v_dim_stride = value_cache.stride(2);
+  int v_token_stride = value_cache.stride(3);
 
   // NOTE: query start location is optional for V0 decode should not be used.
   // If batch contains mix of prefills and decode, prefills should be skipped.

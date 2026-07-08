@@ -1811,7 +1811,8 @@ def test_register_kv_caches(
         kv_caches: dict[str, torch.Tensor]
         if str(enable_cross_layers).lower() == "true":
             assert connector.prefer_cross_layer_blocks == (
-                attn_backend in ("FLASH_ATTN", "FLASHINFER", "TRITON_ATTN")
+                attn_backend
+                in ("FLASH_ATTN", "FLASHINFER", "ROCM_ATTN", "TRITON_ATTN")
             )
         else:
             assert not connector.prefer_cross_layer_blocks
@@ -1819,8 +1820,20 @@ def test_register_kv_caches(
         test_shape = backend_cls.get_kv_cache_shape(
             num_blocks=1, block_size=16, num_kv_heads=1, head_size=1
         )
-        is_blocks_first = len(test_shape) == 5 and test_shape[0] == 1
-        virtually_split = is_blocks_first and not connector.prefer_cross_layer_blocks
+        is_blocks_first = (
+            backend_cls.get_kv_cache_block_dim(
+                block_size=16,
+                num_kv_heads=1,
+                head_size=1,
+            )
+            == 0
+        )
+        virtually_split = (
+            is_blocks_first
+            and len(test_shape) == 5
+            and test_shape[1] == 2
+            and not connector.prefer_cross_layer_blocks
+        )
 
         if connector.prefer_cross_layer_blocks:
             with set_current_vllm_config(vllm_config):
@@ -1891,7 +1904,9 @@ def test_register_kv_caches(
                     unique_tensor[1].data_ptr(),
                 ]
                 expected_num_entries = 4
-            expected_blocks_count = kv_cache_config.num_blocks * 4
+            expected_blocks_count = kv_cache_config.num_blocks * expected_num_entries
+            if virtually_split:
+                expected_blocks_count *= 2
 
         # Execute register_kv_caches
         connector.register_kv_caches(kv_caches)

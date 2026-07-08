@@ -811,6 +811,20 @@ def context_attention_fwd(
         BLOCK_M = 32
         BLOCK_N = 32
 
+    # Large head_dim (e.g. Gemma global-attention layers use head_dim 512)
+    # overflows shared memory: the kernel holds a BLOCK_M x head_dim_padded tile
+    # in LDS, which for BLOCK_M=128, head_dim=512, bf16 is 128 KiB > the 64 KiB
+    # LDS limit on MI300 (head_dim 256 fits at exactly 64 KiB). Shrink BLOCK_M
+    # until the tile fits so these models can run. Uses the real per-device
+    # limit, so nothing changes on hardware with more shared memory.
+    try:
+        lds_limit = torch.cuda.get_device_properties(q.device).shared_memory_per_block
+    except Exception:
+        lds_limit = 64 * 1024
+    while BLOCK_M > 16 and BLOCK_M * Lk_padded * q.element_size() > lds_limit:
+        BLOCK_M //= 2
+        BLOCK_N = min(BLOCK_N, BLOCK_M)
+
     # TRITON_BLOCK_SIZE is kept at 32 to ensure
     # correct alignment logic when the kernel handles
     # non-standard sizes (such as 544).

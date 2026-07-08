@@ -7,8 +7,9 @@ from typing import ClassVar
 
 import torch
 
+from vllm import _custom_ops as ops
 from vllm._aiter_ops import rocm_aiter_ops
-from vllm.config import VllmConfig
+from vllm.config import CUDAGraphMode, VllmConfig
 from vllm.config.cache import CacheDType
 from vllm.logger import init_logger
 from vllm.model_executor.layers.quantization.utils.quant_utils import (
@@ -16,6 +17,7 @@ from vllm.model_executor.layers.quantization.utils.quant_utils import (
     kFp8StaticTensorSym,
 )
 from vllm.platforms import current_platform
+from vllm.utils.math_utils import next_power_of_2
 from vllm.utils.torch_utils import is_quantized_kv_cache
 from vllm.v1.attention.backend import (
     AttentionBackend,
@@ -27,15 +29,13 @@ from vllm.v1.attention.backend import (
     CommonAttentionMetadata,
     MultipleOf,
 )
-from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
-    chunked_prefill_paged_decode,
-    has_native_kv_cache_layout,
+from vllm.v1.attention.backends.utils import (
+    compute_mm_prefix_range_tensor,
+    get_kv_cache_layout,
 )
-from vllm.v1.attention.ops.paged_attn import PagedAttention
-from vllm.v1.attention.ops.triton_reshape_and_cache_flash import (
-    triton_reshape_and_cache_flash,
-)
-from vllm.v1.kv_cache_interface import AttentionSpec
+from vllm.v1.attention.ops.prefix_prefill import context_attention_fwd
+from vllm.v1.attention.ops.triton_unified_attention import unified_attention
+from vllm.v1.kv_cache_interface import AttentionSpec, KVQuantMode, get_kv_quant_mode
 
 logger = init_logger(__name__)
 
@@ -68,6 +68,20 @@ class RocmAttentionMetadata:
     # Optional aot scheduling
     scheduler_metadata: torch.Tensor | None = None
     prefix_scheduler_metadata: torch.Tensor | None = None
+    mm_prefix_range: dict[int, list[tuple[int, int]]] | None = None
+    mm_prefix_range_tensor: torch.Tensor | None = None
+    rswa_prefix_lens: torch.Tensor | None = None
+    rswa_window: int | None = None
+
+    # Decode scheduling buffers used by the shared Triton unified-attention
+    # kernel. ROCM_ATTN owns a different cache shape from TRITON_ATTN, but the
+    # runtime scheduling contract is intentionally the same.
+    seq_threshold_3D: int = 0
+    num_par_softmax_segments: int = 0
+    softmax_segm_output: torch.Tensor | None = None
+    softmax_segm_max: torch.Tensor | None = None
+    softmax_segm_expsum: torch.Tensor | None = None
+    has_decode: bool = False
 
     # DFlash drafting sets this to False via CommonAttentionMetadata.
     causal: bool = True
@@ -75,6 +89,24 @@ class RocmAttentionMetadata:
 
 class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadata]):
     _cudagraph_support: ClassVar[AttentionCGSupport] = AttentionCGSupport.ALWAYS
+
+    @staticmethod
+    def _decode_split_kv_segments(num_kv_heads: int) -> int:
+        """KV segments for the 3D split-KV (flash-decoding) decode.
+
+        The decode kernel needs enough launch-grid thread blocks to saturate the
+        GPU. The 2D single-pass grid is ``num_seqs * num_kv_heads`` blocks; when a
+        batch is smaller than that, the 3D kernel splits each (sequence, kv-head)
+        into this many KV segments to make up the difference. The target is ~128
+        blocks per sequence -- the MI300 saturation point (rocprof, Llama-70B TP8,
+        1 KV head, 9k context: decode attention runs 43.9 / 27.2 / 19.6 us at
+        16 / 32 / 128 segments). Deriving the count from ``num_kv_heads`` keeps a
+        single occupancy target across models with no per-model tuning. This is
+        the same 128-block target and 2D/3D threshold TRITON_ATTN uses; TRITON_ATTN
+        fixes its segment count instead, which under-fills low-KV-head shards.
+        """
+        launch_grid_target = 128
+        return max(1, launch_grid_target // num_kv_heads)
 
     def __init__(
         self,
@@ -93,6 +125,61 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         )
         self.num_heads_kv = model_config.get_num_kv_heads(vllm_config.parallel_config)
         self.headdim = model_config.get_head_size()
+
+        self.decode_cudagraph_enabled = (
+            self.vllm_config.compilation_config.cudagraph_mode
+            in (
+                CUDAGraphMode.FULL_AND_PIECEWISE,
+                CUDAGraphMode.FULL_DECODE_ONLY,
+                CUDAGraphMode.FULL,
+            )
+        )
+        # Segments for the 3D split-KV decode, and -- the same target-derived
+        # value -- the batch size above which the 2D single-pass grid is already
+        # large enough to skip the split. See _decode_split_kv_segments.
+        self.num_par_softmax_segments = self._decode_split_kv_segments(
+            self.num_heads_kv
+        )
+        self.seq_threshold_3D = self.num_par_softmax_segments
+        if self.decode_cudagraph_enabled:
+            capture_sizes = self.vllm_config.compilation_config.cudagraph_capture_sizes
+            assert capture_sizes, "CUDA Graphs enabled but no capture sizes specified."
+            # The pre-allocated reduction buffers are indexed by captured batch
+            # size, so snap the 2D/3D threshold to the nearest captured size.
+            self.seq_threshold_3D = min(
+                capture_sizes,
+                key=lambda x: abs(x - self.seq_threshold_3D),
+            )
+        headdim_padded = next_power_of_2(self.headdim)
+        self.softmax_segm_output = torch.empty(
+            (
+                self.seq_threshold_3D,
+                self.num_heads_q,
+                self.num_par_softmax_segments,
+                headdim_padded,
+            ),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.softmax_segm_max = torch.empty(
+            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            dtype=torch.float32,
+            device=device,
+        )
+        self.softmax_segm_expsum = torch.empty(
+            (self.seq_threshold_3D, self.num_heads_q, self.num_par_softmax_segments),
+            dtype=torch.float32,
+            device=device,
+        )
+
+        self.rswa_window = model_config.rswa_window
+        self.persistent_rswa_prefix_lens: torch.Tensor | None = None
+        if self.rswa_window is not None:
+            self.persistent_rswa_prefix_lens = torch.empty(
+                vllm_config.scheduler_config.max_num_seqs,
+                dtype=torch.int32,
+                device=device,
+            )
 
     def build_for_cudagraph_capture(
         self, common_attn_metadata: CommonAttentionMetadata
@@ -125,8 +212,15 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
         seq_lens = common_attn_metadata.seq_lens
         block_table_tensor = common_attn_metadata.block_table_tensor
         slot_mapping = common_attn_metadata.slot_mapping
+        num_reqs = common_attn_metadata.num_reqs
+        query_lens_cpu = (
+            common_attn_metadata.query_start_loc_cpu[1 : num_reqs + 1]
+            - common_attn_metadata.query_start_loc_cpu[:num_reqs]
+        )
+        has_decode = bool((query_lens_cpu == 1).any())
 
         use_cascade = common_prefix_len > 0
+        prefix_scheduler_metadata = None
 
         if use_cascade:
             cu_prefix_query_lens = torch.tensor(
@@ -141,7 +235,6 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             cu_prefix_query_lens = None
             prefix_kv_lens = None
             suffix_kv_lens = None
-            prefix_scheduler_metadata = None
 
         attn_metadata = RocmAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
@@ -158,7 +251,34 @@ class RocmAttentionMetadataBuilder(AttentionMetadataBuilder[RocmAttentionMetadat
             suffix_kv_lens=suffix_kv_lens,
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             causal=common_attn_metadata.causal,
+            seq_threshold_3D=self.seq_threshold_3D,
+            num_par_softmax_segments=self.num_par_softmax_segments,
+            softmax_segm_output=self.softmax_segm_output,
+            softmax_segm_max=self.softmax_segm_max,
+            softmax_segm_expsum=self.softmax_segm_expsum,
+            has_decode=has_decode,
         )
+
+        mm_ranges = common_attn_metadata.mm_req_doc_ranges
+        if mm_ranges is not None:
+            attn_metadata.mm_prefix_range = mm_ranges
+            attn_metadata.mm_prefix_range_tensor = compute_mm_prefix_range_tensor(
+                mm_ranges,
+                len(seq_lens),
+                seq_lens.device,
+            )
+
+        rswa_prefix_lens = common_attn_metadata.rswa_prefix_lens
+        if self.rswa_window is not None and rswa_prefix_lens is not None:
+            assert self.persistent_rswa_prefix_lens is not None
+            rswa_prefix_lens = rswa_prefix_lens.to(
+                device=self.device, dtype=torch.int32, non_blocking=True
+            )
+            persistent_prefix_lens = self.persistent_rswa_prefix_lens[: len(seq_lens)]
+            persistent_prefix_lens.copy_(rswa_prefix_lens[: len(seq_lens)])
+            attn_metadata.rswa_prefix_lens = persistent_prefix_lens
+            attn_metadata.rswa_window = self.rswa_window
+
         return attn_metadata
 
 
@@ -191,7 +311,7 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def get_supported_head_sizes(cls) -> list[int]:
-        return [32, 64, 80, 96, 128, 160, 192, 224, 256]
+        return [32, 64, 80, 96, 128, 160, 192, 224, 256, 512]
 
     @classmethod
     def supports_mm_prefix(cls) -> bool:
@@ -199,10 +319,7 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_sink(cls) -> bool:
-        # ROCM custom attention kernel does not support sinks.
-        # Callink this backend with sinks will cause it to fall back to the Triton
-        # kernel, which is less efficient than the proper triton backends.
-        return False
+        return True
 
     @classmethod
     def supports_non_causal(cls) -> bool:
@@ -210,9 +327,7 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_kv_connector(cls) -> bool:
-        # ROCM_ATTN uses (2, num_blocks, ...) KV cache layout which is
-        # incompatible with KV connectors that require blocks-first layout.
-        return False
+        return True
 
     forward_includes_kv_cache_update: bool = False
 
@@ -226,13 +341,7 @@ class RocmAttentionBackend(AttentionBackend):
 
     @classmethod
     def supports_attn_type(cls, attn_type: str) -> bool:
-        """ENCODER_DECODER is not supported because
-        chunked_prefill_paged_decode's prefill kernel (context_attention_fwd)
-        assumes self-attention semantics: it treats passed K/V as new tokens
-        to mix with cached K/V. For cross-attention layers the encoder K/V
-        are already fully cached, so mixing them again produces incorrect
-        results when max_query_len > 1 (e.g. beam search).
-        """
+        """ROCM_ATTN currently supports self-attention style cache ownership."""
         return attn_type in (
             AttentionType.DECODER,
             AttentionType.ENCODER,
@@ -249,7 +358,28 @@ class RocmAttentionBackend(AttentionBackend):
     ) -> tuple[int, ...]:
         if block_size % 16 != 0:
             raise ValueError("Block size must be a multiple of 16.")
-        return (2, num_blocks, block_size, num_kv_heads, head_size)
+        return (num_blocks, num_kv_heads, block_size, 2 * head_size)
+
+    @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        cache_layout = get_kv_cache_layout()
+        if cache_layout == "NHD" and include_num_layers_dimension:
+            # Logical: (num_layers, num_blocks, num_kv_heads, block_size, 2D)
+            # Physical: (num_blocks, num_layers, block_size, num_kv_heads, 2D)
+            return (1, 0, 3, 2, 4)
+        if cache_layout == "NHD":
+            # Logical: (num_blocks, num_kv_heads, block_size, 2D)
+            # Physical: (num_blocks, block_size, num_kv_heads, 2D)
+            return (0, 2, 1, 3)
+        if cache_layout == "HND" and include_num_layers_dimension:
+            # Logical: (num_layers, num_blocks, num_kv_heads, block_size, 2D)
+            # Physical: (num_blocks, num_kv_heads, num_layers, block_size, 2D)
+            return (1, 2, 0, 3, 4)
+        if cache_layout == "HND":
+            return (0, 1, 2, 3)
+        raise ValueError(f"Unknown cache layout: {cache_layout}")
 
     @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
@@ -308,6 +438,212 @@ class RocmAttentionImpl(AttentionImpl):
                 f"heads in the layer. Sinks shape: {sinks.shape}, "
                 f"num_heads: {num_heads}."
             )
+        self._kv_quant_mode = get_kv_quant_mode(kv_cache_dtype)
+        self._cached_kv_cache: torch.Tensor | None = None
+        self._cached_key_cache: torch.Tensor | None = None
+        self._cached_value_cache: torch.Tensor | None = None
+        self._cached_prefix_key_cache: torch.Tensor | None = None
+        self._cached_prefix_value_cache: torch.Tensor | None = None
+
+    def _split_kv_cache_for_update(
+        self,
+        kv_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return NHD K/V views from content-packed ROCM_ATTN cache.
+
+        Logical ROCM_ATTN cache is
+        ``[num_blocks, num_kv_heads, block_size, 2 * head_size]``. Writers that
+        use the flash-style cache contract take separate
+        ``[num_blocks, block_size, num_kv_heads, head_size]`` K/V tensors, so
+        this split preserves the shared storage and exposes the expected view.
+        """
+        if kv_cache is not self._cached_kv_cache:
+            self._cached_kv_cache = kv_cache
+            key_cache = kv_cache[..., : self.head_size]
+            value_cache = kv_cache[..., self.head_size :]
+            self._cached_key_cache = key_cache.transpose(1, 2)
+            self._cached_value_cache = value_cache.transpose(1, 2)
+            x = 16 // kv_cache.element_size()
+            self._cached_prefix_key_cache = torch.as_strided(
+                key_cache,
+                (
+                    key_cache.shape[0],
+                    key_cache.shape[1],
+                    self.head_size // x,
+                    key_cache.shape[2],
+                    x,
+                ),
+                (
+                    key_cache.stride(0),
+                    key_cache.stride(1),
+                    x * key_cache.stride(3),
+                    key_cache.stride(2),
+                    key_cache.stride(3),
+                ),
+            )
+            self._cached_prefix_value_cache = torch.as_strided(
+                value_cache,
+                (
+                    value_cache.shape[0],
+                    value_cache.shape[1],
+                    self.head_size,
+                    value_cache.shape[2],
+                ),
+                (
+                    value_cache.stride(0),
+                    value_cache.stride(1),
+                    value_cache.stride(3),
+                    value_cache.stride(2),
+                ),
+            )
+
+        assert self._cached_key_cache is not None
+        assert self._cached_value_cache is not None
+        return self._cached_key_cache, self._cached_value_cache
+
+    def _split_kv_cache_for_prefix_prefill(
+        self,
+        kv_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return prefix-prefill K/V views backed by content-packed storage."""
+        self._split_kv_cache_for_update(kv_cache)
+        assert self._cached_prefix_key_cache is not None
+        assert self._cached_prefix_value_cache is not None
+        return self._cached_prefix_key_cache, self._cached_prefix_value_cache
+
+    def _split_kv_cache_for_unified_attention(
+        self,
+        kv_cache: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return unified-attention K/V views backed by content-packed storage."""
+        return self._split_kv_cache_for_update(kv_cache)
+
+    def _can_use_prefix_prefill_fast_path(
+        self,
+        attn_metadata: RocmAttentionMetadata,
+        key: torch.Tensor | None,
+        value: torch.Tensor | None,
+    ) -> bool:
+        # Only pure-prefill batches take context_attention_fwd. Mixed
+        # prefill+decode batches stay on unified_attention: although
+        # context_attention_fwd is faster on the prefill rows in isolation,
+        # routing the whole mixed batch through it measured ~1.5% slower
+        # end-to-end on 8k/1k TP8 (the decode rows lose more than the prefill
+        # rows gain), so the has_decode gate is kept.
+        return (
+            attn_metadata.max_query_len > 1
+            and not attn_metadata.has_decode
+            and key is not None
+            and value is not None
+            and attn_metadata.mm_prefix_range_tensor is None
+            and attn_metadata.rswa_prefix_lens is None
+            and not self.logits_soft_cap
+        )
+
+    def _can_use_native_decode_fast_path(
+        self,
+        kv_cache: torch.Tensor,
+        attn_metadata: RocmAttentionMetadata,
+        output_scale: torch.Tensor | None,
+    ) -> bool:
+        """Return whether content-packed decode should use ROCm native pages.
+
+        The native ROCm paged-attention kernel only wins for short-context
+        decode. For long context the shared Triton unified-attention path is
+        faster because its split-softmax (3D) reduction parallelizes the long
+        KV scan, while the native kernel serializes it per query-head. This was
+        measured with rocprof on a clean MI300 (bf16, GQA>4, 8 seqs):
+
+            ctx   native (paged_attention_rocm)   unified (3D split)
+            1k    ~25 us                           ~38 us   -> native
+            8k    ~81 us  (Qwen) / ~32 us (Llama)  ~41/23us -> unified
+
+        So gate native to short context only. Keep it narrow otherwise so
+        feature-bearing paths continue through the stride-aware Triton kernel.
+        """
+        if (
+            attn_metadata.max_query_len != 1
+            or self.sinks is not None
+            or self.logits_soft_cap
+            or output_scale is not None
+            or self.kv_cache_dtype != "auto"
+            or self.num_queries_per_kv <= 4
+            or self.sliding_window != (-1, -1)
+            or attn_metadata.rswa_prefix_lens is not None
+            or attn_metadata.causal is not True
+        ):
+            return False
+
+        # NOTE: mm_prefix_range only enables bidirectional attention *within* an
+        # image span during prefill. This gate requires max_query_len == 1, so
+        # every query is a single decode token positioned after all prompt
+        # (image) tokens; the bidirectional range is a no-op for those queries
+        # and native decode matches unified attention exactly. Multimodal decode
+        # (e.g. Qwen2-VL) can therefore still take the native short-context path
+        # instead of being excluded just because the request carries an image.
+
+        block_size = kv_cache.shape[2]
+        if block_size not in (16, 32):
+            return False
+
+        num_seqs = attn_metadata.seq_lens.shape[0]
+        if num_seqs > attn_metadata.seq_threshold_3D:
+            return False
+
+        # Native only wins for short context; long context stays on unified,
+        # which matches the 2D/3D switch inside unified_attention itself. 2048 is
+        # the rocprof crossover on MI300 where unified's KV-parallel 3D reduction
+        # starts beating the single-pass native paged-attention kernel.
+        native_decode_max_seq_len = 2048
+        return attn_metadata.max_seq_len <= native_decode_max_seq_len
+
+    def _native_decode(
+        self,
+        layer: AttentionLayer,
+        query: torch.Tensor,
+        kv_cache: torch.Tensor,
+        output: torch.Tensor,
+        attn_metadata: RocmAttentionMetadata,
+    ) -> torch.Tensor:
+        prefix_key_cache, prefix_value_cache = self._split_kv_cache_for_prefix_prefill(
+            kv_cache
+        )
+        num_seqs = attn_metadata.block_table.shape[0]
+        block_size = kv_cache.shape[2]
+        max_num_partitions = (attn_metadata.max_seq_len + 255) // 256
+        tmp_output = torch.empty(
+            (num_seqs, self.num_heads, max_num_partitions, self.head_size),
+            dtype=query.dtype,
+            device=output.device,
+        )
+        exp_sums = torch.empty(
+            (num_seqs, self.num_heads, max_num_partitions),
+            dtype=torch.float32,
+            device=output.device,
+        )
+        max_logits = torch.empty_like(exp_sums)
+
+        ops.paged_attention_rocm(
+            output,
+            exp_sums,
+            max_logits,
+            tmp_output,
+            query,
+            prefix_key_cache,
+            prefix_value_cache,
+            self.num_kv_heads,
+            scale=self.scale,
+            block_tables=attn_metadata.block_table,
+            seq_lens=attn_metadata.seq_lens,
+            query_start_loc=attn_metadata.query_start_loc,
+            block_size=block_size,
+            max_seq_len=attn_metadata.max_seq_len,
+            alibi_slopes=self.alibi_slopes,
+            kv_cache_dtype=self.kv_cache_dtype,
+            k_scale=layer._k_scale,
+            v_scale=layer._v_scale,
+        )
+        return output
 
     def _forward_encoder_attention(
         self,
@@ -376,7 +712,7 @@ class RocmAttentionImpl(AttentionImpl):
             key: shape = [num_tokens, num_kv_heads, head_size]
             value: shape = [num_tokens, num_kv_heads, head_size]
             kv_cache: shape =
-                [2, num_blocks, block_size, num_kv_heads, head_size]
+                [num_blocks, num_kv_heads, block_size, 2 * head_size]
             attn_metadata: Metadata for attention.
         Returns:
             shape = [num_tokens, num_heads * head_size]
@@ -414,54 +750,90 @@ class RocmAttentionImpl(AttentionImpl):
                 layer,
             )
 
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
-        )
+        key_cache, value_cache = self._split_kv_cache_for_unified_attention(kv_cache)
 
         if is_quantized_kv_cache(self.kv_cache_dtype):
             key_cache = key_cache.view(self.fp8_dtype)
             value_cache = value_cache.view(self.fp8_dtype)
-            # chunked_prefill_paged_decode runs attention with a full-precision
-            # query (it does not quantize Q to fp8 and does not consume
-            # q_scale), so q_scale only matters when the query itself is fp8.
-            # For a non-fp8 query, q_scale is not applicable and is ignored
-            # (mirrors TritonAttentionImpl). This avoids spuriously failing on
-            # checkpoints that carry a non-1.0 q_scale while keeping the query
-            # in full precision.
-            if query.dtype == self.fp8_dtype and layer._q_scale_float != 1.0:
-                raise NotImplementedError(
-                    "A non 1.0 q_scale with an fp8 query is not currently "
-                    "supported by RocmAttentionImpl."
-                )
 
-        cu_seqlens_q = attn_metadata.query_start_loc
-        seqused_k = attn_metadata.seq_lens
-        max_seqlen_q = attn_metadata.max_query_len
-        max_seqlen_k = attn_metadata.max_seq_len
-        block_table = attn_metadata.block_table
+        if self._can_use_prefix_prefill_fast_path(attn_metadata, key, value):
+            prefix_key_cache, prefix_value_cache = (
+                self._split_kv_cache_for_prefix_prefill(kv_cache)
+            )
+            context_attention_fwd(
+                q=query[:num_actual_tokens],
+                k=key[:num_actual_tokens],
+                v=value[:num_actual_tokens],
+                o=output[:num_actual_tokens],
+                kv_cache_dtype=self.kv_cache_dtype,
+                k_cache=prefix_key_cache,
+                v_cache=prefix_value_cache,
+                b_loc=attn_metadata.block_table,
+                b_start_loc=attn_metadata.query_start_loc,
+                b_seq_len=attn_metadata.seq_lens,
+                max_seq_len=attn_metadata.max_seq_len,
+                max_input_len=attn_metadata.max_query_len,
+                k_scale=layer._k_scale,
+                v_scale=layer._v_scale,
+                alibi_slopes=self.alibi_slopes,
+                sliding_window=self.sliding_window[0],
+                sm_scale=self.scale,
+                fp8_out_scale=output_scale,
+                sinks=self.sinks,
+                causal=attn_metadata.causal,
+            )
+            return output
 
-        # Compute attention and update output up to `num_actual_tokens`.
-        chunked_prefill_paged_decode(
-            query=query[:num_actual_tokens],
-            key=key[:num_actual_tokens] if key is not None else None,
-            value=value[:num_actual_tokens] if value is not None else None,
-            output=output[:num_actual_tokens],
-            kv_cache_dtype=self.kv_cache_dtype,
-            key_cache=key_cache,
-            value_cache=value_cache,
-            block_table=block_table,
-            query_start_loc=cu_seqlens_q,
-            seq_lens=seqused_k,
-            max_seq_len=max_seqlen_k,
-            max_query_len=max_seqlen_q,
-            k_scale=layer._k_scale,
-            v_scale=layer._v_scale,
-            alibi_slopes=self.alibi_slopes,
-            sliding_window=self.sliding_window[0],
-            sm_scale=self.scale,
-            output_scale=output_scale,
-            sinks=self.sinks,
+        if self._can_use_native_decode_fast_path(
+            kv_cache, attn_metadata, output_scale
+        ):
+            self._native_decode(
+                layer,
+                query[:num_actual_tokens],
+                kv_cache,
+                output[:num_actual_tokens],
+                attn_metadata,
+            )
+            return output
+
+        q_descale = (
+            layer._q_scale
+            if (
+                self._kv_quant_mode == KVQuantMode.FP8_PER_TENSOR
+                and query.dtype == self.fp8_dtype
+            )
+            else None
+        )
+
+        unified_attention(
+            q=query[:num_actual_tokens],
+            k=key_cache,
+            v=value_cache,
+            out=output[:num_actual_tokens],
+            cu_seqlens_q=attn_metadata.query_start_loc,
+            max_seqlen_q=attn_metadata.max_query_len,
+            seqused_k=attn_metadata.seq_lens,
+            max_seqlen_k=attn_metadata.max_seq_len,
+            softmax_scale=self.scale,
             causal=attn_metadata.causal,
+            alibi_slopes=self.alibi_slopes,
+            window_size=self.sliding_window,
+            block_table=attn_metadata.block_table,
+            softcap=self.logits_soft_cap,
+            q_descale=q_descale,
+            k_descale=layer._k_scale,
+            v_descale=layer._v_scale,
+            seq_threshold_3D=attn_metadata.seq_threshold_3D,
+            num_par_softmax_segments=attn_metadata.num_par_softmax_segments,
+            softmax_segm_output=attn_metadata.softmax_segm_output,
+            softmax_segm_max=attn_metadata.softmax_segm_max,
+            softmax_segm_expsum=attn_metadata.softmax_segm_expsum,
+            sinks=self.sinks,
+            output_scale=output_scale,
+            mm_prefix_range=attn_metadata.mm_prefix_range_tensor,
+            rswa_prefix_lens=attn_metadata.rswa_prefix_lens,
+            rswa_window=attn_metadata.rswa_window,
+            kv_quant_mode=self._kv_quant_mode,
         )
 
         return output
@@ -476,43 +848,22 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache, self.num_kv_heads, self.head_size
+        key_cache, value_cache = self._split_kv_cache_for_update(kv_cache)
+
+        if is_quantized_kv_cache(self.kv_cache_dtype):
+            key_cache = key_cache.view(self.fp8_dtype)
+            value_cache = value_cache.view(self.fp8_dtype)
+
+        ops.reshape_and_cache_flash(
+            key,
+            value,
+            key_cache,
+            value_cache,
+            slot_mapping,
+            self.kv_cache_dtype,
+            layer._k_scale,
+            layer._v_scale,
         )
-
-        # Reshape the input keys and values and store them in the cache.
-        # Get the actual block_size from value_cache
-        # value_cache shape: [num_blocks, num_heads, head_size, block_size]
-        block_size = value_cache.shape[3]
-        has_native_layout = has_native_kv_cache_layout(key_cache, value_cache)
-
-        if block_size in (16, 32) and has_native_layout:
-            # Normal 16, 32 with contiguous blocks: use vLLM native HIP C++ logic.
-            PagedAttention.write_to_paged_cache(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
-        else:
-            # Non-standard blocks and hybrid attention/Mamba layouts need the
-            # stride-aware Triton writer. The native reshape_and_cache kernel
-            # assumes contiguous block storage and writes to the wrong hybrid
-            # cache blocks.
-            triton_reshape_and_cache_flash(
-                key,
-                value,
-                key_cache,
-                value_cache,
-                slot_mapping,
-                self.kv_cache_dtype,
-                layer._k_scale,
-                layer._v_scale,
-            )
 
     def fused_rope_kvcache_supported(self):
         return rocm_aiter_ops.is_enabled()
@@ -531,12 +882,8 @@ class RocmAttentionImpl(AttentionImpl):
     ):
         if self.attn_type in (AttentionType.ENCODER_ONLY, AttentionType.ENCODER):
             return
-        key_cache, value_cache = PagedAttention.split_kv_cache(
-            kv_cache,
-            layer.num_kv_heads,  # type: ignore[attr-defined]
-            layer.head_size,  # type: ignore[attr-defined]
-        )
-        flash_layout = False
+        key_cache, value_cache = self._split_kv_cache_for_update(kv_cache)
+        flash_layout = True
 
         is_fp8_kv_cache = is_quantized_kv_cache(self.kv_cache_dtype)
         if is_fp8_kv_cache:

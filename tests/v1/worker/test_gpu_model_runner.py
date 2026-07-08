@@ -768,9 +768,14 @@ def test_kv_cache_stride_order(monkeypatch, model_runner):
     )
 
     # TODO mla test
-    default_stride = tuple(range(5))
+    default_stride = tuple(range(len(expected_kv_cache_shape)))
+    non_default_stride = (
+        (0, 2, 1, 3)
+        if len(expected_kv_cache_shape) == 4
+        else (1, 4, 0, 2, 3)
+    )
     # Permutation that gets you back to expected kv shape
-    for test_stride in ((1, 4, 0, 2, 3), (0, 1, 2, 3, 4)):
+    for test_stride in (non_default_stride, default_stride):
 
         def rnd_stride_order(
             include_num_layers_dimension: bool = False, test_stride=test_stride

@@ -8,7 +8,9 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.attention.backend import AttentionType
 from vllm.v1.attention.backends.registry import AttentionBackendEnum
+from vllm.v1.attention.backends.utils import set_kv_cache_layout
 from vllm.v1.attention.selector import AttentionSelectorConfig
 
 # ROCm-specific attention backend selection tests
@@ -361,3 +363,112 @@ def test_sparse_not_supported(mock_vllm_config):
         RocmPlatform.get_attn_backend_cls(
             selected_backend=None, attn_selector_config=attn_selector_config
         )
+
+
+def test_rocm_attn_content_packed_kv_cache_contract():
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionBackend
+
+    assert RocmAttentionBackend.supports_sink()
+    assert RocmAttentionBackend.supports_kv_connector()
+    assert RocmAttentionBackend.supports_head_size(512)
+    assert RocmAttentionBackend.get_kv_cache_shape(3, 16, 2, 8) == (
+        3,
+        2,
+        16,
+        16,
+    )
+
+    try:
+        set_kv_cache_layout("HND")
+        assert RocmAttentionBackend.indexes_kv_by_block_stride()
+        assert RocmAttentionBackend.get_kv_cache_stride_order() == (0, 1, 2, 3)
+        assert RocmAttentionBackend.get_kv_cache_stride_order(True) == (
+            1,
+            2,
+            0,
+            3,
+            4,
+        )
+
+        set_kv_cache_layout("NHD")
+        assert RocmAttentionBackend.indexes_kv_by_block_stride()
+        assert RocmAttentionBackend.get_kv_cache_stride_order() == (0, 2, 1, 3)
+        assert RocmAttentionBackend.get_kv_cache_stride_order(True) == (
+            1,
+            0,
+            3,
+            2,
+            4,
+        )
+    finally:
+        set_kv_cache_layout(None)
+
+
+def test_rocm_attn_decode_segment_policy():
+    # The 3D split-KV segment count derives from a single launch-grid target and
+    # the per-rank KV-head count -- no per-model tuning. It must reach the target
+    # occupancy even for low-KV-head shards (e.g. Llama-70B TP8 -> 1 KV head),
+    # which is exactly the case the earlier per-model heuristic missed.
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionMetadataBuilder
+
+    segments = RocmAttentionMetadataBuilder._decode_split_kv_segments
+
+    assert segments(1) == 128  # Llama-70B TP8 (1 KV head) -> full split
+    assert segments(4) == 32  # Qwen3.6-27B TP2
+    assert segments(8) == 16  # gemma-4-31B TP2
+    # More KV heads than the target still splits into at least one segment.
+    assert segments(256) == 1
+
+
+def test_rocm_aiter_unified_stride_order_matches_shape():
+    # RocmAiterUnifiedAttention subclasses RocmAttentionBackend but keeps the
+    # legacy 5D contiguous KV layout, so it must NOT inherit the parent's
+    # content-packed 4D stride order: the runner asserts
+    # len(stride_order) == len(shape) and does not catch AssertionError, so a
+    # mismatch crashes KV-cache init for every model on that backend.
+    from vllm.v1.attention.backends.rocm_aiter_unified_attn import (
+        RocmAiterUnifiedAttentionBackend,
+    )
+
+    shape = RocmAiterUnifiedAttentionBackend.get_kv_cache_shape(100, 16, 8, 128)
+    order = RocmAiterUnifiedAttentionBackend.get_kv_cache_stride_order()
+    order_l = RocmAiterUnifiedAttentionBackend.get_kv_cache_stride_order(True)
+    assert len(order) == len(shape)
+    assert sorted(order) == list(range(len(shape)))
+    assert sorted(order_l) == list(range(len(shape) + 1))
+
+
+def test_rocm_attn_content_packed_split_views():
+    from vllm.v1.attention.ops.chunked_prefill_paged_decode import (
+        has_native_kv_cache_layout,
+    )
+    from vllm.v1.attention.backends.rocm_attn import RocmAttentionImpl
+
+    impl = RocmAttentionImpl(
+        num_heads=2,
+        head_size=16,
+        scale=1.0,
+        num_kv_heads=2,
+        alibi_slopes=None,
+        sliding_window=None,
+        kv_cache_dtype="auto",
+        attn_type=AttentionType.DECODER,
+    )
+    kv_cache = torch.arange(3 * 2 * 4 * 32, dtype=torch.float16).reshape(3, 2, 4, 32)
+
+    key_update, value_update = impl._split_kv_cache_for_update(kv_cache)
+    assert key_update.shape == (3, 4, 2, 16)
+    assert value_update.shape == (3, 4, 2, 16)
+    assert key_update[1, 3, 0, 5] == kv_cache[1, 0, 3, 5]
+    assert value_update[1, 3, 0, 5] == kv_cache[1, 0, 3, 21]
+
+    key_decode, value_decode = impl._split_kv_cache_for_unified_attention(kv_cache)
+    assert key_decode.shape == (3, 4, 2, 16)
+    assert value_decode.shape == (3, 4, 2, 16)
+    assert key_decode[1, 3, 0, 5] == kv_cache[1, 0, 3, 5]
+    assert value_decode[1, 3, 0, 5] == kv_cache[1, 0, 3, 21]
+    assert not has_native_kv_cache_layout(key_decode, value_decode)
+
+    native_key = torch.empty(3, 2, 2, 4, 8)
+    native_value = torch.empty(3, 2, 16, 4)
+    assert has_native_kv_cache_layout(native_key, native_value)

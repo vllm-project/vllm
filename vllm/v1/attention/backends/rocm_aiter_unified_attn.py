@@ -88,6 +88,19 @@ class RocmAiterUnifiedAttentionBackend(RocmAttentionBackend):
         return (num_blocks, 2, block_size, num_kv_heads, head_size)
 
     @staticmethod
+    def get_kv_cache_stride_order(
+        include_num_layers_dimension: bool = False,
+    ) -> tuple[int, ...]:
+        # RocmAiterUnifiedAttention keeps the legacy contiguous KV layout
+        # (num_blocks, 2, block_size, num_kv_heads, head_size) rather than the
+        # content-packed layout of its RocmAttentionBackend parent, so the
+        # physical order matches the logical shape (identity permutation). Do not
+        # inherit the parent's content-packed stride order: it has one fewer
+        # dimension than this shape and would fail the len() check in the runner.
+        ndims = 6 if include_num_layers_dimension else 5
+        return tuple(range(ndims))
+
+    @staticmethod
     def use_cascade_attention(*args, **kwargs) -> bool:
         return False
 

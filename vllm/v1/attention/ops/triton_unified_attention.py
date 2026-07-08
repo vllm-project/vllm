@@ -953,7 +953,10 @@ def unified_attention(
     #    = \sum_i[floor(query_len[i] / BLOCK_Q)] + num_seqs
     #   <= floor(\sum_i(query_len[i]) / BLOCK_Q) + num_seqs
     #    = floor(q.shape[0] / BLOCK_Q) + num_seqs
-    total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
+    if max_seqlen_q == 1:
+        total_num_q_blocks = num_seqs
+    else:
+        total_num_q_blocks = q.shape[0] // BLOCK_Q + num_seqs
 
     sliding_window_val = 1 + window_size[0] if window_size[0] >= 0 else 0
 
@@ -1026,8 +1029,10 @@ def unified_attention(
     # Launch the 2D kernel if
     # 1. No intermediate tiled softmax buffers for the 3D kernel have been allocated, or
     # 2. The batch includes at least one prefill request, or
-    # 3. The number of sequences exceeds the configured threshold, or
-    # 4. Batch invariance is enabled
+    # 3. Decode context is short enough that one full-sequence kernel beats
+    #    split-softmax plus its reduction launch on ROCm,
+    # 4. The number of sequences exceeds the configured threshold, or
+    # 5. Batch invariance is enabled
     use_3d = not (
         seq_threshold_3D is None
         or num_par_softmax_segments is None
@@ -1035,6 +1040,7 @@ def unified_attention(
         or softmax_segm_max is None
         or softmax_segm_expsum is None
         or max_seqlen_q > 1
+        or (current_platform.is_rocm() and max_seqlen_k <= 2048)
         or num_seqs > seq_threshold_3D
         or is_batch_invariant
     )
