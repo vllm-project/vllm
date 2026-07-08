@@ -83,6 +83,7 @@ class MossTranscribeDiarizeAudioInputs(TensorSchema):
         - c: Audio chunks
         - m: Mel bins
         - f: Mel frames
+        - n: Number of audio items
     """
 
     type: Literal["audio_features"] = "audio_features"
@@ -94,6 +95,10 @@ class MossTranscribeDiarizeAudioInputs(TensorSchema):
     audio_feature_lengths: Annotated[
         torch.Tensor | None,
         TensorShape("c"),
+    ]
+    audio_chunk_counts: Annotated[
+        torch.Tensor | None,
+        TensorShape("n"),
     ]
 
 
@@ -274,6 +279,7 @@ class MossTranscribeDiarizeWhisperEncoder(WhisperEncoder):
             ),
             prefix=prefix,
         )
+        self.audio_merge_size = int(vllm_config.model_config.hf_config.audio_merge_size)
         self.max_encoder_batch: int | None = None
 
     def load_weights(self, weights: Iterable[tuple[str, torch.Tensor]]) -> set[str]:
@@ -302,7 +308,7 @@ class MossTranscribeDiarizeWhisperEncoder(WhisperEncoder):
 
         hidden = torch.cat(encoded_parts, dim=0)
         chunks = [
-            hidden[idx : idx + 1, : int(token_len.item()) * 4]
+            hidden[idx : idx + 1, : int(token_len.item()) * self.audio_merge_size]
             for idx, token_len in enumerate(audio_feature_lengths)
         ]
         return torch.cat(chunks, dim=1)
@@ -671,6 +677,7 @@ class MossTranscribeDiarizeForConditionalGeneration(
         input_features = kwargs.pop("input_features", None)
         audio_embeds = kwargs.pop("audio_embeds", None)
         audio_feature_lengths = kwargs.pop("audio_feature_lengths", None)
+        audio_chunk_counts = kwargs.pop("audio_chunk_counts", None)
         if input_features is None and audio_embeds is None:
             return None
         if audio_embeds is not None:
@@ -682,6 +689,7 @@ class MossTranscribeDiarizeForConditionalGeneration(
             type="audio_features",
             input_features=input_features,
             audio_feature_lengths=audio_feature_lengths,
+            audio_chunk_counts=audio_chunk_counts,
         )
 
     def _process_audio_input(
@@ -692,6 +700,7 @@ class MossTranscribeDiarizeForConditionalGeneration(
 
         input_features = audio_input["input_features"]
         audio_feature_lengths = audio_input["audio_feature_lengths"]
+        audio_chunk_counts = audio_input["audio_chunk_counts"]
         if input_features is None or audio_feature_lengths is None:
             raise ValueError(
                 "MOSS-Transcribe-Diarize audio inputs require both "
@@ -704,10 +713,43 @@ class MossTranscribeDiarizeForConditionalGeneration(
                 f"{audio_feature_lengths.numel()} lengths for "
                 f"{input_features.shape[0]} chunks."
             )
+        if audio_chunk_counts is None:
+            audio_chunk_counts = audio_feature_lengths.new_tensor(
+                [input_features.shape[0]],
+                dtype=torch.long,
+            )
+        else:
+            audio_chunk_counts = audio_chunk_counts.to(dtype=torch.long)
+        if audio_chunk_counts.numel() == 0:
+            raise ValueError("`audio_chunk_counts` must contain at least one item.")
+        if torch.any(audio_chunk_counts <= 0):
+            raise ValueError("`audio_chunk_counts` must contain positive counts.")
+        num_audio_chunks = int(audio_chunk_counts.sum().item())
+        if num_audio_chunks != input_features.shape[0]:
+            raise ValueError(
+                "`audio_chunk_counts` must sum to the number of input feature chunks: "
+                f"got {num_audio_chunks} chunks for "
+                f"{input_features.shape[0]} input chunks."
+            )
 
         features = self.whisper_encoder(input_features, audio_feature_lengths)
         merged = self._time_merge(features.to(dtype=self.dtype))
-        return [self.vq_adaptor(merged).squeeze(0)]
+        projected = self.vq_adaptor(merged).squeeze(0)
+
+        audio_chunk_offsets = torch.cumsum(audio_chunk_counts, dim=0)
+        audio_chunk_offsets = torch.cat(
+            [audio_chunk_offsets.new_zeros(1), audio_chunk_offsets]
+        )
+        tokens_per_item = [
+            int(audio_feature_lengths[start:end].sum().item())
+            for start, end in zip(
+                audio_chunk_offsets[:-1].tolist(),
+                audio_chunk_offsets[1:].tolist(),
+            )
+        ]
+        if any(num_tokens <= 0 for num_tokens in tokens_per_item):
+            raise ValueError("Audio input is too short to produce any tokens.")
+        return list(projected.split(tokens_per_item, dim=0))
 
     def embed_multimodal(self, **kwargs: object) -> MultiModalEmbeddings:
         audio_input = self._parse_and_validate_audio_input(**kwargs)
