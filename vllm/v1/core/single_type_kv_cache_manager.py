@@ -45,6 +45,7 @@ class SingleTypeKVCacheManager(ABC):
         scheduler_block_size: int,
         dcp_world_size: int = 1,
         pcp_world_size: int = 1,
+        needs_kv_cache_zeroing: bool = False,
         max_admission_blocks_per_request: int | None = None,
     ) -> None:
         """
@@ -55,6 +56,8 @@ class SingleTypeKVCacheManager(ABC):
             kv_cache_group_id: The id of the kv cache group of this manager.
             scheduler_block_size: The scheduling granularity (LCM of all group
                 block sizes); a multiple of this manager's ``block_size``.
+            needs_kv_cache_zeroing: Whether worker-side KV cache zeroing needs
+                newly allocated block IDs from this manager.
             max_admission_blocks_per_request: Recycling-aware per-request
                 block cap used by `get_num_blocks_to_allocate`. Only set for
                 spec types that recycle blocks across chunks (SWA,
@@ -73,6 +76,14 @@ class SingleTypeKVCacheManager(ABC):
         self.block_pool = block_pool
         self.enable_caching = enable_caching
         self._max_admission_blocks_per_request = max_admission_blocks_per_request
+        # Record newly allocated block ids only when worker-side zeroing will
+        # consume them and this manager holds a spec type that gets zeroed.
+        self._record_new_block_ids = needs_kv_cache_zeroing and type(kv_cache_spec) in (
+            FullAttentionSpec,
+            TQFullAttentionSpec,
+            MLAAttentionSpec,
+            HiddenStateCacheSpec,
+        )
         self.new_block_ids: list[int] = []
 
         # Mapping from request ID to blocks to track the blocks allocated
@@ -268,12 +279,7 @@ class SingleTypeKVCacheManager(ABC):
             cdiv(num_total_computed_tokens, self.block_size) - len(req_blocks)
         )
         req_blocks.extend(allocated_blocks)
-        if type(self.kv_cache_spec) in (
-            FullAttentionSpec,
-            TQFullAttentionSpec,
-            MLAAttentionSpec,
-            HiddenStateCacheSpec,
-        ):
+        if self._record_new_block_ids:
             self.new_block_ids.extend(b.block_id for b in allocated_blocks)
 
     def allocate_new_blocks(
@@ -301,12 +307,7 @@ class SingleTypeKVCacheManager(ABC):
         else:
             new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
             req_blocks.extend(new_blocks)
-            if type(self.kv_cache_spec) in (
-                FullAttentionSpec,
-                TQFullAttentionSpec,
-                MLAAttentionSpec,
-                HiddenStateCacheSpec,
-            ):
+            if self._record_new_block_ids:
                 self.new_block_ids.extend(b.block_id for b in new_blocks)
             return new_blocks
 
@@ -515,7 +516,7 @@ class SingleTypeKVCacheManager(ABC):
     def remove_skipped_blocks(
         self,
         request_id: str,
-        total_computed_tokens: int,
+        processed_computed_tokens: int,
         num_prompt_tokens: int | None = None,
     ) -> None:
         """
@@ -527,15 +528,15 @@ class SingleTypeKVCacheManager(ABC):
 
         Args:
             request_id: The request ID.
-            total_computed_tokens: The total number of computed tokens, including
-                local computed tokens and external computed tokens.
+            processed_computed_tokens: Computed-token prefix length covering
+                fully processed and committed tokens only (safe to free).
             num_prompt_tokens: Optional prompt length for attention types (e.g.
                 R-SWA) that evict a middle gap rather than a head prefix. Ignored
                 by the default implementation.
         """
         del num_prompt_tokens
         # Remove the blocks that will be skipped during attention computation.
-        num_skipped_tokens = self.get_num_skipped_tokens(total_computed_tokens)
+        num_skipped_tokens = self.get_num_skipped_tokens(processed_computed_tokens)
         if num_skipped_tokens <= 0:
             # This indicates that ALL tokens are inside attention window.
             # Thus we do not need to free any blocks outside attention window.
@@ -646,14 +647,14 @@ class RSWAManager(FullAttentionManager):
     def remove_skipped_blocks(
         self,
         request_id: str,
-        total_computed_tokens: int,
+        processed_computed_tokens: int,
         num_prompt_tokens: int | None = None,
     ) -> None:
         """Free gap blocks that are no longer needed for attention.
 
         Gap = blocks entirely within
             [ceil(prefix_len / block_size) * block_size,
-             max(prefix_len, total_computed_tokens - rswa_window))
+             max(prefix_len, processed_computed_tokens - rswa_window))
 
         Freed blocks are replaced with null_block in req_to_blocks so the
         block_table passed to FA4 is valid (null_block KV is all-zero;
@@ -661,7 +662,7 @@ class RSWAManager(FullAttentionManager):
         """
         if num_prompt_tokens is None:
             super().remove_skipped_blocks(
-                request_id, total_computed_tokens, num_prompt_tokens
+                request_id, processed_computed_tokens, num_prompt_tokens
             )
             return
 
@@ -669,7 +670,9 @@ class RSWAManager(FullAttentionManager):
         # First block fully after the prefill boundary.
         first_gap_block = cdiv(num_prompt_tokens, bs)
         # Decode window start position; blocks before this are evictable.
-        window_start = max(num_prompt_tokens, total_computed_tokens - self.rswa_window)
+        window_start = max(
+            num_prompt_tokens, processed_computed_tokens - self.rswa_window
+        )
         last_gap_block = window_start // bs  # exclusive upper bound
         self._remove_blocks_in_range(request_id, first_gap_block, last_gap_block)
 
@@ -1153,20 +1156,13 @@ class MambaManager(SingleTypeKVCacheManager):
     def remove_skipped_blocks(
         self,
         request_id: str,
-        num_computed_tokens: int,
+        processed_computed_tokens: int,
         num_prompt_tokens: int | None = None,
     ) -> None:
         assert isinstance(self.kv_cache_spec, MambaSpec)
 
-        # NOTE (tdoublep) with async scheduling, the num_computed_tokens can contain
-        # draft tokens from the previous step that may or may not be rejected later.
-        # This can make us think we are further ahead in the sequence than we actually
-        # are, so let's assume that all tokens are rejected so we don't free blocks
-        # that we might actually need.
-        num_computed_tokens = max(0, num_computed_tokens - self.num_speculative_blocks)
-
         super().remove_skipped_blocks(
-            request_id, num_computed_tokens, num_prompt_tokens
+            request_id, processed_computed_tokens, num_prompt_tokens
         )
         if self.mamba_cache_mode == "align":
             # `last_state_block_idx` refers to the block index allocated two steps ago.
@@ -1180,7 +1176,7 @@ class MambaManager(SingleTypeKVCacheManager):
             if (
                 last_state_block_idx is not None
                 and last_state_block_idx
-                < cdiv(num_computed_tokens, self.block_size) - 1
+                < cdiv(processed_computed_tokens, self.block_size) - 1
             ):
                 blocks = self.req_to_blocks[request_id]
                 if blocks[last_state_block_idx] != self._null_block:
@@ -1464,7 +1460,7 @@ class SinkFullAttentionManager(FullAttentionManager):
 
 def get_manager_for_kv_cache_spec(
     kv_cache_spec: KVCacheSpec,
-    max_num_batched_tokens: int,
+    max_in_flight_tokens: int,
     max_model_len: int,
     **kwargs,
 ) -> SingleTypeKVCacheManager:
@@ -1477,7 +1473,8 @@ def get_manager_for_kv_cache_spec(
 
     Args:
         kv_cache_spec: The KVCacheSpec instance
-        max_num_batched_tokens: The maximum number of tokens in a batch
+        max_in_flight_tokens: The max tokens scheduled but not yet settled
+            (one batch per concurrent step); see `VllmConfig.max_in_flight_tokens`
         max_model_len: The maximum context length the model could serve
     Returns:
         An instance of the appropriate SingleTypeKVCacheManager subclass
@@ -1498,7 +1495,7 @@ def get_manager_for_kv_cache_spec(
     ):
         kwargs["max_admission_blocks_per_request"] = (
             kv_cache_spec.max_admission_blocks_per_request(
-                max_num_batched_tokens=max_num_batched_tokens,
+                max_in_flight_tokens=max_in_flight_tokens,
                 max_model_len=max_model_len,
             )
         )
