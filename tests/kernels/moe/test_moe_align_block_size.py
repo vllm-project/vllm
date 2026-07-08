@@ -10,8 +10,8 @@ import torch
 
 from vllm import _custom_ops as ops
 from vllm.model_executor.layers.fused_moe.moe_align_block_size import (
-    MoEAlignRadixScratch,
     RADIX_SORT_MIN_ROUTED_ENTRIES,
+    MoEAlignRadixScratch,
     batched_moe_align_block_size,
     moe_align_block_size,
     moe_align_block_size_radix,
