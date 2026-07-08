@@ -76,8 +76,17 @@ def _job_metadata(
     )
 
 
-def _make_manager() -> P2PSecondaryTierManager:
-    """Create a manager with stubbed __init__."""
+def _make_manager(
+    allowed_peers: frozenset[str] | None = None,
+) -> P2PSecondaryTierManager:
+    """Create a manager with stubbed __init__.
+
+    Args:
+        allowed_peers: Peer allowlist.  Defaults to ``{"10.0.0.1:8000"}``
+            so that the standard ``_prefill_kv_params()`` helper is
+            accepted by default.  Pass ``frozenset()`` for an empty list
+            or a custom set as needed.
+    """
     mgr = P2PSecondaryTierManager.__new__(P2PSecondaryTierManager)
     mgr._local_id = "127.0.0.1:7777"
     mgr._finished_jobs = []
@@ -85,6 +94,9 @@ def _make_manager() -> P2PSecondaryTierManager:
     mgr._sessions = {}
     mgr._kv_to_session = {}
     mgr._unbound_stores = {}
+    mgr._allowed_peers = (
+        allowed_peers if allowed_peers is not None else frozenset({"10.0.0.1:8000"})
+    )
     return mgr
 
 
@@ -852,8 +864,8 @@ def _build_paired_managers() -> tuple[P2PSecondaryTierManager, P2PSecondaryTierM
     on the next poll. The test drives polling by calling get_finished_jobs(),
     which invokes _poll_once synchronously on the calling thread.
     """
-    mgr_a = _make_manager()
-    mgr_b = _make_manager()
+    mgr_a = _make_manager(allowed_peers=frozenset({"B:2"}))
+    mgr_b = _make_manager(allowed_peers=frozenset({"A:1"}))
     mgr_a._local_id = "A:1"
     mgr_b._local_id = "B:2"
 
@@ -1373,3 +1385,126 @@ class TestConnectionDeathMidTransfer:
         assert (900, False) not in finishes
         assert (900, True) not in finishes
         assert "req-store" in mgr_a._unbound_stores
+
+
+# ---------------------------------------------------------------------------
+# Tests for peer allowlist (CWE-918 regression)
+# ---------------------------------------------------------------------------
+
+
+class TestPeerAllowlist:
+    """Verify that outbound connections are gated by _allowed_peers."""
+
+    def test_is_peer_allowed_accepts_listed_peer(self):
+        mgr = _make_manager(allowed_peers=frozenset({"10.0.0.1:8000"}))
+        assert mgr._is_peer_allowed("10.0.0.1:8000") is True
+
+    def test_is_peer_allowed_rejects_unlisted_peer(self):
+        mgr = _make_manager(allowed_peers=frozenset({"10.0.0.1:8000"}))
+        assert mgr._is_peer_allowed("attacker.example:4444") is False
+
+    def test_is_peer_allowed_rejects_all_when_empty(self):
+        mgr = _make_manager(allowed_peers=frozenset())
+        assert mgr._is_peer_allowed("10.0.0.1:8000") is False
+
+    def test_lookup_rejects_unlisted_peer(self):
+        mgr = _make_manager(allowed_peers=frozenset({"10.0.0.99:9999"}))
+        ctx = _req_context(
+            kv_params=_prefill_kv_params(
+                remote_host="attacker.example",
+                remote_port=4444,
+            )
+        )
+        assert mgr.lookup(b"key", ctx) is LookupResult.MISS
+
+    def test_lookup_accepts_listed_peer(self):
+        mgr = _make_manager(allowed_peers=frozenset({"10.0.0.1:8000"}))
+        ctx = _req_context(kv_params=_prefill_kv_params())
+        assert mgr.lookup(b"key", ctx) is LookupResult.HIT
+
+    def test_on_new_request_rejects_unlisted_peer(self):
+        """Unlisted peer must not cause a session to be created."""
+        mgr = _make_manager(allowed_peers=frozenset({"10.0.0.99:9999"}))
+        ctx = _req_context(
+            kv_params=_prefill_kv_params(
+                remote_host="attacker.example",
+                remote_port=4444,
+            )
+        )
+        mgr.on_new_request(ctx)
+        assert "attacker.example:4444" not in mgr._sessions
+
+    def test_on_new_request_accepts_listed_peer(self):
+        """Listed peer triggers _get_or_create_session.
+
+        Without a real ControlTransport the connect() call will fail,
+        so we mock _control.connect to verify the call is attempted.
+        """
+        mgr = _make_manager(allowed_peers=frozenset({"10.0.0.1:8000"}))
+
+        class FakeControl:
+            connected_to: str | None = None
+
+            def connect(self, peer_id: str):
+                self.connected_to = peer_id
+                conn = type(
+                    "Conn",
+                    (),
+                    {
+                        "peer_id": peer_id,
+                        "alive": True,
+                        "send": lambda self, m: None,
+                        "recv": lambda self: (),
+                        "mark_dead": lambda self: None,
+                        "close": lambda self: None,
+                    },
+                )()
+                return conn
+
+        fake_ctl = FakeControl()
+        mgr._control = fake_ctl  # type: ignore[assignment]
+        mgr._data = _FakeData(mgr._local_id)  # type: ignore[assignment]
+        ctx = _req_context(kv_params=_prefill_kv_params())
+        mgr.on_new_request(ctx)
+        assert fake_ctl.connected_to == "10.0.0.1:8000"
+
+    def test_submit_load_rejects_unlisted_peer(self):
+        """submit_load for an unlisted peer fails the job immediately."""
+        mgr = _make_manager(allowed_peers=frozenset({"10.0.0.99:9999"}))
+        job = _job_metadata(
+            job_id=42,
+            keys=[b"k1"],
+            block_ids=[0],
+            kv_params=_prefill_kv_params(
+                remote_host="attacker.example",
+                remote_port=4444,
+            ),
+        )
+        mgr.submit_load(job)
+        assert mgr._finished_jobs == [JobResult(job_id=42, success=False)]
+        assert "req-1" in mgr._failed_req_ids
+
+    def test_inbound_peer_accepted_without_allowlist(self):
+        """Inbound connections bypass the allowlist entirely.
+
+        _accept_new_peers creates sessions from connections initiated by
+        the remote side -- these are not gated by _allowed_peers.
+        """
+        mgr = _make_manager(allowed_peers=frozenset())
+        mgr._data = _FakeData(mgr._local_id)  # type: ignore[assignment]
+
+        conn = type(
+            "FakeConn",
+            (),
+            {
+                "peer_id": "inbound.peer:5555",
+                "alive": True,
+                "send": lambda self, m: None,
+                "recv": lambda self: (),
+                "mark_dead": lambda self: None,
+                "close": lambda self: None,
+            },
+        )()
+
+        mgr._accept_new_peers([conn])
+        assert "inbound.peer:5555" in mgr._sessions

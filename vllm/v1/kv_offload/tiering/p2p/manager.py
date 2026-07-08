@@ -115,6 +115,7 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         port: int = 7777,
         backends: list[str] | None = None,
         num_threads: int = 4,
+        peers: list[str] | None = None,
         **kwargs,
     ) -> None:
         """Initialize the P2P secondary tier manager.
@@ -142,11 +143,20 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             num_threads: NIXL agent worker threads for the UCX-only
                 branch. Ignored when ``backends`` contains a non-UCX
                 entry.
+            peers: Allowlist of ``"host:port"`` peer addresses that
+                this manager is permitted to open outbound sessions to.
+                When non-empty, outbound connections to addresses not
+                in this set are rejected.  When ``None`` or empty, all
+                outbound connections are rejected (only inbound peers
+                accepted).  Peer addresses should match the
+                ``host:port`` format used in ``kv_transfer_params``.
             **kwargs: Reserved for future tier-specific options.
         """
         super().__init__(offloading_spec, primary_kv_view, tier_type)
         port = int(port)
         self._local_id = f"{host}:{port}"
+
+        self._allowed_peers: frozenset[str] = frozenset(peers) if peers else frozenset()
 
         config_fields = FileMapper.from_offloading_spec(
             root_dir="",
@@ -194,6 +204,10 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             or not prefill.get("remote_port")
             or not prefill.get("kv_request_id")
         ):
+            return LookupResult.MISS
+
+        peer_id = self._remote_id_from_params(prefill)
+        if peer_id and not self._is_peer_allowed(peer_id):
             return LookupResult.MISS
 
         kv_request_id = prefill["kv_request_id"]
@@ -347,6 +361,11 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         peer_id = self._remote_id_from_params(prefill)
         assert peer_id is not None  # guaranteed by prefill checks above
 
+        if not self._is_peer_allowed(peer_id):
+            self._finished_jobs.append(JobResult(job_id=job_id, success=False))
+            self._failed_req_ids.add(kv_request_id)
+            return
+
         if not keys:
             logger.debug(
                 "P2P %s: submit_load job_id=%d short-circuit success (no keys)",
@@ -443,7 +462,25 @@ class P2PSecondaryTierManager(SecondaryTierManager):
             return f"{host}:{port}"
         return None
 
-    def _get_or_create_session(self, peer_id: str) -> P2PSession:
+    def _is_peer_allowed(self, peer_id: str) -> bool:
+        """Check *peer_id* against the configured allowlist.
+
+        Returns ``True`` when the peer is explicitly listed in
+        ``self._allowed_peers``.  An empty allowlist rejects all
+        outbound peers (only inbound connections are accepted).
+        """
+        if peer_id in self._allowed_peers:
+            return True
+        logger.warning(
+            "P2P %s: rejecting outbound connection to unlisted peer %s "
+            "(allowed_peers=%s)",
+            self._local_id,
+            peer_id,
+            self._allowed_peers or "<empty>",
+        )
+        return False
+
+    def _get_or_create_session(self, peer_id: str) -> P2PSession | None:
         """Return the existing session for peer_id, or open one outbound.
 
         Decoder-side helper for on_new_request: when ``prefill`` is set,
@@ -451,10 +488,15 @@ class P2PSecondaryTierManager(SecondaryTierManager):
         have a session toward that peer (from a prior load or a
         peer-initiated inbound), reuse it; otherwise open an outbound
         ControlConnection and build a connected session.
+
+        Returns ``None`` when the peer is not in the configured
+        allowlist.
         """
         session = self._sessions.get(peer_id)
         if session is not None:
             return session
+        if not self._is_peer_allowed(peer_id):
+            return None
         conn = self._control.connect(peer_id)
         session = P2PSession(
             peer_id=peer_id,

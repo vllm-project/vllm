@@ -61,6 +61,9 @@ from vllm.entrypoints.chat_utils import (
     ChatTemplateContentFormatOption,
 )
 from vllm.entrypoints.openai.engine.protocol import OpenAIBaseModel
+from vllm.entrypoints.openai.kv_transfer_params_sanitizer import (
+    sanitize_kv_transfer_params,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.renderers import ChatParams, TokenizeParams, merge_kwargs
@@ -398,8 +401,9 @@ class ResponsesRequest(OpenAIBaseModel):
             stop = [stop]
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
-        if self.kv_transfer_params:
-            extra_args["kv_transfer_params"] = self.kv_transfer_params
+        sanitized_kv = sanitize_kv_transfer_params(self.kv_transfer_params)
+        if sanitized_kv:
+            extra_args["kv_transfer_params"] = sanitized_kv
 
         return SamplingParams.from_optional(
             temperature=temperature,

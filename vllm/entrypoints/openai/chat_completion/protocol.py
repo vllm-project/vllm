@@ -34,6 +34,9 @@ from vllm.entrypoints.openai.engine.protocol import (
     validate_structural_tag_response_format,
     validate_structured_outputs_structural_tag,
 )
+from vllm.entrypoints.openai.kv_transfer_params_sanitizer import (
+    sanitize_kv_transfer_params,
+)
 from vllm.exceptions import VLLMValidationError
 from vllm.logger import init_logger
 from vllm.logprobs import Logprob
@@ -662,9 +665,9 @@ class ChatCompletionRequest(OpenAIBaseModel):
                 )
 
         extra_args: dict[str, Any] = self.vllm_xargs if self.vllm_xargs else {}
-        if self.kv_transfer_params:
-            # Pass in kv_transfer_params via extra_args
-            extra_args["kv_transfer_params"] = self.kv_transfer_params
+        sanitized_kv = sanitize_kv_transfer_params(self.kv_transfer_params)
+        if sanitized_kv:
+            extra_args["kv_transfer_params"] = sanitized_kv
         return SamplingParams.from_optional(
             n=self.n,
             presence_penalty=self.presence_penalty,
