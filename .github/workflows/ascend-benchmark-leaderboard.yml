@@ -417,14 +417,15 @@ jobs:
           # The runner container may not have HOME set; default to /root for root user.
           export HOME="${HOME:-/root}"
 
-          mkdir -p "$HOME/.ssh"
-          chmod 700 "$HOME/.ssh"
+          ssh_state_dir="${RUNNER_TEMP:-/tmp}/vllm-hust-github-ssh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          mkdir -p "$ssh_state_dir"
+          chmod 700 "$ssh_state_dir"
 
-          key_file="$HOME/.ssh/vllm_hust_benchmark_key"
+          key_file="$ssh_state_dir/vllm_hust_benchmark_key"
           printf '%s\n' "$BENCHMARK_REPO_SSH_KEY" > "$key_file"
           chmod 600 "$key_file"
 
-          known_hosts_file="$HOME/.ssh/known_hosts.github"
+          known_hosts_file="$ssh_state_dir/known_hosts.github"
           known_hosts_tmp="$(mktemp)"
           {
             ssh-keyscan -t rsa,ecdsa,ed25519 github.com 2>/dev/null
@@ -438,7 +439,7 @@ jobs:
           rm -f "$known_hosts_tmp"
           chmod 600 "$known_hosts_file"
 
-          ssh_wrapper="$HOME/.ssh/github-ssh-wrapper.sh"
+          ssh_wrapper="$ssh_state_dir/github-ssh-wrapper.sh"
           cat > "$ssh_wrapper" <<EOF
           #!/usr/bin/env bash
           exec ssh -F /dev/null \\
