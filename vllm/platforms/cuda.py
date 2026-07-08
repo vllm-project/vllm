@@ -915,6 +915,42 @@ class NvmlCudaPlatform(CudaPlatformBase):
 
     @classmethod
     @with_nvml_context
+    def get_torch_to_nvml_mapping(cls) -> dict[int, int]:
+        """
+        Build a mapping from torch.cuda device indices to NVML physical indices.
+
+        torch.cuda and NVML/nvidia-smi can enumerate GPUs in different orders.
+        This function resolves the mapping using PCI bus IDs as the bridge.
+
+        Returns:
+            Dict mapping torch.cuda index -> NVML physical index
+        """
+        import torch
+
+        # Build NVML index -> PCI bus ID mapping (extract just the bus number)
+        nvml_bus_to_idx: dict[int, int] = {}
+        for nvml_idx in range(pynvml.nvmlDeviceGetCount()):
+            handle = pynvml.nvmlDeviceGetHandleByIndex(nvml_idx)
+            pci_info = pynvml.nvmlDeviceGetPciInfo(handle)
+            bus_id = pci_info.busId
+            if isinstance(bus_id, bytes):
+                bus_id = bus_id.decode("utf-8")
+            # Extract bus number (format: "00000000:BB:00.0")
+            bus_num = int(bus_id.split(":")[1], 16)
+            nvml_bus_to_idx[bus_num] = nvml_idx
+
+        # Map torch.cuda indices to NVML indices via PCI bus ID
+        result: dict[int, int] = {}
+        for torch_idx in range(torch.cuda.device_count()):
+            props = torch.cuda.get_device_properties(torch_idx)
+            bus_num = props.pci_bus_id
+            if bus_num in nvml_bus_to_idx:
+                result[torch_idx] = nvml_bus_to_idx[bus_num]
+
+        return result
+
+    @classmethod
+    @with_nvml_context
     def log_warnings(cls):
         device_ids: int = pynvml.nvmlDeviceGetCount()
         if device_ids > 1:

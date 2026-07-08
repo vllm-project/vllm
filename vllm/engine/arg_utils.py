@@ -467,6 +467,8 @@ class EngineArgs:
     numa_bind_nodes: list[int] | None = ParallelConfig.numa_bind_nodes
     numa_bind_cpus: list[str] | None = ParallelConfig.numa_bind_cpus
     device_ids: list[int | str] | None = None
+    rank_gpu_id: list[int] | None = None
+    rank_gpu_memory_mib: int | None = None
     tensor_parallel_size: int = ParallelConfig.tensor_parallel_size
     prefill_context_parallel_size: int = ParallelConfig.prefill_context_parallel_size
     decode_context_parallel_size: int = ParallelConfig.decode_context_parallel_size
@@ -994,6 +996,35 @@ class EngineArgs:
             "visibility for GPU-NIC affinity and DeepGEMM. "
             "Note: has no effect with Ray executors; use Ray "
             "placement groups for GPU selection instead.",
+        )
+        parallel_group.add_argument(
+            "--rank-gpu-id",
+            type=lambda s: [
+                int(x) for x in (part.strip() for part in s.split(","))
+            ],
+            default=None,
+            help="Comma-separated GPU indices for each tensor parallel rank. "
+            "IMPORTANT: Use torch.cuda indices (as seen by torch.cuda.device_count()), "
+            "NOT nvidia-smi indices! Run 'python -c \"import torch; print(torch.cuda.device_count())\"' "
+            "to see available indices. Duplicates mean multiple ranks share that GPU. "
+            "Length must equal tensor-parallel-size. "
+            "Example: --rank-gpu-id 0,1 (two GPUs, one rank each). "
+            "Example: --rank-gpu-id 0,0,1,2 (TP=4, first GPU shared by two ranks). "
+            "Requires --rank-gpu-memory-mib to be set. "
+            "Mutually exclusive with --gpu-memory-utilization.",
+        )
+        parallel_group.add_argument(
+            "--rank-gpu-memory-mib",
+            type=int,
+            default=None,
+            help="Absolute memory budget in MiB per rank when using "
+            "--rank-gpu-id. This is a single scalar value (not a list) "
+            "that applies uniformly to every rank. "
+            "The value is converted to a per-GPU fraction at runtime based on "
+            "each physical GPU's NVML-reported total memory, so the same MiB "
+            "value represents a DIFFERENT fraction on different physical GPUs. "
+            "Required when --rank-gpu-id is set. "
+            "Automatically disables --gpu-memory-utilization.",
         )
         parallel_group.add_argument(
             "--tensor-parallel-size", "-tp", **parallel_kwargs["tensor_parallel_size"]
@@ -2041,6 +2072,9 @@ class EngineArgs:
             model_config.skip_tokenizer_init = True
             logger.info("Skipping tokenizer initialization for tokens-only mode.")
 
+        # Validate --rank-gpu-id and --rank-gpu-memory-mib
+        self._validate_rank_gpu_config(current_platform)
+
         parallel_config = ParallelConfig(
             pipeline_parallel_size=self.pipeline_parallel_size,
             tensor_parallel_size=self.tensor_parallel_size,
@@ -2086,7 +2120,13 @@ class EngineArgs:
             cp_kv_cache_interleave_size=self.cp_kv_cache_interleave_size,
             _api_process_count=self._api_process_count,
             _api_process_rank=self._api_process_rank,
-            assigned_physical_gpu_ids=self._resolve_device_ids(),
+            # When --rank-gpu-id is set, use it as the physical GPU mapping
+            # Otherwise use --device-ids if provided
+            assigned_physical_gpu_ids=(
+                self.rank_gpu_id if self.rank_gpu_id is not None
+                else self._resolve_device_ids()
+            ),
+            rank_gpu_memory_mib=self.rank_gpu_memory_mib,
             numa_bind=self.numa_bind,
             numa_bind_nodes=self.numa_bind_nodes,
             numa_bind_cpus=self.numa_bind_cpus,
@@ -2343,6 +2383,112 @@ class EngineArgs:
         )
 
         return config
+
+    def _validate_rank_gpu_config(self, current_platform) -> None:
+        """
+        Validate --rank-gpu-id and --rank-gpu-memory-mib consistency.
+
+        This validates:
+        1. Mutual exclusivity: both or neither must be set
+        2. Length vs tensor_parallel_size
+        3. PP/DP/EP not supported with --rank-gpu-id
+        4. --gpu-memory-utilization not allowed with --rank-gpu-id
+        5. Physical GPU existence via NVML
+        6. Physical impossibility: (rank_count on GPU) * MiB <= NVML total
+        """
+        from collections import Counter
+
+        # Mutual exclusivity check
+        if self.rank_gpu_id is None and self.rank_gpu_memory_mib is not None:
+            raise ValueError(
+                "--rank-gpu-memory-mib requires --rank-gpu-id to be set."
+            )
+        if self.rank_gpu_memory_mib is None and self.rank_gpu_id is not None:
+            raise ValueError(
+                "--rank-gpu-id requires --rank-gpu-memory-mib to be set."
+            )
+
+        if self.rank_gpu_id is None:
+            return
+
+        # Length vs tensor_parallel_size
+        if len(self.rank_gpu_id) != self.tensor_parallel_size:
+            raise ValueError(
+                f"--rank-gpu-id length ({len(self.rank_gpu_id)}) must equal "
+                f"--tensor-parallel-size ({self.tensor_parallel_size})."
+            )
+
+        # PP/DP/EP not supported
+        if self.pipeline_parallel_size > 1:
+            raise ValueError(
+                f"--rank-gpu-id is not compatible with pipeline-parallel-size > 1 "
+                f"(current: {self.pipeline_parallel_size}). "
+                "Only pure Tensor Parallelism is supported."
+            )
+        if self.data_parallel_size > 1:
+            raise ValueError(
+                f"--rank-gpu-id is not compatible with data-parallel-size > 1 "
+                f"(current: {self.data_parallel_size}). "
+                "Only pure Tensor Parallelism is supported."
+            )
+        if self.enable_expert_parallel:
+            raise ValueError(
+                "--rank-gpu-id is not compatible with expert parallelism."
+            )
+
+        # --gpu-memory-utilization must not be set
+        if self.gpu_memory_utilization != CacheConfig.gpu_memory_utilization:
+            raise ValueError(
+                "--gpu-memory-utilization cannot be set when --rank-gpu-id is used. "
+                "Use --rank-gpu-memory-mib instead to specify absolute MiB budget."
+            )
+
+        # Get torch -> NVML mapping for validation
+        from vllm.platforms.cuda import CudaPlatform
+        from vllm.utils.import_utils import import_pynvml
+
+        torch_to_nvml = CudaPlatform.get_torch_to_nvml_mapping()
+        pynvml = import_pynvml()
+        pynvml.nvmlInit()
+
+        try:
+            # NVML-based physical existence check and sum validation
+            device_count = current_platform.device_count()
+            gpu_counts = Counter(self.rank_gpu_id)
+
+            for gpu_id in self.rank_gpu_id:
+                if gpu_id < 0 or gpu_id >= device_count:
+                    raise ValueError(
+                        f"Physical GPU ID {gpu_id} is out of range. "
+                        f"Available GPUs: 0-{device_count - 1}"
+                    )
+
+                # Map torch.cuda index to NVML physical index for memory query
+                if gpu_id not in torch_to_nvml:
+                    raise ValueError(
+                        f"Could not map torch.cuda:{gpu_id} to a physical GPU. "
+                        f"Available torch.cuda indices: 0-{device_count - 1}"
+                    )
+                nvml_idx = torch_to_nvml[gpu_id]
+
+                # Physical impossibility check using NVML directly
+                # (get_device_total_memory() uses torch.cuda props, not NVML)
+                handle = pynvml.nvmlDeviceGetHandleByIndex(nvml_idx)
+                nvml_total_bytes = pynvml.nvmlDeviceGetMemoryInfo(handle).total
+                nvml_total_mib = nvml_total_bytes // (1024 * 1024)
+                count_on_gpu = gpu_counts[gpu_id]
+                required_mib = count_on_gpu * self.rank_gpu_memory_mib
+
+                if required_mib > nvml_total_mib:
+                    raise ValueError(
+                        f"Physical impossibility: torch.cuda:{gpu_id} "
+                        f"(NVML:{nvml_idx}, {nvml_total_mib} MiB total) cannot fit "
+                        f"{count_on_gpu} ranks × {self.rank_gpu_memory_mib} MiB "
+                        f"= {required_mib} MiB requested. "
+                        f"Reduce --rank-gpu-memory-mib or use fewer ranks on this GPU."
+                    )
+        finally:
+            pynvml.nvmlShutdown()
 
     def _check_feature_supported(self):
         """Raise an error if the feature is not supported."""

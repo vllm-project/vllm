@@ -687,6 +687,51 @@ class WorkerProc:
             # Have the worker close parent end of this worker's pipes too
             "inherited_fds": inherited_fds if inherited_fds is not None else [],
         }
+
+        # Device isolation for --rank-gpu-id mode is handled via
+        # torch.cuda.set_device() in the worker process, NOT via
+        # CUDA_VISIBLE_DEVICES. Setting CUDA_VISIBLE_DEVICES would break
+        # logical_device_id_to_visible_device_id() which expects torch.cuda
+        # indices, not NVML physical indices.
+        #
+        # In the worker, we call torch.cuda.set_device(torch_cuda_idx) where
+        # torch_cuda_idx comes from assigned_physical_gpu_ids[local_rank].
+        # This ensures each worker uses the correct GPU regardless of what's
+        # visible in CUDA_VISIBLE_DEVICES.
+
+        # Configure NCCL for multi-rank-per-GPU if duplicates detected
+        assigned_ids = vllm_config.parallel_config.assigned_physical_gpu_ids
+        if assigned_ids is not None and len(assigned_ids) != len(set(assigned_ids)):
+            from collections import Counter
+            os.environ["NCCL_MULTI_RANK_GPU_ENABLE"] = "1"
+            os.environ["NCCL_NVLS_ENABLE"] = "0"
+            gpu_counts = Counter(assigned_ids)
+            max_colocated = max(gpu_counts.values())
+            if max_colocated > 1:
+                suggested_max_ctas = max(1, 8 // max_colocated)
+                os.environ.setdefault("NCCL_MAX_CTAS", str(suggested_max_ctas))
+            logger.warning_once(
+                "Detected multiple ranks sharing physical GPUs. "
+                "Setting NCCL_MULTI_RANK_GPU_ENABLE=1, NCCL_NVLS_ENABLE=0, "
+                "NCCL_MAX_CTAS=%s for multi-rank-per-GPU.",
+                os.environ.get("NCCL_MAX_CTAS", "default")
+            )
+            # Without CUDA MPS, processes sharing a GPU are TIME-SLICED:
+            # their kernels never run concurrently, but NCCL collectives
+            # busy-spin waiting for the peer rank. Measured impact on this
+            # feature: ~3 tok/s without MPS vs ~78 tok/s with MPS (>20x).
+            mps_pipe_dir = os.environ.get(
+                "CUDA_MPS_PIPE_DIRECTORY", "/tmp/nvidia-mps"
+            )
+            if not os.path.exists(mps_pipe_dir):
+                logger.warning_once(
+                    "Multiple ranks share a physical GPU but the CUDA MPS "
+                    "control pipe (%s) was not found. Without MPS, co-located "
+                    "ranks are time-sliced and NCCL collectives become "
+                    "extremely slow (>20x slowdown). Start MPS with "
+                    "'nvidia-cuda-mps-control -d' before launching vLLM.",
+                    mps_pipe_dir,
+                )
         # Run EngineCore busy loop in background process.
         proc = context.Process(
             target=WorkerProc.worker_main,

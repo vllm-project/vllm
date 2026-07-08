@@ -56,6 +56,7 @@ from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.tracing import instrument
 from vllm.utils.gc_utils import freeze_gc_heap, maybe_attach_gc_debug_callback
+from vllm.utils.import_utils import import_pynvml
 from vllm.utils.mem_constants import GiB_bytes
 from vllm.utils.mem_utils import MemorySnapshot, format_gib, memory_profiling
 from vllm.utils.torch_utils import set_random_seed
@@ -301,15 +302,62 @@ class Worker(WorkerBase):
                         " exceeds assigned_physical_gpu_ids count "
                         f"({len(assigned_physical_gpu_ids)})"
                     )
+
+                # MiB→Fraktion Konvertierung für --rank-gpu-id Modus
+                # Die gleiche MiB-Zahl bedeutet verschiedene Fraktionen auf
+                # verschiedenen GPUs (heterogene Setups)
+                rank_gpu_memory_mib = parallel_config.rank_gpu_memory_mib
+                if rank_gpu_memory_mib is not None:
+                    torch_cuda_idx = assigned_physical_gpu_ids[self.local_rank]
+                    # Map torch.cuda index to NVML physical index for memory query
+                    # torch.cuda and NVML enumerate GPUs in different orders
+                    from vllm.platforms.cuda import CudaPlatform
+                    torch_to_nvml = CudaPlatform.get_torch_to_nvml_mapping()
+                    if torch_cuda_idx in torch_to_nvml:
+                        nvml_idx = torch_to_nvml[torch_cuda_idx]
+                    else:
+                        nvml_idx = torch_cuda_idx  # Fallback
+                    # NVML direkt aufrufen (ohne device_id_to_physical_device_id)
+                    pynvml = import_pynvml()
+                    pynvml.nvmlInit()
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(nvml_idx)
+                    nvml_total_bytes = pynvml.nvmlDeviceGetMemoryInfo(handle).total
+                    pynvml.nvmlShutdown()
+                    nvml_total_mib = nvml_total_bytes // (1024 * 1024)
+                    # KRITISCH: Keine zusaetzliche Prozent-Reduktion anwenden!
+                    # Das ist der gesamte Memory-Budget fuer diesen Rank
+                    # auf dieser GPU - 100% des zugewiesenen MiB-Werts
+                    fraction = rank_gpu_memory_mib / nvml_total_mib
+                    logger.info(
+                        "Rank %d on torch.cuda:%d (NVML:%d): Using "
+                        "--rank-gpu-memory-mib=%d MiB "
+                        "(%s/%s GiB total = %.4f fraction)",
+                        self.rank, torch_cuda_idx, nvml_idx, rank_gpu_memory_mib,
+                        format_gib(rank_gpu_memory_mib * 1024 * 1024),
+                        format_gib(nvml_total_bytes),
+                        fraction
+                    )
+                    # Setze die Fraktion in cache_config für nachfolgende
+                    # Verwendung (request_memory, determine_available_memory)
+                    self.cache_config.gpu_memory_utilization = fraction
+                    # NVML-Index für per-Prozess-Memory-Accounting in
+                    # determine_available_memory() aufbewahren
+                    self._rank_gpu_nvml_idx = nvml_idx
             else:
                 assert self.local_rank < torch.accelerator.device_count(), (
                     f"DP adjusted local rank {self.local_rank} is out of "
                     f"bounds for {torch.accelerator.device_count()} devices."
                 )
 
-            visible_device_index = (
-                current_platform.logical_device_id_to_visible_device_id(self.local_rank)
-            )
+            # Device isolation via --rank-gpu-id: each worker uses the torch.cuda
+            # index from assigned_physical_gpu_ids. This is the actual GPU device.
+            if parallel_config.rank_gpu_memory_mib is not None:
+                torch_cuda_idx = assigned_physical_gpu_ids[self.local_rank]
+                visible_device_index = torch_cuda_idx
+            else:
+                visible_device_index = (
+                    current_platform.logical_device_id_to_visible_device_id(self.local_rank)
+                )
             self.device = torch.device(f"cuda:{visible_device_index}")
             torch.accelerator.set_device_index(self.device)
 
@@ -429,6 +477,39 @@ class Worker(WorkerBase):
             logger.info(msg)
             return kv_cache_memory_bytes
 
+        # When multiple ranks share a physical GPU (via --rank-gpu-id), they
+        # execute determine_available_memory() concurrently. The default
+        # profiling path measures memory via torch.cuda.mem_get_info(), which
+        # is GPU-GLOBAL: each rank would see the other co-located rank's
+        # allocations (weights, activations, CUDA graphs) as its own
+        # "non-torch" overhead, roughly doubling non_kv_cache_memory and
+        # producing negative available-KV-cache estimates.
+        #
+        # NOTE: Serializing the profiling with a barrier is NOT possible:
+        # profile_run() executes a forward pass containing TP collectives
+        # (all-reduce), so ALL ranks must run it simultaneously - holding
+        # back one rank deadlocks the whole TP group.
+        #
+        # Solution: for co-located ranks, replace the mem_get_info-based
+        # non-torch measurement with a PER-PROCESS measurement from NVML
+        # (nvmlDeviceGetComputeRunningProcesses), which reports each
+        # process's own GPU memory usage independently.
+        assigned_ids = self.vllm_config.parallel_config.assigned_physical_gpu_ids
+        co_located_count = 1
+        if (
+            assigned_ids is not None
+            and self.vllm_config.parallel_config.rank_gpu_memory_mib is not None
+        ):
+            physical_gpu_id = assigned_ids[self.local_rank]
+            co_located_count = sum(1 for gid in assigned_ids if gid == physical_gpu_id)
+            if co_located_count > 1:
+                logger.info(
+                    "Rank %d shares torch.cuda:%d with %d ranks total; using "
+                    "per-process NVML memory accounting instead of global "
+                    "mem_get_info for KV cache sizing.",
+                    self.local_rank, physical_gpu_id, co_located_count,
+                )
+
         # Execute a forward pass with dummy inputs to profile the memory usage
         # of the model.
         with memory_profiling(
@@ -456,6 +537,49 @@ class Worker(WorkerBase):
         profile_result.torch_peak_increase = (
             profile_torch_peak - profile_result.before_profile.torch_peak
         )
+
+        if co_located_count > 1:
+            # Replace the polluted global non-torch measurement with a
+            # per-process one: NVML reports this process's total GPU memory;
+            # subtracting torch's reserved pool leaves the true non-torch
+            # overhead (CUDA context, NCCL buffers, cuBLAS workspaces, ...).
+            nvml_idx = getattr(self, "_rank_gpu_nvml_idx", None)
+            my_pid = os.getpid()
+            proc_used_bytes = 0
+            if nvml_idx is not None:
+                pynvml = import_pynvml()
+                pynvml.nvmlInit()
+                try:
+                    handle = pynvml.nvmlDeviceGetHandleByIndex(nvml_idx)
+                    for proc in pynvml.nvmlDeviceGetComputeRunningProcesses(handle):
+                        if proc.pid == my_pid and proc.usedGpuMemory is not None:
+                            proc_used_bytes = proc.usedGpuMemory
+                            break
+                finally:
+                    pynvml.nvmlShutdown()
+            torch_reserved = torch.accelerator.memory_reserved(self.device)
+            non_torch_local = max(0, proc_used_bytes - torch_reserved)
+            # CUDA graph estimates via mem_get_info are also polluted by the
+            # co-located rank (can even go negative); clamp to non-negative.
+            cudagraph_memory_estimate = max(0, cudagraph_memory_estimate)
+            logger.info(
+                "Co-located memory accounting (rank %d, pid %d, NVML:%s): "
+                "nvml_proc_used=%s GiB, torch_reserved=%s GiB, "
+                "non_torch_local=%s GiB (global measurement was %s GiB), "
+                "weights=%s GiB, torch_peak_increase=%s GiB, "
+                "cudagraph_estimate=%s GiB, budget=%s GiB",
+                self.local_rank, my_pid, nvml_idx,
+                format_gib(proc_used_bytes),
+                format_gib(torch_reserved),
+                format_gib(non_torch_local),
+                format_gib(profile_result.non_torch_increase),
+                format_gib(profile_result.weights_memory),
+                format_gib(profile_result.torch_peak_increase),
+                format_gib(cudagraph_memory_estimate),
+                format_gib(self.requested_memory),
+            )
+            profile_result.non_torch_increase = non_torch_local
+
         profile_result.non_kv_cache_memory = (
             profile_result.non_torch_increase
             + profile_result.torch_peak_increase
@@ -477,7 +601,11 @@ class Worker(WorkerBase):
         free_gpu_memory = profile_result.after_profile.free_memory
         # NOTE(woosuk): Here we assume that the other processes using the same
         # GPU did not change their memory usage during the profiling.
-        assert self.init_snapshot.free_memory >= free_gpu_memory, (
+        # With --rank-gpu-id co-location this assumption does not hold (the
+        # co-located rank allocates/frees concurrently), so skip the check.
+        assert co_located_count > 1 or (
+            self.init_snapshot.free_memory >= free_gpu_memory
+        ), (
             "Error in memory profiling. "
             f"Initial free memory {format_gib(self.init_snapshot.free_memory)} GiB, "
             f"current free memory {format_gib(free_gpu_memory)} GiB. "

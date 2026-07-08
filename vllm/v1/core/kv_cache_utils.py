@@ -1328,6 +1328,22 @@ def get_kv_cache_config_from_groups(
             kv_cache_groups=kv_cache_groups,
         )
 
+    # DEBUG: log per-group KV cache spec details to diagnose page size
+    # scaling across TP sizes (attention vs mamba/GDN page sizes).
+    for gi, group in enumerate(kv_cache_groups):
+        spec = group.kv_cache_spec
+        logger.info(
+            "KV-DEBUG group[%d]: type=%s, num_layers=%d, block_size=%s, "
+            "page_size_bytes=%s (%.1f kB/token/layer), available_memory=%s GiB",
+            gi,
+            type(spec).__name__,
+            len(group.layer_names),
+            getattr(spec, "block_size", None),
+            spec.page_size_bytes,
+            spec.page_size_bytes / max(getattr(spec, "block_size", 1), 1) / 1024,
+            round(available_memory / (1 << 30), 2),
+        )
+
     # Determine how model runners should initialize the KV cache tensors.
     if len(kv_cache_groups) == 1 and isinstance(
         kv_cache_groups[0].kv_cache_spec, UniformTypeKVCacheSpecs
@@ -1382,6 +1398,14 @@ def get_kv_cache_config_from_groups(
                 KVCacheTensor(size=page_size * num_blocks, shared_by=shared_by)
             )
 
+    logger.info(
+        "KV-DEBUG result: num_blocks=%d, num_tensors=%d, "
+        "tensor_size=%s GiB each, total=%s GiB",
+        num_blocks,
+        len(kv_cache_tensors),
+        round(kv_cache_tensors[0].size / (1 << 30), 3) if kv_cache_tensors else 0,
+        round(sum(t.size for t in kv_cache_tensors) / (1 << 30), 2),
+    )
     return KVCacheConfig(
         num_blocks=num_blocks,
         kv_cache_tensors=kv_cache_tensors,
