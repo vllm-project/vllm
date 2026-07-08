@@ -66,6 +66,13 @@ class CudaCommunicator(DeviceCommunicatorBase):
         self.use_flashinfer_allreduce = use_flashinfer_allreduce
         self.use_aiter_allreduce = use_aiter_allreduce
 
+        if envs.VLLM_SYMM_MEM_PCIE_SAFE_BARRIER:
+            from vllm.distributed.device_communicators.symm_mem_pcie_barrier import (
+                install_pcie_safe_barrier,
+            )
+
+            install_pcie_safe_barrier()
+
         # lazy import to avoid documentation build error
         from vllm.distributed.device_communicators.custom_all_reduce import (
             CustomAllreduce,
