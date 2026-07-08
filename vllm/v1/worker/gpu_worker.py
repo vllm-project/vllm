@@ -755,6 +755,7 @@ class Worker(WorkerBase):
                 if not any(x in compile_range for x in all_sizes):
                     warmup_sizes.append(compile_range.end)
 
+        # TODO(LucasWilkinson, akaratza): Remove when MRV1 is deprecated
         if (
             current_platform.is_rocm()
             and not self.use_v2_model_runner
