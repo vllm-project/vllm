@@ -26,7 +26,9 @@ def load_dflash_model(target_model: nn.Module, vllm_config: VllmConfig) -> nn.Mo
     draft_vllm_config = replace(
         vllm_config,
         attention_config=replace(
-            vllm_config.attention_config, use_non_causal=not causal
+            vllm_config.attention_config,
+            use_non_causal=not causal,
+            backend=speculative_config.attention_backend,
         ),
     )
     with set_model_tag("dflash_head"):

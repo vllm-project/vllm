@@ -70,6 +70,10 @@ from .utils import (
 
 
 class OAIAttention(nn.Module):
+    # Override to switch RoPE convention. gpt-oss uses NeoX (chunk halves);
+    # privacy-filter and similar derivatives use GPT-J (interleaved pairs).
+    rope_is_neox_style: bool = True
+
     def __init__(
         self,
         config: GptOssConfig,
@@ -99,7 +103,7 @@ class OAIAttention(nn.Module):
                 "beta_slow": config.rope_parameters["beta_slow"],
                 "truncate": config.rope_parameters.get("truncate", True),
             },
-            is_neox_style=True,
+            is_neox_style=self.rope_is_neox_style,
         )
 
         tp_size = get_tensor_model_parallel_world_size()
@@ -133,9 +137,25 @@ class OAIAttention(nn.Module):
         self.num_local_attention_heads = config.num_attention_heads // tp_size
         self.num_local_key_value_heads = config.num_key_value_heads // tp_size
 
+        self.attn = self._build_attention(
+            config=config,
+            cache_config=cache_config,
+            quant_config=quant_config,
+            prefix=prefix,
+        )
+
+    def _build_attention(
+        self,
+        config: GptOssConfig,
+        cache_config: CacheConfig | None,
+        quant_config: QuantizationConfig | None,
+        prefix: str,
+    ) -> Attention:
+        # Override to swap in an encoder-only attention or alter the
+        # per-layer sliding-window policy.
         # Only apply sliding window to every other layer
         sliding_window = config.sliding_window if self.layer_idx % 2 == 0 else None
-        self.attn = Attention(
+        return Attention(
             self.num_local_attention_heads,
             self.head_dim,
             self.scaling,
@@ -172,7 +192,10 @@ class MLPBlock(torch.nn.Module):
         quant_config = vllm_config.quant_config
         parallel_config = vllm_config.parallel_config
 
-        self.is_sequence_parallel = parallel_config.use_sequence_parallel_moe
+        self.is_sequence_parallel = (
+            parallel_config.use_sequence_parallel_moe
+            and vllm_config.lora_config is None
+        )
 
         self.layer_idx = layer_idx
         self.num_experts = config.num_local_experts
@@ -222,6 +245,10 @@ class MLPBlock(torch.nn.Module):
 
 
 class TransformerBlock(torch.nn.Module):
+    # Override to swap attention/MLP without re-implementing the block.
+    attention_cls: type[nn.Module] = OAIAttention
+    mlp_cls: type[nn.Module] = MLPBlock
+
     def __init__(
         self,
         vllm_config: VllmConfig,
@@ -234,13 +261,13 @@ class TransformerBlock(torch.nn.Module):
         cache_config = vllm_config.cache_config
 
         self.layer_idx = extract_layer_index(prefix)
-        self.attn = OAIAttention(
+        self.attn = self.attention_cls(
             config,
             prefix=f"{prefix}.attn",
             quant_config=quant_config,
             cache_config=cache_config,
         )
-        self.mlp = MLPBlock(vllm_config, self.layer_idx, prefix=f"{prefix}.mlp")
+        self.mlp = self.mlp_cls(vllm_config, self.layer_idx, prefix=f"{prefix}.mlp")
         self.input_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=1e-5)
 
@@ -266,6 +293,9 @@ class TransformerBlock(torch.nn.Module):
 
 @support_torch_compile
 class GptOssModel(nn.Module, EagleModelMixin):
+    # Override to swap in an alternative TransformerBlock subclass.
+    block_cls: type[nn.Module] = TransformerBlock
+
     def __init__(
         self,
         *,
@@ -282,7 +312,7 @@ class GptOssModel(nn.Module, EagleModelMixin):
         )
         self.start_layer, self.end_layer, self.layers = make_layers(
             self.config.num_hidden_layers,
-            lambda prefix: TransformerBlock(
+            lambda prefix: self.block_cls(
                 vllm_config,
                 prefix=prefix,
                 quant_config=self.quant_config,
