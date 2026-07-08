@@ -21,6 +21,7 @@ import torch
 from vllm.distributed.kv_events import MEDIUM_FS
 from vllm.v1.kv_offload.base import (
     LookupResult,
+    OffloadingEvent,
     OffloadKey,
     ReqContext,
     ScheduleEndContext,
@@ -577,7 +578,7 @@ def test_cascade_store_emits_fs_event_through_tiering_manager(tmp_path):
         assert manager.prepare_store(keys, _CTX) is not None
         manager.complete_store(keys, _CTX)  # cascades to the fs tier
 
-        events = []
+        events: list[OffloadingEvent] = []
         ctx = ScheduleEndContext(new_req_ids=[], preempted_req_ids=())
         deadline = time.monotonic() + 5.0
         while time.monotonic() < deadline and not events:
