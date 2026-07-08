@@ -8,13 +8,6 @@
 //!
 //! Raw media stays above `vllm-text`; this module lowers it into token IDs and
 //! opaque tensor payloads before the request is handed to text generation.
-//!
-//! Modalities differ in payload types and preprocessing shape (images are
-//! preprocessed as one batch, videos one clip at a time), so each supported
-//! modality resolves into its own [`ModalitySupport`] and produces a common
-//! [`PreparedMedia`] intermediate in its own submodule ([`image`], [`video`]).
-//! Everything downstream of that contract — placeholder expansion and feature
-//! assembly — is shared across modalities and lives here.
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -44,7 +37,7 @@ mod image;
 mod tensor;
 mod video;
 
-use self::expand::{ExpansionLane, expand_prompt_token_ids};
+use self::expand::expand_prompt_token_ids;
 
 /// Resolved multimodal support for one loaded model.
 #[derive(Clone)]
@@ -117,9 +110,7 @@ impl ResolvedMultimodalSpec {
         preprocessed: &PreprocessedEncoderInputs,
         modality: Modality,
     ) -> Result<Vec<PromptReplacement>> {
-        self.raw
-            .prompt_replacements_for(&context.metadata(), preprocessed, modality)
-            .map_err(|error| multimodal!("{error}"))
+        Ok(self.raw.prompt_replacements_for(&context.metadata(), preprocessed, modality)?)
     }
 }
 
@@ -140,9 +131,7 @@ impl ResolvedPlaceholder {
         modality: Modality,
     ) -> Result<Self> {
         let metadata = context.metadata();
-        let token = raw
-            .placeholder_token_for(&metadata, modality)
-            .map_err(|error| multimodal!("{error}"))?;
+        let token = raw.placeholder_token_for(&metadata, modality)?;
         // This is the rendered prompt marker, so resolve it from the token
         // string itself. Do not use `ModelProcessorSpec::placeholder_token_id_for()`:
         // for some specs that ID is the replacement vision/patch token,
@@ -150,9 +139,7 @@ impl ResolvedPlaceholder {
         let marker_token_id = context.tokenizer().token_to_id(&token).ok_or_else(|| {
             multimodal!("placeholder token `{token}` is not in the tokenizer vocabulary")
         })?;
-        let embed_token_id = raw
-            .placeholder_token_id_for(&metadata, modality)
-            .map_err(|error| multimodal!("{error}"))? as u32;
+        let embed_token_id = raw.placeholder_token_id_for(&metadata, modality)? as u32;
 
         Ok(Self {
             token,
@@ -208,19 +195,6 @@ struct PreparedItem {
     data: MmKwargsItem,
     hash: String,
     uuid: Option<String>,
-}
-
-impl PreparedMedia {
-    /// Detach this modality's pending replacements as an expansion lane.
-    fn expansion_lane(&mut self) -> ExpansionLane {
-        ExpansionLane {
-            modality: self.modality,
-            marker_token_id: self.placeholder.marker_token_id,
-            embed_token_id: self.placeholder.embed_token_id,
-            placeholder_token: self.placeholder.token.clone(),
-            replacements: std::mem::take(&mut self.replacements).into(),
-        }
-    }
 }
 
 impl MultimodalModelInfo {
@@ -346,10 +320,10 @@ impl MultimodalModelInfo {
             return Ok(None);
         }
 
-        let media_connector = Arc::new(
-            MediaConnector::new(reqwest::Client::new(), MediaConnectorConfig::default())
-                .map_err(|error| multimodal!("{error}"))?,
-        );
+        let media_connector = Arc::new(MediaConnector::new(
+            reqwest::Client::new(),
+            MediaConnectorConfig::default(),
+        )?);
 
         Ok(Some(Self {
             context,
@@ -366,15 +340,10 @@ impl MultimodalModelInfo {
     /// The HF renderer uses these tokens while flattening media content in
     /// string content format.
     pub fn placeholder_token(&self, modality: Modality) -> Option<&str> {
-        self.modality_support(modality)
-            .map(|support| support.placeholder.token.as_str())
-    }
-
-    fn modality_support(&self, modality: Modality) -> Option<&ModalitySupport> {
         match modality {
-            Modality::Image => self.image.as_ref(),
-            Modality::Video => self.video.as_ref(),
-            _ => None,
+            Modality::Image => self.image.as_ref()?.placeholder.token.as_str().into(),
+            Modality::Video => self.video.as_ref()?.placeholder.token.as_str().into(),
+            _ => return None,
         }
     }
 }
@@ -481,24 +450,23 @@ impl MultimodalModelInfo {
                 .push(self.prepare_videos(fetched.videos, fetched.video_uuids, model_dtype).await?);
         }
 
-        let lanes = prepared.iter_mut().map(PreparedMedia::expansion_lane).collect();
-        let mut ranges = expand_prompt_token_ids(prompt_token_ids, lanes)?;
+        let mut ranges = expand_prompt_token_ids(prompt_token_ids, &prepared)?;
 
         let mut features = Vec::with_capacity(media_parts_len);
-        for lane in prepared {
-            let lane_ranges = ranges.remove(&lane.modality).unwrap_or_default();
-            if lane_ranges.len() != lane.items.len() {
+        for media in prepared {
+            let media_ranges = ranges.remove(&media.modality).unwrap_or_default();
+            if media_ranges.len() != media.items.len() {
                 bail_multimodal!(
                     "number of expanded `{}` placeholders {} does not match number of media items {}",
-                    lane.modality,
-                    lane_ranges.len(),
-                    lane.items.len()
+                    media.modality,
+                    media_ranges.len(),
+                    media.items.len()
                 );
             }
-            for (item, range) in izip!(lane.items, lane_ranges) {
+            for (item, range) in izip!(media.items, media_ranges) {
                 features.push(MmFeatureSpec {
                     data: Some(item.data),
-                    modality: lane.modality.to_string(),
+                    modality: media.modality.to_string(),
                     identifier: item.uuid.unwrap_or_else(|| item.hash.clone()),
                     mm_position: range,
                     mm_hash: Some(item.hash),
@@ -524,11 +492,10 @@ impl MultimodalModelInfo {
     async fn fetch_media(&self, media_parts: Vec<MediaContentPart>) -> Result<FetchedMedia> {
         let mut tracker = AsyncMultiModalTracker::new(Arc::clone(&self.media_connector));
         for part in media_parts {
-            tracker.push_part(part).map_err(|error| multimodal!("{error}"))?;
+            tracker.push_part(part)?;
         }
 
-        let mut tracker_output =
-            tracker.finalize().await.map_err(|error| multimodal!("{error}"))?;
+        let mut tracker_output = tracker.finalize().await?;
 
         let images = tracker_output
             .data

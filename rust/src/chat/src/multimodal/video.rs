@@ -141,7 +141,7 @@ impl MultimodalModelInfo {
             }
 
             let frames = clip.materialized_frames().map_err(|error| multimodal!("{error}"))?;
-            processor.preprocess_video(&frames, &config).map_err(|error| multimodal!("{error}"))
+            Ok(processor.preprocess_video(&frames, &config)?)
         })
         .await
         .map_err(|error| multimodal!("video preprocessing task failed: {error}"))?

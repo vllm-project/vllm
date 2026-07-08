@@ -1,5 +1,5 @@
 use thiserror::Error;
-use thiserror_ext::Macro;
+use thiserror_ext::{AsReport as _, Macro};
 
 type BoxedError = Box<dyn std::error::Error + Send + Sync>;
 
@@ -88,6 +88,30 @@ impl Error {
 
             _ => false,
         }
+    }
+}
+
+impl From<llm_multimodal::MediaConnectorError> for Error {
+    fn from(error: llm_multimodal::MediaConnectorError) -> Self {
+        Self::Multimodal(error.to_report_string())
+    }
+}
+
+impl From<llm_multimodal::MultiModalError> for Error {
+    fn from(error: llm_multimodal::MultiModalError) -> Self {
+        Self::Multimodal(error.to_report_string())
+    }
+}
+
+impl From<llm_multimodal::TransformError> for Error {
+    fn from(error: llm_multimodal::TransformError) -> Self {
+        Self::Multimodal(error.to_report_string())
+    }
+}
+
+impl From<llm_multimodal::registry::ModelRegistryError> for Error {
+    fn from(error: llm_multimodal::registry::ModelRegistryError) -> Self {
+        Self::Multimodal(error.to_report_string())
     }
 }
 

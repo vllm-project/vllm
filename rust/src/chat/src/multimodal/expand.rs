@@ -6,34 +6,49 @@ use llm_multimodal::{Modality, PromptReplacement};
 use vllm_engine_core_client::protocol::multimodal::PlaceholderRange;
 use vllm_engine_core_client::protocol::tensor::WireTensor;
 
+use super::PreparedMedia;
 use crate::error::{Error, Result, bail_multimodal};
 
 /// One modality's queue of pending placeholder replacements for prompt
 /// expansion.
-pub(super) struct ExpansionLane {
-    pub(super) modality: Modality,
-    pub(super) marker_token_id: u32,
-    pub(super) embed_token_id: u32,
-    pub(super) placeholder_token: String,
-    pub(super) replacements: VecDeque<PromptReplacement>,
+struct ExpansionLane<'a> {
+    modality: Modality,
+    marker_token_id: u32,
+    embed_token_id: u32,
+    placeholder_token: String,
+    replacements: VecDeque<&'a PromptReplacement>,
+}
+
+impl<'a> ExpansionLane<'a> {
+    fn from_prepared(media: &'a PreparedMedia) -> Option<Self> {
+        if media.replacements.is_empty() {
+            return None;
+        }
+
+        Some(Self {
+            modality: media.modality,
+            marker_token_id: media.placeholder.marker_token_id,
+            embed_token_id: media.placeholder.embed_token_id,
+            placeholder_token: media.placeholder.token.clone(),
+            replacements: media.replacements.iter().collect(),
+        })
+    }
 }
 
 /// Replace rendered placeholder markers with model-specific replacement
 /// tokens across all modalities in one left-to-right pass.
 ///
-/// Each lane consumes its own marker occurrences in order, matching the
-/// original media-part order within that modality; markers of different
-/// modalities may interleave freely. Only the original prompt is scanned, so
-/// marker tokens inside replacement sequences are never re-matched. The
-/// returned ranges point into the already-expanded prompt, grouped per
-/// modality in item order.
+/// Each prepared modality consumes its own marker occurrences in order,
+/// matching the original media-part order within that modality; markers of
+/// different modalities may interleave freely.
 ///
-/// On error the prompt is left unchanged.
+/// The returned ranges point into the already-expanded prompt, grouped per
+/// modality in item order.
 pub(super) fn expand_prompt_token_ids(
     prompt_token_ids: &mut Vec<u32>,
-    mut lanes: Vec<ExpansionLane>,
+    prepared: &[PreparedMedia],
 ) -> Result<HashMap<Modality, Vec<PlaceholderRange>>> {
-    lanes.retain(|lane| !lane.replacements.is_empty());
+    let mut lanes = prepared.iter().filter_map(ExpansionLane::from_prepared).collect::<Vec<_>>();
     if lanes.is_empty() {
         return Ok(HashMap::new());
     }
@@ -44,8 +59,9 @@ pub(super) fn expand_prompt_token_ids(
         .fold(0usize, |total, replacement| {
             total.saturating_add(replacement.tokens.len().saturating_sub(1))
         });
-    let mut expanded =
-        Vec::with_capacity(prompt_token_ids.len().saturating_add(replacement_growth));
+    let expanded_len = prompt_token_ids.len().saturating_add(replacement_growth);
+
+    let mut expanded = Vec::with_capacity(expanded_len);
     let mut ranges = HashMap::<Modality, Vec<PlaceholderRange>>::new();
 
     for &token in prompt_token_ids.iter() {
@@ -77,7 +93,7 @@ pub(super) fn expand_prompt_token_ids(
         };
 
         let expanded_offset = expanded.len();
-        expanded.extend(replacement.tokens.into_iter().map(|token| token as u32));
+        expanded.extend(replacement.tokens.iter().map(|&token| token as u32));
         ranges.entry(lane.modality).or_default().push(PlaceholderRange {
             offset: expanded_offset,
             length: replacement_len,
@@ -111,29 +127,33 @@ mod tests {
         LLAMA4_TILE_X_SEPARATOR_ID, LLAMA4_TILE_Y_SEPARATOR_ID, QWEN3_IMAGE_PAD_ID,
         QWEN3_VIDEO_PAD_ID,
     };
+    use super::super::{PreparedMedia, ResolvedPlaceholder};
     use super::*;
 
-    /// Build an expansion lane directly from placeholder token IDs.
-    fn lane(
+    /// Build prepared media directly from placeholder token IDs.
+    fn prepared_media(
         modality: Modality,
         placeholder_token: &str,
         marker_token_id: u32,
         embed_token_id: u32,
         replacements: Vec<PromptReplacement>,
-    ) -> ExpansionLane {
-        ExpansionLane {
+    ) -> PreparedMedia {
+        PreparedMedia {
             modality,
-            marker_token_id,
-            embed_token_id,
-            placeholder_token: placeholder_token.to_string(),
-            replacements: replacements.into(),
+            placeholder: ResolvedPlaceholder {
+                token: placeholder_token.to_string(),
+                marker_token_id,
+                embed_token_id,
+            },
+            replacements,
+            items: Vec::new(),
         }
     }
 
-    /// The llama4 image lane: the `<|image|>` marker expands to sequences
-    /// whose embed positions are the `<|patch|>` tokens.
-    fn llama4_lane(replacements: Vec<PromptReplacement>) -> ExpansionLane {
-        lane(
+    /// Llama4 image prepared media: the `<|image|>` marker expands to
+    /// sequences whose embed positions are the `<|patch|>` tokens.
+    fn llama4_prepared(replacements: Vec<PromptReplacement>) -> PreparedMedia {
+        prepared_media(
             Modality::Image,
             "<|image|>",
             LLAMA4_IMAGE_ID,
@@ -142,8 +162,8 @@ mod tests {
         )
     }
 
-    fn qwen3_image_lane(replacements: Vec<PromptReplacement>) -> ExpansionLane {
-        lane(
+    fn qwen3_image_prepared(replacements: Vec<PromptReplacement>) -> PreparedMedia {
+        prepared_media(
             Modality::Image,
             "<|image_pad|>",
             QWEN3_IMAGE_PAD_ID,
@@ -152,8 +172,8 @@ mod tests {
         )
     }
 
-    fn qwen3_video_lane(replacements: Vec<PromptReplacement>) -> ExpansionLane {
-        lane(
+    fn qwen3_video_prepared(replacements: Vec<PromptReplacement>) -> PreparedMedia {
+        prepared_media(
             Modality::Video,
             "<|video_pad|>",
             QWEN3_VIDEO_PAD_ID,
@@ -206,9 +226,9 @@ mod tests {
     #[test]
     fn expand_prompt_tokens_marks_only_llama4_patch_tokens_as_embed() {
         let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2];
-        let lanes = vec![llama4_lane(vec![llama4_multi_tile_replacement()])];
+        let prepared = vec![llama4_prepared(vec![llama4_multi_tile_replacement()])];
 
-        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, lanes).unwrap();
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
         let ranges = &ranges[&Modality::Image];
 
         assert_eq!(
@@ -237,9 +257,9 @@ mod tests {
     #[test]
     fn expand_prompt_tokens_errors_when_placeholder_missing() {
         let mut prompt_token_ids = vec![1, 2, 3];
-        let lanes = vec![llama4_lane(vec![llama4_single_tile_replacement()])];
+        let prepared = vec![llama4_prepared(vec![llama4_single_tile_replacement()])];
 
-        let error = expand_prompt_token_ids(&mut prompt_token_ids, lanes).unwrap_err();
+        let error = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap_err();
 
         assert!(matches!(error, Error::Multimodal(message) if message.contains("not found")));
     }
@@ -248,9 +268,9 @@ mod tests {
     fn expand_prompt_tokens_ignores_empty_replacements() {
         let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2];
         let original_prompt_token_ids = prompt_token_ids.clone();
-        let lanes = vec![llama4_lane(Vec::new())];
+        let prepared = vec![llama4_prepared(Vec::new())];
 
-        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, lanes).unwrap();
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
 
         assert!(ranges.is_empty());
         assert_eq!(prompt_token_ids, original_prompt_token_ids);
@@ -260,12 +280,12 @@ mod tests {
     fn expand_prompt_tokens_leaves_prompt_unchanged_when_later_placeholder_missing() {
         let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2];
         let original_prompt_token_ids = prompt_token_ids.clone();
-        let lanes = vec![llama4_lane(vec![
+        let prepared = vec![llama4_prepared(vec![
             llama4_single_tile_replacement(),
             llama4_single_tile_replacement(),
         ])];
 
-        let error = expand_prompt_token_ids(&mut prompt_token_ids, lanes).unwrap_err();
+        let error = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap_err();
 
         assert!(matches!(error, Error::Multimodal(message) if message.contains("not found")));
         assert_eq!(prompt_token_ids, original_prompt_token_ids);
@@ -275,13 +295,13 @@ mod tests {
     fn expand_prompt_tokens_errors_when_replacement_is_empty() {
         let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2];
         let original_prompt_token_ids = prompt_token_ids.clone();
-        let lanes = vec![llama4_lane(vec![PromptReplacement::sequence(
+        let prepared = vec![llama4_prepared(vec![PromptReplacement::sequence(
             Modality::Image,
             "<|image|>",
             Vec::new(),
         )])];
 
-        let error = expand_prompt_token_ids(&mut prompt_token_ids, lanes).unwrap_err();
+        let error = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap_err();
 
         assert!(
             matches!(error, Error::Multimodal(message) if message.contains("expanded to no tokens"))
@@ -292,12 +312,12 @@ mod tests {
     #[test]
     fn expand_prompt_tokens_skips_llama4_image_marker_inside_replacement() {
         let mut prompt_token_ids = vec![1, LLAMA4_IMAGE_ID, 2, LLAMA4_IMAGE_ID, 3];
-        let lanes = vec![llama4_lane(vec![
+        let prepared = vec![llama4_prepared(vec![
             llama4_single_tile_replacement(),
             llama4_single_tile_replacement(),
         ])];
 
-        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, lanes).unwrap();
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
         let ranges = &ranges[&Modality::Image];
 
         assert_eq!(
@@ -327,7 +347,7 @@ mod tests {
     }
 
     #[test]
-    fn expand_prompt_tokens_interleaves_image_and_video_lanes() {
+    fn expand_prompt_tokens_interleaves_image_and_video_prepared_media() {
         let mut prompt_token_ids = vec![
             1,
             QWEN3_IMAGE_PAD_ID,
@@ -337,8 +357,8 @@ mod tests {
             QWEN3_IMAGE_PAD_ID,
             4,
         ];
-        let lanes = vec![
-            qwen3_image_lane(vec![
+        let prepared = vec![
+            qwen3_image_prepared(vec![
                 PromptReplacement::repeated(
                     Modality::Image,
                     "<|image_pad|>",
@@ -352,7 +372,7 @@ mod tests {
                     3,
                 ),
             ]),
-            qwen3_video_lane(vec![PromptReplacement::repeated(
+            qwen3_video_prepared(vec![PromptReplacement::repeated(
                 Modality::Video,
                 "<|video_pad|>",
                 QWEN3_VIDEO_PAD_ID as TokenId,
@@ -360,7 +380,7 @@ mod tests {
             )]),
         ];
 
-        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, lanes).unwrap();
+        let ranges = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap();
 
         assert_eq!(
             prompt_token_ids,
@@ -399,14 +419,14 @@ mod tests {
     fn expand_prompt_tokens_error_names_modality_with_leftover_replacements() {
         let mut prompt_token_ids = vec![1, QWEN3_IMAGE_PAD_ID, 2];
         let original_prompt_token_ids = prompt_token_ids.clone();
-        let lanes = vec![
-            qwen3_image_lane(vec![PromptReplacement::repeated(
+        let prepared = vec![
+            qwen3_image_prepared(vec![PromptReplacement::repeated(
                 Modality::Image,
                 "<|image_pad|>",
                 QWEN3_IMAGE_PAD_ID as TokenId,
                 2,
             )]),
-            qwen3_video_lane(vec![PromptReplacement::repeated(
+            qwen3_video_prepared(vec![PromptReplacement::repeated(
                 Modality::Video,
                 "<|video_pad|>",
                 QWEN3_VIDEO_PAD_ID as TokenId,
@@ -414,7 +434,7 @@ mod tests {
             )]),
         ];
 
-        let error = expand_prompt_token_ids(&mut prompt_token_ids, lanes).unwrap_err();
+        let error = expand_prompt_token_ids(&mut prompt_token_ids, &prepared).unwrap_err();
 
         assert!(matches!(
             error,
