@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
+import contextlib
 import threading
 from dataclasses import dataclass
 from typing import Any
@@ -1103,10 +1104,8 @@ class FlashInferEPAll2AllManagerBase(All2AllManagerBase):
 
     def destroy(self):
         for fleet in self._fleets.values():
-            try:
+            with contextlib.suppress(Exception):
                 fleet.destroy()
-            except Exception:
-                pass
         self._fleets.clear()
 
 

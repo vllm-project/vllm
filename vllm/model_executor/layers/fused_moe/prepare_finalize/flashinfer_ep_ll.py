@@ -113,9 +113,7 @@ class FlashInferEPLLPrepareAndFinalize(FlashInferEPPrepareAndFinalizeBase):
             # fused_expert_output: [num_local_experts, cap, hidden] (batched). combine
             # gathers back to origin ranks, reweighting per token on receive, into
             # `output` in place.
-            handle.combine(
-                CombineInputParams(x=[fused_expert_output], out=output)
-            )
+            handle.combine(CombineInputParams(x=[fused_expert_output], out=output))
         finally:
             # LL non-staged self-drains, but call complete() to honor the handle
             # lifecycle uniformly (no-op in non-staged mode).

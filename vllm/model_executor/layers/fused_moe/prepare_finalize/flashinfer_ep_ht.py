@@ -2,31 +2,26 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """FlashInfer moe_ep high-throughput prepare/finalize (FLAT / Standard).
 
-FlashInfer's HT dispatch is token-major: it returns a `[num_recv, hidden]` receive
-buffer plus the per-received-token routing (`recv_topk_idx` in LOCAL expert space with
-`-1` for non-local/padding picks, and `recv_topk_weights`). That matches vLLM's
-`Standard` activation format, so the fused experts run over `[num_recv, hidden]` and
-finalize calls combine.
+FlashInfer's HT dispatch is token-major: it returns a `[num_recv, hidden]`
+receive buffer plus the per-received-token routing (`recv_topk_idx` in LOCAL
+expert space with `-1` for non-local/padding picks, and `recv_topk_weights`).
+That matches vLLM's `Standard` activation format, so the fused experts run
+over `[num_recv, hidden]` and finalize calls combine.
 
-GAP 3 (recv-count): this adapter opts in to `HandleAlgoKnobNumReceivedTokens`, so
-`DispatchOutput.recv_total_counter` carries the actual received-token count. On nccl-ep
-v0.1 the transport buffer stays statically sized to `max_recv_tokens_per_rank`; the count
-enables a future compute-view trim (`recv_x[:actual_recv]`) without resizing the buffer.
+Two adaptations to the Standard-experts contract (both GPU-validated with
+GSM8K through a DP-EP deployment):
 
-⚠ ON-GPU VALIDATION REQUIRED. Three points in this path are structurally implemented but
-must be verified/iterated on real hardware (lyris), and cannot be exercised on a
-CPU/host-only box:
-  1. Feeding `recv_topk_idx` (local indices, `-1` for non-local) into vLLM's Standard
-     `fused_moe` — confirm `-1` picks are masked (contribute 0), i.e. expert_map/`-1`
-     handling matches.
-  2. finalize's `fused_expert_output` arrives `(M, topk, K)` per the modular contract,
-     while FlashInfer HT combine consumes `[num_recv, hidden]`; the reshape/reduce
-     reconciliation below assumes the combine owns the cross-rank reduce and weights were
-     bound at dispatch.
-  3. The optional `recv_total_counter` compute-view trim (left off here for correctness;
-     the full static buffer is used, with `-1` masking handling padding).
-The low-latency adapter (`flashinfer_ep_ll.py`) is the clean, directly-mapped path and
-should be validated first.
+1. Expert-id space: the Standard experts expect GLOBAL expert ids in topk_ids
+   (non-local picks are skipped via `expert_map`, never via `-1` in topk_ids),
+   so prepare() rebuilds global ids from `expert_map` and remaps `-1` picks to
+   a non-owned global id.
+2. Recv-count trim: the transport buffer is statically sized to
+   `max_recv_tokens_per_rank` on nccl-ep v0.1, but the metadata step fills
+   `recv_total_counter` at handle creation, so prepare() trims the compute
+   view to the actually-received rows (host sync; this path is eager-only).
+   finalize() copies the trimmed expert output back into a persistent
+   full-size buffer, since combine expects the address-stable static staging
+   layout (padding rows carry no routing state and are never sent).
 """
 
 from __future__ import annotations
@@ -151,8 +146,9 @@ class FlashInferEPHTPrepareAndFinalize(FlashInferEPPrepareAndFinalizeBase):
                 skip_id = (not_owned[0] if not_owned.numel() else owned[0]).to(
                     recv_idx.dtype
                 )
-                self._l2g_cache = (expert_map, local_to_global, skip_id)
-            _, local_to_global, skip_id = self._l2g_cache
+                cached = (expert_map, local_to_global, skip_id)
+                self._l2g_cache = cached
+            _, local_to_global, skip_id = cached
             valid = recv_idx >= 0
             recv_idx = torch.where(
                 valid, local_to_global[recv_idx.clamp_min(0)], skip_id
