@@ -140,7 +140,7 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | Key | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `bucket` | yes | — | Bucket name. |
-| `endpoint_override` | yes | — | Object store endpoint. |
+| `endpoint_override` | yes | — | Object store endpoint host; the URL scheme is set separately via `scheme`. |
 | `scheme` | no | `http` | `http` or `https`. |
 | `access_key`, `secret_key`, `session_token` | no | `""` | Explicit credentials. When left empty, the NIXL OBJ plugin falls back to the AWS SDK default credential provider chain (IAM roles, environment variables, credential files), which enables workload-identity auth on Kubernetes. |
 | `region` | no | `""` | Bucket region, if the endpoint requires one. |
