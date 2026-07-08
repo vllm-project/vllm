@@ -1372,9 +1372,26 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
   # s_waitcnt asm) that gfx1250 (gfx12) does not provide. Exclude it from the
   # gfx1250 build and disable its op registrations (VLLM_SKIP_SKINNY_GEMMS);
   # vLLM falls back to default/Triton GEMM for those ops on gfx1250.
-  if(VLLM_GPU_ARCHES MATCHES "gfx1250")
-    message(STATUS "gfx1250 detected: excluding csrc/rocm/skinny_gemms.cu from _rocm_C")
-    list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms.cu")
+  list(REMOVE_ITEM VLLM_ROCM_EXT_SRC "csrc/rocm/skinny_gemms.cu")
+  set(VLLM_SKINNY_ARCHES ${VLLM_GPU_ARCHES})
+  list(FILTER VLLM_SKINNY_ARCHES EXCLUDE REGEX "gfx1250")
+  if(VLLM_SKINNY_ARCHES)
+    message(STATUS "Building skinny_gemms for archs: ${VLLM_SKINNY_ARCHES}")
+    hipify_sources_target(VLLM_SKINNY_HIP_SRCS _rocm_C_skinny "csrc/rocm/skinny_gemms.cu")
+    unset(_VLLM_LAST_HIPIFY_TARGET)
+    add_library(_rocm_C_skinny OBJECT ${VLLM_SKINNY_HIP_SRCS})
+    add_dependencies(_rocm_C_skinny hipify_all)
+    set_source_files_properties(${VLLM_SKINNY_HIP_SRCS} PROPERTIES LANGUAGE ${VLLM_GPU_LANG})
+    set_target_properties(_rocm_C_skinny PROPERTIES
+      ${VLLM_GPU_LANG}_ARCHITECTURES "${VLLM_SKINNY_ARCHES}"
+      POSITION_INDEPENDENT_CODE ON)
+    target_include_directories(_rocm_C_skinny PRIVATE ${CMAKE_CURRENT_BINARY_DIR}/csrc)
+    target_compile_options(_rocm_C_skinny PRIVATE
+      $<$<COMPILE_LANGUAGE:${VLLM_GPU_LANG}>:${VLLM_ROCM_EXT_FLAGS}>)
+    target_compile_definitions(_rocm_C_skinny PRIVATE "-DTORCH_EXTENSION_NAME=_rocm_C")
+    target_link_libraries(_rocm_C_skinny PRIVATE torch)
+  else()
+    message(STATUS "Only gfx1250, skipping skinny_gemms")
     list(APPEND VLLM_ROCM_EXT_FLAGS "-DVLLM_SKIP_SKINNY_GEMMS")
   endif()
 
@@ -1397,8 +1414,9 @@ if(VLLM_GPU_LANG STREQUAL "HIP")
     USE_SABI 3
     WITH_SOABI)
   
-  # Needed to pass skip skinny flag to .cpp targets
-  if(VLLM_GPU_ARCHES MATCHES "gfx1250")                               
+  if(TARGET _rocm_C_skinny)
+    target_link_libraries(_rocm_C PRIVATE _rocm_C_skinny)
+  else()
     target_compile_definitions(_rocm_C PRIVATE VLLM_SKIP_SKINNY_GEMMS)
   endif()
 
