@@ -115,9 +115,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         self.use_spec_decode = self.num_spec_tokens > 0
         self.use_cached_kernel = vllm_config.cache_config.use_replayssm
         self.max_cache_len = vllm_config.cache_config.replayssm_buffer_len
-        self.use_cache_spec_kernel = (
-            vllm_config.cache_config.use_replayssm_spec
-        )
+        self.use_cache_spec_kernel = vllm_config.cache_config.use_replayssm_spec
         self.max_spec_len = 1 + self.num_spec_tokens
         # L = B + max_spec_len history window; physical pow2 ring = next_pow2(L).
         self.spec_flush_threshold = self.max_cache_len + self.max_spec_len
@@ -193,9 +191,7 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 dtype=torch.int8,
                 device=device,
             )
-            self.cached_kernel_variant: str = (
-                vllm_config.cache_config.replayssm_route
-            )
+            self.cached_kernel_variant: str = vllm_config.cache_config.replayssm_route
             if self.cached_kernel_variant == "output_only":
                 # B_cache shape = (ngroups, max_cache_len, dstate). Index in
                 # MambaSpec.shapes is (conv_state, ssm_state, x_cache,
@@ -504,11 +500,8 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
         has_prior_state = seq_lens_cpu > 1
         prefill_to_decode = single_token_prefill_rows & has_prior_state
         if torch.any(prefill_to_decode).item():
-            if self.use_cached_kernel and metadata.num_decodes > 0:
-                raise ValueError(
-                    "--use-replayssm does not support single-token "
-                    "prefill rows replayed through the decode path"
-                )
+            # ReplaySSM handles these rows as single-token flushes (see the
+            # write-position derivation below), same as the baseline decode path.
             is_prefilling = is_prefilling.clone()
             is_prefilling[prefill_to_decode] = False
             common_attn_metadata = common_attn_metadata.replace(
@@ -645,18 +638,22 @@ class BaseMambaAttentionMetadataBuilder(AttentionMetadataBuilder[M], abc.ABC):
                 - common_attn_metadata.query_start_loc_cpu[:num_decodes]
             )
             valid_decode_rows = query_lens_cpu > 0
-            if torch.any(decode_steps_cpu[valid_decode_rows] < 0).item():
-                raise ValueError(
-                    "--use-replayssm requires decode-step counts "
-                    "that exclude prompt tokens and start at zero"
-                )
+            # A single-token prefill row replayed as decode (query_len==1 with
+            # prior state) has decode_steps < 0; force it to a one-token flush
+            # (write_pos=0, is_flush=1). The flush branch reads an empty history
+            # window, so it applies exactly one recurrence step off the checkpoint
+            # -- identical to the baseline decode kernel for that row. The split
+            # (treat_short_extends_as_decodes=False) admits only such rows here.
+            leftover_prompt = valid_decode_rows & (decode_steps_cpu < 0)
             decode_steps_cpu = torch.where(
-                valid_decode_rows,
+                valid_decode_rows & ~leftover_prompt,
                 decode_steps_cpu,
                 torch.zeros_like(decode_steps_cpu),
             )
             write_pos_cpu = torch.remainder(decode_steps_cpu, self.max_cache_len)
-            is_flush_cpu = (write_pos_cpu == self.max_cache_len - 1).to(torch.int8)
+            is_flush_cpu = (
+                (write_pos_cpu == self.max_cache_len - 1) | leftover_prompt
+            ).to(torch.int8)
             write_pos_d = async_tensor_h2d(
                 write_pos_cpu.to(torch.int32).tolist(),
                 dtype=torch.int32,
