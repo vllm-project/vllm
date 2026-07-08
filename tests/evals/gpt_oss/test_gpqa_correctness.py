@@ -16,8 +16,11 @@ import sys
 import regex as re
 import yaml
 
-from tests.cache_utils import download_to_vllm_test_cache, get_vllm_test_cache_dir
-from tests.utils import RemoteOpenAIServer
+from tests.utils import (
+    RemoteOpenAIServer,
+    download_to_vllm_test_cache,
+    get_vllm_test_cache_dir,
+)
 
 TOL = 0.05  # Absolute tolerance for accuracy comparison
 

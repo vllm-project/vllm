@@ -49,7 +49,7 @@ from tests.models.utils import (
     TokensTextLogprobsPromptLogprobs,
     softmax,
 )
-from tests.cache_utils import get_vllm_test_cache_dir
+from tests.utils import get_vllm_test_cache_dir
 from vllm import LLM, SamplingParams, envs
 from vllm.assets.audio import AudioAsset
 from vllm.assets.image import ImageAsset

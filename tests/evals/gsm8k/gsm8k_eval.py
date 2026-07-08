@@ -18,7 +18,7 @@ import numpy as np
 import regex as re
 from tqdm.asyncio import tqdm
 
-from tests.cache_utils import download_to_vllm_test_cache, download_url_to_file
+from tests.utils import download_to_vllm_test_cache, download_url_to_file
 
 INVALID = -9999999
 

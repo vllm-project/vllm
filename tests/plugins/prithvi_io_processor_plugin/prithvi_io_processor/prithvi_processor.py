@@ -16,7 +16,7 @@ import torch
 from einops import rearrange
 from terratorch.datamodules import Sen1Floods11NonGeoDataModule
 
-from tests.cache_utils import download_to_vllm_test_cache
+from tests.utils import download_to_vllm_test_cache
 from vllm.config import VllmConfig
 from vllm.inputs import PromptType
 from vllm.logger import init_logger

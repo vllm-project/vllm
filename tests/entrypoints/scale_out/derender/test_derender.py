@@ -7,8 +7,11 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from tests.cache_utils import download_url_to_file, get_vllm_test_cache_dir
-from tests.utils import RemoteLaunchRenderServer
+from tests.utils import (
+    RemoteLaunchRenderServer,
+    download_url_to_file,
+    get_vllm_test_cache_dir,
+)
 from vllm.tokenizers import get_tokenizer
 
 MODEL_NAME = "hmellor/tiny-random-LlamaForCausalLM"
