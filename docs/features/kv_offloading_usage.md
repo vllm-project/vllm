@@ -132,7 +132,7 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `type` | yes | — | Must be `obj`. |
 | `store_config` | yes | — | Object store connection parameters (see below). |
 | `prefix` | no | `""` | Key prefix prepended to all object keys. |
-| `io_threads` | no | `4` | NIXL OBJ backend I/O threads. |
+| `io_threads` | no | `4` | Number of NIXL OBJ backend I/O threads. |
 | `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `OBJ`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 
 `store_config` fields:
