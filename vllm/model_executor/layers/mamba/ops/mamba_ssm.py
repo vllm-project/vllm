@@ -16,9 +16,6 @@ from packaging import version
 import vllm.envs as envs
 from vllm import _custom_ops as ops
 from vllm.logger import init_logger
-from vllm.model_executor.layers.mamba.ops.cpu_fallbacks import (
-    _selective_state_update_cpu,
-)
 from vllm.model_executor.layers.mamba.ops.triton_helpers import fast_exp
 from vllm.platforms import current_platform
 from vllm.triton_utils import HAS_TRITON, tl, triton
@@ -609,7 +606,7 @@ def _selective_state_update_cuda(
         assert num_accepted_tokens.shape == (N,)
 
     if not HAS_TRITON:
-        return _selective_state_update_cpu(
+        return ops.selective_state_update_cpu(
             state,
             x,
             dt,
@@ -626,9 +623,6 @@ def _selective_state_update_cuda(
             out,
             num_accepted_tokens,
             cu_seqlens,
-            is_blackwell,
-            enable_stochastic_rounding,
-            cache_philox_rounds,
         )
 
     grid = lambda META: (triton.cdiv(dim, META["BLOCK_SIZE_M"]), N, nheads)

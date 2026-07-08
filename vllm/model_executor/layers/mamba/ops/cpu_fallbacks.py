@@ -4,7 +4,7 @@
 import torch
 
 import vllm._custom_ops as ops
-from vllm.v1.attention.backends.utils import NULL_BLOCK_ID, PAD_SLOT_ID
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 
 
 def _causal_conv1d_fn_cpu(
@@ -181,125 +181,6 @@ def _causal_conv1d_update_cpu(
         conv_state[cache_idx] = local_state
 
     return out.to(original_x_dtype)
-
-
-def _selective_state_update_cpu(
-    state,
-    x,
-    dt,
-    A,
-    B,
-    C,
-    D=None,
-    z=None,
-    dt_bias=None,
-    dt_softplus=False,
-    state_batch_indices=None,
-    dst_state_batch_indices=None,
-    null_block_id=NULL_BLOCK_ID,
-    out=None,
-    num_accepted_tokens=None,
-    cu_seqlens=None,
-    is_blackwell=False,
-    enable_stochastic_rounding=False,
-    cache_philox_rounds=0,
-    **kwargs,
-):
-    if state.dim() == 3:
-        state = state.unsqueeze(1)
-    if x.dim() == 2:
-        x = x.unsqueeze(1)
-    if dt.dim() == 2:
-        dt = dt.unsqueeze(1)
-    if A.dim() == 2:
-        A = A.unsqueeze(0)
-    if B.dim() == 2:
-        B = B.unsqueeze(1)
-    if C.dim() == 2:
-        C = C.unsqueeze(1)
-    if D is not None and D.dim() == 1:
-        D = D.unsqueeze(0)
-    if z is not None and z.dim() == 2:
-        z = z.unsqueeze(1)
-    if dt_bias is not None and dt_bias.dim() == 1:
-        dt_bias = dt_bias.unsqueeze(0)
-    if out.dim() == 2:
-        out = out.unsqueeze(1)
-    if state_batch_indices is not None and state_batch_indices.dim() == 1:
-        state_batch_indices = state_batch_indices.unsqueeze(1)
-    if dst_state_batch_indices is not None and dst_state_batch_indices.dim() == 1:
-        dst_state_batch_indices = dst_state_batch_indices.unsqueeze(1)
-
-    _, nheads, dim, dstate = state.shape
-    batch = x.shape[0]
-    N = len(cu_seqlens) - 1 if cu_seqlens is not None else batch
-
-    ngroups = B.shape[1]
-    nheads_ngroups_ratio = nheads // ngroups
-
-    for seq_idx in range(N):
-        if cu_seqlens is not None:
-            bos = cu_seqlens[seq_idx].item()
-            seq_len = cu_seqlens[seq_idx + 1].item() - bos
-        else:
-            bos = seq_idx
-            seq_len = 1
-
-        if state_batch_indices is not None:
-            state_idx = state_batch_indices[seq_idx, 0].item()
-            if state_idx == null_block_id:
-                continue
-        else:
-            state_idx = seq_idx
-
-        if num_accepted_tokens is None:
-            if dst_state_batch_indices is not None:
-                dst_idx = dst_state_batch_indices[seq_idx, 0].item()
-            else:
-                dst_idx = state_idx
-
-        s = state[state_idx].float()
-
-        for t in range(seq_len):
-            token_idx = bos + t
-
-            x_val = x[token_idx].float()
-            dt_val = dt[token_idx].float()
-
-            if dt_bias is not None:
-                dt_val = dt_val + dt_bias.float()
-            if dt_softplus:
-                dt_val = torch.nn.functional.softplus(dt_val)
-
-            A_val = A.float()
-
-            B_val = B[token_idx].float()
-            B_expanded = B_val.repeat_interleave(nheads_ngroups_ratio, dim=0)
-            C_val = C[token_idx].float()
-            C_expanded = C_val.repeat_interleave(nheads_ngroups_ratio, dim=0)
-
-            dA = torch.exp(A_val * dt_val.unsqueeze(-1))
-            dBx = B_expanded.unsqueeze(1) * (x_val * dt_val).unsqueeze(-1)
-            s = s * dA + dBx
-
-            if num_accepted_tokens is not None:
-                token_dst_idx = dst_state_batch_indices[seq_idx, t].item()
-                if token_dst_idx != null_block_id:
-                    state[token_dst_idx] = s.to(state.dtype)
-
-            out_val = (s * C_expanded.unsqueeze(1)).sum(dim=-1)
-
-            if D is not None:
-                out_val = out_val + x_val * D.float()
-
-            if z is not None:
-                z_val = z[token_idx].float()
-                out_val = out_val * z_val * torch.sigmoid(z_val)
-
-            out[token_idx] = out_val.to(out.dtype)
-
-        if num_accepted_tokens is None and dst_idx != null_block_id:
-            state[dst_idx] = s.to(state.dtype)
 
 
 def _mamba_chunk_scan_combined_fwd_cpu(

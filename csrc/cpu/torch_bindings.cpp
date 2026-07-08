@@ -491,11 +491,12 @@ TORCH_LIBRARY_EXPAND(TORCH_EXTENSION_NAME, ops) {
       "Tensor");
   ops.impl("causal_conv1d_fwd_cpu", torch::kCPU, &causal_conv1d_fwd_cpu);
   ops.def(
-      "causal_conv1d_update_cpu(Tensor x, Tensor(a!) conv_states, Tensor "
+      "causal_conv1d_update_cpu_amx(Tensor x, Tensor(a!) conv_states, Tensor "
       "weight, Tensor? bias, bool silu_activation,"
       "Tensor? cache_seqlens, Tensor? conv_state_indices, int pad_slot_id, "
       "bool is_vnni) -> Tensor");
-  ops.impl("causal_conv1d_update_cpu", torch::kCPU, &causal_conv1d_update_cpu);
+  ops.impl("causal_conv1d_update_cpu_amx", torch::kCPU,
+           &causal_conv1d_update_cpu);
 #endif
 
 #if (defined(__AVX512BF16__) && defined(__AVX512F__) && \

@@ -98,15 +98,14 @@ def cpu_gdn_attention_core(
         decode_a = a[:num_decode_tokens]
         decode_state_indices = state_indices_tensor[:num_decodes]
         if is_amx:
-            decode_mixed_qkv = ops.causal_conv1d_update_cpu(
+            decode_mixed_qkv = ops.causal_conv1d_update_cpu_amx(
                 x=decode_mixed_qkv,
-                conv_state=conv_state,
+                conv_states=conv_state,
                 weight=layer.conv1d.weight,
                 bias=layer.conv1d.bias,
-                activation="silu" if layer.activation == "silu" else None,
+                silu_activation=(layer.activation == "silu"),
                 conv_state_indices=decode_state_indices,
-                query_start_loc=None,
-                pad_slot_id=0,
+                is_vnni=True,
             )
         else:
             decode_conv_state = conv_state[decode_state_indices].contiguous()

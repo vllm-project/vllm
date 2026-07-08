@@ -1008,10 +1008,10 @@ class MambaMixer2(MambaBase, PluggableLayer):
 
             # 3. State Space Model sequence transformation
             n_groups = self.n_groups // self.tp_size
-            # Keep A in native dtype to avoid expensive conversions
-            # The SSU kernel handles mixed types efficiently
-            A_d = self.A[:, None, ...][:, :, None].expand(
-                -1, self.head_dim, self.ssm_state_size
+            A_d = (
+                self.A[:, None, ...][:, :, None]
+                .expand(-1, self.head_dim, self.ssm_state_size)
+                .to(dtype=torch.float32)
             )
             dt_d = dt_d[:, :, None].expand(-1, -1, self.head_dim)
             dt_bias = self.dt_bias[:, None, ...].expand(-1, self.head_dim)
