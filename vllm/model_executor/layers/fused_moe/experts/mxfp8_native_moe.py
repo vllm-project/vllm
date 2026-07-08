@@ -19,6 +19,7 @@ and the top-k weighted reduction run in PyTorch between/after the two GEMMs.
 import torch
 
 import vllm.model_executor.layers.fused_moe.modular_kernel as mk
+from vllm._aiter_ops import rocm_aiter_ops
 from vllm.logger import init_logger
 from vllm.model_executor.layers.fused_moe.experts.mxfp8_emulation_moe import (
     Mxfp8TritonExpertsBase,
@@ -33,6 +34,12 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 
 logger = init_logger(__name__)
+
+# Optional aiter small-M HIP grouped GEMM (gfx950). Imported once; absent -> Triton.
+try:
+    from aiter.ops.smallm_gemm_mxfp8 import grouped_gemm_mxfp8 as _aiter_smallm_moe
+except ImportError:
+    _aiter_smallm_moe = None
 
 
 @triton.jit
@@ -125,7 +132,7 @@ def _mxfp8_grouped_gemm_kernel(
     )
 
 
-def _grouped_gemm_mxfp8(
+def _grouped_gemm_mxfp8_triton(
     a_q: torch.Tensor,  # [M, K] fp8 e4m3
     a_scale: torch.Tensor,  # [M, K//32] uint8 (E8M0)
     w: torch.Tensor,  # [E, N, K] fp8 e4m3
@@ -206,6 +213,94 @@ def _mxfp8_moe_tiles(num_tokens: int) -> dict:
     return _MXFP8_DECODE_TILES
 
 
+def _grouped_gemm_mxfp8(
+    a_q: torch.Tensor,
+    a_scale: torch.Tensor,
+    w: torch.Tensor,
+    w_scale: torch.Tensor,
+    sorted_token_ids: torch.Tensor,
+    expert_ids: torch.Tensor,
+    num_tokens_post_padded: torch.Tensor,
+    num_valid_tokens: int,
+    top_k: int,
+    block_m: int,
+    out_dtype: torch.dtype,
+    a_div: int,
+    mul_weight_by: torch.Tensor | None = None,
+    expert_map: torch.Tensor | None = None,
+    topk_ids: torch.Tensor | None = None,
+    block_n: int = 128,
+    num_warps: int = 8,
+    num_stages: int = 2,
+) -> torch.Tensor:
+    """Decode grouped GEMM dispatcher: the aiter small-M HIP kernel, else the
+    Triton ``dot_scaled`` path.
+
+    The aiter wrapper does the explicit shape gating (arch, K alignment, 2 GB
+    raw-buffer guard, allowlist) and returns ``None`` on a miss, so this is a
+    plain ``None``-check -- no try/except. Expert parallelism (``expert_map``
+    set) always uses Triton. ``block_n``/``num_warps``/``num_stages`` tune only
+    the Triton fallback (the aiter kernel autotunes its own tiles).
+    """
+    if (
+        _aiter_smallm_moe is not None
+        and topk_ids is not None
+        and expert_map is None
+        and rocm_aiter_ops.is_fused_moe_enabled()
+    ):
+        out = _aiter_smallm_moe(
+            a_q,
+            a_scale,
+            w,
+            w_scale,
+            sorted_token_ids,
+            expert_ids,
+            num_tokens_post_padded,
+            num_valid_tokens,
+            top_k,
+            block_m,
+            out_dtype,
+            a_div,
+            mul_weight_by,
+            topk_ids=topk_ids,
+        )
+        if out is not None:
+            logger.info_once(
+                "MiniMax-M3 MXFP8 decode MoE: using aiter small-M HIP grouped GEMM."
+            )
+            return out
+    elif (
+        _aiter_smallm_moe is not None
+        and expert_map is None
+        and current_platform.supports_mx()
+    ):
+        # On gfx950 with aiter disabled the slower Triton dot_scaled path runs;
+        # surface it once so silent non-engagement is visible in the log.
+        logger.info_once(
+            "MiniMax-M3 MXFP8 decode MoE: aiter HIP kernel available but "
+            "VLLM_ROCM_USE_AITER is not set; using the Triton dot_scaled path."
+        )
+    return _grouped_gemm_mxfp8_triton(
+        a_q,
+        a_scale,
+        w,
+        w_scale,
+        sorted_token_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        num_valid_tokens,
+        top_k,
+        block_m,
+        out_dtype,
+        a_div,
+        mul_weight_by,
+        expert_map,
+        block_n=block_n,
+        num_warps=num_warps,
+        num_stages=num_stages,
+    )
+
+
 def fused_moe_mxfp8_native(
     hidden_states: torch.Tensor,  # [T, H] bf16
     w13: torch.Tensor,  # [E, 2I, H] fp8
@@ -260,6 +355,7 @@ def fused_moe_mxfp8_native(
         block_n=tiles["block_n"],
         num_warps=tiles["num_warps"],
         num_stages=tiles["num_stages"],
+        topk_ids=topk_ids,
     )  # [M, 2I]
 
     # SwiGLU-OAI (split layout: gate=g1[:, :I], up=g1[:, I:]) FUSED with the
@@ -291,6 +387,7 @@ def fused_moe_mxfp8_native(
         block_n=tiles["block_n"],
         num_warps=tiles["num_warps"],
         num_stages=tiles["num_stages"],
+        topk_ids=topk_ids,
     )  # [M, H] == [T*top_k, H]
 
     return g2.view(T, top_k, H).sum(dim=1).to(hidden_states.dtype)
