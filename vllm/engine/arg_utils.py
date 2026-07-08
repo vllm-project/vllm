@@ -630,6 +630,7 @@ class EngineArgs:
     spec_method: str | None = None
     spec_model: str | None = None
     spec_tokens: int | None = None
+    confidence_based_verification: Literal["none", "off", "auto", "mask"] | None = None
     diffusion_config: dict[str, Any] | None = None
 
     show_hidden_metrics_for_version: str | None = (
@@ -1534,6 +1535,12 @@ class EngineArgs:
         vllm_group.add_argument(
             "--spec-tokens", **speculative_kwargs["num_speculative_tokens"]
         )
+        vllm_group.add_argument(
+            "--confidence-based-verification",
+            choices=["none", "off", "auto", "mask"],
+            default=None,
+            help=speculative_kwargs["confidence_based_verification"]["help"],
+        )
         vllm_kwargs["diffusion_config"]["type"] = optional_type(json.loads)
         vllm_group.add_argument(
             "--diffusion-config", "-dc", **vllm_kwargs["diffusion_config"]
@@ -1740,6 +1747,11 @@ class EngineArgs:
             ("--spec-method", "method", self.spec_method),
             ("--spec-model", "model", self.spec_model),
             ("--spec-tokens", "num_speculative_tokens", self.spec_tokens),
+            (
+                "--confidence-based-verification",
+                "confidence_based_verification",
+                self.confidence_based_verification,
+            ),
         ):
             if value is None:
                 continue

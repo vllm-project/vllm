@@ -1572,6 +1572,62 @@ def test_draft_sample_method_gumbel_is_rejected():
         )
 
 
+def test_dspark_confidence_config_validation():
+    speculative_config = SpeculativeConfig(
+        method="ngram",
+        num_speculative_tokens=1,
+        dspark_confidence_threshold=0.25,
+        dspark_budget_frac=0.5,
+        confidence_based_verification="mask",
+    )
+    assert speculative_config.dspark_confidence_threshold == 0.25
+    assert speculative_config.dspark_budget_frac == 0.5
+    assert speculative_config.confidence_based_verification == "mask"
+    assert (
+        SpeculativeConfig(
+            method="ngram", num_speculative_tokens=1
+        ).confidence_based_verification
+        == "auto"
+    )
+    for mode in ("none", "off", "auto", "mask"):
+        assert (
+            SpeculativeConfig(
+                method="ngram",
+                num_speculative_tokens=1,
+                confidence_based_verification=mode,
+            ).confidence_based_verification
+            == mode
+        )
+    with pytest.raises(ValidationError, match="confidence_based_verification"):
+        SpeculativeConfig(
+            method="ngram",
+            num_speculative_tokens=1,
+            confidence_based_verification="compact",
+        )
+    assert (
+        SpeculativeConfig(
+            method="ngram", num_speculative_tokens=1
+        ).dspark_confidence_threshold
+        == 0.0
+    )
+
+    for threshold in (-0.1, 1.1):
+        with pytest.raises(ValueError, match="dspark_confidence_threshold"):
+            SpeculativeConfig(
+                method="ngram",
+                num_speculative_tokens=1,
+                dspark_confidence_threshold=threshold,
+            )
+
+    for budget_frac in (0.0, -0.1, 1.1):
+        with pytest.raises(ValueError, match="dspark_budget_frac"):
+            SpeculativeConfig(
+                method="ngram",
+                num_speculative_tokens=1,
+                dspark_budget_frac=budget_frac,
+            )
+
+
 def test_ir_op_priority_default():
     """Test that IR op priority defaults are set correctly."""
     from vllm.config.kernel import IrOpPriorityConfig

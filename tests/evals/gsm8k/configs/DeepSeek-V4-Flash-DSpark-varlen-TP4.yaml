@@ -1,0 +1,22 @@
+model_name: "deepseek-ai/DeepSeek-V4-Flash-DSpark"
+accuracy_threshold: 0.92
+num_questions: 1319
+num_fewshot: 5
+startup_max_wait_seconds: 1800
+server_args: >-
+  --tokenizer-mode deepseek_v4
+  --trust-remote-code
+  --dtype bfloat16
+  --max-model-len 8192
+  --tensor-parallel-size 4
+  --enable-expert-parallel
+  --block-size 256
+  --gpu-memory-utilization 0.5
+  --kv-cache-dtype fp8
+  --max-num-batched-tokens 16384
+  --max-num-seqs 32
+  --speculative-config '{"method":"dspark",
+  "model":"deepseek-ai/DeepSeek-V4-Flash-DSpark",
+  "attention_backend":"FLASH_ATTN","num_speculative_tokens":7,
+  "draft_sample_method":"probabilistic","dspark_confidence_threshold":0.0,
+  "dspark_budget_frac":0.5,"confidence_based_verification":"auto"}'

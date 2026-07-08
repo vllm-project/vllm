@@ -310,6 +310,21 @@ def warmup_kernels(
         worker_execute_model(decode_output)
         worker_sample_tokens(None)
 
+        manager = model_runner.spec_decode_confidence_manager
+        if manager is not None:
+            manager.warmup(model_runner.input_buffers)
+            if manager.wants_auto_sps_curve:
+                manager.profile_sps_curve(
+                    model_runner,
+                    worker_execute_model,
+                    worker_sample_tokens,
+                    req_ids,
+                    prompt_len,
+                    decode_query_len,
+                    num_spec_steps,
+                    num_kv_cache_groups,
+                )
+
     # Clean up - process finish_req_ids.
     cleanup_output = SchedulerOutput.make_empty()
     cleanup_output.finished_req_ids = set(req_ids)

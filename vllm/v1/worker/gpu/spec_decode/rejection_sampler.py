@@ -109,6 +109,9 @@ class RejectionSampler:
         num_nans = get_num_nans(logits) if self.sampler.compute_nans else None
 
         draft_sampled = input_batch.input_ids[input_batch.logits_indices]
+        draft_sampled.masked_fill_(
+            input_batch.is_padding[input_batch.logits_indices], -1
+        )
         pos = input_batch.positions[input_batch.logits_indices]
         processed_logits = self.sampler.apply_sampling_params(
             logits,

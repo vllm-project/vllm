@@ -5,6 +5,7 @@ import pytest
 import torch
 
 from vllm.platforms import current_platform
+from vllm.v1.attention.backends.utils import PAD_SLOT_ID
 from vllm.v1.worker.gpu.block_table import BlockTables
 
 pytestmark = pytest.mark.skipif(
@@ -130,3 +131,49 @@ def test_block_tables_apply_staged_writes_single_group():
         block_tables.block_tables[0].gpu[0, :2],
         torch.tensor([1, 2], dtype=torch.int32, device=device),
     )
+
+
+def test_compute_slot_mappings_applies_padding_mask():
+    device = torch.device("cuda")
+    block_tables = BlockTables(
+        block_sizes=[16],
+        max_num_reqs=2,
+        max_num_batched_tokens=8,
+        max_num_blocks_per_group=[4],
+        device=device,
+        kernel_block_sizes=[16],
+    )
+
+    block_tables.append_block_ids(
+        req_index=0,
+        new_block_ids=([2],),
+        overwrite=True,
+    )
+    block_tables.append_block_ids(
+        req_index=1,
+        new_block_ids=([3],),
+        overwrite=True,
+    )
+    block_tables.apply_staged_writes()
+
+    idx_mapping = torch.tensor([0, 1], dtype=torch.int32, device=device)
+    query_start_loc = torch.tensor([0, 3, 5], dtype=torch.int32, device=device)
+    positions = torch.tensor([0, 1, 2, 0, 1], dtype=torch.int64, device=device)
+    is_padding = torch.tensor(
+        [False, True, False, False, True, False, False, False],
+        dtype=torch.bool,
+        device=device,
+    )
+
+    slot_mappings = block_tables.compute_slot_mappings(
+        idx_mapping,
+        query_start_loc,
+        positions,
+        num_tokens_padded=8,
+        is_padding=is_padding,
+    )
+    torch.accelerator.synchronize()
+
+    assert slot_mappings.cpu().tolist() == [
+        [32, PAD_SLOT_ID, 34, 48, PAD_SLOT_ID, PAD_SLOT_ID, PAD_SLOT_ID, PAD_SLOT_ID]
+    ]

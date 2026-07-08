@@ -99,12 +99,15 @@ class InputBatch:
     # [num_reqs] per-request prompt length, only populated for R-SWA.
     prompt_lens: torch.Tensor | None
 
+    max_req_tokens: int | None = None
+
     @classmethod
     def make_dummy(
         cls,
         num_reqs: int,
         num_tokens: int,
         input_buffers: InputBuffers,
+        max_req_tokens: int | None = None,
     ) -> "InputBatch":
         assert 0 < num_reqs <= num_tokens
         device = input_buffers.device
@@ -115,13 +118,27 @@ class InputBatch:
         expanded_idx_mapping = idx_mapping
         expanded_local_pos = torch.zeros(num_reqs, dtype=torch.int32, device=device)
 
-        num_scheduled_tokens = np.full(num_reqs, num_tokens // num_reqs, dtype=np.int32)
-        num_scheduled_tokens[-1] += num_tokens % num_reqs
+        if max_req_tokens is None:
+            num_scheduled_tokens = np.full(
+                num_reqs, num_tokens // num_reqs, dtype=np.int32
+            )
+            num_scheduled_tokens[-1] += num_tokens % num_reqs
+        else:
+            assert num_tokens <= num_reqs * max_req_tokens
+            num_scheduled_tokens = np.ones(num_reqs, dtype=np.int32)
+            remaining = num_tokens - num_reqs
+            for i in range(num_reqs - 1, -1, -1):
+                num_tokens_for_req = min(remaining, max_req_tokens - 1)
+                num_scheduled_tokens[i] += num_tokens_for_req
+                remaining -= num_tokens_for_req
+                if remaining == 0:
+                    break
         assert int(num_scheduled_tokens.sum()) == num_tokens
 
         # seq_len equals to query_len
-        input_buffers.seq_lens[:num_reqs] = num_tokens // num_reqs
-        input_buffers.seq_lens[num_reqs - 1] += num_tokens % num_reqs
+        input_buffers.seq_lens[:num_reqs].copy_(
+            torch.from_numpy(num_scheduled_tokens).to(device=device)
+        )
         # Pad for full CUDA graph mode.
         input_buffers.seq_lens[num_reqs:] = 0
         seq_lens = input_buffers.seq_lens[:num_reqs]
@@ -143,7 +160,7 @@ class InputBatch:
         input_buffers.is_padding[:num_tokens].fill_(True)
         is_padding = input_buffers.is_padding[:num_tokens]
 
-        logits_indices = query_start_loc[1:] - 1
+        logits_indices = torch.clamp(query_start_loc[1:] - 1, min=0)
         cu_num_logits = torch.arange(num_reqs + 1, device=device, dtype=torch.int32)
         cu_num_logits_np = np.arange(num_reqs + 1, dtype=np.int32)
         # Dummy: seq_len == query_len (fresh-prefill shape).
@@ -179,6 +196,7 @@ class InputBatch:
             cu_num_logits_np=cu_num_logits_np,
             has_structured_output_reqs=False,
             prompt_lens=None,
+            max_req_tokens=max_req_tokens,
         )
 
 
@@ -245,6 +263,7 @@ def prepare_prefill_inputs(
 @triton.jit
 def _prepare_pos_seq_lens_kernel(
     pos_ptr,
+    is_padding_ptr,
     seq_lens_ptr,
     idx_mapping_ptr,
     query_start_loc_ptr,
@@ -277,6 +296,7 @@ def _prepare_pos_seq_lens_kernel(
         mask = block < query_len
         pos = num_computed_tokens + block
         tl.store(pos_ptr + start + block, pos, mask=mask)
+        tl.store(is_padding_ptr + start + block, False, mask=mask)
 
 
 def prepare_pos_seq_lens(
@@ -284,6 +304,7 @@ def prepare_pos_seq_lens(
     query_start_loc: torch.Tensor,
     num_computed_tokens: torch.Tensor,
     pos: torch.Tensor,
+    is_padding: torch.Tensor,
     seq_lens: torch.Tensor,
 ) -> None:
     num_reqs = idx_mapping.shape[0]
@@ -291,6 +312,7 @@ def prepare_pos_seq_lens(
     # to pad unused seq_lens as 0 for full CUDA graphs.
     _prepare_pos_seq_lens_kernel[(num_reqs + 1,)](
         pos,
+        is_padding,
         seq_lens,
         idx_mapping,
         query_start_loc,

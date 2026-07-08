@@ -203,6 +203,7 @@ class DeepSeekV32IndexerDecodeMetadata:
     requires_padding: bool
     schedule_metadata: torch.Tensor
     global_seq_lens: torch.Tensor | None = None
+    indices: torch.Tensor | None = None
 
 
 @dataclass
@@ -237,6 +238,14 @@ def get_max_prefill_buffer_size(vllm_config: VllmConfig):
     return max_model_len * 40
 
 
+def _supports_varlen_paged_mqa_logits() -> bool:
+    return (
+        current_platform.is_cuda()
+        and current_platform.is_device_capability_family(100)
+        and has_deep_gemm()
+    )
+
+
 class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
     # The indexer opts out of the shared reorder-threshold vote (see __init__),
     # so this is None; its own split uses self.decode_threshold.
@@ -248,6 +257,8 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         vllm_config: VllmConfig,
         kv_cache_spec: AttentionSpec,
     ) -> AttentionCGSupport:
+        if _supports_varlen_paged_mqa_logits():
+            return AttentionCGSupport.ALWAYS
         return AttentionCGSupport.UNIFORM_BATCH
 
     def __init__(self, *args, **kwargs):
@@ -297,10 +308,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.use_flattening = not current_platform.is_device_capability_family(
             100
         ) and next_n not in (1, 2)
+        self.supports_varlen = _supports_varlen_paged_mqa_logits()
         logger.info_once(
-            "DSA indexer decode path: use_flattening=%s "
+            "DSA indexer decode path: use_flattening=%s supports_varlen=%s "
             "(next_n=%d, use_fp4_indexer_cache=%s)",
             self.use_flattening,
+            self.supports_varlen,
             next_n,
             self.use_fp4_indexer_cache,
         )
@@ -325,6 +338,11 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
             device=self.device,
         )
         self.global_decode_seq_lens_buffer = torch.zeros(
+            (scheduler_config.max_num_batched_tokens,),
+            dtype=torch.int32,
+            device=self.device,
+        )
+        self.decode_indices_buffer = torch.zeros(
             (scheduler_config.max_num_batched_tokens,),
             dtype=torch.int32,
             device=self.device,
@@ -414,26 +432,17 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         use_native: bool,
         next_n: int,
         max_decode_len: int,
+        force_flatten: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, bool]:
-        """Expand seq_lens/block_table/decode_lens for the decode kernels.
-
-        Flatten path (not use_native, max_decode_len > 1):
-          Each multi-token decode request is expanded into individual
-          single-token entries so the kernel always sees next_n=1.
-
-        Native path (use_native or max_decode_len == 1):
-          Plain decode or spec-decode with 2D per-token context lengths.
-
-        Returns (seq_lens, block_table, decode_lens, batch_size, requires_padding).
-        seq_lens is 1D (batch_size,) for flatten/plain, 2D (B, max_decode_len)
-        for native MTP.
-        """
+        """Prepare native or per-token flattened decode tensors."""
         min_decode_len = int(decode_lens_cpu.min().item())
-        if not use_native and max_decode_len > 1:
+        if not use_native and (max_decode_len > 1 or force_flatten):
             assert self.decode_seq_lens_buffer.dim() == 1
-            if min_decode_len == max_decode_len:
-                # Uniform decode lengths.
-                num_decode_tokens = num_decodes * max_decode_len
+            if (
+                min_decode_len == max_decode_len
+                and num_decodes * max_decode_len == num_decode_tokens
+            ):
+                # Uniform decode lengths with no cudagraph token padding.
                 _prepare_uniform_decode_kernel[(num_decode_tokens,)](
                     seq_lens,
                     self.decode_seq_lens_buffer,
@@ -550,6 +559,36 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         self.global_decode_seq_lens_buffer[actual_expanded:num_decode_tokens] = 0
         return self.global_decode_seq_lens_buffer[:num_decode_tokens]
 
+    def _build_varlen_decode_indices(
+        self,
+        decode_lens: torch.Tensor,
+        decode_lens_cpu: torch.Tensor,
+        num_decode_tokens: int,
+        max_decode_len: int,
+    ) -> torch.Tensor:
+        """Build request ids for flattened SM100 varlen rows."""
+        indices = self.decode_indices_buffer[:num_decode_tokens]
+        if max_decode_len <= 1:
+            indices.copy_(self.arange_buffer[:num_decode_tokens])
+            return indices
+
+        actual_expanded = int(decode_lens_cpu.sum().item())
+        num_decodes = decode_lens.shape[0]
+        if actual_expanded == num_decodes * max_decode_len == num_decode_tokens:
+            indices.copy_(self.arange_buffer[:num_decode_tokens] // max_decode_len)
+        else:
+            indices[:actual_expanded] = torch.repeat_interleave(
+                self.arange_buffer[:num_decodes],
+                decode_lens,
+                output_size=actual_expanded,
+            )
+            if actual_expanded < num_decode_tokens:
+                pad = num_decode_tokens - actual_expanded
+                indices[actual_expanded:num_decode_tokens] = (
+                    num_decodes + self.arange_buffer[:pad]
+                )
+        return indices
+
     def build(
         self,
         common_prefix_len: int,
@@ -564,12 +603,16 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
         slot_mapping = common_attn_metadata.slot_mapping
         block_table = common_attn_metadata.block_table_tensor
         dcp_local_seq_lens = common_attn_metadata.dcp_local_seq_lens
+        use_varlen_decode = (
+            self.supports_varlen and common_attn_metadata.max_req_tokens > 0
+        )
 
+        # Keep the decode split aligned across DSv4 attention builders.
         num_decodes, num_prefills, num_decode_tokens, num_prefill_tokens = (
             split_decodes_and_prefills(
                 common_attn_metadata,
                 decode_threshold=self.decode_threshold,
-                require_uniform=not self.use_flattening,
+                require_uniform=not (self.use_flattening or use_varlen_decode),
             )
         )
 
@@ -668,7 +711,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
 
             max_decode_len = int(decode_lens_cpu.max().item())
             next_n = 1 + self.num_speculative_tokens
-            use_native = not self.use_flattening and max_decode_len <= next_n
+            use_varlen = use_varlen_decode and (
+                max_decode_len > 1 or common_attn_metadata.max_query_len > 1
+            )
+            use_native = (
+                not (self.use_flattening or use_varlen) and max_decode_len <= next_n
+            )
 
             global_seq_lens_for_decode = self._prepare_global_decode_seq_lens(
                 global_seq_lens=global_seq_lens_for_decode,
@@ -679,6 +727,15 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 use_native=use_native,
                 max_decode_len=max_decode_len,
             )
+
+            decode_indices = None
+            if use_varlen:
+                decode_indices = self._build_varlen_decode_indices(
+                    decode_lens=decode_lens,
+                    decode_lens_cpu=decode_lens_cpu,
+                    num_decode_tokens=num_decode_tokens,
+                    max_decode_len=max_decode_len,
+                )
 
             seq_lens, block_table, decode_lens, batch_size, requires_padding = (
                 self._prepare_decode_tensors(
@@ -692,11 +749,12 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     use_native=use_native,
                     next_n=next_n,
                     max_decode_len=max_decode_len,
+                    force_flatten=use_varlen,
                 )
             )
 
             seq_lens_is_buffer_view = (use_native and next_n > 1) or (
-                not use_native and max_decode_len > 1
+                not use_native and (max_decode_len > 1 or use_varlen)
             )
 
             # DCP: localize the now-expanded per-token global bounds to this
@@ -732,6 +790,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                     seq_lens,
                     self.kv_cache_spec.storage_block_size,
                     self.num_sms,
+                    indices=decode_indices,
                 )
 
             decode_metadata = DeepSeekV32IndexerDecodeMetadata(
@@ -740,6 +799,7 @@ class DeepseekV32IndexerMetadataBuilder(AttentionMetadataBuilder):
                 decode_lens=decode_lens,
                 requires_padding=requires_padding,
                 schedule_metadata=self.scheduler_metadata_buffer,
+                indices=decode_indices,
                 global_seq_lens=global_seq_lens_for_decode,
             )
 
