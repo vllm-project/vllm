@@ -1055,6 +1055,101 @@ def test_aiter_sparse_block_table_handles_padded_decode_rows():
     assert torch.equal(sparse_bt, expected_bt)
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 AITER sparse PA is ROCm-only",
+)
+def test_aiter_decode_sparse_block_table_supports_spec_decode():
+    """AITER sparse PA needs one compact page-16 table per speculative query.
+
+    The decode indexer flattens speculative rows as
+    ``req_id * decode_query_len + local_q``. This verifies that the ROCm AITER
+    block-table adapter uses the same mapping before handing rows to Gluon.
+    """
+    from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+        PAGES_PER_SPARSE_BLOCK,
+        minimax_m3_build_sparse_block_table_decode,
+    )
+
+    decode_query_len = 4
+    seq_lens = torch.tensor([260, 132, 0], device="cuda", dtype=torch.int32)
+    block_table = torch.tensor(
+        [
+            [5, 7, 11],
+            [13, 17, 19],
+            [0, 0, 0],
+        ],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    topk_idx = torch.tensor(
+        [
+            [
+                [2, 0, 3, -1],
+                [0, 2, 3, -1],
+                [2, 1, 0, -1],
+                [1, 2, 0, -1],
+                [1, 0, 2, -1],
+                [0, 1, 2, -1],
+                [1, -1, 0, -1],
+                [0, 2, 1, -1],
+                [0, 1, -1, -1],
+                [0, 1, -1, -1],
+                [0, 1, -1, -1],
+                [0, 1, -1, -1],
+            ]
+        ],
+        device="cuda",
+        dtype=torch.int32,
+    )
+
+    sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table_decode(
+        topk_idx, block_table, seq_lens, decode_query_len
+    )
+    torch.accelerator.synchronize()
+
+    expected_bt = torch.zeros_like(sparse_bt)
+    expected_ctx = torch.empty_like(sparse_ctx)
+    topk_cpu = topk_idx.cpu()[0].tolist()
+    block_table_cpu = block_table.cpu()
+    seq_lens_cpu = seq_lens.cpu().tolist()
+
+    for row, selected_blocks in enumerate(topk_cpu):
+        req_id = row // decode_query_len
+        local_q = row - req_id * decode_query_len
+        query_pos = seq_lens_cpu[req_id] - decode_query_len + local_q
+        causal_len = max(query_pos + 1, 0)
+        if causal_len == 0:
+            expected_ctx[row] = 0
+            continue
+        self_block = query_pos // BLOCK_SIZE
+
+        valid = [blk for blk in selected_blocks if 0 <= blk <= self_block]
+        full_blocks = [blk for blk in valid if blk < self_block]
+        tail_blocks = [blk for blk in valid if blk == self_block]
+        ordered_blocks = full_blocks + tail_blocks
+
+        for slot, block_id in enumerate(ordered_blocks):
+            base_phys = int(block_table_cpu[req_id, block_id]) * PAGES_PER_SPARSE_BLOCK
+            start = slot * PAGES_PER_SPARSE_BLOCK
+            expected_bt[row, start : start + PAGES_PER_SPARSE_BLOCK] = torch.arange(
+                base_phys,
+                base_phys + PAGES_PER_SPARSE_BLOCK,
+                device="cuda",
+                dtype=torch.int32,
+            )
+
+        if tail_blocks:
+            expected_ctx[row] = (
+                len(full_blocks) * BLOCK_SIZE + causal_len - self_block * BLOCK_SIZE
+            )
+        else:
+            expected_ctx[row] = min(len(valid) * BLOCK_SIZE, causal_len)
+
+    assert torch.equal(sparse_ctx, expected_ctx)
+    assert torch.equal(sparse_bt, expected_bt)
+
+
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
 @pytest.mark.parametrize(
     "seq_lens_list",
