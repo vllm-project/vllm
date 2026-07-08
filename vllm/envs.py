@@ -244,6 +244,7 @@ if TYPE_CHECKING:
     VLLM_ROCM_FP8_MFMA_PAGE_ATTN: bool = False
     VLLM_ALLREDUCE_USE_SYMM_MEM: bool = True
     VLLM_ALLREDUCE_USE_FLASHINFER: bool = False
+    VLLM_ALLOW_CUSTOM_ALLREDUCE_PCIE: bool = False
     VLLM_TUNED_CONFIG_FOLDER: str | None = None
     VLLM_ENABLE_STARTUP_PLAN: bool = False
     VLLM_GPT_OSS_SYSTEM_TOOL_MCP_LABELS: set[str] = set()
@@ -1785,6 +1786,13 @@ environment_variables: dict[str, Callable[[], Any]] = {
     # Whether to use FlashInfer allreduce
     "VLLM_ALLREDUCE_USE_FLASHINFER": lambda: bool(
         int(os.getenv("VLLM_ALLREDUCE_USE_FLASHINFER", "0"))
+    ),
+    # Allow the custom allreduce on >2 GPUs without full NVLink connectivity
+    # (PCIe-only P2P). The custom AR sync protocol is atomics-free (peer
+    # plain writes + local polling), so this is a performance opt-in, not a
+    # correctness risk; measure against NCCL on your topology first.
+    "VLLM_ALLOW_CUSTOM_ALLREDUCE_PCIE": lambda: bool(
+        int(os.getenv("VLLM_ALLOW_CUSTOM_ALLREDUCE_PCIE", "0"))
     ),
     # Experimental: use this to enable MCP tool calling for non harmony models
     "VLLM_USE_EXPERIMENTAL_PARSER_CONTEXT": lambda: bool(
