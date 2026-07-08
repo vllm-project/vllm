@@ -133,6 +133,13 @@ _V4_USE_REF_QUANT = False
 _V4_USE_TRITON_FUSION = False
 ENABLE_DS_QKNORM_QUANT_FUSION = True
 
+# Per-tile byte budget for the prefill indexer's dense [rows, total_committed]
+# fp32 logits: query rows are tiled so each tile stays around this size regardless
+# of committed width (rows = budget / (total_committed * 4)). top-k is per-row so
+# tiling is exact. A row floor keeps the fp8_mqa_logits/top-k kernels efficient.
+_INDEXER_LOGITS_TILE_BYTES = 1 << 30  # ~1 GiB
+_INDEXER_Q_CHUNK_MIN = 512
+
 
 def _rmsnorm_nw(x: torch.Tensor, eps: float, dim: int) -> torch.Tensor:
     if _V4_USE_TRITON_RMSNORM:
@@ -1298,41 +1305,42 @@ class Indexer(nn.Module):
 
         cu_starts = indexer_meta["cu_starts_gpu"]  # [total_tokens] int32
         cu_ends = indexer_meta["cu_ends_gpu"]  # [total_tokens] int32
-        logits = fp8_mqa_logits(
-            Q=q_fp8,
-            KV=k_fp8,
-            kv_scales=k_scale,
-            weights=weights,
-            cu_starts=cu_starts,
-            cu_ends=cu_ends,
-        )  # [total_tokens, total_committed] fp32; outside [start,end) is -inf
-
-        # aiter `top_k_per_row_prefill` (radix kernel, parametric `k` via the
-        # pybind kwarg). Honors per-row [cu_starts[i], cu_ends[i]) so cells
-        # outside each row's valid window are never selected; rows shorter
-        # than `topk` get -1 sentinels for tail cols.
-        #
-        # Output is GLOBAL: each cell holds either -1 or
-        # `cu_starts[t] + col_in_seq` (= seq_base + seq-local idx). We
-        # subtract `seq_base_per_token` to produce the raw seq-local layout
-        # `csa_translate_pack` expects. The -1 sentinels are preserved via
-        # `torch.where`.
-        # [total_tokens, topk] int32 — eager-only path so per-fwd alloc
-        # is fine (prefill total_tokens is dynamic; no CG capture here).
+        # `top_k_per_row_prefill` output is GLOBAL: each cell holds -1 or
+        # `cu_starts[t] + col_in_seq`; we subtract `seq_base_per_token` below to
+        # get the raw seq-local layout `csa_translate_pack` expects.
+        # Tile the [rows, total_committed] fp32 logits over query rows so the
+        # workspace never scales with the full batch; top-k is per-row, so this is
+        # exact. Tile rows adapt to committed width to hold ~a fixed byte budget.
+        # Eager-only (dynamic total_committed).
         topk_global = torch.empty(
             (total_tokens, topk), dtype=torch.int32, device=device
         )
-        top_k_per_row_prefill(
-            logits,
-            cu_starts,
-            cu_ends,
-            topk_global,
-            None,  # values not needed, only indices
-            total_tokens,
-            logits.stride(0),
-            logits.stride(1),
-            k=topk,
-        )
+        q_chunk = total_tokens
+        if total_committed > 0:
+            q_chunk = _INDEXER_LOGITS_TILE_BYTES // (total_committed * 4)
+            q_chunk = min(total_tokens, max(_INDEXER_Q_CHUNK_MIN, q_chunk))
+        q_chunk = max(1, q_chunk)
+        for s in range(0, total_tokens, q_chunk):
+            e = min(s + q_chunk, total_tokens)
+            logits = fp8_mqa_logits(
+                Q=q_fp8[s:e],
+                KV=k_fp8,
+                kv_scales=k_scale,
+                weights=weights[s:e],
+                cu_starts=cu_starts[s:e],
+                cu_ends=cu_ends[s:e],
+            )  # [e-s, total_committed] fp32; outside [start,end) is -inf
+            top_k_per_row_prefill(
+                logits,
+                cu_starts[s:e],
+                cu_ends[s:e],
+                topk_global[s:e],
+                None,  # values not needed, only indices
+                e - s,
+                logits.stride(0),
+                logits.stride(1),
+                k=topk,
+            )
         seq_base = indexer_meta["seq_base_per_token_gpu"].unsqueeze(
             1
         )  # [total_tokens, 1] int32
