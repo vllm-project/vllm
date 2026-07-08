@@ -93,7 +93,7 @@ The filesystem tier (`type: "fs"`) writes blocks to a directory on local storage
 | `root_dir` | yes | — | Base directory; vLLM creates subdirectories beneath it (see [On-Disk Layout](#on-disk-layout)). |
 | `n_read_threads` | no | `16` | Read-priority I/O threads (load path). |
 | `n_write_threads` | no | `16` | Write-priority I/O threads (store path). |
-| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `FS`) for successfully stored blocks. Requires globally enabled KV cache events. |
+| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `FS`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 
 Each thread group prefers its own queue but pulls from the other when its primary queue is empty, so a write-heavy or read-heavy burst won't leave the off-priority queue waiting. Size the totals to your storage's effective concurrency.
 
@@ -133,7 +133,7 @@ The object-store tier (`type: "obj"`) offloads blocks to an S3-compatible object
 | `store_config` | yes | — | Object store connection parameters (see below). |
 | `prefix` | no | `""` | Key prefix prepended to all object keys. |
 | `io_threads` | no | `4` | NIXL OBJ backend I/O threads. |
-| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `OBJ`) for successfully stored blocks. Requires globally enabled KV cache events. |
+| `enable_kv_events` | no | `false` | Publish `BlockStored` KV events (medium `OBJ`) for successfully stored blocks. Requires KV cache events to be enabled globally. |
 
 `store_config` fields:
 
