@@ -68,13 +68,15 @@ def _wrap_media_fetch_error(
         Original exception for transient errors or other exceptions.
     """
     if isinstance(exc, aiohttp.ClientResponseError):
-        if exc.status in (408, 429) or exc.status >= 500:
+        if exc.status in (408, 429):
             return exc
-        return VLLMUnprocessableEntityError(
-            f"Failed to fetch media from URL: HTTP {exc.status} error",
-            parameter="image_url",
-            value=url,
-        )
+        if exc.status < 500:
+            return VLLMUnprocessableEntityError(
+                f"Failed to fetch media from URL: HTTP {exc.status} error",
+                parameter="image_url",
+                value=url,
+            )
+        return exc
 
     if isinstance(exc, aiohttp.InvalidURL):
         return VLLMUnprocessableEntityError(
