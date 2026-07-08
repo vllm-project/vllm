@@ -890,7 +890,7 @@ class MLAAttention(nn.Module, AttentionLayerBase):
                 and self.rotary_emb is not None
             )
             if use_fused_qk_rope_cache:
-                # fold RoPE + Q-concat + KV-concat + KV-cache-write 
+                # fold RoPE + Q-concat + KV-concat + KV-cache-write
                 # into one kernel. positions is threaded in as a real argument
                 # (survives torch.compile / CUDA graph replay).
                 if positions is None:

@@ -691,7 +691,7 @@ class ROCMAiterMLASparseImpl(MLAAttentionImpl[ROCMAiterMLASparseMetadata]):
         )
 
         # fold decode RoPE + Q-concat + KV-concat + KV-cache-write into
-        # a single aiter kernel (fused_qk_rope_concat_and_cache_mla). 
+        # a single aiter kernel (fused_qk_rope_concat_and_cache_mla).
         self.use_fused_qk_rope_cache = (
             rocm_aiter_ops.is_fused_mla_qkprep_enabled()
             and self.kv_cache_dtype.startswith("fp8")
