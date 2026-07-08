@@ -463,6 +463,11 @@ class CommonAttentionMetadata:
     fixed sliding window. None disables R-SWA. The attention backend copies this
     into its own persistent buffer and reads ``rswa_window`` from model config."""
 
+    num_prompt_tokens_cpu: torch.Tensor | None = None
+    """(batch_size,) CPU prompt lengths, when available from the worker input
+    batch. Used by Mamba2 ReplaySSM decode to derive generated-token counts
+    (write positions) without including prompt tokens."""
+
     # WARNING: Deprecated fields. Will be removed in a future release (v0.15.0)
     _seq_lens_cpu: torch.Tensor | None = None
     _num_computed_tokens_cpu: torch.Tensor | None = None
@@ -557,6 +562,7 @@ class CommonAttentionMetadata:
             _num_computed_tokens_cpu=self._num_computed_tokens_cpu[:num_actual_reqs]
             if self._num_computed_tokens_cpu is not None
             else None,
+            num_prompt_tokens_cpu=maybe_slice_reqs(self.num_prompt_tokens_cpu),
             num_reqs=num_actual_reqs,
             num_actual_tokens=num_actual_tokens,
             max_query_len=self.max_query_len,
