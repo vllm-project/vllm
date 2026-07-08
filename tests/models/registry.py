@@ -709,6 +709,12 @@ _TOKEN_CLASSIFICATION_EXAMPLE_MODELS = {
         "openai/privacy-filter",
         min_transformers_version="5.6.0.dev0",
     ),
+    "RobertaForTokenClassification": _HfExamplesInfo(
+        "Jean-Baptiste/roberta-large-ner-english"
+    ),
+    "XLMRobertaForTokenClassification": _HfExamplesInfo(
+        "Davlan/xlm-roberta-base-ner-hrl"
+    ),
 }
 
 _SEQUENCE_CLASSIFICATION_EXAMPLE_MODELS = {
