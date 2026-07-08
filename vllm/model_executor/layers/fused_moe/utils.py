@@ -2,6 +2,7 @@
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 import functools
 from math import prod
+from typing import TYPE_CHECKING
 
 import torch
 import torch.nn.functional as F
@@ -32,6 +33,9 @@ from vllm.model_executor.layers.quantization.utils.w8a8_utils import (
 from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import cdiv
+
+if TYPE_CHECKING:
+    from vllm.model_executor.layers.fused_moe.config import FusedMoEConfig
 
 
 @triton.jit
@@ -401,6 +405,23 @@ def _pack_topk_ids_weights_kernel(
 
     packed = expert_id_shifted | weight_int32
     tl.store(output_ptr + offsets, packed, mask=mask)
+
+
+def fi_moe_largest_bucket(moe_config: "FusedMoEConfig") -> int:
+    """Estimate FlashInfer's MoE autotuning maximum token count.
+
+    All DP ranks may contribute `max_num_tokens` to one invocation.
+    Keep FlashInfer's default moe `tune_max_num_tokens=8192`
+    floor to avoid over-underestimation.
+    DeepEP, SP, or PCP may make this underestimate, however overestimation
+    may be dangerous, increasing tuning- cost and memory use.
+
+    NOTE: The DP factor applies even when EP is disabled:
+    > Without `--enable-expert-parallel`, MoE layers would use tensor parallelism.
+
+    For a detailed explanation, see: `docs/serving/data_parallel_deployment.md`
+    """
+    return max(moe_config.max_num_tokens * moe_config.dp_size, 8192)
 
 
 def trtllm_moe_pack_topk_ids_weights(
