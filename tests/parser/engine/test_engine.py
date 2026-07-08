@@ -714,6 +714,7 @@ class TestToolPreambleFinish:
         end_events = [e for e in finish_events if e.type == EventType.TOOL_CALL_END]
         assert len(end_events) == 1
         assert end_events[0].tool_index == 0
+        assert end_events[0].truncated is True
 
     def test_finish_no_tool_call_end_without_tool_index(self):
         config = self._preamble_without_tool_call_start_config()

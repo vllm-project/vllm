@@ -54,6 +54,7 @@ class ToolCallSlot:
         "name_sent",
         "string_keys",
         "streamed_json",
+        "truncated",
     )
 
     def __init__(self) -> None:
@@ -64,6 +65,7 @@ class ToolCallSlot:
         self.name_sent: bool = False
         self.string_keys: set[str] | None = None
         self.streamed_json: str = ""
+        self.truncated: bool = False
 
     @property
     def args(self) -> str:
@@ -852,8 +854,9 @@ class ParserEngine(Parser):
         if idx >= len(self._tool_slots):
             return
 
-        remaining = self._flush_arg_converter(idx)
         slot = self._tool_slots[idx]
+        slot.truncated = slot.truncated or event.truncated
+        remaining = self._flush_arg_converter(idx, partial=slot.truncated)
 
         if not slot.name_sent:
             name = slot.name or self._try_extract_name(idx)
@@ -962,14 +965,14 @@ class ParserEngine(Parser):
             return diff
         return None
 
-    def _flush_arg_converter(self, idx: int) -> str | None:
+    def _flush_arg_converter(self, idx: int, *, partial: bool = False) -> str | None:
         converter = self._arg_converter
         if converter is None:
             return None
 
         slot = self._tool_slots[idx]
         try:
-            final_json = converter(slot.args, False)
+            final_json = converter(slot.args, partial)
         except (json.JSONDecodeError, ValueError, TypeError):
             logger.debug("arg converter failed (flush): %s", slot.args[:80])
             return None
@@ -1021,7 +1024,7 @@ class ParserEngine(Parser):
                 converter = self._arg_converter
                 if converter is not None:
                     try:
-                        args_json = converter(raw_body, False)
+                        args_json = converter(raw_body, slot.truncated)
                     except (json.JSONDecodeError, ValueError, TypeError):
                         logger.debug(
                             "arg converter failed (extract): %s", raw_body[:80]

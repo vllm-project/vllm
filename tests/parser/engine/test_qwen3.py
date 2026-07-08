@@ -459,6 +459,40 @@ class TestStreaming:
         args_text = collect_tool_arguments(results)
         assert json.loads(args_text) == {"query": "hello", "limit": "10"}
 
+    def test_truncated_parameter_value_matches_non_streaming(
+        self,
+        parser,
+        mock_tokenizer,
+        mock_request,
+    ):
+        chunks = [
+            "Let me check.",
+            "<tool_call>\n",
+            "<function=get_weather>\n",
+            "<parameter=city>\n",
+            "San Fr",
+        ]
+
+        results = simulate_tool_streaming(parser, mock_request, chunks)
+        results.append((parser.finish_streaming(), "".join(chunks)))
+        streamed_args = collect_tool_arguments(results)
+
+        assert json.loads(streamed_args) == {"city": "San Fr"}
+
+        non_streaming_parser = ParserEngine(
+            mock_tokenizer,
+            parser_engine_config=qwen3_config(thinking=False),
+        )
+        result = non_streaming_parser.extract_tool_calls(
+            "".join(chunks),
+            mock_request,
+        )
+
+        assert result.tools_called is True
+        assert result.content == "Let me check."
+        assert result.tool_calls[0].function.name == "get_weather"
+        assert result.tool_calls[0].function.arguments == streamed_args
+
     def test_streaming_numeric_values(self, parser, mock_request):
         chunks = [
             "<tool_call>\n",
