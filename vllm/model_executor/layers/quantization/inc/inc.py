@@ -385,12 +385,16 @@ class INCConfig(QuantizationConfig):
     ) -> "QuantizationMethods | None":
         del user_quant, hf_config
 
-        quant_method = hf_quant_cfg.get("quant_method", None)
-        packing_format = hf_quant_cfg.get("packing_format", None)
-        if quant_method in cls.AUTO_ROUND_QUANT_METHODS:
+        quant_method = hf_quant_cfg.get("quant_method")
+        packing_format = hf_quant_cfg.get("packing_format")
+
+        is_auto_round_checkpoint = quant_method in cls.AUTO_ROUND_QUANT_METHODS
+        # Some exported configs store the FP8 format string in quant_method
+        # instead of packing_format. Keep accepting that historical layout.
+        is_fp8_block_checkpoint = quant_method == cls.FP8_BLOCK_PACKING_FORMAT
+        is_mxfp8_checkpoint = packing_format == cls.MXFP8_PACKING_FORMAT
+
+        if is_auto_round_checkpoint or is_fp8_block_checkpoint or is_mxfp8_checkpoint:
             return cls.get_name()
-        if quant_method == cls.FP8_BLOCK_PACKING_FORMAT:
-            return cls.get_name()
-        if packing_format == cls.MXFP8_PACKING_FORMAT:
-            return cls.get_name()
+
         return None
