@@ -280,7 +280,77 @@ def _create_nvfp4_hnd_kv_cache(
     return nvfp4_cache
 
 
-def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL):
+def _create_fp8_hnd_kv_cache(
+    k_contexts,
+    v_contexts,
+    block_size,
+    num_kv_heads,
+    head_size,
+    dtype,
+    device,
+    num_blocks,
+    common_attn_metadata,
+    kv_scale_val,
+):
+    """Create an FP8 KV cache by quantizing bf16 context via
+    reshape_and_cache_flash, using the same block-table layout as
+    _create_hnd_kv_cache."""
+    bf16_cache = _create_hnd_kv_cache(
+        k_contexts,
+        v_contexts,
+        block_size,
+        num_kv_heads,
+        head_size,
+        dtype,
+        device,
+        num_blocks,
+        common_attn_metadata,
+    )
+
+    hnd_order = (0, 1, 3, 2, 4)
+    fp8_cache = torch.zeros(
+        (num_blocks, 2, num_kv_heads, block_size, head_size),
+        dtype=torch.float8_e4m3fn,
+        device=device,
+    ).permute(*hnd_order)
+
+    block_table = common_attn_metadata.block_table_tensor
+    seq_lens = common_attn_metadata.seq_lens.cpu()
+    query_lens = (
+        common_attn_metadata.query_start_loc_cpu[1:]
+        - common_attn_metadata.query_start_loc_cpu[:-1]
+    )
+    kv_scale_t = torch.tensor(kv_scale_val, dtype=torch.float32, device=device)
+
+    for i in range(len(k_contexts)):
+        ctx_len = int(seq_lens[i]) - int(query_lens[i])
+        if ctx_len == 0:
+            continue
+        n_ctx_blocks = (ctx_len + block_size - 1) // block_size
+        blocks = block_table[i, :n_ctx_blocks]
+        k_ctx = bf16_cache[blocks, 0].reshape(-1, num_kv_heads, head_size)[:ctx_len]
+        v_ctx = bf16_cache[blocks, 1].reshape(-1, num_kv_heads, head_size)[:ctx_len]
+        token_offsets = torch.arange(ctx_len, device=device)
+        block_indices = token_offsets // block_size
+        intra_offsets = token_offsets % block_size
+        slots = block_table[i, block_indices] * block_size + intra_offsets
+        torch.ops._C_cache_ops.reshape_and_cache_flash(
+            k_ctx,
+            v_ctx,
+            fp8_cache[:, 0],
+            fp8_cache[:, 1],
+            slots,
+            "fp8",
+            kv_scale_t,
+            kv_scale_t,
+        )
+
+    return fp8_cache
+
+
+def _run_trtllm_integration(
+    batch_spec, kv_cache_dtype="auto", model_name=MODEL, disable_q_quant=False
+):
     """Run TRTLLM attention through the full FlashInfer pipeline
     and compare against an SDPA reference."""
     set_random_seed(42)
@@ -294,6 +364,7 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
     )
     vllm_config.attention_config.use_trtllm_attention = True
     vllm_config.cache_config.cache_dtype = kv_cache_dtype
+    vllm_config.attention_config.disable_flashinfer_q_quantization = disable_q_quant
 
     num_q_heads = vllm_config.model_config.get_num_attention_heads(
         vllm_config.parallel_config
@@ -361,11 +432,27 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
 
     # 2. Create HND KV cache
     is_nvfp4 = kv_cache_dtype == "nvfp4"
+    is_fp8 = kv_cache_dtype == "fp8"
     if is_nvfp4:
         # Compute a global scale from the context data.
         all_ctx = torch.cat(k_contexts + v_contexts, dim=0)
         kv_scale_val = (all_ctx.abs().amax() / 448.0).item()
         kv_cache = _create_nvfp4_hnd_kv_cache(
+            k_contexts,
+            v_contexts,
+            BLOCK_SIZE,
+            num_kv_heads,
+            head_size,
+            dtype,
+            device,
+            NUM_GPU_BLOCKS,
+            common_attn_metadata,
+            kv_scale_val,
+        )
+    elif is_fp8:
+        all_ctx = torch.cat(k_contexts + v_contexts, dim=0)
+        kv_scale_val = (all_ctx.abs().amax() / 448.0).item()
+        kv_cache = _create_fp8_hnd_kv_cache(
             k_contexts,
             v_contexts,
             BLOCK_SIZE,
@@ -396,9 +483,15 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
     get_kv_cache_layout.cache_clear()
 
     try:
-        is_nvfp4 = kv_cache_dtype == "nvfp4"
-        kv_quant_mode = KVQuantMode.NVFP4 if is_nvfp4 else KVQuantMode.NONE
-        spec_dtype = torch.uint8 if is_nvfp4 else dtype
+        if is_nvfp4:
+            kv_quant_mode = KVQuantMode.NVFP4
+            spec_dtype = torch.uint8
+        elif is_fp8:
+            kv_quant_mode = KVQuantMode.FP8_PER_TENSOR
+            spec_dtype = torch.float8_e4m3fn
+        else:
+            kv_quant_mode = KVQuantMode.NONE
+            spec_dtype = dtype
         kv_cache_spec = FullAttentionSpec(
             block_size=BLOCK_SIZE,
             num_kv_heads=num_kv_heads,
@@ -453,9 +546,11 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
             )
 
             mock_layer = MockAttentionLayer(device)
-            if is_nvfp4:
-                # For nvfp4, k_scale/v_scale are the global quantization
-                # scales (amax/448) used by reshape_and_cache_flash.
+            if is_nvfp4 or is_fp8:
+                # k_scale/v_scale are the global quantization scales
+                # (amax/448) used by reshape_and_cache_flash. The default
+                # non-unity _q_scale stays: with BF16 queries it must be
+                # ignored by the backend.
                 kv_scale_t = torch.tensor(
                     kv_scale_val, dtype=torch.float32, device=device
                 )
@@ -503,6 +598,8 @@ def _run_trtllm_integration(batch_spec, kv_cache_dtype="auto", model_name=MODEL)
         # 4. Compare against SDPA reference
         if is_nvfp4:
             atol, rtol = 1.0, 1.0  # nvfp4 has higher quantization error
+        elif is_fp8:
+            atol, rtol = 5e-2, 5e-2  # fp8 KV quantization error
         else:
             atol, rtol = 1e-2, 1e-2
         torch.testing.assert_close(output, sdpa_output, atol=atol, rtol=rtol)
@@ -522,6 +619,22 @@ def test_trtllm_gen_full_attention_integration(batch_spec_name: str):
     MetadataBuilder.build() -> FlashInferImpl.forward() pipeline,
     with real TRTLLM kernels on Blackwell."""
     _run_trtllm_integration(BATCH_SPECS[batch_spec_name])
+
+
+@pytest.mark.parametrize(
+    "batch_spec_name",
+    list(BATCH_SPECS.keys()),
+)
+@torch.inference_mode()
+def test_trtllm_gen_fp8_kv_bf16_q_integration(batch_spec_name: str):
+    """Test FP8 KV cache with BF16 queries (disable_flashinfer_q_quantization):
+    prefill takes the KV dequant fallback and decode runs trtllm-gen with a
+    model-dtype query, so q/k/v scales must be applied exactly once (#47847)."""
+    _run_trtllm_integration(
+        BATCH_SPECS[batch_spec_name],
+        kv_cache_dtype="fp8",
+        disable_q_quant=True,
+    )
 
 
 @pytest.mark.parametrize(
