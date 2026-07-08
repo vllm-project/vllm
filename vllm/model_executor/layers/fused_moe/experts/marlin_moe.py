@@ -604,7 +604,6 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             or quant_config.use_fp8_w8a16
         ), "Supports only {mxfp,nvfp,int}4_w4a16, int8_w8a16 or fp8_w8a16"
         self.input_dtype = get_marlin_input_dtype()
-        self._align_radix_scratch: MoEAlignRadixScratch | None = None
 
         super().__init__(
             moe_config=moe_config,
@@ -613,18 +612,18 @@ class MarlinExpertsBase(mk.FusedMoEExpertsModular):
             num_dispatchers=num_dispatchers,
         )
 
+        self._align_radix_scratch = MoEAlignRadixScratch(
+            max_num_tokens=self.moe_config.max_num_tokens,
+            topk=self.moe_config.experts_per_token,
+            num_experts=self.moe_config.num_experts,
+            device=torch.device(self.moe_config.device),
+        )
+
     def _get_align_radix_scratch(
         self, topk_ids: torch.Tensor
     ) -> MoEAlignRadixScratch | None:
         if topk_ids.numel() < RADIX_SORT_MIN_ROUTED_ENTRIES:
             return None
-        if self._align_radix_scratch is None:
-            self._align_radix_scratch = MoEAlignRadixScratch(
-                max_num_tokens=self.moe_config.max_num_tokens,
-                topk=self.moe_config.experts_per_token,
-                num_experts=self.moe_config.num_experts,
-                device=torch.device(self.moe_config.device),
-            )
         return self._align_radix_scratch
 
     @staticmethod
