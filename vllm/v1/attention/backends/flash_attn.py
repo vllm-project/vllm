@@ -43,7 +43,6 @@ if is_flash_attn_varlen_func_available():
 import vllm.envs as envs
 from vllm.config import (
     VllmConfig,
-    get_current_vllm_config,
     get_current_vllm_config_or_none,
     get_layers_from_vllm_config,
 )
@@ -75,22 +74,6 @@ class FlashAttentionBackend(AttentionBackend):
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
-        vllm_config = get_current_vllm_config()
-        model_config = vllm_config.model_config
-        cache_config = vllm_config.cache_config
-        if (
-            model_config
-            and model_config.is_hybrid
-            and (
-                cache_config.mamba_ssm_cache_dtype == "float32"
-                or cache_config.mamba_cache_dtype == "float32"
-            )
-        ):
-            # NOTE(tdoublep): while in principle, FA supports
-            # MultipleOf(16), these are the block sizes that do not
-            # suffer from the NaN propagation problem described here:
-            # https://github.com/Dao-AILab/flash-attention/issues/1974
-            return [16, 32, 64]
         return [MultipleOf(16)]
 
     forward_includes_kv_cache_update: bool = False
@@ -269,9 +252,21 @@ class FlashAttentionMetadata:
 
     causal: bool | torch.Tensor = True
 
+    sliding_window: tuple[int, int] | None = None
+
     # PrefixLM bidirectional ranges for multimodal tokens.
     # Shape: (num_seqs, max_ranges, 2) int32, [start, end] per range.
     mm_prefix_range_tensor: torch.Tensor | None = None
+
+    # Reference Sliding Window Attention (R-SWA) fields.
+    # rswa_prefix_lens:  per-request prompt lengths [num_reqs], int32, CUDA.
+    # rswa_window:       sliding window size (scalar int, for logic checks).
+    # rswa_window_tensor: [1] int32 CUDA tensor — pre-allocated in build() so
+    #   no CPU→CUDA copy is needed inside forward() during CUDA graph capture.
+    # Only populated when the model uses R-SWA (Unlimited-OCR).
+    rswa_prefix_lens: torch.Tensor | None = None
+    rswa_window: int | None = None
+    rswa_window_tensor: torch.Tensor | None = None
 
 
 def _get_sliding_window_configs(
@@ -289,6 +284,20 @@ def _get_sliding_window_configs(
             continue
         sliding_window_configs.add(layer.impl.sliding_window)
     return sliding_window_configs
+
+
+def _maybe_symmetrize_window(
+    window: tuple[int, int] | None,
+    causal: bool | torch.Tensor,
+) -> tuple[int, int] | None:
+    """Make a causal sliding window ``(w, 0)`` symmetric ``(w, w)`` when attention
+    is non-causal, so bidirectional queries attend in both directions. Leaves
+    full-attention ``(-1, -1)`` and already-symmetric windows untouched.
+    """
+    non_causal = isinstance(causal, torch.Tensor) or causal is False
+    if window is not None and window[0] >= 0 and window[1] == 0 and non_causal:
+        return (window[0], window[0])
+    return window
 
 
 class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetadata]):
@@ -403,6 +412,19 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         # populated on first build() call.
         self.aot_sliding_window: tuple[int, int] | None = None
 
+        # R-SWA: persistent CUDA-graph-safe buffers owned by this builder.
+        self.rswa_window: int | None = self.model_config.rswa_window
+        self.persistent_rswa_prefix_lens: torch.Tensor | None = None
+        self.persistent_rswa_window_tensor: torch.Tensor | None = None
+        if self.rswa_window is not None:
+            max_num_reqs = vllm_config.scheduler_config.max_num_seqs
+            self.persistent_rswa_prefix_lens = torch.zeros(
+                max_num_reqs, dtype=torch.int32, device=self.device
+            )
+            self.persistent_rswa_window_tensor = torch.tensor(
+                [self.rswa_window], dtype=torch.int32, device=self.device
+            )
+
     def build(
         self,
         common_prefix_len: int,
@@ -481,7 +503,9 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
                     cu_seqlens_q=cu_query_lens,
                     page_size=self.block_size,
                     causal=causal,
-                    window_size=self.aot_sliding_window,
+                    window_size=_maybe_symmetrize_window(
+                        self.aot_sliding_window, causal
+                    ),
                     num_splits=max_num_splits,
                 )
             return None
@@ -573,6 +597,13 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
         if isinstance(causal, torch.Tensor) and causal.dtype != torch.int32:
             causal = causal.to(torch.int32)
 
+        # Symmetrize the spec's sliding_window for non-causal attention
+        group_sliding_window = getattr(self.kv_cache_spec, "sliding_window", None)
+        base_window = (
+            (-1, -1) if group_sliding_window is None else (group_sliding_window - 1, 0)
+        )
+        effective_sliding_window = _maybe_symmetrize_window(base_window, causal)
+
         attn_metadata = FlashAttentionMetadata(
             num_actual_tokens=num_actual_tokens,
             max_query_len=max_query_len,
@@ -592,6 +623,7 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             prefix_scheduler_metadata=prefix_scheduler_metadata,
             max_num_splits=max_num_splits,
             causal=causal,
+            sliding_window=effective_sliding_window,
         )
 
         # Compute mm_prefix range tensor if the batch contains
@@ -605,6 +637,22 @@ class FlashAttentionMetadataBuilder(AttentionMetadataBuilder[FlashAttentionMetad
             attn_metadata.mm_prefix_range_tensor = compute_mm_prefix_range_tensor(
                 mm_ranges, num_reqs, seq_lens.device
             )
+
+        # R-SWA: copy prefix lengths into persistent buffers (outside the
+        # compiled region) so forward() never allocates during CUDA graph
+        # capture.  rswa_window is a static model config scalar read here.
+        if (
+            self.rswa_window is not None
+            and common_attn_metadata.rswa_prefix_lens is not None
+        ):
+            assert self.persistent_rswa_prefix_lens is not None
+            assert self.persistent_rswa_window_tensor is not None
+            src = common_attn_metadata.rswa_prefix_lens
+            rswa_prefix_lens = self.persistent_rswa_prefix_lens[:num_reqs]
+            rswa_prefix_lens.copy_(src[:num_reqs], non_blocking=True)
+            attn_metadata.rswa_prefix_lens = rswa_prefix_lens
+            attn_metadata.rswa_window = self.rswa_window
+            attn_metadata.rswa_window_tensor = self.persistent_rswa_window_tensor
 
         return attn_metadata
 
@@ -822,27 +870,17 @@ class FlashAttentionImpl(AttentionImpl):
                 )
                 return output
             else:
-                sliding_window_size = (
-                    list(self.sliding_window)
-                    if self.sliding_window is not None
-                    else None
+                window = (
+                    attn_metadata.sliding_window
+                    if attn_metadata.sliding_window is not None
+                    else self.sliding_window
+                )
+                sliding_window_size: list[int] | None = (
+                    list(window) if window is not None else None
                 )
 
                 causal = attn_metadata.causal
                 is_dynamic_causal = isinstance(causal, torch.Tensor)
-
-                # For non-causal (bidirectional) attention, make the
-                # sliding window symmetric so queries attend in both
-                # directions.
-                if (
-                    sliding_window_size is not None
-                    and sliding_window_size[1] == 0
-                    and (is_dynamic_causal or causal is False)
-                ):
-                    sliding_window_size = [
-                        sliding_window_size[0],
-                        sliding_window_size[0],
-                    ]
 
                 mm_prefix_ranges = attn_metadata.mm_prefix_range_tensor
                 mm_mask_mod = None
@@ -854,8 +892,49 @@ class FlashAttentionImpl(AttentionImpl):
                     and self.vllm_flash_attn_version == 4
                 ):
                     max_ranges = mm_prefix_ranges.shape[1]
-                    mm_mask_mod = _make_mm_prefix_mask_mod(max_ranges)
+                    # Sliding window value in Triton convention
+                    # (1 + window_size[0]).  Global-attention layers
+                    # store (-1, -1) → sw stays None / 0.
+                    sw_val = (
+                        1 + sliding_window_size[0]
+                        if sliding_window_size is not None
+                        and sliding_window_size[0] >= 0
+                        else None
+                    )
+                    # Gemma4: also clamp the bidirectional block to the
+                    # sliding window when the layer opts in
+                    # (mm_prefix_clamp_sliding_window flag from PR #47217).
+                    mm_clamp_sw = 0
+                    if (
+                        getattr(layer, "mm_prefix_clamp_sliding_window", False)
+                        and sw_val is not None
+                    ):
+                        mm_clamp_sw = sw_val
+                    mm_mask_mod = _make_mm_prefix_mask_mod(
+                        max_ranges,
+                        sliding_window=mm_clamp_sw,
+                        sliding_window_left=sw_val,
+                    )
                     mm_aux = [mm_prefix_ranges]
+
+                # R-SWA: use CuTE-DSL mask_mod on FA4 for exact token-level
+                # mask without block-size approximation.  The mask_mod encodes
+                # "causal AND (kv < prefix_len OR q - kv < rswa_window)", which
+                # supersedes any FA-layer sliding_window_size parameter.
+                rswa_mask_mod_fn = None
+                rswa_aux = None
+                if (
+                    attn_metadata.rswa_prefix_lens is not None
+                    and self.vllm_flash_attn_version == 4
+                    and not is_dynamic_causal
+                ):
+                    rswa_mask_mod_fn = _make_rswa_mask_mod()
+                    rswa_aux = [
+                        attn_metadata.rswa_prefix_lens.to(torch.int32),
+                        attn_metadata.rswa_window_tensor,  # pre-allocated CUDA tensor
+                    ]
+                    # mask_mod fully expresses R-SWA; disable FA's own window.
+                    sliding_window_size = None
 
                 dynamic_causal = None
                 if isinstance(causal, torch.Tensor):
@@ -865,7 +944,10 @@ class FlashAttentionImpl(AttentionImpl):
                             f"FA{self.vllm_flash_attn_version}"
                         )
                     dynamic_causal = causal
-                    causal = False
+                    has_window = (
+                        sliding_window_size is not None and sliding_window_size[1] >= 0
+                    )
+                    causal = not has_window
 
                 flash_attn_varlen_func(
                     q=query[:num_actual_tokens],
@@ -890,8 +972,8 @@ class FlashAttentionImpl(AttentionImpl):
                     dynamic_causal=dynamic_causal,
                     num_splits=attn_metadata.max_num_splits,
                     s_aux=self.sinks,
-                    mask_mod=mm_mask_mod,
-                    aux_tensors=mm_aux,
+                    mask_mod=rswa_mask_mod_fn or mm_mask_mod,
+                    aux_tensors=rswa_aux or mm_aux,
                 )
                 return output
 
@@ -1123,18 +1205,32 @@ class FlashAttentionImpl(AttentionImpl):
             k_descale=layer._k_scale.expand(descale_shape),  # type: ignore[operator]
             v_descale=layer._v_scale.expand(descale_shape),  # type: ignore[operator]
             num_splits=1 if self.batch_invariant_enabled else 0,
+            s_aux=self.sinks,
         )
 
         return output
 
 
-def _make_mm_prefix_mask_mod(max_ranges: int):
-    """Build a CuTE-DSL mask_mod implementing (causal OR mm_prefix).
+def _make_mm_prefix_mask_mod(
+    max_ranges: int,
+    sliding_window: int = 0,
+    sliding_window_left: int | None = None,
+):
+    """Build a CuTE-DSL mask_mod implementing
+    ``(causal AND sliding_window) OR mm_prefix``.
 
-    Returns a @cute.jit callable that evaluates:
-      keep = (kv_idx <= q_idx) OR
-             (q_idx in [r_start,r_end] AND kv_idx in [r_start,r_end])
-    for each mm_prefix range stored in aux_tensors[0].
+    The FA4 kernel passes *local* ``q_idx`` (0-based within the current
+    prefill chunk) while ``kv_idx`` is absolute (0-based over the full
+    KV cache).  We recover the absolute Q position via
+    ``q_abs = q_idx + seqlen_k - seqlen_q`` (the context-length offset)
+    so that causal, sliding-window, and mm_prefix range comparisons all
+    use consistent absolute positions.  This matches the Triton
+    reference path (``compute_kv_seq_mask``).
+
+    ``sliding_window_left`` enforces the sliding window on the causal
+    term (None = full causal, no window).  ``sliding_window`` clamps the
+    bidirectional block to the window (0 = unclamped; >0 = Gemma4 local
+    layers via ``mm_prefix_clamp_sliding_window``).
     """
     import cutlass
     import cutlass.cute as cute
@@ -1144,8 +1240,95 @@ def _make_mm_prefix_mask_mod(max_ranges: int):
         scalar_to_ssa,
     )
 
+    if sliding_window_left is not None:
+
+        @cute.jit
+        def mm_prefix_mask_mod(
+            batch_idx: cute.TensorSSA,
+            head_idx: cute.TensorSSA,
+            q_idx: cute.TensorSSA,
+            kv_idx: cute.TensorSSA,
+            seqlen_info,
+            aux_tensors,
+        ):
+            ctx_off = scalar_to_ssa(seqlen_info.seqlen_k - seqlen_info.seqlen_q, Int32)
+            q_abs = q_idx + ctx_off
+            sw = scalar_to_ssa(Int32(sliding_window_left), Int32)
+            keep = (kv_idx <= q_abs) & ((q_abs - kv_idx) < sw)
+            ranges = aux_tensors[0]
+            b = batch_idx[0]
+            for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
+                r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
+                r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
+                valid = r_start < r_end
+                q_in = (q_abs >= r_start) & (q_abs <= r_end) & valid
+                k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
+                mm = q_in & k_in
+                if sliding_window > 0:
+                    mm = mm & ((q_abs - kv_idx) < sw)
+                keep = keep | mm
+            return keep
+
+    else:
+
+        @cute.jit
+        def mm_prefix_mask_mod(
+            batch_idx: cute.TensorSSA,
+            head_idx: cute.TensorSSA,
+            q_idx: cute.TensorSSA,
+            kv_idx: cute.TensorSSA,
+            seqlen_info,
+            aux_tensors,
+        ):
+            ctx_off = scalar_to_ssa(seqlen_info.seqlen_k - seqlen_info.seqlen_q, Int32)
+            q_abs = q_idx + ctx_off
+            keep = kv_idx <= q_abs
+            ranges = aux_tensors[0]
+            b = batch_idx[0]
+            for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
+                r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
+                r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
+                valid = r_start < r_end
+                q_in = (q_abs >= r_start) & (q_abs <= r_end) & valid
+                k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
+                keep = keep | (q_in & k_in)
+            return keep
+
+    mm_prefix_mask_mod.use_fast_sampling = True
+    return mm_prefix_mask_mod
+
+
+def _make_rswa_mask_mod():
+    """Build a CuTE-DSL mask_mod for Reference Sliding Window Attention (R-SWA).
+
+    FA4 varlen + paged-KV convention (verified from cute/mask.py apply_mask):
+      q_idx  = LOCAL query-token offset (0 .. seqlen_q - 1) within this sequence.
+      kv_idx = LOCAL KV-token position (0 .. seqlen_k - 1) within this sequence.
+
+    To recover the ABSOLUTE token position (needed for causal and the sliding
+    window distance), use the standard offset:
+      abs_q = q_idx + (seqlen_k - seqlen_q)
+
+    R-SWA keep condition:
+      abs_q >= kv_idx                    (causal: KV at or before the query)
+      AND (kv_idx < prefix_len           (global prefix is always visible)
+           OR  abs_q - kv_idx < window)  (generated tokens: sliding window)
+
+    aux_tensors[0]: prefix_lens [num_reqs] int32 — per-request prefill length.
+    aux_tensors[1]: rswa_window [1]        int32 — decode sliding window size.
+
+    use_fast_sampling=True lets FA4 skip fully-masked KV blocks (gap blocks)
+    without loading their data.
+    """
+    import cutlass.cute as cute
+    from cutlass import Int32  # type: ignore[attr-defined]
+
+    from vllm.vllm_flash_attn.cute.utils import (  # type: ignore[import-untyped]
+        scalar_to_ssa,
+    )
+
     @cute.jit
-    def mm_prefix_mask_mod(
+    def rswa_mask_mod(
         batch_idx: cute.TensorSSA,
         head_idx: cute.TensorSSA,
         q_idx: cute.TensorSSA,
@@ -1153,20 +1336,19 @@ def _make_mm_prefix_mask_mod(max_ranges: int):
         seqlen_info,
         aux_tensors,
     ):
-        keep = kv_idx <= q_idx
-        ranges = aux_tensors[0]
         b = batch_idx[0]
-        for i in cutlass.range_constexpr(max_ranges):  # type: ignore[attr-defined]
-            r_start = scalar_to_ssa(ranges[b, i, 0], Int32)
-            r_end = scalar_to_ssa(ranges[b, i, 1], Int32)
-            valid = r_start < r_end
-            q_in = (q_idx >= r_start) & (q_idx <= r_end) & valid
-            k_in = (kv_idx >= r_start) & (kv_idx <= r_end) & valid
-            keep = keep | (q_in & k_in)
-        return keep
+        prefix_len = scalar_to_ssa(aux_tensors[0][b], Int32)
+        window = scalar_to_ssa(aux_tensors[1][0], Int32)
+        # Convert local q offset to absolute token position.
+        offset = scalar_to_ssa(seqlen_info.seqlen_k - seqlen_info.seqlen_q, Int32)
+        abs_q = q_idx + offset
+        causal = kv_idx <= abs_q
+        in_prefix = kv_idx < prefix_len
+        in_window = (abs_q - kv_idx) < window
+        return causal & (in_prefix | in_window)
 
-    mm_prefix_mask_mod.use_fast_sampling = True
-    return mm_prefix_mask_mod
+    rswa_mask_mod.use_fast_sampling = True
+    return rswa_mask_mod
 
 
 def use_cascade_attention(

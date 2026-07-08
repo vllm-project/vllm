@@ -219,18 +219,19 @@ class Fp8Config(QuantizationConfig):
             return Fp8KVCacheMethod(self)
         return None
 
-    def get_cache_scale_mapper(self) -> "WeightsMapper":
+    @staticmethod
+    def get_cache_scale_mapper() -> "WeightsMapper":
         """Map compressed-tensors KV-cache scale names to vLLM names."""
         from vllm.model_executor.models.utils import WeightsMapper
 
-        return WeightsMapper(
-            orig_to_new_suffix={
-                ".k_proj.output_scale": ".attn.k_scale",
-                ".v_proj.output_scale": ".attn.v_scale",
-                ".q_proj.output_scale": ".attn.q_scale",
-                ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
-            }
-        )
+        orig_to_new_suffix = {
+            ".k_proj.output_scale": ".attn.k_scale",
+            ".v_proj.output_scale": ".attn.v_scale",
+            ".q_proj.output_scale": ".attn.q_scale",
+            ".self_attn.prob_output_scale": ".self_attn.attn.prob_scale",
+        }
+        cache_scale_mapper = WeightsMapper(orig_to_new_suffix=orig_to_new_suffix)
+        return cache_scale_mapper | QuantizationConfig.get_cache_scale_mapper()
 
 
 class CopyNumelCounter(TorchDispatchMode):
@@ -320,7 +321,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
     def create_weights(
         self,
-        layer: RoutedExperts,
+        layer: torch.nn.Module,
         input_size_per_partition: int,
         output_partition_sizes: list[int],
         input_size: int,
@@ -394,7 +395,7 @@ class Fp8LinearMethod(LinearMethodBase):
 
         self.use_marlin = isinstance(self.fp8_linear, MarlinFP8ScaledMMLinearKernel)
 
-    def process_weights_after_loading(self, layer: RoutedExperts) -> None:
+    def process_weights_after_loading(self, layer: torch.nn.Module) -> None:
         if self.use_marlin:
             if not self.block_quant:
                 # Canonicalize to (K, N) for the kernel.
@@ -705,15 +706,16 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             layer.w2_weight.is_shuffled = True
 
         self.moe_quant_config = self.get_fused_moe_quant_config(layer)
-        if self.moe_quant_config:
-            assert self.experts_cls is not None
-            self.moe_kernel = make_fp8_moe_kernel(
-                moe_quant_config=self.moe_quant_config,
-                moe_config=self.moe,
-                fp8_backend=self.fp8_backend,
-                experts_cls=self.experts_cls,
-                routing_tables=layer._expert_routing_tables(),
-            )
+        assert self.moe_quant_config is not None
+        assert self.experts_cls is not None
+        self.moe_kernel = make_fp8_moe_kernel(
+            moe_quant_config=self.moe_quant_config,
+            moe_config=self.moe,
+            fp8_backend=self.fp8_backend,
+            experts_cls=self.experts_cls,
+            routing_tables=layer._expert_routing_tables(),
+            layer=layer,
+        )
 
     def process_weights_after_loading(self, layer: RoutedExperts) -> None:
         # Allow for accessing weights and scales in standard way.
@@ -785,6 +787,7 @@ class Fp8MoEMethod(FusedMoEMethodBase):
             swiglu_limit=getattr(layer, "swiglu_limit", None),
             gemm1_alpha=getattr(layer, "swiglu_alpha", None),
             gemm1_beta=getattr(layer, "swiglu_beta", None),
+            layer=layer,
         )
 
         # Inject biases into the quant config if the model has them

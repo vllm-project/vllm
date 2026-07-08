@@ -56,6 +56,14 @@ def _get_mla_prefill_backend_priorities(
     Returns:
         List of backends in priority order (highest priority first).
     """
+    from vllm.platforms import current_platform
+
+    if current_platform.is_rocm():
+        return [
+            MLAPrefillBackendEnum.ROCM_AITER_FA,
+            MLAPrefillBackendEnum.FLASH_ATTN,
+        ]
+
     if device_capability.major == 10:  # Blackwell
         return [
             MLAPrefillBackendEnum.FLASH_ATTN,
@@ -126,7 +134,7 @@ def get_mla_prefill_backend(
                 f"Reason: {invalid_reasons}"
             )
         assert backend_cls is not None
-        logger.info("Using %s MLA prefill backend.", selected_backend.name)
+        logger.info_once("Using %s MLA prefill backend.", selected_backend.name)
         return backend_cls
 
     return _auto_select_mla_prefill_backend(

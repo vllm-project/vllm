@@ -98,14 +98,17 @@ class LoRAModelManager:
             f"No supported LoRA modules found in {self.model.__class__.__name__}."
         )
 
-        self._registered_adapters: dict[int, LoRAModel] = {}
-        # Dict instead of a set for compatibility with LRUCache.
-        self._active_adapters: dict[int, None] = {}
         self.adapter_type = "LoRA"
         self.lora_config = lora_config
         self.device = device
         self.max_num_seqs = max_num_seqs
         assert self.capacity >= self.lora_slots
+        self._registered_adapters: AdapterLRUCache[LoRAModel] = AdapterLRUCache(
+            self.capacity, self.deactivate_adapter
+        )
+        self._active_adapters: AdapterLRUCache[None] = AdapterLRUCache(
+            self.lora_slots, self._deactivate_adapter
+        )
         self.max_num_batched_tokens = math.ceil(max_num_batched_tokens / 8) * 8
         self.lora_index_to_id: list[int | None] = [None] * self.lora_slots
         self.vocab_size = vocab_size
@@ -114,6 +117,7 @@ class LoRAModelManager:
         self.packed_modules: dict[str, list[str]] = {}
         self.modules: dict[str, BaseLayerWithLoRA] = {}
         self._last_mapping: LoRAMapping | None = None
+        self._last_slot_layout: tuple[int | None, ...] | None = None
         is_moe = is_moe_model(self.model)
         self._is_moe = is_moe
 
@@ -1144,9 +1148,14 @@ class LoRAModelManager:
         return True
 
     def set_adapter_mapping(self, mapping: LoRAMapping) -> None:
-        if self._last_mapping != mapping:
+        # The punica metadata derives from the slot layout as well as the
+        # mapping: an out-of-band add_lora() can LRU-evict and reassign slots
+        # while the running batch, and thus the mapping, is unchanged.
+        slot_layout = tuple(self.lora_index_to_id)
+        if self._last_mapping != mapping or self._last_slot_layout != slot_layout:
             self._set_adapter_mapping(mapping)
             self._last_mapping = mapping
+            self._last_slot_layout = slot_layout
 
     def remove_adapter(self, adapter_id: int) -> bool:
         self.deactivate_adapter(adapter_id)
@@ -1156,49 +1165,14 @@ class LoRAModelManager:
         return True
 
     def list_adapters(self) -> dict[int, LoRAModel]:
-        return dict(self._registered_adapters)
+        return dict(self._registered_adapters.cache)
 
     def get_adapter(self, adapter_id: int) -> LoRAModel | None:
         return self._registered_adapters.get(adapter_id)
 
 
-class LoRALRUCache(AdapterLRUCache[LoRAModel]):
-    def __init__(self, capacity: int, deactivate_lora_fn: Callable[[int], object]):
-        super().__init__(capacity, deactivate_lora_fn)
-
-
 class LRUCacheLoRAModelManager(LoRAModelManager):
     """A model manager that manages multiple LoRAs with LRU cache."""
-
-    def __init__(
-        self,
-        model: SupportsLoRAModel,
-        max_num_seqs: int,
-        max_num_batched_tokens: int,
-        vocab_size: int,
-        lora_config: LoRAConfig,
-        device: torch.device,
-        vllm_config: VllmConfig,
-    ):
-        super().__init__(
-            model,
-            max_num_seqs,
-            max_num_batched_tokens,
-            vocab_size,
-            lora_config,
-            device,
-            vllm_config,
-        )
-        self._registered_adapters: LoRALRUCache = LoRALRUCache(  # type: ignore[assignment]
-            self.capacity, self.deactivate_adapter
-        )
-        self._active_adapters: LoRALRUCache = LoRALRUCache(  # type: ignore[assignment]
-            self.lora_slots, self._deactivate_adapter
-        )
-
-    def list_adapters(self) -> dict[int, LoRAModel]:
-        """List all registered LoRAModels."""
-        return dict(self._registered_adapters.cache)
 
     def add_adapter(self, lora: LoRAModel) -> bool:
         """Add a LoRAModel to the manager."""

@@ -21,7 +21,7 @@ use vllm_chat::{
     AssistantBlockKind, AssistantMessageExt as _, ChatEvent, ChatEventStream, ChatEventStreamTrait,
     CollectedAssistantMessage, FinishReason,
 };
-use vllm_engine_core_client::protocol::StopReason;
+use vllm_engine_core_client::protocol::output::StopReason;
 
 use self::convert::{ResponseOptions, prepare_chat_request};
 use crate::config::ApiServerOptions;
@@ -211,7 +211,7 @@ async fn collect_chat_completion(
                     Some(prefix) => Some(format!("{prefix}{}", message.text())),
                     None => Some(message.text()).filter(|t| !t.is_empty()),
                 },
-                tool_calls: Some(tool_calls).filter(|calls| !calls.is_empty()),
+                tool_calls,
                 reasoning: if include_reasoning { reasoning } else { None },
             },
             logprobs,
@@ -805,7 +805,7 @@ fn chat_finish_reason_to_openai(
         FinishReason::Stop(_) => Ok("stop"),
         FinishReason::Length => Ok("length"),
         FinishReason::Abort => Ok("abort"),
-        FinishReason::Repetition => Ok("stop"),
+        FinishReason::Repetition(_) => Ok("repetition"),
         FinishReason::Error => {
             bail_server_error!("Internal server error");
         }
@@ -825,7 +825,7 @@ mod tests {
     use vllm_chat::{
         AssistantBlockKind, AssistantContentBlock, AssistantToolCall, ChatEvent, FinishReason,
     };
-    use vllm_engine_core_client::protocol::StopReason;
+    use vllm_engine_core_client::protocol::output::StopReason;
     use vllm_text::{DecodedLogprobs, DecodedPositionLogprobs, DecodedTokenLogprob};
 
     use super::{
