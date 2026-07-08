@@ -612,3 +612,63 @@ def test_dp_coordinator_drops_undecodable_frame():
         with contextlib.suppress(Exception):
             ctx.destroy(linger=0)
         thread.join(timeout=5)
+
+
+def test_try_decode_frame_passes_through_valid():
+    """A well-formed frame decodes normally and is returned unchanged."""
+    from vllm.v1.serial_utils import DROP_FRAME, try_decode_frame
+
+    buf = msgspec.msgpack.encode(["a", 1, 2])
+    assert try_decode_frame(msgspec.msgpack.decode, buf, "test") == ["a", 1, 2]
+    assert try_decode_frame(msgspec.msgpack.decode, buf, "test", expected_len=3) == [
+        "a",
+        1,
+        2,
+    ]
+    assert try_decode_frame(msgspec.msgpack.decode, buf, "test") is not DROP_FRAME
+
+
+def test_try_decode_frame_drops_undecodable():
+    """Garbage bytes and typed-schema mismatches yield DROP_FRAME, not a raise.
+
+    Covers the core #44486 crash: an ``int`` where an array is expected raises
+    ``msgspec.ValidationError`` under a typed decoder; the helper must swallow it.
+    """
+    from vllm.v1.engine import EngineCoreOutputs
+    from vllm.v1.serial_utils import DROP_FRAME, try_decode_frame
+
+    # Raw junk bytes -> DecodeError.
+    assert try_decode_frame(msgspec.msgpack.decode, b"\xc1\xff\xff", "test") is (
+        DROP_FRAME
+    )
+
+    # Type mismatch against a typed decoder -> ValidationError
+    # ("Expected array, got int"), the exact error from the issue.
+    typed = MsgpackDecoder(EngineCoreOutputs)
+    junk = bytes(MsgpackEncoder().encode(123)[0])
+    assert try_decode_frame(typed.decode, junk, "test") is DROP_FRAME
+
+
+def test_try_decode_frame_drops_wrong_shape():
+    """A well-formed-but-misshapen untyped frame is dropped before the unpack.
+
+    This is the second class of #44486 bug: ``msgspec.msgpack.decode`` succeeds
+    on any valid msgpack, so a wrong-arity sequence (e.g. from a crafted frame)
+    would crash the caller's fixed-arity tuple-unpack. ``expected_len`` turns
+    that into a dropped frame instead.
+    """
+    from vllm.v1.serial_utils import DROP_FRAME, try_decode_frame
+
+    # Right type, wrong length.
+    buf = msgspec.msgpack.encode([1, 2])
+    assert (
+        try_decode_frame(msgspec.msgpack.decode, buf, "test", expected_len=3)
+        is DROP_FRAME
+    )
+
+    # Decodes fine, but not a sequence at all.
+    buf = msgspec.msgpack.encode(5)
+    assert (
+        try_decode_frame(msgspec.msgpack.decode, buf, "test", expected_len=2)
+        is DROP_FRAME
+    )
