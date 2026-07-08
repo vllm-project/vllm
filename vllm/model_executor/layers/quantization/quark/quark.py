@@ -63,11 +63,6 @@ class QuarkConfig(QuantizationConfig):
         if kv_cache_group is None:
             kv_cache_group = []
         self.quant_config = quant_config
-        self.packed_modules_mapping = dict(
-            getattr(type(self), "packed_modules_mapping", {})
-        )
-        self.packed_modules_mapping.setdefault("gate_up_proj", ["w1", "w3"])
-        self.packed_modules_mapping.setdefault("fused_wqa_wkv", ["wq_a", "wkv"])
         self.kv_cache_group = kv_cache_group
         self.kv_cache_config = kv_cache_config
         self.pack_method = pack_method
@@ -338,29 +333,11 @@ class QuarkConfig(QuantizationConfig):
             "per_tensor",
             "per_channel",
         ]
-        is_per_block_weight = (
-            weight_quant.get("qscheme") == "per_block"
-            and list(weight_quant.get("block_size") or []) == [128, 128]
-            and weight_quant.get("symmetric") is True
-        )
 
-        if not is_fp8_dtype or not is_static_weight:
+        if not (is_fp8_dtype and is_static_weight and is_per_tensor_or_channel_weight):
             return False
 
-        if is_per_block_weight:
-            if not input_quant.get("is_dynamic"):
-                return False
-            return (
-                input_quant.get("qscheme") == "per_group"
-                and input_quant.get("group_size") == 128
-                and input_quant.get("symmetric") is True
-            )
-
-        if not is_per_tensor_or_channel_weight:
-            return False
-
-        # Dynamic quantization is always supported if tensor/channel weights
-        # are supported.
+        # Dynamic quantization is always supported if weights supported.
         if input_quant.get("is_dynamic"):
             return True
 

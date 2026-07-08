@@ -191,7 +191,6 @@ def select_nvfp4_moe_backend(
         NvFp4MoeBackend.FLASHINFER_TRTLLM,
         NvFp4MoeBackend.FLASHINFER_CUTLASS,
         NvFp4MoeBackend.MARLIN,
-        NvFp4MoeBackend.EMULATION,
     }
 
     if config.swiglu_limit is not None:
