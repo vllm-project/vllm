@@ -74,7 +74,7 @@ from torch._inductor.utils import fresh_cache
 
 
 if TYPE_CHECKING:
-    from transformers import PreTrainedTokenizer, PreTrainedTokenizerFast
+    from transformers import PythonBackend, TokenizersBackend
     from transformers.generation.utils import GenerateOutput
 
 
@@ -499,7 +499,7 @@ class HfRunner:
             self.model = model
 
         if not skip_tokenizer_init:
-            self.tokenizer: "PreTrainedTokenizer | PreTrainedTokenizerFast" = (
+            self.tokenizer: "PythonBackend | TokenizersBackend" = (
                 AutoTokenizer.from_pretrained(
                     tokenizer_name or model_name,
                     trust_remote_code=trust_remote_code,
@@ -1587,7 +1587,13 @@ class AssetHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError) as e:
+            logger.debug(
+                "Client disconnected while serving test asset %s: %r", filename, e
+            )
+            self.close_connection = True
 
 
 def _find_free_port() -> int:
