@@ -295,6 +295,8 @@ class XPUPlatform(Platform):
             "fuse_attn_quant": "Attention + quant fusion",
             "fuse_act_padding": "Activation + padding fusion",
             "fuse_rope_kvcache": "RoPE + KV cache fusion",
+            "fuse_rope_kvcache_cat_mla": "RoPE + KV cache + MLA fusion",
+            "enable_qk_norm_rope_fusion": "QK Norm + RoPE fusion",
         }
         if compilation_config.mode != CompilationMode.NONE:
             for flag, feature_name in fusion_passes_to_disable.items():
