@@ -124,6 +124,8 @@ PYTHONHASHSEED=0 vllm serve ...
 
 The P2P tier (`type: "p2p"`) shares completed KV blocks between vLLM instances over RDMA via NIXL. Each instance binds a control socket on `host:port` and exchanges blocks directly with peers — no shared filesystem required.
 
+PYTHONHASHSEED environment variable must be set to the same fixed value on all nodes.
+
 | Key | Required | Default | Notes |
 | --- | --- | --- | --- |
 | `type` | yes | — | Must be `p2p`. |
