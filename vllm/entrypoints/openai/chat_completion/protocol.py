@@ -190,21 +190,14 @@ class ChatCompletionNamedToolChoiceParam(OpenAIBaseModel):
     type: Literal["function"] = "function"
 
 
-# Content-part keys that imply a non-text modality. Mirrors the inference in
-# ChatCompletionRequest.check_system_message_content_type.
-_MULTIMODAL_CONTENT_KEYS = (
-    "image_url",
-    "image_pil",
-    "image_embeds",
-    "audio_url",
-    "input_audio",
-    "audio_embeds",
-    "video_url",
-)
-
-
 def _messages_contain_multimodal(messages: Any) -> bool:
-    """Return True if any raw message carries non-text (multimodal) content."""
+    """Return True if any raw message carries non-text (multimodal) content.
+
+    A content part is text only when explicitly typed ``"text"`` or given as
+    the untyped ``{"text": ...}`` shorthand; every other part (image, audio,
+    video, embeds, and any future modality) counts as multimodal. Detecting it
+    structurally avoids drifting from the modality registry in chat_utils.
+    """
     if not isinstance(messages, list):
         return False
     for msg in messages:
@@ -215,10 +208,8 @@ def _messages_contain_multimodal(messages: Any) -> bool:
             if not isinstance(part, dict):
                 continue
             part_type = part.get("type")
-            if part_type is None:
-                if any(k in part for k in _MULTIMODAL_CONTENT_KEYS):
-                    return True
-            elif part_type != "text":
+            is_text = part_type == "text" or (part_type is None and "text" in part)
+            if not is_text:
                 return True
     return False
 
@@ -463,11 +454,11 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "(text-out). At least one of `messages` or `prompt_token_ids` must "
             "be provided; when both are set, `prompt_token_ids` takes "
             "precedence and `messages` is ignored for prompt construction. "
-            "Text tokens only: chat-template options (e.g. `chat_template`, "
-            "`documents`, `add_generation_prompt`, `continue_final_message`, "
-            "`add_special_tokens`, `echo`) and multimodal message content are "
-            "incompatible with this field. Intended for disaggregated serving "
-            "where the prompt is tokenized once upstream."
+            "Text tokens only: options that drive chat templating (e.g. "
+            "`chat_template`, `documents`, `add_generation_prompt`, `echo`), "
+            "prompt truncation (`truncate_prompt_tokens`), or multimodal "
+            "message content are incompatible with this field. Intended for "
+            "disaggregated serving where the prompt is tokenized once upstream."
         ),
     )
 
@@ -962,8 +953,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
     def check_prompt_token_ids(cls, data):
         if not isinstance(data, dict) or not data.get("prompt_token_ids"):
             return data
-        # These options drive chat templating or multimodal processing, neither
-        # of which runs for pre-tokenized input.
+        # These options drive chat templating, prompt truncation, or multimodal
+        # processing, none of which runs for pre-tokenized input. Checked by
+        # truthiness (like prompt_token_ids above) so an explicit no-op value
+        # such as ``documents=None`` or ``add_special_tokens=False`` is allowed.
         incompatible = (
             "chat_template",
             "chat_template_kwargs",
@@ -974,8 +967,10 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "echo",
             "mm_processor_kwargs",
             "media_io_kwargs",
+            "truncate_prompt_tokens",
+            "truncation_side",
         )
-        conflicts = [k for k in incompatible if k in data]
+        conflicts = [k for k in incompatible if data.get(k)]
         if conflicts:
             raise VLLMValidationError(
                 f"{sorted(conflicts)} cannot be used with `prompt_token_ids`.",

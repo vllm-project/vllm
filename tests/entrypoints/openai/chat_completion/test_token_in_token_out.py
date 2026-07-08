@@ -99,21 +99,24 @@ IMAGE_MESSAGES = [
     [
         # A chat-template option cannot apply to pre-tokenized input.
         ([], {"add_generation_prompt": True}),
+        # Truncation would desync the max_tokens budget from the real prompt.
+        ([], {"truncate_prompt_tokens": 8}),
         # Token ids carry no multimodal features.
         (IMAGE_MESSAGES, {}),
     ],
-    ids=["template-option", "multimodal-content"],
+    ids=["template-option", "truncate-option", "multimodal-content"],
 )
 async def test_chat_token_in_rejects_incompatible_input(
     server, messages, extra_options
 ):
     """Options and message content that cannot apply are rejected, not ignored."""
-    prompt_token_ids = _render_prompt_token_ids(server)
+    # Rejection happens during request validation, so the ids need only be
+    # non-empty; no need to render real ones.
     async with server.get_async_client() as client:
         with pytest.raises(openai.BadRequestError):
             await client.chat.completions.create(
                 model=MODEL_PATH,
                 messages=messages,
                 max_completion_tokens=4,
-                extra_body={"prompt_token_ids": prompt_token_ids, **extra_options},
+                extra_body={"prompt_token_ids": [1, 2, 3], **extra_options},
             )

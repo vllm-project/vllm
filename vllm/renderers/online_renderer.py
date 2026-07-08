@@ -101,18 +101,12 @@ class OnlineRenderer:
 
         Called directly by render_chat_request and delegated to by
         OpenAIServingChat.render_chat_request after its engine-aware checks.
-        """
-        # Pre-tokenized input (token-in): feed the provided ids straight to the
-        # engine, skipping chat templating and tokenization. ``messages`` are
-        # ignored; the output is still detokenized and parsed downstream
-        # (text-out). The protocol layer rejects template options and
-        # multimodal content, so this path is text tokens only.
-        if request.prompt_token_ids:
-            engine_input = tokens_input(
-                request.prompt_token_ids, cache_salt=request.cache_salt
-            )
-            return [], [engine_input]
 
+        Pre-tokenized input (``prompt_token_ids``, token-in) is handled deeper,
+        in ``preprocess_chat`` / ``_make_request_with_harmony``, so it skips only
+        templating and tokenization while tool-choice validation and
+        ``adjust_request`` still run and the output is detokenized (text-out).
+        """
         tokenizer = self.renderer.tokenizer
 
         tool_parser = self.parser.tool_parser_cls if self.parser is not None else None
@@ -192,6 +186,14 @@ class OnlineRenderer:
         should_include_tools: bool = True,
     ):
         """Build Harmony (GPT-OSS) messages and engine prompt from a chat request."""
+        if request.prompt_token_ids:
+            # Pre-tokenized input (token-in): feed the ids straight to the
+            # engine. Harmony has no adjust_request hook to preserve.
+            engine_input = tokens_input(
+                request.prompt_token_ids, cache_salt=request.cache_salt
+            )
+            return [], [engine_input]
+
         messages: list[OpenAIMessage] = []
 
         # because of issues with pydantic we need to potentially
@@ -374,17 +376,28 @@ class OnlineRenderer:
             default_mm_processor_kwargs=getattr(request, "mm_processor_kwargs", None),
         )
 
-        (conversation,), (engine_input,) = await renderer.render_chat_async(
-            [messages],
-            chat_params,
-            tok_params,
-            prompt_extras={
-                k: v
-                for k in ("mm_processor_kwargs", "cache_salt")
-                if (v := getattr(request, k, None)) is not None
-            },
-            skip_mm_cache=skip_mm_cache,
-        )
+        prompt_token_ids = getattr(request, "prompt_token_ids", None)
+        if prompt_token_ids:
+            # Pre-tokenized input (token-in): feed the ids straight to the
+            # engine, skipping templating and tokenization. ``messages`` are
+            # ignored (the protocol layer rejects template/multimodal options),
+            # so conversation is empty. The adjust_request tail below still runs.
+            conversation: list[ConversationMessage] = []
+            engine_input = tokens_input(
+                prompt_token_ids, cache_salt=getattr(request, "cache_salt", None)
+            )
+        else:
+            (conversation,), (engine_input,) = await renderer.render_chat_async(
+                [messages],
+                chat_params,
+                tok_params,
+                prompt_extras={
+                    k: v
+                    for k in ("mm_processor_kwargs", "cache_salt")
+                    if (v := getattr(request, k, None)) is not None
+                },
+                skip_mm_cache=skip_mm_cache,
+            )
 
         # tool parsing is done only if a tool_parser has been set and if
         # tool_choice is not "none" (if tool_choice is "none" but a tool_parser
