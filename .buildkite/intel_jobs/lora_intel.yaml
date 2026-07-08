@@ -128,8 +128,7 @@ steps:
   commands:
     - >-
       bash .buildkite/scripts/hardware_ci/run-intel-test.sh
-      'cd tests && pip install tensorizer &&
-      pip uninstall -y oneccl-devel oneccl &&
+      'cd tests &&
       export VLLM_WORKER_MULTIPROC_METHOD=spawn &&
       pytest -v -s lora/test_quant_model.py --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model0]" --deselect="tests/lora/test_quant_model.py::test_quant_model_lora[model1]" --deselect="tests/lora/test_quant_model.py::test_quant_model_tp_equality[model0]" &&
       pytest -v -s lora/test_transformers_model.py &&
