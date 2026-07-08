@@ -49,7 +49,8 @@ def _build_sparse_block_table_kernel(
 ):
     pid_b = tl.program_id(0)
     seq_len = tl.load(seq_lens_ptr + pid_b)
-    last_blk = (seq_len - 1) // SPARSE_BLOCK_SIZE_C
+    has_tokens = seq_len > 0
+    last_blk = tl.maximum((seq_len - 1) // SPARSE_BLOCK_SIZE_C, 0)
 
     topk_row = topk_ptr + pid_b * stride_topk_n
     bt_row = block_table_ptr + pid_b * stride_bt_b
@@ -57,7 +58,7 @@ def _build_sparse_block_table_kernel(
 
     off_t = tl.arange(0, BLOCK_SIZE_T)
     blk = tl.load(topk_row + off_t * stride_topk_k, mask=off_t < max_topk, other=-1)
-    valid = blk >= 0
+    valid = has_tokens & (blk >= 0)
     is_tail = valid & (blk == last_blk)
     is_full = valid & (blk != last_blk)
 
@@ -82,7 +83,7 @@ def _build_sparse_block_table_kernel(
         mask=(off_w >= n_used) & (off_w < row_width),
     )
 
-    tail_tokens = seq_len - last_blk * SPARSE_BLOCK_SIZE_C
+    tail_tokens = tl.where(has_tokens, seq_len - last_blk * SPARSE_BLOCK_SIZE_C, 0)
     has_tail = tl.sum(is_tail.to(tl.int32), axis=0) > 0
     ctx = n_full * SPARSE_BLOCK_SIZE_C + tl.where(has_tail, tail_tokens, 0)
     ctx = tl.where(has_tail, ctx, tl.minimum(n_valid * SPARSE_BLOCK_SIZE_C, seq_len))

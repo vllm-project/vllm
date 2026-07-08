@@ -1010,6 +1010,51 @@ def _build_decode_inputs(
     return q, block_table, seq_lens, topk_idx, num_pages
 
 
+@pytest.mark.skipif(
+    not current_platform.is_rocm(),
+    reason="MiniMax-M3 AITER sparse PA is ROCm-only",
+)
+def test_aiter_sparse_block_table_handles_padded_decode_rows():
+    """Zero-length padded decode rows must produce empty sparse attention."""
+    from vllm.models.minimax_m3.amd.ops.sparse_pa import (
+        PAGES_PER_SPARSE_BLOCK,
+        minimax_m3_build_sparse_block_table,
+    )
+
+    topk_idx = torch.tensor(
+        [[[1, 0, -1], [0, 1, -1]]],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    block_table = torch.tensor(
+        [[5, 7], [11, 13]],
+        device="cuda",
+        dtype=torch.int32,
+    )
+    seq_lens = torch.tensor([129, 0], device="cuda", dtype=torch.int32)
+
+    sparse_bt, sparse_ctx = minimax_m3_build_sparse_block_table(
+        topk_idx, block_table, seq_lens
+    )
+    torch.accelerator.synchronize()
+
+    expected_bt = torch.zeros_like(sparse_bt)
+    expected_ctx = torch.tensor([129, 0], device="cuda", dtype=torch.int32)
+
+    for slot, block_id in enumerate((0, 1)):
+        base_phys = int(block_table[0, block_id]) * PAGES_PER_SPARSE_BLOCK
+        start = slot * PAGES_PER_SPARSE_BLOCK
+        expected_bt[0, start : start + PAGES_PER_SPARSE_BLOCK] = torch.arange(
+            base_phys,
+            base_phys + PAGES_PER_SPARSE_BLOCK,
+            device="cuda",
+            dtype=torch.int32,
+        )
+
+    assert torch.equal(sparse_ctx, expected_ctx)
+    assert torch.equal(sparse_bt, expected_bt)
+
+
 @pytest.mark.parametrize("kv_layout", ["NHD", "HND"], indirect=True)
 @pytest.mark.parametrize(
     "seq_lens_list",
