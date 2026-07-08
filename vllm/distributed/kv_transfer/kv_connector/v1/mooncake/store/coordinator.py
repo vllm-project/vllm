@@ -31,8 +31,8 @@ class ExternalCachedBlockPool:
 
     def __init__(
         self,
+        hash_block_size: int,
         exists: set[tuple[int, bytes]] | None = None,
-        hash_block_size: int = 16,
     ) -> None:
         # ``exists=None`` is used on the recv side where hit_length is already
         # determined and we just want each spec's manager to apply its own mask.
@@ -171,7 +171,7 @@ class MooncakeStoreCoordinator:
         masks, _ = self.find_longest_cache_hit(
             block_hashes,
             token_len,
-            ExternalCachedBlockPool(hash_block_size=self.hash_block_size),
+            ExternalCachedBlockPool(self.hash_block_size),
             apply_eagle=False,
         )
         return masks
@@ -304,11 +304,11 @@ class MooncakeStoreCoordinator:
             curr_hit_length = hit_length
 
             for idx, (spec, group_ids, manager_cls) in enumerate(self.attention_groups):
-                cached = hit_blocks_by_group[group_ids[0]]
+                first_group_id = group_ids[0]
+                cached = hit_blocks_by_group[first_group_id]
                 if isinstance(spec, FullAttentionSpec) and cached is not None:
                     curr_hit_length = min(
-                        curr_hit_length,
-                        hit_length_by_group[group_ids[0]],
+                        curr_hit_length, hit_length_by_group[first_group_id]
                     )
                     continue
 

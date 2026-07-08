@@ -1289,8 +1289,7 @@ class MambaManager(SingleTypeKVCacheManager):
             hash_block_size = alignment_tokens
             scale_factor = block_size // hash_block_size
             max_num_partial_units = min(
-                max_length // hash_block_size,
-                len(block_hashes),
+                max_length // hash_block_size, len(block_hashes)
             )
             for fine_idx in range(max_num_partial_units - 1, -1, -1):
                 num_tokens = (fine_idx + 1) * hash_block_size

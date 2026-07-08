@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from itertools import product as iprod
 from typing import Any
 
+import numpy as np
 import torch
 
 from vllm.config import CacheConfig, VllmConfig
@@ -18,6 +19,7 @@ from vllm.platforms import current_platform
 from vllm.triton_utils import tl, triton
 from vllm.utils.math_utils import largest_power_of_2_divisor
 from vllm.utils.mem_utils import MemorySnapshot, format_gib
+from vllm.utils.torch_utils import async_tensor_h2d
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionMetadataBuilder,
@@ -542,15 +544,18 @@ def copy_kv_cache_blocks_inplace(
 
     if not storage_tensors:
         return
-    src_block_ids, dst_block_ids = zip(*kv_cache_block_copies)
     device = storage_tensors[0].device
-    src_indices = torch.tensor(src_block_ids, dtype=torch.long, device=device)
-    dst_indices = torch.tensor(dst_block_ids, dtype=torch.long, device=device)
+    indices_np = np.array(kv_cache_block_copies, dtype=np.int64)
+    indices = async_tensor_h2d(indices_np, device=device)
+    src_indices, dst_indices = indices.unbind(dim=1)
 
     for tensor in storage_tensors:
         assert tensor.device == device
         blocks = torch.empty(0, dtype=torch.uint8, device=device)
         blocks.set_(tensor.untyped_storage())
+        # Block-major backing storage: block i owns the contiguous byte range
+        # [i * page_size, (i + 1) * page_size).
+        assert blocks.numel() % num_blocks == 0
         blocks = blocks.view(num_blocks, -1)
         blocks[dst_indices] = blocks[src_indices]
 

@@ -700,14 +700,14 @@ class HybridKVCacheCoordinator(KVCacheCoordinator):
             for idx, (spec, group_ids, manager_cls, use_eagle) in enumerate(
                 self.attention_groups
             ):
-                cached_blocks = hit_blocks_by_group[group_ids[0]]
+                first_group_id = group_ids[0]
+                cached_blocks = hit_blocks_by_group[first_group_id]
                 if isinstance(spec, FullAttentionSpec) and cached_blocks is not None:
                     # Full attention is downward-closed: we only need to look
                     # up cached blocks once; on subsequent iterations just trim
                     # to the (reduced) current hit length.
                     curr_hit_length = min(
-                        curr_hit_length,
-                        hit_length_by_group[group_ids[0]],
+                        curr_hit_length, hit_length_by_group[first_group_id]
                     )
                     continue
 
